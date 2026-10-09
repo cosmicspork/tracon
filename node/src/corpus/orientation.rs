@@ -110,6 +110,10 @@ pub struct Facts<'a> {
     /// for a session whose egress is not its own grant, where the node has
     /// nothing true to say about a refusal.
     pub egress: Option<&'a [String]>,
+    /// The repository on its forge, from the checkout's `origin` as launch
+    /// resolved it. `None` for a local-only repository or a host that is
+    /// neither forge, where there is nothing to name.
+    pub forge_repo: Option<&'a crate::forge::ForgeRepo>,
 }
 
 /// Context this orientation could not carry in full. Named, with the call
@@ -228,6 +232,7 @@ fn push_node(out: &mut String, facts: &Facts) {
         )),
         _ => out.push('\n'),
     }
+    push_repository(out, facts);
     out.push_str(&format!(
         "- Your worktree is `{}`; the main checkout is not yours.\n",
         facts.worktree
@@ -274,6 +279,39 @@ fn push_node(out: &mut String, facts: &Facts) {
                 .join(", ")
         ));
     }
+}
+
+/// Which repository on which forge, so a forge tool is not called with a
+/// guess. The workspace has no remote to read it from, and the forge tools
+/// default to it only where they are offered.
+fn push_repository(out: &mut String, facts: &Facts) {
+    use crate::{forge::Forge, mcp};
+    let Some(repo) = facts.forge_repo else { return };
+    let offered = |name: &str| facts.tools.iter().any(|t| t == name);
+    let (forge, tools) = match repo.forge {
+        Forge::Github => ("GitHub", offered(mcp::github::PR_STATUS)),
+        Forge::Gitlab => ("GitLab project", offered(mcp::gitlab::MR_STATUS)),
+    };
+    let submit = offered(mcp::review::SUBMIT);
+    out.push_str(&format!("- Repository: {forge} `{}`", repo.path));
+    match (submit, tools) {
+        (true, true) => out.push_str(&format!(
+            "; `submit_review` and the forge tools default to it (the forge tools take it as \
+             `{}`)",
+            repo.argument()
+        )),
+        (true, false) => out.push_str("; `submit_review` defaults to it"),
+        (false, true) => out.push_str(&format!(
+            "; the forge tools take it as `{}` and default to it",
+            repo.argument()
+        )),
+        (false, false) => {}
+    }
+    out.push_str(". The workspace has no git remote: fetching and pushing go through the node");
+    if submit {
+        out.push_str(" (`submit_review` publishes)");
+    }
+    out.push_str(".\n");
 }
 
 /// The item, its phase, what the phase must produce, and the plan.
@@ -768,6 +806,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         assert!(missing.is_empty(), "{missing:?}");
@@ -811,6 +850,101 @@ mod tests {
         assert!(text.contains("(directive) run just test"));
         assert!(text.contains("`recall`, `retain`"));
         assert!(text.contains("Project `tracon`"));
+        // No forge remote, no repository line: nothing is guessed.
+        assert!(!text.contains("Repository:"), "{text}");
+    }
+
+    /// The workspace has no remote, so the orientation is where a session
+    /// learns which repository the forge tools mean — and that they default
+    /// to it, which is only true where they are offered.
+    #[test]
+    fn the_repository_is_named_with_the_argument_its_forge_tools_take() {
+        let store = Store::open_in_memory().unwrap();
+        let manifest = crate::manifest::LaunchManifest::default();
+        let tools: Vec<String> = ["pr_status", "run_status", "mr_status", "submit_review"]
+            .map(String::from)
+            .to_vec();
+        let told = |repo: Option<&crate::forge::ForgeRepo>, tools: &[String]| {
+            let facts = Facts {
+                node_name: "laptop",
+                node_id: "0123456789abcdef",
+                backend: "podman",
+                harness: "claude",
+                harness_version: "2",
+                channel: "personal",
+                project_id: Some("6c90cf32aaaa"),
+                project_name: Some("tracon"),
+                tools,
+                worktree: "/work",
+                phase: "execute",
+                item: None,
+                plan_body: None,
+                ready: &[],
+                review: None,
+                manifest: &manifest,
+                context: None,
+                egress: None,
+                forge_repo: repo,
+            };
+            let (text, _) = assemble(&store, &Policy::default(), &facts);
+            let node = &text[text.find("## This node").unwrap()..];
+            node[..node.find("\n\n## ").unwrap_or(node.len())].to_string()
+        };
+
+        let github = crate::forge::ForgeRepo::from_remote("github.com/cosmicspork/tracon");
+        let text = told(github.as_ref(), &tools);
+        assert!(
+            text.contains(
+                "- Repository: GitHub `cosmicspork/tracon`; `submit_review` and the forge tools \
+                 default to it (the forge tools take it as `repo`). The workspace has no git \
+                 remote: fetching and pushing go through the node (`submit_review` publishes).\n"
+            ),
+            "{text}"
+        );
+        // Beside the project, before the worktree.
+        assert!(text.find("Project `tracon`") < text.find("- Repository:"));
+        assert!(text.find("- Repository:") < text.find("Your worktree"));
+
+        let gitlab = crate::forge::ForgeRepo::from_remote("gitlab.example.com/group/app");
+        let text = told(gitlab.as_ref(), &tools);
+        assert!(
+            text.contains(
+                "- Repository: GitLab project `group/app`; `submit_review` and the forge \
+                 tools default to it (the forge tools take it as `project`)."
+            ),
+            "{text}"
+        );
+
+        // No forge tools offered (a review session): the repository is named,
+        // and no default is promised.
+        let text = told(github.as_ref(), &[]);
+        assert!(
+            text.contains(
+                "- Repository: GitHub `cosmicspork/tracon`. The workspace has no git remote: \
+                 fetching and pushing go through the node.\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("default to it"), "{text}");
+        // Forge tools without the review path, and the review path alone.
+        let text = told(github.as_ref(), &tools[..2]);
+        assert!(
+            text.contains("; the forge tools take it as `repo` and default to it."),
+            "{text}"
+        );
+        assert!(!text.contains("submit_review"), "{text}");
+        let text = told(github.as_ref(), &tools[3..]);
+        assert!(text.contains("; `submit_review` defaults to it."), "{text}");
+
+        // A local-only repository, or a host that is neither forge: nothing.
+        for remote in [
+            None,
+            crate::forge::ForgeRepo::from_remote("git.example.com/o/r"),
+        ] {
+            let text = told(remote.as_ref(), &tools);
+            assert!(!text.contains("Repository:"), "{text}");
+            assert!(!text.contains("git remote"), "{text}");
+        }
     }
 
     fn item(title: &str, body: &str) -> WorkItem {
@@ -891,6 +1025,7 @@ mod tests {
             manifest: &manifest,
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -950,6 +1085,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&"x".repeat(KNOWN_CHARS)), "{text}");
@@ -992,6 +1128,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&ready_title), "ready work bypassed the cap");
@@ -1040,6 +1177,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("old guidance"), "{text}");
@@ -1086,6 +1224,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(
@@ -1137,6 +1276,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, _) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("should not appear"), "{text}");
@@ -1180,6 +1320,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         // All three pinned documents survive in full: none was capped,
@@ -1233,6 +1374,7 @@ mod tests {
                 manifest,
                 context: None,
                 egress: None,
+                forge_repo: None,
             }
         }
         let (bare, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
@@ -1308,6 +1450,7 @@ mod tests {
                 manifest,
                 context: None,
                 egress: None,
+                forge_repo: None,
             }
         }
 
@@ -1375,6 +1518,7 @@ mod tests {
             manifest: &manifest,
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
 
@@ -1467,6 +1611,7 @@ mod tests {
             manifest: &manifest,
             context: Some((&delivered, &receipt)),
             egress: None,
+            forge_repo: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -1517,6 +1662,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             context: None,
             egress: None,
+            forge_repo: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
         assert!(text.contains("## Working agreements"), "{text}");

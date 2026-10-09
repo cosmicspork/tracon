@@ -30,6 +30,7 @@ struct Fixture {
     harness: axum::Router,
     manager: Manager,
     store: Arc<Store>,
+    tools: Arc<Tools>,
     dir: std::path::PathBuf,
     worktree: String,
 }
@@ -209,6 +210,9 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
             // `workspace://<id>` is how a session names a durable, runtime-owned
             // workspace rather than a host checkout (see `Manager::snapshot_workspace`).
             r.repo_path = format!("workspace://{workspace_id}");
+            // A project with no row: no forge repository to default to,
+            // unless a test records one (`on_forge`).
+            r.project_id = Some(SESSION_PROJECT.into());
             r.worktree_path = None;
             r.branch = "feat/x".into();
             r.harness_id = "omp".into();
@@ -262,7 +266,7 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
         cfg,
         adapter,
         node_id: "n1".into(),
-        tools,
+        tools: tools.clone(),
         mesh: None,
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
         enroll: Default::default(),
@@ -275,10 +279,14 @@ async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> 
         harness,
         manager,
         store,
+        tools,
         dir,
         worktree,
     }
 }
+
+/// The project the fixture's session `s1` belongs to.
+const SESSION_PROJECT: &str = "p-s1";
 
 const WITH_GH: &str = r#"
     [credentials.gh]
@@ -433,6 +441,20 @@ impl Fixture {
                 }
             })
             .unwrap_or(json!({ "error": text }))
+    }
+
+    /// Record the session's repository on its forge, as launch does from
+    /// the checkout's `origin`.
+    fn on_forge(&self, remote: &str) {
+        self.store
+            .project_put(&tracon::store::ProjectRow {
+                id: SESSION_PROJECT.into(),
+                channel: "work".into(),
+                name: "name".into(),
+                remote_url: Some(remote.into()),
+                created_ms: now_ms(),
+            })
+            .unwrap();
     }
 
     fn submit_args(&self) -> Value {
@@ -4201,4 +4223,107 @@ async fn a_resubmission_shows_what_changed_since_the_last_verdict() {
     assert_eq!(response["reason"], "add the missing file");
     assert_eq!(response["answered_by"], detail["revision"]["id"]);
     assert_eq!(response["files"][0]["path"], "b.txt");
+}
+
+/// A session's workspace has no remote, so `submit_review` defaults its
+/// provider and project to the session's own repository. The stored review
+/// records what was filled in; an explicit pair wins; a lone value that
+/// disagrees is refused rather than mixed; and with no repository to default
+/// to, both stay required.
+#[tokio::test]
+async fn a_session_submission_defaults_to_its_own_repository() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let target = |id: &str| -> tracon::review::publish::Target {
+        serde_json::from_str(&f.store.get_review(id).unwrap().unwrap().target).unwrap()
+    };
+    let bare = json!({ "title": "feat: the thing", "body": "why", "base": "main" });
+
+    // No repository recorded for the session: required, as before.
+    let v = f.tool("s1", "submit_review", bare.clone()).await;
+    assert!(
+        v["error"].to_string().contains("provider"),
+        "nothing to default to: {v}"
+    );
+
+    f.on_forge("github.com/owner/name");
+    // A lone value that disagrees with the session's repository.
+    let mut lone = bare.clone();
+    lone["project"] = json!("someone/else");
+    let v = f.tool("s1", "submit_review", lone).await;
+    assert!(
+        v["error"]
+            .to_string()
+            .contains("this session's repository is github `owner/name`"),
+        "{v}"
+    );
+
+    let v = f.tool("s1", "submit_review", bare.clone()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let recorded = target(&id);
+    assert_eq!(
+        (recorded.provider.as_str(), recorded.project.as_str()),
+        ("github", "owner/name")
+    );
+
+    // A second commit, submitted as a new review with an explicit pair: the
+    // pair wins over the session's repository.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    let mut explicit = bare.clone();
+    explicit["provider"] = json!("github");
+    explicit["project"] = json!("fork/name");
+    let v = f.tool("s1", "submit_review", explicit).await;
+    let other = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_ne!(other, id);
+    assert_eq!(target(&other).project, "fork/name");
+}
+
+/// An external harness has no session repository: `submit_review` without
+/// provider and project is still refused, and still told they are required.
+#[tokio::test]
+async fn an_external_submission_still_names_its_repository() {
+    state::isolate();
+    // The workspace stands in for an external worktree, so it must be under
+    // a root the external door accepts.
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    f.on_forge("github.com/owner/name");
+    let tools = &f.tools;
+    let ctx = tracon::mcp::CallContext::external(None, "work", "n1");
+    let refused = tools
+        .call(
+            &ctx,
+            "submit_review",
+            &json!({ "title": "t", "body": "b", "base": "main", "worktree": f.worktree }),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.contains("provider"), "{refused}");
+    let required = |ctx: &tracon::mcp::CallContext| {
+        tools
+            .list_offered(ctx)
+            .into_iter()
+            .find(|d| d["name"] == "submit_review")
+            .unwrap()["inputSchema"]["required"]
+            .clone()
+    };
+    assert_eq!(
+        required(&ctx),
+        json!(["title", "body", "provider", "project"])
+    );
+    assert_eq!(
+        required(&tracon::mcp::CallContext::session("s1", "work", "n1")),
+        json!(["title", "body"])
+    );
 }

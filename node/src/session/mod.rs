@@ -1823,6 +1823,15 @@ impl Manager {
                 .review_id
                 .as_deref()
                 .and_then(|r| self.store.get_review(r).ok().flatten());
+            // Resolved from `origin` when the row was created, and read back
+            // the way the forge tools read it when they default to it, so
+            // what the session is told and what a call without `repo` reaches
+            // cannot differ.
+            let forge_repo = self
+                .store
+                .session_remote(id)?
+                .as_deref()
+                .and_then(crate::forge::ForgeRepo::from_remote);
             let tool_names: Vec<String> = self
                 .tools
                 .list_for(&spec.channel, &self.node_id, spec.phase)
@@ -1863,6 +1872,7 @@ impl Manager {
                     egress: egress
                         .as_ref()
                         .map(|_| environment.session_egress.as_slice()),
+                    forge_repo: forge_repo.as_ref(),
                 },
             );
             (assembled, context.map(|(_, receipt)| receipt))

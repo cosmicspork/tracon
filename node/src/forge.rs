@@ -98,6 +98,42 @@ impl Forge {
     }
 }
 
+/// A repository as the forge tools name it: `owner/name` on GitHub, the
+/// project path on GitLab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeRepo {
+    pub forge: Forge,
+    pub path: String,
+}
+
+impl ForgeRepo {
+    /// From a canonical remote (`host/owner/name`, as
+    /// [`crate::corpus::project::canonical_remote`] spells it). `None` for a
+    /// host that is neither forge, and for a path the tools could not take:
+    /// GitHub's is exactly two segments, GitLab's at least two.
+    pub fn from_remote(canonical: &str) -> Option<Self> {
+        let forge = crate::readiness::forge_of(canonical)?;
+        let (_, path) = canonical.split_once('/')?;
+        let segments = path.split('/').collect::<Vec<_>>();
+        let fits = match forge {
+            Forge::Github => segments.len() == 2,
+            Forge::Gitlab => segments.len() >= 2,
+        };
+        (fits && segments.iter().all(|s| !s.is_empty())).then(|| Self {
+            forge,
+            path: path.to_string(),
+        })
+    }
+
+    /// The argument the forge's tools take the repository as.
+    pub fn argument(&self) -> &'static str {
+        match self.forge {
+            Forge::Github => "repo",
+            Forge::Gitlab => "project",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Repo {
     pub host: String,
@@ -883,6 +919,31 @@ mod tests {
             identity.gitconfig(),
             "[user]\n\tname = \"Adaemail = evil@example.com \\\"quoted\\\" \\\\\"\n\temail = \"a@b\"\n"
         );
+    }
+
+    #[test]
+    fn a_canonical_remote_names_the_repository_the_forge_tools_take() {
+        let github = ForgeRepo::from_remote("github.com/cosmicspork/tracon").unwrap();
+        assert_eq!(
+            (github.forge, github.path.as_str(), github.argument()),
+            (Forge::Github, "cosmicspork/tracon", "repo")
+        );
+        let gitlab = ForgeRepo::from_remote("gitlab.example.com/group/sub/app").unwrap();
+        assert_eq!(
+            (gitlab.forge, gitlab.path.as_str(), gitlab.argument()),
+            (Forge::Gitlab, "group/sub/app", "project")
+        );
+        // An unknown host, the directory-name fallback, and a path the tool
+        // would refuse name nothing.
+        for remote in [
+            "git.example.com/o/r",
+            "local/tracon",
+            "github.com/o",
+            "github.com/o/r/extra",
+            "gitlab.com/solo",
+        ] {
+            assert_eq!(ForgeRepo::from_remote(remote), None, "{remote}");
+        }
     }
 
     #[test]

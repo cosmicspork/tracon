@@ -1649,6 +1649,36 @@ impl Store {
         .optional()
         .map_err(Into::into)
     }
+
+    /// The canonical remote (`host/owner/name`) of the repository a session
+    /// works on, as its launch resolved it into the project row. A session
+    /// launched on a retained workspace (a continuation, a reopen) has a
+    /// workspace project with no remote, so the lineage is followed back to
+    /// the session that was launched on the checkout.
+    pub fn session_remote(&self, session_id: &str) -> Result<Option<String>> {
+        // Lineage is a chain of continuations; nothing legitimate is anywhere
+        // near this long, and the bound keeps a cycle from looping.
+        const MAX_LINEAGE: usize = 32;
+        let mut next = Some(session_id.to_string());
+        for _ in 0..MAX_LINEAGE {
+            let Some(id) = next else { break };
+            let Some(session) = self.get_session(&id)? else {
+                break;
+            };
+            if let Some(remote) = session
+                .project_id
+                .as_deref()
+                .map(|project| self.project_get(project))
+                .transpose()?
+                .flatten()
+                .and_then(|project| project.remote_url)
+            {
+                return Ok(Some(remote));
+            }
+            next = session.continued_from.or(session.parent_session);
+        }
+        Ok(None)
+    }
 }
 
 /// Of rows sharing a slug (two sites created it offline), keep the newest.

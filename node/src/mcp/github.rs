@@ -23,6 +23,24 @@ pub const PR_FOR_BRANCH: &str = "pr_for_branch";
 pub const RUN_LOGS: &str = "run_logs";
 pub const RUN_RERUN: &str = "run_rerun";
 
+/// Every tool here, each of which takes the repository as `repo`.
+pub const TOOLS: &[&str] = &[
+    PR_STATUS,
+    PR_COMMENT,
+    RUN_STATUS,
+    PR_MERGE,
+    PR_THREADS,
+    PR_REPLY,
+    PR_FOR_BRANCH,
+    RUN_LOGS,
+    RUN_RERUN,
+];
+
+/// What `repo` is. Optional in what a session on a GitHub repository is
+/// offered (`Tools::list_offered`), required everywhere else.
+const REPO: &str = "owner/name. In a session on a GitHub repository, defaults to that \
+                    repository; required outside a session.";
+
 /// How much of a job's log `run_logs` returns, in KiB, unless asked: the same
 /// limits as GitLab's `job_trace`.
 const LOG_KIB: u64 = 16;
@@ -71,7 +89,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "number": { "type": "integer" },
                 },
                 "required": ["repo", "number"],
@@ -84,7 +102,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "number": { "type": "integer" },
                     "body": { "type": "string" },
                 },
@@ -100,7 +118,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "branch": { "type": "string" },
                     "sha": { "type": "string", "description": "An exact commit SHA." },
                     "run_id": { "type": "integer", "description": "One run, with its jobs." },
@@ -114,7 +132,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "job_id": { "type": "integer", "description": "From run_status with run_id." },
                     "kib": { "type": "integer", "description": "How much of the end, in KiB (16 unless you say, at most 64)." },
                 },
@@ -130,7 +148,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "run_id": { "type": "integer" },
                 },
                 "required": ["repo", "run_id"],
@@ -144,7 +162,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "number": { "type": "integer" },
                     "unresolved_only": { "type": "boolean", "description": "Leave out resolved threads." },
                 },
@@ -158,7 +176,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "number": { "type": "integer" },
                     "thread_id": { "type": "string", "description": "The thread's id from pr_threads." },
                     "body": { "type": "string", "description": "The reply. May be omitted when only resolving." },
@@ -174,7 +192,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "branch": { "type": "string" },
                 },
                 "required": ["repo", "branch"],
@@ -186,7 +204,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "owner/name" },
+                    "repo": { "type": "string", "description": REPO },
                     "number": { "type": "integer" },
                     "head_sha": { "type": "string", "description": "The reviewed pull request head SHA." },
                     "method": { "type": "string", "enum": ["merge", "squash", "rebase"] },
