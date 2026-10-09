@@ -30,6 +30,28 @@ pub const MR_DISCUSSIONS: &str = "mr_discussions";
 pub const MR_REPLY: &str = "mr_reply";
 pub const MR_FOR_BRANCH: &str = "mr_for_branch";
 
+/// Every tool here, each of which takes the repository as `project`.
+pub const TOOLS: &[&str] = &[
+    MR_STATUS,
+    MR_COMMENT,
+    PIPELINE_STATUS,
+    PIPELINE_WAIT,
+    PIPELINE_LIST_BY_SHA,
+    JOB_TRACE,
+    JOB_PLAY,
+    PIPELINE_RUN,
+    MR_MERGE,
+    DEPLOY,
+    MR_DISCUSSIONS,
+    MR_REPLY,
+    MR_FOR_BRANCH,
+];
+
+/// What `project` is. Optional in what a session on a GitLab repository is
+/// offered (`Tools::list_offered`), required everywhere else.
+const PROJECT: &str = "group/project path or numeric id. In a session on a GitLab \
+                       repository, defaults to that project; required outside a session.";
+
 /// One page of discussions: a review is read in one call, and a merge request
 /// with more than this says so rather than pretending it has none.
 const DISCUSSIONS_MAX: usize = 100;
@@ -51,7 +73,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "project": { "type": "string", "description": PROJECT },
                     "iid": { "type": "integer", "description": "The merge request's iid (the !number)." },
                 },
                 "required": ["project", "iid"],
@@ -64,7 +86,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
+                    "project": { "type": "string", "description": PROJECT },
                     "iid": { "type": "integer" },
                     "body": { "type": "string" },
                 },
@@ -79,7 +101,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "project": { "type": "string", "description": PROJECT },
                     "iid": { "type": "integer" },
                     "unresolved_only": { "type": "boolean", "description": "Leave out resolved discussions." },
                 },
@@ -93,7 +115,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
+                    "project": { "type": "string", "description": PROJECT },
                     "iid": { "type": "integer" },
                     "discussion_id": { "type": "string", "description": "The discussion's id from mr_discussions." },
                     "body": { "type": "string", "description": "The reply. May be omitted when only resolving." },
@@ -109,7 +131,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "project": { "type": "string", "description": PROJECT },
                     "branch": { "type": "string" },
                 },
                 "required": ["project", "branch"],
@@ -121,7 +143,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "project": { "type": "string", "description": PROJECT },
                     "pipeline_id": { "type": "integer" },
                     "ref": { "type": "string", "description": "A branch or tag; the latest pipeline for it." },
                 },
@@ -138,7 +160,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "project": { "type": "string", "description": PROJECT },
                     "pipeline_id": { "type": "integer" },
                     "since": { "type": "string", "description": "The `state` an earlier call returned." },
                     "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
@@ -153,7 +175,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "group/project path or numeric id." },
+                    "project": { "type": "string", "description": PROJECT },
                     "sha": { "type": "string", "description": "The exact commit SHA." },
                 },
                 "required": ["project", "sha"],
@@ -165,7 +187,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
+                    "project": { "type": "string", "description": PROJECT },
                     "job_id": { "type": "integer" },
                     "kib": { "type": "integer", "description": "How much of the end, in KiB (16 unless you say, at most 64)." },
                 },
@@ -180,7 +202,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
+                    "project": { "type": "string", "description": PROJECT },
                     "job_id": { "type": "integer" },
                     "variables": { "type": "object", "description": "Job variables, name to string value. Values are sent as given; a number or boolean is refused, so quote it." },
                 },
@@ -195,7 +217,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
+                    "project": { "type": "string", "description": PROJECT },
                     "ref": { "type": "string", "description": "The branch." },
                     "variables": { "type": "object", "description": "Pipeline variables, name to string value. Values are sent as given; a number or boolean is refused, so quote it." },
                 },
@@ -206,7 +228,7 @@ pub fn definitions() -> Vec<Value> {
             "name": MR_MERGE,
             "description": "Merge a GitLab merge request only when its source SHA still matches the granted revision.",
             "inputSchema": { "type": "object", "properties": {
-                "project": { "type": "string" }, "iid": { "type": "integer" },
+                "project": { "type": "string", "description": PROJECT }, "iid": { "type": "integer" },
                 "head_sha": { "type": "string" }, "squash": { "type": "boolean" },
                 "operation_id": { "type": "string" }
             }, "required": ["project", "iid", "head_sha", "operation_id"] },
@@ -215,7 +237,7 @@ pub fn definitions() -> Vec<Value> {
             "name": DEPLOY,
             "description": "Play one existing manual GitLab deployment job for an immutable pipeline SHA. The pipeline and job are verified before the broker plays it.",
             "inputSchema": { "type": "object", "properties": {
-                "project": { "type": "string" }, "pipeline_id": { "type": "integer" },
+                "project": { "type": "string", "description": PROJECT }, "pipeline_id": { "type": "integer" },
                 "job_id": { "type": "integer" }, "environment": { "type": "string" },
                 "source_sha": { "type": "string" }, "operation_id": { "type": "string" }
             }, "required": ["project", "pipeline_id", "job_id", "environment", "source_sha", "operation_id"] },

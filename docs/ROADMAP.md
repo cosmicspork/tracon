@@ -86,9 +86,18 @@ hit on a real task.
       size cap and a redirect limit, the URL and a digest of the body recorded as evidence.
       Claude Code's server-side `WebSearch` already works through the gateway; every
       client-side fetch, `curl` included, does not and should say why.
-- [ ] `repo_fetch`: the node refreshes the workspace's remote refs with its own credential
-      and records the sha, so a session can rebase onto a `main` that moved since launch.
-      Inside the boundary `git fetch` has neither a credential nor a route.
+- [ ] **A real `origin` through the gateway.** The workspace gets a remote named `origin`
+      pointing at the gateway (`http://<gateway>/git/<channel>/<owner>/<name>.git`), which
+      speaks git's smart HTTP to the forge with the channel's brokered token; the token
+      never enters the workspace. Reads pass (`git-upload-pack`: fetch, pull, a rebase
+      onto a `main` that moved since launch), each recorded on the session with the refs
+      and shas fetched. Writes are refused at the protocol (`git-receive-pack` answers
+      with a pointer to `submit_review`), so publication stays review-only however git is
+      invoked; a policy rule on the shell command would be text matching, and noise on
+      every fetch. Scoped to the session's own repository: the gateway forwards that path
+      only, so the token cannot read the operator's other private repositories. Shares its
+      mechanism with lending application credentials below. LFS and submodules from other
+      repositories are out until a task needs them.
 - [ ] Refusals the agent can read: what the boundary refuses and which brokered tool to
       use instead, stated in the orientation. A refused egress already asks the operator
       (`request_egress`); this covers the rest.

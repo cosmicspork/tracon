@@ -507,3 +507,147 @@ async fn rerunning_failed_jobs_waits_on_the_operator() {
         )
     );
 }
+
+/// A session on `owner/name` (resolved from its checkout's `origin` into the
+/// project row, as launch does), its continuation on a retained workspace,
+/// and the tools wired to the node's store so a call can find them.
+async fn session_rig(policy: &str) -> (Arc<Tools>, Seen) {
+    use tracon::store::{ProjectRow, Store};
+    let (mut tools, seen) = rig().await;
+    tools.policy = allowing(policy);
+    let tools = Arc::new(tools);
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.ensure_peer_node("n1").unwrap();
+    store.channel_put("work", &[], "{}").unwrap();
+    for (project, remote) in [
+        ("p-checkout", Some("github.com/owner/name")),
+        ("p-workspace", None),
+    ] {
+        store
+            .project_put(&ProjectRow {
+                id: project.into(),
+                channel: "work".into(),
+                name: project.into(),
+                remote_url: remote.map(String::from),
+                created_ms: 1,
+            })
+            .unwrap();
+    }
+    let mut first = support::rows::session_row("s1", "n1", "work");
+    first.project_id = Some("p-checkout".into());
+    first.state = "closed".into();
+    store.insert_session(&first).unwrap();
+    // A continuation runs on the retained workspace, whose project has no
+    // remote: its repository is its lineage's.
+    let mut next = support::rows::session_row("s2", "n1", "work");
+    next.project_id = Some("p-workspace".into());
+    next.repo_path = "workspace://s1".into();
+    next.continued_from = Some("s1".into());
+    store.insert_session(&next).unwrap();
+    // And one on a local-only repository, which has nothing to default to.
+    let mut local = support::rows::session_row("s3", "n1", "work");
+    local.project_id = Some("p-workspace".into());
+    store.insert_session(&local).unwrap();
+    let cfg = tools.cfg.clone();
+    let manager = tracon::session::Manager::new(
+        store.clone(),
+        tracon::stream::Bus::new(),
+        cfg,
+        "n1".into(),
+        tools.clone(),
+        Default::default(),
+        Arc::new(tracon::runner::local::LocalBackend),
+    );
+    let _ = tools
+        .session
+        .set(tracon::mcp::SessionAccess { store, manager });
+    (tools, seen)
+}
+
+/// A session's workspace has no remote, so a forge tool it calls without
+/// `repo` means the session's own repository; nothing else is guessed.
+#[tokio::test]
+async fn a_session_call_without_repo_reaches_its_own_repository() {
+    state::isolate();
+    let (t, seen) = session_rig(r#""run_status""#).await;
+    let session = CallContext::session("s2", "work", "n1");
+    let (err, v) = call(&t, &session, "run_status", json!({ "branch": "main" })).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["runs"][0]["conclusion"], "success");
+    assert_eq!(
+        seen.lock().unwrap().last().unwrap().1,
+        "/repos/owner/name/actions/runs?branch=main&per_page=10"
+    );
+
+    // An explicit repository wins over the default.
+    let (_, _) = call(
+        &t,
+        &session,
+        "run_status",
+        json!({ "repo": "other/thing", "branch": "main" }),
+    )
+    .await;
+    assert_eq!(
+        seen.lock().unwrap().last().unwrap().1,
+        "/repos/other/thing/actions/runs?branch=main&per_page=10"
+    );
+
+    // A session on a local-only repository, and an external harness, still
+    // have to name one, and are refused before anything is sent.
+    let sent = seen.lock().unwrap().len();
+    for caller in [
+        CallContext::session("s3", "work", "n1"),
+        CallContext::external(None, "work", "n1"),
+    ] {
+        let (err, v) = call(&t, &caller, "run_status", json!({ "branch": "main" })).await;
+        assert!(err, "{v}");
+        assert!(v.to_string().contains("repo is required"), "{v}");
+    }
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        sent,
+        "the refused calls sent nothing"
+    );
+}
+
+/// What each caller is offered says the same: `repo` is optional only to a
+/// session that has a repository for it to default to.
+#[tokio::test]
+async fn repo_is_optional_only_where_it_defaults() {
+    state::isolate();
+    let (t, _) = session_rig(r#""run_status""#).await;
+    let required = |ctx: &CallContext, tool: &str| -> Vec<String> {
+        t.list_offered(ctx)
+            .into_iter()
+            .find(|d| d["name"] == tool)
+            .unwrap()["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    let session = CallContext::session("s2", "work", "n1");
+    assert_eq!(required(&session, "run_status"), Vec::<String>::new());
+    assert_eq!(
+        required(&session, "pr_merge"),
+        ["number", "head_sha", "operation_id"]
+    );
+    for other in [
+        CallContext::session("s3", "work", "n1"),
+        CallContext::external(None, "work", "n1"),
+    ] {
+        assert_eq!(required(&other, "run_status"), ["repo"]);
+    }
+    let described = t
+        .list_offered(&session)
+        .into_iter()
+        .find(|d| d["name"] == "run_status")
+        .unwrap();
+    assert!(
+        described["inputSchema"]["properties"]["repo"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("defaults to that repository")
+    );
+}
