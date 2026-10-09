@@ -250,7 +250,7 @@ impl Tools {
     }
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
-        let defaulted = with_provider_defaults(name, args, self.session_repo(ctx, name).as_ref());
+        let defaulted = self.with_defaults(ctx, name, args)?;
         let args = defaulted.as_ref().unwrap_or(args);
         // A plan session's own plan document is the phase's artifact: writing
         // that one slug is what the session exists to do, so it is not asked.
@@ -365,7 +365,7 @@ impl Tools {
     ) -> Result<Value, String> {
         // The operator may have edited the arguments in the prompt; a default
         // they removed is put back the same visible way.
-        let defaulted = with_provider_defaults(name, args, self.session_repo(ctx, name).as_ref());
+        let defaulted = self.with_defaults(ctx, name, args)?;
         let args = defaulted.as_ref().unwrap_or(args);
         let gated = GatedCall { one_shot };
         if consequential_name(name) && consequential(name, args).is_none() {
@@ -865,13 +865,13 @@ impl Tools {
         if !ctx.is_external() {
             if let Some(repo) = self.session_forge_repo(ctx) {
                 for tool in &mut all {
-                    let takes = tool["name"]
-                        .as_str()
-                        .is_some_and(|name| forge_of_tool(name) == Some(repo.forge));
-                    if let (true, Some(required)) =
-                        (takes, tool["inputSchema"]["required"].as_array_mut())
-                    {
-                        required.retain(|key| key != repo.argument());
+                    let defaulted: &[&str] = match tool["name"].as_str() {
+                        Some(review::SUBMIT) => &["provider", "project"],
+                        Some(name) if forge_of_tool(name) == Some(repo.forge) => &[repo.argument()],
+                        _ => &[],
+                    };
+                    if let Some(required) = tool["inputSchema"]["required"].as_array_mut() {
+                        required.retain(|key| !defaulted.iter().any(|d| key == d));
                     }
                 }
             }
@@ -895,12 +895,26 @@ impl Tools {
         crate::forge::ForgeRepo::from_remote(&remote)
     }
 
-    /// The session's repository, when `name` is a tool on its forge: the
-    /// only calls it can be a default for.
-    fn session_repo(&self, ctx: &CallContext, name: &str) -> Option<crate::forge::ForgeRepo> {
-        let forge = forge_of_tool(name)?;
-        self.session_forge_repo(ctx)
-            .filter(|repo| repo.forge == forge)
+    /// The arguments with every default written in: the provider's own, and
+    /// the calling session's repository for its forge's tools and for
+    /// `submit_review`. Applied before policy, approval, authority and any
+    /// hash of the arguments, so a call that leaves a default out and one
+    /// that spells it are the same request. `None` when nothing was missing.
+    fn with_defaults(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<Option<Value>, String> {
+        if name == review::SUBMIT {
+            return submission_defaults(args, self.session_forge_repo(ctx).as_ref());
+        }
+        // Only a tool on the session's own forge can take its repository.
+        let repo = forge_of_tool(name).and_then(|forge| {
+            self.session_forge_repo(ctx)
+                .filter(|repo| repo.forge == forge)
+        });
+        Ok(with_provider_defaults(name, args, repo.as_ref()))
     }
 
     fn is_review_session(&self, ctx: &CallContext) -> bool {
@@ -1627,6 +1641,53 @@ fn with_provider_defaults(
     Some(Value::Object(map))
 }
 
+/// `submit_review`'s `provider` and `project`, from the calling session's
+/// repository when it has one. Both missing: both filled. One given: the
+/// other is filled only when the given one is the session's own; otherwise
+/// the call is refused rather than publishing to a pair nobody named. Both
+/// given: untouched, wherever they point.
+fn submission_defaults(
+    args: &Value,
+    repo: Option<&crate::forge::ForgeRepo>,
+) -> Result<Option<Value>, String> {
+    let (Some(repo), Some(map)) = (repo, args.as_object()) else {
+        return Ok(None);
+    };
+    let given = |key: &str| {
+        map.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let provider = repo.forge.name();
+    let mismatch = |named: String| {
+        format!(
+            "this session's repository is {provider} `{}`, and the submission names {named}; \
+             leave out both provider and project to publish to the session's repository, or \
+             give both to publish elsewhere",
+            repo.path
+        )
+    };
+    match (given("provider"), given("project")) {
+        (Some(_), Some(_)) => return Ok(None),
+        (Some(asked), None) if crate::forge::Forge::parse(asked) != Some(repo.forge) => {
+            return Err(mismatch(format!("provider `{asked}`")))
+        }
+        (None, Some(asked)) if !asked.eq_ignore_ascii_case(&repo.path) => {
+            return Err(mismatch(format!("project `{asked}`")))
+        }
+        _ => {}
+    }
+    let mut filled = map.clone();
+    if given("provider").is_none() {
+        filled.insert("provider".into(), Value::from(provider));
+    }
+    if given("project").is_none() {
+        filled.insert("project".into(), Value::from(repo.path.as_str()));
+    }
+    Ok(Some(Value::Object(filled)))
+}
+
 /// Normalize provider defaults and ignore arguments a consequential provider
 /// does not consume before comparing a stable operation id on replay.
 fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
@@ -1896,6 +1957,61 @@ mod tests {
             }
         }
         assert_eq!(forge_of_tool(review::SUBMIT), None);
+    }
+
+    /// `submit_review` takes the session's repository as provider and
+    /// project: both filled when both are missing, the other filled when the
+    /// one given is the session's own, refused when it is not, and never
+    /// touched when both are given.
+    #[test]
+    fn a_submission_defaults_to_the_session_repository_or_is_refused() {
+        let github = crate::forge::ForgeRepo::from_remote("github.com/o/n").unwrap();
+        let gitlab = crate::forge::ForgeRepo::from_remote("gitlab.com/g/sub/p").unwrap();
+        let bare = json!({ "title": "t", "body": "b" });
+
+        let filled = submission_defaults(&bare, Some(&github)).unwrap().unwrap();
+        assert_eq!(
+            (&filled["provider"], &filled["project"]),
+            (&json!("github"), &json!("o/n"))
+        );
+        let named = json!({ "title": "t", "body": "b", "provider": "github", "project": "o/n" });
+        assert_eq!(
+            request_key(review::SUBMIT, &filled),
+            request_key(review::SUBMIT, &named)
+        );
+        let filled = submission_defaults(&bare, Some(&gitlab)).unwrap().unwrap();
+        assert_eq!(
+            (&filled["provider"], &filled["project"]),
+            (&json!("gitlab"), &json!("g/sub/p"))
+        );
+
+        // Both given: untouched, wherever they point.
+        let elsewhere = json!({ "provider": "gitlab", "project": "x/y" });
+        assert_eq!(submission_defaults(&elsewhere, Some(&github)), Ok(None));
+        // One given and consistent: the other is filled. Blank is missing.
+        for (given, filled_key, value) in [
+            (json!({ "provider": "github" }), "project", "o/n"),
+            (
+                json!({ "project": "O/N", "provider": " " }),
+                "provider",
+                "github",
+            ),
+        ] {
+            let out = submission_defaults(&given, Some(&github)).unwrap().unwrap();
+            assert_eq!(out[filled_key], value, "{given}");
+        }
+        // One given and not the session's: refused, naming both sides.
+        for given in [json!({ "provider": "gitlab" }), json!({ "project": "x/y" })] {
+            let refused = submission_defaults(&given, Some(&github)).unwrap_err();
+            assert!(refused.contains("github `o/n`"), "{refused}");
+            assert!(refused.contains("give both"), "{refused}");
+        }
+        // No session repository: nothing filled, nothing refused here.
+        assert_eq!(submission_defaults(&bare, None), Ok(None));
+        assert_eq!(
+            submission_defaults(&json!({ "project": "x/y" }), None),
+            Ok(None)
+        );
     }
 
     fn tools(store: &str) -> Tools {

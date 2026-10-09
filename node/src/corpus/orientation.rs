@@ -292,19 +292,24 @@ fn push_repository(out: &mut String, facts: &Facts) {
         Forge::Github => ("GitHub", offered(mcp::github::PR_STATUS)),
         Forge::Gitlab => ("GitLab project", offered(mcp::gitlab::MR_STATUS)),
     };
+    let submit = offered(mcp::review::SUBMIT);
     out.push_str(&format!("- Repository: {forge} `{}`", repo.path));
-    if tools {
-        out.push_str(&format!(
+    match (submit, tools) {
+        (true, true) => out.push_str(&format!(
+            "; `submit_review` and the forge tools default to it (the forge tools take it as \
+             `{}`)",
+            repo.argument()
+        )),
+        (true, false) => out.push_str("; `submit_review` defaults to it"),
+        (false, true) => out.push_str(&format!(
             "; the forge tools take it as `{}` and default to it",
             repo.argument()
-        ));
+        )),
+        (false, false) => {}
     }
     out.push_str(". The workspace has no git remote: fetching and pushing go through the node");
-    if offered(mcp::review::SUBMIT) {
-        out.push_str(&format!(
-            " (`submit_review` publishes, with provider `{}` and this as `project`)",
-            repo.forge.name()
-        ));
+    if submit {
+        out.push_str(" (`submit_review` publishes)");
     }
     out.push_str(".\n");
 }
@@ -890,10 +895,9 @@ mod tests {
         let text = told(github.as_ref(), &tools);
         assert!(
             text.contains(
-                "- Repository: GitHub `cosmicspork/tracon`; the forge tools take it as `repo` \
-                 and default to it. The workspace has no git remote: fetching and pushing go \
-                 through the node (`submit_review` publishes, with provider `github` and this \
-                 as `project`).\n"
+                "- Repository: GitHub `cosmicspork/tracon`; `submit_review` and the forge tools \
+                 default to it (the forge tools take it as `repo`). The workspace has no git \
+                 remote: fetching and pushing go through the node (`submit_review` publishes).\n"
             ),
             "{text}"
         );
@@ -905,8 +909,8 @@ mod tests {
         let text = told(gitlab.as_ref(), &tools);
         assert!(
             text.contains(
-                "- Repository: GitLab project `group/app`; the forge tools take it as \
-                 `project` and default to it."
+                "- Repository: GitLab project `group/app`; `submit_review` and the forge \
+                 tools default to it (the forge tools take it as `project`)."
             ),
             "{text}"
         );
@@ -922,6 +926,15 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("default to it"), "{text}");
+        // Forge tools without the review path, and the review path alone.
+        let text = told(github.as_ref(), &tools[..2]);
+        assert!(
+            text.contains("; the forge tools take it as `repo` and default to it."),
+            "{text}"
+        );
+        assert!(!text.contains("submit_review"), "{text}");
+        let text = told(github.as_ref(), &tools[3..]);
+        assert!(text.contains("; `submit_review` defaults to it."), "{text}");
 
         // A local-only repository, or a host that is neither forge: nothing.
         for remote in [
