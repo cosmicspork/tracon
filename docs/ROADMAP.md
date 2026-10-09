@@ -49,7 +49,10 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 ## Now — start, build, ship from one node
 
 Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
-runs, or in the daily desktop use since.
+runs, in the daily desktop use since, or in the 0.29.0 screen audit of 2026-10-08: every
+screen and state rendered at desktop and phone width, dark and light, by
+`spa/scripts/ui-audit.mjs`. The names in brackets are its states; `--state <name>`
+reproduces one.
 
 - [ ] **An unkeyed API provider is a dead end in Connections.** Found reviewing 0.29.0
       on the desktop, 2026-10-08. `default_providers()` seeds `openai` into every node, so
@@ -59,6 +62,41 @@ runs, or in the daily desktop use since.
       these cards; #253 brought them back so a provider the operator had just added
       stayed visible. Hide a disconnected key provider that only the defaults declare,
       give one the operator declared an inline field for its key, and say its state once.
+
+**0.29.0 screen audit, for a patch release**
+
+- [ ] Review on a phone: the sticky verdict bar sits under the tab bar, hiding Reject and
+      the composer's Send; draft and refusal notices render below the diff, out of sight
+      of the sticky composer; findings collapse to one word per line; a long evidence path
+      widens the page. On every width Approve is disabled without a reason when
+      publication is not ready, and an approved, published review still reads as pending,
+      with live verdicts and no link to the pull request (`review-phone-bar-in-view`,
+      `review-not-ready`, `review-approved`, `review-long-content`).
+- [ ] Session log: events 0.29.0 added (`service`, `published`, `session_suspended`,
+      `provider_exhausted`, `exhaustion_boundary`, `exhaustion_wake`, `session_paused`)
+      and older ones (`session_resumed`, `approval_settled`, `candidate_verified`,
+      `review_decision`) print as bare kind names (`sessions-running-working`,
+      `sessions-suspended`, `sessions-exhausted-held`).
+- [ ] Settings editors: declared models always show 0 (`structuredClone` on a `$state`
+      proxy throws), the repositories table reads as unsaved straight after load and a
+      save drops `commits` and `style` from `node.toml`, and the push toggle stays on
+      after enrolment fails (`settings-connections`, `settings-repositories`,
+      `settings-devices-denied`).
+- [ ] Gated tools added in 0.29.0 present as raw JSON: a Jira transition approval shows a
+      `transition_id` and not the status it moves to; `pr_merge`, `run_rerun`,
+      `service_start` and `repo_setup_propose` have no prose title, on Home and in push
+      notifications too; `service_start` has no input schema
+      (`approvals-issue-transition`, `approvals-run-rerun`, `approvals-service-start`).
+- [ ] Continue after a plan session starts another plan session where Next says to
+      execute, and Next offers execute on an unplanned item whose Execute is disabled
+      (`work-item-planned`, `work-item-new`).
+- [ ] The permission card loses its title on a phone and its actions run off-screen,
+      which blocks approving from the phone (`home-permission-request-open`,
+      `sessions-waiting-egress`).
+- [ ] Work, Documents, Sessions, Usage and Home show their empty state while loading and
+      beside a load error, and a failed queue load hides pending decisions with no error
+      at all (`work-loading`, `docs-list-error`, `home-queue-error`).
+- [ ] `context-*` documents never appear in the Documents list (`docs-list`).
 
 ## Next — the working loop, made comfortable
 
@@ -165,6 +203,47 @@ hit on a real task.
       The design follows oh-my-pi's transcript (MIT, a terminal and React UI keyed to its
       own tools); the code is tracon's own.
 
+**Screens, from the 0.29.0 audit**
+
+- [ ] Say what failed: a 500 on an approval or a review reads "not found", an unknown
+      session loads forever, a failed add reports a failed load, a document that failed
+      to load is labelled new, and the own-harness card loads forever when the
+      configuration cannot be read (`approvals-server-error`, `sessions-not-found`,
+      `work-new-form-refused`, `docs-doc-error`, `settings-maintenance-config-error`).
+- [ ] Session actions that match the state: a suspended or continued session still offers
+      Pause and Stop, the exhaustion "held" banner offers no action, a node-restarted
+      session has two Continue buttons on different endpoints, and the composer says input
+      is disabled while it is not (`sessions-suspended`, `sessions-exhausted-held`,
+      `sessions-node-restart`).
+- [ ] The approval page: a list of shell commands is edited as one comma-separated field,
+      so a comma inside a command splits it; locked targets sit between editable fields;
+      egress offers the tool's `wait_secs`; a decided approval shows no result and no time;
+      the head and tables are cramped on a phone (`approvals-setup-propose`,
+      `approvals-egress`, `approvals-succeeded-edited`).
+- [ ] Start stays enabled when readiness or preparation says the session cannot work
+      (`work-launch-not-investigable`, `work-launch-preparation-incompatible`).
+- [ ] Evidence and Memories overflow the page on a phone or with long content
+      (`insight-evidence-populated`, `insight-evidence-long`, `insight-memories-long`).
+- [ ] Node facts, wherever the navigation above puts them: a pinned version shown for a harness that is not installed, the "holds"
+      figure cut off whenever anything is waiting, and the healthy bar on nodes that cannot
+      run (`insight-nodes-several`, `insight-nodes-hub-connected`).
+- [ ] Shared styling: `--line`, `--red` and `--surface` are used but never defined, which
+      leaves the operator question and issue cards unstyled; every ended session is green
+      whatever ended it; destructive confirmations look neutral
+      (`home-decisions-all-kinds`, `home-session-end-reasons`,
+      `settings-maintenance-token-confirm`).
+- [ ] Phone layout: `<details>` summaries lose their disclosure marker, a retained prompt
+      widens the page, a document with an unbroken token or a wide image does too, and the
+      session list's columns do not line up (`home-permission-request-open`,
+      `sessions-node-restart`, `docs-doc-overflow`, `sessions-list`).
+- [ ] The rail footer cuts the keep-awake reason to "keeping awake · 1 s…", and its title
+      shows the method rather than the reason (`home-awake-held`).
+- [ ] Review: "Since your last verdict" comes after the evidence, prose, commits and files
+      it is meant to save reading, and a report's body shows its Markdown raw
+      (`review-since`, `review-report`).
+- [ ] Work item: one unlabelled evidence box per session, and session ids shortened four
+      ways on one page (`work-item-long`, `work-item-failed`).
+
 **OpenCode, contingent on the spike above**
 
 - [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
@@ -207,6 +286,15 @@ wait until **Now** and **Next** have made a day's work unremarkable.
       revision and explicitly accept. Show that a candidate whose shown work fails the
       user task stays unaccepted with an obvious continuation path. Fixtures are not
       substitutes.
+
+**Screens, the rest of the 0.29.0 audit**
+
+- [ ] About sixty polish items and nits, reproducible from the audit's states: the
+      Settings layouts (the exhaustion policy row, meters, the phone section nav, clipped
+      identities), the Documents screens (browser-default inputs on import and transfer,
+      grey errors, duplicated actions), text formatting (missing spaces after conditional
+      fragments, raw Markdown and enum values from node strings, units and plurals), the
+      work item's layout, and the mirrored-review and squash editors.
 
 **The boundary, extended when a task needs it**
 
