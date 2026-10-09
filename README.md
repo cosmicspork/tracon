@@ -474,7 +474,10 @@ agent's summary for you; what reaches the forge is separate and editable before
 you approve: a description (a new change's, or a replacement for an existing
 one's), a comment, both, or — for an update — nothing but the push. Submit checks
 the forge first: a branch with an open change must name it, and an update must be
-an open change of that branch into that base. An update pushes only over the
+an open change of that repository into that base. An update is pushed to the
+change's own branch, whatever the worktree's is called. A review that opened a
+change goes on updating it: resubmitted after it was published, its next revision
+comes back to you on the same card. An update pushes only over the
 commit the change held at submit; a rewritten history (rebase, amend) must be
 declared, is forced with that commit as its lease, and always comes to you even
 under a publish grant. Until a change is opened, a resubmission may name another

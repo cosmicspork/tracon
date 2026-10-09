@@ -3505,7 +3505,8 @@ async fn a_closed_or_foreign_change_is_refused_at_submit() {
         ),
     ] {
         gh_forge(&f, pull);
-        let submitted = f.submit_update(json!({})).await;
+        // Named, the branch must be the change's; unnamed, the change's is used.
+        let submitted = f.submit_update(json!({ "branch": "feat/x" })).await;
         assert!(
             submitted["error"].to_string().contains(expected),
             "{submitted}"
@@ -3725,6 +3726,168 @@ async fn a_resubmission_cannot_move_an_opened_changes_base() {
     let review = f.store.get_review(&id).unwrap().unwrap();
     let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
     assert_eq!(target.base, "main");
+}
+
+/// Pull request 1, as `gh_forge` opens it, for `branch` holding `head`.
+fn pull_one(branch: &str, head: &str) -> Value {
+    json!({
+        "html_url": "https://github.test/pull/1",
+        "state": "open",
+        "head": { "ref": branch, "sha": head, "repo": { "full_name": "owner/name" } },
+        "base": { "ref": "main" },
+    })
+}
+
+/// A review that opened a change goes on updating it: resubmitted after it
+/// was published, with or without naming the change, its next revision is
+/// pushed to the branch the change was opened on, though the worktree's
+/// branch is called something else.
+#[tokio::test]
+async fn a_review_updates_the_change_it_opened() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/renamed");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["published"], "https://github.test/pull/1");
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert_eq!(target.branch, "feat/renamed");
+    assert_eq!(
+        target.change.map(|c| c.number),
+        Some(1),
+        "publication records the change it opened"
+    );
+
+    let wt = std::path::Path::new(&f.worktree);
+    let origin = f.dir.join("origin.git");
+    for (round, change) in [(1, None), (2, Some(1))] {
+        let held = sh_out(&origin, "git rev-parse refs/heads/feat/renamed");
+        gh_forge(&f, pull_one("feat/renamed", &held));
+        sh(
+            wt,
+            &format!("echo round{round} >> a.txt && git add -A && git commit -qm round{round}"),
+        );
+        let mut args = f.submit_args();
+        args["review_id"] = json!(id);
+        if let Some(change) = change {
+            args["change"] = json!(change);
+        }
+        let resubmitted = f.tool("s1", "submit_review", args).await;
+        assert_eq!(review_id(&resubmitted), id, "{resubmitted}");
+        f.forget_logs();
+
+        let (status, body) = f.approve(&id).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["published"], "https://github.test/pull/1");
+        assert_eq!(
+            sh_out(&origin, "git rev-parse refs/heads/feat/renamed"),
+            sh_out(wt, "git rev-parse HEAD"),
+        );
+        assert!(!f.gh_log().contains("pr create"), "{}", f.gh_log());
+        assert!(
+            sh_out(&origin, "git branch --list feat/x").is_empty(),
+            "nothing goes to the worktree's branch"
+        );
+    }
+}
+
+/// A review published before publication recorded the change it opened
+/// finds it in the publication record, so it can still be resubmitted.
+#[tokio::test]
+async fn a_review_published_before_its_change_was_recorded_still_updates_it() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let publication = f.publication_id(&id);
+    f.store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: &id,
+            revision_id: None,
+            candidate_id: &tracon::store::candidate_id(&review.head_sha, "work"),
+            channel: "work",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat/renamed",
+            head_sha: &review.head_sha,
+            instance: "an-earlier-release",
+        })
+        .unwrap();
+    f.store
+        .publication_opened(&publication, "https://github.test/pull/1")
+        .unwrap();
+    assert!(f.store.begin_publish(&id, None).unwrap());
+    assert!(f
+        .store
+        .finish_publish(&id, "t", "b", "https://github.test/pull/1", &review.target)
+        .unwrap());
+    f.forge_holds(&review.head_sha);
+    let origin = f.dir.join("origin.git");
+    sh(
+        &f.dir,
+        &format!(
+            "git --git-dir={} branch feat/renamed feat/x",
+            origin.display()
+        ),
+    );
+    gh_forge(&f, pull_one("feat/renamed", &review.head_sha));
+
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo later >> a.txt && git add -A && git commit -qm later",
+    );
+    let mut args = f.submit_args();
+    args["review_id"] = json!(id);
+    let resubmitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(review_id(&resubmitted), id, "{resubmitted}");
+    let target: tracon::review::publish::Target =
+        serde_json::from_str(&f.store.get_review(&id).unwrap().unwrap().target).unwrap();
+    assert_eq!(target.change.map(|c| c.number), Some(1));
+    assert_eq!(target.branch, "feat/renamed");
+}
+
+/// A new review naming a change pushes to that change's branch, whatever
+/// the worktree's branch is called; what it may replace is still only what
+/// the change holds.
+#[tokio::test]
+async fn a_new_review_updates_a_change_on_another_branch() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    let origin = f.dir.join("origin.git");
+    sh(
+        &f.dir,
+        &format!("git --git-dir={} branch feat/y main", origin.display()),
+    );
+    gh_forge(
+        &f,
+        json!({
+            "html_url": "https://github.test/pull/7",
+            "state": "open",
+            "head": { "ref": "feat/y", "sha": base, "repo": { "full_name": "owner/name" } },
+            "base": { "ref": "main" },
+        }),
+    );
+    let id = review_id(&f.submit_update(json!({})).await);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert_eq!(target.branch, "feat/y");
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        sh_out(&origin, "git rev-parse refs/heads/feat/y"),
+        review.head_sha
+    );
+    assert!(sh_out(&origin, "git branch --list feat/x").is_empty());
 }
 
 /// Work shown with `show_work` reaches the review its session submits, read
