@@ -48,36 +48,9 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 
 ## Now — start, build, ship from one node
 
-Every item here was found on the 2026-09-20, 2026-09-28, 2026-09-30 or 2026-10-03 live
-runs, in the daily desktop use since, or in the 0.29.0 screen audit of 2026-10-08: every
-screen and state rendered at desktop and phone width, dark and light, by
-`spa/scripts/ui-audit.mjs`. The names in brackets are its states; `--state <name>`
-reproduces one.
-
-- [ ] **An unkeyed API provider is a dead end in Connections.** Found reviewing 0.29.0
-      on the desktop, 2026-10-08. `default_providers()` seeds `openai` into every node, so
-      Connections always shows "OpenAI API · not connected · disconnected · API key only.
-      Add it under serving-node credentials." The link points at the page it is on, and
-      nothing there takes a provider key: Forge tokens is `gh` and `glab` only. #228 hid
-      these cards; #253 brought them back so a provider the operator had just added
-      stayed visible. Hide a disconnected key provider that only the defaults declare,
-      give one the operator declared an inline field for its key, and say its state once.
-
-**0.29.0 screen audit, for a patch release**
-
-- [ ] Work, Documents, Sessions, Usage and Home show their empty state while loading and
-      beside a load error, and a failed queue load hides pending decisions with no error
-      at all (`work-loading`, `docs-list-error`, `home-queue-error`).
-
-**The first live session on 0.29.0** (2026-10-08, README screenshots through the browser
-service; `note-tracon-dogfood` has the detail)
-
-- [ ] **A failed check says what failed.** `just check` exited 101 on a failing test, and
-      the `check_result` tail (the last 4 KiB of the log) held only `Compiling …` lines; the
-      test's name reached neither the agent nor the review, and the agent spent a full
-      `cargo test` finding it. Keep the lines that carry the failure (a test runner's
-      failure summary, the last error) beside the tail, and check the order the log is
-      assembled in, since a stream appended after another hides the first one's end.
+Empty. Everything found on the live runs through 2026-10-08 and in the 0.29.0 screen audit
+has landed (#419–#434). The audit's states stay in `spa/scripts/ui-audit.mjs`;
+`--state <name>` reproduces one.
 
 ## Next — the working loop, made comfortable
 
@@ -88,6 +61,9 @@ Needed for daily use, but not blocking it today.
 - [ ] A provider error the harness reports with no status and no message
       (`message: "unknown"`, seen once on 2026-10-08) keeps the raw harness frame on the
       event, so an unexplained retry can be explained afterwards.
+- [ ] `sessions::an_execute_session_starts_on_its_plan_without_a_nudge` failed once in CI
+      on `main` (7983cd17: the harness exited before the first prompt) and passes locally.
+      Find the race rather than retrying it.
 - [ ] **`just check` passes on the operator's own machine.** Three OpenCode integration
       tests (`opencode_adversarial` ×2, `opencode_pty::a_real_shell_is_spawned_and_read_back_through_the_proxy`)
       fail on unmodified `main` on the desktop host with "Unexpected server error" from the
@@ -367,6 +343,12 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       whose revision merged `main` clearing GitHub's conflict; and an `ask_operator` left
       past 45 s in a node-started Claude Code session, answered and read back through
       `question_status`. Each is proven against a fake forge or by test only.
+- [ ] **The 0.29.0 follow-ups, live** (#432, #433, #434): a provider key saved from its
+      Connections card and used by a session; a failed required check under the Podman
+      runner whose refusal names the failing test; and a node-started session on Claude
+      Code 2.1.295 holding an MCP call past five minutes. The last one could not be
+      reproduced outside a session under 2.1.247 either, so the cause of the live cutoff
+      is still unknown.
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
