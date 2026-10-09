@@ -15,6 +15,7 @@
     usageUnmeteredLine,
   } from '../lib/log'
   import { formatTokens } from '../lib/format'
+  import { renderMessage } from '../lib/markdown'
   import type { Event } from '../lib/types'
 
   let {
@@ -69,9 +70,9 @@
     {#if entry.kind === 'leaf'}
       {@const e = entry.event!}
       {#if e.kind === 'user_prompt'}
-        <div class="you">{text(e)}</div>
+        <div class="you"><span class="prompt">›</span><div class="md">{@html renderMessage(text(e))}</div></div>
       {:else if e.kind === 'message'}
-        <div class="msg">{text(e)}</div>
+        <div class="msg md">{@html renderMessage(text(e))}</div>
       {:else if e.kind === 'thought'}
         <details class="fold">
           <summary>thought</summary>
@@ -241,13 +242,96 @@
   }
   .you {
     color: var(--acc);
+    display: flex;
+    gap: 1ch;
   }
-  .you::before {
-    content: '› ';
+  .you .md {
+    min-width: 0;
+    flex: 1;
   }
   .msg {
     color: var(--ink);
+  }
+  /* A finished message is Markdown; one still arriving is shown as it streams. */
+  .msg.live {
     white-space: pre-wrap;
+  }
+  .md {
+    overflow-wrap: anywhere;
+  }
+  .md > :global(:first-child) {
+    margin-top: 0;
+  }
+  .md > :global(:last-child) {
+    margin-bottom: 0;
+  }
+  .md :global(p),
+  .md :global(ul),
+  .md :global(ol),
+  .md :global(blockquote),
+  .md :global(pre),
+  .md :global(table) {
+    margin: 4px 0;
+  }
+  .md :global(ul),
+  .md :global(ol) {
+    padding-left: 2.5ch;
+  }
+  .md :global(h1),
+  .md :global(h2),
+  .md :global(h3),
+  .md :global(h4) {
+    font-size: 1em;
+    font-weight: 600;
+    margin: 10px 0 4px;
+  }
+  .md :global(h1),
+  .md :global(h2) {
+    font-size: 1.08em;
+  }
+  .md :global(code) {
+    background: var(--s2);
+    border-radius: 3px;
+    padding: 0 3px;
+  }
+  .md :global(pre) {
+    background: var(--s2);
+    border-radius: 4px;
+    padding: 8px 10px;
+    overflow-x: auto;
+  }
+  .md :global(pre code) {
+    background: none;
+    padding: 0;
+    overflow-wrap: normal;
+  }
+  /* A wide table scrolls on its own rather than widening the log. */
+  .md :global(table) {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+  }
+  .md :global(th),
+  .md :global(td) {
+    border: 1px solid var(--rule);
+    padding: 2px 8px;
+    text-align: left;
+  }
+  .md :global(blockquote) {
+    border-left: 2px solid var(--rule);
+    padding-left: 1.5ch;
+    color: var(--ink2);
+  }
+  .md :global(hr) {
+    border: 0;
+    border-top: 1px solid var(--rule);
+  }
+  .md :global(a) {
+    color: var(--acc);
+  }
+  .md :global(.no-fetch) {
+    color: var(--dim);
   }
   .sys {
     color: var(--dim);
