@@ -909,7 +909,7 @@ export default [
   }),
 
   state('not-ready', 'Cannot publish from this node yet', {
-    note: 'No token stored: the readiness line with its Settings link; Approve is disabled.',
+    note: 'No token stored: Approve is disabled, and the bar says why with a Settings link.',
     since: '#381',
     detail: raw(
       details({
@@ -1049,6 +1049,36 @@ export default [
     },
   }),
 
+  state('phone-refused-in-view', 'A refused approval on a phone, mid-page', {
+    note: 'Viewport only, phone: the refusal shows in the bar, beside the verdict that drew it, not below the diff.',
+    sizes: ['phone'],
+    full: false,
+    api: {
+      'POST /api/reviews/*/verdict': {
+        status: 409,
+        body: { error: { code: 409, message: 'this review moved to a new revision while it was being decided; reload it and decide again' } },
+      },
+    },
+    act: async (page) => {
+      await page.getByText('Title and body').first().evaluate((el) => el.scrollIntoView({ block: 'start' }))
+      await click(page, 'Approve and publish')
+      await settle(page, 800)
+    },
+  }),
+
+  state('phone-draft-unsaved-in-view', 'An unsaved draft while writing a reason on a phone', {
+    note: 'Viewport only, phone: "draft not saved" shows in the bar under the composer.',
+    sizes: ['phone'],
+    full: false,
+    api: { 'PUT /api/reviews/*/draft': { status: 500, body: { error: { code: 500, message: 'database is locked' } } } },
+    act: async (page) => {
+      await page.getByText('Title and body').first().evaluate((el) => el.scrollIntoView({ block: 'start' }))
+      await click(page, /^Request changes…$/)
+      await page.locator('.decide textarea').fill('The refill needs clamping at capacity.')
+      await settle(page, 1200)
+    },
+  }),
+
   state('draft-restored', 'Unsent words restored from the node', {
     note: 'A draft saved on another device against an earlier revision comes back over the agent\'s text: "draft saved · written against an earlier revision".',
     since: '#395',
@@ -1121,13 +1151,18 @@ export default [
   }),
 
   state('approved', 'Approved and published', {
-    note: 'A review that has been approved and published, opened again from its session.',
+    note: 'A review that has been approved and published, opened again from its session: decided, linking the pull request, no verdicts.',
     detail: raw(
       details({
         review: { state: 'approved', publish_result: 'https://github.com/example-org/orbit/pull/418' },
         publication: { readiness: READY, latest: publication({ outcome: 'published', url: 'https://github.com/example-org/orbit/pull/418', remedy: '', recoverable: false }) },
       }),
     ),
+  }),
+
+  state('rejected', 'Rejected', {
+    note: 'A rejected review opened again: decided, with its reason and no verdicts.',
+    detail: raw(details({ review: { state: 'rejected', verdict_reason: 'The ceiling already covers this; a burst limit is not wanted.' } })),
   }),
 
   state('edit-diff', 'Editing the diff in place', {

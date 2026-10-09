@@ -33,7 +33,7 @@
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
   import type { ReviewDraftFields } from '../lib/types'
-  import { composerLabel, unavailable } from '../lib/verdicts'
+  import { CLOSED_STATES, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
   let { id }: { id: string } = $props()
@@ -162,7 +162,7 @@
     // Release on navigating away. The node's sweeper covers a client that
     // vanishes without getting here.
     return () => {
-      if (!decided) void api.releaseReview(id).catch(() => {})
+      if (!decided && !closed) void api.releaseReview(id).catch(() => {})
     }
   })
 
@@ -237,10 +237,20 @@
   )
   const editedFiles = $derived([...editable.entries()].filter(([, f]) => f.now !== f.head).length)
   const publishing = $derived(review?.state === 'publishing')
+  /** Decided and done: nothing on this screen is sent any more. */
+  const closed = $derived(review !== null && (CLOSED_STATES as readonly string[]).includes(review.state))
+  /** Where the approval landed, when it reached the forge. */
+  const landed = $derived(
+    review?.state === 'approved'
+      ? publishedChange(publication?.latest?.outcome === 'published' ? publication.latest.url : null) ??
+          publishedChange(review.publish_result)
+      : null,
+  )
+  const readiness = $derived(remoteOwner ? null : (publication?.readiness ?? null))
   /** The verdict whose reason is being written, if one is. */
   let composing = $state<'revise' | 'reject' | null>(null)
   let reasonInput = $state<HTMLTextAreaElement | null>(null)
-  const conditions = $derived({ busy, publishing, stale, reason })
+  const conditions = $derived({ busy, publishing, stale, reason, readiness })
   const approveBlocked = $derived(unavailable('approve', conditions))
   const sendBlocked = $derived(composing ? unavailable(composing, conditions) : null)
 
@@ -502,6 +512,23 @@
     }
   }
 
+  const draftLine = $derived(
+    draftState === 'saving'
+      ? 'saving draft…'
+      : draftState === 'saved'
+        ? `draft saved${draftFromEarlier ? ' · written against an earlier revision' : ''}`
+        : draftState === 'unsaved'
+          ? 'draft not saved · the node could not be reached; it saves on your next edit'
+          : '',
+  )
+
+  const CLOSED_LABEL: Record<string, string> = {
+    approved: 'Approved',
+    rejected: 'Rejected',
+    acknowledged: 'Acknowledged',
+    gone: 'Closed',
+  }
+
   const OUTCOME: Record<string, string> = {
     not_attempted: 'publication not attempted',
     failed: 'publication failed',
@@ -514,7 +541,6 @@
         : null
       : null,
   )
-  const readiness = $derived(remoteOwner ? null : (publication?.readiness ?? null))
 </script>
 
 {#if !loaded}
@@ -524,14 +550,19 @@
 {:else if report}
   <ReportReview {report} />
 {:else}
-  <div class="head" class:stale={stale.length > 0}>
+  <div
+    class="head"
+    class:stale={!closed && stale.length > 0}
+    class:approved={review.state === 'approved'}
+    class:closed={closed && review.state !== 'approved'}
+  >
     <span class="bar"></span>
     <span class="mono">{formatAge(review.created_ms, clock.now)}</span>
     <span class="t">
-      <em>{stale.length > 0 ? 'Changed since submit' : 'Review'}</em>
+      <em>{closed ? CLOSED_LABEL[review.state] : stale.length > 0 ? 'Changed since submit' : 'Review'}</em>
       {title || review.title}
       <small
-        >{files.length} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
+        >{files.length} files · +{review.added} −{review.removed} · {review.channel}{!closed && review.claimed_ms
           ? ' · claimed'
           : ''}</small
       >
@@ -539,9 +570,11 @@
   </div>
 
   <dl class="kv">
-    <dt>Publishes</dt>
+    <dt>{review.state === 'approved' ? 'Published' : 'Publishes'}</dt>
     <dd class="m">
-      {#if change}
+      {#if landed}
+        <a href={landed.url} target="_blank" rel="noreferrer">{landed.number !== null ? `${noun} ${landed.number}` : landed.url}</a>
+      {:else if change}
         updates <a href={change.url} target="_blank" rel="noreferrer">{noun} {change.number}</a>
       {:else}
         new {noun}{intent.forge.draft ? ' (draft)' : ''}
@@ -748,7 +781,7 @@
         {#if verdict.findings?.length}
           <ul class="findings">
             {#each verdict.findings as f, i (i)}
-              <li><span class="sev {f.severity ?? 'should'}">{f.severity ?? 'should'}</span><span class="path">{f.path ?? ''}{f.line ? `:${f.line}` : ''}</span><span>{f.note}</span></li>
+              <li><span class="sev {f.severity ?? 'should'}">{f.severity ?? 'should'}</span><span class="path">{f.path ?? ''}{f.line ? `:${f.line}` : ''}</span><span class="fnote">{f.note}</span></li>
             {/each}
           </ul>
         {/if}
@@ -792,7 +825,7 @@
     </div>
   {/if}
 
-  {#if stale.length > 0}
+  {#if !closed && stale.length > 0}
     <div class="banner crit">
       changed since submit <b>· {stale.join(', ')} · approve is disabled; ask the agent to resubmit</b>
     </div>
@@ -806,36 +839,36 @@
     </div>
   {:else}
     <div class="h4">
-      Title and body <b>{surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
+      Title and body <b>{closed ? 'as decided' : surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
     </div>
-    <input class="edit" bind:value={title} disabled={busy || publishing || surface.phone} />
-    <textarea class="edit body" bind:value={body} use:autogrow={body} disabled={busy || publishing || surface.phone}></textarea>
+    <input class="edit" bind:value={title} disabled={busy || publishing || closed || surface.phone} />
+    <textarea class="edit body" bind:value={body} use:autogrow={body} disabled={busy || publishing || closed || surface.phone}></textarea>
   {/if}
 
-  <div class="h4">On the forge <b>{remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
+  <div class="h4">On the forge <b>{closed ? 'as decided' : remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
   {#if remoteOwner}
     <div class="note dim">Approving publishes what the agent asked the forge to show; to change it, open this review on the node that holds it.</div>
   {:else}
   <label class="toggle">
-    <input type="checkbox" bind:checked={describe} disabled={busy || publishing || surface.phone} />
+    <input type="checkbox" bind:checked={describe} disabled={busy || publishing || closed || surface.phone} />
     {change ? `Replace the ${noun}'s title and description` : `Describe the ${noun} separately from the summary`}
   </label>
   {#if describe}
-    <input class="edit" bind:value={descTitle} placeholder="title" disabled={busy || publishing || surface.phone} />
-    <textarea class="edit body" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || surface.phone}></textarea>
+    <input class="edit" bind:value={descTitle} placeholder="title" disabled={busy || publishing || closed || surface.phone} />
+    <textarea class="edit body" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || closed || surface.phone}></textarea>
   {/if}
   <label class="toggle">
-    <input type="checkbox" bind:checked={commenting} disabled={busy || publishing || surface.phone} />
+    <input type="checkbox" bind:checked={commenting} disabled={busy || publishing || closed || surface.phone} />
     Comment on the {noun}
   </label>
   {#if commenting}
-    <textarea class="edit body" bind:value={comment} use:autogrow={comment} disabled={busy || publishing || surface.phone}></textarea>
+    <textarea class="edit body" bind:value={comment} use:autogrow={comment} disabled={busy || publishing || closed || surface.phone}></textarea>
   {/if}
   {#if change && !describe && !(commenting && comment.trim())}
     <div class="note dim">Approving only pushes; the {noun}'s text is left as it is.</div>
   {/if}
   {/if}
-  {#if edited}
+  {#if edited && !closed}
     <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
   {/if}
 
@@ -857,13 +890,13 @@
         aria-label="commit message"
         bind:value={message}
         use:autogrow={message}
-        disabled={busy || publishing || surface.phone}
+        disabled={busy || publishing || closed || surface.phone}
       ></textarea>
     {/if}
     {#if change === null && !remoteOwner}
       <label class="branch">
         Branch
-        <input class="edit mono" bind:value={branchName} disabled={busy || publishing || surface.phone} />
+        <input class="edit mono" bind:value={branchName} disabled={busy || publishing || closed || surface.phone} />
       </label>
     {/if}
   {/if}
@@ -956,7 +989,9 @@
     {/if}
   {/if}
 
-  {#if remoteOwner}
+  {#if closed}
+    <!-- decided: there is nothing left to edit -->
+  {:else if remoteOwner}
     <p class="note">Editing the diff needs the worktree, which is on {nodeLabel(store.nodes, remoteOwner)}.</p>
   {:else if !surface.phone}
     <div class="editbar">
@@ -976,33 +1011,39 @@
     <p class="note">Editing a diff needs a keyboard and a wide screen — open this on the desktop.</p>
   {/if}
 
-  {#if error}
-    <div class="banner crit">refused <b>· {error}</b></div>
-  {/if}
-
-  {#if draftState === 'conflict'}
-    <div class="banner crit draft-conflict">
-      changed on another device <b>· {draftTheirs?.reason ? `it says “${draftTheirs.reason}”` : 'its draft differs from this one'}</b>
-      <button class="btn" onclick={takeTheirs}>Use theirs</button>
-      <button class="btn" onclick={keepMine}>Keep mine</button>
-    </div>
-  {/if}
-  <div class="draft-state" aria-live="polite">
-    {#if draftState === 'saving'}saving draft…
-    {:else if draftState === 'saved'}draft saved{draftFromEarlier ? ' · written against an earlier revision' : ''}
-    {:else if draftState === 'unsaved'}draft not saved · the node could not be reached; it saves on your next edit
-    {/if}
-  </div>
-  {#if readiness && !readiness.ready}
-    <div class="note">
-      Cannot publish from here yet: {readiness.problem}.
-      <a class="lnk" href={readiness.settings}>Bind a token in Settings</a>
-    </div>
-  {:else if readiness?.note}
+  {#if readiness?.ready && readiness.note && !closed}
     <div class="note dim">{readiness.note}</div>
   {/if}
 
+  {#if closed}
+    <div class="decided" class:approved={review.state === 'approved'}>
+      {#if review.state === 'approved'}
+        {#if landed}
+          approved and published as
+          <a href={landed.url} target="_blank" rel="noreferrer">{landed.number !== null ? `${noun} ${landed.number}` : landed.url}</a>
+        {:else}
+          approved
+        {/if}
+      {:else if review.state === 'gone'}
+        closed <b>· no longer open on the node that held it</b>
+      {:else}
+        {review.state}{#if review.verdict_reason}<b>{` · ${review.verdict_reason}`}</b>{/if}
+      {/if}
+    </div>
+  {:else}
+  <!-- Everything that answers a verdict sits in the bar, so it is in view
+       wherever on the page the verdict was given. -->
   <div class="decide" role="group" aria-label="Verdict">
+    {#if error}
+      <div class="banner crit">refused <b>· {error}</b></div>
+    {/if}
+    {#if draftState === 'conflict'}
+      <div class="banner crit draft-conflict">
+        changed on another device <b>· {draftTheirs?.reason ? `it says “${draftTheirs.reason}”` : 'its draft differs from this one'}</b>
+        <button class="btn" onclick={takeTheirs}>Use theirs</button>
+        <button class="btn" onclick={keepMine}>Keep mine</button>
+      </div>
+    {/if}
     {#if composing}
       <label class="composer">
         <span>{composerLabel(composing, editedFiles)}</span>
@@ -1020,12 +1061,8 @@
         {#if sendBlocked}<span class="why">{sendBlocked}</span>{/if}
       </div>
     {:else}
-      <div class="row">
-        <button
-          class="btn p"
-          disabled={approveBlocked !== null || readiness?.ready === false}
-          onclick={() => decide('approve')}
-        >
+      <div class="row verdicts">
+        <button class="btn p" disabled={approveBlocked !== null} onclick={() => decide('approve')}>
           Approve and publish
         </button>
         <button class="btn" disabled={busy || publishing} onclick={() => compose('revise')}>
@@ -1033,9 +1070,18 @@
         </button>
         <button class="btn d" disabled={busy || publishing} onclick={() => compose('reject')}>Reject…</button>
       </div>
-      {#if approveBlocked}<p class="why">Approve: {approveBlocked}</p>{/if}
+      {#if approveBlocked}
+        <p class="why">
+          Approve: {approveBlocked}.
+          {#if readiness && !readiness.ready && !busy && !publishing && stale.length === 0}
+            <a class="lnk" href={readiness.settings}>Bind a token in Settings</a>
+          {/if}
+        </p>
+      {/if}
     {/if}
+    <div class="draft-state" aria-live="polite">{draftLine}</div>
   </div>
+  {/if}
 {/if}
 
 <style>
@@ -1067,6 +1113,18 @@
   .head.stale .bar {
     background: var(--crit);
   }
+  .head.approved {
+    background: linear-gradient(90deg, var(--wash-ok), var(--s1) 42%);
+  }
+  .head.approved .bar {
+    background: var(--ok);
+  }
+  .head.closed {
+    background: linear-gradient(90deg, var(--wash-dim), var(--s1) 42%);
+  }
+  .head.closed .bar {
+    background: var(--dim);
+  }
   .t {
     font-weight: 500;
     min-width: 0;
@@ -1078,6 +1136,12 @@
   }
   .head.stale .t em {
     color: var(--crit);
+  }
+  .head.approved .t em {
+    color: var(--ok);
+  }
+  .head.closed .t em {
+    color: var(--dim);
   }
   .t small {
     display: block;
@@ -1145,6 +1209,7 @@
     padding-top: 0;
   }
   .evidence-panel summary {
+    overflow-wrap: anywhere;
     cursor: pointer;
     color: var(--ink2);
     font: 11.5px var(--mono);
@@ -1405,6 +1470,10 @@
     .path {
       grid-column: 2;
     }
+    /* Under its severity and path, not squeezed into the severity's column. */
+    .fnote {
+      grid-column: 1 / -1;
+    }
   }
   .edit {
     background: var(--s1);
@@ -1530,10 +1599,12 @@
     color: var(--crit);
   }
   .draft-state {
-    min-height: 1.2em;
     font: 12px var(--mono);
     color: var(--dim);
-    margin: 8px 0 -4px;
+  }
+  /* Kept in the page for the live region; takes no room while it says nothing. */
+  .draft-state:empty {
+    margin-top: -8px;
   }
   .draft-conflict {
     display: flex;
@@ -1576,10 +1647,11 @@
     color: inherit;
     border-color: currentColor;
   }
-  /* However long the review, the verdict stays on screen. */
+  /* However long the review, the verdict stays on screen, above the phone's
+     bottom tabs. */
   .decide {
     position: sticky;
-    bottom: 0;
+    bottom: var(--tabbar);
     z-index: 5;
     display: grid;
     gap: 8px;
@@ -1612,5 +1684,39 @@
     margin: 0;
     font-size: 12px;
     color: var(--dim);
+  }
+  .decided {
+    border-left: 3px solid var(--dim);
+    border-radius: 4px;
+    background: linear-gradient(90deg, var(--wash-dim), var(--s1) 50%);
+    padding: 10px 12px;
+    font: 12.5px var(--mono);
+    color: var(--ink2);
+    overflow-wrap: anywhere;
+  }
+  .decided b {
+    font-weight: 400;
+    color: var(--ink);
+  }
+  .decided.approved {
+    border-left-color: var(--ok);
+    background: linear-gradient(90deg, var(--wash-ok), var(--s1) 50%);
+    color: var(--ok);
+  }
+  @media (max-width: 700px) {
+    .decide {
+      padding-bottom: 12px;
+    }
+    /* Three verdicts in one row: two rows of buttons would take a quarter of
+       the screen above the tabs. */
+    .decide .row.verdicts {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .decide .row.verdicts .btn {
+      padding: 6px 8px;
+      line-height: 1.25;
+    }
   }
 </style>

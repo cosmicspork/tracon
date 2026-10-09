@@ -146,6 +146,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus
   outline-offset: 2px;
 }
 
+/* What the phone's fixed bottom tabs (App.svelte) cover: a 56px row, its 1px
+   rule and the safe area. Anything sticky at the bottom sits above it. */
+:root { --tabbar: 0px; }
+@media (max-width: 700px) {
+  :root { --tabbar: calc(57px + env(safe-area-inset-bottom)); }
+}
+
 @media (max-width: 700px) {
   .btn, .lnk {
     min-height: 44px;
