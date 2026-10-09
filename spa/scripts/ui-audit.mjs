@@ -86,7 +86,7 @@ if (process.argv.includes('--list')) {
 }
 
 // Durations end in _ms too, and are not offsets from now.
-const durations = new Set(['asleep_ms', 'duration_ms', 'idle_ms', 'elapsed_ms', 'ttl_ms', 'timeout_ms', 'wall_ms', 'awake_ms'])
+const durations = new Set(['asleep_ms', 'duration_ms', 'idle_ms', 'elapsed_ms', 'ttl_ms', 'timeout_ms', 'wall_ms', 'awake_ms', 'waiting_ms'])
 const stamp = (v) => {
   if (Array.isArray(v)) return v.map(stamp)
   if (v !== null && typeof v === 'object') {

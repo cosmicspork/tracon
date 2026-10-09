@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import {
+  eventLine,
+  fallbackLine,
+  SILENT,
   groupLog,
   missingContext,
   missingLine,
@@ -223,4 +227,87 @@ test('an orientation names the context revision it carried and what moved since 
   // An orientation from before contexts were selected, or for an item with none.
   expect(orientationContext({ chars: 1 })).toBeNull()
   expect(orientationContext({ context: null })).toBeNull()
+})
+
+// Every kind the node writes to a session's log, read from the Rust module
+// that names them, so a kind added there without a line here fails this test
+// rather than printing as a bare identifier.
+function nodeEventKinds(): string[] {
+  const rust = readFileSync(new URL('../../../node/src/session/state.rs', import.meta.url), 'utf8')
+  const start = rust.indexOf('pub mod event_kind {')
+  const end = rust.indexOf('\n}\n', start)
+  expect(start).toBeGreaterThan(-1)
+  return [...rust.slice(start, end).matchAll(/pub const [A-Z_]+: &str = "([a-z_]+)";/g)].map((m) => m[1])
+}
+
+// The kinds Log.svelte gives markup of its own.
+function markedUpKinds(): Set<string> {
+  const svelte = readFileSync(new URL('../components/Log.svelte', import.meta.url), 'utf8')
+  return new Set([...svelte.matchAll(/e\.kind === '([a-z_]+)'/g)].map((m) => m[1]))
+}
+
+test('every event kind the node records has a line of its own', () => {
+  const kinds = nodeEventKinds()
+  // A sanity floor: a parse that found nothing would pass vacuously.
+  expect(kinds.length).toBeGreaterThan(40)
+  expect(kinds).toContain('provider_exhausted')
+  const markup = markedUpKinds()
+  // Tool calls fold into groups; the silent kinds render nothing on purpose.
+  const handled = (kind: string) =>
+    kind === 'tool_call' || SILENT.has(kind) || markup.has(kind) || eventLine(ev(kind)) !== null
+  expect(kinds.filter((k) => !handled(k))).toEqual([])
+})
+
+test('each 0.29.0 kind reads as a sentence, not its name', () => {
+  const lines: [string, Record<string, unknown>, string][] = [
+    ['service', { name: 'postgres', container: 'c', state: 'ready' }, 'service postgres ready'],
+    ['service', { name: 'postgres', state: 'failed', detail: 'did not answer on 5432 within 30s' }, 'service postgres failed · did not answer on 5432 within 30s'],
+    ['published', { url: 'https://github.com/o/r/pull/418', review_id: 'rev-1' }, 'published · o/r/pull/418'],
+    ['session_suspended', { idle_ms: 1_800_000 }, 'suspended · idle 30m after publishing'],
+    ['session_paused', { source: 'operator', reason: 'operator paused the session' }, 'paused by the operator'],
+    ['session_paused', { source: 'watchdog', reason: '3 failed tool calls in a row' }, 'paused by the node · 3 failed tool calls in a row'],
+    ['session_paused', { source: 'exhausted', reason: 'anthropic is exhausted (…)' }, 'paused · its provider is exhausted'],
+    ['session_resumed', { source: 'wake', reason: "the provider's limit has reset" }, "resumed by the node · the provider's limit has reset"],
+    ['session_resumed', { source: 'operator', reason: 'operator resumed the session' }, 'resumed by the operator'],
+    ['exhaustion_boundary', { boundary_seq: 42, outcome: 'waiting' }, 'the cut-off turn has settled · the work resumes from here'],
+    ['exhaustion_wake', { outcome: 'resumed' }, "the provider's limit reset · resumed"],
+    ['exhaustion_wake', { outcome: 'held', note: 'The node did not carry on: no model.' }, 'held for you · The node did not carry on: no model.'],
+    ['approval_settled', { tool: 'pr_merge', state: 'succeeded', reason: 'x' }, 'approved call succeeded · pr_merge'],
+    ['approval_settled', { tool: 'pr_merge', state: 'failed', reason: 'not mergeable' }, 'approved call failed · pr_merge · not mergeable'],
+    ['candidate_verified', { candidate_id: 'c', head_sha: '8c4be91f03a2d6e7b5c1', reused: true }, 'checks passed · at 8c4be91f03a2 · evidence reused'],
+    ['review_decision', { source: 'operator', review_id: 'r', decision: 'approved', waiting_ms: 720_000 }, 'review approved · by the operator · after 12m waiting'],
+    ['review_decision', { decision: 'revise', waiting_ms: 5000 }, 'review sent back with notes · by the operator · after 5s waiting'],
+    ['uncertain', { reason: 'the prompt never reported', refusing: 'prompt' }, 'outcome unknown · the prompt never reported · new prompts refused until it settles'],
+    ['uncertain', { cleared: 'the turn ended' }, 'outcome settled · the turn ended'],
+    ['pty_opened', { phase: 'spawn', command: 'bash', args: ['-l'], cwd: '/w' }, 'terminal opened · bash -l · in /w · what is typed in it is not recorded'],
+    ['pty_closed', { phase: 'detached', duration_ms: 65_000 }, 'terminal detached · after 1m'],
+    ['abandoned', { reason: 'item closed', summary: 'superseded by #12' }, 'abandoned · superseded by #12'],
+  ]
+  for (const [kind, payload, text] of lines) expect(eventLine(ev(kind, null, payload))?.text).toBe(text)
+})
+
+test('a published line links the forge, and a continued wake links the new session', () => {
+  const published = eventLine(ev('published', null, { url: 'https://github.com/o/r/pull/418' }))!
+  expect(published.href).toBe('https://github.com/o/r/pull/418')
+  expect(published.tone).toBe('ok')
+  const wake = eventLine(ev('exhaustion_wake', null, { outcome: 'continued', continued_by: '0b1c2d3e-4f50', model: 'openai/gpt-5' }))!
+  expect(wake.text).toBe('continued in a new session · on openai/gpt-5')
+  expect(wake.href).toBe('/sessions/0b1c2d3e-4f50')
+  expect(wake.link).toBe('0b1c2d3e')
+})
+
+test('the exhaustion line says what refused and what happens next', () => {
+  const held = eventLine(
+    ev('provider_exhausted', null, { policy: 'pause', outcome: 'held', provider: 'anthropic', reason: 'usage limit reached', note: 'no fallback' }),
+  )!
+  expect(held.text).toBe('anthropic is exhausted · usage limit reached · waiting for you · no fallback')
+  const falling = eventLine(ev('provider_exhausted', null, { outcome: 'falling_back', provider: 'anthropic', fallback: 'openai/gpt-5' }))!
+  expect(falling.text).toBe('anthropic is exhausted · carrying on with openai/gpt-5 from where it stopped')
+})
+
+test('a kind nobody taught the log still reads as words with its short fields', () => {
+  expect(eventLine(ev('brand_new_kind'))).toBeNull()
+  const line = fallbackLine(ev('brand_new_kind', null, { name: 'postgres', nested: { a: 1 }, ready: true, count: 3, extra: 'x' }))
+  expect(line.text).toBe('brand new kind · name postgres · ready true · count 3')
+  expect(line.tone).toBe('sys')
 })

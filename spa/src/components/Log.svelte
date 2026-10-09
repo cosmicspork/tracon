@@ -1,5 +1,7 @@
 <script lang="ts">
   import {
+    eventLine,
+    fallbackLine,
     groupLog,
     policyLine,
     groupOpen,
@@ -133,13 +135,13 @@
         {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
         {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}
         {#if changes.length}
-          <div class="mark">on the forge · {changes.join(' · ')}{#if url} · <a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
+          <div class="mark">on the forge · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
         {/if}
       {:else if e.kind === 'pipeline_follow'}
         {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
         {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}
         {#if changes.length}
-          <div class="mark" class:crit={e.payload.status === 'failed'}>pipeline {e.payload.pipeline_id} · {changes.join(' · ')}{#if url} · <a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
+          <div class="mark" class:crit={e.payload.status === 'failed'}>pipeline {e.payload.pipeline_id} · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
         {/if}
       {:else if e.kind === 'work_closed'}
         <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>
@@ -200,8 +202,13 @@
         <div class="mark crit">{policyLine(e)}</div>
       {:else if e.kind === 'policy_allowed'}
         <div class="mark wait">{policyLine(e)}</div>
-      {:else if e.kind !== 'usage' && e.kind !== 'plan'}
-        <div class="sys">{e.kind}</div>
+      {:else}
+        <!-- groupLog has already dropped the silent kinds. -->
+        {@const line = eventLine(e) ?? fallbackLine(e)}
+        {@const external = line.href?.startsWith('http') ?? false}
+        <div class={line.tone === 'sys' || line.tone === 'mark' ? line.tone : `mark ${line.tone}`}>
+          {line.text}{#if line.href}{' · '}<a href={line.href} target={external ? '_blank' : undefined} rel={external ? 'noopener' : undefined}>{line.link ?? 'open'}</a>{/if}
+        </div>
       {/if}
     {:else}
       {@const tools = entry.tools!}
@@ -338,6 +345,11 @@
   }
   .mark {
     color: var(--ink2);
+  }
+  /* A path, a URL or an id is one unbroken word; it wraps, not the page. */
+  .sys,
+  .mark {
+    overflow-wrap: anywhere;
   }
   .mark.wait {
     color: var(--wait);

@@ -5,8 +5,9 @@
 // break a run: every Claude Code call now carries a policy record, and letting
 // those through left no two calls side by side.
 
-import { formatTokens } from './format'
-import type { Event } from './types'
+import { exhaustionNote } from './exhaustion'
+import { formatDuration, formatTokens } from './format'
+import type { Event, SessionExhaustion } from './types'
 
 export interface ToolEntry {
   call: Event
@@ -27,7 +28,7 @@ function quietAllow(e: Event): boolean {
 }
 
 /// Kinds the log renders nothing for; they must not end a run either.
-const SILENT = new Set(['usage', 'plan'])
+export const SILENT = new Set(['usage', 'plan'])
 
 export interface LogEntry {
   kind: 'leaf' | 'tools'
@@ -264,4 +265,161 @@ export function missingLine(m: MissingContext): string {
   const scope = m.partial ? 'cut short' : 'not included'
   const size = m.chars > 0 ? `, ${formatTokens(m.chars)} chars` : ''
   return `${m.what} ${scope}${size}${m.fetch ? ` — ${m.fetch}` : ''}`
+}
+
+/** One line of the log for an event with no markup of its own. */
+export interface EventLine {
+  text: string
+  /** `sys` is the node talking to itself; the rest are `mark` lines in that colour. */
+  tone: 'sys' | 'mark' | 'wait' | 'crit' | 'ok'
+  /** A link after the text: a forge URL, or a route in this app. */
+  href?: string
+  link?: string
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : ''
+}
+
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+function line(tone: EventLine['tone'], parts: unknown[], href?: string, link?: string): EventLine {
+  const text = parts.filter((p) => typeof p === 'string' && p).join(' · ')
+  return href ? { text, tone, href, link } : { text, tone }
+}
+
+/// A pause or resume reason, unless it is the node's stand-in for none.
+function ownReason(v: unknown): string {
+  const reason = str(v)
+  return /^operator (paused|resumed) the session$/.test(reason) ? '' : reason
+}
+
+/// A forge URL without its scheme and host: "cosmic-example/orbit/pull/418".
+function forgePath(url: string): string {
+  try {
+    const u = new URL(url)
+    return u.pathname.replace(/^\/+|\/+$/g, '') || u.host
+  } catch {
+    return url
+  }
+}
+
+/// The line for every event kind Log.svelte gives no markup of its own, or
+/// null for a kind this does not know. Only what the node recorded: a field
+/// it left out is left out of the line, never filled with a guess.
+export function eventLine(e: Event): EventLine | null {
+  const p = e.payload
+  switch (e.kind) {
+    case 'session_paused': {
+      const source = str(p.source)
+      // The exhaustion line just before says what the provider did and what
+      // happens next; repeating its sentence here says it twice.
+      if (source === 'exhausted') return line('wait', ['paused', 'its provider is exhausted'])
+      const who = source === 'watchdog' ? 'paused by the node' : 'paused by the operator'
+      return line('wait', [who, ownReason(p.reason)])
+    }
+    case 'session_resumed': {
+      const who = str(p.source) === 'wake' ? 'resumed by the node' : 'resumed by the operator'
+      return line('mark', [who, ownReason(p.reason)])
+    }
+    case 'published': {
+      const url = str(p.url)
+      return line('ok', ['published', url ? forgePath(url) : ''], url || undefined, url ? 'open' : undefined)
+    }
+    case 'session_suspended': {
+      const idle = num(p.idle_ms)
+      return line('mark', ['suspended', idle !== null ? `idle ${formatDuration(idle)} after publishing` : 'idle after publishing'])
+    }
+    case 'approval_settled': {
+      const state = str(p.state) || 'settled'
+      const tone = state === 'succeeded' ? 'ok' : state === 'failed' ? 'crit' : state === 'uncertain' ? 'wait' : 'mark'
+      const what = state === 'uncertain' ? 'outcome unknown' : state
+      return line(tone, [`approved call ${what}`, str(p.tool), state === 'succeeded' ? '' : str(p.reason)])
+    }
+    case 'candidate_verified': {
+      const sha = str(p.head_sha).slice(0, 12)
+      return line('ok', ['checks passed', sha ? `at ${sha}` : '', p.reused === true ? 'evidence reused' : ''])
+    }
+    case 'review_decision': {
+      const decision = str(p.decision)
+      const said: Record<string, [string, EventLine['tone']]> = {
+        approved: ['review approved', 'ok'],
+        rejected: ['review rejected', 'crit'],
+        revise: ['review sent back with notes', 'wait'],
+      }
+      const [text, tone] = said[decision] ?? [`review ${decision || 'decided'}`, 'mark']
+      const waited = num(p.waiting_ms)
+      return line(tone, [text, 'by the operator', waited !== null ? `after ${formatDuration(waited)} waiting` : ''])
+    }
+    case 'provider_exhausted': {
+      const note = exhaustionNote(p as unknown as SessionExhaustion)
+      const provider = str(p.provider) || 'its provider'
+      return line('wait', [note?.title ?? `${provider} is exhausted`, str(p.reason), note?.detail ?? str(p.note)])
+    }
+    case 'exhaustion_boundary': {
+      const carried = str(p.outcome) === 'falling_back'
+      return line('sys', ['the cut-off turn has settled', carried ? 'the fallback carries on from here' : 'the work resumes from here'])
+    }
+    case 'exhaustion_wake': {
+      const outcome = str(p.outcome)
+      const note = str(p.note)
+      switch (outcome) {
+        case 'resumed':
+          return line('mark', ["the provider's limit reset", 'resumed', note])
+        case 'continued': {
+          const next = str(p.continued_by)
+          return line('mark', ['continued in a new session', str(p.model) ? `on ${str(p.model)}` : '', note], next ? `/sessions/${next}` : undefined, next ? next.slice(0, 8) : undefined)
+        }
+        case 'held':
+          return line('wait', ['held for you', note])
+        case 'operator':
+          return line('mark', ['taken over by the operator', note])
+        case 'abandoned':
+          return line('sys', ['not woken', note])
+        default:
+          return line('mark', ['exhaustion', outcome, note])
+      }
+    }
+    case 'uncertain': {
+      const cleared = str(p.cleared)
+      if (cleared) return line('sys', ['outcome settled', cleared])
+      return line('wait', ['outcome unknown', str(p.reason), 'new prompts refused until it settles'])
+    }
+    case 'child_session':
+      return line('wait', ['the harness started a session of its own', str(p.child), 'recorded, not driven'])
+    case 'pty_opened': {
+      if (str(p.phase) === 'attach') return line('wait', ['terminal attached', str(p.pty_id)])
+      const args = Array.isArray(p.args) ? p.args.filter((a) => typeof a === 'string') : []
+      const command = [str(p.command), ...args].filter(Boolean).join(' ')
+      return line('wait', ['terminal opened', command, str(p.cwd) ? `in ${str(p.cwd)}` : '', 'what is typed in it is not recorded'])
+    }
+    case 'pty_closed': {
+      const duration = num(p.duration_ms)
+      const what = str(p.phase) === 'detached' ? 'terminal detached' : 'terminal closed'
+      return line('sys', [what, duration !== null ? `after ${formatDuration(duration)}` : '', str(p.reason)])
+    }
+    case 'service': {
+      const state = str(p.state) || 'changed'
+      const tone = state === 'failed' ? 'crit' : state === 'ready' ? 'ok' : 'mark'
+      return line(tone, [`service ${str(p.name) || 'unnamed'} ${state}`, str(p.detail)])
+    }
+    case 'abandoned':
+      return line('mark', ['abandoned', str(p.summary) || str(p.reason)])
+    default:
+      return null
+  }
+}
+
+/// A kind nobody taught the log: its name in words and its short fields,
+/// "some kind · name postgres · state ready", never a bare identifier. A
+/// stand-in until it gets a line of its own; the test over the node's kinds
+/// is what notices one is missing.
+export function fallbackLine(e: Event): EventLine {
+  const fields = Object.entries(e.payload)
+    .filter(([, v]) => (typeof v === 'string' && v.trim() && v.length <= 80) || typeof v === 'number' || typeof v === 'boolean')
+    .slice(0, 3)
+    .map(([k, v]) => `${k.replace(/_/g, ' ')} ${String(v).trim()}`)
+  return line('sys', [e.kind.replace(/_/g, ' '), ...fields])
 }
