@@ -1560,6 +1560,10 @@ export interface RepoEntry {
   prepare: string[]
   egress: string[]
   session_egress?: boolean
+  /** How this repository's commits reach the forge. Not edited here. */
+  commits?: 'squash' | 'keep'
+  /** Its commit-subject and branch rules. Not edited here. */
+  style?: Record<string, unknown>
 }
 
 /** One build of a repository's image on this node. */

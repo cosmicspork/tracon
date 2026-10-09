@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { acceptsUploads, blankForm, buildLine, lines, problems, toEntry, toForm, words } from './repos'
+import { acceptsUploads, blankForm, buildLine, canonical, lines, problems, toEntry, toForm, words } from './repos'
 import type { RepoEntry, RepoImageBuild } from './types'
 
 const presets: [string, string[]][] = [
@@ -26,6 +26,42 @@ test('an entry survives the form unchanged', () => {
     { path: '/src/plain', prepare: [], egress: [] },
   ]
   for (const entry of entries) expect(toEntry(toForm(entry))).toEqual(entry)
+})
+
+test('what the form does not edit is saved back as it came', () => {
+  const entry: RepoEntry = {
+    path: 'github.com/owner/app',
+    prepare: [],
+    egress: [],
+    commits: 'keep',
+    style: { conventional: true, max_subject: 72 },
+  }
+  const form = toForm(entry)
+  form.prepare = 'bun install'
+  expect(toEntry(form)).toEqual({ ...entry, prepare: ['bun install'] })
+})
+
+test('a table read back from the node is not an unsaved change', () => {
+  // serde_json's map is sorted, so the node's keys never arrive in the order
+  // the form writes them.
+  const fromNode = [
+    {
+      checks: ['just check'],
+      commits: 'squash',
+      dockerfile: '.devcontainer/Dockerfile',
+      egress: ['crates'],
+      path: '/src/app',
+      prepare: ['cargo fetch --locked'],
+      session_egress: true,
+      style: { conventional: true },
+      timeout_secs: 900,
+    },
+    { egress: [], image: 'localhost/tc@sha256:abc', path: 'owner/pinned', prepare: [] },
+  ] as RepoEntry[]
+  const forms = fromNode.map(toForm)
+  // Compared as it arrived, an untouched form would read as edited.
+  expect(JSON.stringify(forms.map(toEntry))).not.toBe(JSON.stringify(fromNode))
+  expect(JSON.stringify(forms.map(toEntry))).toBe(canonical(fromNode))
 })
 
 test('explicitly no checks is not the same as the node-wide checks', () => {

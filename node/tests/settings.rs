@@ -1146,6 +1146,7 @@ async fn repository_environments_are_listed_and_built_only_from_this_machine() {
 /// whole and changes nothing.
 #[tokio::test]
 async fn the_repository_table_is_saved_whole_and_applies_without_a_restart() {
+    let _guard = state::config_lock().await;
     let n = node();
     let entries = json!({ "entries": [
         { "path": "/src/app", "dockerfile": ".devcontainer/Dockerfile",
@@ -1228,4 +1229,88 @@ async fn the_repository_table_is_saved_whole_and_applies_without_a_restart() {
         assert!(v.to_string().contains(why), "{v}");
     }
     assert_eq!(Config::try_load().unwrap().repo.len(), 2);
+}
+
+/// An entry's `commits` and `style` are not edited where the table is, but
+/// the table is saved whole: what the list hands a client has to come back
+/// to `node.toml` unchanged when the client sends it back.
+#[tokio::test]
+async fn saving_the_repository_table_keeps_commits_and_style() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let entries = json!({ "entries": [
+        { "path": "github.com/owner/app", "prepare": [], "egress": [],
+          "commits": "keep",
+          "style": { "conventional": true, "max_subject": 72 } },
+        { "path": "/src/plain", "prepare": [], "egress": [] },
+    ]});
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(LOCAL),
+        Some(entries),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    let written = || {
+        let text = std::fs::read_to_string(Config::config_path()).unwrap();
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        let repo = doc["repo"].as_array().unwrap()[0].clone();
+        (text, repo)
+    };
+    let (text, repo) = written();
+    assert_eq!(repo["commits"].as_str(), Some("keep"), "{text}");
+    assert_eq!(
+        repo["style"]["conventional"].as_bool(),
+        Some(true),
+        "{text}"
+    );
+    assert_eq!(
+        repo["style"]["max_subject"].as_integer(),
+        Some(72),
+        "{text}"
+    );
+
+    // What the list says is what a client sends back, and it changes nothing.
+    let (_, v) = call(&n, "GET", "/api/repos/environments", Some(LOCAL), None).await;
+    let listed: Vec<Value> = v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["entry"].clone())
+        .collect();
+    assert_eq!(listed[0]["commits"], json!("keep"));
+    assert_eq!(
+        listed[0]["style"],
+        json!({ "conventional": true, "max_subject": 72 })
+    );
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(LOCAL),
+        Some(json!({ "entries": listed })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["changed"], json!(false));
+    let (text, repo) = written();
+    assert_eq!(repo["commits"].as_str(), Some("keep"), "{text}");
+    assert_eq!(
+        repo["style"]["max_subject"].as_integer(),
+        Some(72),
+        "{text}"
+    );
+    let file = Config::try_load().unwrap();
+    assert_eq!(file.repo[0].commits, Some(tracon::config::Commits::Keep));
+    assert_eq!(
+        file.repo[0].style,
+        Some(tracon::review::prose::Style {
+            conventional: true,
+            max_subject: 72,
+            ..Default::default()
+        })
+    );
 }
