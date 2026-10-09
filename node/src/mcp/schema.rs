@@ -66,6 +66,9 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (review::SUBMIT_REPORT, "markdown", &["body"], &["report_id"]),
     (super::egress::REQUEST, "markdown", &[], &["host"]),
     (super::setup::PROPOSE, "markdown", &["why"], &[]),
+    (super::services::START, "markdown", &[], &["name"]),
+    // The title names the status this id leads to, read when it was asked.
+    (jira::ISSUE_TRANSITION, "markdown", &[], &["transition_id"]),
 ];
 
 pub fn presentation(tool: &str) -> Presentation {
@@ -82,31 +85,40 @@ pub fn presentation(tool: &str) -> Presentation {
 
 /// The input schema of a tool by name.
 pub fn input_schema(tool: &str) -> Option<&'static Value> {
+    registry().get(tool)
+}
+
+/// Every tool the registry knows by name: each one an operator could be
+/// asked to decide.
+pub fn tool_names() -> impl Iterator<Item = &'static str> {
+    registry().keys().map(String::as_str)
+}
+
+fn registry() -> &'static HashMap<String, Value> {
     static REGISTRY: OnceLock<HashMap<String, Value>> = OnceLock::new();
-    REGISTRY
-        .get_or_init(|| {
-            [
-                jira::definitions(),
-                github::definitions(),
-                gitlab::definitions(),
-                super::consulta::definitions(&[]),
-                docs::definitions(),
-                memory::definitions(),
-                super::operator::definitions(),
-                super::egress::definitions(),
-                super::setup::definitions(),
-                work::definitions(),
-                review::definitions(),
-            ]
-            .into_iter()
-            .flatten()
-            .filter_map(|mut d| {
-                let name = d.get("name")?.as_str()?.to_string();
-                Some((name, d.get_mut("inputSchema")?.take()))
-            })
-            .collect()
+    REGISTRY.get_or_init(|| {
+        [
+            jira::definitions(),
+            github::definitions(),
+            gitlab::definitions(),
+            super::consulta::definitions(&[]),
+            docs::definitions(),
+            memory::definitions(),
+            super::operator::definitions(),
+            super::egress::definitions(),
+            super::setup::definitions(),
+            super::services::definitions_for(&[], ""),
+            work::definitions(),
+            review::definitions(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|mut d| {
+            let name = d.get("name")?.as_str()?.to_string();
+            Some((name, d.get_mut("inputSchema")?.take()))
         })
-        .get(tool)
+        .collect()
+    })
 }
 
 /// Why the operator's `edited` arguments cannot replace `original` for
@@ -290,6 +302,18 @@ mod tests {
         let doc = presentation("doc_write");
         assert_eq!(doc.prose_fields, ["body"]);
         assert!(doc.locked_fields.contains(&"slug") && doc.locked_fields.contains(&"key"));
+        // A held service start has its schema with no catalogue to hand,
+        // and the service it starts is what the call acts on.
+        let service = input_schema("service_start").unwrap();
+        assert_eq!(service["required"], serde_json::json!(["name"]));
+        assert!(service["properties"]["name"].get("enum").is_none());
+        assert!(presentation("service_start")
+            .locked_fields
+            .contains(&"name"));
+        // The title names where a transition leads; the id it names is fixed.
+        assert!(presentation("issue_transition")
+            .locked_fields
+            .contains(&"transition_id"));
         let unknown = presentation("pipeline_run");
         assert_eq!(unknown.format, "markdown");
         assert!(unknown.prose_fields.is_empty());

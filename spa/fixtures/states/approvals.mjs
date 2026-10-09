@@ -65,6 +65,14 @@ const SCHEMAS = {
     properties: { repo, run_id: { type: 'integer' } },
     required: ['repo', 'run_id'],
   },
+  service_start: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: "The service's name in the node's catalogue." },
+      wait_secs: { type: 'integer', minimum: 0, description: 'Seconds to wait for it to become ready (capped). Default 30.' },
+    },
+    required: ['name'],
+  },
   issue_transition: {
     type: 'object',
     properties: { key: { type: 'string' }, transition_id: { type: 'string' }, operation_id: { type: 'string' } },
@@ -151,9 +159,11 @@ const PRESENT = {
   issue_create: ['jira_wiki', ['description'], []],
   request_egress: ['markdown', [], ['host']],
   repo_setup_propose: ['markdown', ['why'], []],
+  service_start: ['markdown', [], ['name']],
+  issue_transition: ['markdown', [], ['transition_id']],
 }
 
-/** mcp::summarize: a prose call is titled by target and first line; anything else is `name {json}`. */
+/** mcp::summarize: a prose or gated call is titled in words; anything else is `name {json}`. */
 function summarize(tool, args) {
   const first = (k) => (typeof args[k] === 'string' ? args[k].split('\n').map((l) => l.trim()).find(Boolean) : undefined)
   const withSaid = (head, said) => (said ? `${head}: ${said}` : head)
@@ -168,6 +178,21 @@ function summarize(tool, args) {
       break
     case 'issue_create':
       s = withSaid(`${tool} ${args.project} ${args.type}`, args.summary)
+      break
+    case 'issue_transition':
+      s = `${tool} ${args.key}: transition ${args.transition_id}`
+      break
+    case 'pr_merge':
+      s = `${tool} ${args.repo}#${args.number}: ${args.method ?? 'squash'} at ${args.head_sha.slice(0, 7)}`
+      break
+    case 'run_rerun':
+      s = `${tool} ${args.repo}: failed jobs of run ${args.run_id}`
+      break
+    case 'service_start':
+      s = `${tool} ${args.name}`
+      break
+    case 'repo_setup_propose':
+      s = withSaid(`${tool} ${args.repo}`, first('why'))
       break
     default:
       s = `${tool} ${JSON.stringify(sorted(args))}`
@@ -354,11 +379,17 @@ const merge = approval(ID.merge, 'pr_merge', {
 
 const rerun = approval(ID.rerun, 'run_rerun', { repo: 'acme/orbit', run_id: 11893472205 })
 
-const transition = approval(ID.transition, 'issue_transition', {
-  key: 'WRK-1874',
-  transition_id: '31',
-  operation_id: 'transition-WRK-1874-31-0199f2d5',
-})
+// The node asks Jira where transition 31 leads when the call is held.
+const transition = approval(
+  ID.transition,
+  'issue_transition',
+  {
+    key: 'WRK-1874',
+    transition_id: '31',
+    operation_id: 'transition-WRK-1874-31-0199f2d5',
+  },
+  { title: 'issue_transition WRK-1874: move to In Review' },
+)
 
 const create = approval(ID.create, 'issue_create', {
   project: 'WRK',
@@ -451,8 +482,8 @@ export default [
   }),
   at(ID.merge, merge, {
     id: 'approvals-pr-merge',
-    title: 'PR merge: enum select, JSON-ish title',
-    note: 'A call with no prose is titled `pr_merge {json}` by the node. method renders as a select.',
+    title: 'PR merge: enum select',
+    note: 'Titled by the node as target, method and short head SHA. method renders as a select.',
   }),
   at(ID.rerun, rerun, {
     id: 'approvals-run-rerun',
@@ -472,8 +503,8 @@ export default [
   at(ID.transition, transition, {
     id: 'approvals-issue-transition',
     since: '#401',
-    title: 'Jira transition by id',
-    note: 'issue_transition takes the id issue_transitions (new in #401) lists; the card shows only the opaque id "31", never the transition name.',
+    title: 'Jira transition, titled by the status it leads to',
+    note: 'issue_transition takes the id issue_transitions (new in #401) lists; the node asks Jira when the call is held and titles it "move to In Review". transition_id is locked.',
   }),
   at(ID.create, create, {
     id: 'approvals-issue-create-jira',
@@ -493,14 +524,14 @@ export default [
   at(ID.service, service, {
     id: 'approvals-service-start',
     since: '#389',
-    title: 'Service sidecar start (no schema known)',
-    note: 'service_start is not in the node\'s schema registry, so input_schema is null and the form is read off the arguments: name and wait_secs, both optional, nothing locked.',
+    title: 'Service sidecar start',
+    note: 'service_start: name is required and locked, wait_secs an optional whole number.',
   }),
   at(ID.propose, propose, {
     id: 'approvals-setup-propose',
     since: '#391',
     title: "Repository entry proposed from a session",
-    note: 'repo_setup_propose: why renders as a document, checks/prepare/egress as comma-separated inputs (commas inside a command would split it), long field descriptions, and a 400-char JSON title.',
+    note: 'repo_setup_propose: why renders as a document, checks/prepare/egress as comma-separated inputs (commas inside a command would split it), long field descriptions, and a title from the first line of why.',
   }),
   at(ID.propose, propose, {
     id: 'approvals-setup-propose-edited',

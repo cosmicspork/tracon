@@ -105,6 +105,7 @@ async fn a_service_is_asked_for_by_name_and_decided_by_name() {
     // A database waits for the operator.
     let v = tool(&h, &token, "service_start", json!({ "name": "postgres" })).await;
     assert_eq!(v["state"], "awaiting_operator", "{v}");
+    assert_eq!(v["summary"], "service_start postgres", "{v}");
 
     // Status is a read.
     let v = tool(&h, &token, "service_status", json!({ "name": "postgres" })).await;

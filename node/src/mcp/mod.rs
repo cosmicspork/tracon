@@ -59,6 +59,10 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
     ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// How long a held Jira transition waits on Jira to name the status it leads
+/// to before it is titled by its id instead.
+const TRANSITION_LOOKUP: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct Tools {
     pub broker: SharedBroker,
     pub cfg: Arc<Config>,
@@ -968,7 +972,6 @@ impl Tools {
             .get()
             .ok_or("this call needs the operator's approval and this node cannot hold one")?;
         let request_key = request_key(name, args);
-        let summary = summarize(name, args);
         let existing = access
             .store
             .pending_approval(&ctx.channel, &request_key)
@@ -976,6 +979,7 @@ impl Tools {
         let approval = match existing {
             Some(approval) => approval,
             None => {
+                let title = self.approval_title(ctx, name, args).await;
                 let now = crate::store::now_ms();
                 let row = ApprovalRow {
                     id: uuid::Uuid::now_v7().to_string(),
@@ -986,7 +990,7 @@ impl Tools {
                     tool: name.to_string(),
                     arguments: args.to_string(),
                     request_key,
-                    title: summary.clone(),
+                    title,
                     state: PENDING.into(),
                     answer_option_id: None,
                     edited_arguments: None,
@@ -1018,6 +1022,20 @@ impl Tools {
                 approvals::STATUS
             ),
         }))
+    }
+
+    /// What the operator reads on the card and in the push for a held call:
+    /// [`summarize`], except that a Jira transition is named by the status it
+    /// leads to, which only Jira can say. A lookup that fails or is slow
+    /// leaves the id in the title rather than holding the request.
+    async fn approval_title(&self, ctx: &CallContext, name: &str, args: &Value) -> String {
+        if name == jira::ISSUE_TRANSITION {
+            let lookup = jira::transition_target(&self.broker, &self.http, ctx, args);
+            if let Ok(Some(to)) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
+                return transition_title(args, &to);
+            }
+        }
+        summarize(name, args)
     }
 
     /// The operator's answer to an approval. Allowing it runs the call, with
@@ -1767,6 +1785,12 @@ pub fn summarize(name: &str, args: &Value) -> String {
         (None, Some(p)) => format!("{name} profile={p} {args}"),
         (None, None) => format!("{name} {args}"),
     };
+    bound(&mut s);
+    s
+}
+
+/// A title cut to the length a card and a push notification carry.
+fn bound(s: &mut String) {
     if s.len() > 400 {
         let mut cut = 400;
         while !s.is_char_boundary(cut) {
@@ -1775,6 +1799,19 @@ pub fn summarize(name: &str, args: &Value) -> String {
         s.truncate(cut);
         s.push('…');
     }
+}
+
+/// A Jira transition titled by the status it leads to, which the operator
+/// knows, rather than by its id, which they do not. Jira is asked at request
+/// time; when it cannot say, the title names the id.
+fn transition_title(args: &Value, to: &str) -> String {
+    let key = args
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .trim();
+    let mut s = format!("{} {key}: move to {to}", jira::ISSUE_TRANSITION);
+    bound(&mut s);
     s
 }
 
@@ -1797,6 +1834,21 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
     let with = |head: String, said: Option<&str>| match said {
         Some(said) => format!("{head}: {said}"),
         None => head,
+    };
+    let short = |key: &str| id(key).chars().take(7).collect::<String>();
+    // Variable names, not values: which ones are set is what an operator
+    // weighs, and the page shows the values.
+    let with_variables = |head: String| {
+        let names: Vec<&str> = args
+            .get("variables")
+            .and_then(Value::as_object)
+            .map(|v| v.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        if names.is_empty() {
+            head
+        } else {
+            format!("{head} with {}", names.join(", "))
+        }
     };
     Some(match name {
         jira::ISSUE_CREATE => with(
@@ -1828,6 +1880,43 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             first_line("value"),
         ),
         review::SUBMIT_REPORT => with(name.to_string(), text("title")),
+        jira::ISSUE_TRANSITION => {
+            format!("{name} {}: transition {}", id("key"), id("transition_id"))
+        }
+        github::PR_MERGE => format!(
+            "{name} {}#{}: {} at {}",
+            id("repo"),
+            id("number"),
+            text("method").unwrap_or("squash"),
+            short("head_sha")
+        ),
+        gitlab::MR_MERGE => format!(
+            "{name} {}!{}: {} at {}",
+            id("project"),
+            id("iid"),
+            if args.get("squash") == Some(&Value::Bool(false)) {
+                "merge"
+            } else {
+                "squash"
+            },
+            short("head_sha")
+        ),
+        gitlab::JOB_PLAY => {
+            with_variables(format!("{name} {}: job {}", id("project"), id("job_id")))
+        }
+        gitlab::PIPELINE_RUN => with_variables(format!("{name} {}: {}", id("project"), id("ref"))),
+        gitlab::PIPELINE_LIST_BY_SHA => format!("{name} {}: {}", id("project"), short("sha")),
+        gitlab::DEPLOY => format!(
+            "{name} {}: {} from job {} of pipeline {} at {}",
+            id("project"),
+            id("environment"),
+            id("job_id"),
+            id("pipeline_id"),
+            short("source_sha")
+        ),
+        github::RUN_RERUN => format!("{name} {}: failed jobs of run {}", id("repo"), id("run_id")),
+        services::START => format!("{name} {}", id("name")),
+        setup::PROPOSE => with(format!("{name} {}", id("repo")), first_line("why")),
         _ => return None,
     })
 }
@@ -1875,6 +1964,109 @@ mod tests {
         assert_eq!(summarize(docs::DOC_WRITE, &doc), "doc_write plan-foo");
         let query = json!({ "profile": "qa", "sql": "select 1" });
         assert!(summarize("query", &query).starts_with("query profile=qa {"));
+    }
+
+    /// A gated call with no prose is titled in words too, on the card and in
+    /// the push, rather than as its arguments.
+    #[test]
+    fn a_gated_call_is_titled_by_what_it_does() {
+        let merge = json!({ "repo": "o/n", "number": 412, "head_sha": "3e1f0a2c9b8d", "method": "squash", "operation_id": "op" });
+        assert_eq!(
+            summarize(github::PR_MERGE, &merge),
+            "pr_merge o/n#412: squash at 3e1f0a2"
+        );
+        let mr = json!({ "project": "g/p", "iid": 9, "head_sha": "abcdef12", "squash": false, "operation_id": "op" });
+        assert_eq!(
+            summarize(gitlab::MR_MERGE, &mr),
+            "mr_merge g/p!9: merge at abcdef1"
+        );
+        let rerun = json!({ "repo": "o/n", "run_id": 11893472205_u64 });
+        assert_eq!(
+            summarize(github::RUN_RERUN, &rerun),
+            "run_rerun o/n: failed jobs of run 11893472205"
+        );
+        let service = json!({ "name": "postgres", "wait_secs": 30 });
+        assert_eq!(
+            summarize(services::START, &service),
+            "service_start postgres"
+        );
+        let propose = json!({ "repo": "/src/orbit", "checks": ["cargo test"], "why": "\nTried it twice.\nBoth passed." });
+        assert_eq!(
+            summarize(setup::PROPOSE, &propose),
+            "repo_setup_propose /src/orbit: Tried it twice."
+        );
+        let play = json!({ "project": "g/p", "job_id": 5, "variables": { "TARGET": "qa" } });
+        assert_eq!(
+            summarize(gitlab::JOB_PLAY, &play),
+            "job_play g/p: job 5 with TARGET"
+        );
+        let run = json!({ "project": "g/p", "ref": "main" });
+        assert_eq!(
+            summarize(gitlab::PIPELINE_RUN, &run),
+            "pipeline_run g/p: main"
+        );
+        let deploy = json!({ "project": "g/p", "pipeline_id": 12, "job_id": 7, "environment": "qa", "source_sha": "abcdef12", "operation_id": "op" });
+        assert_eq!(
+            summarize(gitlab::DEPLOY, &deploy),
+            "deploy g/p: qa from job 7 of pipeline 12 at abcdef1"
+        );
+        // Without Jira's word on where it leads, a transition names its id.
+        let transition = json!({ "key": "WRK-1", "transition_id": "31", "operation_id": "op" });
+        assert_eq!(
+            summarize(jira::ISSUE_TRANSITION, &transition),
+            "issue_transition WRK-1: transition 31"
+        );
+        assert_eq!(
+            transition_title(&transition, "In Review"),
+            "issue_transition WRK-1: move to In Review"
+        );
+    }
+
+    /// Every tool the operator can be asked about has a title in words, so a
+    /// new gated tool cannot reach the card or a push as raw JSON unnoticed.
+    /// Asked means: the shipped bundle asks with no arguments, or the node
+    /// always holds it.
+    #[test]
+    fn every_asked_tool_is_titled_in_words() {
+        let policy = crate::policy::Policy::shipped();
+        let none = json!({});
+        let mut asked: Vec<&str> = schema::tool_names()
+            .filter(|name| {
+                let decision = policy.decide(&Request {
+                    channel: "work",
+                    action: name,
+                    kind: Some(TOOL_KIND),
+                    resource: None,
+                    command: None,
+                    arguments: Some(&none),
+                });
+                decision.verdict == Verdict::Ask
+            })
+            // Routed before the policy: these hold their own approval, with
+            // their own title (egress), or none at all.
+            .filter(|name| {
+                ![
+                    operator::ASK,
+                    operator::NOTIFY,
+                    operator::REPORT,
+                    operator::REPORT_STATUS,
+                    egress::REQUEST,
+                    setup::DRAFT,
+                    setup::TRY,
+                ]
+                .contains(name)
+            })
+            .chain([setup::PROPOSE])
+            .collect();
+        asked.sort();
+        asked.dedup();
+        assert!(asked.contains(&github::PR_MERGE), "{asked:?}");
+        let raw: Vec<String> = asked
+            .iter()
+            .map(|name| summarize(name, &none))
+            .filter(|title| title.contains('{'))
+            .collect();
+        assert!(raw.is_empty(), "titled as JSON: {raw:?}");
     }
 
     #[test]

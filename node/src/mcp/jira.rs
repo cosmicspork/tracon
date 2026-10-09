@@ -389,6 +389,37 @@ pub async fn call(
     }
 }
 
+/// The status a held `issue_transition` would move its issue to, read from
+/// the transitions the issue offers now: a read, so a person deciding the
+/// call sees "In Review" rather than "31". `None` when Jira cannot say.
+pub async fn transition_target(
+    broker: &SharedBroker,
+    http: &reqwest::Client,
+    ctx: &CallContext,
+    args: &Value,
+) -> Option<String> {
+    let id = args.get("transition_id")?.as_str()?.trim();
+    let listed = call(broker, http, ctx, ISSUE_TRANSITIONS, args, None)
+        .await
+        .ok()?;
+    target_of(&listed, id)
+}
+
+/// Where the transition `id` in an `issue_transitions` listing leads: the
+/// status, or the transition's own name when the status is not given.
+fn target_of(listed: &Value, id: &str) -> Option<String> {
+    let found = listed["transitions"]
+        .as_array()?
+        .iter()
+        .find(|t| t["id"].as_str() == Some(id))?;
+    [&found["to"], &found["name"]]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 /// An issue key, validated before it reaches a URL or a field.
 fn issue_key<'a>(v: Option<&'a Value>, what: &str) -> Result<&'a str, String> {
     v.and_then(Value::as_str)
@@ -616,6 +647,20 @@ fn refusal(what: &str, status: reqwest::StatusCode, v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transition_is_named_by_the_status_it_leads_to() {
+        let listed = json!({ "key": "WRK-1", "transitions": [
+            { "id": "21", "name": "Start review", "to": "In Review" },
+            { "id": "31", "name": "Close", "to": null },
+            { "id": "41", "name": " ", "to": "" },
+        ] });
+        assert_eq!(target_of(&listed, "21").as_deref(), Some("In Review"));
+        assert_eq!(target_of(&listed, "31").as_deref(), Some("Close"));
+        assert_eq!(target_of(&listed, "41"), None);
+        assert_eq!(target_of(&listed, "99"), None);
+        assert_eq!(target_of(&json!({}), "21"), None);
+    }
 
     #[test]
     fn a_field_the_tools_do_not_write_is_refused_by_name() {

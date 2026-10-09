@@ -753,6 +753,33 @@ export default [
     }),
   },
   {
+    id: 'home-gated-approvals',
+    area: 'home',
+    route: '/',
+    title: 'Waiting on you: gated tools titled in words',
+    note: 'pr_merge, run_rerun, service_start, issue_transition and repo_setup_propose cards carry the titles mcp::summarize gives them, not their arguments as JSON. The transition names the status it leads to.',
+    api: base({
+      '/api/queue': queue({
+        waiting: [
+          ['ap-merge', 'pr_merge', 'pr_merge op/orbit#212: squash at 3e1f0a2', { repo: 'op/orbit', number: 212, head_sha: '3e1f0a2c9b8d7e6f5a4b', method: 'squash', operation_id: 'op-1' }],
+          ['ap-rerun', 'run_rerun', 'run_rerun op/orbit: failed jobs of run 11893472205', { repo: 'op/orbit', run_id: 11893472205 }],
+          ['ap-service', 'service_start', 'service_start postgres', { name: 'postgres', wait_secs: 30 }],
+          ['ap-transition', 'issue_transition', 'issue_transition WRK-1874: move to In Review', { key: 'WRK-1874', transition_id: '31', operation_id: 'op-2' }],
+          ['ap-propose', 'repo_setup_propose', 'repo_setup_propose /var/home/op/src/orbit: Tried the draft twice in a fresh container.', { repo: '/var/home/op/src/orbit', checks: ['cargo nextest run'], why: 'Tried the draft twice in a fresh container.' }],
+        ].map(([id, tool, title, args], i) =>
+          approval({
+            id,
+            title,
+            raw_input: JSON.stringify({ tool, arguments: args, approval_id: id, lane: null }),
+            created_ms: -60000 * (i + 1),
+          }),
+        ),
+        running: [S_RUN],
+        ended: [S_PLAN, S_OLD],
+      }),
+    }),
+  },
+  {
     id: 'home-agent-and-external-lanes',
     area: 'home',
     route: '/',
