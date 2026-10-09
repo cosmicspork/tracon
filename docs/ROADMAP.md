@@ -98,12 +98,52 @@ reproduces one.
       at all (`work-loading`, `docs-list-error`, `home-queue-error`).
 - [ ] `context-*` documents never appear in the Documents list (`docs-list`).
 
+**The first live session on 0.29.0** (2026-10-08, README screenshots through the browser
+service; `note-tracon-dogfood` has the detail)
+
+- [ ] **Nothing a session calls may wait on a person past the wait budget.** Claude Code's
+      HTTP MCP client ended `submit_review` calls at 5–5½ minutes although the node writes
+      a 20-minute `timeout` into its MCP config (`MCP_CALL_TIMEOUT_MS`); #417 bounded
+      `submit_review`. `ask_operator` still blocks until the operator answers
+      (`wait_for_question`), and `request_egress` waits for the answer, so a question left
+      longer than the client's limit comes back to the agent as "The operation timed out"
+      while the card stays open. Return within `MAX_WAIT_SECS` with `still_waiting` and a
+      handle, as `review_status` does, and find which limit the client actually applies so
+      the comment in `adapter/claude.rs` says what is true.
+- [ ] **A failed check says what failed.** `just check` exited 101 on a failing test, and
+      the `check_result` tail (the last 4 KiB of the log) held only `Compiling …` lines; the
+      test's name reached neither the agent nor the review, and the agent spent a full
+      `cargo test` finding it. Keep the lines that carry the failure (a test runner's
+      failure summary, the last error) beside the tail, and check the order the log is
+      assembled in, since a stream appended after another hides the first one's end.
+- [ ] **A review can update the pull request it opened.** Twice (#414, #416), resubmitting
+      an approved, published review was refused both ways: without `change`, "pull request
+      N is already open …; pass change: N to update it"; with `change: N`, "a review updates
+      the change it was first submitted for". Publication seems never to write the opened
+      number back to the review's target. The fallback, a new review with `change`, also
+      needs the worktree's branch to match the forge branch, which the first submit's
+      `branch` may have renamed without saying so.
+- [ ] **Squashing an update keeps the target it merged.** An update whose reviewed revision
+      merges `main` (to resolve a conflict) is pushed as one commit on the old head, which
+      drops the `main` parent, so the forge still reports the conflict (#414). When the
+      reviewed revision has the target as an ancestor, parent the squash on it too, or
+      offer rebase onto the target as the update.
+
 ## Next — the working loop, made comfortable
 
 Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
+- [ ] A provider error the harness reports with no status and no message
+      (`message: "unknown"`, seen once on 2026-10-08) keeps the raw harness frame on the
+      event, so an unexplained retry can be explained afterwards.
+- [ ] **`just check` passes on the operator's own machine.** Three OpenCode integration
+      tests (`opencode_adversarial` ×2, `opencode_pty::a_real_shell_is_spawned_and_read_back_through_the_proxy`)
+      fail on unmodified `main` on the desktop host with "Unexpected server error" from the
+      `opencode` on its PATH (Homebrew, 1.18.30), so the recipe stops before the doc tests
+      and the SPA. Find what differs from CI, and have the tests use the pinned binary or
+      say why they skip.
 - [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
       tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
       channel manifests for managed harnesses, and optional free-text notes on how to run
@@ -156,6 +196,11 @@ hit on a real task.
 
 **Review and publication**
 
+- [ ] **Checks start warm.** A required check still prepares from the repository's base
+      cache, so tracon's `just check` compiles the workspace twice from nothing (clippy, then
+      nextest) and runs past five minutes on this machine. The session cache (#390) is not
+      the answer: no check may build on what an agent wrote. A node-built cache of the
+      default branch, made when the repository image is built and mounted read-only, is.
 - [ ] Edit each commit's message under `publish.commits = keep`. Squash (the default)
       already ships one commit of the reviewed tree with the approved message and
       branch; `keep` lists the agent's commits and checks their subjects but pushes
@@ -300,6 +345,9 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 
 - [ ] More catalogue services, with an optional persistent volume per repository (a
       database's data, a browser profile).
+- [ ] A catalogue entry can name an `entrypoint`. Without one, an upstream image's own
+      wrapper runs: chromedp's headless-shell puts socat on `0.0.0.0:9222`, which is why the
+      browser is tracon's own image (#405).
 - [ ] Say when a newer `tracon-browser` digest is published than the one a `[[service]]`
       entry pins, and pin it on the operator's word (Settings, or `tracon service pin
       browser`). The entry stays a digest; only the step of copying one in goes away.
