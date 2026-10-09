@@ -4939,6 +4939,7 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
         | RemoteDisconnect
         // The node did what it could; the credential simply cannot be renewed
         // without the operator signing in again.
+        | Conflict(_)
         | ReconnectRequired(_) => StatusCode::CONFLICT,
         Failed(_) => StatusCode::BAD_GATEWAY,
     };
@@ -5282,6 +5283,34 @@ pub struct ChannelsBody {
 
 /// `PUT /api/providers/{name}/channels`: the channels a connected provider
 /// serves. A peer's sign-in is changed on the node that holds it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderKeyBody {
+    key: String,
+    channels: Vec<String>,
+}
+
+/// Seal an API key for a provider this node already runs, under the
+/// credential its `[providers.<name>]` names. The key is never echoed back.
+pub async fn put_provider_key(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<ProviderKeyBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let key = body.key.trim();
+    if key.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "key must not be empty".into(),
+        ));
+    }
+    let channels = chosen_channels(s.store(), body.channels, false)?;
+    providers_of(&s)?
+        .set_key(&name, key, channels.clone())
+        .map_err(provider_err)?;
+    Ok(Json(json!({ "name": name, "channels": channels })))
+}
+
 pub async fn set_provider_channels(
     State(s): State<AppState>,
     Path(name): Path<String>,
@@ -5447,6 +5476,7 @@ pub(crate) fn providers_json(s: &AppState) -> Vec<serde_json::Value> {
                 "expires_ms": cred.and_then(|(_, c)| c.expires_ms),
                 "kind": null,
                 "can_login": false,
+                "declared": s.cfg.declared_providers.contains(name),
                 "channels": cred.map_or(&[][..], |(_, c)| c.channels.as_slice()),
                 "updated_ms": null,
             })
@@ -6108,10 +6138,18 @@ pub async fn create_provider(
             format!("node.toml does not parse, so it will not be rewritten: {e}"),
         )
     })?;
-    if cfg.providers.contains_key(name) {
+    // A built-in the file does not name is the operator's to take over:
+    // `openai` is always present, and this is how it gets its upstream and key.
+    if cfg.declared_providers.contains(name) {
         return Err(ApiError(
             StatusCode::CONFLICT,
             format!("providers.{name} already exists"),
+        ));
+    }
+    if cfg.providers.get(name).is_some_and(|p| p.login.is_some()) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("{name} is the subscription sign-in; give the API-key provider another name"),
         ));
     }
 

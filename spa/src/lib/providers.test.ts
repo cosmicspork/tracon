@@ -43,6 +43,13 @@ test('a provider is only a row once something has actually happened to it', () =
     provider('openai-codex', true, 'failed'),
   ])
   expect(listed.map((p) => p.name)).toEqual(['openai', 'openai-codex'])
+  // ...unless only the node's built-in defaults declare it: then there is
+  // nobody's provider to key, and "API key / custom" is the way in.
+  const builtIn = { ...provider('openai', false, 'disconnected'), declared: false }
+  const declared = { ...provider('openrouter', false, 'disconnected'), declared: true }
+  expect(connectableProviders([builtIn, declared]).map((p) => p.name)).toEqual(['openrouter'])
+  expect(connectableProviders([{ ...builtIn, state: 'failed' }]).map((p) => p.name)).toEqual(['openai'])
+  expect(connectableProviders([{ ...builtIn, state: 'connected' }]).map((p) => p.name)).toEqual(['openai'])
   expect(connectableProviders([provider('openai', false, 'connected')]).map((p) => p.name)).toEqual(['openai'])
   expect(connectableProviders([provider('anthropic', true, 'pending')]).map((p) => p.name)).toEqual(['anthropic'])
 })
@@ -56,6 +63,7 @@ test('the credential import TOML seals the key under env.API_KEY, quoted against
   const toml = credentialImportToml('openrouter', 'sk-or-"quote"-and-\\backslash', ['work', 'personal'])
   expect(toml).toContain('[credentials."openrouter"]')
   expect(toml).toContain('kind = "api_key"')
+  expect(toml).toContain('provider = "openrouter"')
   expect(toml).toContain('channels = ["work", "personal"]')
   expect(toml).toContain('"API_KEY"')
   // Round-trips through TOML's own basic-string escaping, the same subset

@@ -250,6 +250,7 @@ pub fn router(state: AppState) -> Router {
             "/api/providers/{name}/channels",
             put(api::set_provider_channels),
         )
+        .route("/api/providers/{name}/key", put(api::put_provider_key))
         .route(
             "/api/providers/{name}/disconnect",
             post(api::disconnect_provider),

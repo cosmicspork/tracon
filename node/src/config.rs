@@ -35,6 +35,12 @@ pub struct Config {
     pub service: Vec<Service>,
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
+    /// The providers `node.toml` itself names, as opposed to the ones
+    /// `default_providers` fills in. Not part of the file: it is what lets
+    /// Connections leave out a built-in API-key provider nobody asked for,
+    /// and lets `POST /api/providers` take that name over.
+    #[serde(skip)]
+    pub declared_providers: std::collections::BTreeSet<String>,
     pub memory: Memory,
     pub supervision: Supervision,
     pub review: ReviewLimits,
@@ -1175,6 +1181,19 @@ impl Default for Provider {
     }
 }
 
+/// The provider names a `node.toml` text writes under `[providers]`.
+fn declared_providers(text: &str) -> std::collections::BTreeSet<String> {
+    toml::from_str::<toml::Table>(text)
+        .ok()
+        .and_then(|mut doc| match doc.remove("providers") {
+            Some(toml::Value::Table(providers)) => {
+                Some(providers.into_iter().map(|(name, _)| name).collect())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
     [
         (
@@ -1334,6 +1353,7 @@ impl Default for Config {
             live_repo: LiveRepos::default(),
             service: Vec::new(),
             providers: default_providers(),
+            declared_providers: Default::default(),
             memory: Memory::default(),
             ui: Ui::default(),
             supervision: Supervision::default(),
@@ -1665,6 +1685,9 @@ impl Config {
                 };
                 let mut config: Self = toml::from_str(&text)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
+                // From the text, not the struct: a file with no
+                // `[providers]` at all deserializes to the defaults whole.
+                config.declared_providers = declared_providers(&text);
                 for (name, provider) in default_providers() {
                     config.providers.entry(name).or_insert(provider);
                 }
@@ -2343,6 +2366,40 @@ shape = "openai"
         assert_eq!(codex.shape, SHAPE_OPENAI_CODEX);
         assert_eq!(codex.login.as_deref(), Some("openai"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Only what the file writes under `[providers]` is the operator's; the
+    /// built-ins merged in beside it, or standing in for a file with no
+    /// providers at all, are not.
+    #[test]
+    fn declared_providers_are_the_ones_the_file_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(&path, "node_name = \"n\"\n").unwrap();
+        let config = Config::try_load_from(&path).unwrap();
+        assert!(config.providers.contains_key("openai"));
+        assert!(config.declared_providers.is_empty());
+
+        std::fs::write(
+            &path,
+            r#"
+[providers.openrouter]
+credential = "openrouter"
+upstream = "https://openrouter.ai/api/v1"
+shape = "openai"
+
+[providers.openai]
+credential = "openai"
+"#,
+        )
+        .unwrap();
+        let config = Config::try_load_from(&path).unwrap();
+        assert!(config.providers.contains_key("anthropic"));
+        assert_eq!(
+            config.declared_providers.iter().collect::<Vec<_>>(),
+            ["openai", "openrouter"]
+        );
+        assert!(Config::default().declared_providers.is_empty());
     }
 
     /// A fresh node, or one whose provider sections name no models, still

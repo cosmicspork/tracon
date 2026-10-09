@@ -53,6 +53,7 @@ const P_OPENROUTER = {
   identity: null,
   expires_ms: null,
   channels: ['personal'],
+  declared: true,
   updated_ms: -86400000 * 3,
 }
 const P_OPENAI_FAILED = {
@@ -65,7 +66,21 @@ const P_OPENAI_FAILED = {
   identity: null,
   expires_ms: null,
   channels: ['work'],
+  declared: true,
   updated_ms: -7200000,
+}
+const P_OPENAI_UNKEYED = {
+  name: 'openai',
+  state: 'disconnected',
+  kind: null,
+  can_login: false,
+  declared: true,
+  url: null,
+  error: null,
+  identity: null,
+  expires_ms: null,
+  channels: [],
+  updated_ms: null,
 }
 const PROVIDERS = [P_ANTHROPIC, P_CODEX, P_OPENROUTER, P_OPENAI_FAILED]
 
@@ -715,6 +730,29 @@ export default [
       const sel = page.locator('.share select').first()
       await sel.selectOption({ index: 1 })
       await click(page, 'Review share')
+    },
+  }),
+  S('connections-unkeyed-default', '/settings#connections', 'Connections: the built-in OpenAI API provider, never keyed', {
+    note: 'openai is seeded into every node and has no key: it is left out rather than shown as a card nothing on the page can connect.',
+    over: {
+      '/api/providers': [P_ANTHROPIC, { ...P_OPENAI_UNKEYED, declared: false }],
+    },
+  }),
+  S('connections-unkeyed-declared', '/settings#connections', 'Connections: a declared API-key provider waiting for its key', {
+    note: 'The operator named openai in node.toml and has not given it a key: the card says disconnected once and takes the key in place.',
+    over: {
+      '/api/providers': [P_ANTHROPIC, P_OPENAI_UNKEYED],
+    },
+  }),
+  S('connections-unkeyed-refused', '/settings#connections', 'Connections: a provider key the node refused', {
+    note: 'The key field keeps what was typed and shows the node\'s refusal under it.',
+    over: {
+      '/api/providers': [P_ANTHROPIC, P_OPENAI_UNKEYED],
+      'PUT /api/providers/openai/key': fail(409, 'openai holds a subscription sign-in; disconnect it before adding a key'),
+    },
+    act: async (page) => {
+      await page.getByLabel('API key for OpenAI API').fill('sk-proj-0000')
+      await click(page, 'Save key')
     },
   }),
   S('connections-peer', `/settings?node=${PEER}#connections`, 'Connections: managing a peer', {
