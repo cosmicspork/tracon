@@ -108,7 +108,9 @@ impl EndReason {
     }
 }
 
-/// Event kinds written to the log. The SPA groups on these.
+/// Event kinds written to the log. The SPA groups on these, and its log test
+/// reads this module: a kind added here needs a line in `spa/src/lib/log.ts`
+/// or markup in `Log.svelte`, keeping the `pub const NAME: &str = "kind";` form.
 pub mod event_kind {
     pub const SESSION_STARTED: &str = "session_started";
     pub const WORKTREE: &str = "worktree";
