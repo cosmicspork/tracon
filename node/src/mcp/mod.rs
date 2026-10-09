@@ -8,6 +8,7 @@
 //! something it may ask the node to do, never as something it holds.
 
 pub mod approvals;
+pub mod checking;
 pub mod consulta;
 pub mod docs;
 pub mod egress;
@@ -547,7 +548,6 @@ impl Tools {
             other => Err(format!("no tool named {other}")),
         };
         let result = match (name, result) {
-            (review::SUBMIT, Ok(submitted)) => self.auto_publish_review(ctx, args, submitted).await,
             (gitlab::PIPELINE_RUN | gitlab::JOB_PLAY | gitlab::DEPLOY, Ok(started)) => {
                 Ok(crate::follow::subscribe(self, ctx, name, args, started).await)
             }
@@ -569,10 +569,12 @@ impl Tools {
         result
     }
 
-    async fn auto_publish_review(
+    /// Publish a review `submit_review` just recorded when an authority grant
+    /// covers it. Called by the submission itself, which for a session is the
+    /// node's check task once the checks pass rather than this call.
+    pub(crate) async fn auto_publish_review(
         &self,
         ctx: &CallContext,
-        _args: &Value,
         submitted: Value,
     ) -> Result<Value, String> {
         let Some(review_id) = submitted.get("review_id").and_then(Value::as_str) else {

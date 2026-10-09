@@ -2838,6 +2838,331 @@ async fn stopping_a_session_mid_check_cancels_the_run_and_kills_its_process_grou
     );
 }
 
+// ---- checks that outlive the submitting call ----
+
+/// A submission whose checks have to run, with how long `submit_review` may
+/// wait for them.
+fn submit_waiting(f: &Fixture, wait_secs: u64) -> Value {
+    let mut args = f.submit_args();
+    args["wait_secs"] = json!(wait_secs);
+    args
+}
+
+/// Poll `review_status` the way an agent does until the checks under
+/// `handle` have settled, and return what it said then.
+async fn settled(f: &Fixture, handle: &str) -> Value {
+    for _ in 0..60 {
+        let v = f
+            .tool(
+                "s1",
+                "review_status",
+                json!({ "review_id": handle, "wait_secs": 1 }),
+            )
+            .await;
+        if v["state"] != "checking" {
+            return v;
+        }
+        assert_eq!(v["still_waiting"], true, "{v}");
+    }
+    panic!("the checks under {handle} never settled");
+}
+
+fn session_state(f: &Fixture) -> String {
+    f.store.get_session("s1").unwrap().unwrap().state
+}
+
+fn head_candidate(f: &Fixture) -> String {
+    let head = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
+    tracon::store::candidate_id(&head, "work")
+}
+
+/// Checks slower than the call's wait keep running on the node: the call
+/// returns `checking` with a handle while they run, and `review_status` on
+/// that handle reports them running and then the review they opened, under
+/// the same id.
+#[tokio::test]
+async fn a_slow_check_returns_checking_and_review_status_sees_it_pass() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["sleep 3 && test -f a.txt".into()];
+    })
+    .await;
+    let started = std::time::Instant::now();
+    let v = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "the call returned before the check could finish"
+    );
+    assert_eq!(v["state"], "checking", "{v}");
+    assert_eq!(v["checks"], json!(["sleep 3 && test -f a.txt"]), "{v}");
+    assert_eq!(v["candidate_id"], json!(head_candidate(&f)), "{v}");
+    assert!(
+        v["authorship"].is_object() || v["authorship"].is_null(),
+        "{v}"
+    );
+    let handle = v["review_id"].as_str().unwrap().to_string();
+    assert!(
+        f.store.get_review(&handle).unwrap().is_none(),
+        "nothing is in front of the operator until the checks pass"
+    );
+    assert_eq!(session_state(&f), "waiting_on_check");
+
+    let waiting = f
+        .tool(
+            "s1",
+            "review_status",
+            json!({ "review_id": handle, "wait_secs": 0 }),
+        )
+        .await;
+    assert_eq!(waiting["state"], "checking", "{waiting}");
+    assert_eq!(waiting["still_waiting"], true, "{waiting}");
+    assert!(waiting["running_secs"].is_i64(), "{waiting}");
+
+    let v = settled(&f, &handle).await;
+    assert_eq!(v["review_id"], json!(handle), "{v}");
+    assert_eq!(v["state"], "new", "the review waits for a human now: {v}");
+    let review = f
+        .store
+        .get_review(&handle)
+        .unwrap()
+        .expect("the review was opened");
+    let checks: Vec<Value> = serde_json::from_str(review.checks_json.as_deref().unwrap()).unwrap();
+    assert_eq!(checks[0]["ok"], true, "{checks:?}");
+    assert_eq!(session_state(&f), "running");
+    let runs = f
+        .store
+        .check_runs_for_candidate(&head_candidate(&f))
+        .unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].outcome, "passed");
+}
+
+/// A slow check that fails reaches the agent through `review_status` with the
+/// refusal `submit_review` used to return, and the handle it was given is
+/// what it resubmits once the fix is committed.
+#[tokio::test]
+async fn a_slow_check_that_fails_is_reported_by_review_status() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks =
+            vec!["sleep 2; test -f .tracon/allowed || (echo boom >&2; exit 3)".into()];
+    })
+    .await;
+    let v = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    assert_eq!(v["state"], "checking", "{v}");
+    let handle = v["review_id"].as_str().unwrap().to_string();
+
+    let v = settled(&f, &handle).await;
+    assert_eq!(v["state"], "submit_failed", "{v}");
+    let message = v["message"].as_str().unwrap_or_default();
+    assert!(message.starts_with("check failed: `"), "{v}");
+    assert!(
+        message.contains("(exit 3). Fix it and submit again.") && message.contains("boom"),
+        "the same refusal and tail the submission used to return: {v}"
+    );
+    assert!(f.store.open_reviews().unwrap().is_empty());
+    assert!(f.event_kinds("s1").contains(&"review_rejected".to_string()));
+    assert_eq!(session_state(&f), "running");
+    // Asking again says the same: the outcome is kept, not consumed.
+    let again = f.status_tool(&handle).await;
+    assert_eq!(again["state"], "submit_failed", "{again}");
+
+    let wt = std::path::Path::new(&f.worktree);
+    std::fs::create_dir_all(wt.join(".tracon")).unwrap();
+    std::fs::write(wt.join(".tracon/allowed"), "").unwrap();
+    sh(wt, "git add .tracon/allowed && git commit -qm allow-checks");
+    let mut args = submit_waiting(&f, 30);
+    args["review_id"] = json!(handle);
+    let v = f.tool("s1", "submit_review", args).await;
+    assert_eq!(
+        v["review_id"],
+        json!(handle),
+        "the review opens under its handle: {v}"
+    );
+    assert_eq!(v["state"], "new", "{v}");
+    assert!(f.store.get_review(&handle).unwrap().is_some());
+}
+
+/// The client giving up on `submit_review` (Claude Code's HTTP client does at
+/// about five minutes) drops the call's future. The checks are the node's, so
+/// they finish, the review opens, and the session leaves `waiting_on_check`.
+#[tokio::test]
+async fn an_abandoned_submission_does_not_take_its_checks_with_it() {
+    state::isolate();
+    let f = Arc::new(
+        fixture_with(test_name!(), WITH_GH, |c| {
+            c.supervision.checks = vec!["sleep 3 && test -f a.txt".into()];
+        })
+        .await,
+    );
+    let candidate = head_candidate(&f);
+    let submitting = tokio::spawn({
+        let f = f.clone();
+        async move { f.tool("s1", "submit_review", f.submit_args()).await }
+    });
+    assert!(
+        until(10, || f
+            .store
+            .check_runs_for_candidate(&candidate)
+            .is_ok_and(|runs| runs
+                .iter()
+                .any(|run| run.outcome == "running")))
+        .await,
+        "the check never started"
+    );
+    assert_eq!(session_state(&f), "waiting_on_check");
+    submitting.abort();
+    assert!(submitting.await.unwrap_err().is_cancelled());
+
+    assert!(
+        until(30, || session_state(&f) == "running").await,
+        "the session is still {}",
+        session_state(&f)
+    );
+    let runs = f.store.check_runs_for_candidate(&candidate).unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].outcome, "passed", "the check ran to the end");
+    assert!(runs[0].finished_ms.is_some());
+    assert!(
+        until(10, || f
+            .store
+            .open_reviews()
+            .is_ok_and(|reviews| reviews.len() == 1))
+        .await,
+        "the passing check opened the review nobody was waiting on"
+    );
+    // A retry after the client gave up finds the review the checks opened.
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    assert_eq!(v["already_submitted"], true, "{v}");
+}
+
+/// Retrying a submission whose checks are still running attaches to them:
+/// the same handle, and no second execution of the same definitions.
+#[tokio::test]
+async fn a_retried_submission_attaches_to_the_running_checks() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec!["sleep 3 && test -f a.txt".into()];
+    })
+    .await;
+    let first = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    assert_eq!(first["state"], "checking", "{first}");
+    let handle = first["review_id"].as_str().unwrap().to_string();
+
+    let mut retry = submit_waiting(&f, 0);
+    retry["title"] = json!("feat: the thing, retried");
+    let second = f.tool("s1", "submit_review", retry).await;
+    assert_eq!(second["state"], "checking", "{second}");
+    assert_eq!(second["review_id"], json!(handle), "{second}");
+    assert_eq!(second["attached"], true, "{second}");
+    // Naming the handle attaches the same way.
+    let mut named = submit_waiting(&f, 0);
+    named["review_id"] = json!(handle);
+    let third = f.tool("s1", "submit_review", named).await;
+    assert_eq!(third["review_id"], json!(handle), "{third}");
+    assert_eq!(third["attached"], true, "{third}");
+
+    let v = settled(&f, &handle).await;
+    assert_eq!(v["state"], "new", "{v}");
+    let runs = f
+        .store
+        .check_runs_for_candidate(&head_candidate(&f))
+        .unwrap();
+    assert_eq!(
+        runs.len(),
+        1,
+        "one execution, however often it was asked for: {runs:?}"
+    );
+    assert_eq!(f.store.open_reviews().unwrap().len(), 1);
+    let kinds = f.event_kinds("s1");
+    assert_eq!(
+        kinds.iter().filter(|kind| *kind == "check_started").count(),
+        1,
+        "{kinds:?}"
+    );
+}
+
+/// With no required checks there is nothing to wait for: the review comes
+/// back from the call itself, even one asked not to wait.
+#[tokio::test]
+async fn a_submission_without_required_checks_is_answered_at_once() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = Vec::new();
+    })
+    .await;
+    let v = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    assert_eq!(v["state"], "new", "{v}");
+    let id = v["review_id"].as_str().unwrap();
+    assert!(f.store.get_review(id).unwrap().is_some());
+    assert_eq!(session_state(&f), "running");
+}
+
+/// What a submission abandoned before this node ran its checks on its own
+/// left behind: a `running` row nobody will finish and a session parked in
+/// `waiting_on_check`. A restart settles both.
+#[tokio::test]
+async fn checks_orphaned_by_an_earlier_process_are_settled_on_restart() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let head = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
+    let candidate = tracon::store::candidate_id(&head, "work");
+    f.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: candidate.clone(),
+            head_sha: head,
+            tree_sha: None,
+            channel: "work".into(),
+            owner_session_id: Some("s1".into()),
+            source_kind: "git".into(),
+            captured_ms: now_ms(),
+            capture_json: "{}".into(),
+        })
+        .unwrap();
+    f.store
+        .insert_check_run(&tracon::store::CheckRunRow {
+            id: "orphan".into(),
+            candidate_id: Some(candidate),
+            session_id: Some("s1".into()),
+            command: Some("just check".into()),
+            definition_json: "{}".into(),
+            definition_hash: None,
+            execution_image: None,
+            inputs_json: None,
+            reuse_key: None,
+            outcome: "running".into(),
+            source_outcome: None,
+            exit_code: None,
+            log: String::new(),
+            duration_ms: None,
+            started_ms: now_ms(),
+            finished_ms: None,
+            rerun_of: None,
+            reused_from_id: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    f.manager.set_checking("s1", true);
+    assert_eq!(session_state(&f), "waiting_on_check");
+
+    // The serving node's own startup, in its order.
+    f.store.reconcile_interrupted_runs().unwrap();
+    let cleaned =
+        tracon::session::reconcile_after_restart(&f.store, "n1", f.manager.backend().as_ref())
+            .await;
+
+    let run = f.store.check_run("orphan").unwrap().unwrap();
+    assert_eq!(
+        run.outcome, "interrupted",
+        "never a pass, never still running"
+    );
+    assert!(run.finished_ms.is_some());
+    assert!(cleaned.contains(&"s1".to_string()), "{cleaned:?}");
+    let session = f.store.get_session("s1").unwrap().unwrap();
+    assert_eq!(session.state, "closed", "no longer parked on a check");
+    assert_eq!(session.end_reason.as_deref(), Some("node_restart"));
+}
+
 // ---- updating an existing change ----
 
 /// A `gh` that answers the REST calls publication makes for an existing

@@ -542,7 +542,17 @@ applies to the next session and check without ending the ones in progress — ov
 node-wide checks and the
 harness image where the entry names none; a command that image has no tool for is
 recorded `not_runnable` — never a pass, never reusable evidence, and never a failure
-the agent is asked to fix. An entry may name the repository's Dockerfile instead of an
+the agent is asked to fix. The checks belong to the node, not to the tool call that
+asked for them: `submit_review` starts them in a task of its own and waits only as long
+as a status call may (45 s), because an MCP client abandons a call long before a
+`just check` finishes — Claude Code's HTTP client at about five minutes, whatever its
+config says — and dropping the call must not drop the check, its `check_run` row, or the
+session's way back out of `waiting_on_check`. Past that the call returns `checking` with
+the id the review will have, `review_status` carries the wait and then reports the
+review or the same refusal the call would have given, and a retry of the same candidate
+against the same check definitions attaches to the run instead of starting another. A
+restart interrupts whatever was still `running` and closes the sessions that asked for
+it, like every other live session. An entry may name the repository's Dockerfile instead of an
 image: the node then builds it (`crate::repo_image`) from the **default branch**, read
 through Git's object store and never from a working tree, adds one layer of its own
 (root, `/work`, no entrypoint), and records the digest it built in its own state — the
