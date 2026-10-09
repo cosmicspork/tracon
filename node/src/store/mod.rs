@@ -3281,7 +3281,7 @@ mod tests {
             },
             HarnessState {
                 id: "claude".into(),
-                pinned: "2.1.247".into(),
+                pinned: "2.1.295".into(),
                 found: Some("2.1.200".into()),
                 default: false,
                 image: Some("localhost/tracon-harness-claude".into()),

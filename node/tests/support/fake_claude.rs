@@ -3,8 +3,8 @@
 //!
 //! It exists so the adapter is exercised against a real process over real
 //! pipes rather than against a mock of itself. The frames it emits are the
-//! shapes read out of the shipped 2.1.247 binary and confirmed against a live
-//! run.
+//! shapes read out of the shipped 2.1.247 binary, confirmed against a live
+//! run, and seen again from 2.1.295.
 
 use std::io::{BufRead, Write};
 
@@ -17,7 +17,7 @@ fn emit(v: serde_json::Value) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version") {
-        println!("2.1.247 (Claude Code)");
+        println!("2.1.295 (Claude Code)");
         return;
     }
     let session_id = args
@@ -32,7 +32,7 @@ fn main() {
         .unwrap_or_else(|| "sonnet".into());
     // The version the adapter checks the pin against. `FAKE_CLAUDE_VERSION`
     // lets a test drive the mismatch path.
-    let version = std::env::var("FAKE_CLAUDE_VERSION").unwrap_or_else(|_| "2.1.247".to_string());
+    let version = std::env::var("FAKE_CLAUDE_VERSION").unwrap_or_else(|_| "2.1.295".to_string());
     let mcp_status =
         std::env::var("FAKE_CLAUDE_MCP_STATUS").unwrap_or_else(|_| "connected".to_string());
     let has_mcp = args.iter().any(|a| a == "--mcp-config");
@@ -62,8 +62,8 @@ fn main() {
     if let Some(protocol) = protocol {
         init["protocol_version"] = serde_json::json!(protocol);
     }
-    // Like the pinned CLI (2.1.247), the init frame is emitted only once the
-    // first user message has arrived, never on its own.
+    // Like the pinned CLI (2.1.247, 2.1.295), the init frame is emitted only
+    // once the first user message has arrived, never on its own.
     let mut init = Some(init);
 
     // One turn per user message on stdin, and the process stays alive between

@@ -53,9 +53,9 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// launched, and one speaking an unknown MCP is a compatibility fault worth
 /// seeing rather than a handshake to muddle through.
 ///
-/// `2025-11-25` is what Claude Code 2.1.247 announces (observed against the
-/// pinned CLI: refusing it is exactly the "failed" MCP server its init frame
-/// then reports, and the session never gets its tools).
+/// `2025-11-25` is what Claude Code 2.1.247 and 2.1.295 announce (observed
+/// against the CLI: refusing it is exactly the "failed" MCP server its init
+/// frame then reports, and the session never gets its tools).
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
     ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
