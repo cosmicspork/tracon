@@ -2050,6 +2050,7 @@ mod tests {
                     operator::NOTIFY,
                     operator::REPORT,
                     operator::REPORT_STATUS,
+                    operator::QUESTION_STATUS,
                     egress::REQUEST,
                     setup::DRAFT,
                     setup::TRY,
