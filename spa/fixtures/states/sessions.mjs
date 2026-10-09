@@ -668,6 +668,36 @@ export default [
     }),
   },
   {
+    id: 'sessions-check-failed-test',
+    area: 'sessions',
+    route: `/sessions/${S.check.id}`,
+    title: 'A check failed on a test',
+    note: 'The failed check leads with what failed (test name, panic, verdict), read from the whole output; the tail is only compiler progress.',
+    api: page(S.check, {
+      events: [
+        ...opening(S.check.id, { branch: 'feat/outcome-record' }),
+        ...workTurn(S.check.id, -5000000),
+        ev(S.check.id, 'check_started', { commands: ['just check'] }, -400000),
+        ev(S.check.id, 'check_prepared', { ok: true, ms: 41000 }, -359000),
+        ev(
+          S.check.id,
+          'check_result',
+          {
+            command: 'just check',
+            ok: false,
+            exit: 101,
+            failures:
+              "test review::output::tests::refills_to_capacity ... FAILED\nthread 'review::output::tests::refills_to_capacity' (903584) panicked at node/src/review/output.rs:612:40:\nassertion `left == right` failed: bucket overfilled\nleft: 4\nright: 5\nfailures:\nreview::output::tests::refills_to_capacity\ntest result: FAILED. 1203 passed; 1 failed; 4 ignored; 0 measured; 0 filtered out; finished in 41.20s\nerror: test failed, to rerun pass `-p tracon --lib`\nerror: recipe `check` failed on line 14 with exit code 101",
+            tail:
+              '…   Compiling tracon-proto v0.29.0 (/work/proto)\n   Compiling tracon-mesh v0.29.0 (/work/mesh)\n   Compiling tracon v0.29.0 (/work/node)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 12s\n     Running unittests src/lib.rs (target/debug/deps/tracon-6f1c0e2a9b7d4c31)\nerror: test failed, to rerun pass `-p tracon --lib`\nerror: recipe `check` failed on line 14 with exit code 101',
+            ms: 251000,
+          },
+          -100000,
+        ),
+      ],
+    }),
+  },
+  {
     id: 'sessions-idle',
     area: 'sessions',
     route: `/sessions/${S.idle.id}`,

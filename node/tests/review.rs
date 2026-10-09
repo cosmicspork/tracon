@@ -1176,6 +1176,47 @@ async fn a_check_the_image_has_no_tool_for_is_not_the_agents_failure() {
     );
 }
 
+/// A check that fails on a test and then prints pages of something else says
+/// which test failed: the failure is read from the whole output, which is
+/// assembled in the order it was printed, not stdout then stderr. The agent
+/// gets it ahead of the tail, and the session log records it beside the tail.
+#[tokio::test]
+async fn a_failed_check_says_what_failed_ahead_of_its_tail() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.supervision.checks = vec![r#"echo 'test limiter::refills_to_capacity ... FAILED'
+echo 'test result: FAILED. 9 passed; 1 failed' >&2
+i=0; while [ $i -lt 300 ]; do echo "   Compiling crate-$i v1.0.0"; i=$((i+1)); done
+exit 101"#
+            .into()];
+    })
+    .await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default().to_string();
+    assert!(err.contains("(exit 101). Fix it and submit again."), "{v}");
+    assert!(
+        err.contains(
+            "What failed:\ntest limiter::refills_to_capacity ... FAILED\n\
+             test result: FAILED. 9 passed; 1 failed\n\nEnd of the output:\n…"
+        ),
+        "{err}"
+    );
+    assert!(err.ends_with("Compiling crate-299 v1.0.0\n"), "{err}");
+
+    let events = f.store.events_after("s1", 0, 500).unwrap();
+    let result = events
+        .iter()
+        .find(|e| e.kind == "check_result")
+        .expect("a check result");
+    assert_eq!(result.payload["outcome"], "failed");
+    assert_eq!(
+        result.payload["failures"],
+        "test limiter::refills_to_capacity ... FAILED\ntest result: FAILED. 9 passed; 1 failed"
+    );
+    let tail = result.payload["tail"].as_str().unwrap();
+    assert!(!tail.contains("refills_to_capacity"), "{tail}");
+}
+
 /// A repository's `[[repo]]` entry replaces the node-wide checks for work
 /// that came from it, and its `prepare` commands run first on the very copy
 /// the check then sees. The node-wide check here can only fail, and the

@@ -385,6 +385,16 @@
   )
   const authoritativeChecks = $derived(evidence?.checks ?? [])
 
+  /** The lines of a failed run's whole output that say what failed, which its log tail may not hold. */
+  function failuresOf(run: CandidateEvidence['checks'][number]): string {
+    try {
+      const failures = (JSON.parse(run.metadata_json) as { failures?: unknown }).failures
+      return typeof failures === 'string' ? failures : ''
+    } catch {
+      return ''
+    }
+  }
+
   function inputsFor(run: CandidateEvidence['checks'][number]) {
     if (!run.inputs_json) return 'input identity was not recorded'
     try {
@@ -648,6 +658,7 @@
           <h3>Runtime evidence</h3>
           {#if authoritativeChecks.length}
             {#each authoritativeChecks as run (run.id)}
+              {@const failures = failuresOf(run)}
               <div class="run">
                 <span class:ok={run.outcome === 'passed' || run.source_outcome === 'passed'} class:bad={run.outcome === 'failed' || run.outcome === 'not_runnable' || run.outcome === 'interrupted' || run.outcome === 'cancelled'}>
                   {run.outcome === 'not_runnable' ? 'not runnable' : run.outcome}{run.outcome === 'reused' ? ` · ${run.source_outcome ?? 'unknown source'}` : ''}
@@ -656,6 +667,9 @@
                 <code>{run.execution_image ?? 'image identity not recorded'}</code>
                 <small>{inputsFor(run)}</small>
                 {#if run.reused_from_id}<small>reused from {run.reused_from_id.slice(0, 8)}</small>{/if}
+                {#if failures}
+                  <pre class="failures" aria-label="what failed">{failures}</pre>
+                {/if}
                 <details>
                   <summary>log · {run.duration_ms == null ? 'unfinished' : `${Math.round(run.duration_ms / 1000)}s`}</summary>
                   <pre>{run.log || '(no retained output)'}</pre>
@@ -1220,6 +1234,15 @@
     overflow: auto;
     white-space: pre;
     font: 11px/1.45 var(--mono);
+  }
+  /* Wrapped: a failure line cut off at the panel's edge says nothing. */
+  .evidence pre.failures {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding-left: 8px;
+    border-left: 2px solid var(--crit);
+    color: var(--ink2);
   }
   .run {
     display: flex;

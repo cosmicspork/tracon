@@ -1627,6 +1627,7 @@ async fn run_checks(
                 "ok": result.ok,
                 "exit": result.exit,
                 "tail": result.tail,
+                "failures": result.failures,
                 "ms": result.ms,
                 "outcome": result.outcome,
                 "reused_from": result.reused_from,
@@ -1709,7 +1710,7 @@ async fn run_checks(
                 .exit
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "none".into()),
-            failed.tail
+            review::output::with_failures(&failed.failures, &failed.tail)
         );
         manager.record_event(
             session_id,
