@@ -545,8 +545,8 @@ recorded `not_runnable` — never a pass, never reusable evidence, and never a f
 the agent is asked to fix. The checks belong to the node, not to the tool call that
 asked for them: `submit_review` starts them in a task of its own and waits only as long
 as a status call may (45 s), because an MCP client abandons a call long before a
-`just check` finishes — Claude Code's HTTP client at about five minutes, whatever its
-config says — and dropping the call must not drop the check, its `check_run` row, or the
+`just check` finishes — Claude Code 2.1.247 at 300 s, Bun's own `fetch` timeout,
+whatever its MCP config says — and dropping the call must not drop the check, its `check_run` row, or the
 session's way back out of `waiting_on_check`. Past that the call returns `checking` with
 the id the review will have, `review_status` carries the wait and then reports the
 review or the same refusal the call would have given, and a retry of the same candidate
@@ -691,6 +691,17 @@ issue number beside its URL, and a discard records the operator's reason.
 there was none, on the node that drafted it. Like `approval_status`, it is
 dispatched before the policy is consulted, so a signed bundle that predates it
 cannot turn reading one's own draft into a question for the operator.
+
+**Nothing a session calls waits on a person past one status call.** A person
+answers in minutes or hours and an MCP client abandons a call long before that, so
+every tool that waits on the operator returns within 45 s with `still_waiting` and
+a handle, and a status tool carries the wait: `ask_operator` returns a
+`question_id` that `question_status` reads, `request_egress` and every gated call
+an `approval_id` that `approval_status` reads, and `submit_review` a `review_id`
+that `review_status` reads. The state lives in the store, not in the call, so a dropped or timed-out
+call loses nothing and an answer given in between is read by the next status call.
+`question_status` follows `issue_report_status`'s ownership rule and is dispatched
+before the policy is consulted for the same reason.
 
 **Evidence reads preserve ownership.** Candidate lists and detail requests carry
 their runner/owner and ordinary channel. Mesh handlers authenticate both channel

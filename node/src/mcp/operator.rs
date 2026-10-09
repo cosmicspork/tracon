@@ -19,13 +19,55 @@ pub const ASK: &str = "ask_operator";
 pub const NOTIFY: &str = "notify_operator";
 pub const REPORT: &str = "report_issue";
 pub const REPORT_STATUS: &str = "issue_report_status";
+pub const QUESTION_STATUS: &str = "question_status";
 const MAX_TEXT: usize = 8 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 8 * 1024;
 const MAX_ATTACHMENTS: usize = 3;
 
 pub fn definitions() -> Vec<Value> {
     vec![
-        json!({"name": ASK, "description":"Ask the operator a free-text question, optionally choosing from explicit choices. Supply a stable request_id to recover an unanswered or answered question after reconnect/restart; it never grants access.", "inputSchema":{"type":"object","properties":{"request_id":{"type":"string","maxLength":128},"question":{"type":"string"},"choices":{"type":"array","items":{"type":"string"},"maxItems":20}},"required":["request_id","question"]}}),
+        json!({
+            "name": ASK,
+            "description": format!(
+                "Ask the operator a free-text question, optionally choosing from explicit \
+                 choices. Waits up to {MAX_WAIT_SECS} seconds for the answer and returns \
+                 `answered` with it, `cancelled` if the operator withdrew the question, or \
+                 `unanswered` with `still_waiting: true` and a `question_id` when they have not \
+                 answered yet. The question stays in their queue either way, and an answer given \
+                 later is kept: call {QUESTION_STATUS} with the question_id to keep waiting. A \
+                 stable request_id recovers the same question after a reconnect or restart. An \
+                 answer never grants access."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_id": { "type": "string", "maxLength": 128 },
+                    "question": { "type": "string" },
+                    "choices": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+                    "wait_secs": wait_secs_schema(),
+                },
+                "required": ["request_id", "question"],
+            },
+        }),
+        json!({
+            "name": QUESTION_STATUS,
+            "description": format!(
+                "Wait for the answer to questions you asked with {ASK}. Pass `question_id`, or \
+                 `question_ids` to wait on several: the call returns as soon as any of them is \
+                 answered or cancelled, or after up to {MAX_WAIT_SECS} seconds, with every id's \
+                 state — `unanswered` while the operator has not answered, `answered` with the \
+                 `answer`, or `cancelled` when they withdrew it without answering. \
+                 `still_waiting` is true when nothing was decided; call again to keep waiting."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question_id": { "type": "string" },
+                    "question_ids": { "type": "array", "items": { "type": "string" } },
+                    "wait_secs": wait_secs_schema(),
+                },
+            },
+        }),
         json!({"name": NOTIFY, "description":"Intentionally send an OS/PWA notification to configured operator devices. A push-service attempt is not evidence a human read it.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"device_ids":{"type":"array","items":{"type":"string"}},"node_ids":{"type":"array","items":{"type":"string"}}},"required":["title","message"]}}),
         json!({"name": REPORT, "description":"Draft a report about tracon, its environments, tools, or harness integration. It never pauses execution or uploads repository files/transcripts. The operator inspects and authorizes publication separately.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"expected":{"type":"string"},"actual":{"type":"string"},"reproduction":{"type":"string"},"versions":{"type":"string"},"errors":{"type":"string"},"recovery":{"type":"string"},"diagnosis":{"type":"string"},"attachments":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"content":{"type":"string"}},"required":["name","content"]},"maxItems":3}},"required":["title","expected","actual"]}}),
         json!({
@@ -44,17 +86,21 @@ pub fn definitions() -> Vec<Value> {
                 "properties": {
                     "issue_id": { "type": "string" },
                     "issue_ids": { "type": "array", "items": { "type": "string" } },
-                    "wait_secs": {
-                        "type": "integer",
-                        "description": format!(
-                            "How long to block, up to {MAX_WAIT_SECS}; larger values are capped. \
-                             Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
-                        ),
-                    },
+                    "wait_secs": wait_secs_schema(),
                 },
             },
         }),
     ]
+}
+
+fn wait_secs_schema() -> Value {
+    json!({
+        "type": "integer",
+        "description": format!(
+            "How long to block, up to {MAX_WAIT_SECS}; larger values are capped. \
+             Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
+        ),
+    })
 }
 
 pub async fn call(
@@ -70,6 +116,10 @@ pub async fn call(
         NOTIFY => notify_operator(store, manager, cfg, ctx, args).await,
         REPORT => report(store, ctx, args),
         REPORT_STATUS => report_status(store, ctx, args).await,
+        QUESTION_STATUS => {
+            let ids = ids(args, "question_id", "question_ids")?;
+            question_status(store, ctx, &ids, args).await
+        }
         _ => Err(format!("no operator tool named {name}")),
     }
 }
@@ -132,27 +182,78 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
             stored
         }
     };
-    wait_for_question(store, row.id).await
+    question_status(store, ctx, &[row.id], args).await
 }
 
-async fn wait_for_question(store: &Arc<Store>, id: String) -> Result<Value, String> {
+/// Where the caller's questions stand, waiting up to the caller's
+/// `wait_secs` for one of them to be answered or cancelled. A question
+/// outlives every call that waits on it: the row is the state, so a caller
+/// that gives up or is dropped loses nothing, and the next call reads an
+/// answer given in between.
+async fn question_status(
+    store: &Arc<Store>,
+    ctx: &CallContext,
+    ids: &[String],
+    args: &Value,
+) -> Result<Value, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs(args));
     loop {
-        let row = store
-            .operator_question(&id)
-            .map_err(|e| e.to_string())?
-            .ok_or("operator question disappeared")?;
-        match row.state.as_str() {
-            "answered" => {
-                return Ok(
-                    json!({"question_id": id, "answer": row.answer_json.and_then(|v| serde_json::from_str::<Value>(&v).ok()).unwrap_or(Value::Null)}),
-                )
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row = store
+                .operator_question(id)
+                .map_err(|e| e.to_string())?
+                .filter(|row| {
+                    caller_owns(store, ctx, &row.channel, row.session_id.as_deref())
+                        && row.node_id == ctx.node_id
+                })
+                .ok_or_else(|| format!("no question {id} of yours on this channel"))?;
+            if !matches!(row.state.as_str(), "unanswered" | "answered" | "cancelled") {
+                return Err("operator question has an invalid state".into());
             }
-            "cancelled" => {
-                return Err("the operator cancelled this question; no answer was given".into())
-            }
-            "unanswered" => sleep(Duration::from_millis(250)).await,
-            _ => return Err("operator question has an invalid state".into()),
+            rows.push(row);
         }
+        let decided = rows.iter().any(|row| row.state != "unanswered");
+        if decided || tokio::time::Instant::now() >= deadline {
+            let views: Vec<Value> = rows.iter().map(question_view).collect();
+            return Ok(if args.get("question_ids").is_some() {
+                json!({ "questions": views, "still_waiting": !decided })
+            } else {
+                let mut view = views.into_iter().next().unwrap_or(Value::Null);
+                view["still_waiting"] = json!(!decided);
+                view
+            });
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn question_view(row: &OperatorQuestionRow) -> Value {
+    match row.state.as_str() {
+        "answered" => json!({
+            "question_id": row.id,
+            "state": "answered",
+            "answer": row
+                .answer_json
+                .as_deref()
+                .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                .unwrap_or(Value::Null),
+        }),
+        "cancelled" => json!({
+            "question_id": row.id,
+            "state": "cancelled",
+            "message": "The operator cancelled this question; no answer was given.",
+        }),
+        state => json!({
+            "question_id": row.id,
+            "request_id": row.request_key,
+            "state": state,
+            "message": format!(
+                "The operator has not answered yet. The question stays in their queue and an \
+                 answer given meanwhile is kept. Call {QUESTION_STATUS} with this question_id to \
+                 keep waiting; each call waits up to {MAX_WAIT_SECS} seconds."
+            ),
+        }),
     }
 }
 
@@ -364,7 +465,7 @@ async fn report_status(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
-    let ids = issue_ids(args)?;
+    let ids = ids(args, "issue_id", "issue_ids")?;
     let wait = wait_secs(args);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
@@ -397,11 +498,11 @@ async fn report_status(
     }
 }
 
-fn issue_ids(args: &Value) -> Result<Vec<String>, String> {
-    if let Some(list) = args.get("issue_ids") {
+fn ids(args: &Value, one: &str, many: &str) -> Result<Vec<String>, String> {
+    if let Some(list) = args.get(many) {
         let ids: Vec<String> = list
             .as_array()
-            .ok_or("issue_ids is a list of issue ids")?
+            .ok_or_else(|| format!("{many} is a list of ids"))?
             .iter()
             .filter_map(Value::as_str)
             .map(str::trim)
@@ -409,16 +510,16 @@ fn issue_ids(args: &Value) -> Result<Vec<String>, String> {
             .map(str::to_string)
             .collect();
         if ids.is_empty() {
-            return Err("issue_ids names no issue".into());
+            return Err(format!("{many} names nothing"));
         }
         return Ok(ids);
     }
-    args.get("issue_id")
+    args.get(one)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| vec![s.to_string()])
-        .ok_or_else(|| "issue_id or issue_ids is required".into())
+        .ok_or_else(|| format!("{one} or {many} is required"))
 }
 
 fn issue_view(row: &IssueDraftRow) -> Value {

@@ -275,7 +275,11 @@ impl Tools {
         }
         if matches!(
             name,
-            operator::ASK | operator::NOTIFY | operator::REPORT | operator::REPORT_STATUS
+            operator::ASK
+                | operator::NOTIFY
+                | operator::REPORT
+                | operator::REPORT_STATUS
+                | operator::QUESTION_STATUS
         ) {
             let access = self
                 .session

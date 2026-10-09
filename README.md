@@ -530,10 +530,13 @@ that a peer has none.
 ### Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.
-`ask_operator` posts a free-text question, optionally with choices, and blocks
-until you answer it from the queue or the session; the question survives the
-client disconnecting or the node restarting, and a retry with the same
-`request_id` picks the existing answer up instead of asking twice. Silence is
+`ask_operator` posts a free-text question, optionally with choices, and waits up
+to 45 seconds for you to answer it from the queue or the session. Past that it
+returns `unanswered` with a `question_id`, and `question_status` carries the wait
+in 45-second calls, so no client gives up on the call first. The question
+survives the call returning, the client disconnecting, or the node restarting:
+an answer given meanwhile is kept for the next status call, and a retry with the
+same `request_id` picks it up instead of asking twice. Silence is
 not consent, and an answer widens nothing. `notify_operator` asks for a real
 push to your devices — title, message, and a link back — rate-limited and
 deduplicated, and reports only what the push service said, never that you saw
