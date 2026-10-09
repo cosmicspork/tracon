@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use self::callback::{CallbackCapture, CallbackError, CallbackOutcome, CaptureEvent, CaptureReply};
 use self::mesh::{claim_key, ClaimResult, CredentialMesh};
 use crate::{
-    broker::{Credential, SharedBroker, KIND_OAUTH},
+    broker::{Credential, SharedBroker, KIND_API_KEY, KIND_OAUTH},
     config::Config,
     oauth::{self, anthropic, codex, Endpoints, Flow, OAuthError, Pkce, Tokens},
     store::now_ms,
@@ -179,6 +179,10 @@ pub enum ProviderError {
     RemoteDisconnect,
     #[error("{0}")]
     Failed(String),
+    /// The credential the provider names holds something an API key must
+    /// not replace.
+    #[error("{0}")]
+    Conflict(String),
     /// The credential has run out and nothing can renew it: connect again.
     #[error("{0}")]
     ReconnectRequired(String),
@@ -312,6 +316,7 @@ impl Providers {
                     "state": state,
                     "kind": cred.map(|(_, c)| c.kind.clone()),
                     "can_login": provider.login.as_deref().and_then(Flow::for_login).is_some(),
+                    "declared": self.cfg.declared_providers.contains(name),
                     "identity": cred.and_then(|(_, c)| c.identity.clone()),
                     "expires_ms": cred.and_then(|(_, c)| c.expires_ms),
                     "channels": cred.map(|(_, c)| c.channels.clone()).unwrap_or_default(),
@@ -979,6 +984,56 @@ impl Providers {
             if let Some(callback) = self.on_connected.get() {
                 callback();
             }
+        }
+        self.publish();
+        Ok(())
+    }
+
+    /// Seal an API key as the credential a provider names, bound to these
+    /// channels on this node. It is not handed to peers: a key stays on the
+    /// node it was given to. A subscription sign-in under the same name is
+    /// left alone; disconnecting it is a separate, deliberate step.
+    pub fn set_key(
+        &self,
+        name: &str,
+        key: &str,
+        channels: Vec<String>,
+    ) -> Result<(), ProviderError> {
+        let credential_name = self.credential_name(name)?;
+        {
+            let mut broker = self.broker.write().unwrap();
+            let mut staged = broker.clone();
+            let mut credential = staged.get(&credential_name).cloned().unwrap_or_default();
+            match credential.kind.as_str() {
+                KIND_OAUTH => {
+                    return Err(ProviderError::Conflict(format!(
+                        "{credential_name} holds a subscription sign-in; disconnect it before adding a key"
+                    )))
+                }
+                KIND_API_KEY => {}
+                // A fresh `Credential` is an empty `env` one.
+                _ if credential.env.is_empty() => {}
+                _ => {
+                    return Err(ProviderError::Conflict(format!(
+                        "credential {credential_name} is not a model key and cannot be replaced here"
+                    )))
+                }
+            }
+            credential.kind = KIND_API_KEY.into();
+            credential.provider = Some(name.to_string());
+            credential.channels = channels;
+            credential.expires_ms = None;
+            credential.identity = None;
+            credential.env.insert("API_KEY".into(), key.to_string());
+            staged.put(&credential_name, credential);
+            staged
+                .save(&self.store_key)
+                .map_err(|error| ProviderError::Failed(error.to_string()))?;
+            *broker = staged;
+        }
+        self.notes.lock().remove(name);
+        if let Some(callback) = self.on_connected.get() {
+            callback();
         }
         self.publish();
         Ok(())

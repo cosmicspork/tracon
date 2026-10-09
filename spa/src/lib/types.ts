@@ -66,8 +66,11 @@ export interface ProviderInfo {
   name: string
   state: 'connected' | 'pending' | 'failed' | 'disconnected'
   kind: 'api_key' | 'oauth' | null
-  /** Whether the harness has a login flow for it; otherwise an API key is imported in Settings. */
+  /** Whether the harness has a login flow for it; otherwise it takes an API key. */
   can_login: boolean
+  /** Whether node.toml names it, rather than only the node's built-in
+      defaults. Absent from a node older than this field. */
+  declared?: boolean
   /** Private to the serving node; peer summaries deliberately omit completion details. */
   url?: string | null
   completion?: LoginCompletion | null

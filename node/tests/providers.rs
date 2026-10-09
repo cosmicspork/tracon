@@ -932,3 +932,93 @@ async fn channels_are_changed_only_on_a_connected_provider() {
         Err(ProviderError::Unknown(_))
     ));
 }
+
+/// An API-key provider is keyed in place: the key is sealed under the
+/// credential the provider names, bound to the chosen channels, and the
+/// provider reads as connected. A subscription sign-in under that name is
+/// not overwritten.
+#[tokio::test]
+async fn an_api_key_provider_takes_its_key_in_place() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, bus) = providers(fake.endpoints());
+    let mut frames = bus.subscribe();
+    let before = listed(&p, "openai");
+    assert_eq!(before["state"], "disconnected");
+    assert_eq!(before["can_login"], false);
+    // Config::default() writes no `[providers]`: every one is a built-in.
+    assert_eq!(before["declared"], false);
+
+    p.set_key("openai", "sk-test", vec!["work".into()]).unwrap();
+    let held = broker.read().unwrap().get("openai").unwrap().clone();
+    assert_eq!(held.kind, "api_key");
+    assert_eq!(held.provider.as_deref(), Some("openai"));
+    assert_eq!(held.channels, ["work"]);
+    assert_eq!(
+        env(&broker, "openai", "API_KEY").as_deref(),
+        Some("sk-test")
+    );
+    let after = listed(&p, "openai");
+    assert_eq!(after["state"], "connected");
+    assert_eq!(after["kind"], "api_key");
+    assert!(!after.to_string().contains("sk-test"));
+    assert!(matches!(
+        frames.try_recv(),
+        Ok(tracon::stream::Frame::Providers { .. })
+    ));
+
+    // A second key replaces the first, and its channels with it.
+    p.set_key("openai", "sk-next", vec!["personal".into()])
+        .unwrap();
+    assert_eq!(
+        env(&broker, "openai", "API_KEY").as_deref(),
+        Some("sk-next")
+    );
+    assert_eq!(
+        broker.read().unwrap().get("openai").unwrap().channels,
+        ["personal"]
+    );
+
+    broker.write().unwrap().put(
+        "anthropic",
+        Credential {
+            kind: KIND_OAUTH.into(),
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        p.set_key("anthropic", "sk-ant", vec!["work".into()]),
+        Err(ProviderError::Conflict(_))
+    ));
+    assert_eq!(
+        broker.read().unwrap().get("anthropic").unwrap().kind,
+        KIND_OAUTH
+    );
+    assert!(matches!(
+        p.set_key("nope", "sk", vec!["work".into()]),
+        Err(ProviderError::Unknown(_))
+    ));
+}
+
+/// Whether node.toml names a provider is carried to the interface, public
+/// and private, so a built-in nobody asked for can be left out.
+#[tokio::test]
+async fn the_listing_says_which_providers_the_operator_declared() {
+    state::isolate();
+    let mut cfg = Config::default();
+    cfg.declared_providers.insert("openai".into());
+    let p = Providers::new(
+        Arc::new(cfg),
+        Broker::default().shared(),
+        proto::envelope::DataKey::from_bytes([9u8; 32]),
+        "n1".into(),
+        Bus::new(),
+    );
+    let public = p.list_public();
+    let declared =
+        |name: &str| public.iter().find(|value| value["name"] == name).unwrap()["declared"].clone();
+    assert_eq!(declared("openai"), true);
+    assert_eq!(declared("anthropic"), false);
+    assert_eq!(listed(&p, "openai")["declared"], true);
+}

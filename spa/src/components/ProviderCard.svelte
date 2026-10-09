@@ -34,6 +34,7 @@
   } = $props()
 
   let code = $state('')
+  let apiKey = $state('')
   let busy = $state(false)
   let error = $state('')
   let justResult = $state<ProviderConnectResult | null>(null)
@@ -182,6 +183,16 @@
     })
   }
 
+  function saveKey() {
+    const key = apiKey.trim()
+    if (!key) return
+    return act(async () => {
+      await api.setProviderKey(p.name, key, picked)
+      apiKey = ''
+      chosen = null
+    })
+  }
+
   function disconnect() {
     return act(async () => {
       await api.nodeDisconnectProvider(nodeId, p.name)
@@ -197,14 +208,21 @@
   }
 </script>
 
-<div class="prov" class:pending={shownState === 'pending'} class:bad={p.state === 'failed'}>
+<div
+  class="prov"
+  class:pending={shownState === 'pending'}
+  class:bad={p.state === 'failed'}
+  class:off={shownState === 'disconnected'}
+>
   <span class="pbar"></span>
+  <!-- What kind of connection this is; the state is the chip beside it. -->
   <span class="pnm">
     {providerLabel(p.name)}
     <small
       >{#if p.state === 'connected'}{p.kind === 'oauth' ? 'subscription' : 'api key'}{#if p.identity}
-          · {p.identity}{/if}{:else if shownState === 'pending'}waiting on you{:else if p.state === 'failed'}failed{:else}not
-        connected{/if}</small
+          · {p.identity}{/if}{:else if shownState === 'pending'}waiting on you{:else}{p.can_login
+          ? 'subscription'
+          : 'api key'}{/if}</small
     >
   </span>
   <span class="pst">
@@ -349,10 +367,32 @@
         {/if}
         <span><button class="lnk" onclick={connect} disabled={busy || picked.length === 0}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
       {:else if isSelf}
-        <span>API key only. Add it under <a class="lnk" href="/settings#connections">serving-node credentials</a>.</span>
+        {#if channelChoices.length > 1}
+          <ChannelChoice
+            legend="Channels this key serves"
+            choices={channelChoices}
+            selected={picked}
+            onchange={(next) => (chosen = next)}
+            disabled={busy}
+          />
+        {/if}
+        <span class="paste">
+          <input
+            type="password"
+            autocomplete="off"
+            aria-label={`API key for ${providerLabel(p.name)}`}
+            placeholder={p.state === 'failed' ? 'a new API key' : 'API key'}
+            bind:value={apiKey}
+            onkeydown={(event) => event.key === 'Enter' && saveKey()}
+            disabled={busy}
+          />
+          <button class="btn p" onclick={saveKey} disabled={busy || !apiKey.trim() || picked.length === 0}
+            >{busy ? 'Saving…' : 'Save key'}</button
+          >
+        </span>
       {:else}
-        <span>API key only. Add the key while managing {nodeName}; it never crosses the mesh to this browser.</span>
-    {/if}
+        <span>Add the key while managing {nodeName}; it never crosses the mesh to this browser.</span>
+      {/if}
     {/if}
     {#if error}<span class="l bad" role="alert">{error}</span>{/if}
   </span>
@@ -381,6 +421,9 @@
   }
   .prov.bad .pbar {
     background: var(--crit);
+  }
+  .prov.off .pbar {
+    background: var(--dim);
   }
   .pnm {
     font-weight: 600;

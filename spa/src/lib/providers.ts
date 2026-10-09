@@ -18,16 +18,16 @@ export function completionInstruction(completion: LoginCompletion | null): strin
 }
 
 // A card appears once there is something to show: a sign-in in flight, a
-// failed attempt to retry, a live connection, or an API-key provider (which
-// has no "not yet started" state to hide — it exists the moment it is
-// created and there is no separate connect step for it). A loginable
-// provider that has never been touched is the only one hidden while
-// disconnected — the Connections pane's "Add a provider" chooser is its only
-// entry point, so an entry that has not been started stays out of the row
-// list entirely rather than sitting there as a card with nothing on it but a
-// Connect button.
+// failed attempt to retry, a live connection, or an API-key provider the
+// operator declared in node.toml, which takes its key on the card. Hidden
+// while disconnected: a subscription nobody has started (the "Add a
+// provider" chooser starts one), and an API-key provider only the node's
+// built-in defaults declare (`openai` is in every node; "API key / custom"
+// adds it). A node too old to say whether it declared one keeps the card.
 export function connectableProviders(providers: ProviderInfo[]): ProviderInfo[] {
-  return providers.filter((provider) => provider.state !== 'disconnected' || !provider.can_login)
+  return providers.filter(
+    (provider) => provider.state !== 'disconnected' || (!provider.can_login && provider.declared !== false),
+  )
 }
 
 /** The shapes `POST /api/providers` accepts, and what the Shape dropdown offers. */
@@ -60,6 +60,9 @@ export function credentialImportToml(name: string, key: string, channels: string
   return [
     `[credentials.${quote(name)}]`,
     'kind = "api_key"',
+    // The provider the gateway injects it for, and what Connections reads
+    // to call the provider connected.
+    `provider = ${quote(name)}`,
     `channels = [${channelList}]`,
     `env = { ${quote(CREDENTIAL_KEY_ENV)} = ${quote(key)} }`,
     '',

@@ -601,6 +601,10 @@ export const api = {
   /** The channels a connected provider on the serving node serves. */
   setProviderChannels: (name: string, channels: string[]) =>
     call<{ name: string; channels: string[] }>('PUT', `/api/providers/${name}/channels`, { channels }),
+  /** Seal an API key for a provider the serving node runs. Write-only: the
+      key never comes back. */
+  setProviderKey: (name: string, key: string, channels: string[]) =>
+    call<{ name: string; channels: string[] }>('PUT', `/api/providers/${name}/key`, { key, channels }),
   /** Ask this node's harness for its model list again. The probe runs on the
       serving node — a peer's catalogue is refreshed by that peer. */
   refreshModels: () => call<ModelOption[]>('POST', '/api/node/refresh-models'),

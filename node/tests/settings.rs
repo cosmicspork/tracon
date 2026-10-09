@@ -507,6 +507,43 @@ env = { API_KEY = "sk-or-not-a-real-key" }
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
 
+    // A built-in the file does not name is the operator's to take over:
+    // `openai` is always listed, and this is how it gets its key and upstream.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/providers",
+        Some(LOCAL),
+        Some(json!({
+            "name": "openai",
+            "upstream": "https://api.openai.com/v1",
+            "shape": "openai",
+            "credential": "openai",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, v) = call(&n, "GET", "/api/config", Some(LOCAL), None).await;
+    assert_eq!(
+        v["providers"]["openai"]["upstream"],
+        "https://api.openai.com/v1"
+    );
+    // Once written, it is the operator's own and not taken over again.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/providers",
+        Some(LOCAL),
+        Some(json!({
+            "name": "openai",
+            "upstream": "https://elsewhere.example.com",
+            "shape": "openai",
+            "credential": "openai",
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+
     // Bad shape: refused before anything is written.
     let (s, v) = call(
         &n,
@@ -966,6 +1003,57 @@ async fn provider_channels_must_be_open_channels_this_node_holds() {
         "/api/providers/anthropic/channels",
         Some(LOCAL),
         Some(json!({ "channels": ["work", "work"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+}
+
+/// A provider key is checked like a forge token before it reaches the
+/// providers: something to seal, open channels this node holds, and nothing
+/// the body does not define.
+#[tokio::test]
+async fn a_provider_key_needs_a_key_and_open_channels() {
+    let n = node();
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/channels",
+        Some(LOCAL),
+        Some(json!({ "name": "work" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    for body in [
+        json!({ "key": "  ", "channels": ["work"] }),
+        json!({ "key": "sk", "channels": [] }),
+        json!({ "key": "sk", "channels": ["@mesh"] }),
+        json!({ "key": "sk", "channels": ["missing"] }),
+    ] {
+        let (s, v) = call(
+            &n,
+            "PUT",
+            "/api/providers/openai/key",
+            Some(LOCAL),
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{body}: {v}");
+    }
+    let (s, _) = call(
+        &n,
+        "PUT",
+        "/api/providers/openai/key",
+        Some(LOCAL),
+        Some(json!({ "key": "sk", "channels": ["work"], "extra": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/providers/openai/key",
+        Some(LOCAL),
+        Some(json!({ "key": "sk", "channels": ["work"] })),
     )
     .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
