@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use super::output;
 use crate::{
     boundary::Backend,
     config::{Config, RuntimeKind},
@@ -65,9 +66,14 @@ pub struct CheckResult {
     /// `passed`, `failed`, `not_runnable`, `interrupted`, `cancelled`, or
     /// `reused`.
     pub outcome: String,
-    /// The last few KiB of stdout+stderr, or the retained output of reused
+    /// The last few KiB of the output, or the retained output of reused
     /// evidence.
     pub tail: String,
+    /// For a `failed` outcome: the lines of the whole output that say what
+    /// failed, which the tail alone often does not hold. Empty when none were
+    /// recognised.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub failures: String,
     pub ms: u64,
     pub reused_from: Option<String>,
     /// For a `not_runnable` outcome: the tool the shell said it could not find,
@@ -256,6 +262,7 @@ pub async fn run_required(
                 ms: source.duration_ms.unwrap_or_default().max(0) as u64,
                 reused_from: Some(source.id),
                 missing_tool: None,
+                failures: recorded_failures(&source.metadata_json),
             });
             any_reused = true;
             continue;
@@ -367,6 +374,7 @@ pub async fn run_required(
                 ms: 0,
                 reused_from: None,
                 missing_tool: None,
+                failures: String::new(),
             });
             continue;
         }
@@ -379,7 +387,7 @@ pub async fn run_required(
         // install is not taken out of the first check's time and no other's.
         let deadline = tokio::time::Instant::now() + timeout;
         let cmd = RunnerCommand {
-            argv: vec!["sh".into(), "-lc".into(), command.clone()],
+            argv: output::merged_shell(command),
             env,
             mounts,
             workdir: Some("/work".into()),
@@ -461,6 +469,13 @@ pub async fn run_required(
                     metadata["prepared_with"] = json!(environment.prepare);
                     metadata["cache_volume"] = json!(environment.cache_volume);
                 }
+                // Read from the whole output, before it is cut to a tail.
+                if outcome == "failed" {
+                    let failures = output::failure_lines(&output_text);
+                    if !failures.is_empty() {
+                        metadata["failures"] = json!(failures);
+                    }
+                }
                 (outcome, code, tail(&output_text), metadata)
             }
             Ok(Err(error)) => (
@@ -498,6 +513,11 @@ pub async fn run_required(
             .get("missing_tool")
             .and_then(|tool| tool.as_str())
             .map(str::to_string);
+        let failures = metadata
+            .get("failures")
+            .and_then(|failures| failures.as_str())
+            .unwrap_or_default()
+            .to_string();
         let recorded = store
             .finish_check_run(
                 &run_id,
@@ -541,6 +561,7 @@ pub async fn run_required(
             ms: duration_ms.max(0) as u64,
             reused_from: None,
             missing_tool,
+            failures,
         });
     }
     // The checks are over; the tree they were copied from, and the cache
@@ -742,7 +763,7 @@ pub(crate) async fn run_preparation(
         let mut env = cache_env();
         env.extend(egress.env.iter().cloned());
         let cmd = RunnerCommand {
-            argv: vec!["sh".into(), "-lc".into(), command.clone()],
+            argv: output::merged_shell(command),
             env,
             mounts: vec![
                 Mount::volume(work.to_string(), "/work", false),
@@ -767,6 +788,7 @@ pub(crate) async fn run_preparation(
         if !output.status.success() {
             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
             text.push_str(&String::from_utf8_lossy(&output.stderr));
+            let said = output::with_failures(&output::failure_lines(&text), &tail(&text));
             return Err(Stopped::Unprepared(format!(
                 "preparation `{command}` failed (exit {}) in {} ({}); the check was not run.\n\n{}",
                 output
@@ -776,7 +798,7 @@ pub(crate) async fn run_preparation(
                     .unwrap_or_else(|| "none".into()),
                 environment.image,
                 environment.image_source,
-                tail(&text)
+                said
             )));
         }
     }
@@ -828,6 +850,7 @@ fn cancelled_result(command: &str, reason: &str, ms: u64) -> CheckResult {
         ms,
         reused_from: None,
         missing_tool: None,
+        failures: String::new(),
     }
 }
 
@@ -953,6 +976,14 @@ pub fn effective_outcome(run: &CheckRunRow) -> &str {
 
 fn hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+/// The failure lines a run recorded in its metadata, if it recorded any.
+fn recorded_failures(metadata_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(metadata_json)
+        .ok()
+        .and_then(|metadata| metadata.get("failures")?.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 fn tail(text: &str) -> String {
@@ -1434,6 +1465,9 @@ mod tests {
         commands: std::sync::Mutex<Vec<RunnerCommand>>,
         /// Exit status handed to a preparation command.
         prepare_exit: i32,
+        /// Exit status and output handed to a check.
+        check_exit: i32,
+        check_output: String,
     }
 
     /// A run's volume by what it is for, without the id that names the run.
@@ -1465,20 +1499,28 @@ mod tests {
                 .mounts
                 .iter()
                 .any(|m| m.target == "/cache" && !m.read_only);
-            let exit = if preparing { self.0.prepare_exit } else { 0 };
+            let exit = if preparing {
+                self.0.prepare_exit
+            } else {
+                self.0.check_exit
+            };
             self.0
                 .log
                 .lock()
                 .unwrap()
-                .push(format!("run {}", cmd.argv[2]));
+                .push(format!("run {}", cmd.argv.last().unwrap()));
             self.0.commands.lock().unwrap().push(cmd);
             Ok(std::process::Output {
                 status: std::process::ExitStatus::from_raw(exit << 8),
-                stdout: Vec::new(),
-                stderr: if exit == 0 {
+                stdout: if preparing {
                     Vec::new()
                 } else {
+                    self.0.check_output.as_bytes().to_vec()
+                },
+                stderr: if preparing && exit != 0 {
                     b"error: 403 Forbidden".to_vec()
+                } else {
+                    Vec::new()
                 },
             })
         }
@@ -1775,6 +1817,83 @@ mod tests {
                 "close",
             ]
         );
+    }
+
+    /// A failed check says what failed even when the end of its output does
+    /// not: the failure lines are read from the whole output, recorded with
+    /// the run, and carried by a later submission that reuses it. The check
+    /// runs with its stderr merged into stdout, in the order it was printed.
+    #[tokio::test]
+    async fn a_failed_check_carries_what_failed_beyond_its_tail() {
+        let (store, cfg, candidate) = prepared_repo("fail1");
+        let mut output = String::from(
+            "running 2 tests\n\
+             test limiter::tests::refills_to_capacity ... FAILED\n\
+             thread 'limiter::tests::refills_to_capacity' panicked at src/limiter.rs:88:9:\n\
+             assertion failed: bucket <= capacity\n\
+             test result: FAILED. 1 passed; 1 failed; 0 ignored\n",
+        );
+        while output.len() < 3 * TAIL_BYTES {
+            output.push_str("   Compiling some-crate v1.0.0\n");
+        }
+        output.push_str("error: recipe `check` failed on line 3 with exit code 101\n");
+        let recorded = std::sync::Arc::new(Recorded {
+            check_exit: 101,
+            check_output: output,
+            ..Default::default()
+        });
+        let backend = RecordingBackend(recorded.clone());
+        let snapshot = std::env::temp_dir();
+
+        let first = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        let result = &first.results[0];
+        assert_eq!(result.outcome, "failed");
+        assert!(
+            !result.tail.contains("refills_to_capacity"),
+            "{}",
+            result.tail
+        );
+        assert_eq!(
+            result.failures,
+            "test limiter::tests::refills_to_capacity ... FAILED\n\
+             thread 'limiter::tests::refills_to_capacity' panicked at src/limiter.rs:88:9:\n\
+             assertion failed: bucket <= capacity\n\
+             test result: FAILED. 1 passed; 1 failed; 0 ignored\n\
+             error: recipe `check` failed on line 3 with exit code 101"
+        );
+        let argv = recorded
+            .commands
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .argv
+            .clone();
+        assert_eq!(argv, output::merged_shell("just check"));
+
+        let second = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.results[0].outcome, "reused");
+        assert_eq!(second.results[0].failures, result.failures);
     }
 
     /// A candidate is prepared once however many checks it has: each check

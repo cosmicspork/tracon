@@ -8,6 +8,7 @@
 //! instruction the agent may forget by hour two.
 
 pub mod checks;
+pub mod output;
 pub mod prose;
 pub mod publish;
 pub mod report;

@@ -112,7 +112,12 @@
       {:else if e.kind === 'check_result'}
         <details class="fold" open={e.payload.ok !== true}>
           <summary class={e.payload.ok ? '' : 'crit'}>{e.payload.ok ? '✓' : '✗'} {e.payload.command} · exit {e.payload.exit ?? 'none'} · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</summary>
-          <div>{e.payload.tail || '(no output)'}</div>
+          {#if e.payload.failures}
+            <div class="failures"><span class="label">what failed</span>{'\n'}{e.payload.failures}</div>
+            <div><span class="label">end of the output</span>{'\n'}{e.payload.tail || '(no output)'}</div>
+          {:else}
+            <div>{e.payload.tail || '(no output)'}</div>
+          {/if}
         </details>
       {:else if e.kind === 'check_cancelled'}
         <div class="mark crit">checks cancelled · {e.payload.reason} · nothing was verified</div>
@@ -398,6 +403,15 @@
     margin: 4px 0 0 4px;
     color: var(--dim);
     white-space: pre-wrap;
+  }
+  /* The lines that say why a check failed, read out of the whole output. */
+  .fold > div.failures {
+    border-left-color: var(--crit);
+    color: var(--ink2);
+  }
+  .fold .label {
+    color: var(--dim);
+    font-size: 11px;
   }
   .cursor {
     color: var(--ink2);

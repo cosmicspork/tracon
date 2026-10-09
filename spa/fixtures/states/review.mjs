@@ -172,7 +172,13 @@ const run = (command, outcome, seconds, o = {}) => ({
   finished_ms: -1490000 + seconds * 1000,
   rerun_of: null,
   reused_from_id: null,
-  metadata_json: '{}',
+  metadata_json:
+    outcome === 'failed'
+      ? JSON.stringify({
+          failures:
+            'error[E0599]: no method named `advance` found for struct `Limiter` in the current scope\n--> tests/rate_limit.rs:18:13\nerror: could not compile `orbit` (test "rate_limit") due to 1 previous error',
+        })
+      : '{}',
   ...o,
 })
 

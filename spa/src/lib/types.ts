@@ -721,6 +721,8 @@ export interface CheckResult {
   ok: boolean
   exit: number | null
   tail: string
+  /** A failed check's lines that say what failed, read from its whole output. */
+  failures?: string
   ms: number
 }
 

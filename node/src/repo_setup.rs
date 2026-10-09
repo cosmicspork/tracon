@@ -785,7 +785,7 @@ async fn run(
                     let name = format!("tracon-t-{}-c{index}", &id[..12]);
                     let running = runner.capture_name(&name);
                     let cmd = RunnerCommand {
-                        argv: vec!["sh".into(), "-lc".into(), command.clone()],
+                        argv: crate::review::output::merged_shell(command),
                         env,
                         mounts: vec![
                             Mount::volume(copy.clone(), "/work", false),
@@ -823,13 +823,19 @@ async fn run(
                         Ok(Ok(output)) => {
                             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
                             text.push_str(&String::from_utf8_lossy(&output.stderr));
+                            let ok = output.status.success();
+                            let failures = if ok {
+                                String::new()
+                            } else {
+                                crate::review::output::failure_lines(&text)
+                            };
                             Step {
                                 phase: "check",
                                 command: command.clone(),
-                                ok: output.status.success(),
+                                ok,
                                 exit: output.status.code(),
                                 ms: started.elapsed().as_millis() as u64,
-                                tail: tail(&text),
+                                tail: crate::review::output::with_failures(&failures, &tail(&text)),
                             }
                         }
                     };
