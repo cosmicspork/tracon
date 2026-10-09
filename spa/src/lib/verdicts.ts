@@ -13,6 +13,8 @@ export interface VerdictConditions {
   stale: string[]
   /** What the reason composer holds, for the verdicts that need one. */
   reason: string
+  /** Whether this node can publish an approval; absent when it is not asked. */
+  readiness?: { ready: boolean; problem?: string | null } | null
 }
 
 /** Why `action` cannot be sent, or null when it can. */
@@ -25,6 +27,9 @@ export function unavailable(action: VerdictAction, c: VerdictConditions): string
     if (c.stale.length > 0) {
       const files = c.stale.length === 1 ? c.stale[0] : `${c.stale.length} files`
       return `${files} changed since submit; ask the agent to resubmit, then approve what it sends`
+    }
+    if (c.readiness && !c.readiness.ready) {
+      return `cannot publish from this node yet: ${c.readiness.problem ?? 'its forge token is not ready'}`
     }
     return null
   }
@@ -40,4 +45,19 @@ export function composerLabel(action: Exclude<VerdictAction, 'approve'>, editedF
   return editedFiles > 0
     ? `What should change, beyond your edits to ${editedFiles} file${editedFiles === 1 ? '' : 's'}? The agent reads this.`
     : 'What should change? The agent reads this.'
+}
+
+/** States a review is finished in: no verdict can be sent on it any more. */
+export const CLOSED_STATES = ['approved', 'rejected', 'acknowledged', 'gone'] as const
+
+/**
+ * The change an approval opened or updated, from the URL the node recorded
+ * as its publication result. The number is read from the forge's own path,
+ * and is null when the URL does not carry one.
+ */
+export function publishedChange(result: string | null | undefined): { url: string; number: number | null } | null {
+  const url = result?.trim()
+  if (!url || !/^https?:\/\//.test(url)) return null
+  const m = /\/(?:pull|pulls|merge_requests)\/(\d+)(?:[/?#]|$)/.exec(url)
+  return { url, number: m ? Number(m[1]) : null }
 }
