@@ -4,11 +4,10 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
+  import { groupDocs } from '../lib/docs'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { Document, RecallHit } from '../lib/types'
-
-  const KINDS = ['guide', 'ref', 'architecture', 'brief', 'plan', 'proposal', 'repo', 'note', 'meeting', 'inbox', 'shown', 'other']
 
   let channel = $state<string>('')
   let docs = $state<Document[]>([])
@@ -65,13 +64,7 @@
   })
 
   const live = $derived(docs.filter((d) => !d.archived))
-  const archived = $derived(docs.filter((d) => d.archived))
-  const grouped = $derived.by(() => {
-    const m = new Map<string, Document[]>()
-    for (const d of live) m.set(d.kind, [...(m.get(d.kind) ?? []), d])
-    const groups = KINDS.filter((k) => m.has(k)).map((k) => [k, m.get(k)!] as const)
-    return archived.length ? [...groups, ['archived', archived] as const] : groups
-  })
+  const grouped = $derived(groupDocs(docs))
 
   function create() {
     const slug = newSlug.trim().toLowerCase()

@@ -443,7 +443,7 @@ export default [
     area,
     route: '/docs',
     title: 'Documents grouped by kind',
-    note: 'Every kind the node writes is present; context-wi-2 should appear but the SPA KINDS list has no "context" (count in the header vs rows). Pinned doc carries no marker in the list.',
+    note: 'Every kind the node writes is present, context-wi-2 under context, and the header count matches the rows. Pinned doc carries no marker in the list.',
     api: { '/api/docs': populated },
   },
   {
