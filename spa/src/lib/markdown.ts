@@ -24,10 +24,11 @@ export function safeUrl(value: string, image = false): string | null {
   return escapeHtml(href)
 }
 
-function link(text: string, href: string, title?: string | null): string {
+function link(text: string, href: string, title?: string | null, aside = false): string {
   const clean = safeUrl(href)
   if (clean === null) return text
-  return `<a href="${clean}"${title ? ` title="${escapeHtml(title)}"` : ''}>${text}</a>`
+  const target = aside ? ' target="_blank" rel="noopener noreferrer"' : ''
+  return `<a href="${clean}"${title ? ` title="${escapeHtml(title)}"` : ''}${target}>${text}</a>`
 }
 
 marked.use({
@@ -73,4 +74,30 @@ offline.use({
 
 export function renderWithoutFetching(md: string): string {
   return offline.parse(md, { async: false }) as string
+}
+
+// A session's messages, in its log: an agent's or the operator's words, read
+// without fetching anything, as shown work is. A single newline stays a line
+// break, as it was when the log showed them as plain text, and a link opens
+// beside the session (on the desktop app, in the host's browser) rather than
+// navigating the log away.
+const message = new Marked({ gfm: true, breaks: true })
+message.use({
+  renderer: {
+    html({ text }: Tokens.HTML | Tokens.Tag) {
+      return escapeHtml(text)
+    },
+    link({ href, title, tokens }: Tokens.Link) {
+      return link(this.parser.parseInline(tokens), href, title, true)
+    },
+    image({ title, text, tokens }: Tokens.Image) {
+      if (tokens) text = this.parser.parseInline(tokens, this.parser.textRenderer)
+      const label = text || title || 'image'
+      return `<span class="no-fetch">[${escapeHtml(label)}]</span>`
+    },
+  },
+})
+
+export function renderMessage(md: string): string {
+  return message.parse(md, { async: false }) as string
 }
