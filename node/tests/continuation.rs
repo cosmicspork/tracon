@@ -36,6 +36,45 @@ fn event(h: &Harness, session: &str, kind: &str, payload: Value) {
         .unwrap();
 }
 
+fn new_item(h: &Harness, title: &str, deps: Vec<String>) -> tracon_sync::work::WorkItem {
+    tracon::corpus::work::create(
+        &h.store,
+        &h.bus,
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: title.into(),
+            body: "why it matters".into(),
+            deps,
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+        },
+    )
+    .unwrap()
+}
+
+/// What a plan session leaves behind: the plan document, linked to the item.
+fn write_plan(h: &Harness, item: &str) -> String {
+    let slug = tracon::corpus::work::plan_slug(item);
+    tracon::corpus::write(
+        &h.store,
+        &h.bus,
+        "n1",
+        "personal",
+        "document",
+        tracon_sync::ChangeOp::Upsert,
+        &slug,
+        json!({"channel": "personal", "slug": slug, "kind": "plan",
+               "title": "Plan", "body": "Add the table, then the view.",
+               "pinned": false, "hash": "p", "created_ms": now_ms(), "updated_ms": now_ms()}),
+    )
+    .unwrap();
+    tracon::corpus::work::set_plan(&h.store, &h.bus, "n1", item, &slug).unwrap();
+    slug
+}
+
 async fn ready(h: &Harness) {
     h.store
         .conn()
@@ -239,26 +278,8 @@ async fn abandoning_a_plain_lineage_puts_it_away_with_the_reason() {
 #[tokio::test]
 async fn an_items_view_names_its_blockers_and_abandoning_closes_it() {
     let h = harness().await;
-    let mk = |title: &str, deps: Vec<String>| {
-        tracon::corpus::work::create(
-            &h.store,
-            &h.bus,
-            "n1",
-            tracon::corpus::work::NewWork {
-                channel: "personal".into(),
-                project_id: None,
-                title: title.into(),
-                body: "why it matters".into(),
-                deps,
-                priority: 0,
-                discovered_from: None,
-                discovered_by_session: None,
-            },
-        )
-        .unwrap()
-    };
-    let first = mk("Lay the schema", vec![]);
-    let second = mk("Build the ledger", vec![first.id.clone()]);
+    let first = new_item(&h, "Lay the schema", vec![]);
+    let second = new_item(&h, "Build the ledger", vec![first.id.clone()]);
 
     let (st, v) = call(
         &h.operator,
@@ -280,6 +301,19 @@ async fn an_items_view_names_its_blockers_and_abandoning_closes_it() {
         "{v}"
     );
 
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/work/{}/continuation", first.id),
+        None,
+    )
+    .await;
+    assert_eq!(v["next"]["kind"], "start");
+    assert_eq!(
+        v["next"]["text"], "Nothing has run yet: plan it.",
+        "execute is not offered on an item with no plan"
+    );
+
     let mut planned = ended("p", 1, "phase_done", None);
     planned.phase = "plan".into();
     planned.work_item_id = Some(first.id.clone());
@@ -290,6 +324,12 @@ async fn an_items_view_names_its_blockers_and_abandoning_closes_it() {
         "a session on an item opens the item's work"
     );
     assert_eq!(v["id"], first.id.as_str());
+    assert_eq!(
+        v["next"]["kind"], "continue",
+        "no plan was recorded, so execute would be refused"
+    );
+    write_plan(&h, &first.id);
+    let (_, v) = call(&h.operator, "GET", "/api/sessions/p/continuation", None).await;
     assert_eq!(v["next"]["kind"], "execute");
 
     let (st, v) = call(
@@ -324,4 +364,66 @@ async fn an_items_view_names_its_blockers_and_abandoning_closes_it() {
         StatusCode::CONFLICT,
         "an item already closed is not abandoned twice"
     );
+}
+
+/// Continuing after a plan session that wrote its plan executes the plan in
+/// that session's workspace; a plan session cut off before it finished goes
+/// on planning.
+#[tokio::test]
+async fn continuing_a_written_plan_executes_it() {
+    let h = harness().await;
+    ready(&h).await;
+    let item = new_item(&h, "Lay the schema", vec![]);
+    let slug = write_plan(&h, &item.id);
+    let mut planned = ended("p", 1, "phase_done", None);
+    planned.phase = "plan".into();
+    planned.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&planned).unwrap();
+
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/work/{}/continuation", item.id),
+        None,
+    )
+    .await;
+    assert_eq!(v["next"]["kind"], "execute");
+    assert_eq!(v["actions"]["continue_from"], "p");
+
+    let (st, row) = call(
+        &h.operator,
+        "POST",
+        "/api/continuation/continue",
+        Some(json!({ "session_id": "p" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{row}");
+    assert_eq!(row["phase"], "execute");
+    assert_eq!(row["continued_from"], "p");
+    assert_eq!(row["repo_path"], "workspace://p");
+    assert_eq!(row["work_item_id"], item.id.as_str());
+    let note = h
+        .store
+        .get_draft(row["id"].as_str().unwrap())
+        .unwrap()
+        .map(|(text, _)| text)
+        .unwrap_or_default();
+    assert!(note.starts_with("Carry out work item"), "{note}");
+    assert!(note.contains(&format!("document `{slug}`")), "{note}");
+    assert!(note.contains("`submit_review`"), "{note}");
+
+    let other = new_item(&h, "Build the ledger", vec![]);
+    let mut cut = ended("q", 2, "node_restart", None);
+    cut.phase = "plan".into();
+    cut.work_item_id = Some(other.id.clone());
+    h.store.insert_session(&cut).unwrap();
+    let (st, row) = call(
+        &h.operator,
+        "POST",
+        "/api/continuation/continue",
+        Some(json!({ "session_id": "q" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{row}");
+    assert_eq!(row["phase"], "plan");
 }
