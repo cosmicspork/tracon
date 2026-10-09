@@ -585,13 +585,23 @@ async fn submit(
     if squash {
         // Onto what the branch holds when the push adds to it; otherwise
         // where the branch leaves its base, so the change is exactly the
-        // reviewed diff.
-        intent.squash_onto = Some(match (&intent.lease, intent.rewrite) {
-            (Some(lease), false) => lease.clone(),
-            _ => review::merge_base(&worktree, &range_base, &capture.head_sha)
-                .await
-                .map_err(|e| e.to_string())?,
-        });
+        // reviewed diff. Added to what the branch holds, the squash keeps
+        // where the branch leaves its base as a second parent unless the
+        // branch already has it: a revision that merged its base to resolve
+        // a conflict ships that merge. The lease may be an earlier squash
+        // this worktree never had; publication settles that case.
+        let leaves = review::merge_base(&worktree, &range_base, &capture.head_sha)
+            .await
+            .map_err(|e| e.to_string())?;
+        match (&intent.lease, intent.rewrite) {
+            (Some(lease), false) => {
+                intent.squash_onto = Some(lease.clone());
+                if !review::descends_from(&worktree, lease, &leaves).await {
+                    intent.squash_merges = Some(leaves);
+                }
+            }
+            _ => intent.squash_onto = Some(leaves),
+        }
     }
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     let max_snapshot_bytes = manager.cfg().supervision.max_snapshot_bytes;
