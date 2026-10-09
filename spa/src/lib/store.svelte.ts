@@ -6,6 +6,7 @@ import * as push from './push'
 import { router } from './router.svelte'
 import { api, ApiError } from './api'
 import { upsertNode } from './nodes'
+import { LOADING, settledLoad, type LoadStatus } from './load'
 import { applySessionFrame } from './queue'
 import { allAnswered, kept, wantsLogin } from './snapshot'
 import type {
@@ -31,6 +32,8 @@ const RECONNECTED_BANNER_MS = 8000
 // without them. Polled here rather than on the home screen, so the badge and
 // the list it links to are never counting different things.
 const INTERVENTION_POLL_MS = 5000
+
+type Snapshot = 'nodes' | 'mesh' | 'channels' | 'queue' | 'sessions' | 'providers'
 
 class Store {
   /** Every node this one knows, itself first. */
@@ -62,6 +65,21 @@ class Store {
   openChunks = $state<Map<string, { kind: string; text: string }>>(new Map())
   /** Latest ephemeral status per tool call. */
   toolProgress = $state<Map<string, string>>(new Map())
+  /**
+   * Each snapshot's fetch: loading until it first answers, failed while its
+   * latest refetch did. A snapshot that failed keeps its last value, so this
+   * is the only place a screen can tell "none" from "could not ask".
+   */
+  loads = $state<Record<Snapshot, LoadStatus>>({
+    nodes: LOADING,
+    mesh: LOADING,
+    channels: LOADING,
+    queue: LOADING,
+    sessions: LOADING,
+    providers: LOADING,
+  })
+  /** A refetch is in flight; a retry button waits on it. */
+  refetching = $state(false)
   connected = $state(false)
   /** The node wants a login: show the gate rather than an empty interface. */
   authRequired = $state(false)
@@ -132,6 +150,7 @@ class Store {
     // one of them failing used to discard the other five. `mesh` left null
     // that way reads on the Nodes screen as "no hub configured" — a claim the
     // SPA has not heard — and nothing refetches until the stream reconnects.
+    this.refetching = true
     const results = await Promise.allSettled([
       api.nodes(),
       api.mesh(),
@@ -139,13 +158,21 @@ class Store {
       api.queue(),
       api.sessions(),
       api.providers(),
-    ])
+    ]).finally(() => (this.refetching = false))
     // Nothing else depends on it, and an older node has no such route.
     void api
       .awake()
       .then((a) => (this.awake = a))
       .catch(() => {})
     const [nodes, mesh, channels, queue, sessions, providers] = results
+    this.loads = {
+      nodes: settledLoad(this.loads.nodes, nodes),
+      mesh: settledLoad(this.loads.mesh, mesh),
+      channels: settledLoad(this.loads.channels, channels),
+      queue: settledLoad(this.loads.queue, queue),
+      sessions: settledLoad(this.loads.sessions, sessions),
+      providers: settledLoad(this.loads.providers, providers),
+    }
     this.nodes = kept(nodes, [] as NodeInfo[]).reduce(upsertNode, [] as NodeInfo[])
     this.mesh = kept(mesh, this.mesh)
     this.channels = kept(channels, this.channels)

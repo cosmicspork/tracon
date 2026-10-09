@@ -1,29 +1,22 @@
 <script lang="ts">
+  import LoadGate from '../components/LoadGate.svelte'
   import { api } from '../lib/api'
   import { formatTokens } from '../lib/format'
+  import { Loader } from '../lib/loader.svelte'
   import { store } from '../lib/store.svelte'
   import type { ChannelMetrics } from '../lib/types'
 
   let days = $state(30)
-  let rows = $state<ChannelMetrics[]>([])
-  let note = $state('')
-  let error = $state<string | null>(null)
+  const usage = new Loader<{ rows: ChannelMetrics[]; note: string }>()
 
-  let generation = 0
   $effect(() => {
-    const request = ++generation
-    error = null
-    api
-      .metrics(Date.now() - days * 86_400_000)
-      .then((d) => {
-        if (request !== generation) return
-        rows = d.channels
-        note = d.note
-      })
-      .catch((e) => {
-        if (request === generation) error = e instanceof Error ? e.message : String(e)
-      })
+    const span = days
+    usage.load(String(span), () =>
+      api.metrics(Date.now() - span * 86_400_000).then((d) => ({ rows: d.channels, note: d.note })),
+    )
   })
+  const rows = $derived(usage.value?.rows ?? [])
+  const note = $derived(usage.value?.note ?? '')
 
   function num(x: number | null, f: (n: number) => string = (n) => n.toFixed(1)): string {
     return x === null ? '—' : f(x)
@@ -43,49 +36,49 @@
 </div>
 <p class="scope">{note || 'Grouped by channel; values are limited to activity this node can observe.'}</p>
 
-{#if error}
-  <div class="banner crit">usage <b>· {error}</b></div>
-{:else if rows.length === 0}
-  <div class="empty">No usage is recorded for this window. <a class="lnk" href="/work">Open Work</a> to create a clear outcome, then start a session.</div>
-{:else}
-  <div class="workflow">
-    {#each rows as r (r.channel)}
-      <section>
-        <h2>{r.channel}</h2>
-        <dl>
-          <div><dt>Time to verified work</dt><dd>{num(r.seconds_to_first_verified_candidate, dur)}</dd></div>
-          <div><dt>Verified sessions</dt><dd>{r.verified_sessions}</dd></div>
-          <div><dt>Session setup failures</dt><dd>{r.setup_failures}</dd></div>
-          <div><dt>Human interventions</dt><dd>{r.interventions}</dd></div>
-          <div><dt>Request waiting</dt><dd>{dur(r.human_wait_seconds)}</dd></div>
-        </dl>
-      </section>
-    {/each}
-  </div>
-  <div class="scroll">
-    <table>
-      <thead>
-        <tr><th>Channel</th><th>Approvals / accepted</th><th>Tokens / accepted</th><th>Accepted</th><th>Rejected</th><th>Tokens</th><th>Cost</th><th>Human</th><th>Agent</th><th>Sessions</th></tr>
-      </thead>
-      <tbody>
-        {#each rows as r (r.channel)}
-          <tr>
-            <td>{r.channel}</td>
-            <td class="big">{num(r.approvals_per_accepted_change)}</td>
-            <td class="big">{num(r.tokens_per_accepted_change, formatTokens)}</td>
-            <td>{r.accepted_changes}</td>
-            <td>{r.rejected_changes}</td>
-            <td>{formatTokens(r.tokens)}</td>
-            <td class:u={r.cost_usd === null}>{r.cost_usd === null ? 'unpriced' : `$${r.cost_usd.toFixed(2)}`}</td>
-            <td>{dur(r.human_seconds)}</td>
-            <td>{dur(r.agent_seconds)}</td>
-            <td>{r.sessions}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
-{/if}
+<LoadGate status={usage} what="usage" onretry={() => usage.retry()} retrying={usage.pending}>
+  {#if rows.length === 0}
+    <div class="empty">No usage is recorded for this window. <a class="lnk" href="/work">Open Work</a> to create a clear outcome, then start a session.</div>
+  {:else}
+    <div class="workflow">
+      {#each rows as r (r.channel)}
+        <section>
+          <h2>{r.channel}</h2>
+          <dl>
+            <div><dt>Time to verified work</dt><dd>{num(r.seconds_to_first_verified_candidate, dur)}</dd></div>
+            <div><dt>Verified sessions</dt><dd>{r.verified_sessions}</dd></div>
+            <div><dt>Session setup failures</dt><dd>{r.setup_failures}</dd></div>
+            <div><dt>Human interventions</dt><dd>{r.interventions}</dd></div>
+            <div><dt>Request waiting</dt><dd>{dur(r.human_wait_seconds)}</dd></div>
+          </dl>
+        </section>
+      {/each}
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Channel</th><th>Approvals / accepted</th><th>Tokens / accepted</th><th>Accepted</th><th>Rejected</th><th>Tokens</th><th>Cost</th><th>Human</th><th>Agent</th><th>Sessions</th></tr>
+        </thead>
+        <tbody>
+          {#each rows as r (r.channel)}
+            <tr>
+              <td>{r.channel}</td>
+              <td class="big">{num(r.approvals_per_accepted_change)}</td>
+              <td class="big">{num(r.tokens_per_accepted_change, formatTokens)}</td>
+              <td>{r.accepted_changes}</td>
+              <td>{r.rejected_changes}</td>
+              <td>{formatTokens(r.tokens)}</td>
+              <td class:u={r.cost_usd === null}>{r.cost_usd === null ? 'unpriced' : `$${r.cost_usd.toFixed(2)}`}</td>
+              <td>{dur(r.human_seconds)}</td>
+              <td>{dur(r.agent_seconds)}</td>
+              <td>{r.sessions}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</LoadGate>
 
 <details class="methodology">
   <summary>How Usage is calculated</summary>

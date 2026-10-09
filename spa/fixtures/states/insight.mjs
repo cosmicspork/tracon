@@ -629,7 +629,7 @@ export default [
     area: 'insight',
     route: '/metrics',
     title: 'Usage: request still in flight',
-    note: 'Metrics.svelte has no loading state: it shows the "no usage" empty text while loading.',
+    note: 'Says it is loading, not that no usage is recorded.',
     api: { '/api/metrics': hang },
   },
   {

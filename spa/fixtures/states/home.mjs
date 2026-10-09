@@ -574,7 +574,7 @@ export default [
     area: 'home',
     route: '/',
     title: 'First paint, snapshots still loading',
-    note: 'What the home shows before the node answers. It should not claim the node needs setting up.',
+    note: 'What the home shows before the node answers: loading, not the setup checklist.',
     api: {
       '/api/nodes': never,
       '/api/mesh': never,
@@ -590,10 +590,20 @@ export default [
     area: 'home',
     route: '/',
     title: 'Queue snapshot failed (500)',
-    note: 'GET /api/queue answers 500 and every other snapshot succeeds. Does the home say anything, or read as "nothing waiting"?',
+    note: 'GET /api/queue answers 500 and every other snapshot succeeds: a banner says what is waiting could not be loaded, with a Retry.',
     api: base({
       '/api/queue': { status: 500, body: { error: { code: 500, message: 'database is locked' } } },
       '/api/sessions': sessionsOf(BASE_QUEUE),
+    }),
+  },
+  {
+    id: 'home-channels-error',
+    area: 'home',
+    route: '/',
+    title: 'Channels snapshot failed (500)',
+    note: 'Without the channel list the home cannot tell a configured node from a new one: it says it could not load, with a retry, and no setup checklist.',
+    api: base({
+      '/api/channels': { status: 500, body: { error: { code: 500, message: 'database is locked' } } },
     }),
   },
 

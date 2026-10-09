@@ -5,6 +5,8 @@
 // screen reads its row from there), the detail, the events and whatever the
 // panels on the page fetch.
 
+import { flaky, streamEvent } from '../flaky.mjs'
+
 const SELF = '9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6'
 const PEER = '4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1'
 
@@ -483,8 +485,35 @@ export default [
     area: 'sessions',
     route: '/sessions',
     title: 'Session list request fails (500)',
-    note: 'What the operator sees when /api/sessions errors: is it distinguishable from "nothing running"?',
+    note: 'The error with a Retry, and neither "No sessions running" nor "Nothing has ended yet".',
     api: { 'GET /api/sessions': fail(500, 'database is locked'), 'GET /api/queue': NO_QUEUE },
+  },
+  {
+    id: 'sessions-list-retried',
+    area: 'sessions',
+    route: '/sessions',
+    title: 'Session list failed once, then Retry',
+    note: 'The first snapshot fails; Retry refetches and the rows replace the error.',
+    api: { 'GET /api/sessions': ROWS.slice(0, 6), 'GET /api/queue': NO_QUEUE },
+    init: flaky('/api/sessions', [1]),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Retry' }).click()
+      await page.locator('.h4', { hasText: 'Ended' }).first().waitFor()
+    },
+  },
+  {
+    id: 'sessions-refresh-error',
+    area: 'sessions',
+    route: '/sessions',
+    title: 'Session list loaded, then a refetch failed',
+    note: 'The stream reconnects and the refetch of /api/sessions fails: the rows stay, under "Could not refresh sessions" with a Retry.',
+    api: { 'GET /api/sessions': ROWS.slice(0, 6), 'GET /api/queue': NO_QUEUE },
+    init: flaky('/api/sessions', [2]),
+    act: async (page) => {
+      await page.locator('.h4', { hasText: 'Ended' }).first().waitFor()
+      await streamEvent(page, 'open')
+      await page.getByText('Could not refresh sessions').waitFor()
+    },
   },
   {
     id: 'sessions-list-loading',
