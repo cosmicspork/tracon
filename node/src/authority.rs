@@ -748,7 +748,11 @@ pub async fn publish_review(
                 .squash_onto
                 .as_deref()
                 .zip(message.as_deref())
-                .map(|(onto, message)| crate::review::publish::Squash { onto, message }),
+                .map(|(onto, message)| crate::review::publish::Squash {
+                    onto,
+                    merges: intent.squash_merges.as_deref(),
+                    message,
+                }),
             resume,
             pushed: record.pushed_sha.is_some(),
             before_push: recheck_authority,

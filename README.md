@@ -463,7 +463,9 @@ credential; if the branch moved since submit, approval is refused and the change
 are named. The tree is what was reviewed; the commit message and branch it ships with are
 prose you edit beside the diff, where the agent's own commits are listed. By default the
 node pushes one commit holding the reviewed tree with the approved message on the
-approved branch; `commits = "keep"` (in `[publish]`, a repository's entry, or the
+approved branch. An update adds that commit to what the change holds, and when the
+revision merged its base (to resolve a conflict, say) the commit keeps that base as a
+second parent, so the forge sees it merged. `commits = "keep"` (in `[publish]`, a repository's entry, or the
 channel's `publish.commits` binding) pushes the agent's commits as written instead.
 Subject and branch rules (`style`) are off unless configured, and a submission that
 breaks them is refused before it reaches you.

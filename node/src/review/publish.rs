@@ -193,6 +193,13 @@ pub struct Intent {
     /// Absent pushes the agent's commits as written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub squash_onto: Option<String>,
+    /// For a squash added to what the branch holds: the base commit the
+    /// reviewed revision contains, made the squash's second parent unless
+    /// `squash_onto` already has it. Without it a revision that merged its
+    /// base to resolve a conflict would ship the resolution without the
+    /// merge, and the forge would still see the conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squash_merges: Option<String>,
     /// The agent's commits beyond the base, oldest first, as listed beside
     /// the diff.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -378,12 +385,15 @@ pub struct Publication<'a> {
 }
 
 /// One commit carrying exactly the reviewed tree, made in the publisher
-/// repository. Its parent, message, author and committer are all fixed before
+/// repository. Its parents, message, author and committer are all fixed before
 /// it is made — the author and dates are the candidate head's own — so a
 /// resumed attempt makes the identical commit and recognises it on the forge.
 #[derive(Debug, Clone, Copy)]
 pub struct Squash<'a> {
     pub onto: &'a str,
+    /// A second parent from the base (`Intent::squash_merges`), dropped when
+    /// `onto` already descends from it.
+    pub merges: Option<&'a str>,
     pub message: &'a str,
 }
 
@@ -1073,6 +1083,29 @@ async fn squash_commit(
             });
         }
     }
+    // The merged base commit is in the candidate's history, imported above;
+    // whether `onto` already has it is settled by those two fixed commits, so
+    // a resumed attempt decides the same way.
+    let merges = match squash.merges {
+        Some(merged) => {
+            publisher_git(
+                git,
+                publisher,
+                ["cat-file", "-e", &format!("{merged}^{{commit}}")],
+            )
+            .await
+            .map_err(|_| PublishError::IdentityChanged)?;
+            let contained = publisher_git(
+                git,
+                publisher,
+                ["merge-base", "--is-ancestor", merged, squash.onto],
+            )
+            .await
+            .is_ok();
+            (!contained).then_some(merged)
+        }
+        None => None,
+    };
     // A revision that changes nothing the branch holds pushes nothing: an
     // empty commit is not a revision.
     let onto_tree = publisher_git(
@@ -1081,7 +1114,7 @@ async fn squash_commit(
         ["rev-parse", &format!("{}^{{tree}}", squash.onto)],
     )
     .await?;
-    if onto_tree == p.reviewed_tree {
+    if onto_tree == p.reviewed_tree && merges.is_none() {
         return Ok(squash.onto.to_string());
     }
     let who = publisher_git(
@@ -1109,8 +1142,11 @@ async fn squash_commit(
         .env("GIT_COMMITTER_NAME", committer)
         .env("GIT_COMMITTER_EMAIL", committer_email)
         .env("GIT_COMMITTER_DATE", committer_date)
-        .args(["commit-tree", p.reviewed_tree, "-p", squash.onto, "-m"])
-        .arg(squash.message);
+        .args(["commit-tree", p.reviewed_tree, "-p", squash.onto]);
+    if let Some(merged) = merges {
+        command.args(["-p", merged]);
+    }
+    command.arg("-m").arg(squash.message);
     let made = output(git, command).await?;
     // The tree is the reviewed one by construction; read it back anyway, the
     // way every other identity on this path is.

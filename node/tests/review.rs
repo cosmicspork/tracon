@@ -4620,10 +4620,72 @@ async fn an_update_to_a_squashed_change_squashes_onto_it() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let second = f.forge_branch();
     let origin = f.dir.join("origin.git");
-    assert_eq!(sh_out(&origin, &format!("git rev-parse {second}^")), first);
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-list --parents -n1 {second}")),
+        format!("{second} {first}"),
+        "one parent: the branch already has its base"
+    );
     assert_eq!(
         sh_out(&origin, &format!("git rev-parse {second}^{{tree}}")),
         sh_out(wt, "git rev-parse HEAD^{tree}")
+    );
+}
+
+/// An update whose revision merged its base, as an agent does to resolve a
+/// conflict, is squashed onto what the branch holds and keeps the base it
+/// merged as a second parent, so the forge sees the base merged.
+#[tokio::test]
+async fn a_squashed_update_that_merged_its_base_keeps_it() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first = f.forge_branch();
+
+    // The base moves on with a change the branch conflicts with.
+    let host = f.dir.join("wt");
+    sh(
+        &host,
+        "git checkout -q main && echo moved > a.txt && git add -A \
+         && git commit -qm moved && git push -q origin main",
+    );
+    let moved = sh_out(&host, "git rev-parse main");
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        &format!(
+            "git fetch -q {} main:refs/remotes/origin/main \
+             && ! git merge -q origin/main 2>/dev/null; \
+             echo resolved > a.txt && git add -A && git commit -qm 'merge main'",
+            f.dir.join("origin.git").display()
+        ),
+    );
+    gh_forge(&f, pull_seven(&first));
+    let id = review_id(&f.submit_update(json!({})).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    assert_eq!(intent.squash_onto.as_deref(), Some(first.as_str()));
+    assert_eq!(intent.squash_merges.as_deref(), Some(moved.as_str()));
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second = f.forge_branch();
+    let origin = f.dir.join("origin.git");
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-list --parents -n1 {second}")),
+        format!("{second} {first} {moved}"),
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {second}^{{tree}}")),
+        sh_out(wt, "git rev-parse HEAD^{tree}")
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git merge-base {second} main")),
+        moved,
+        "the change merges cleanly into its base"
     );
 }
 
