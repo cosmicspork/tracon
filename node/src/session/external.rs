@@ -77,12 +77,38 @@ impl Liveness {
     }
 }
 
-/// When `pid` started, as `ps` prints it, or `None` if there is no such
-/// process or no `ps` to ask.
+/// When `pid` started, or `None` if there is no such process. Only compared
+/// with itself, so each platform may say it its own way.
 async fn started(pid: u32) -> Option<String> {
     if pid <= 1 {
         return None;
     }
+    start_time(pid).await
+}
+
+/// Linux reads the start time from `/proc` rather than asking `ps`, which a
+/// minimal image (a repository's check image, the node's container) may not
+/// carry: without it every process would read as gone.
+#[cfg(target_os = "linux")]
+async fn start_time(pid: u32) -> Option<String> {
+    let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .await
+        .ok()?;
+    stat_start_time(&stat).map(str::to_string)
+}
+
+/// Field 22 of `/proc/<pid>/stat`, `starttime`, in clock ticks since boot.
+/// The command name (field 2) is in parentheses and may itself hold spaces
+/// and parentheses, so fields are counted from after its last `)`.
+#[cfg(any(target_os = "linux", test))]
+fn stat_start_time(stat: &str) -> Option<&str> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    // `rest` starts at field 3, the state.
+    rest.split_whitespace().nth(22 - 3)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn start_time(pid: u32) -> Option<String> {
     let out = tokio::process::Command::new("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
         .output()
@@ -115,5 +141,13 @@ mod tests {
         assert_eq!(live.running("work", Some("repo:main")).await, Some(1));
         // Another lane is its own.
         assert_eq!(live.running("work", None).await, None);
+    }
+
+    #[test]
+    fn a_command_name_with_spaces_and_parentheses_does_not_shift_the_fields() {
+        let stat = "4242 (a (b) c) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 \
+                    12345 67 18446744073709551615";
+        assert_eq!(stat_start_time(stat), Some("987654"));
+        assert_eq!(stat_start_time("garbage"), None);
     }
 }
