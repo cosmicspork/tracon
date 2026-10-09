@@ -7,6 +7,7 @@
   import Composer from '../components/Composer.svelte'
   import ExternalAgents from '../components/ExternalAgents.svelte'
   import FirstTaskGuide from '../components/FirstTaskGuide.svelte'
+  import LoadGate from '../components/LoadGate.svelte'
   import OperatorIssueCard from '../components/OperatorIssueCard.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
@@ -18,6 +19,7 @@
   import { attention, type Thread } from '../lib/attention'
   import { defaultChannel, rememberedChannel } from '../lib/channel'
   import { clock } from '../lib/clock.svelte'
+  import { combineLoads, hasAnswer, loadPhase } from '../lib/load'
   import { eligibleNodes, modelsForChannel } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
@@ -93,6 +95,17 @@
   const composerChannel = $derived(selectedTarget?.channel ?? null)
   const composerChannelInfo = $derived(store.channels.find((channel) => channel.name === composerChannel) ?? null)
   const canCompose = $derived(taskTargets.length > 0)
+  // Until these answer, no task target only means nothing is known yet: the
+  // setup checklist would tell a configured node it needs setting up.
+  // Providers may fail on their own (a node serving none still works), so
+  // only their first answer is waited on.
+  const known = $derived(
+    combineLoads(store.loads.nodes, store.loads.channels, {
+      loaded: store.loads.providers.loaded || store.loads.providers.error !== null,
+      error: null,
+    }),
+  )
+  const refetch = () => void store.refetch()
   function selectTask(nodeId: string, channel: string) {
     selectedNodeId = nodeId
     selectedChannel = channel
@@ -138,23 +151,30 @@
   })
 </script>
 
-{#if canCompose}
-  {#if !itemId && store.sessions.size === 0}
-    <FirstTaskGuide
-      local={store.node}
-      localChannels={localTaskTargets.map((target) => target.channel)}
-      peers={peerTaskTargets}
-      selectedNodeId={composerNodeId}
-      selectedChannel={composerChannel}
-      channel={composerChannelInfo}
-      onchoose={selectTask}
-    />
+<!-- A refresh that fails once the node is known keeps the composer, and
+     whatever is typed in it, under the banner. -->
+{#if loadPhase(known) !== 'ready'}
+  <LoadGate status={known} what="this node" onretry={refetch} retrying={store.refetching} />
+{/if}
+{#if known.loaded}
+  {#if canCompose}
+    {#if !itemId && hasAnswer(store.loads.sessions) && store.sessions.size === 0}
+      <FirstTaskGuide
+        local={store.node}
+        localChannels={localTaskTargets.map((target) => target.channel)}
+        peers={peerTaskTargets}
+        selectedNodeId={composerNodeId}
+        selectedChannel={composerChannel}
+        channel={composerChannelInfo}
+        onchoose={selectTask}
+      />
+    {/if}
+    {#key itemId}
+      <Composer {item} {phase} preferredNodeId={composerNodeId} preferredChannel={composerChannel} ontargetchange={syncComposerTarget} />
+    {/key}
+  {:else}
+    <SetupCard />
   {/if}
-  {#key itemId}
-    <Composer {item} {phase} preferredNodeId={composerNodeId} preferredChannel={composerChannel} ontargetchange={syncComposerTarget} />
-  {/key}
-{:else}
-  <SetupCard />
 {/if}
 
 {#snippet card(thread: Thread)}
@@ -184,6 +204,12 @@
     </div>
   {/if}
 {/snippet}
+
+<!-- A failed queue leaves the lanes below short of every permission, review
+     and promotion; saying nothing would read as nothing waiting. -->
+{#if store.loads.queue.error !== null}
+  <LoadGate status={store.loads.queue} what="what is waiting on you" onretry={refetch} retrying={store.refetching} />
+{/if}
 
 {@render lane(bay.decisions, 'Waiting on you', 'questions and requests before reviews · oldest first')}
 {@render lane(bay.agent, 'With the agent', 'nothing to decide until it comes back')}

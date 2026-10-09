@@ -5,6 +5,8 @@
 // carries no bodies, search returns { hits, text_only }, a lost edit is a 412
 // with { error, hash, body }, and a preview is a POST minting { url, expires_ms }.
 
+import { flaky, streamEvent } from '../flaky.mjs'
+
 const area = 'docs'
 
 // A stable 64-hex stand-in for a content hash: FNV-1a over the whole seed,
@@ -466,7 +468,7 @@ export default [
     area,
     route: '/docs',
     title: 'List still loading',
-    note: 'There is no loading state: while the list request is pending the page claims the channel has no documents.',
+    note: 'Says it is loading, with no count in the header and no empty-state copy.',
     api: { '/api/docs': pending },
   },
   {
@@ -474,8 +476,22 @@ export default [
     area,
     route: '/docs',
     title: 'List failed to load',
-    note: 'Header still claims "0 on personal" beside the error.',
+    note: 'The error with a Retry; no count in the header and no empty-state copy beside it.',
     api: { '/api/docs': { status: 500, body: { error: { code: 500, message: 'database is locked' } } } },
+  },
+  {
+    id: 'docs-list-refresh-error',
+    area,
+    route: '/docs',
+    title: 'List loaded, then a refresh failed',
+    note: 'A document change on the stream refetches and that request fails: the list stays, under "Could not refresh documents" with a Retry.',
+    api: { '/api/docs': populated },
+    init: flaky('/api/docs', [2]),
+    act: async (page) => {
+      await page.locator('.h5').first().waitFor()
+      await streamEvent(page, 'changes', { type: 'changes', changes: [{ table: 'document' }] })
+      await page.getByText('Could not refresh documents').waitFor()
+    },
   },
   {
     id: 'docs-list-archived',

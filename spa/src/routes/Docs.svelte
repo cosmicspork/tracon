@@ -1,19 +1,21 @@
 <script lang="ts">
   import HtmlImport from '../components/HtmlImport.svelte'
+  import LoadGate from '../components/LoadGate.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
+  import { hasAnswer } from '../lib/load'
+  import { Loader } from '../lib/loader.svelte'
   import { groupDocs } from '../lib/docs'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { Document, RecallHit } from '../lib/types'
 
   let channel = $state<string>('')
-  let docs = $state<Document[]>([])
+  const listing = new Loader<Document[]>()
   let query = $state('')
   let hits = $state<RecallHit[] | null>(null)
-  let error = $state<string | null>(null)
   let creating = $state(false)
   let importing = $state(false)
   let newSlug = $state('')
@@ -32,12 +34,18 @@
 
   $effect(() => {
     void store.docsVersion
-    if (!channel && channels.length) return
-    api
-      .docs(channel || undefined, undefined, showArchived)
-      .then((d) => (docs = d.docs))
-      .catch((e) => (error = e instanceof Error ? e.message : String(e)))
+    // Wait for the channel list: listing every channel first and then the
+    // chosen one shows the wrong documents for a moment.
+    if (!store.loads.channels.loaded || (!channel && channels.length)) return
+    const name = channel || undefined
+    const archived = showArchived
+    listing.load(`${name ?? ''}|${archived}`, () => api.docs(name, undefined, archived).then((d) => d.docs))
   })
+  // Before the channel list answers there is nothing to ask for yet.
+  const status = $derived(store.loads.channels.loaded ? listing : store.loads.channels)
+  const shown = $derived(hasAnswer(status))
+  const retry = () => (store.loads.channels.loaded ? listing.retry() : void store.refetch())
+  const docs = $derived(listing.value ?? [])
 
   // This node embeds, but could not reach its endpoint for this query: the
   // results are narrower than usual, and a search that quietly got worse is
@@ -81,7 +89,7 @@
 <div class="h4">
   Documents
   <b
-    >{live.length} on {channel || '…'}{store.mesh?.hub.state === 'unreachable'
+    >{shown ? `${live.length} on ` : 'on '}{channel || '…'}{store.mesh?.hub.state === 'unreachable'
       ? ' · hub down · search is local'
       : ''}{textOnly ? ' · text only · no semantic search' : ''}</b
   >
@@ -122,9 +130,7 @@
   <HtmlImport {channel} onimported={imported} />
 {/if}
 
-{#if error}
-  <div class="banner crit">documents <b>· {error}</b></div>
-{:else if hits !== null}
+{#if hits !== null}
   {#if hits.length === 0}
     <div class="empty">Nothing matches this search. <button class="lnk" type="button" onclick={() => (query = '')}>Clear search</button> or use different words.</div>
   {:else}
@@ -143,32 +149,36 @@
       {/each}
     </div>
   {/if}
-{:else if docs.length === 0}
-  <div class="empty">
-    <div>No documents on {channel || 'this channel'} yet.</div>
-    <div class="empty-actions">
-      <button class="btn p" type="button" onclick={() => { creating = true; importing = false }}>Write Markdown</button>
-      <button class="lnk" type="button" onclick={() => { importing = true; creating = false }}>Import HTML</button>
-    </div>
-    <small><code>tracon doc import &lt;dir&gt;</code> brings a directory of Markdown in.</small>
-  </div>
 {:else}
-  {#each grouped as [kind, list] (kind)}
-    <div class="h5">{kind} <b>{list.length}</b></div>
-    <div class="rows">
-      {#each list as d (d.id)}
-        <a class="row" href="/docs/{d.channel}/{d.slug}">
-          <span class="bar"></span>
-          <span class="t">
-            {#if d.format === 'html'}<em>HTML</em>{/if}
-            {d.title}
-            <small>{d.slug} · {formatAge(d.updated_ms, clock.now)}</small>
-          </span>
-          <span class="act">Open</span>
-        </a>
+  <LoadGate {status} what="documents" onretry={retry} retrying={store.loads.channels.loaded ? listing.pending : store.refetching}>
+    {#if docs.length === 0}
+      <div class="empty">
+        <div>No documents on {channel || 'this channel'} yet.</div>
+        <div class="empty-actions">
+          <button class="btn p" type="button" onclick={() => { creating = true; importing = false }}>Write Markdown</button>
+          <button class="lnk" type="button" onclick={() => { importing = true; creating = false }}>Import HTML</button>
+        </div>
+        <small><code>tracon doc import &lt;dir&gt;</code> brings a directory of Markdown in.</small>
+      </div>
+    {:else}
+      {#each grouped as [kind, list] (kind)}
+        <div class="h5">{kind} <b>{list.length}</b></div>
+        <div class="rows">
+          {#each list as d (d.id)}
+            <a class="row" href="/docs/{d.channel}/{d.slug}">
+              <span class="bar"></span>
+              <span class="t">
+                {#if d.format === 'html'}<em>HTML</em>{/if}
+                {d.title}
+                <small>{d.slug} · {formatAge(d.updated_ms, clock.now)}</small>
+              </span>
+              <span class="act">Open</span>
+            </a>
+          {/each}
+        </div>
       {/each}
-    </div>
-  {/each}
+    {/if}
+  </LoadGate>
 {/if}
 
 <style>

@@ -9,6 +9,8 @@
 
 import { readFileSync } from 'node:fs'
 
+import { flaky, streamEvent } from '../flaky.mjs'
+
 const baseline = JSON.parse(readFileSync(new URL('../api.json', import.meta.url), 'utf8'))
 
 const M = 60_000
@@ -524,7 +526,7 @@ const states = [
     area: 'work',
     route: '/work',
     title: 'Ledger still loading',
-    note: 'the list request held open: is anything said, or does it claim the channel is empty?',
+    note: 'The list request held open: says it is loading, with no count and no empty-state copy.',
     api: { '/api/work': never },
   },
   {
@@ -533,6 +535,33 @@ const states = [
     route: '/work',
     title: 'Ledger failed to load',
     api: { '/api/work': err(500, 'database is locked') },
+  },
+  {
+    id: 'work-load-retried',
+    area: 'work',
+    route: '/work',
+    title: 'Ledger failed once, then Retry',
+    note: 'The first list request fails; Retry asks again and the ledger replaces the error.',
+    api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
+    init: flaky('/api/work', [1]),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Retry' }).click()
+      await page.locator('.h5', { hasText: 'Ready' }).first().waitFor()
+    },
+  },
+  {
+    id: 'work-refresh-error',
+    area: 'work',
+    route: '/work',
+    title: 'Ledger loaded, then a refresh failed',
+    note: 'A work change on the stream refetches and that request fails: the rows stay, under "Could not refresh work" with a Retry.',
+    api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
+    init: flaky('/api/work', [2]),
+    act: async (page) => {
+      await page.locator('.h5', { hasText: 'Ready' }).first().waitFor()
+      await streamEvent(page, 'changes', { type: 'changes', changes: [{ table: 'work_item' }] })
+      await page.getByText('Could not refresh work').waitFor()
+    },
   },
   {
     id: 'work-new-form',
