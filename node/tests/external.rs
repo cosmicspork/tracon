@@ -1596,3 +1596,59 @@ async fn an_external_caller_cannot_retain_into_a_session_scope() {
     assert!(err, "{out}");
     assert!(out.to_string().contains("global"), "{out}");
 }
+
+/// A Jira that offers WRK-1 one transition, and records every request.
+async fn fake_jira(seen: Arc<std::sync::Mutex<Vec<String>>>) -> std::net::SocketAddr {
+    let app = axum::Router::new().route(
+        "/rest/api/2/issue/WRK-1/transitions",
+        axum::routing::any(move |method: axum::http::Method| {
+            seen.lock().unwrap().push(method.to_string());
+            async {
+                axum::Json(json!({ "transitions": [
+                    { "id": "21", "name": "Start review",
+                      "to": { "name": "In Review", "statusCategory": { "name": "In Progress" } } },
+                ] }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// A held Jira transition reads as the status it moves the issue to, which
+/// Jira is asked for when the call is held; nothing is transitioned by asking.
+/// An id Jira does not offer is titled by the id.
+#[tokio::test]
+async fn a_held_transition_is_titled_by_the_status_it_leads_to() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let addr = fake_jira(seen.clone()).await;
+    h.tools.broker.write().unwrap().put(
+        "jira",
+        tracon::broker::Credential {
+            env: [
+                ("JIRA_URL".to_string(), format!("http://{addr}")),
+                ("JIRA_EMAIL".to_string(), "me@example.com".to_string()),
+                ("JIRA_TOKEN".to_string(), "t".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            channels: vec!["work".into()],
+            ..Default::default()
+        },
+    );
+    let args = |id: &str| json!({ "key": "WRK-1", "transition_id": id, "operation_id": format!("transition-{id}") });
+
+    let id = ask(&h, "issue_transition", args("21")).await;
+    let row = h.store.get_approval(&id).unwrap().unwrap();
+    assert_eq!(row.title, "issue_transition WRK-1: move to In Review");
+
+    let id = ask(&h, "issue_transition", args("99")).await;
+    let row = h.store.get_approval(&id).unwrap().unwrap();
+    assert_eq!(row.title, "issue_transition WRK-1: transition 99");
+
+    assert_eq!(*seen.lock().unwrap(), ["GET", "GET"]);
+}

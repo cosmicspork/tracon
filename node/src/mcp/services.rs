@@ -20,13 +20,21 @@ pub const START: &str = "service_start";
 pub const STATUS: &str = "service_status";
 
 pub fn definitions(cfg: &Config) -> Vec<Value> {
-    let offered = sidecars::describe(cfg);
     let names: Vec<&str> = cfg.service.iter().map(|s| s.name.as_str()).collect();
-    let name = json!({
+    definitions_for(&names, &sidecars::describe(cfg))
+}
+
+/// The tools for a catalogue of `names`. With none, `name` is any text: that
+/// is the schema an operator's edit of a held call is checked against, since
+/// the catalogue it was asked from may have changed since.
+pub fn definitions_for(names: &[&str], offered: &str) -> Vec<Value> {
+    let mut name = json!({
         "type": "string",
         "description": "The service's name in the node's catalogue.",
-        "enum": names,
     });
+    if !names.is_empty() {
+        name["enum"] = json!(names);
+    }
     let wait = json!({
         "type": "integer",
         "minimum": 0,
