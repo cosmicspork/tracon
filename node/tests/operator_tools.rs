@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tracon::{
     broker::Broker,
     config::Config,
-    mcp::{CallContext, SessionAccess, Tools},
+    mcp::{wait::MAX_WAIT_SECS, CallContext, SessionAccess, Tools},
     session::Manager,
     store::{now_ms, PushSubscriptionRow, Store},
     stream::Bus,
@@ -484,4 +484,267 @@ async fn another_callers_draft_is_refused() {
         )
         .await
         .is_err());
+}
+
+// ---------------------------------------------------------------------------
+// A question outlives the call that asked it. An MCP client gives up on a
+// call long before a person answers (Claude Code at five minutes, whatever
+// its config says), so `ask_operator` returns inside the wait budget and
+// `question_status` carries the wait, the way `review_status` does.
+// ---------------------------------------------------------------------------
+
+impl Rig {
+    async fn answer(&self, id: &str, answer: &str) -> (axum::http::StatusCode, Value) {
+        support::http::call(
+            &self.operator,
+            "POST",
+            &format!("/api/operator/questions/{id}/answer"),
+            Some(json!({ "answer": answer })),
+        )
+        .await
+    }
+}
+
+/// Unanswered at the deadline, the call returns a handle; the question
+/// stays in the queue, and an answer given after the call returned is read
+/// by the next status call and by a retried ask alike.
+#[tokio::test]
+async fn an_unanswered_question_returns_a_handle_and_keeps_the_later_answer() {
+    state::isolate();
+    let rig = rig();
+    let asked_at = std::time::Instant::now();
+    let asked = rig
+        .call(
+            "ask_operator",
+            json!({ "request_id": "q-late", "question": "ship it?", "wait_secs": 1 }),
+        )
+        .await
+        .unwrap();
+    assert!(asked_at.elapsed() < Duration::from_secs(3), "{asked}");
+    assert_eq!(asked["state"], "unanswered", "{asked}");
+    assert_eq!(asked["still_waiting"], true);
+    assert_eq!(asked["request_id"], "q-late");
+    assert!(asked["message"]
+        .as_str()
+        .unwrap()
+        .contains("question_status"));
+    let id = asked["question_id"].as_str().unwrap().to_string();
+    let open = rig.store.open_operator_questions().unwrap();
+    assert_eq!(open.len(), 1, "the card stays open after the call returned");
+    assert_eq!(open[0].id, id);
+
+    let waiting = rig
+        .call(
+            "question_status",
+            json!({ "question_id": id, "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(waiting["state"], "unanswered", "{waiting}");
+    assert_eq!(waiting["still_waiting"], true);
+
+    let (status, body) = rig.answer(&id, "yes").await;
+    assert_eq!(status, 200, "{body}");
+
+    let answered = rig
+        .call(
+            "question_status",
+            json!({ "question_id": id, "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered["state"], "answered", "{answered}");
+    assert_eq!(answered["answer"]["text"], "yes");
+    assert_eq!(answered["still_waiting"], false);
+
+    // Asking again under the same request_id is the same question, answered.
+    let again = rig
+        .call(
+            "ask_operator",
+            json!({ "request_id": "q-late", "question": "ship it?", "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again["question_id"], id.as_str());
+    assert_eq!(again["answer"]["text"], "yes", "{again}");
+    assert_eq!(rig.store.open_operator_questions().unwrap().len(), 0);
+}
+
+/// Nothing asked may hold a call past the wait budget, even when the
+/// caller asks for longer or names no wait at all.
+#[tokio::test(start_paused = true)]
+async fn asking_never_blocks_past_the_wait_budget() {
+    state::isolate();
+    let rig = rig();
+    for (request_id, wait) in [("q-default", None), ("q-long", Some(3600))] {
+        let mut args = json!({ "request_id": request_id, "question": "which remote?" });
+        if let Some(wait) = wait {
+            args["wait_secs"] = json!(wait);
+        }
+        let started = tokio::time::Instant::now();
+        let asked = rig.call("ask_operator", args).await.unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_secs(MAX_WAIT_SECS)
+                && waited < Duration::from_secs(MAX_WAIT_SECS + 2),
+            "{request_id}: {waited:?}"
+        );
+        assert_eq!(asked["still_waiting"], true, "{asked}");
+
+        let id = asked["question_id"].as_str().unwrap();
+        let started = tokio::time::Instant::now();
+        let status = rig
+            .call(
+                "question_status",
+                json!({ "question_id": id, "wait_secs": 600 }),
+            )
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(MAX_WAIT_SECS + 2));
+        assert_eq!(status["still_waiting"], true, "{status}");
+    }
+}
+
+/// A status call that is waiting returns as soon as the answer lands.
+#[tokio::test]
+async fn a_waiting_status_call_is_released_by_the_answer() {
+    state::isolate();
+    let rig = rig();
+    let asked = rig
+        .call(
+            "ask_operator",
+            json!({ "request_id": "q-wait", "question": "which remote?", "choices": ["origin", "fork"], "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    let id = asked["question_id"].as_str().unwrap().to_string();
+    let tools = rig.tools.clone();
+    let ctx = rig.ctx.clone();
+    let waiting = {
+        let id = id.clone();
+        tokio::spawn(async move {
+            tools
+                .call(&ctx, "question_status", &json!({ "question_id": id }))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished());
+    let (status, body) = rig.answer(&id, "fork").await;
+    assert_eq!(status, 200, "{body}");
+    let answered = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the answer releases the wait")
+        .unwrap()
+        .unwrap();
+    assert_eq!(answered["state"], "answered", "{answered}");
+    assert_eq!(answered["answer"]["text"], "fork");
+}
+
+/// The client dropping the call (its timeout, a restart) takes nothing with
+/// it: the question can still be answered, and the answer is still read.
+#[tokio::test]
+async fn a_dropped_ask_leaves_the_question_answerable() {
+    state::isolate();
+    let rig = rig();
+    let tools = rig.tools.clone();
+    let ctx = rig.ctx.clone();
+    let asking = tokio::spawn(async move {
+        tools
+            .call(
+                &ctx,
+                "ask_operator",
+                &json!({ "request_id": "q-drop", "question": "keep the old API?" }),
+            )
+            .await
+    });
+    let mut open = Vec::new();
+    for _ in 0..200 {
+        open = rig.store.open_operator_questions().unwrap();
+        if !open.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(open.len(), 1);
+    asking.abort();
+    assert!(asking.await.unwrap_err().is_cancelled());
+
+    let (status, body) = rig.answer(&open[0].id, "no").await;
+    assert_eq!(status, 200, "{body}");
+    let answered = rig
+        .call(
+            "question_status",
+            json!({ "question_id": open[0].id, "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered["state"], "answered", "{answered}");
+    assert_eq!(answered["answer"]["text"], "no");
+}
+
+/// Several questions wait together; a cancelled one is a decision with no
+/// answer; another caller's question reads as none at all.
+#[tokio::test]
+async fn questions_wait_together_and_only_for_whoever_asked() {
+    state::isolate();
+    let rig = rig();
+    let mut ids = Vec::new();
+    for n in 0..2 {
+        let asked = rig
+            .call(
+                "ask_operator",
+                json!({ "request_id": format!("q-{n}"), "question": format!("question {n}"), "wait_secs": 0 }),
+            )
+            .await
+            .unwrap();
+        ids.push(asked["question_id"].as_str().unwrap().to_string());
+    }
+    let both = rig
+        .call(
+            "question_status",
+            json!({ "question_ids": ids, "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(both["still_waiting"], true, "{both}");
+    assert_eq!(both["questions"].as_array().unwrap().len(), 2);
+
+    let (status, body) = support::http::call(
+        &rig.operator,
+        "POST",
+        &format!("/api/operator/questions/{}/cancel", ids[1]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let decided = rig
+        .call("question_status", json!({ "question_ids": ids }))
+        .await
+        .unwrap();
+    assert_eq!(decided["still_waiting"], false, "{decided}");
+    assert_eq!(decided["questions"][0]["state"], "unanswered");
+    assert_eq!(decided["questions"][1]["state"], "cancelled");
+
+    for other in [
+        CallContext::session("s2", "personal", "n1"),
+        CallContext::external(None, "personal", "n1"),
+        CallContext::external(None, "work", "n1"),
+    ] {
+        let refused = rig
+            .tools
+            .call(
+                &other,
+                "question_status",
+                &json!({ "question_id": ids[0], "wait_secs": 0 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.contains("no question"), "{refused}");
+    }
+    assert!(rig
+        .call("question_status", json!({}))
+        .await
+        .unwrap_err()
+        .contains("question_id"));
 }

@@ -146,16 +146,26 @@ fn claude_model(model: &str) -> Result<&str, AdapterError> {
     }
 }
 
-/// The node builds one neutral MCP descriptor; Claude Code wants a map keyed
-/// by server name, with headers as an object rather than a list.
-/// How long Claude Code waits on one call to the node's MCP server, silent or
-/// not. Left at its default the CLI aborts a call that sends nothing for about
-/// a minute, and `ask_operator` sends nothing until a person answers: every
-/// question came back "The operation timed out" while the node still held it
-/// open. Twenty minutes covers the node's own permission timeout (fifteen by
-/// default) and matches a turn's idle bound.
+/// The per-server `timeout` Claude Code applies to a call to the node's MCP
+/// server. Left unset, its HTTP transport aborts a POST that has not answered
+/// in 60 s (or `MCP_TIMEOUT`, if larger), and the node answers a tool call
+/// with one response when the call ends. This value lifts that timer, the
+/// tool-call wall clock and the 300 s idle watchdog to twenty minutes.
+///
+/// It does not lift the limit that actually ends long calls on the version
+/// the harness image pins (2.1.247): Bun's `fetch` gives up on a request
+/// whose response has not arrived after 300 s, whatever the abort
+/// signal says, with the same `TimeoutError` "The operation timed out." the
+/// transport's own timer raises. Claude Code passes Bun's `timeout: false`
+/// only from a later release (2.1.290 does, when this value exceeds 300 s).
+/// So a call to the node must return within five minutes, and every tool
+/// that waits on a person returns within `mcp::wait::MAX_WAIT_SECS` with a
+/// handle its status tool waits on. This value is headroom for slow tools
+/// that are not waiting on anyone, not permission to block.
 const MCP_CALL_TIMEOUT_MS: u64 = 20 * 60 * 1000;
 
+/// The node builds one neutral MCP descriptor; Claude Code wants a map keyed
+/// by server name, with headers as an object rather than a list.
 fn mcp_config(servers: &[Value]) -> Value {
     let mut map = serde_json::Map::new();
     for s in servers {
@@ -923,7 +933,8 @@ mod tests {
         assert_eq!(server["type"], "http");
         assert_eq!(server["url"], "http://gw:7421/mcp/s1");
         assert_eq!(server["headers"]["Authorization"], "Bearer tok");
-        // Long enough for an operator to answer an ask.
+        // Past the client's 60 s default; tools still return within
+        // MAX_WAIT_SECS, since Bun's own fetch stops at 300 s.
         assert_eq!(server["timeout"], MCP_CALL_TIMEOUT_MS);
     }
 
