@@ -233,6 +233,9 @@
     border-radius: 3px;
   }
   .bar {
+    /* Down every row the card grows into, not just the first: the rows below
+       are empty unless the request has fields or a body, and rows have no gap. */
+    grid-row: 1 / span 4;
     align-self: stretch;
     background: var(--wait);
     border-radius: 2px 0 0 2px;
@@ -292,12 +295,35 @@
   .t small .chip {
     vertical-align: baseline;
   }
+  /* A phone has no room for the title beside up to four answers: the answers
+     take their own row and wrap. */
   @media (max-width: 700px) {
-    .card {
-      grid-template-columns: 3px minmax(0, 1fr) auto;
+    .card,
+    .card.inline {
+      grid-template-columns: 3px minmax(0, 1fr);
     }
     .head {
       display: none;
+    }
+    /* Wrapped, not cut: the expiry, an answer's error and the links into the
+       session are all past where one line ends on a phone. */
+    .t,
+    .t small {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .act {
+      grid-column: 2;
+      flex-wrap: wrap;
+      gap: 6px 16px;
+      margin-top: 8px;
+      white-space: normal;
+    }
+    .request,
+    .fields,
+    .inline .request,
+    .inline .fields {
+      grid-column: 2 / -1;
     }
   }
 </style>

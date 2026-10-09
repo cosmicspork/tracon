@@ -96,6 +96,8 @@
     font: 12px var(--mono);
     color: var(--dim);
     margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .act {
     color: var(--acc);
