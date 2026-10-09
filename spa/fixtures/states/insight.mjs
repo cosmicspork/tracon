@@ -961,24 +961,35 @@ export default [
     },
   },
   {
-    id: 'insight-memories-retire-error',
+    id: 'insight-memories-delete-confirm',
     area: 'insight',
     route: '/memories',
-    title: 'Memories: retire fails',
+    title: 'Memories: confirming a delete',
+    note: 'The confirm step replaces the row actions; deletes reach every node on the channel.',
+    api: memoriesApi({ personal: typicalMemories }),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Delete' }).first().click()
+    },
+  },
+  {
+    id: 'insight-memories-delete-error',
+    area: 'insight',
+    route: '/memories',
+    title: 'Memories: delete fails',
     api: {
       ...memoriesApi({ personal: typicalMemories }),
       'DELETE /api/memories/*': err(500, 'replicate tombstone: hub refused the change (channel key rotated)'),
     },
     act: async (page) => {
-      await page.getByRole('button', { name: 'Retire' }).first().click()
+      await page.getByRole('button', { name: 'Delete' }).first().click()
+      await page.locator('.act.confirm .btn').click()
     },
   },
   {
-    id: 'insight-memories-retired',
+    id: 'insight-memories-deleted',
     area: 'insight',
     route: '/memories',
-    title: 'Memories: one retired, list reloaded',
-    note: 'Retire acts immediately with no confirm step.',
+    title: 'Memories: one deleted, list reloaded',
     api: {
       ...memoriesApi({ personal: typicalMemories }),
       'DELETE /api/memories/*': { ok: true },
@@ -991,7 +1002,8 @@ export default [
           body: JSON.stringify({ memories: typicalMemories.slice(1).map((m) => ({ ...m, updated_ms: Date.now() + m.updated_ms, created_ms: Date.now() + m.created_ms })) }),
         }),
       )
-      await page.getByRole('button', { name: 'Retire' }).first().click()
+      await page.getByRole('button', { name: 'Delete' }).first().click()
+      await page.locator('.act.confirm .btn').click()
     },
   },
 ]

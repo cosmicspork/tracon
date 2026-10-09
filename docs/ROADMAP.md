@@ -54,6 +54,15 @@ screen and state rendered at desktop and phone width, dark and light, by
 `spa/scripts/ui-audit.mjs`. The names in brackets are its states; `--state <name>`
 reproduces one.
 
+- [ ] **An unkeyed API provider is a dead end in Connections.** Found reviewing 0.29.0
+      on the desktop, 2026-10-08. `default_providers()` seeds `openai` into every node, so
+      Connections always shows "OpenAI API · not connected · disconnected · API key only.
+      Add it under serving-node credentials." The link points at the page it is on, and
+      nothing there takes a provider key: Forge tokens is `gh` and `glab` only. #228 hid
+      these cards; #253 brought them back so a provider the operator had just added
+      stayed visible. Hide a disconnected key provider that only the defaults declare,
+      give one the operator declared an inline field for its key, and say its state once.
+
 **0.29.0 screen audit, for a patch release**
 
 - [ ] Review on a phone: the sticky verdict bar sits under the tab bar, hiding Reject and
@@ -63,11 +72,11 @@ reproduces one.
       publication is not ready, and an approved, published review still reads as pending,
       with live verdicts and no link to the pull request (`review-phone-bar-in-view`,
       `review-not-ready`, `review-approved`, `review-long-content`).
-- [ ] Session log: the events 0.29.0 added (`policy_allowed`, `service`, `published`,
-      `session_suspended`, `provider_exhausted`, `exhaustion_boundary`, `exhaustion_wake`,
-      `session_paused`) and five older ones print as bare kind names, and the
-      `policy_allowed` after each Claude Code tool call splits every run of reads into
-      separate open groups (`sessions-running-working`, `sessions-idle`).
+- [ ] Session log: events 0.29.0 added (`service`, `published`, `session_suspended`,
+      `provider_exhausted`, `exhaustion_boundary`, `exhaustion_wake`, `session_paused`)
+      and older ones (`session_resumed`, `approval_settled`, `candidate_verified`,
+      `review_decision`) print as bare kind names (`sessions-running-working`,
+      `sessions-suspended`, `sessions-exhausted-held`).
 - [ ] Settings editors: declared models always show 0 (`structuredClone` on a `$state`
       proxy throws), the repositories table reads as unsaved straight after load and a
       save drops `commits` and `style` from `node.toml`, and the push toggle stays on
@@ -151,6 +160,40 @@ hit on a real task.
 
 **Node data**
 
+**Screens and navigation.** Found reviewing 0.29.0 on the desktop, 2026-10-08.
+
+- [ ] Readiness as main banners. The composer's `✓ investigate ✓ verify ✓ publish` line
+      and its "Ready to investigate, verify and publish." go. A path that is not ready gets
+      a banner in the main column, as a failed isolation check does, naming the gap and
+      where to close it; a ready repository shows nothing.
+- [ ] Top-level navigation without Work and Nodes. Tasks, Sessions, Evidence and Usage
+      become rail entries instead of tabs under Work (`/metrics` becomes `/usage`). Nodes
+      leaves the rail: on one node it is a single row and a pointer to Settings, and its
+      remaining facts (harness version mismatch, whether a node can run, running and
+      waiting counts, last seen) move into Settings → Mesh beside the members. A serving
+      node that cannot run says so in a banner. The phone's bottom bar keeps five slots
+      (Home, Tasks, Sessions, Documents, More) and More holds Memories, which it lacks
+      today, Evidence, Usage and Settings.
+- [ ] Document editing fills the page: the editor takes the height below the header with
+      Save and Cancel pinned, rather than a 60vh textarea with a resize handle.
+- [ ] Regroup Settings' nine sections. Maintenance has become a catch-all (node
+      configuration, the operator token, runtime setup, your own harness, session transfer,
+      the boundary, service and recovery). A likely shape: General; Connections; Channels
+      and repositories; Access and devices (operator token, administrator access,
+      notifications, your own harness); Permissions and policies; Mesh (hub, members, the
+      node list above); System (node configuration, runtime, service, data held, sweep).
+      Session transfer moves to Sessions as an import.
+- [ ] A session's tool calls as a transcript you scan, opened on demand. A run already
+      folds every call between two things the operator reads (a message, a prompt, a
+      card, a refusal, the end of a turn), and records nobody reads no longer split it.
+      What remains: opened, each call is one line with its path or command (from
+      `raw_input`), its status and duration, consecutive reads merged under one head, and
+      a call opens again to its output. A failed call's first error line shows without
+      opening anything; while a call runs, its line shows the tail of its output; folded,
+      the run says how long it took; one key opens or folds every run on the screen.
+      The design follows oh-my-pi's transcript (MIT, a terminal and React UI keyed to its
+      own tools); the code is tracon's own.
+
 **Screens, from the 0.29.0 audit**
 
 - [ ] Say what failed: a 500 on an approval or a review reads "not found", an unknown
@@ -170,10 +213,9 @@ hit on a real task.
       `approvals-egress`, `approvals-succeeded-edited`).
 - [ ] Start stays enabled when readiness or preparation says the session cannot work
       (`work-launch-not-investigable`, `work-launch-preparation-incompatible`).
-- [ ] Evidence and Memories overflow the page on a phone or with long content, and Retire
-      acts at once with focus landing on the next Retire (`insight-evidence-populated`,
-      `insight-evidence-long`, `insight-memories-long`, `insight-memories-retired`).
-- [ ] Nodes: a pinned version shown for a harness that is not installed, the "holds"
+- [ ] Evidence and Memories overflow the page on a phone or with long content
+      (`insight-evidence-populated`, `insight-evidence-long`, `insight-memories-long`).
+- [ ] Node facts, wherever the navigation above puts them: a pinned version shown for a harness that is not installed, the "holds"
       figure cut off whenever anything is waiting, and the healthy bar on nodes that cannot
       run (`insight-nodes-several`, `insight-nodes-hub-connected`).
 - [ ] Shared styling: `--line`, `--red` and `--surface` are used but never defined, which
@@ -249,6 +291,9 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 
 - [ ] More catalogue services, with an optional persistent volume per repository (a
       database's data, a browser profile).
+- [ ] Say when a newer `tracon-browser` digest is published than the one a `[[service]]`
+      entry pins, and pin it on the operator's word (Settings, or `tracon service pin
+      browser`). The entry stays a digest; only the step of copying one in goes away.
 - [ ] A keyed per-repository stash for artefacts that are expensive to rebuild
       (`stash_put` / `stash_get`, keyed on a digest of named input paths so a stale one is
       never silently reused); cached "before" screenshots of the default branch are a

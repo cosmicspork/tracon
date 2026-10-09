@@ -98,7 +98,7 @@
 
 {#if view?.enabled && (lanes.length || hidden || stopped.length)}
   <div class="h4">
-    Your own agents <b>{lanes.length} · harnesses you run yourself, by the label each gives</b>
+    Your own agents <b>{lanes.length}</b>
     {#if hidden}<span class="r"><button class="lnk" onclick={showAll}>show {hidden} dismissed</button></span>{/if}
   </div>
   {#each stopped as channel (channel)}

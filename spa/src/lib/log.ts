@@ -1,6 +1,9 @@
 // Turns the flat event log into what the session screen renders: consecutive
 // tool calls fold into one group, open while any of them lacks a result, and a
-// permission request breaks the group so it sits at its true position.
+// permission request breaks the group so it sits at its true position. Records
+// the log shows nobody (a call the policy allowed, usage, a plan update) never
+// break a run: every Claude Code call now carries a policy record, and letting
+// those through left no two calls side by side.
 
 import { formatTokens } from './format'
 import type { Event } from './types'
@@ -9,7 +12,22 @@ export interface ToolEntry {
   call: Event
   result?: Event
   progress?: string
+  /// What the call did, from its policy record: the harness labels every call
+  /// `other`, and the policy has already worked out read, edit or execute.
+  kind?: string
 }
+
+/// A record that says only that the policy let a call through. One the
+/// policy would have asked about or refused (a harness that ran it without
+/// asking) is not quiet: that is for the operator to see.
+function quietAllow(e: Event): boolean {
+  if (e.kind !== 'policy_allowed') return false
+  const verdict = e.payload.policy
+  return verdict === undefined || verdict === null || verdict === 'allow'
+}
+
+/// Kinds the log renders nothing for; they must not end a run either.
+const SILENT = new Set(['usage', 'plan'])
 
 export interface LogEntry {
   kind: 'leaf' | 'tools'
@@ -44,6 +62,17 @@ export function groupLog(events: Event[], progress: Map<string, string> = new Ma
       out.push({ kind: 'leaf', event: e })
       continue
     }
+    if (quietAllow(e)) {
+      // Lend its kind to the call it decided: by id when the record names
+      // one, else the call just made, which the record always follows.
+      const id = typeof e.payload.tool_call_id === 'string' ? e.payload.tool_call_id : undefined
+      const last = out[out.length - 1]
+      const entry = id ? openCalls.get(id) : last?.kind === 'tools' ? last.tools![last.tools!.length - 1] : undefined
+      const kind = e.payload.kind
+      if (entry && !entry.kind && typeof kind === 'string' && kind) entry.kind = kind
+      continue
+    }
+    if (SILENT.has(e.kind)) continue
     // Everything else is a leaf and ends any run of tool calls, so the next
     // tool call starts a new group at its true position.
     out.push({ kind: 'leaf', event: e })
@@ -123,6 +152,23 @@ export function repetitionHint(events: Event[]): string | null {
   return null
 }
 
+/// A policy record worth a line of its own: "refused by policy · Bash: rm -rf
+/// / · reason", or "ran without asking · the policy would have asked · …" for
+/// a call the harness let through on its own rules that the node would not
+/// have. A plain allow never gets here; `groupLog` folds it into its call.
+export function policyLine(e: Event): string {
+  const p = e.payload
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : '')
+  const what = text(p.title) || text(p.command) || text(p.action) || 'a call'
+  const why = text(p.reason)
+  if (e.kind === 'policy_denied') return ['refused by policy', what, why].filter(Boolean).join(' · ')
+  const would = p.policy === 'deny' ? 'refused it' : 'asked'
+  const rule = text(p.rule)
+  return ['ran without asking', `the policy would have ${would}${rule ? ` (${rule})` : ''}`, what]
+    .filter(Boolean)
+    .join(' · ')
+}
+
 export function groupOpen(tools: ToolEntry[]): boolean {
   return tools.some((t) => !t.result)
 }
@@ -131,7 +177,7 @@ export function groupOpen(tools: ToolEntry[]): boolean {
 export function groupSummary(tools: ToolEntry[]): string {
   const counts = new Map<string, number>()
   for (const t of tools) {
-    const kind = (t.call.payload.kind as string) ?? 'tool'
+    const kind = t.kind ?? (t.call.payload.kind as string) ?? 'tool'
     counts.set(kind, (counts.get(kind) ?? 0) + 1)
   }
   const labels: Record<string, [string, string]> = {
@@ -140,6 +186,7 @@ export function groupSummary(tools: ToolEntry[]): string {
     execute: ['ran %d shell command', 'ran %d shell commands'],
     think: ['updated the plan', 'updated the plan'],
     fetch: ['fetched %d page', 'fetched %d pages'],
+    other: ['called %d tool', 'called %d tools'],
   }
   const parts: string[] = []
   for (const [kind, n] of counts) {

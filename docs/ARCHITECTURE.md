@@ -577,7 +577,10 @@ keeps waiting. It never names an image or a command. The service joins the sessi
 container's network namespace, so it is reached on the session's loopback and reaches
 the gateway and nothing of its own, and the policy bundle decides each service by its
 name: the shipped bundle runs a headless browser unattended and asks about anything
-else. The service's `service` events on the session are how every path that removes
+else. Loopback is only the session's if the service binds nothing wider, so tracon
+publishes the browser it means (`containers/browser`, Chrome started on 127.0.0.1
+directly) and the `browser` workflow refuses any build that listens beyond loopback,
+upstream base bumps included. The service's `service` events on the session are how every path that removes
 the session's container (its end, a kill, a restart's reconciliation) finds and removes
 its services first. A session's pause stops neither the harness container nor its
 services today; both run until the session ends. A runtime that cannot share a

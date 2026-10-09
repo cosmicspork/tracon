@@ -873,10 +873,12 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # policy bundle decides each by `name`; the shipped one runs
                                     # `browser` unattended and asks about any other
 # name = "browser"
-# image = "docker.io/chromedp/headless-shell@sha256:…"  # digest-pinned, as a repository image is
-# command = ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9222"]
-                                    # bind to loopback: the session's namespace is on the shared
-                                    # internal network, and loopback is the session's alone
+# image = "ghcr.io/cosmicspork/tracon-browser@sha256:…"  # digest-pinned, as a repository image is;
+                                    # each publish's digest is in its `browser` workflow run summary.
+                                    # Headless Chrome bound to loopback: the session's namespace is
+                                    # on the shared internal network, and loopback is the session's
+                                    # alone. Upstream chromedp/headless-shell puts socat on 0.0.0.0
+# command = []                      # the image's arguments, when another image needs them
 # port = 9222                       # where the session reaches it
 # ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed

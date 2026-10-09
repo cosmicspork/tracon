@@ -101,6 +101,15 @@ else
 fi
 "#;
 
+/// Copies one volume's tree into another, in a container of the harness
+/// image, which may be any image an operator names, so the flags are ones GNU
+/// coreutils and busybox both take. `-dRp` is `-a` without its `context` and
+/// `xattr`: GNU `cp -a` copies `security.selinux` as an extended attribute
+/// even under `--no-preserve=context`, and setting the source's label on the
+/// copy is a `relabelto` a confined container is denied, logged once per file.
+/// The destination volume already carries the label it should have.
+const CLONE_TREE: &str = "cp -dRp --reflink=auto /from/. /to/";
+
 /// Export a workspace volume without what its repository ignores. The
 /// repository's own configuration is the agent's to write, so Git reads it
 /// only here: in a container with no network, no capabilities and the volume
@@ -428,7 +437,7 @@ impl Backend for PodmanBackend {
             &format!("type=volume,src={destination},dst=/to"),
             &self.cfg.boundary.harness_image,
             "-c",
-            "cp -a --reflink=auto /from/. /to/",
+            CLONE_TREE,
         ])
         .await
         .map(|_| ())
@@ -797,6 +806,64 @@ mod tests {
         // Nothing anywhere: the bare name, so the spawn error names it.
         assert_eq!(resolve_podman("", Some(&empty), &[]), "podman");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The clone's flags still copy everything a cache is: modes, mtimes,
+    /// symlinks as symlinks, and hard links as links. Run with the host's GNU
+    /// `cp`, which is what the shipped harness images carry; macOS's BSD `cp`
+    /// has neither `-d` nor `--reflink` and never runs this command.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_clone_copies_modes_times_and_links() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::time::{Duration, SystemTime};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::create_dir_all(from.join("sub")).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        let file = from.join("sub/file");
+        std::fs::write(&file, "cached").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_934_245);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        std::fs::hard_link(&file, from.join("hard")).unwrap();
+        std::os::unix::fs::symlink("sub/file", from.join("link")).unwrap();
+
+        let script = super::CLONE_TREE
+            .replace("/from/", &format!("{}/", from.display()))
+            .replace("/to/", &format!("{}/", to.display()));
+        let out = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let copied = std::fs::metadata(to.join("sub/file")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(to.join("sub/file")).unwrap(),
+            "cached"
+        );
+        assert_eq!(copied.permissions().mode() & 0o777, 0o640);
+        assert_eq!(copied.modified().unwrap(), mtime);
+        assert_eq!(copied.nlink(), 2);
+        assert_eq!(
+            std::fs::metadata(to.join("hard")).unwrap().ino(),
+            copied.ino()
+        );
+        assert_eq!(
+            std::fs::read_link(to.join("link")).unwrap(),
+            Path::new("sub/file")
+        );
     }
 
     #[test]
