@@ -98,6 +98,22 @@ pub struct Target {
     pub change: Option<ChangeRef>,
 }
 
+impl Target {
+    /// The target after publication opened the change at `url`: what a
+    /// resubmission of the same review updates rather than opening another.
+    pub fn opened(mut self, url: &str) -> Self {
+        if self.change.is_none() {
+            self.change = change_number(url)
+                .filter(|number| *number > 0)
+                .map(|number| ChangeRef {
+                    number,
+                    url: url.to_string(),
+                });
+        }
+        self
+    }
+}
+
 /// An existing pull request (by number) or merge request (by iid).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeRef {

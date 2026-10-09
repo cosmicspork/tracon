@@ -935,7 +935,9 @@ impl Store {
     /// checks. Returns `false`, changing nothing, when the review is not in a
     /// state a resubmission may touch — in particular while it is `publishing`, so a resubmission
     /// racing an approval can never swap the revision an in-flight publish is
-    /// about to record as approved.
+    /// about to record as approved. A published review may be revised: its
+    /// next revision updates the change it opened, and the prose approved for
+    /// the last one is not carried onto it.
     #[allow(clippy::too_many_arguments)]
     pub fn revise_review_with_revision(
         &self,
@@ -957,8 +959,11 @@ impl Store {
         let changed = tx.execute(
             "UPDATE review SET title=?2, body=?3, diff=?4, files=?5, head_sha=?6, added=?7,
                 removed=?8, checks_json=?9, state='new', verdict_reason=NULL, revision_patch=NULL,
-                claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?10, target=?11, base_ref=?12
-             WHERE id=?1 AND state IN ('new','claimed','revising')",
+                claimed_ms=NULL, resolved_mono_ms=NULL, updated_ms=?10, target=?11, base_ref=?12,
+                edited_title=CASE WHEN state='approved' THEN NULL ELSE edited_title END,
+                edited_body=CASE WHEN state='approved' THEN NULL ELSE edited_body END
+             WHERE id=?1 AND (state IN ('new','claimed','revising')
+                OR (state='approved' AND COALESCE(publish_result, '') <> ''))",
             params![
                 review_id,
                 title,

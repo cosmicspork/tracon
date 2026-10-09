@@ -683,7 +683,13 @@ pub async fn publish_review(
         .and_then(|row| row.result.clone())
     {
         ctx.store
-            .finish_publish(&review.id, title, body, &url)
+            .finish_publish(
+                &review.id,
+                title,
+                body,
+                &url,
+                &published_target(&target, &url)?,
+            )
             .map_err(|e| PublishError::External(e.to_string()))?;
         ctx.manager.publish_queue().await;
         return Ok(Published { url, outputs });
@@ -754,7 +760,13 @@ pub async fn publish_review(
         Ok(published) => {
             if !ctx
                 .store
-                .finish_publish(&review.id, title, body, &published)
+                .finish_publish(
+                    &review.id,
+                    title,
+                    body,
+                    &published,
+                    &published_target(&target, &published)?,
+                )
                 .map_err(|e| PublishError::External(e.to_string()))?
             {
                 return Err(PublishError::Conflict(
@@ -827,6 +839,16 @@ pub async fn publish_review(
             })
         }
     }
+}
+
+/// The target as it published: on the branch it was pushed to, and naming
+/// the change it opened, so the review's next revision updates that change.
+fn published_target(
+    target: &crate::review::publish::Target,
+    url: &str,
+) -> Result<String, PublishError> {
+    serde_json::to_string(&target.clone().opened(url))
+        .map_err(|e| PublishError::External(e.to_string()))
 }
 
 #[cfg(test)]

@@ -3101,13 +3101,14 @@ impl Store {
         title: &str,
         body: &str,
         publish_result: &str,
+        target: &str,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "UPDATE review SET state='approved', edited_title=?2, edited_body=?3,
-                publish_result=?4, resolved_mono_ms=0, updated_ms=?5
+                publish_result=?4, resolved_mono_ms=0, updated_ms=?5, target=?6
              WHERE id=?1 AND state='publishing'",
-            rusqlite::params![id, title, body, publish_result, now_ms()],
+            rusqlite::params![id, title, body, publish_result, now_ms(), target],
         )?;
         Ok(n == 1)
     }
@@ -3697,7 +3698,7 @@ mod tests {
 
         // Once finished, a fresh begin_publish against the (now stale) revision A must fail.
         assert!(store
-            .finish_publish("rv1", "t", "b", "https://example.com/pr/1")
+            .finish_publish("rv1", "t", "b", "https://example.com/pr/1", "{}")
             .unwrap());
         assert!(!store.begin_publish("rv1", Some("revA")).unwrap());
     }

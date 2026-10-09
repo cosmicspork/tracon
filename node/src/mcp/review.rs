@@ -71,7 +71,7 @@ pub fn definitions() -> Vec<Value> {
                     "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "In a session on a GitHub or GitLab repository, defaults to that repository's forge; required outside a session." },
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab. In a session on a GitHub or GitLab repository, defaults to that repository; required outside a session. Give both or neither when publishing somewhere else." },
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, and on a resubmission to the base it was last submitted with. A resubmission may name another base until its change is opened; after that the base is moved on the forge. Resubmitting a commit still waiting for a verdict with another base is such a resubmission, not a retry." },
-                    "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested." },
+                    "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested, or after it was published to update the change it opened." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
                     "wait_secs": {
                         "type": "integer",
@@ -81,7 +81,7 @@ pub fn definitions() -> Vec<Value> {
                              Defaults to {MAX_WAIT_SECS}. The checks run on either way."
                         ),
                     },
-                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it). Approval updates it instead of opening a new one. Fixed by the first submit of a review." },
+                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it). Approval pushes to that change's branch instead of opening a new one. Fixed by the first submit of a review; a review that opened a change updates it without this." },
                     "forge": {
                         "type": "object",
                         "description": "What the forge shows besides the commits. Omit for a new change to describe it with title and body; omit for an existing change to push only.",
@@ -100,7 +100,7 @@ pub fn definitions() -> Vec<Value> {
                         },
                     },
                     "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message (else the description's, else title and body); a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it." },
-                    "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title when that is the node's placeholder. Fixed by the first submit of a review." },
+                    "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title when that is the node's placeholder. Fixed by the first submit of a review. An existing change is pushed to its own branch whatever your worktree's is called." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds: the change's head, or for a branch pushed before its change opened, whatever the branch holds now. Forced only over what it held at submit, and always approved by the operator." },
                 },
                 "required": ["title", "body", "provider", "project"],
@@ -386,10 +386,7 @@ async fn submit(
         },
     };
     let stored = match &resubmission {
-        Some(existing) => Some(
-            serde_json::from_str::<Target>(&existing.target)
-                .map_err(|e| format!("this review's target is unreadable: {e}"))?,
-        ),
+        Some(existing) => Some(stored_target(store, existing)?),
         None => None,
     };
     // The base defaults to what the worktree was branched from — read from the
@@ -573,6 +570,7 @@ async fn submit(
         manager,
         ctx,
         &mut target,
+        asked_branch.is_some(),
         &capture.head_sha,
         &worktree,
         forge,
@@ -1216,10 +1214,34 @@ fn forge_arg(args: &Value) -> Result<Outputs, String> {
     })
 }
 
+/// Where a resubmission publishes: the review's stored target, and for a
+/// review published before publication recorded the change it opened, that
+/// change and the branch it was pushed to, read from the publication record.
+fn stored_target(store: &Store, review: &ReviewRow) -> Result<Target, String> {
+    let target = serde_json::from_str::<Target>(&review.target)
+        .map_err(|e| format!("this review's target is unreadable: {e}"))?;
+    if target.change.is_some() {
+        return Ok(target);
+    }
+    let opened = store
+        .publications_for_review(&review.id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|publication| publication.state == "opened");
+    Ok(
+        match opened.and_then(|publication| Some((publication.result?, publication.branch))) {
+            Some((url, branch)) => Target { branch, ..target }.opened(&url),
+            None => target,
+        },
+    )
+}
+
 /// Settle what this revision may do on the forge, asking the forge rather
 /// than finding out after the operator approved. An existing change must be
-/// open and be this branch of this repository into this base; what its branch
-/// holds now is the only thing the push may replace. A new change must not
+/// open and of this repository into this base, and is pushed to on its own
+/// branch unless the agent named another (`branch_named`), which must then be
+/// the change's; what its branch holds now is the only thing the push may
+/// replace. A new change must not
 /// collide with one already open for the branch, and a declared rewrite of a
 /// branch pushed without one may replace only what the branch holds now
 /// (`last_pushed` when the forge cannot say).
@@ -1228,6 +1250,7 @@ async fn forge_intent(
     manager: &Manager,
     ctx: &CallContext,
     target: &mut Target,
+    branch_named: bool,
     head_sha: &str,
     worktree: &str,
     forge: Outputs,
@@ -1324,6 +1347,11 @@ async fn forge_intent(
     let state = review::publish::change_state(provider, cfg, &dir, &env, target, number)
         .await
         .map_err(|e| format!("could not read {noun} {number}: {e}"))?;
+    // The worktree's branch name is local: the push goes to the change's
+    // branch, and the lease below holds it to building on what that holds.
+    if !branch_named {
+        target.branch = state.source_branch.clone();
+    }
     if let Some(refusal) = state.refusal(provider, target, number) {
         return Err(refusal);
     }
