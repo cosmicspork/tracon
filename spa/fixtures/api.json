@@ -362,7 +362,7 @@
         "cost_usd": 6.4,
         "context_used": null,
         "context_size": null,
-        "state": "ended",
+        "state": "closed",
         "end_reason": "phase_done",
         "last_error": null,
         "turn_active": 0,
@@ -390,7 +390,7 @@
         "cost_usd": 8.9,
         "context_used": null,
         "context_size": null,
-        "state": "ended",
+        "state": "closed",
         "end_reason": "item_close",
         "last_error": null,
         "turn_active": 0,
@@ -449,7 +449,7 @@
       "cost_usd": 6.4,
       "context_used": null,
       "context_size": null,
-      "state": "ended",
+      "state": "closed",
       "end_reason": "phase_done",
       "last_error": null,
       "turn_active": 0,
@@ -477,7 +477,7 @@
       "cost_usd": 8.9,
       "context_used": null,
       "context_size": null,
-      "state": "ended",
+      "state": "closed",
       "end_reason": "item_close",
       "last_error": null,
       "turn_active": 0,
@@ -511,7 +511,7 @@
       "end_reason": null,
       "last_error": null,
       "turn_active": 0,
-      "draft": "Also cap the retry queue \u2014 the same window, not a new table.",
+      "draft": "Also cap the retry queue — the same window, not a new table.",
       "created_ms": -2700000,
       "updated_ms": -140000
     },
@@ -592,7 +592,7 @@
       "kind": "message",
       "ref_id": null,
       "payload": {
-        "text": "Reading the gateway's request path first. The per-channel window in metrics.rs already has the counters this needs, so the limiter reuses it \u2014 no new table. Two files will change: the gateway's request path and the window's read side."
+        "text": "Reading the gateway's request path first. The per-channel window in metrics.rs already has the counters this needs, so the limiter reuses it — no new table. Two files will change: the gateway's request path and the window's read side."
       },
       "at_ms": -2600000,
       "mono_ms": 100000
@@ -630,7 +630,7 @@
       "kind": "message",
       "ref_id": null,
       "payload": {
-        "text": "Done \u2014 refusals now read like the ceiling's (\"work is at its daily ceiling: model calls resume tomorrow\"). Running the checks before submitting; I need permission for `just test`."
+        "text": "Done — refusals now read like the ceiling's (\"work is at its daily ceiling: model calls resume tomorrow\"). Running the checks before submitting; I need permission for `just test`."
       },
       "at_ms": -160000,
       "mono_ms": 2540000
@@ -1064,7 +1064,11 @@
     "entry_path": "index.html",
     "source_name": "preview-demo",
     "bundle_files": [
-      { "path": "index.html", "media_type": "text/html; charset=utf-8", "size_bytes": 743 }
+      {
+        "path": "index.html",
+        "media_type": "text/html; charset=utf-8",
+        "size_bytes": 743
+      }
     ],
     "site": "fixture",
     "hlc_ms": -3600000,
@@ -1076,5 +1080,28 @@
   "/api/docs/personal/ref-html-preview/preview": {
     "url": "/html-preview-fixture.html",
     "expires_ms": 3600000
+  },
+  "/api/awake": {
+    "held": false,
+    "reason": null,
+    "method": "logind",
+    "error": null,
+    "last_suspend": null
+  },
+  "/api/operator/questions": {
+    "questions": []
+  },
+  "/api/operator/issues": {
+    "issues": []
+  },
+  "/api/operator/notifications": {
+    "notifications": [],
+    "receipt": ""
+  },
+  "/api/external": {
+    "enabled": false,
+    "channels": [],
+    "lanes": [],
+    "stopped": []
   }
 }
