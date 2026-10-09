@@ -39,7 +39,7 @@ impl Runner for FakeRunner {
     ) -> Result<std::process::Output, tracon::runner::RunnerError> {
         Ok(std::process::Output {
             status: Default::default(),
-            stdout: b"2.1.247 (Claude Code)\n".to_vec(),
+            stdout: b"2.1.295 (Claude Code)\n".to_vec(),
             stderr: Vec::new(),
         })
     }
@@ -77,16 +77,16 @@ fn spec_env(env: Vec<(String, String)>) -> LaunchSpec {
 #[tokio::test]
 async fn version_is_parsed_from_the_runner() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let v = a.version(&FakeRunner).await.unwrap();
-    assert_eq!(v.found, "2.1.247");
+    assert_eq!(v.found, "2.1.295");
     assert!(v.matches());
 }
 
 #[tokio::test]
 async fn launch_prompt_permission_and_turn_result() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     assert!(!handle.harness_session_id().is_empty());
 
@@ -155,7 +155,7 @@ async fn launch_prompt_permission_and_turn_result() {
 #[tokio::test]
 async fn denying_a_permission_fails_the_tool_call() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let turn = tokio::spawn(async move { handle.prompt("do it".into()).await });
 
@@ -182,7 +182,7 @@ async fn denying_a_permission_fails_the_tool_call() {
 #[tokio::test]
 async fn an_expired_permission_denies_rather_than_hanging() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let turn = tokio::spawn(async move { handle.prompt("do it".into()).await });
 
@@ -212,7 +212,7 @@ async fn an_expired_permission_denies_rather_than_hanging() {
 #[tokio::test]
 async fn a_version_the_node_did_not_pin_refuses_the_first_turn() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let spec = spec_env(vec![("FAKE_CLAUDE_VERSION".into(), "2.0.1".into())]);
     let (handle, _rx) = a.launch(&FakeRunner, spec).await.unwrap();
     let err = match handle.prompt("do the thing".into()).await {
@@ -222,7 +222,7 @@ async fn a_version_the_node_did_not_pin_refuses_the_first_turn() {
     match err {
         AdapterError::VersionMismatch { found, pinned } => {
             assert_eq!(found, "2.0.1");
-            assert_eq!(pinned, "2.1.247");
+            assert_eq!(pinned, "2.1.295");
         }
         other => panic!("expected a version mismatch, got {other}"),
     }
@@ -233,7 +233,7 @@ async fn a_version_the_node_did_not_pin_refuses_the_first_turn() {
 #[tokio::test]
 async fn an_unreachable_mcp_server_refuses_the_first_turn() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let spec = spec_env(vec![("FAKE_CLAUDE_MCP_STATUS".into(), "failed".into())]);
     let (handle, mut rx) = a.launch(&FakeRunner, spec).await.unwrap();
     let err = match handle.prompt("do the thing".into()).await {
@@ -260,7 +260,7 @@ async fn an_unreachable_mcp_server_refuses_the_first_turn() {
 #[tokio::test]
 async fn the_node_chooses_the_session_id() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let (handle, _rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let id = handle.harness_session_id();
     assert!(uuid::Uuid::parse_str(id).is_ok(), "{id} is not a uuid");
@@ -269,7 +269,7 @@ async fn the_node_chooses_the_session_id() {
 #[tokio::test]
 async fn a_session_takes_more_than_one_turn() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let handle = std::sync::Arc::new(handle);
 
@@ -300,7 +300,7 @@ async fn a_session_takes_more_than_one_turn() {
 #[tokio::test]
 async fn a_stream_json_revision_the_node_does_not_speak_refuses_the_first_turn() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let spec = spec_env(vec![("FAKE_CLAUDE_PROTOCOL".into(), "4".into())]);
     let (handle, _rx) = a.launch(&FakeRunner, spec).await.unwrap();
     let err = match handle.prompt("do the thing".into()).await {
@@ -321,11 +321,11 @@ async fn a_stream_json_revision_the_node_does_not_speak_refuses_the_first_turn()
 #[tokio::test]
 async fn a_compatible_handshake_reports_what_it_ran() {
     state::isolate();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let (handle, _rx) = a.launch(&FakeRunner, spec()).await.unwrap();
     let compat = handle.compat();
     assert_eq!(compat.agent, "claude");
-    assert_eq!(compat.version, "2.1.247");
+    assert_eq!(compat.version, "2.1.295");
     assert_eq!(compat.protocol, "claude-stream-json/1");
 }
 
@@ -354,7 +354,7 @@ async fn probe_models_reflects_declared_anthropic_models() {
     );
     let wiring = harness_wiring(&cfg, "gw", "tok", |_, _| true);
 
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let models = a.probe_models(&FakeRunner, &wiring).await.unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].value, "claude-x");
@@ -368,7 +368,7 @@ async fn probe_models_reflects_declared_anthropic_models() {
 async fn probe_models_falls_back_to_aliases_when_none_declared() {
     state::isolate();
     let empty = tracon::gateway::model::Wiring::default();
-    let a = ClaudeAdapter::new("2.1.247");
+    let a = ClaudeAdapter::new("2.1.295");
     let models = a.probe_models(&FakeRunner, &empty).await.unwrap();
     assert_eq!(
         models.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(),

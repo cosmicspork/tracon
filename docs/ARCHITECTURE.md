@@ -544,9 +544,10 @@ harness image where the entry names none; a command that image has no tool for i
 recorded `not_runnable` — never a pass, never reusable evidence, and never a failure
 the agent is asked to fix. The checks belong to the node, not to the tool call that
 asked for them: `submit_review` starts them in a task of its own and waits only as long
-as a status call may (45 s), because an MCP client abandons a call long before a
-`just check` finishes — Claude Code 2.1.247 at 300 s, Bun's own `fetch` timeout,
-whatever its MCP config says — and dropping the call must not drop the check, its `check_run` row, or the
+as a status call may (45 s), because an MCP client abandons a call that runs long —
+Claude Code 2.1.247 ended them at 5–5½ minutes whatever its MCP config said, and no
+client waits past the twenty-minute `timeout` the node writes there — and dropping
+the call must not drop the check, its `check_run` row, or the
 session's way back out of `waiting_on_check`. Past that the call returns `checking` with
 the id the review will have, `review_status` carries the wait and then reports the
 review or the same refusal the call would have given, and a retry of the same candidate

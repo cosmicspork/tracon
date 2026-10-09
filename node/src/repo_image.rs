@@ -1148,7 +1148,7 @@ mod tests {
     fn claude(image: &str) -> SessionHarness<'static> {
         SessionHarness {
             id: "claude",
-            version: "2.1.247",
+            version: "2.1.295",
             image: image.to_string(),
             layer: harness_layer("claude").unwrap(),
         }
@@ -1162,7 +1162,7 @@ mod tests {
         let repo = Path::new("/src/app");
         let store = Store::open_in_memory().unwrap();
         let builder = FakeBuilder::default();
-        let runner = ProbeRunner::saying("2.1.247 (Claude Code)\ngit version 2.50", 0);
+        let runner = ProbeRunner::saying("2.1.295 (Claude Code)\ngit version 2.50", 0);
         let harness = claude("localhost/tracon-harness-claude");
 
         let first =

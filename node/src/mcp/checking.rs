@@ -1,11 +1,12 @@
 //! Submissions whose required checks are running on the node.
 //!
 //! A required check is minutes of subprocess, and an MCP client gives up on a
-//! tool call long before that: Claude Code's HTTP client drops it at about
-//! five minutes whatever timeout its config names. Dropping the call used to
-//! drop the check with it. So `submit_review` hands the checks to a task the
-//! node owns and returns a handle, and `review_status` waits on that handle the
-//! way it waits on a human. Nothing here outlives the process: a restart
+//! tool call that runs long: Claude Code 2.1.247 dropped it at about five
+//! minutes whatever timeout its config named, and no release waits past that
+//! timeout (twenty minutes from this node). Dropping the call used to drop the
+//! check with it. So `submit_review` hands the checks to
+//! a task the node owns and returns a handle, and `review_status` waits on that
+//! handle the way it waits on a human. Nothing here outlives the process: a restart
 //! interrupts every `running` check row and closes the sessions that asked
 //! for them (`Store::reconcile_interrupted_runs`,
 //! `session::reconcile_after_restart`).

@@ -8,7 +8,8 @@
 //!
 //! The shapes below were read out of the shipped 2.1.247 binary and confirmed
 //! against a live run, because the CLI's `--help` documents neither the
-//! control protocol nor `--permission-prompt-tool`.
+//! control protocol nor `--permission-prompt-tool`; 2.1.295 was checked
+//! against them the same way.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,7 +43,7 @@ impl ClaudeAdapter {
     /// `containers/harness-claude/Containerfile` fetches exactly this release
     /// at exactly one digest; `the_image_installs_the_pinned_claude` keeps the
     /// two from drifting apart.
-    pub const PINNED_VERSION: &'static str = "2.1.247";
+    pub const PINNED_VERSION: &'static str = "2.1.295";
 
     /// Claude Code's contract is the stream-json control protocol, which
     /// carries no version field of its own. Every shape this
@@ -152,16 +153,18 @@ fn claude_model(model: &str) -> Result<&str, AdapterError> {
 /// with one response when the call ends. This value lifts that timer, the
 /// tool-call wall clock and the 300 s idle watchdog to twenty minutes.
 ///
-/// It does not lift the limit that actually ends long calls on the version
-/// the harness image pins (2.1.247): Bun's `fetch` gives up on a request
-/// whose response has not arrived after 300 s, whatever the abort
-/// signal says, with the same `TimeoutError` "The operation timed out." the
-/// transport's own timer raises. Claude Code passes Bun's `timeout: false`
-/// only from a later release (2.1.290 does, when this value exceeds 300 s).
-/// So a call to the node must return within five minutes, and every tool
-/// that waits on a person returns within `mcp::wait::MAX_WAIT_SECS` with a
-/// handle its status tool waits on. This value is headroom for slow tools
-/// that are not waiting on anyone, not permission to block.
+/// Under 2.1.247 live calls still ended at 5–5½ minutes with "The operation
+/// timed out.", whatever this value said. 2.1.274 fixed "Streamable HTTP MCP
+/// tool calls timing out after about 5 minutes even when a longer per-server
+/// `timeout` was set" by passing Bun's `fetch` `timeout: false` once this
+/// value exceeds 300 s, and the pinned release does that. A call held for
+/// 330 s outside a session returned under 2.1.247 too, so which limit cut the
+/// live calls is not pinned down.
+///
+/// Every tool that waits on a person still returns within
+/// `mcp::wait::MAX_WAIT_SECS` with a handle its status tool waits on, since
+/// twenty minutes is no bound on a person either. This value is headroom for
+/// slow tools that are not waiting on anyone, not permission to block.
 const MCP_CALL_TIMEOUT_MS: u64 = 20 * 60 * 1000;
 
 /// The node builds one neutral MCP descriptor; Claude Code wants a map keyed
@@ -203,7 +206,7 @@ fn init_protocol(init: &Value) -> u32 {
 }
 
 fn parse_version(out: &str) -> String {
-    // "2.1.247 (Claude Code)"
+    // "2.1.295 (Claude Code)"
     out.split_whitespace()
         .next()
         .filter(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
@@ -825,13 +828,13 @@ impl HarnessAdapter for ClaudeAdapter {
 
         // Nothing is read here. The pinned CLI emits `system/init` only once
         // the first user message has arrived on stdin (observed against
-        // 2.1.247: with stdin open and silent it prints nothing for as long
-        // as it is left alone), so a launch that waited for the frame before
-        // writing anything waited forever. The frame is checked by the pump
-        // when the first turn elicits it (`Pump::check_init`), and that turn
-        // is what fails if the harness is not the one this node pins. Until
-        // then the handle reports the pin, which `version()` already checked
-        // against the image at startup.
+        // 2.1.247 and 2.1.295: with stdin open and silent it prints nothing
+        // for as long as it is left alone), so a launch that waited for the
+        // frame before writing anything waited forever. The frame is checked
+        // by the pump when the first turn elicits it (`Pump::check_init`), and
+        // that turn is what fails if the harness is not the one this node
+        // pins. Until then the handle reports the pin, which `version()`
+        // already checked against the image at startup.
         let fault: Fault = Arc::new(Mutex::new(None));
         let turn = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel(256);
@@ -933,9 +936,11 @@ mod tests {
         assert_eq!(server["type"], "http");
         assert_eq!(server["url"], "http://gw:7421/mcp/s1");
         assert_eq!(server["headers"]["Authorization"], "Bearer tok");
-        // Past the client's 60 s default; tools still return within
-        // MAX_WAIT_SECS, since Bun's own fetch stops at 300 s.
+        // Past the client's 60 s default, and past 300 s so the pinned release
+        // turns Bun's own fetch timeout off; tools that wait on a person
+        // still return within MAX_WAIT_SECS.
         assert_eq!(server["timeout"], MCP_CALL_TIMEOUT_MS);
+        const { assert!(MCP_CALL_TIMEOUT_MS > 300_000) };
     }
 
     /// The ledger keeps what a tool returned, whichever shape Claude Code sent
@@ -981,7 +986,7 @@ mod tests {
 
     #[test]
     fn a_version_is_read_out_of_the_cli_banner() {
-        assert_eq!(parse_version("2.1.247 (Claude Code)\n"), "2.1.247");
+        assert_eq!(parse_version("2.1.295 (Claude Code)\n"), "2.1.295");
         assert_eq!(parse_version("something odd"), "unknown");
         assert_eq!(parse_version(""), "unknown");
     }
