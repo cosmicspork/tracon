@@ -980,8 +980,10 @@ and brief), what is in the way, the workspace the latest attempt left, and the
 reviews and shown work. It also gives the one next action. Every part of that is
 read from recorded state, and the next action follows fixed rules over those records,
 so it cannot claim more than they say. It offers three verbs. Continue carries the
-work on from the last ended attempt's workspace. Change approach does the same and
-hands the operator's new direction, in their own words, to the next attempt.
+work on from the last ended attempt's workspace, in that attempt's phase, except
+that a plan session which wrote its plan is carried on by executing it. Change
+approach does the same and hands the operator's new direction, in their own words,
+to the next attempt.
 Abandon closes the item, or stops a plain lineage and puts it away, and records the
 reason. Abandon deletes nothing.
 

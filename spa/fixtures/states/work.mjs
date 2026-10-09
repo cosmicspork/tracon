@@ -104,7 +104,7 @@ const continuation = (it, o) => ({
   intent: { title: it.title, body: it.body, source: 'item' },
   attempts: [],
   blockers: [],
-  next: { kind: 'start', text: 'Nothing has run yet: plan it, or execute it if it needs no plan.', session_id: null },
+  next: { kind: 'start', text: 'Nothing has run yet: plan it.', session_id: null },
   workspace: null,
   decisions: { plan: it.phase_plan_slug, brief: it.brief_slug, answered: [] },
   evidence: { reviews: [], shown: [] },
@@ -572,7 +572,7 @@ const states = [
     route: `/work/${ID.export}`,
     title: 'New item: no plan, nothing run, no brief or context',
     since: '#385',
-    note: 'continuation says start; Execute disabled with "needs a plan"; empty brief, criteria, context and evidence; discovered-from line',
+    note: 'continuation says plan it, and nothing else, since Execute is disabled with "needs a plan"; empty brief, criteria, context and evidence; discovered-from line',
     api: itemApi(ledger.find((i) => i.id === ID.export), {
       continuation: continuation(ledger.find((i) => i.id === ID.export), { decisions: { plan: null, brief: null, answered: [] } }),
     }),
@@ -583,7 +583,7 @@ const states = [
     route: `/work/${ID.limits}`,
     title: 'Planned item with brief, criteria, context, evidence',
     since: '#385',
-    note: 'continuation "The plan is written: execute it." — the node offers continue_from the plan session, so the primary button is Continue (which re-runs plan). Brief, criteria, context populated; evidence empty (only a plan ran)',
+    note: 'continuation "The plan is written: execute it." — the node offers continue_from the plan session, so the primary button is Continue, which the node carries on as an execute session in the plan\'s workspace. Brief, criteria, context populated; evidence empty (only a plan ran)',
     api: itemApi(planned, {
       sessions: [planSession],
       brief: brief(planned),

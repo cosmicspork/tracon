@@ -171,6 +171,24 @@ fn short(id: &str) -> &str {
     &id[..8.min(id.len())]
 }
 
+/// Whether an ended attempt left a plan to execute: a plan session that
+/// finished its phase, on an item whose plan document is there. Carrying such
+/// an attempt on executes the plan rather than planning again.
+fn plan_written(phase: &str, end_reason: Option<&str>, item_planned: bool) -> bool {
+    phase == "plan" && end_reason == Some(EndReason::PhaseDone.as_str()) && item_planned
+}
+
+/// The item's plan document, when its slug is recorded and the document is
+/// there: what the node requires before it starts an execute session.
+fn written_plan(store: &Store, item: &WorkItem) -> Result<Option<String>> {
+    let Some(slug) = item.phase_plan_slug.as_deref() else {
+        return Ok(None);
+    };
+    Ok(store
+        .doc_get(&item.channel, slug)?
+        .map(|_| slug.to_string()))
+}
+
 /// The one thing to do next, by fixed rules over recorded state.
 pub fn next_action(s: &Situation<'_>) -> NextAction {
     let at = |kind, text: String, row: Option<Latest<'_>>| NextAction {
@@ -196,12 +214,15 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
                 None,
             );
         }
+        // Execute is offered for an item only once its plan is written, so an
+        // unplanned item is pointed at planning even where the channel would
+        // let it execute without one.
         return at(
             "start",
-            if s.is_item && !s.item_planned {
-                "Nothing has run yet: plan it, or execute it if it needs no plan.".into()
-            } else {
-                "Nothing has run yet: start a session on it.".into()
+            match (s.is_item, s.item_planned) {
+                (true, false) => "Nothing has run yet: plan it.".into(),
+                (true, true) => "Its plan is written and nothing has run yet: execute it.".into(),
+                (false, _) => "Nothing has run yet: start a session on it.".into(),
             },
             None,
         );
@@ -254,10 +275,19 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
     }
     let reason = latest.end_reason.unwrap_or_default();
     let is = |r: EndReason| reason == r.as_str();
-    if is(EndReason::PhaseDone) && latest.phase == "plan" {
+    if plan_written(latest.phase, latest.end_reason, s.item_planned) {
         return at(
             "execute",
             "The plan is written: execute it.".into(),
+            Some(latest),
+        );
+    }
+    if is(EndReason::PhaseDone) && latest.phase == "plan" {
+        return at(
+            "continue",
+            format!(
+                "Session {who} ended without a written plan; continue planning from its workspace."
+            ),
             Some(latest),
         );
     }
@@ -403,10 +433,14 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
             .iter()
             .any(|a| a.continued_from.as_deref() == Some(l.id.as_str()))
     });
+    let item_planned = match &item {
+        Some(item) => written_plan(store, item)?.is_some(),
+        None => false,
+    };
     let next = next_action(&Situation {
         item_closed,
         item_blockers,
-        item_planned: item.as_ref().is_some_and(|i| i.phase_plan_slug.is_some()),
+        item_planned,
         is_item: item.is_some(),
         latest: latest.map(Latest::from),
         continued,
@@ -551,6 +585,24 @@ mod tests {
         next_action(&s)
     }
 
+    /// An item with nothing run is pointed at the one start the interface
+    /// enables: plan while it has no plan, execute once it has one.
+    #[test]
+    fn an_unplanned_item_is_offered_planning_alone() {
+        let n = next(Situation {
+            is_item: true,
+            ..Default::default()
+        });
+        assert_eq!(n.kind, "start");
+        assert_eq!(n.text, "Nothing has run yet: plan it.");
+        let n = next(Situation {
+            is_item: true,
+            item_planned: true,
+            ..Default::default()
+        });
+        assert!(n.text.ends_with("execute it."), "{}", n.text);
+    }
+
     #[test]
     fn the_next_action_follows_the_records() {
         assert_eq!(
@@ -603,12 +655,23 @@ mod tests {
         let planned = row("closed", Some("phase_done"), "plan", None);
         assert_eq!(
             next(Situation {
+                is_item: true,
+                item_planned: true,
                 latest: Some(planned),
                 ..Default::default()
             })
             .kind,
             "execute"
         );
+        // A plan session that ended with no plan on the item is not followed
+        // by execute, which the node would refuse.
+        let n = next(Situation {
+            is_item: true,
+            latest: Some(planned),
+            ..Default::default()
+        });
+        assert_eq!(n.kind, "continue");
+        assert!(n.text.contains("continue planning"), "{}", n.text);
         let restarted = row("closed", Some("node_restart"), "execute", None);
         assert_eq!(
             next(Situation {
@@ -717,6 +780,14 @@ pub async fn carry_on(
                 .then(|| old.harness_id.clone())
                 .filter(|h| crate::adapter::KNOWN.contains(&h.as_str()))
         });
+    let plan = match old.work_item_id.as_deref() {
+        Some(id) => match store.work_get(id)? {
+            Some(item) => written_plan(store, &item)?,
+            None => None,
+        },
+        None => None,
+    };
+    let plan = plan.filter(|_| plan_written(&old.phase, old.end_reason.as_deref(), true));
     let workspace_id = old
         .repo_path
         .strip_prefix("workspace://")
@@ -729,9 +800,11 @@ pub async fn carry_on(
         work_item_id: old.work_item_id.clone(),
         model: model.unwrap_or_else(|| old.model.clone()),
         budget_tokens: Some(old.budget_tokens),
-        initial_prompt: Some(handoff(&old, approach.as_deref())),
+        initial_prompt: Some(handoff(&old, approach.as_deref(), plan.as_deref())),
         node_id: Some(old.node_id.clone()),
-        phase: if old.phase == "plan" {
+        // A written plan is carried on by executing it; an unfinished plan
+        // goes on planning.
+        phase: if old.phase == "plan" && plan.is_none() {
             Phase::Plan
         } else {
             Phase::Execute
@@ -750,8 +823,26 @@ pub async fn carry_on(
 
 /// The new attempt's first prompt: what it continues, how that ended, that
 /// it inherits the workspace and nothing else, and the operator's changed
-/// approach when there is one.
-fn handoff(old: &SessionRow, approach: Option<&str>) -> String {
+/// approach when there is one. After a written plan, `plan` names it and the
+/// new attempt is told to carry it out.
+fn handoff(old: &SessionRow, approach: Option<&str>, plan: Option<&str>) -> String {
+    if let Some(slug) = plan {
+        let item = old.work_item_id.as_deref().unwrap_or_default();
+        let mut note = format!(
+            "Carry out work item {item} by the plan session {} wrote for it: document \
+             `{slug}`. Your orientation carries it, and `doc_read` returns it whole.\n\n\
+             You inherit that session's workspace on branch `{}`, not its conversation. \
+             Commit the work in the worktree and call `submit_review` when it is ready.",
+            old.id, old.branch,
+        );
+        if let Some(approach) = approach {
+            note.push_str(&format!(
+                "\n\nThe operator has changed the approach. Work this way where the plan \
+                 says otherwise:\n\n{approach}"
+            ));
+        }
+        return note;
+    }
     let ended = match old.end_reason.as_deref() {
         Some("node_restart") => "was cut off when its node restarted".to_string(),
         Some("provider_exhausted") => "stopped when its provider was exhausted".to_string(),
