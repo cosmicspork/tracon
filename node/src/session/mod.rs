@@ -385,6 +385,9 @@ pub struct Manager {
     /// The grants whose refusals this node turns into asks, and which an
     /// operator's answer widens. The backend's own, once startup watches it.
     egress: Arc<parking_lot::RwLock<Option<crate::gateway::proxy::Grants>>>,
+    /// Required checks `submit_review` started, owned by the node rather
+    /// than by the call that asked for them.
+    checking: Arc<crate::mcp::checking::Checking>,
 }
 
 impl Manager {
@@ -429,7 +432,14 @@ impl Manager {
             default_adapter: Arc::new(std::sync::OnceLock::new()),
             previews: Arc::new(crate::http::preview::PreviewTokens::default()),
             egress: Arc::default(),
+            checking: Arc::default(),
         }
+    }
+
+    /// The required checks `submit_review` has running, and what the recent
+    /// ones came to.
+    pub fn checking(&self) -> &Arc<crate::mcp::checking::Checking> {
+        &self.checking
     }
 
     pub fn backend(&self) -> &Arc<dyn crate::boundary::Backend> {
@@ -2488,11 +2498,12 @@ impl Manager {
     }
 
     /// Mark a session as waiting on deterministic checks (or back to running)
-    /// and tell the interface. Called from the submit tool, inside a turn.
-    /// A check can outlive the session that asked for it, so both ends of
-    /// this are fenced in the UPDATE itself rather than by a read first: a
-    /// pause or a stop landing mid-check wins, and the check finishing
-    /// afterwards must not put the row back into `running`.
+    /// and tell the interface. Set by the submit tool inside a turn, and
+    /// cleared by the node-owned task running the checks, which can finish
+    /// after that turn ended. A check can outlive the session that asked for
+    /// it, so both ends of this are fenced in the UPDATE itself rather than
+    /// by a read first: a pause or a stop landing mid-check wins, and the
+    /// check finishing afterwards must not put the row back into `running`.
     pub fn set_checking(&self, id: &str, checking: bool) {
         let state = if checking {
             SessionState::WaitingOnCheck

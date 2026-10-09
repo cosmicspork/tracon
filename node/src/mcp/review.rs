@@ -2,8 +2,11 @@
 //!
 //! `submit_review` states an intent; the node captures the diff from the
 //! worktree itself, so the artifact under review is what the branch actually
-//! contains rather than what the agent says it contains. `review_status` waits
-//! for the verdict and returns it, including the operator's edits.
+//! contains rather than what the agent says it contains. A session's required
+//! checks run in a task the node owns, so a call its client abandons does not
+//! take them down with it; `submit_review` waits for them only as long as a
+//! status call would. `review_status` waits for the checks and then the
+//! verdict, and returns it, including the operator's edits.
 
 use std::sync::Arc;
 
@@ -39,18 +42,26 @@ pub fn definitions() -> Vec<Value> {
     vec![
         json!({
             "name": SUBMIT,
-            "description": "Submit the current branch for human review. The node captures the diff \
-                            from the worktree, so commit your work first. Nothing is published \
-                            until a human approves; call review_status to wait for the verdict. \
-                            Resubmit with the same review_id after making changes. A harness you \
-                            run yourself passes `worktree`: the absolute path of a worktree whose \
-                            repository is under the node's [external] repo_roots; its branch is \
-                            what gets pushed. `title` and `body` are your summary for the \
-                            operator. Without `change`, approval opens a new pull/merge request \
-                            described by `forge.description`, or by title and body when that is \
-                            absent. With `change`, approval pushes to that open change's branch \
-                            and sends only what `forge` asks for: a replacement description, a \
-                            comment, both, or neither.",
+            "description": format!(
+                "Submit the current branch for human review. The node captures the diff \
+                 from the worktree, so commit your work first. In a session the node then runs \
+                 the repository's required checks; it waits for them for up to `wait_secs` \
+                 ({MAX_WAIT_SECS} at most), and checks that take longer keep running on the \
+                 node while this returns `state: \"checking\"` with the review_id to pass to \
+                 review_status, which waits for them and then for the verdict. Submitting the \
+                 same commit again while its checks run returns the same review_id and starts \
+                 nothing. Nothing is published until a human approves; call review_status to \
+                 wait for the verdict. Resubmit with the same review_id after making changes, \
+                 including after checks failed. A harness you \
+                 run yourself passes `worktree`: the absolute path of a worktree whose \
+                 repository is under the node's [external] repo_roots; its branch is \
+                 what gets pushed. `title` and `body` are your summary for the \
+                 operator. Without `change`, approval opens a new pull/merge request \
+                 described by `forge.description`, or by title and body when that is \
+                 absent. With `change`, approval pushes to that open change's branch \
+                 and sends only what `forge` asks for: a replacement description, a \
+                 comment, both, or neither."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -62,6 +73,14 @@ pub fn definitions() -> Vec<Value> {
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, and on a resubmission to the base it was last submitted with. A resubmission may name another base until its change is opened; after that the base is moved on the forge. Resubmitting a commit still waiting for a verdict with another base is such a resubmission, not a retry." },
                     "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
+                    "wait_secs": {
+                        "type": "integer",
+                        "description": format!(
+                            "How long to wait for the required checks before returning \
+                             `checking`, up to {MAX_WAIT_SECS}; larger values are capped. \
+                             Defaults to {MAX_WAIT_SECS}. The checks run on either way."
+                        ),
+                    },
                     "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it). Approval updates it instead of opening a new one. Fixed by the first submit of a review." },
                     "forge": {
                         "type": "object",
@@ -112,7 +131,11 @@ pub fn definitions() -> Vec<Value> {
                  at {MAX_WAIT_SECS} seconds so the call always returns before an MCP \
                  client gives up on it; a human takes far longer than that, so expect to \
                  poll — while the review is undecided this returns `still_waiting` with \
-                 the current state, and you call it again. On approval the node publishes \
+                 the current state, and you call it again. A submission whose required \
+                 checks are still running reads `still_waiting` with `state: \"checking\"` \
+                 and how long they have run; if they fail it returns `state: \
+                 \"submit_failed\"` with the same message submit_review would have \
+                 refused with, and nothing was submitted. On approval the node publishes \
                  the approved text itself and returns where it landed."
             ),
             "inputSchema": {
@@ -177,7 +200,7 @@ pub async fn call(
 ) -> Result<Value, String> {
     match name {
         SUBMIT => submit(store, manager, ctx, args).await,
-        STATUS => status(store, ctx, args).await,
+        STATUS => status(store, manager, ctx, args).await,
         SUBMIT_REPORT => submit_report(store, manager, ctx, args).await,
         REPORT_STATUS => report_status(store, ctx, args).await,
         VERDICT => verdict(store, manager, ctx, args).await,
@@ -191,6 +214,10 @@ async fn submit(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
+    // How long this call waits on its checks before handing the wait to
+    // `review_status`, counted from the start so capture and the forge's
+    // answers come out of the same budget.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs(args));
     let session = match ctx.session_id() {
         Some(id) => Some(
             store
@@ -260,12 +287,27 @@ async fn submit(
     // Validate resubmission ownership before capturing or executing anything
     // from this worktree. A review id cannot be used as a way to make another
     // session's candidate consume a check runner.
-    let resubmission = match args.get("review_id").and_then(Value::as_str) {
-        Some(id) => {
-            let existing = store
-                .get_review(id)
-                .map_err(|error| error.to_string())?
-                .ok_or("no review with that id")?;
+    let named = args.get("review_id").and_then(Value::as_str);
+    // A handle whose checks never became a review: submitting it again opens
+    // the review under that id, so the agent keeps the one it was given.
+    let mut handle = None;
+    let named_review = match named {
+        Some(id) => match store.get_review(id).map_err(|error| error.to_string())? {
+            Some(existing) => Some(existing),
+            None => {
+                manager
+                    .checking()
+                    .get(id)
+                    .filter(|entry| Some(entry.session_id.as_str()) == ctx.session_id())
+                    .ok_or("no review with that id")?;
+                handle = Some(id.to_string());
+                None
+            }
+        },
+        None => None,
+    };
+    let resubmission = match named_review {
+        Some(existing) => {
             if !owns(store, ctx, &existing) {
                 return Err("that review belongs to another session".into());
             }
@@ -290,16 +332,42 @@ async fn submit(
     };
     // A client that gave up waiting may retry a submission that is still
     // running or already recorded. Same-commit submits from one worktree run
-    // one at a time, and a fresh one finds the review the other made.
+    // one at a time, and a fresh one finds the checks or the review the other
+    // started.
     let head_sha = review::resolve(&worktree, "HEAD")
         .await
         .map_err(|e| e.to_string())?;
-    let _in_flight = in_flight(&format!(
+    let in_flight = in_flight(&format!(
         "{}\n{}\n{head_sha}",
         ctx.channel,
         ctx.session_id().unwrap_or(&worktree)
     ))
     .await;
+    if let Some(session_id) = ctx.session_id() {
+        if let Some(entry) = running_checks_of(store, manager, session_id, &ctx.channel, &head_sha)?
+        {
+            if named.is_none_or(|id| id == entry.handle) {
+                return Ok(attached(&entry));
+            }
+            return Err(format!(
+                "checks of this commit are already running under review_id {}; call \
+                 review_status with it to wait for them",
+                entry.handle
+            ));
+        }
+        if let Some(id) = named {
+            if manager
+                .checking()
+                .get(id)
+                .is_some_and(|entry| entry.outcome().is_none())
+            {
+                return Err(format!(
+                    "review {id} is still running checks of an earlier commit; call review_status \
+                     to wait for their outcome before submitting it again"
+                ));
+            }
+        }
+    }
     let asked_base = args.get("base").and_then(Value::as_str);
     let resubmission = match resubmission {
         Some(existing) => Some(existing),
@@ -312,7 +380,7 @@ async fn submit(
                             .is_ok_and(|target| target.base == asked)
                     }) =>
             {
-                return Ok(already_submitted(&existing));
+                return publish_if_granted(manager, ctx, already_submitted(&existing)).await;
             }
             other => other,
         },
@@ -550,12 +618,34 @@ async fn submit(
         max_snapshot_bytes,
     )
     .await?;
+    let id = match (&resubmission, handle) {
+        (Some(existing), _) => existing.id.clone(),
+        (None, Some(handle)) => handle,
+        (None, None) => uuid::Uuid::now_v7().to_string(),
+    };
+    let submission = Submission {
+        id,
+        session,
+        resubmission,
+        worktree,
+        title,
+        body,
+        provider,
+        target,
+        base,
+        capture,
+        files,
+        intent_json,
+        candidate,
+        max_snapshot_bytes,
+        authorship,
+    };
     // The operator's own toolchain is where an external harness's checks
     // run, never this node's container: nothing here can execute a command
     // in a worktree the node does not own.
-    let checks = if external {
-        review::checks::CheckReport {
-            candidate_id: candidate.id.clone(),
+    let Some(session_id) = ctx.session_id() else {
+        let checks = review::checks::CheckReport {
+            candidate_id: submission.candidate.id.clone(),
             results: Vec::new(),
             required_count: 0,
             all_required_passed: true,
@@ -566,171 +656,363 @@ async fn submit(
             image_source: "external harness",
             cancelled: None,
             prepared: None,
-        }
-    } else {
-        let snapshot = snapshot.take().ok_or("checks run on a snapshot")?;
-        let report = run_checks(
-            store,
-            manager,
-            ctx.session_id().ok_or("checks run for a session")?,
-            &candidate,
-            &snapshot.root,
-            args.get("rerun_checks")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        )
-        .await;
-        tokio::task::spawn_blocking(move || drop(snapshot));
-        report?
+        };
+        let recorded = submission.record(store, manager, ctx, checks).await?;
+        return publish_if_granted(manager, ctx, recorded).await;
     };
-    let checks_json =
-        (!external).then(|| serde_json::to_string(&checks.results).unwrap_or_else(|_| "[]".into()));
+    let snapshot = snapshot.take().ok_or("checks run on a snapshot")?;
+    let commands =
+        review::checks::candidate_environment(store, manager.cfg(), &submission.candidate)?.checks;
+    let rerun = args
+        .get("rerun_checks")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // The checks belong to the node from here on, not to this call: a client
+    // that gives up on it (Claude Code's HTTP client does at about five
+    // minutes) drops this future, and the checks, the review they open and
+    // the session's way back out of `waiting_on_check` must not go with it.
+    let no_checks = commands.is_empty();
+    begin_checks(manager, session_id, &submission.candidate, &commands, rerun);
+    let entry = manager.checking().begin(
+        &submission.id,
+        session_id,
+        &submission.candidate.id,
+        commands,
+    );
+    let mut extras = json!({
+        "files": submission.capture.files.len(),
+        "added": submission.capture.added,
+        "removed": submission.capture.removed,
+        "uncommitted": submission.capture.uncommitted,
+        "authorship": submission.authorship,
+    });
+    let running = tokio::spawn({
+        let store = store.clone();
+        let manager = manager.clone();
+        let ctx = ctx.clone();
+        let session_id = session_id.to_string();
+        async move {
+            let report = run_checks(
+                &store,
+                &manager,
+                &session_id,
+                &submission.candidate,
+                &snapshot.root,
+                rerun,
+            )
+            .await;
+            tokio::task::spawn_blocking(move || drop(snapshot));
+            let report = match report {
+                Ok(report) => report,
+                Err(refused) => return (Err(refused), false),
+            };
+            match submission.record(&store, &manager, &ctx, report).await {
+                Ok(recorded) => (publish_if_granted(&manager, &ctx, recorded).await, true),
+                Err(refused) => (Err(refused), false),
+            }
+        }
+    });
+    tokio::spawn({
+        let entry = entry.clone();
+        let manager = manager.clone();
+        let session_id = session_id.to_string();
+        async move {
+            let (outcome, recorded) = running.await.unwrap_or_else(|error| {
+                // Whatever stopped the task, the session is not left
+                // waiting on checks nobody is running.
+                manager.set_checking(&session_id, false);
+                (
+                    Err(format!(
+                        "the checks stopped without an outcome ({error}). Submit again."
+                    )),
+                    false,
+                )
+            });
+            entry.finish(outcome, recorded);
+        }
+    });
+    // Nothing else waits on this slot now: a retry finds the running entry.
+    drop(in_flight);
+    // With nothing required there is nothing slow to wait for, and the
+    // review is answered here as it always was.
+    let deadline = if no_checks {
+        deadline.max(tokio::time::Instant::now() + std::time::Duration::from_secs(MAX_WAIT_SECS))
+    } else {
+        deadline
+    };
+    match entry.wait(deadline).await {
+        Some(outcome) => outcome,
+        None => {
+            let mut response = checking(&entry);
+            if let (Some(response), Some(extras)) =
+                (response.as_object_mut(), extras.as_object_mut())
+            {
+                response.append(extras);
+            }
+            Ok(response)
+        }
+    }
+}
 
-    // Requirements shown on the review screen are what this revision was
-    // actually checked against, read once here and pinned to the revision —
-    // never the (mutable) work item re-read at display time.
-    let requirements = session
-        .as_ref()
-        .and_then(|s| s.work_item_id.as_ref())
-        .and_then(|work_item_id| store.work_get(work_item_id).ok().flatten());
-    let requirements_title = requirements.as_ref().map(|w| w.title.clone());
-    let requirements_body = requirements.as_ref().map(|w| w.body.clone());
-    let requirements_hash = requirements
-        .as_ref()
-        .map(|w| crate::corpus::hash_body(&format!("{}\n{}", w.title, w.body)));
+/// Everything a submission settled before its checks, which is what records
+/// the review once they pass.
+struct Submission {
+    /// The review this revises, or the id the new one is opened under.
+    id: String,
+    session: Option<crate::store::SessionRow>,
+    resubmission: Option<ReviewRow>,
+    worktree: String,
+    title: String,
+    body: String,
+    provider: String,
+    target: Target,
+    base: String,
+    capture: review::Capture,
+    files: String,
+    intent_json: Option<String>,
+    candidate: CandidateRow,
+    max_snapshot_bytes: u64,
+    authorship: Option<Value>,
+}
 
-    // A resubmission keeps the same card and the same thread.
-    if let Some(existing) = resubmission {
-        let id = existing.id.as_str();
+impl Submission {
+    /// Open or revise the review on checks that passed, or on none for an
+    /// external harness.
+    async fn record(
+        self,
+        store: &Arc<Store>,
+        manager: &Manager,
+        ctx: &CallContext,
+        checks: review::checks::CheckReport,
+    ) -> Result<Value, String> {
+        let Submission {
+            id,
+            session,
+            resubmission,
+            worktree,
+            title,
+            body,
+            provider,
+            target,
+            base,
+            capture,
+            files,
+            intent_json,
+            candidate,
+            max_snapshot_bytes,
+            authorship,
+        } = self;
+        let external = session.is_none();
+        let checks_json = (!external)
+            .then(|| serde_json::to_string(&checks.results).unwrap_or_else(|_| "[]".into()));
+
+        // Requirements shown on the review screen are what this revision was
+        // actually checked against, read once here and pinned to the revision —
+        // never the (mutable) work item re-read at display time.
+        let requirements = session
+            .as_ref()
+            .and_then(|s| s.work_item_id.as_ref())
+            .and_then(|work_item_id| store.work_get(work_item_id).ok().flatten());
+        let requirements_title = requirements.as_ref().map(|w| w.title.clone());
+        let requirements_body = requirements.as_ref().map(|w| w.body.clone());
+        let requirements_hash = requirements
+            .as_ref()
+            .map(|w| crate::corpus::hash_body(&format!("{}\n{}", w.title, w.body)));
+
+        // A resubmission keeps the same card and the same thread.
+        if resubmission.is_some() {
+            let revision = ReviewRevisionRow {
+                id: uuid::Uuid::now_v7().to_string(),
+                review_id: id.clone(),
+                candidate_id: candidate.id.clone(),
+                title: title.clone(),
+                body: body.clone(),
+                diff: capture.diff.clone(),
+                files: files.clone(),
+                head_sha: capture.head_sha.clone(),
+                context_json: serde_json::to_string(&capture.contexts)
+                    .unwrap_or_else(|_| "[]".into()),
+                requirements_work_item_id: session.as_ref().and_then(|s| s.work_item_id.clone()),
+                requirements_title,
+                requirements_body,
+                requirements_hash,
+                created_ms: now_ms(),
+                intent_json,
+            };
+            let revised = store
+                .revise_review_with_revision(
+                    &id,
+                    &title,
+                    &body,
+                    &serde_json::to_string(&target).map_err(|e| e.to_string())?,
+                    &base,
+                    capture.added,
+                    capture.removed,
+                    checks_json.as_deref(),
+                    &revision,
+                )
+                .map_err(|error| error.to_string())?;
+            if !revised {
+                return Err(format!(
+                    "review {id} is currently being published and cannot be resubmitted; call \
+                     review_status to wait for the verdict"
+                ));
+            }
+            retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
+            manager.publish_queue().await;
+            let reviewer = spawn_review_session(store, manager, ctx, &id, session.as_ref()).await;
+            return Ok(json!({
+                "review_id": id,
+                "state": "new",
+                "message": "Resubmitted. Call review_status to wait for the verdict.",
+                "files": capture.files.len(),
+                "added": capture.added,
+                "removed": capture.removed,
+                "uncommitted": capture.uncommitted,
+                "review_session": reviewer,
+                "candidate_id": candidate.id,
+                "checks_reused": checks.reused,
+                "authorship": authorship,
+            }));
+        }
+
+        let row = ReviewRow {
+            id: id.clone(),
+            session_id: ctx.session_id().map(str::to_string),
+            node_id: ctx.node_id.clone(),
+            channel: ctx.channel.clone(),
+            kind: if provider == "gitlab" {
+                "mr".into()
+            } else {
+                "pr".into()
+            },
+            title,
+            body,
+            edited_title: None,
+            edited_body: None,
+            provider,
+            target: serde_json::to_string(&target).unwrap_or_default(),
+            diff: capture.diff,
+            files,
+            head_sha: capture.head_sha,
+            base_ref: base,
+            added: capture.added,
+            removed: capture.removed,
+            state: "new".into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: now_ms(),
+            checks_json,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+            lane: ctx.lane().map(str::to_string),
+        };
         let revision = ReviewRevisionRow {
             id: uuid::Uuid::now_v7().to_string(),
-            review_id: id.to_string(),
+            review_id: id.clone(),
             candidate_id: candidate.id.clone(),
-            title: title.clone(),
-            body: body.clone(),
-            diff: capture.diff.clone(),
-            files: files.clone(),
-            head_sha: capture.head_sha.clone(),
+            title: row.title.clone(),
+            body: row.body.clone(),
+            diff: row.diff.clone(),
+            files: row.files.clone(),
+            head_sha: row.head_sha.clone(),
             context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
             requirements_work_item_id: session.as_ref().and_then(|s| s.work_item_id.clone()),
             requirements_title,
             requirements_body,
             requirements_hash,
-            created_ms: now_ms(),
+            created_ms: row.created_ms,
             intent_json,
         };
-        let revised = store
-            .revise_review_with_revision(
-                id,
-                &title,
-                &body,
-                &serde_json::to_string(&target).map_err(|e| e.to_string())?,
-                &base,
-                capture.added,
-                capture.removed,
-                checks_json.as_deref(),
-                &revision,
-            )
+        store
+            .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
-        if !revised {
-            return Err(format!(
-                "review {id} is currently being published and cannot be resubmitted; call review_status \
-                 to wait for the verdict"
-            ));
-        }
         retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
         manager.publish_queue().await;
-        let reviewer = spawn_review_session(store, manager, ctx, id, session.as_ref()).await;
-        return Ok(json!({
+        let reviewer = spawn_review_session(store, manager, ctx, &id, session.as_ref()).await;
+
+        Ok(json!({
             "review_id": id,
             "state": "new",
-            "message": "Resubmitted. Call review_status to wait for the verdict.",
+            "message": "Submitted for review. Nothing is published until a human approves. \
+                        Call review_status to wait for the verdict.",
             "files": capture.files.len(),
-            "added": capture.added,
-            "removed": capture.removed,
+            "added": row.added,
+            "removed": row.removed,
             "uncommitted": capture.uncommitted,
             "review_session": reviewer,
             "candidate_id": candidate.id,
             "checks_reused": checks.reused,
             "authorship": authorship,
-        }));
+        }))
     }
+}
 
-    let id = uuid::Uuid::now_v7().to_string();
-    let row = ReviewRow {
-        id: id.clone(),
-        session_id: ctx.session_id().map(str::to_string),
-        node_id: ctx.node_id.clone(),
-        channel: ctx.channel.clone(),
-        kind: if provider == "gitlab" {
-            "mr".into()
-        } else {
-            "pr".into()
-        },
-        title,
-        body,
-        edited_title: None,
-        edited_body: None,
-        provider,
-        target: serde_json::to_string(&target).unwrap_or_default(),
-        diff: capture.diff,
-        files,
-        head_sha: capture.head_sha,
-        base_ref: base,
-        added: capture.added,
-        removed: capture.removed,
-        state: "new".into(),
-        verdict_reason: None,
-        publish_result: None,
-        claimed_ms: None,
-        created_ms: now_ms(),
-        created_mono_ms: 0,
-        resolved_mono_ms: None,
-        updated_ms: now_ms(),
-        checks_json,
-        review_session_id: None,
-        ai_verdict_json: None,
-        revision_patch: None,
-        lane: ctx.lane().map(str::to_string),
-    };
-    let revision = ReviewRevisionRow {
-        id: uuid::Uuid::now_v7().to_string(),
-        review_id: id.clone(),
-        candidate_id: candidate.id.clone(),
-        title: row.title.clone(),
-        body: row.body.clone(),
-        diff: row.diff.clone(),
-        files: row.files.clone(),
-        head_sha: row.head_sha.clone(),
-        context_json: serde_json::to_string(&capture.contexts).unwrap_or_else(|_| "[]".into()),
-        requirements_work_item_id: session.as_ref().and_then(|s| s.work_item_id.clone()),
-        requirements_title,
-        requirements_body,
-        requirements_hash,
-        created_ms: row.created_ms,
-        intent_json,
-    };
-    store
-        .insert_review_with_revision(&row, &revision)
-        .map_err(|error| error.to_string())?;
-    retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
-    manager.publish_queue().await;
-    let reviewer = spawn_review_session(store, manager, ctx, &id, session.as_ref()).await;
+/// A recorded review publishes at once when an authority grant covers it,
+/// exactly as if the operator had approved it; otherwise the response says
+/// what publication would need.
+async fn publish_if_granted(
+    manager: &Manager,
+    ctx: &CallContext,
+    submitted: Value,
+) -> Result<Value, String> {
+    manager.tools.auto_publish_review(ctx, submitted).await
+}
 
-    Ok(json!({
-        "review_id": id,
-        "state": "new",
-        "message": "Submitted for review. Nothing is published until a human approves. \
-                    Call review_status to wait for the verdict.",
-        "files": capture.files.len(),
-        "added": row.added,
-        "removed": row.removed,
-        "uncommitted": capture.uncommitted,
-        "review_session": reviewer,
-        "candidate_id": candidate.id,
-        "checks_reused": checks.reused,
-        "authorship": authorship,
-    }))
+/// Checks this session already has running on `head_sha`, against the check
+/// definitions its candidate answers to now.
+fn running_checks_of(
+    store: &Store,
+    manager: &Manager,
+    session_id: &str,
+    channel: &str,
+    head_sha: &str,
+) -> Result<Option<Arc<crate::mcp::checking::Entry>>, String> {
+    let Some(candidate) = store
+        .candidate(&candidate_id(head_sha, channel))
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let commands = review::checks::candidate_environment(store, manager.cfg(), &candidate)?.checks;
+    Ok(manager.checking().running(&crate::mcp::checking::key(
+        session_id,
+        &candidate.id,
+        &commands,
+    )))
+}
+
+/// What a caller is told while checks run: the handle to wait on, and what is
+/// running.
+fn checking(entry: &crate::mcp::checking::Entry) -> Value {
+    json!({
+        "review_id": entry.handle,
+        "state": "checking",
+        "candidate_id": entry.candidate_id,
+        "checks": entry.commands,
+        "running_secs": entry.running_secs(),
+        "message": "The required checks are running on the node; nothing reaches the operator \
+                    until they pass. Call review_status with this review_id to wait for them: it \
+                    returns the review once they pass, or what failed.",
+    })
+}
+
+/// A retried submission of a commit whose checks are already running.
+fn attached(entry: &crate::mcp::checking::Entry) -> Value {
+    let mut response = checking(entry);
+    response["attached"] = json!(true);
+    response["message"] = json!(
+        "Checks of this commit are already running for this submission; nothing new was \
+         started, and this call's title, body and other arguments were not used. Call \
+         review_status with this review_id to wait for the outcome, then resubmit with it if \
+         the words should change."
+    );
+    response
 }
 
 /// Holds the submission slot for `key` until dropped.
@@ -1240,18 +1522,16 @@ impl review::checks::Cancel for SessionStillWants {
     }
 }
 
-/// Required checks against the immutable candidate snapshot. The candidate
-/// owner receives the verification milestone even if a later prose-only
-/// revision is submitted by another attached session.
-async fn run_checks(
-    store: &Arc<Store>,
+/// Put the session in `waiting_on_check` and say what is starting, before the
+/// submitting call can return: by the time an agent hears `checking`, the
+/// session and its log already say so.
+fn begin_checks(
     manager: &Manager,
     session_id: &str,
     candidate: &CandidateRow,
-    snapshot: &std::path::Path,
+    commands: &[String],
     force_rerun: bool,
-) -> Result<review::checks::CheckReport, String> {
-    let commands = review::checks::candidate_environment(store, manager.cfg(), candidate)?.checks;
+) {
     manager.set_checking(session_id, true);
     manager.record_event(
         session_id,
@@ -1263,6 +1543,20 @@ async fn run_checks(
             "rerun": force_rerun,
         }),
     );
+}
+
+/// Required checks against the immutable candidate snapshot, after
+/// [`begin_checks`]. The candidate owner receives the verification milestone
+/// even if a later prose-only revision is submitted by another attached
+/// session.
+async fn run_checks(
+    store: &Arc<Store>,
+    manager: &Manager,
+    session_id: &str,
+    candidate: &CandidateRow,
+    snapshot: &std::path::Path,
+    force_rerun: bool,
+) -> Result<review::checks::CheckReport, String> {
     let report = review::checks::run_required(
         manager.backend().as_ref(),
         manager.cfg(),
@@ -1610,11 +1904,58 @@ async fn report_status(
     }
 }
 
-async fn status(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
+async fn status(
+    store: &Arc<Store>,
+    manager: &Manager,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
     let id = str_arg(args, "review_id")?;
     let wait = wait_secs(args);
     // tokio's clock, not std's, so the wait is the same thing a test can drive.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+
+    // Checks the node is running for this handle come first: until they
+    // settle, the review either does not exist yet or is still the revision
+    // they are meant to replace.
+    if let Some(entry) = manager
+        .checking()
+        .get(&id)
+        .filter(|entry| Some(entry.session_id.as_str()) == ctx.session_id())
+    {
+        match entry.wait(deadline).await {
+            None => {
+                let mut response = checking(&entry);
+                response["still_waiting"] = json!(true);
+                response["waited_secs"] = json!(wait);
+                response["message"] = json!(format!(
+                    "Still running the required checks ({}s so far); nothing reaches the \
+                     operator until they pass. The wait is capped at {MAX_WAIT_SECS} seconds; \
+                     call review_status again with the same review_id.",
+                    entry.running_secs()
+                ));
+                return Ok(response);
+            }
+            // What the submission would have refused with, had it waited —
+            // unless the review it would have revised was decided since.
+            Some(Err(reason)) if !entry.recorded() => {
+                let decided = store
+                    .get_review(&id)
+                    .map_err(|e| e.to_string())?
+                    .is_some_and(|r| matches!(r.state.as_str(), "approved" | "rejected"));
+                if !decided {
+                    return Ok(json!({
+                        "review_id": id,
+                        "state": "submit_failed",
+                        "candidate_id": entry.candidate_id,
+                        "checks": entry.commands,
+                        "message": reason,
+                    }));
+                }
+            }
+            Some(_) => {}
+        }
+    }
 
     loop {
         let r = store
