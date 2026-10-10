@@ -1474,7 +1474,7 @@ export function promotionItems(p: Promotion): PromotionItem[] {
 export type Frame =
   | ({ type: 'event' } & Event)
   | { type: 'chunk'; session_id: string; message_id: string | null; kind: string; text: string }
-  | { type: 'tool_update'; session_id: string; tool_call_id: string; status: string | null }
+  | { type: 'tool_update'; session_id: string; tool_call_id: string; status: string | null; output?: string | null }
   | ({ type: 'session' } & Session)
   | { type: 'queue'; waiting: Permission[] }
   | { type: 'reviews'; waiting: Review[] }

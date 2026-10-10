@@ -152,6 +152,44 @@ function claudeRead(sid, n, path, at) {
   ]
 }
 
+// A Claude Code call as the node records it: the tool's name as the title,
+// `other` as the kind (the policy record says what it did), the input as the
+// model wrote it, and the output serialized as JSON. `output: undefined`
+// leaves the call running.
+function claudeCall(sid, id, name, kind, input, at, ms, o = {}) {
+  const events = [
+    ev(sid, 'tool_call', { title: name, kind: 'other', status: 'in_progress', raw_input: input, locations: [] }, at, id),
+    ev(sid, 'policy_allowed', { title: name, action: kind, kind, resource: input.file_path ?? input.path ?? null, command: input.command ?? null, rule: kind === 'execute' ? 'cargo-local' : 'workspace-read', reason: '', tool_call_id: id, decided_by: 'harness', policy: 'allow' }, at + 50),
+  ]
+  if (o.output !== undefined) {
+    const output = o.cut ? JSON.stringify(o.output).slice(0, o.cut) : JSON.stringify(o.output)
+    events.push(ev(sid, 'tool_result', { status: o.failed ? 'failed' : 'completed', output, truncated: !!o.cut }, at + ms, id))
+  }
+  return events
+}
+
+function transcriptEvents(sid) {
+  const wt = `/var/lib/tracon/worktrees/orbit-${sid.slice(0, 6)}`
+  const src = (f) => `${wt}/node/src/${f}`
+  const rust = (n) => Array.from({ length: n }, (_, i) => `${String(i + 1).padStart(4)}\t// line ${i + 1}`).join('\n')
+  return [
+    ...opening(sid, { prompt: 'Add per-channel rate limits to the gateway, reusing the ceiling window.' }),
+    ...claudeCall(sid, 'toolu_t1', 'Read', 'read', { file_path: src('gateway/model.rs') }, -840000, 300, { output: rust(40) }),
+    ...claudeCall(sid, 'toolu_t2', 'Read', 'read', { file_path: src('metrics.rs') }, -838000, 200, { output: rust(30) }),
+    ...claudeCall(sid, 'toolu_t3', 'Read', 'read', { file_path: src('gateway/mod.rs'), offset: 200, limit: 80 }, -836000, 250, { output: rust(400), cut: 900 }),
+    ...claudeCall(sid, 'toolu_t4', 'Grep', 'search', { pattern: 'fn ceiling', path: `${wt}/node/src` }, -834000, 400, { output: 'node/src/metrics.rs:118:pub fn ceiling(&self, channel: &str) -> Option<u64> {' }),
+    ...claudeCall(sid, 'toolu_t5', 'Edit', 'edit', { file_path: src('gateway/model.rs'), old_string: 'let used = 0;', new_string: 'let used = window.used(channel);' }, -800000, 600, { output: 'The file node/src/gateway/model.rs has been updated.' }),
+    ...claudeCall(sid, 'toolu_t6', 'Bash', 'execute', { command: 'cargo build -p tracon-node', description: 'Build the node' }, -790000, 48200, {
+      failed: true,
+      output: '   Compiling tracon-node v0.30.0 (/work/node)\nerror[E0425]: cannot find value `window` in this scope\n   --> node/src/gateway/model.rs:212:20\n    |\n212 |         let used = window.used(channel);\n    |                    ^^^^^^ not found in this scope\n\nerror: could not compile `tracon-node` (lib) due to 1 previous error',
+    }),
+    ev(sid, 'message', { text: 'The window lives on the metrics side; taking it from the gateway state instead and building again.' }, -130000),
+    ...claudeCall(sid, 'toolu_t7', 'Edit', 'edit', { file_path: src('gateway/model.rs'), old_string: 'window.used', new_string: 'self.metrics.window().used' }, -120000, 500, { output: 'The file node/src/gateway/model.rs has been updated.' }),
+    ...claudeCall(sid, 'toolu_t8', 'Read', 'read', { file_path: src('metrics.rs'), offset: 100, limit: 40 }, -118000, 200, { output: rust(40) }),
+    ...claudeCall(sid, 'toolu_t9', 'Bash', 'execute', { command: 'cargo test -p tracon-node gateway\n  && cargo clippy -p tracon-node', description: 'Test the gateway' }, -95000, 0),
+  ]
+}
+
 function workTurn(sid, at = -2620000) {
   return [
     ev(sid, 'thought', { text: 'The ceiling check in metrics.rs already counts tokens per channel per day. A limiter can reuse that window instead of keeping its own.' }, at),
@@ -383,6 +421,7 @@ const S = {
   external: session('a0b7a9c8-7547-4819-b658-c7cf5d3c7479', { harness_id: 'external', harness_version: '', harness_agent: 'claude-code', harness_found: null, harness_protocol: null, harness_session_id: 'mcp-7f3a9c', model: 'external', state: 'running', branch: '', repo_path: '', worktree_path: null, tokens_used: 0, budget_tokens: 0, cost_usd: null, context_used: null, context_size: null, policy_version: 12, manifest_digest: null, work_item_id: null, created_ms: -600000, updated_ms: -20000 }),
   legacy: session('d3eadafb-a87a-4b4c-c98b-faf2806fa7ac', { state: 'closed', end_reason: 'phase_done', harness_id: 'claude-acp', harness_version: '0.9.2', harness_found: '0.9.2', harness_agent: 'claude-code-acp', branch: 'feat/early-gateway', archived_ms: -900000000, legacy_ms: -900000000, created_ms: -1200000000, updated_ms: -1190000000 }),
   remote: session('a7d6c9e8-dbad-4e7f-9cbe-8d2b6f4e7ad9', { node_id: PEER, channel: 'work', state: 'running', branch: 'feat/queue-metrics', repo_path: '/srv/repos/platform/orbit', created_ms: -3600000, updated_ms: -1900000 }),
+  transcript: session('b8c7d0e9-1f2a-4b3c-8d4e-5f6a7b8c9d0e', { state: 'running', turn_active: 1, branch: 'feat/rate-limits', created_ms: -900000, updated_ms: -3000 }),
   long: session('fa0e1d2c-3b4a-4596-8778-695a4b3c2d1e', {
     state: 'running',
     branch: LONG_BRANCH,
@@ -565,6 +604,27 @@ export default [
         'GET /api/awake': { held: true, reason: '1 session working', method: 'logind', error: null, last_suspend: null },
       },
     }),
+  },
+  {
+    id: 'sessions-transcript',
+    area: 'sessions',
+    route: `/sessions/${S.transcript.id}`,
+    title: 'Tool calls as a transcript (Claude Code)',
+    note: 'A finished run folded with its duration and its failed build named under it; the open run below has a call still running. Paths come from raw_input, from the worktree.',
+    api: page(S.transcript, { events: transcriptEvents(S.transcript.id) }),
+  },
+  {
+    id: 'sessions-transcript-opened',
+    area: 'sessions',
+    route: `/sessions/${S.transcript.id}`,
+    title: 'Tool calls as a transcript, every run opened',
+    note: 'After pressing o: every run open, three reads under one head, the failed build opened to its output.',
+    api: page(S.transcript, { events: transcriptEvents(S.transcript.id) }),
+    act: async (page) => {
+      await page.keyboard.press('o')
+      await page.locator('details.call.reads > summary').first().click()
+      await page.locator('details.call.crit > summary').first().click()
+    },
   },
   {
     id: 'sessions-waiting-permission',

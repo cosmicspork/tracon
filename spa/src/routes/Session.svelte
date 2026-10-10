@@ -521,7 +521,7 @@
     <div class="banner dim">{unreachable} <b>· the log resumes when {owner?.name ?? 'it'} returns</b></div>
   {/if}
 
-  <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} />
+  <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} toolOutput={store.toolOutput} root={session.worktree_path} />
   <!-- Open by default once the session has ended: that is when what it came
        to is the question. -->
   <OutcomePanel {id} open={isTerminal(session.state) || router.hash === '#outcome'} />
