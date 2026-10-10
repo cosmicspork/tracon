@@ -497,14 +497,22 @@ async fn rerunning_failed_jobs_waits_on_the_operator() {
     let (err, v) = call(&t, &c, "run_rerun", args).await;
     assert!(!err, "{v}");
     assert_eq!(v["run_id"], 900);
+    // The attempt it starts is the one after the run's latest.
+    assert_eq!(v["attempt"], 2);
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1);
+    let calls: Vec<(&str, &str)> = seen
+        .iter()
+        .map(|(method, path, ..)| (method.as_str(), path.as_str()))
+        .collect();
     assert_eq!(
-        (seen[0].0.as_str(), seen[0].1.as_str()),
-        (
-            "POST",
-            "/repos/owner/name/actions/runs/900/rerun-failed-jobs"
-        )
+        calls,
+        [
+            ("GET", "/repos/owner/name/actions/runs/900"),
+            (
+                "POST",
+                "/repos/owner/name/actions/runs/900/rerun-failed-jobs"
+            )
+        ]
     );
 }
 

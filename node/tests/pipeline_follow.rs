@@ -226,3 +226,159 @@ async fn pipeline_wait_returns_when_something_moved() {
     assert_eq!(done["finished"], true);
     assert_eq!(done["status"], "failed");
 }
+
+/// The GitHub run the stub serves: its attempt, status and conclusion, and
+/// its jobs as (id, name, status, conclusion).
+#[derive(Default)]
+struct Run {
+    attempt: i64,
+    status: &'static str,
+    conclusion: Option<&'static str>,
+    jobs: Vec<(i64, &'static str, &'static str, Option<&'static str>)>,
+}
+
+type SharedRun = Arc<Mutex<Run>>;
+
+async fn github_stub(run: SharedRun) -> String {
+    let app = Router::new()
+        .route(
+            "/repos/o/n/actions/runs/{id}",
+            get(
+                |State(r): State<SharedRun>, Path(id): Path<i64>| async move {
+                    let r = r.lock().unwrap();
+                    Json(json!({
+                        "id": id, "name": "ci", "status": r.status, "conclusion": r.conclusion,
+                        "run_attempt": r.attempt, "head_branch": "main", "head_sha": "abc",
+                        "html_url": "https://github.test/o/n/actions/runs/900",
+                    }))
+                },
+            ),
+        )
+        .route(
+            "/repos/o/n/actions/runs/{id}/jobs",
+            get(|State(r): State<SharedRun>| async move {
+                let r = r.lock().unwrap();
+                let jobs: Vec<Value> = r
+                    .jobs
+                    .iter()
+                    .map(|(id, name, status, conclusion)| {
+                        json!({ "id": id, "name": name, "status": status,
+                                "conclusion": conclusion, "steps": [] })
+                    })
+                    .collect();
+                Json(json!({ "total_count": jobs.len(), "jobs": jobs }))
+            }),
+        )
+        .route(
+            "/repos/o/n/actions/runs/{id}/rerun-failed-jobs",
+            post(|| async { (axum::http::StatusCode::CREATED, Json(json!({}))) }),
+        )
+        .with_state(run);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(l, app).await;
+    });
+    base
+}
+
+#[tokio::test]
+async fn a_run_the_session_reran_is_followed_from_the_attempt_it_started() {
+    let h = harness().await;
+    let run = SharedRun::default();
+    *run.lock().unwrap() = Run {
+        attempt: 1,
+        status: "completed",
+        conclusion: Some("failure"),
+        jobs: vec![(31, "test", "completed", Some("failure"))],
+    };
+    let base = github_stub(run.clone()).await;
+    h.tools.broker.write().unwrap().put(
+        "gh",
+        Credential {
+            env: BTreeMap::from([
+                ("GH_TOKEN".to_string(), "t".to_string()),
+                ("GITHUB_API".to_string(), base),
+            ]),
+            channels: vec!["personal".to_string()],
+            ..Credential::default()
+        },
+    );
+    *h.tools.policy.write() = toml::from_str(
+        r#"
+        version = 9
+        [[rule]]
+        id = "test-allow"
+        verdict = "allow"
+        reason = "Under test."
+        kinds = ["tool"]
+        matches = ["run_rerun", "run_wait"]
+        "#,
+    )
+    .unwrap();
+    let node = h.manager.node_id().to_string();
+    h.store
+        .insert_session(&session_row("s1", &node, "personal"))
+        .unwrap();
+    let ctx = CallContext::session("s1", "personal", node);
+
+    let rerun = h
+        .tools
+        .call(&ctx, "run_rerun", &json!({ "repo": "o/n", "run_id": 900 }))
+        .await
+        .unwrap();
+    assert_eq!(rerun["attempt"], 2);
+    assert_eq!(rerun["following"]["run_id"], 900);
+    let follows = h.store.pipelines_followed("n1").unwrap();
+    assert_eq!(follows.len(), 1);
+    assert_eq!(follows[0].provider, "github");
+
+    // GitHub has not begun the new attempt: the old one's failure is not
+    // this one's, and a wait for it does not return finished.
+    assert!(tracon::follow::tick_pipelines(&h.tools).await.is_empty());
+    let waited = h
+        .tools
+        .call(
+            &ctx,
+            "run_wait",
+            &json!({ "repo": "o/n", "run_id": 900, "attempt": 2, "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(waited["finished"], false);
+    let state = waited["state"].as_str().unwrap().to_string();
+
+    *run.lock().unwrap() = Run {
+        attempt: 2,
+        status: "in_progress",
+        conclusion: None,
+        jobs: vec![(41, "test", "in_progress", None)],
+    };
+    let moved = h
+        .tools
+        .call(
+            &ctx,
+            "run_wait",
+            &json!({ "repo": "o/n", "run_id": 900, "attempt": 2, "since": state }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved["changed"], true);
+    assert_eq!(moved["run"]["attempt"], 2);
+    assert!(tracon::follow::tick_pipelines(&h.tools).await.is_empty());
+
+    *run.lock().unwrap() = Run {
+        attempt: 2,
+        status: "completed",
+        conclusion: Some("success"),
+        jobs: vec![(41, "test", "completed", Some("success"))],
+    };
+    let done = tracon::follow::tick_pipelines(&h.tools).await;
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].changes, ["`test` passed", "run passed"]);
+    assert!(done[0].pushed);
+    assert!(
+        h.store.pipelines_followed("n1").unwrap().is_empty(),
+        "a finished run is no longer followed"
+    );
+}

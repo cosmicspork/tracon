@@ -497,8 +497,9 @@ which you are asked about like any other comment. CI reads the same on either
 forge: a run's jobs and the step that failed (`run_status` with `run_id` /
 `pipeline_status`), the runs at an exact commit (`run_status` with `sha` /
 `pipeline_list_by_sha`), and the end of a job's log (`run_logs` / `job_trace`, 16 KiB
-unless asked, at most 64) are unattended; rerunning a run's failed jobs (`run_rerun`)
-or playing a job (`job_play`) is asked. `tracon provenance <sha>`
+unless asked, at most 64) are unattended, and so is waiting for one to move (`run_wait` /
+`pipeline_wait`); rerunning a run's failed jobs (`run_rerun`) or playing a job
+(`job_play`) is asked, and the node follows the run or pipeline it started. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 

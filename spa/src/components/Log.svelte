@@ -146,7 +146,7 @@
         {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
         {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}
         {#if changes.length}
-          <div class="mark" class:crit={e.payload.status === 'failed'}>pipeline {e.payload.pipeline_id} · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
+          <div class="mark" class:crit={e.payload.status === 'failed'}>{e.payload.provider === 'github' ? 'run' : 'pipeline'} {e.payload.pipeline_id} · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
         {/if}
       {:else if e.kind === 'work_closed'}
         <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>

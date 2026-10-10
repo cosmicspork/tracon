@@ -535,7 +535,8 @@ impl Tools {
             | github::PR_REPLY
             | github::PR_FOR_BRANCH
             | github::RUN_LOGS
-            | github::RUN_RERUN => {
+            | github::RUN_RERUN
+            | github::RUN_WAIT => {
                 github::call(
                     &self.broker,
                     &self.http,
@@ -556,9 +557,10 @@ impl Tools {
             other => Err(format!("no tool named {other}")),
         };
         let result = match (name, result) {
-            (gitlab::PIPELINE_RUN | gitlab::JOB_PLAY | gitlab::DEPLOY, Ok(started)) => {
-                Ok(crate::follow::subscribe(self, ctx, name, args, started).await)
-            }
+            (
+                gitlab::PIPELINE_RUN | gitlab::JOB_PLAY | gitlab::DEPLOY | github::RUN_RERUN,
+                Ok(started),
+            ) => Ok(crate::follow::subscribe(self, ctx, name, args, started).await),
             (_, result) => result,
         };
         if let Some(ActionRecord::New(id)) = action_record {

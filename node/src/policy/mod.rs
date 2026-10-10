@@ -879,6 +879,7 @@ mod tests {
             "pr_status",
             "run_status",
             "run_logs",
+            "run_wait",
             "pr_threads",
             "pr_for_branch",
             "mr_discussions",
