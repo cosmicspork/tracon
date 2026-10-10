@@ -46,7 +46,7 @@ export function refHref(channel: string, ref: BriefRef): string | null {
     case 'doc':
       return `/docs/${channel}/${ref.value}`
     case 'work':
-      return `/work/${ref.value}`
+      return `/tasks/${ref.value}`
     case 'session':
       return `/sessions/${ref.value}`
     case 'url':

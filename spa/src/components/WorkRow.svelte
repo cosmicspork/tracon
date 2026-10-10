@@ -24,7 +24,7 @@
   )
 </script>
 
-<a class="row {state}" href={state === 'insession' && item.session_id ? `/sessions/${item.session_id}` : `/work/${item.id}`}>
+<a class="row {state}" href={state === 'insession' && item.session_id ? `/sessions/${item.session_id}` : `/tasks/${item.id}`}>
   <span class="bar"></span>
   <span class="mono pri" class:hi={item.priority >= 5}>p{item.priority} · {formatAge(item.created_ms, clock.now)}</span>
   <span class="t">

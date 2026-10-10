@@ -23,6 +23,7 @@
   import DataHeld from '../components/settings/DataHeld.svelte'
   import Repositories from '../components/settings/Repositories.svelte'
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
+  import NodeList from '../components/settings/NodeList.svelte'
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
   import Card from '../components/settings/Card.svelte'
@@ -1013,6 +1014,7 @@
       <small>Which hub a node belongs to is decided on the serving node itself.</small>
     {/if}
   </Card>
+  <NodeList />
   <MeshAdministration />
   <HubRollups />
 {/if}

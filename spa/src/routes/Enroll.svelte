@@ -8,7 +8,7 @@
   const local = $derived(store.node?.loopback ?? false)
 </script>
 
-<div class="h4"><a class="lnk" href="/nodes">‹ Nodes</a> Enroll a node</div>
+<div class="h4"><a class="lnk" href="/settings#mesh">‹ Mesh</a> Enroll a node</div>
 <p class="lede">
   Add a peer to the mesh without granting it live access to this machine. A node always keeps its own host configuration, provider logins, browser subscriptions, and running sessions.
 </p>
@@ -51,7 +51,7 @@
       Compare the joining node’s fingerprint with the fingerprint it prints through a separate trusted path. Admit only an exact match. Cancelling a mismatch leaves no persistent invitation or live connection.
     </p>
     <p class="note">
-      Once admitted, the node is a connected mesh peer with only <code>@mesh</code> and the selected channel keys. It manages its own compatibility, providers, and readiness; view that operational state on <a href="/nodes">Nodes</a>.
+      Once admitted, the node is a connected mesh peer with only <code>@mesh</code> and the selected channel keys. It manages its own compatibility, providers, and readiness; view that operational state in <a href="/settings#mesh">Settings › Mesh</a>.
     </p>
   </section>
 {/if}

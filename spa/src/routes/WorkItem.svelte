@@ -91,7 +91,7 @@
   function remove() {
     return act(async () => {
       await api.deleteWork(id)
-      router.go('/work')
+      router.go('/tasks')
     })
   }
   function phaseLabel(s: Session): string {
@@ -110,7 +110,7 @@
 {:else if !item}
   <div class="banner crit">not found <b>· {error ?? `no work item ${id.slice(0, 8)}`}</b></div>
 {:else}
-  <div class="h4"><a class="lnk" href="/work">‹ Work</a></div>
+  <div class="h4"><a class="lnk" href="/tasks">‹ Tasks</a></div>
   <div class="head {ws}">
     <span class="bar"></span>
     <span class="t">
@@ -133,14 +133,14 @@
     <dd class="m">
       {#if item.deps.length === 0}nothing{:else}
         {#each item.deps as d (d)}
-          <span class="dep"><a href="/work/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if !surface.phone && item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
+          <span class="dep"><a href="/tasks/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if !surface.phone && item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
         {/each}
       {/if}
       {#if item.readiness.state === 'blocked'}<span class="why"> · {blockersLine(item.readiness.by, titles)}</span>{/if}
     </dd>
     {#if item.discovered_from}
       <dt>Discovered from</dt>
-      <dd class="m"><a href="/work/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by session '}<a href="/sessions/{item.discovered_by_session}">{short(item.discovered_by_session)}</a>{/if}</dd>
+      <dd class="m"><a href="/tasks/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by session '}<a href="/sessions/{item.discovered_by_session}">{short(item.discovered_by_session)}</a>{/if}</dd>
     {/if}
     <dt>Sessions</dt>
     <dd class="m">
@@ -174,7 +174,7 @@
     <div class="h5">Discovered from this item <b>{discovered.length}</b></div>
     <div class="chain">
       {#each discovered as d (d.id)}
-        <span>{short(item.id)}</span><span class="arr">→</span><a href="/work/{d.id}">{short(d.id)} {d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>
+        <span>{short(item.id)}</span><span class="arr">→</span><a href="/tasks/{d.id}">{short(d.id)} {d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>
       {/each}
     </div>
   {/if}

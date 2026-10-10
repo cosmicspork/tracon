@@ -10,7 +10,7 @@
   import WorkItem from './routes/WorkItem.svelte'
   import Promotion from './routes/Promotion.svelte'
   import Home from './routes/Home.svelte'
-  import Nodes from './routes/Nodes.svelte'
+  import More from './routes/More.svelte'
   import Sessions from './routes/Sessions.svelte'
   import Settings from './routes/Settings.svelte'
   import Session from './routes/Session.svelte'
@@ -23,6 +23,7 @@
   import { shellSessionId } from './lib/opencode'
   import { clock } from './lib/clock.svelte'
   import { formatAge } from './lib/format'
+  import { servingBanner } from './lib/nodes'
   import { remedy } from './lib/refusal'
   import { router } from './lib/router.svelte'
   import { store } from './lib/store.svelte'
@@ -87,21 +88,30 @@
   const docPreviewRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)\/preview$/))
   const docRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/))
   const docEdit = $derived(Boolean(docRef?.[3]))
-  const workId = $derived(router.path.match(/^\/work\/([^/]+)/)?.[1] ?? null)
+  const workId = $derived(router.path.match(/^\/tasks\/([^/]+)/)?.[1] ?? null)
+  /** Which rail entry the screen belongs to. Enrolling a node is part of Mesh. */
   const nav = $derived(
-    settings
+    settings || enroll
       ? 'settings'
-      : router.path === '/nodes' || enroll
-        ? 'nodes'
-        : router.path.startsWith('/docs')
-          ? 'docs'
-          : router.path.startsWith('/memories')
-            ? 'memories'
-            : router.path.startsWith('/work') || router.path.startsWith('/sessions') ||
-                router.path.startsWith('/evidence') || router.path === '/metrics'
-              ? 'work'
-              : 'home'
+      : router.path.startsWith('/docs')
+        ? 'docs'
+        : router.path.startsWith('/memories')
+          ? 'memories'
+          : router.path.startsWith('/tasks')
+            ? 'tasks'
+            : router.path.startsWith('/sessions')
+              ? 'sessions'
+              : router.path.startsWith('/evidence')
+                ? 'evidence'
+                : router.path === '/usage'
+                  ? 'usage'
+                  : router.path === '/more'
+                    ? 'more'
+                    : 'home'
   )
+  /** The phone's More tab stands for every entry its bar has no room for. */
+  const more = $derived(['memories', 'evidence', 'usage', 'settings', 'more'].includes(nav))
+  const cannotRun = $derived(servingBanner(store.nodes))
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const staleVersion = $derived(
     staleInterface(__TRACON_VERSION__, store.node?.application_version) ? store.node?.application_version : null,
@@ -142,9 +152,13 @@
       <span class="lbl">Home</span>
       {#if waiting > 0}<span class="n">{waiting}</span>{/if}
     </a>
-    <a href="/work" class:on={nav === 'work'}>
+    <a href="/tasks" class:on={nav === 'tasks'}>
       <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
-      <span class="lbl">Work</span>
+      <span class="lbl">Tasks</span>
+    </a>
+    <a href="/sessions" class:on={nav === 'sessions'}>
+      <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 10l3 2-3 2M13 14h3" /></svg>
+      <span class="lbl">Sessions</span>
     </a>
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
@@ -154,9 +168,13 @@
       <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
       <span class="lbl">Memories</span>
     </a>
-    <a href="/nodes" class:on={nav === 'nodes'}>
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
-      <span class="lbl">Nodes</span>
+    <a href="/evidence" class:on={nav === 'evidence'}>
+      <svg viewBox="0 0 24 24"><path d="M9 4h6l1 3H8z" /><path d="M6 7h12v13H6z" /><path d="M9 12l2 2 4-4" /></svg>
+      <span class="lbl">Evidence</span>
+    </a>
+    <a href="/usage" class:on={nav === 'usage'}>
+      <svg viewBox="0 0 24 24"><path d="M5 19V11M10 19V5M15 19v-6M20 19V8" /></svg>
+      <span class="lbl">Usage</span>
     </a>
     <span class="sp"></span>
     <a href="/settings" class:on={nav === 'settings'}>
@@ -190,14 +208,6 @@
   </nav>
 
   <main>
-    {#if nav === 'work'}
-      <nav class="work-nav" aria-label="Work navigation">
-        <a href="/work" class:on={router.path.startsWith('/work')}>Tasks</a>
-        <a href="/sessions" class:on={router.path.startsWith('/sessions')}>Sessions</a>
-        <a href="/evidence" class:on={router.path.startsWith('/evidence')}>Evidence</a>
-        <a href="/metrics" class:on={router.path === '/metrics'}>Usage</a>
-      </nav>
-    {/if}
     {#if !store.connected}
       <div class="banner crit">Connection lost <b>· reconnecting. Saved work remains on the node; keep this page open to preserve unsent text.</b></div>
     {/if}
@@ -211,6 +221,9 @@
           <p>{remedy(store.node.failed_check)}</p>
         </details>
       </div>
+    {/if}
+    {#if cannotRun}
+      <div class="banner">This node cannot run tasks <b>· {cannotRun.detail}</b> <a href={cannotRun.href}>{cannotRun.action}</a></div>
     {/if}
     {#if staleVersion}
       <div class="banner">
@@ -236,14 +249,14 @@
       <Sessions />
     {:else if enroll}
       <Enroll />
-    {:else if router.path === '/metrics'}
+    {:else if router.path === '/usage'}
       <Metrics />
-    {:else if nav === 'nodes'}
-      <Nodes />
     {:else if workId}
       <WorkItem id={workId} />
-    {:else if router.path === '/work'}
+    {:else if router.path === '/tasks'}
       <Work />
+    {:else if nav === 'more'}
+      <More />
     {:else if router.path === '/evidence'}
       <Evidence />
     {:else if docRef}
@@ -266,21 +279,21 @@
       <span>Home</span>
       {#if waiting > 0}<i class="dot"></i>{/if}
     </a>
-    <a href="/work" class:on={nav === 'work'}>
+    <a href="/tasks" class:on={nav === 'tasks'}>
       <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
-      <span>Work</span>
+      <span>Tasks</span>
+    </a>
+    <a href="/sessions" class:on={nav === 'sessions'}>
+      <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 10l3 2-3 2M13 14h3" /></svg>
+      <span>Sessions</span>
     </a>
     <a href="/docs" class:on={nav === 'docs'}>
       <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
       <span>Documents</span>
     </a>
-    <a href="/nodes" class:on={nav === 'nodes'}>
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="6" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6.5 7.5l4 3M17.5 7.5l-4 3M12 14.5v2.5" /></svg>
-      <span>Nodes</span>
-    </a>
-    <a href="/settings" class:on={nav === 'settings'}>
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
-      <span>Settings</span>
+    <a href="/more" class:on={more}>
+      <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.3" /><circle cx="12" cy="12" r="1.3" /><circle cx="18" cy="12" r="1.3" /></svg>
+      <span>More</span>
     </a>
   </nav>
 </div>
@@ -318,15 +331,11 @@
   main { padding: 18px 22px 22px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   /* Bottom tabs are the phone's navigation; the rail is the desktop's. */
   .tabs { display: none; }
-  .work-nav { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--rule); }
-  .work-nav a { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 12px; border-radius: 4px; color: var(--ink2); text-decoration: none; font-weight: 500; }
-  .work-nav a.on { color: var(--ink); background: var(--s2); }
 
   @media (max-width: 700px) {
     .shell, .shell.narrow { grid-template-columns: minmax(0, 1fr); }
     .rail { display: none; }
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
-    .work-nav a { min-height: 44px; }
     .tabs {
       display: grid;
       grid-template-columns: repeat(5, minmax(0, 1fr));

@@ -112,7 +112,7 @@
           {#if item.work_items.length || item.reviews.length}
             <div class="relations">
               {#each item.work_items as work (work.id)}
-                <a href="/work/{encodeURIComponent(work.id)}">Task · {work.title}</a>
+                <a href="/tasks/{encodeURIComponent(work.id)}">Task · {work.title}</a>
               {/each}
               {#each item.reviews as review (review.id)}
                 <a href="/reviews/{encodeURIComponent(review.id)}">Review · {review.title}</a>

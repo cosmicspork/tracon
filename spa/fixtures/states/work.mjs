@@ -445,7 +445,7 @@ const states = [
   {
     id: 'work-list',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Ledger: ready, blocked, in session, closed',
     note: 'every row state at once: ready with and without a plan, blocked by an open item and by an unknown one, in session with its holder, p5 priority colour, closed count',
     api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
@@ -453,7 +453,7 @@ const states = [
   {
     id: 'work-list-closed-shown',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Ledger with closed items shown',
     api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
     act: async (page) => page.getByRole('button', { name: 'Show' }).click(),
@@ -461,14 +461,14 @@ const states = [
   {
     id: 'work-empty',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'No work on the channel',
     api: { '/api/work': { items: [] } },
   },
   {
     id: 'work-only-closed',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Every item closed',
     note: 'header says 0 open · 2 closed; the empty line reads as if nothing was ever added',
     api: { '/api/work': { items: ledger.filter((i) => i.state === 'closed') } },
@@ -476,7 +476,7 @@ const states = [
   {
     id: 'work-all-blocked',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Every open item blocked',
     api: {
       '/api/work': {
@@ -491,14 +491,14 @@ const states = [
   {
     id: 'work-all-in-session',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Every open item already in a session',
     api: { '/api/work': { items: [ledger.find((i) => i.id === ID.retry)] }, '/api/sessions': sessionsWithRun },
   },
   {
     id: 'work-filtered-empty',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Switched to a channel with no work',
     note: 'channel select on "work", which has nothing',
     api: { '/api/work': (req) => ({ items: req.query.channel === 'work' ? [] : ledger }) },
@@ -507,7 +507,7 @@ const states = [
   {
     id: 'work-many',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Forty items, long titles',
     note: 'ellipsis on titles and the detail line; priority column width at p10+',
     api: {
@@ -532,7 +532,7 @@ const states = [
   {
     id: 'work-long-unbroken',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Unbroken title strings',
     note: 'a title that is one long token; ellipsis must hold on phone',
     api: {
@@ -547,7 +547,7 @@ const states = [
   {
     id: 'work-loading',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Ledger still loading',
     note: 'The list request held open: says it is loading, with no count and no empty-state copy.',
     api: { '/api/work': never },
@@ -555,14 +555,14 @@ const states = [
   {
     id: 'work-load-error',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Ledger failed to load',
     api: { '/api/work': err(500, 'database is locked') },
   },
   {
     id: 'work-load-retried',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Ledger failed once, then Retry',
     note: 'The first list request fails; Retry asks again and the ledger replaces the error.',
     api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
@@ -575,7 +575,7 @@ const states = [
   {
     id: 'work-refresh-error',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'Ledger loaded, then a refresh failed',
     note: 'A work change on the stream refetches and that request fails: the rows stay, under "Could not refresh work" with a Retry.',
     api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
@@ -589,7 +589,7 @@ const states = [
   {
     id: 'work-new-form',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'New work item form',
     api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
     act: async (page) => {
@@ -602,7 +602,7 @@ const states = [
   {
     id: 'work-new-form-refused',
     area: 'work',
-    route: '/work',
+    route: '/tasks',
     title: 'New work item refused',
     note: 'an add that fails shows its error under the heading "Could not load work"',
     api: {
@@ -621,7 +621,7 @@ const states = [
   {
     id: 'work-item-new',
     area: 'work',
-    route: `/work/${ID.export}`,
+    route: `/tasks/${ID.export}`,
     title: 'New item: no plan, nothing run, no brief or context',
     since: '#385',
     note: 'continuation says plan it, and nothing else, since Execute is disabled with "needs a plan"; empty brief, criteria, context and evidence; discovered-from line',
@@ -632,7 +632,7 @@ const states = [
   {
     id: 'work-item-planned',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Planned item with brief, criteria, context, evidence',
     since: '#385',
     note: 'continuation "The plan is written: execute it." — the node offers continue_from the plan session, so the primary button is Continue, which the node carries on as an execute session in the plan\'s workspace. Brief, criteria, context populated; evidence empty (only a plan ran)',
@@ -652,7 +652,7 @@ const states = [
   {
     id: 'work-item-in-session',
     area: 'work',
-    route: `/work/${ID.retry}`,
+    route: `/tasks/${ID.retry}`,
     title: 'In session: a session is working on it',
     since: '#385',
     note: 'continuation "watch" with an Open link; Open session primary action',
@@ -671,7 +671,7 @@ const states = [
   {
     id: 'work-item-waiting-on-you',
     area: 'work',
-    route: `/work/${ID.retry}`,
+    route: `/tasks/${ID.retry}`,
     title: 'In session, waiting on the operator',
     since: '#385',
     note: 'next kind "answer" (wait-coloured edge), blockers line, decisions already answered',
@@ -700,7 +700,7 @@ const states = [
   {
     id: 'work-item-paused',
     area: 'work',
-    route: `/work/${ID.retry}`,
+    route: `/tasks/${ID.retry}`,
     title: 'In session, paused by the node',
     since: '#384',
     note: 'next "resume" with the reason the node paused it',
@@ -721,7 +721,7 @@ const states = [
   {
     id: 'work-item-blocked',
     area: 'work',
-    route: `/work/${ID.alert}`,
+    route: `/tasks/${ID.alert}`,
     title: 'Blocked: waits on an open item, an unknown one, and a cycle',
     since: '#385',
     note: 'Waits on list with × removers; continuation "unblock"; Plan/Execute not offered',
@@ -742,7 +742,7 @@ const states = [
   {
     id: 'work-item-node-restart',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Cut off by a node restart: continue offered',
     since: '#375',
     note: 'Continue primary, Change approach secondary, Abandon; attempt reads "node restarted"',
@@ -762,7 +762,7 @@ const states = [
   {
     id: 'work-item-failed',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Attempt failed: change approach comes first',
     since: '#385',
     note: 'next "change_approach" edge, Change approach primary, no plain Continue; continued lineage "continues 8b4e0d2a"; reviews in evidence',
@@ -797,7 +797,7 @@ const states = [
   {
     id: 'work-item-change-approach-form',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Change approach: direction typed',
     since: '#385',
     api: itemApi(planned, {
@@ -817,7 +817,7 @@ const states = [
   {
     id: 'work-item-abandon-confirm',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Abandon: the confirm step',
     since: '#385',
     api: itemApi(planned, {
@@ -836,7 +836,7 @@ const states = [
   {
     id: 'work-item-continue-refused',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Continue refused by the node',
     since: '#385',
     api: itemApi(planned, {
@@ -853,7 +853,7 @@ const states = [
   {
     id: 'work-item-provider-exhausted',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Attempt ended because the provider was exhausted',
     since: '#384',
     note: 'attempt state reads "provider exhausted"; next asks for a change of approach',
@@ -870,7 +870,7 @@ const states = [
   {
     id: 'work-item-done',
     area: 'work',
-    route: `/work/${ID.cookies}`,
+    route: `/tasks/${ID.cookies}`,
     title: 'Closed by its session, published',
     since: '#385',
     note: 'green head, Closed by session line, next "done", published review in evidence, Reopen only',
@@ -907,7 +907,7 @@ const states = [
   {
     id: 'work-item-abandoned',
     area: 'work',
-    route: `/work/${ID.docsync}`,
+    route: `/tasks/${ID.docsync}`,
     title: 'Closed without a session (abandoned)',
     since: '#385',
     api: (() => {
@@ -925,7 +925,7 @@ const states = [
   {
     id: 'work-item-continuation-error',
     area: 'work',
-    route: `/work/${ID.export}`,
+    route: `/tasks/${ID.export}`,
     title: 'Continuation view unavailable',
     since: '#385',
     api: itemApi(ledger.find((i) => i.id === ID.export), {
@@ -935,21 +935,21 @@ const states = [
   {
     id: 'work-item-not-found',
     area: 'work',
-    route: '/work/0000deadbeef0000',
+    route: '/tasks/0000deadbeef0000',
     title: 'No such item',
     api: { '/api/work/0000deadbeef0000': err(404, 'no work item 0000deadbeef0000') },
   },
   {
     id: 'work-item-loading',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Item loading',
     api: { [`/api/work/${ID.limits}`]: never },
   },
   {
     id: 'work-item-close-refused',
     area: 'work',
-    route: `/work/${ID.export}`,
+    route: `/tasks/${ID.export}`,
     title: 'Closing refused',
     note: 'item actions are desktop-only',
     sizes: ['desktop'],
@@ -961,7 +961,7 @@ const states = [
   {
     id: 'work-item-long',
     area: 'work',
-    route: `/work/${ID.long}`,
+    route: `/tasks/${ID.long}`,
     title: 'Long title, body, deps, branch and many attempts',
     since: '#385',
     note: 'wrapping of the head, Waits on list, attempt rows, workspace branch and the discovered chain',
@@ -1008,7 +1008,7 @@ const states = [
   {
     id: 'work-item-brief-adding',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Brief: adding an observed line with a bad reference',
     note: 'both validation notices: "Not a reference" and "An observation with nothing to point at"',
     sizes: ['desktop'],
@@ -1023,7 +1023,7 @@ const states = [
   {
     id: 'work-item-brief-all-inferred',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Brief with nothing observed, most sections absent',
     note: '"Nothing in this brief was observed" notice, absent sections, the extra Markdown block',
     api: itemApi(planned, {
@@ -1054,7 +1054,7 @@ const states = [
   {
     id: 'work-item-brief-unreadable',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Brief pointer this node cannot read',
     api: itemApi(planned, { sessions: [planSession] }),
   },
@@ -1063,7 +1063,7 @@ const states = [
   {
     id: 'work-item-criteria-retired',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Criteria: retired scenario/observation links, duplicate, earlier and orphaned verdicts',
     since: '#398',
     note: 'retired links say they settle nothing; duplicate disables its actions; open questions and reworded-verdict sections',
@@ -1115,7 +1115,7 @@ const states = [
   {
     id: 'work-item-criteria-link-form',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Criteria: say what settles it (check only)',
     since: '#398',
     note: 'the link form no longer offers a kind picker: provenance select and a check command',
@@ -1129,7 +1129,7 @@ const states = [
   {
     id: 'work-item-criteria-judge-form',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Criteria: judging with nothing captured',
     note: 'verdict form with the "about the criterion itself" notice',
     sizes: ['desktop'],
@@ -1156,7 +1156,7 @@ const states = [
   {
     id: 'work-item-criteria-none-stated',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Criteria: brief states none',
     api: itemApi(planned, {
       sessions: [planSession],
@@ -1169,7 +1169,7 @@ const states = [
   {
     id: 'work-item-context-attempts-open',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Context: each attempt expanded',
     note: 'changes and per-document delivery (full, cut short, left out)',
     api: itemApi(planned, { sessions: [planSession], brief: brief(planned), criteria: criteria(planned), context: contextFull(planned) }),
@@ -1178,7 +1178,7 @@ const states = [
   {
     id: 'work-item-context-adding',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Context: adding a document',
     sizes: ['desktop'],
     api: itemApi(planned, { sessions: [planSession], brief: brief(planned), criteria: criteria(planned), context: contextFull(planned) }),
@@ -1191,7 +1191,7 @@ const states = [
   {
     id: 'work-item-context-empty-selection',
     area: 'work',
-    route: `/work/${ID.limits}`,
+    route: `/tasks/${ID.limits}`,
     title: 'Context: selection document with no picks',
     api: itemApi(planned, {
       sessions: [planSession], brief: brief(planned), criteria: criteria(planned),

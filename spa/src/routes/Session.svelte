@@ -380,7 +380,7 @@
       >
     {/if}
     {#if session.work_item_id}
-      <a class="mono" href="/work/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
+      <a class="mono" href="/tasks/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
     {/if}
     {#if canOpenOpencode}
       <button

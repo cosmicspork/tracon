@@ -162,6 +162,28 @@ export function eligibleNodes(nodes: NodeInfo[], channels: Record<string, string
   return nodes.filter((node) => (!bound || bound.includes(node.id)) && nodeReadiness(node).canRun)
 }
 
+/**
+ * Why the serving node cannot take work, for a banner on every screen, or
+ * null. A refused isolation check has a banner of its own. A node offering no
+ * model is worth one only while no other node can run either: a controller
+ * that sends its work to a ready peer is set up as intended.
+ */
+export function servingBanner(nodes: NodeInfo[]): { detail: string; href: string; action: string } | null {
+  const self = nodes.find((node) => node.is_self)
+  if (!self || self.state === 'refused') return null
+  const readiness = nodeReadiness(self)
+  if (readiness.canRun) return null
+  if (readiness.label === 'No model offered') {
+    if (nodes.some((node) => !node.is_self && nodeReadiness(node).canRun)) return null
+    return { detail: 'no connected provider offers it a model.', href: '/settings#connections', action: 'Connect a provider' }
+  }
+  return {
+    detail: readiness.detail.replace(/^This node /, 'it ').replace(/^This /, 'the '),
+    href: '/settings#maintenance',
+    action: 'Review setup',
+  }
+}
+
 export function hubBanner(mesh: MeshState | null): string | null {
   if (!mesh || mesh.hub.state !== 'unreachable') return null
   return 'hub unreachable'

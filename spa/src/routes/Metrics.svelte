@@ -38,7 +38,7 @@
 
 <LoadGate status={usage} what="usage" onretry={() => usage.retry()} retrying={usage.pending}>
   {#if rows.length === 0}
-    <div class="empty">No usage is recorded for this window. <a class="lnk" href="/work">Open Work</a> to create a clear outcome, then start a session.</div>
+    <div class="empty">No usage is recorded for this window. <a class="lnk" href="/tasks">Open Tasks</a> to create a clear outcome, then start a session.</div>
   {:else}
     <div class="workflow">
       {#each rows as r (r.channel)}

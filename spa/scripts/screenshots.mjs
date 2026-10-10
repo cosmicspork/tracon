@@ -20,8 +20,8 @@ mkdirSync(out, { recursive: true })
 const shots = [
   { path: '/', name: 'home' },
   { path: '/sessions/s-run', name: 'session' },
-  { path: '/work', name: 'work' },
-  { path: '/nodes', name: 'nodes' },
+  { path: '/tasks', name: 'work' },
+  { path: '/settings#mesh', name: 'nodes' },
   { path: '/settings', name: 'settings' },
 ]
 const sizes = [

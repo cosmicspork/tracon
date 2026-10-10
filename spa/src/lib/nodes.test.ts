@@ -8,6 +8,7 @@ import {
   nodeHarnesses,
   nodeLabel,
   nodeReadiness,
+  servingBanner,
   unreachableReason,
   upsertNode,
 } from './nodes'
@@ -161,4 +162,17 @@ test('only a model either harness runs offers a choice', () => {
   expect(harnessTag({ value: 'a', name: 'a', harnesses: ['claude'] })).toBe('claude')
   expect(harnessTag({ value: 'b', name: 'b', harnesses: ['opencode', 'claude'] })).toBe('either')
   expect(harnessTag({ value: 'c', name: 'c' })).toBeNull()
+})
+
+test('a serving node that cannot run says so, unless a ready peer runs instead', () => {
+  const model = { value: 'anthropic/x', name: 'X' }
+  const self = node({ id: 'me', is_self: true, models: [model] })
+  expect(servingBanner([self])).toBeNull()
+  expect(servingBanner([{ ...self, state: 'refused' }])).toBeNull()
+  const mismatched = { ...self, harness: { id: 'claude', pinned: '2.5.0', found: '2.3.1', mismatch: true } }
+  expect(servingBanner([mismatched])?.detail).toBe('it expects 2.5.0, but found 2.3.1.')
+  expect(servingBanner([{ ...self, state: 'unknown' }])?.href).toBe('/settings#maintenance')
+  const bare = { ...self, models: [] }
+  expect(servingBanner([bare])?.href).toBe('/settings#connections')
+  expect(servingBanner([bare, node({ id: 'p', models: [model] })])).toBeNull()
 })

@@ -239,7 +239,7 @@
     {#if search.trim() || channel.trim() || runner.trim()}
       <div class="empty">No captured candidate evidence matches these filters. <button class="lnk" type="button" onclick={clearFilters}>Clear filters</button></div>
     {:else}
-      <div class="empty">No candidate evidence has been captured on this node. Submit a committed change for review, or choose a shared channel and another runner. <a href="/work">Open Work</a></div>
+      <div class="empty">No candidate evidence has been captured on this node. Submit a committed change for review, or choose a shared channel and another runner. <a href="/tasks">Open Tasks</a></div>
     {/if}
   {:else}
     <div class="candidate-list">
@@ -252,7 +252,7 @@
           {#if item.work_items.length || item.reviews.length}
             <div class="relations">
               {#each item.work_items as work (work.id)}
-                <a href="/work/{encodeURIComponent(work.id)}">Task · {work.title}</a>
+                <a href="/tasks/{encodeURIComponent(work.id)}">Task · {work.title}</a>
               {/each}
               {#each item.reviews as review (review.id)}
                 <a href="/reviews/{encodeURIComponent(review.id)}">Review · {review.title}</a>

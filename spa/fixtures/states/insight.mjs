@@ -1,4 +1,4 @@
-// Evidence, Usage, Nodes and Memories: the screens that report what the node
+// Evidence, Usage, the node list in Settings › Mesh, and Memories: the screens that report what the node
 // observed rather than drive work. api.json has no fixture for metrics,
 // memories, evidence or the data inventory, and its /api/mesh predates most of
 // MeshState's fields, so every state here brings its own.
@@ -120,8 +120,14 @@ const data = (total) => ({
   ],
 })
 
-/** The calls the Nodes screen makes, with overrides on top. */
+/** The calls Settings › Mesh makes, where the node list lives, with overrides
+    on top. Administrator access is locked: these states are about the nodes. */
 const nodesApi = (o = {}) => ({
+  '/api/config': { node_name: 'laptop', running: { harness_id: 'claude', harness_version: '2.5.0', node_name: 'laptop' }, external: { enabled: false } },
+  '/api/authority/grants': { policy: { version: 0, rules: [], trusted: false }, grants: [] },
+  '/api/admin/access': { authenticated: false, token_configured: true, local: true },
+  '/api/admin/mesh': err(401, 'administrator access required'),
+  '/api/mesh/rollups': hang,
   '/api/node': o.self ?? self,
   '/api/nodes': o.nodes ?? [self, pod],
   '/api/mesh': o.mesh ?? meshConnected,
@@ -619,7 +625,7 @@ export default [
   {
     id: 'insight-metrics-populated',
     area: 'insight',
-    route: '/metrics',
+    route: '/usage',
     title: 'Usage: two channels',
     note: 'Cards, table, unpriced cost, the node note under the heading.',
     api: { '/api/metrics': metricsBody(typicalMetrics) },
@@ -627,7 +633,7 @@ export default [
   {
     id: 'insight-metrics-loading',
     area: 'insight',
-    route: '/metrics',
+    route: '/usage',
     title: 'Usage: request still in flight',
     note: 'Says it is loading, not that no usage is recorded.',
     api: { '/api/metrics': hang },
@@ -635,21 +641,21 @@ export default [
   {
     id: 'insight-metrics-empty',
     area: 'insight',
-    route: '/metrics',
+    route: '/usage',
     title: 'Usage: nothing recorded in the window',
     api: { '/api/metrics': metricsBody([]) },
   },
   {
     id: 'insight-metrics-error',
     area: 'insight',
-    route: '/metrics',
+    route: '/usage',
     title: 'Usage: request fails',
     api: { '/api/metrics': err(500, 'metrics query failed: no such column: turn_usage.awake_ms') },
   },
   {
     id: 'insight-metrics-many',
     area: 'insight',
-    route: '/metrics',
+    route: '/usage',
     title: 'Usage: many channels, huge and zero values',
     note: 'Long channel name in card heading and first column, billions of tokens, 1000h+ durations, all-null row.',
     api: { '/api/metrics': metricsBody(manyMetrics) },
@@ -657,7 +663,7 @@ export default [
   {
     id: 'insight-metrics-7d-methodology',
     area: 'insight',
-    route: '/metrics',
+    route: '/usage',
     title: 'Usage: 7-day window, methodology open',
     note: 'Active window underline on 7d; the expanded explanation.',
     api: {
@@ -674,7 +680,7 @@ export default [
   {
     id: 'insight-nodes-single',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: this machine only, no hub',
     since: '#402',
     note: '"holds 3.4 GB" link on the serving node; heading says no hub configured; rail foot "pair a hub".',
@@ -683,7 +689,7 @@ export default [
   {
     id: 'insight-nodes-hub-connected',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: hub connected, one peer',
     since: '#402',
     note: 'Peer rows never show "holds"; running/awaiting counts per node.',
@@ -692,7 +698,7 @@ export default [
   {
     id: 'insight-nodes-hub-unreachable',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: hub unreachable, peers stale',
     note: 'Dim banner, rail foot "hub down 31m", peers dimmed with last seen.',
     api: nodesApi({
@@ -707,7 +713,7 @@ export default [
   {
     id: 'insight-nodes-several',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: several peers in every state',
     note: 'Ready, offline, isolation refused, runtime mismatch, isolation unknown, no model offered (provider disconnected).',
     api: nodesApi({
@@ -747,7 +753,7 @@ export default [
   {
     id: 'insight-nodes-mismatch',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: one harness mismatched, the other fine',
     note: 'Warn colouring when only one of two harnesses mismatches; readiness still Ready.',
     api: nodesApi({
@@ -760,7 +766,7 @@ export default [
   {
     id: 'insight-nodes-self-refused',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: the serving node failed its isolation check',
     note: 'Crit banner with technical details, red serving-node row.',
     api: (() => {
@@ -781,7 +787,7 @@ export default [
   {
     id: 'insight-nodes-long',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: long names, big holdings, busy',
     since: '#402',
     note: 'Name column is 150px; long hostnames, detail ellipsis, "holds 1.3 TB", many running/awaiting.',
@@ -810,7 +816,7 @@ export default [
   {
     id: 'insight-nodes-data-error',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: data inventory unavailable',
     since: '#402',
     note: 'The "holds" fragment is simply absent when /api/maintenance/data fails.',
@@ -819,14 +825,14 @@ export default [
   {
     id: 'insight-nodes-waiting',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Nodes: no node answered yet',
     api: nodesApi({ self: hang, nodes: hang, mesh: hang }),
   },
   {
     id: 'insight-nodes-awake-held',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Rail: keeping the machine awake',
     since: '#379',
     note: 'Rail foot "keeping awake · <reason>" in the accent colour; check ellipsis on a long reason.',
@@ -837,7 +843,7 @@ export default [
   {
     id: 'insight-nodes-awake-error-slept',
     area: 'insight',
-    route: '/nodes',
+    route: '/settings#mesh',
     title: 'Rail: cannot keep awake, and slept recently',
     since: '#379',
     note: 'Both warn lines in the rail foot together.',

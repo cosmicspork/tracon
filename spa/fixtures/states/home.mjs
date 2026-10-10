@@ -682,6 +682,25 @@ export default [
     act: clickText('Technical details'),
   },
   {
+    id: 'home-node-cannot-run',
+    area: 'home',
+    route: '/',
+    title: 'Banner: the serving node cannot run tasks',
+    note: 'Its only harness reports another version than it pins: the banner names the gap and links to setup. The peer can still run, so the composer stays.',
+    api: base({
+      '/api/nodes': [node({ harness: { id: 'claude', pinned: '2.5.0', found: '2.3.1', mismatch: true } }), peer()],
+    }),
+  },
+  {
+    id: 'home-more',
+    area: 'home',
+    route: '/more',
+    title: 'More: the destinations the phone bar has no room for',
+    note: 'Memories, Evidence, Usage and Settings; the More tab is lit.',
+    api: base(),
+    sizes: ['phone'],
+  },
+  {
     id: 'home-stale-version',
     area: 'home',
     route: '/',

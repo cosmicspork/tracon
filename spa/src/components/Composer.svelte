@@ -248,7 +248,7 @@
     <div class="on-item">
       <span class="lbl">{phase === 'plan' ? 'Plan' : 'Execute'}</span>
       <span class="ttl">{item.title}</span>
-      <a href="/work/{item.id}">open item</a>
+      <a href="/tasks/{item.id}">open item</a>
     </div>
   {:else}
     <textarea
@@ -427,7 +427,7 @@
   {#if error}
     <div class="banner crit">
       could not start <b>· {error}</b>
-      {#if savedItem}<i>What you typed is saved as a work item · <a href="/work/{savedItem}">open it</a></i>{/if}
+      {#if savedItem}<i>What you typed is saved as a work item · <a href="/tasks/{savedItem}">open it</a></i>{/if}
     </div>
   {/if}
 </form>

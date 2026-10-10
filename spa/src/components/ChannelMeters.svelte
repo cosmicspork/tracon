@@ -14,7 +14,7 @@
 </script>
 
 <Card title="Usage today" note="Gateway tokens per channel. Resets at local midnight.">
-{#snippet actions()}<a class="lnk" href="/metrics">Full usage</a>{/snippet}
+{#snippet actions()}<a class="lnk" href="/usage">Full usage</a>{/snippet}
 <div class="meters">
   {#each channels as c (c.name)}
     <div class="meter {c.ceiling.state}">
