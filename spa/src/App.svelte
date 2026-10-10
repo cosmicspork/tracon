@@ -170,7 +170,10 @@
         {#if noHub}<a href="/settings#mesh">pair a hub</a>{:else}{hubLabel}{/if}</span
       >
       {#if store.awake?.held}
-        <span class="awake" title="Holding this machine awake ({store.awake.method}) until the work is done">keeping awake · {store.awake.reason}</span>
+        <!-- The reason on its own lines: the rail is too narrow to cut it to "1 s…". -->
+        <span class="awake" title={`Keeping this machine awake: ${store.awake.reason ?? 'work in progress'}${store.awake.method ? ` (held with ${store.awake.method})` : ''}`}
+          >keeping awake{#if store.awake.reason}<span class="why">{store.awake.reason}</span>{/if}</span
+        >
       {:else if store.awake?.error}
         <span class="warn" title={store.awake.error}>cannot keep this machine awake</span>
       {/if}
@@ -303,6 +306,7 @@
   .foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .foot a { color: var(--acc); text-decoration: none; }
   .foot .awake { color: var(--acc); }
+  .foot .awake .why { display: block; white-space: normal; overflow-wrap: anywhere; color: var(--ink2); }
   .foot .warn { color: var(--wait); }
   .foot a:hover { text-decoration: underline; }
   .rail button { color: var(--dim); }
