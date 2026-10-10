@@ -618,6 +618,35 @@
       <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
     </div>
   {/if}
+  <!-- Before the evidence, prose and files: it is what saves reading them again. -->
+  {#if sinceReviewed}
+    <section class="since">
+      <div class="h4">
+        Since your last verdict
+        <b>{sinceReviewed.head_sha.slice(0, 8)} → {review.head_sha.slice(0, 8)}</b>
+      </div>
+      {#each sinceReviewed.responses as r, i (i)}
+        <div class="response">
+          <span class="said">{r.source === 'operator' ? 'You' : r.source} · {r.decision === 'revise' ? 'asked' : r.decision}{r.sent_edit ? ' · with an edit' : ''}</span>
+          <q>{r.reason || '(no reason given)'}</q>
+          <span class="answer">
+            {#if !r.answered_by}
+              not answered yet
+            {:else if r.files === null}
+              answered · the files it changed can no longer be read
+            {:else if r.files.length === 0}
+              answered with no change to the files
+            {:else}
+              answered in {r.files.map((f) => f.path).join(', ')}
+            {/if}
+          </span>
+        </div>
+      {/each}
+      {#if sinceReviewed.unavailable}
+        <p class="note dim">{sinceReviewed.unavailable}</p>
+      {/if}
+    </section>
+  {/if}
   {#if remoteOwner && !evidence}
     <!-- what the owner holds could not be read; the banner above says why -->
   {:else if !evidence}
@@ -958,43 +987,15 @@
       {/if}
     {/if}
   {:else}
-    {#if sinceReviewed}
-      <section class="since">
-        <div class="h4">
-          Since your last verdict
-          <b>{sinceReviewed.head_sha.slice(0, 8)} → {review.head_sha.slice(0, 8)}</b>
-        </div>
-        {#each sinceReviewed.responses as r, i (i)}
-          <div class="response">
-            <span class="said">{r.source === 'operator' ? 'You' : r.source} · {r.decision === 'revise' ? 'asked' : r.decision}{r.sent_edit ? ' · with an edit' : ''}</span>
-            <q>{r.reason || '(no reason given)'}</q>
-            <span class="answer">
-              {#if !r.answered_by}
-                not answered yet
-              {:else if r.files === null}
-                answered · the files it changed can no longer be read
-              {:else if r.files.length === 0}
-                answered with no change to the files
-              {:else}
-                answered in {r.files.map((f) => f.path).join(', ')}
-              {/if}
-            </span>
-          </div>
-        {/each}
-        {#if sinceReviewed.unavailable}
-          <p class="note dim">{sinceReviewed.unavailable}</p>
-        {/if}
-        {#if sinceReviewed.diff}
-          <div class="tabs" role="tablist">
-            <button role="tab" class:on={diffView === 'since'} aria-selected={diffView === 'since'} onclick={() => (diffView = 'since')}>
-              Since last verdict · {sinceReviewed.files?.length ?? 0} files
-            </button>
-            <button role="tab" class:on={diffView === 'full'} aria-selected={diffView === 'full'} onclick={() => (diffView = 'full')}>
-              Full change · {files.length} files
-            </button>
-          </div>
-        {/if}
-      </section>
+    {#if sinceReviewed?.diff}
+      <div class="tabs" role="tablist">
+        <button role="tab" class:on={diffView === 'since'} aria-selected={diffView === 'since'} onclick={() => (diffView = 'since')}>
+          Since last verdict · {sinceReviewed.files?.length ?? 0} files
+        </button>
+        <button role="tab" class:on={diffView === 'full'} aria-selected={diffView === 'full'} onclick={() => (diffView = 'full')}>
+          Full change · {files.length} files
+        </button>
+      </div>
     {/if}
     {#if diffView === 'since' && sinceReviewed?.diff}
       <Diff diff={sinceReviewed.diff} perFile={surface.phone} />

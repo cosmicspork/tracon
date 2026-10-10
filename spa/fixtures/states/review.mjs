@@ -538,7 +538,7 @@ function report(o = {}) {
       kind: 'report',
       title: 'Why the nightly import has been slow since Tuesday',
       body:
-        'Summary\n\nThe nightly import went from about 4 minutes to 38 minutes on Tuesday. The cause is the new `invoices_by_vendor` index: every insert now updates it, and the importer inserts row by row inside one transaction.\n\nWhat I looked at\n\n- The import log for the last 10 nights (attached to the session).\n- `EXPLAIN QUERY PLAN` for the insert, before and after the migration.\n- The migration that added the index: https://forge.example.net/example-org/ledger/-/blob/main/migrations/0031_invoices_by_vendor_index_for_the_vendor_statement_report.sql\n\nWhat I suggest\n\n1. Drop and recreate the index around the import, or\n2. batch the inserts 500 at a time.\n\nI have not changed anything. Option 2 is smaller and keeps the index available to the vendor report during the import.',
+        '## Summary\n\nThe nightly import went from about 4 minutes to **38 minutes** on Tuesday. The cause is the new `invoices_by_vendor` index: every insert now updates it, and the importer inserts row by row inside one transaction.\n\n## What I looked at\n\n- The import log for the last 10 nights (attached to the session).\n- `EXPLAIN QUERY PLAN` for the insert, before and after the migration.\n- The migration that added the index: https://forge.example.net/example-org/ledger/-/blob/main/migrations/0031_invoices_by_vendor_index_for_the_vendor_statement_report.sql\n\n## What I suggest\n\n1. Drop and recreate the index around the import, or\n2. batch the inserts 500 at a time.\n\nI have not changed anything. Option 2 is smaller and keeps the index available to the vendor report during the import.',
       provider: 'none',
       target: JSON.stringify({ kind: 'narrative_report', session_id: null, lane: 'claude-code · ledger' }),
       diff: '',
@@ -1265,7 +1265,7 @@ export default [
   // Narrative reports render through ReportReview.
   state('report', 'Narrative report awaiting acknowledgement', {
     rid: 'r-report',
-    note: 'The report body, with a long unbroken URL, and the decision form.',
+    note: 'The report body rendered as Markdown (headings, a list, inline code), with a long unbroken URL, and the decision form.',
     detail: raw(reportDetail()),
   }),
 
