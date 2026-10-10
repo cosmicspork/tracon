@@ -498,6 +498,9 @@ async fn submit(
     // The branch is the operator's to rename at approval, not the forge
     // output's; the agent proposes it with `branch`.
     forge.branch = None;
+    // Each commit's message is the commit's own; the operator's edits of
+    // them are made at approval.
+    forge.messages.clear();
     if let Some(message) = args.get("message").and_then(Value::as_str) {
         forge.commit = Some(message.trim().to_string()).filter(|m| !m.is_empty());
     }

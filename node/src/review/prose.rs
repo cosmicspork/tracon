@@ -7,7 +7,9 @@
 //! operator. By default (`commits = "squash"`) publication pushes one commit
 //! holding exactly the reviewed tree, carrying the approved message, on the
 //! approved branch, so neither the candidate nor its evidence nor the verdict
-//! changes. `keep` pushes the agent's commits as written.
+//! changes. `keep` pushes the agent's commits, each with the message the
+//! operator approved for it: as written unless they edited it, and then
+//! with the same tree, author and dates.
 //!
 //! The rules here are deterministic and come from configuration: the
 //! repository's entry, then the channel's bindings, then `[publish]`. A message
@@ -351,6 +353,10 @@ pub fn rules(cfg: &Config, store: &Store, channel: &str, repo: Option<&Path>) ->
 pub struct CommitLine {
     pub sha: String,
     pub subject: String,
+    /// The message after its subject, for the operator to edit from. Absent
+    /// for a revision listed before it was kept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
 }
 
 #[cfg(test)]

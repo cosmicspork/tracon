@@ -149,6 +149,11 @@ pub struct Outputs {
     /// revision's commits are pushed as written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// The operator's message for each of the agent's commits they edited,
+    /// by the commit's id. A commit not named keeps the agent's message.
+    /// Meaningless when the revision ships as one squashed commit.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub messages: BTreeMap<String, String>,
     /// The operator's rename of the branch a new change is pushed to. An
     /// existing change's branch is the change's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -375,6 +380,9 @@ pub struct Publication<'a> {
     pub rewrite: bool,
     /// Push one commit holding the reviewed tree instead of `head_sha`.
     pub squash: Option<Squash<'a>>,
+    /// Push the agent's commits with the operator's messages instead of
+    /// `head_sha`. Never with `squash`.
+    pub reword: Option<Reword<'a>>,
     /// A previous attempt for this same publication reached, or may have
     /// reached, the forge. Its side effects are observed rather than repeated.
     pub resume: bool,
@@ -395,6 +403,20 @@ pub struct Squash<'a> {
     /// `onto` already descends from it.
     pub merges: Option<&'a str>,
     pub message: &'a str,
+}
+
+/// The agent's commits with the messages the operator approved. Each commit
+/// keeps its tree, its author and committer and both their dates; only its
+/// message changes, and its parents where they were themselves rewritten. All
+/// of that is fixed before anything is made, so a resumed attempt makes the
+/// identical commits and recognises them on the forge.
+#[derive(Debug, Clone, Copy)]
+pub struct Reword<'a> {
+    /// The revision's commits beyond the base, as listed at submit
+    /// (`Intent::commits`); `head_sha` is one of them.
+    pub commits: &'a [super::prose::CommitLine],
+    /// Original commit id → the approved message.
+    pub messages: &'a BTreeMap<String, String>,
 }
 
 /// Publish an immutable candidate. Git reads it with an empty credential
@@ -562,10 +584,16 @@ async fn attempt(
     let credential = git_remote::brokered(provider.forge().git_user(), token);
     let refname = format!("refs/heads/{}", p.target.branch);
 
-    // What is pushed: the reviewed commit, or one commit holding its tree.
-    let pushing = match &p.squash {
-        None => p.head_sha.to_string(),
-        Some(squash) => squash_commit(cfg, &publisher, &credential, p, squash, &refname).await?,
+    // What is pushed: the reviewed commit, one commit holding its tree, or
+    // the reviewed commits with the approved messages.
+    let pushing = match (&p.squash, &p.reword) {
+        (Some(squash), _) => {
+            squash_commit(cfg, &publisher, &credential, p, squash, &refname).await?
+        }
+        (None, Some(reword)) if !reword.messages.is_empty() => {
+            reword_commits(cfg, &publisher, &credential, p, reword, &refname).await?
+        }
+        (None, _) => p.head_sha.to_string(),
     };
     let pushing = pushing.as_str();
 
@@ -1053,35 +1081,11 @@ async fn squash_commit(
     refname: &str,
 ) -> Result<String, PublishError> {
     let git = &cfg.publish.git;
-    let commit = format!("{}^{{commit}}", squash.onto);
-    let held = |dir: &Path| {
-        let commit = commit.clone();
-        let dir = dir.to_path_buf();
-        async move {
-            publisher_git(git, &dir, ["cat-file", "-e", commit.as_str()])
-                .await
-                .is_ok()
-        }
-    };
-    if !held(publisher).await {
-        let fetched = publisher_git_with_credential(
-            git,
-            publisher,
-            credential,
-            [
-                "fetch",
-                "--no-tags",
-                "origin",
-                &format!("+{refname}:refs/tracon/forge"),
-            ],
-        )
-        .await;
-        if fetched.is_err() || !held(publisher).await {
-            return Err(PublishError::SquashBaseGone {
-                branch: p.target.branch.clone(),
-                onto: squash.onto.to_string(),
-            });
-        }
+    if !hold_from_forge(git, publisher, credential, refname, squash.onto).await {
+        return Err(PublishError::SquashBaseGone {
+            branch: p.target.branch.clone(),
+            onto: squash.onto.to_string(),
+        });
     }
     // The merged base commit is in the candidate's history, imported above;
     // whether `onto` already has it is settled by those two fixed commits, so
@@ -1155,6 +1159,221 @@ async fn squash_commit(
         return Err(PublishError::IdentityChanged);
     }
     Ok(made)
+}
+
+/// Whether the publisher repository holds `commit`, fetching what the forge's
+/// `refname` holds when it does not yet.
+async fn hold_from_forge(
+    git: &str,
+    publisher: &Path,
+    credential: &Credential<'_>,
+    refname: &str,
+    commit: &str,
+) -> bool {
+    let commit = format!("{commit}^{{commit}}");
+    let held = || publisher_git(git, publisher, ["cat-file", "-e", commit.as_str()]);
+    if held().await.is_ok() {
+        return true;
+    }
+    let fetched = publisher_git_with_credential(
+        git,
+        publisher,
+        credential,
+        [
+            "fetch",
+            "--no-tags",
+            "origin",
+            &format!("+{refname}:refs/tracon/forge"),
+        ],
+    )
+    .await;
+    fetched.is_ok() && held().await.is_ok()
+}
+
+/// One of the agent's commits as Git recorded it, read raw out of the
+/// publisher repository.
+struct RawCommit {
+    tree: String,
+    parents: Vec<String>,
+    /// `(name, email, date)`, the date as Git stores it: seconds and offset.
+    author: (String, String, String),
+    committer: (String, String, String),
+    /// The message bytes exactly as stored.
+    message: Vec<u8>,
+}
+
+fn read_commit(raw: &[u8]) -> Option<RawCommit> {
+    let split = raw.windows(2).position(|w| w == b"\n\n");
+    let (head, message) = match split {
+        Some(at) => (&raw[..at], raw[at + 2..].to_vec()),
+        None => (raw, Vec::new()),
+    };
+    let head = std::str::from_utf8(head).ok()?;
+    let ident = |rest: &str| {
+        let (who, date) = rest.rsplit_once("> ")?;
+        let (name, email) = who.rsplit_once(" <")?;
+        Some((name.to_string(), email.to_string(), date.to_string()))
+    };
+    let (mut tree, mut parents, mut author, mut committer) = (None, Vec::new(), None, None);
+    for line in head.lines() {
+        match line.split_once(' ') {
+            Some(("tree", sha)) => tree = Some(sha.to_string()),
+            Some(("parent", sha)) => parents.push(sha.to_string()),
+            Some(("author", rest)) => author = ident(rest),
+            Some(("committer", rest)) => committer = ident(rest),
+            // A message in another encoding would be relabelled as UTF-8.
+            Some(("encoding", encoding)) if !encoding.eq_ignore_ascii_case("utf-8") => return None,
+            _ => {}
+        }
+    }
+    Some(RawCommit {
+        tree: tree?,
+        parents,
+        author: author?,
+        committer: committer?,
+        message,
+    })
+}
+
+/// The agent's commits remade with the approved messages, parents first; the
+/// rewritten head. A commit whose message and parents are unchanged is kept
+/// as it is, so only an edited commit and what follows it change.
+async fn reword_commits(
+    cfg: &Config,
+    publisher: &Path,
+    credential: &Credential<'_>,
+    p: &Publication<'_>,
+    reword: &Reword<'_>,
+    refname: &str,
+) -> Result<String, PublishError> {
+    let git = &cfg.publish.git;
+    let listed: std::collections::BTreeSet<&str> =
+        reword.commits.iter().map(|c| c.sha.as_str()).collect();
+    if !listed.contains(p.head_sha) {
+        return Err(PublishError::Target(
+            "the reviewed commit is not among the commits listed for this revision, so their \
+             messages cannot be edited; approve it again without editing them"
+                .into(),
+        ));
+    }
+    if let Some(sha) = reword
+        .messages
+        .keys()
+        .find(|sha| !listed.contains(sha.as_str()))
+    {
+        return Err(PublishError::Target(format!(
+            "{sha:.8} is not one of this revision's commits"
+        )));
+    }
+    // Adding to what the branch holds cannot change a commit it already has.
+    if let (Some(lease), false) = (p.lease, p.rewrite) {
+        if !hold_from_forge(git, publisher, credential, refname, lease).await {
+            return Err(PublishError::SquashBaseGone {
+                branch: p.target.branch.clone(),
+                onto: lease.to_string(),
+            });
+        }
+        for sha in reword.messages.keys() {
+            let held = publisher_git(git, publisher, ["merge-base", "--is-ancestor", sha, lease])
+                .await
+                .is_ok();
+            if held {
+                return Err(PublishError::Target(format!(
+                    "{sha:.8} is already on {}; its message can change only by rewriting the \
+                     branch, so resubmit with rewrite or leave it as it is",
+                    p.target.branch
+                )));
+            }
+        }
+    }
+    let mut originals = BTreeMap::new();
+    for commit in reword.commits {
+        let raw = publisher_raw(git, publisher, ["cat-file", "commit", &commit.sha]).await?;
+        let read = read_commit(&raw).ok_or_else(|| {
+            PublishError::Target(format!(
+                "{:.8} is not a commit whose message can be rewritten here",
+                commit.sha
+            ))
+        })?;
+        originals.insert(commit.sha.as_str(), read);
+    }
+    let file = publisher.join("tracon-message");
+    let mut made: BTreeMap<&str, String> = BTreeMap::new();
+    // Parents before children, whatever order the listing came in. Each
+    // round makes every commit whose listed parents are made; a round that
+    // makes none means the listing is not a history.
+    while made.len() < reword.commits.len() {
+        let before = made.len();
+        for commit in reword.commits {
+            let sha = commit.sha.as_str();
+            let original = &originals[sha];
+            let waiting = original.parents.iter().any(|parent| {
+                listed.contains(parent.as_str()) && !made.contains_key(parent.as_str())
+            });
+            if made.contains_key(sha) || waiting {
+                continue;
+            }
+            let parents: Vec<&str> = original
+                .parents
+                .iter()
+                .map(|parent| {
+                    made.get(parent.as_str())
+                        .map_or(parent.as_str(), String::as_str)
+                })
+                .collect();
+            let written = String::from_utf8_lossy(&original.message);
+            let edited = reword
+                .messages
+                .get(sha)
+                .map(|message| message.trim())
+                .filter(|message| *message != written.trim());
+            if edited.is_none() && parents.iter().eq(original.parents.iter()) {
+                made.insert(sha, sha.to_string());
+                continue;
+            }
+            let message = match edited {
+                Some(message) => format!("{message}\n").into_bytes(),
+                None => original.message.clone(),
+            };
+            std::fs::write(&file, message).map_err(|source| PublishError::Spawn {
+                cli: "write".into(),
+                source,
+            })?;
+            let mut command =
+                git_remote::git_bare(git, publisher, PUBLISH_HOME, &Credential::Anonymous);
+            let (author, committer) = (&original.author, &original.committer);
+            command
+                .env("GIT_AUTHOR_NAME", &author.0)
+                .env("GIT_AUTHOR_EMAIL", &author.1)
+                .env("GIT_AUTHOR_DATE", &author.2)
+                .env("GIT_COMMITTER_NAME", &committer.0)
+                .env("GIT_COMMITTER_EMAIL", &committer.1)
+                .env("GIT_COMMITTER_DATE", &committer.2)
+                .arg("commit-tree")
+                .arg(&original.tree);
+            for parent in &parents {
+                command.args(["-p", parent]);
+            }
+            command.arg("-F").arg(&file);
+            let remade = output(git, command).await?;
+            let tree =
+                publisher_git(git, publisher, ["rev-parse", &format!("{remade}^{{tree}}")]).await?;
+            if tree != original.tree {
+                return Err(PublishError::IdentityChanged);
+            }
+            made.insert(sha, remade);
+        }
+        if made.len() == before {
+            return Err(PublishError::IdentityChanged);
+        }
+    }
+    let _ = std::fs::remove_file(&file);
+    let head = made[p.head_sha].clone();
+    let tree = publisher_git(git, publisher, ["rev-parse", &format!("{head}^{{tree}}")]).await?;
+    if tree != p.reviewed_tree {
+        return Err(PublishError::IdentityChanged);
+    }
+    Ok(head)
 }
 
 async fn remote_sha(
@@ -1424,6 +1643,31 @@ async fn publisher_git<'a>(
     publisher_git_with_credential(git, dir, &Credential::Anonymous, args).await
 }
 
+/// A publisher Git command's output as bytes, untrimmed.
+async fn publisher_raw<'a>(
+    git: &str,
+    dir: &Path,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<u8>, PublishError> {
+    let mut command = git_remote::git_bare(git, dir, PUBLISH_HOME, &Credential::Anonymous);
+    command.args(args);
+    let out = command
+        .output()
+        .await
+        .map_err(|source| PublishError::Spawn {
+            cli: git.to_string(),
+            source,
+        })?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(PublishError::Refused {
+            cli: git.to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
+}
+
 async fn publisher_git_with_credential<'a>(
     git: &str,
     dir: &Path,
@@ -1511,6 +1755,7 @@ mod tests {
             lease: None,
             rewrite: false,
             squash: None,
+            reword: None,
             resume: false,
             pushed: false,
             before_push: None,
@@ -1613,6 +1858,28 @@ mod tests {
             recognise(&changes, &p, p.head_sha),
             Recognised::Ours("u/9".into())
         );
+    }
+
+    #[test]
+    fn a_commit_is_read_raw_and_exactly() {
+        let raw = b"tree t1\nparent p1\nparent p2\n\
+            author A B <a@e> 981173106 +0100\n\
+            committer C <c@e> 1015211167 +0200\n\
+            gpgsig -----BEGIN-----\n line\n -----END-----\n\
+            \nfeat: x\n\nbody  \n\n";
+        let read = read_commit(raw).unwrap();
+        assert_eq!(read.tree, "t1");
+        assert_eq!(read.parents, ["p1", "p2"]);
+        assert_eq!(
+            read.author,
+            ("A B".into(), "a@e".into(), "981173106 +0100".into())
+        );
+        assert_eq!(read.committer.2, "1015211167 +0200");
+        assert_eq!(read.message, b"feat: x\n\nbody  \n\n");
+        assert!(read_commit(
+            b"tree t\nauthor A <a@e> 1 +0000\ncommitter A <a@e> 1 +0000\nencoding latin1\n\nx\n"
+        )
+        .is_none());
     }
 
     #[test]

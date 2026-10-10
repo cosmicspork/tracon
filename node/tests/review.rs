@@ -1002,6 +1002,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
             lease: None,
             rewrite: false,
             squash: None,
+            reword: None,
             resume: false,
             pushed: false,
             before_push: None,
@@ -4759,6 +4760,230 @@ async fn a_message_that_breaks_the_rules_never_reaches_the_operator() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(body.to_string().contains("not lowercase"), "{body}");
+}
+
+/// Under `keep` the second commit of the worktree, by another author on
+/// another date, so that what a rewrite must keep is not the defaults.
+fn a_second_commit(f: &Fixture) {
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A \
+         && GIT_AUTHOR_DATE='2001-02-03T04:05:06+0100' GIT_COMMITTER_DATE='2002-03-04T05:06:07+0200' \
+            git commit -q --author 'Other <other@e>' -m second -m 'the second body'",
+    );
+}
+
+/// What `rev` holds in `dir`: tree, author, author date, committer and
+/// committer date.
+fn identity(dir: &std::path::Path, rev: &str) -> String {
+    sh_out(
+        dir,
+        &format!("git log -1 --date=raw --format='%T %an <%ae> %ad / %cn <%ce> %cd' {rev}"),
+    )
+}
+
+/// Under `keep` the operator edits a commit's message on the review, and the
+/// agent's commits ship with it: the same trees, authors and dates, the
+/// edited message on the commit it was written for, every other message as
+/// the agent wrote it.
+#[tokio::test]
+async fn edited_commit_messages_ship_with_the_agents_commits() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    a_second_commit(&f);
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    assert!(intent.squash_onto.is_none());
+    let listed: Vec<_> = intent
+        .commits
+        .iter()
+        .map(|c| (c.subject.as_str(), c.body.as_str()))
+        .collect();
+    assert_eq!(listed, [("work", ""), ("second", "the second body")]);
+    let (first, second) = (intent.commits[0].sha.clone(), intent.commits[1].sha.clone());
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": {
+                "messages": { first.clone(): "feat: the operator's words\n\nand why" },
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let wt = std::path::Path::new(&f.worktree);
+    let origin = f.dir.join("origin.git");
+    let shipped = f.forge_branch();
+    let chain = sh_out(&origin, &format!("git rev-list --reverse main..{shipped}"));
+    let chain: Vec<_> = chain.lines().collect();
+    assert_eq!(chain.len(), 2, "the agent's two commits, not a squash");
+    assert_ne!(chain[0], first, "the edited commit is remade");
+    assert_ne!(chain[1], second, "and so is what follows it");
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {}^", chain[0])),
+        f.base_sha()
+    );
+    for (made, original) in chain.iter().zip([&first, &second]) {
+        assert_eq!(
+            identity(&origin, made),
+            identity(wt, original),
+            "the same tree, author, committer and dates"
+        );
+    }
+    assert_eq!(
+        sh_out(&origin, &format!("git log -1 --format=%B {}", chain[0])),
+        "feat: the operator's words\n\nand why"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git log -1 --format=%B {}", chain[1])),
+        sh_out(wt, &format!("git log -1 --format=%B {second}")),
+        "a commit nobody edited keeps its message"
+    );
+    let record = &f.store.publications_for_review(&id).unwrap()[0];
+    assert_eq!(record.pushed_sha.as_deref(), Some(shipped.as_str()));
+}
+
+/// An edited message is held to the repository's rules as a squash message
+/// is, and must belong to one of the revision's commits.
+#[tokio::test]
+async fn an_edited_commit_message_that_breaks_the_rules_is_refused() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.publish.style = tracon::review::prose::Style {
+            max_subject: 20,
+            ..Default::default()
+        };
+    })
+    .await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    let sha = intent.commits[0].sha.clone();
+
+    for (messages, says) in [
+        (
+            json!({ sha.clone(): "a subject well past twenty characters" }),
+            "the limit is 20",
+        ),
+        (json!({ sha.clone(): "  \n" }), "no subject line"),
+        (
+            json!({ "0123456789abcdef": "short" }),
+            "not one of this revision's commits",
+        ),
+    ] {
+        let (status, body) = f
+            .call(
+                "POST",
+                &format!("/api/reviews/{id}/verdict"),
+                Some(json!({ "verdict": "approve", "outputs": { "messages": messages } })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.to_string().contains(says), "{says}: {body}");
+    }
+    assert!(
+        sh_out(&f.dir.join("origin.git"), "git branch --list feat/x").is_empty(),
+        "nothing ships"
+    );
+}
+
+/// An update adds to what the branch holds, so a commit already on it keeps
+/// its message; one the update adds can be reworded.
+#[tokio::test]
+async fn an_update_rewords_only_commits_the_branch_does_not_hold() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let held = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
+    f.forge_holds(&held);
+    gh_forge(&f, pull_seven(&held));
+    a_second_commit(&f);
+    let id = review_id(&f.submit_update(json!({})).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    let added = intent.commits[1].sha.clone();
+
+    let verdict = format!("/api/reviews/{id}/verdict");
+    let approve = |messages: Value| {
+        f.call(
+            "POST",
+            &verdict,
+            Some(json!({ "verdict": "approve", "outputs": { "messages": messages } })),
+        )
+    };
+    let (status, body) = approve(json!({ held.clone(): "fix: too late" })).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(body.to_string().contains("already on feat/x"), "{body}");
+    assert_eq!(f.forge_branch(), held, "nothing was pushed");
+
+    let (status, body) = approve(json!({ added: "fix: just in time" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shipped = f.forge_branch();
+    let origin = f.dir.join("origin.git");
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-list --parents -n1 {shipped}")),
+        format!("{shipped} {held}"),
+        "added to what the branch holds"
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git log -1 --format=%s {shipped}")),
+        "fix: just in time"
+    );
+}
+
+/// A rewrite is fixed by what was approved, so an attempt that did not
+/// land and is retried makes the very same commits.
+#[tokio::test]
+async fn a_retried_publication_rewrites_to_the_same_commits() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    a_second_commit(&f);
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    let edited = json!({ intent.commits[1].sha.clone(): "fix: the second, reworded" });
+
+    let stub = f.dir.join("bin/git-remote-stub");
+    let pushing = std::fs::read(&stub).unwrap();
+    git_that_swallows_pushes(&f);
+    f.forget_logs();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": { "messages": edited } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let attempted = f
+        .git_log()
+        .lines()
+        .find_map(|line| {
+            let refspec = line.split("push origin ").nth(1)?;
+            Some(refspec.split(':').next()?.to_string())
+        })
+        .expect("the first attempt pushed");
+    assert_ne!(attempted, intent.commits[1].sha);
+
+    std::fs::write(&stub, pushing).unwrap();
+    let publication = f.store.publications_for_review(&id).unwrap()[0].id.clone();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/publication/recover"),
+            Some(json!({ "publication_id": publication })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(f.forge_branch(), attempted, "the same commits, made again");
+    assert_eq!(
+        sh_out(
+            &f.dir.join("origin.git"),
+            &format!("git log -1 --format=%s {attempted}")
+        ),
+        "fix: the second, reworded"
+    );
 }
 
 // ---- what changed since the last verdict ----

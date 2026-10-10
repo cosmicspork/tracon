@@ -722,7 +722,11 @@ the commit pinned at submit — where the branch leaves its base for a new
 branch, or what the change's branch holds for an update, including an earlier
 squash the agent never had — with the candidate head's author and dates, so a
 resumed attempt makes the identical commit. `keep` pushes the agent's commits
-as written. The message and branch are bound by the publish grant's prose hash
+as written, unless the operator edited a commit's message (`messages` in the
+approved outputs, by the commit's sha): then that commit and those after it are
+remade in the publisher with the same trees, authors, committers and dates and
+their rewritten parents, so a resumed attempt makes the identical chain. A
+commit the branch already holds is not reworded by an update. The message and branch are bound by the publish grant's prose hash
 and target like the description, and a deterministic check (conventional type,
 imperative subject, length, kebab branch, no tracker keys — each off unless the
 repository's entry, the channel's `publish.style` binding or `[publish] style`

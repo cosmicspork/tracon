@@ -466,7 +466,8 @@ node pushes one commit holding the reviewed tree with the approved message on th
 approved branch. An update adds that commit to what the change holds, and when the
 revision merged its base (to resolve a conflict, say) the commit keeps that base as a
 second parent, so the forge sees it merged. `commits = "keep"` (in `[publish]`, a repository's entry, or the
-channel's `publish.commits` binding) pushes the agent's commits as written instead.
+channel's `publish.commits` binding) pushes the agent's commits instead: as written, or
+with the messages you edited on the review, each remade with the same tree, author and dates.
 Subject and branch rules (`style`) are off unless configured, and a submission that
 breaks them is refused before it reaches you.
 
