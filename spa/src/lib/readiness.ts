@@ -62,3 +62,10 @@ export function remedy(key: string): { href: string; label: string } | null {
       return null
   }
 }
+
+/** Why no session can work here at all — investigating is the least a
+    session needs — or null when it can, or the node has not said. */
+export function cannotWork(r: RepoReadiness | null): string | null {
+  if (!r || r.investigate.ready) return null
+  return summarize(r)[0].line
+}

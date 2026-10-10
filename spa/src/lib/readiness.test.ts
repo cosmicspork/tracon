@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { allGaps, headline, ownGaps, remedy, summarize } from './readiness'
+import { allGaps, cannotWork, headline, ownGaps, remedy, summarize } from './readiness'
 import type { RepoReadiness } from './types'
 
 const gap = (key: string) => ({ key, message: `${key} is missing` })
@@ -45,4 +45,11 @@ test('each gap is listed once, under the first path it stops, with where it is c
   expect(allGaps(readiness).map(({ purpose, gap }) => `${purpose}:${gap.key}`)).toEqual(['verify:checks', 'publish:credential'])
   expect(remedy('credential')?.href).toBe('/settings#connections')
   expect(remedy('remote')).toBeNull()
+})
+
+test('only a repository nothing can investigate stops a launch', () => {
+  expect(cannotWork(null)).toBeNull()
+  expect(cannotWork(readiness)).toBeNull()
+  const nothing = { ...readiness, investigate: { purpose: 'investigate' as const, ready: false, missing: [gap('repo'), gap('launch')], notes: [] } }
+  expect(cannotWork(nothing)).toBe('repo is missing (+1 more)')
 })

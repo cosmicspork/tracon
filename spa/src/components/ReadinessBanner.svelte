@@ -10,9 +10,18 @@
   import { repoLabel } from '../lib/repo'
   import type { RepoReadiness } from '../lib/types'
 
-  let { channel, repo, workItem = null }: { channel: string; repo: string; workItem?: string | null } = $props()
-
-  let view = $state<RepoReadiness | null>(null)
+  let {
+    channel,
+    repo,
+    workItem = null,
+    view = $bindable(null),
+  }: {
+    channel: string
+    repo: string
+    workItem?: string | null
+    /** The node's answer, for a launcher that must not start what it refuses. */
+    view?: RepoReadiness | null
+  } = $props()
   let timer: ReturnType<typeof setTimeout> | undefined
 
   $effect(() => {

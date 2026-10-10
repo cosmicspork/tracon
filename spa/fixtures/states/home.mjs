@@ -379,6 +379,8 @@ const base = (o = {}) => {
     '/api/sessions': q.running ? sessionsOf(q) : sessionsOf(BASE_QUEUE),
     '/api/awake': { held: false, reason: null, method: 'logind', error: null, last_suspend: null },
     '/api/readiness': readiness({}),
+    // Nothing in the checkout the node would refuse to prepare.
+    '/api/preparation': (req) => ({ repo: req.query.repo, image: 'localhost/tracon-claude:2.5.0', image_source: 'harness image', devcontainer_image: null, lockfiles: [], install: null, prepare: [], egress: [], incompatible: [], ready: true }),
     ...o,
   }
 }

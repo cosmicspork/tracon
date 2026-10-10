@@ -421,6 +421,25 @@ const longTitle =
   'Rework the publication path so a review approved on one node publishes from the node that holds the forge credential, with the approved message and branch, and a retry that never double-pushes'
 const longUnbroken = 'feat/rework-publication-path-so-approved-reviews-publish-from-the-credential-holding-node-without-double-pushing'
 
+// A repository devcontainer the node would refuse to prepare, beside three it passes over.
+const PREP_BLOCKED = {
+  repo: '/home/op/src/orbit',
+  image: 'mcr.microsoft.com/devcontainers/rust:1-bookworm',
+  image_source: 'repository devcontainer',
+  devcontainer_image: 'mcr.microsoft.com/devcontainers/rust:1-bookworm',
+  lockfiles: ['Cargo.lock', 'package-lock.json'],
+  install: 'cargo fetch --locked',
+  prepare: [],
+  egress: [],
+  incompatible: [
+    { source: '.devcontainer/devcontainer.json', item: 'image', reason: 'mcr.microsoft.com/devcontainers/rust:1-bookworm is neither pinned to a digest nor in the node\'s approved images', instead: 'the image by digest (`name@sha256:…`), or the [[repo]] entry\'s `image`', blocking: true },
+    { source: '.devcontainer/devcontainer.json', item: 'postCreateCommand', reason: 'is a setup hook the repository controls; the node does not run it', instead: "a command in the [[repo]] entry's `prepare`, which runs in the check image with only `egress` reachable", blocking: false },
+    { source: '.devcontainer/devcontainer.json', item: 'mounts', reason: 'asks for host paths in the container; the node mounts only the workspace and its cache', instead: null, blocking: false },
+    { source: 'package.json', item: 'scripts.postinstall', reason: 'runs during install; preparation installs with scripts off, so it does not run', instead: "a command in the [[repo]] entry's `prepare`, if the project needs it", blocking: false },
+  ],
+  ready: false,
+}
+
 const states = [
   // ---------------------------------------------------------------- ledger
   {
@@ -1245,6 +1264,7 @@ const states = [
     route: `/?item=${ID.limits}&phase=execute`,
     title: 'Launch: nothing ready (repository missing, node not ready)',
     since: '#387',
+    note: 'Start reads "Cannot run here" and is disabled; the readiness line says why.',
     api: launchApi(planned, {
       readiness: {
         channel: 'personal',
@@ -1279,30 +1299,22 @@ const states = [
     route: `/?item=${ID.limits}&phase=execute`,
     title: 'Launch: preparation would refuse the devcontainer',
     since: '#388',
-    note: 'preparation line, crit summary when blocking, each incompatibility with where its work belongs',
+    note: 'preparation line, crit summary when blocking, each incompatibility with where its work belongs; Start reads "Cannot prepare" and is disabled',
     api: launchApi(planned, {
-      preparation: {
-        repo: '/home/op/src/orbit',
-        image: 'mcr.microsoft.com/devcontainers/rust:1-bookworm',
-        image_source: 'repository devcontainer',
-        devcontainer_image: 'mcr.microsoft.com/devcontainers/rust:1-bookworm',
-        lockfiles: ['Cargo.lock', 'package-lock.json'],
-        install: 'cargo fetch --locked',
-        prepare: [],
-        egress: [],
-        incompatible: [
-          { source: '.devcontainer/devcontainer.json', item: 'image', reason: 'mcr.microsoft.com/devcontainers/rust:1-bookworm is neither pinned to a digest nor in the node\'s approved images', instead: 'the image by digest (`name@sha256:…`), or the [[repo]] entry\'s `image`', blocking: true },
-          { source: '.devcontainer/devcontainer.json', item: 'postCreateCommand', reason: 'is a setup hook the repository controls; the node does not run it', instead: "a command in the [[repo]] entry's `prepare`, which runs in the check image with only `egress` reachable", blocking: false },
-          { source: '.devcontainer/devcontainer.json', item: 'mounts', reason: 'asks for host paths in the container; the node mounts only the workspace and its cache', instead: null, blocking: false },
-          { source: 'package.json', item: 'scripts.postinstall', reason: 'runs during install; preparation installs with scripts off, so it does not run', instead: "a command in the [[repo]] entry's `prepare`, if the project needs it", blocking: false },
-        ],
-        ready: false,
-      },
+      preparation: PREP_BLOCKED,
     }),
     act: async (page) => {
       await openAdjust(page)
       await openDetails('.prep details')(page)
     },
+  },
+  {
+    id: 'work-launch-preparation-blocked-closed',
+    area: 'work',
+    route: `/?item=${ID.limits}&phase=execute`,
+    title: 'Launch: preparation would refuse, adjust closed',
+    note: 'Start is disabled and the first thing that would stop preparation shows under the readiness line, with a link that opens adjust.',
+    api: launchApi(planned, { preparation: PREP_BLOCKED }),
   },
   {
     id: 'work-launch-start-refused',
