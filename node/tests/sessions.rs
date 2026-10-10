@@ -3074,10 +3074,17 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
         repo,
         store,
         manager,
-        adapter,
         row: planning,
         ..
     } = orientation("kickoff-execute").await;
+    // Its own harness: the fake keeps only the sender of the session it
+    // launched last, and the planning session's launch is spawned, so on a
+    // shared fake it can land after this one's and drop its channel — the
+    // harness reads as exited before the first prompt (7983cd17 on CI).
+    let adapter = Arc::new(FakeAdapter {
+        tx: Arc::new(Mutex::new(None)),
+        tokens: Arc::new(Mutex::new(100)),
+    });
     let bus = Bus::new();
     let item = tracon::corpus::work::create(
         &store,
