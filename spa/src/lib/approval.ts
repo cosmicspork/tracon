@@ -91,7 +91,8 @@ export function schemaFor(schema: JsonSchema | null, args: Record<string, unknow
 
 /**
  * The form's fields, with the node's word on which are prose and which are
- * locked over the guesses schema-form makes on its own.
+ * locked over the guesses schema-form makes on its own. Locked fields come
+ * first, so what the call acts on reads as one block above what can change.
  */
 export function approvalFields(
   schema: JsonSchema,
@@ -99,7 +100,7 @@ export function approvalFields(
   prose: readonly string[],
   locked: readonly string[],
 ): Field[] {
-  return formFields(schema, args).map((f) => {
+  const all = formFields(schema, args).map((f) => {
     const multiline = typeof args[f.key] === 'string' && (args[f.key] as string).includes('\n')
     const kind =
       prose.includes(f.key) && (f.kind === 'text' || f.kind === 'prose')
@@ -109,6 +110,34 @@ export function approvalFields(
           : f.kind
     return { ...f, kind, locked: locked.includes(f.key) }
   })
+  return [...all.filter((f) => f.locked), ...all.filter((f) => !f.locked)]
+}
+
+/**
+ * Arguments that only say how long the asking call blocks for the answer.
+ * They are the agent's own tuning, not part of what is being decided.
+ */
+export const CALLER_ONLY: readonly string[] = ['wait_secs']
+
+/**
+ * Whether allowing this approval grants access for a scope rather than
+ * running the call: the answers offer a scope beyond once (a host for the
+ * session or the repository). The node reads no edit with such an answer,
+ * so the request is shown as asked rather than as a form.
+ */
+export function grantsAccess(options: readonly { kind: string }[]): boolean {
+  return options.some((o) => o.kind === 'allow_session' || o.kind === 'allow_repo')
+}
+
+/** A tool's result as rows to show, or null when it is not an object. */
+export function resultRows(result: unknown): { key: string; value: string; href: string | null }[] | null {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null
+  return Object.entries(result as Record<string, unknown>)
+    .filter(([, v]) => v !== null && v !== undefined)
+    .map(([key, v]) => {
+      const value = typeof v === 'string' ? v : JSON.stringify(v)
+      return { key, value, href: typeof v === 'string' && /^https?:\/\//.test(v) ? v : null }
+    })
 }
 
 /** The arguments the form describes. A locked field is always the agent's own. */

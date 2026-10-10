@@ -623,6 +623,25 @@ pub async fn publish_review(
     if let Some(message) = &message {
         broken.extend(style.check_message(message));
     }
+    // Under `keep`, each of the agent's commits the operator gave a message
+    // ships with it, held to the same rules.
+    let reword = intent.squash_onto.is_none() && !outputs.messages.is_empty();
+    if reword {
+        for (sha, message) in &outputs.messages {
+            if !intent.commits.iter().any(|commit| &commit.sha == sha) {
+                return Err(PublishError::Conflict(format!(
+                    "{sha:.8} is not one of this revision's commits; reload the review and edit \
+                     its messages again"
+                )));
+            }
+            broken.extend(
+                style
+                    .check_message(message)
+                    .into_iter()
+                    .map(|finding| format!("{sha:.8}: {finding}")),
+            );
+        }
+    }
     if !broken.is_empty() {
         return Err(PublishError::Conflict(format!(
             "what would ship breaks this repository's commit rules: {}",
@@ -753,6 +772,10 @@ pub async fn publish_review(
                     merges: intent.squash_merges.as_deref(),
                     message,
                 }),
+            reword: reword.then_some(crate::review::publish::Reword {
+                commits: &intent.commits,
+                messages: &outputs.messages,
+            }),
             resume,
             pushed: record.pushed_sha.is_some(),
             before_push: recheck_authority,

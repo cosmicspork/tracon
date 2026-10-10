@@ -1780,7 +1780,7 @@ impl Manager {
             let (skills, instructions, agents) = self.store.manifest_contents(&spec.channel)?;
             let built = crate::manifest::build(crate::manifest::Inputs {
                 channel: &spec.channel,
-                skills,
+                skills: crate::manifest::with_builtins(skills),
                 instructions,
                 agents,
                 plugins: &self.cfg.launch.plugins,

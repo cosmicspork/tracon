@@ -237,7 +237,7 @@ const READY = {
 
 const COMMITS = [
   { sha: 'a7c2e9f14b8d3062e5a1c7f9b4d2e8a0c3f6b1d9', subject: 'feat(gateway): add a token bucket per channel' },
-  { sha: '3e8b0d5a9c2f7e14b6a0d3c8f5e2b9a7d1c4e0f6', subject: 'test(gateway): bucket admits its capacity then refuses' },
+  { sha: '3e8b0d5a9c2f7e14b6a0d3c8f5e2b9a7d1c4e0f6', subject: 'test(gateway): bucket admits its capacity then refuses', body: 'Three calls on a bucket of three pass; the fourth is refused.' },
   { sha: HEAD, subject: 'fix(gateway): clamp the refill at capacity' },
 ]
 
@@ -538,7 +538,7 @@ function report(o = {}) {
       kind: 'report',
       title: 'Why the nightly import has been slow since Tuesday',
       body:
-        'Summary\n\nThe nightly import went from about 4 minutes to 38 minutes on Tuesday. The cause is the new `invoices_by_vendor` index: every insert now updates it, and the importer inserts row by row inside one transaction.\n\nWhat I looked at\n\n- The import log for the last 10 nights (attached to the session).\n- `EXPLAIN QUERY PLAN` for the insert, before and after the migration.\n- The migration that added the index: https://forge.example.net/example-org/ledger/-/blob/main/migrations/0031_invoices_by_vendor_index_for_the_vendor_statement_report.sql\n\nWhat I suggest\n\n1. Drop and recreate the index around the import, or\n2. batch the inserts 500 at a time.\n\nI have not changed anything. Option 2 is smaller and keeps the index available to the vendor report during the import.',
+        '## Summary\n\nThe nightly import went from about 4 minutes to **38 minutes** on Tuesday. The cause is the new `invoices_by_vendor` index: every insert now updates it, and the importer inserts row by row inside one transaction.\n\n## What I looked at\n\n- The import log for the last 10 nights (attached to the session).\n- `EXPLAIN QUERY PLAN` for the insert, before and after the migration.\n- The migration that added the index: https://forge.example.net/example-org/ledger/-/blob/main/migrations/0031_invoices_by_vendor_index_for_the_vendor_statement_report.sql\n\n## What I suggest\n\n1. Drop and recreate the index around the import, or\n2. batch the inserts 500 at a time.\n\nI have not changed anything. Option 2 is smaller and keeps the index available to the vendor report during the import.',
       provider: 'none',
       target: JSON.stringify({ kind: 'narrative_report', session_id: null, lane: 'claude-code · ledger' }),
       diff: '',
@@ -590,7 +590,7 @@ export default [
   }),
 
   state('server-error', 'The node failed reading it', {
-    note: 'A 500 is shown the same way as a missing review.',
+    note: 'Says the review could not be loaded, with Retry; not "not found".',
     detail: { status: 500, body: { error: { code: 500, message: 'database is locked' } } },
   }),
 
@@ -725,6 +725,20 @@ export default [
       const msg = page.getByLabel('commit message')
       await msg.fill('feat(gateway): smooth bursts with a per-channel token bucket\n\nA call over `per_minute` is refused before it counts against the day.')
       await page.locator('label.branch input').fill('feat/gateway-burst-limit')
+      await settle(page)
+    },
+  }),
+
+  state('keep-edited', 'Commits pushed as the agent wrote them, one message edited', {
+    note: 'Under publish.commits = keep each commit has "Edit message"; the edited one shows its message in the squash editor\'s textarea, an "edited" chip and Undo, and the heading counts the edits.',
+    sizes: ['desktop'],
+    detail: raw(details({ intent: { forge: {}, commits: COMMITS } })),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Edit message' }).nth(1).click()
+      await page
+        .getByLabel('message of 3e8b0d5a')
+        .fill('test(gateway): admit a full bucket, then refuse\n\nThree calls on a bucket of three pass; the fourth is refused.')
+      await page.getByRole('button', { name: 'Edit message' }).first().click()
       await settle(page)
     },
   }),
@@ -1265,7 +1279,7 @@ export default [
   // Narrative reports render through ReportReview.
   state('report', 'Narrative report awaiting acknowledgement', {
     rid: 'r-report',
-    note: 'The report body, with a long unbroken URL, and the decision form.',
+    note: 'The report body rendered as Markdown (headings, a list, inline code), with a long unbroken URL, and the decision form.',
     detail: raw(reportDetail()),
   }),
 

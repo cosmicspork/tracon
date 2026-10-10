@@ -385,18 +385,20 @@ pub async fn commits(
             "log",
             "--reverse",
             "--no-decorate",
-            "--format=%H%x1f%s",
+            "--format=%H%x1f%s%x1f%b%x1e",
             &format!("{base_ref}..HEAD"),
         ],
     )
     .await?;
     Ok(listed
-        .lines()
-        .filter_map(|line| {
-            let (sha, subject) = line.split_once('\u{1f}')?;
+        .split('\u{1e}')
+        .filter_map(|record| {
+            let mut cols = record.trim_start_matches('\n').splitn(3, '\u{1f}');
+            let sha = cols.next().filter(|sha| !sha.is_empty())?;
             Some(prose::CommitLine {
                 sha: sha.to_string(),
-                subject: subject.to_string(),
+                subject: cols.next()?.to_string(),
+                body: cols.next().unwrap_or_default().trim().to_string(),
             })
         })
         .collect())

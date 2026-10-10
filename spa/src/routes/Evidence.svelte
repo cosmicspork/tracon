@@ -239,7 +239,7 @@
     {#if search.trim() || channel.trim() || runner.trim()}
       <div class="empty">No captured candidate evidence matches these filters. <button class="lnk" type="button" onclick={clearFilters}>Clear filters</button></div>
     {:else}
-      <div class="empty">No candidate evidence has been captured on this node. Submit a committed change for review, or choose a shared channel and another runner. <a href="/work">Open Work</a></div>
+      <div class="empty">No candidate evidence has been captured on this node. Submit a committed change for review, or choose a shared channel and another runner. <a href="/tasks">Open Tasks</a></div>
     {/if}
   {:else}
     <div class="candidate-list">
@@ -252,7 +252,7 @@
           {#if item.work_items.length || item.reviews.length}
             <div class="relations">
               {#each item.work_items as work (work.id)}
-                <a href="/work/{encodeURIComponent(work.id)}">Task · {work.title}</a>
+                <a href="/tasks/{encodeURIComponent(work.id)}">Task · {work.title}</a>
               {/each}
               {#each item.reviews as review (review.id)}
                 <a href="/reviews/{encodeURIComponent(review.id)}">Review · {review.title}</a>
@@ -291,11 +291,13 @@
 <style>
   .lookup { display: flex; gap: .55rem; flex-wrap: wrap; align-items: center; }
   .lede { max-width: 66rem; margin: .45rem 0 0; color: var(--ink2); }
-  .browse-panel { display: grid; gap: .7rem; margin-top: 1.3rem; }
+  /* One column that never grows past the page: a grid track sizes to its
+     widest content otherwise, and a long title or link is wider than a phone. */
+  .browse-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: .7rem; margin-top: 1.3rem; }
   .browse { display: flex; gap: .55rem; flex-wrap: wrap; align-items: center; }
   .browse input:first-child { min-width: min(28rem, 100%); flex: 1; }
-  .candidate-list { display: grid; gap: .45rem; }
-  .candidate-list article { display: grid; gap: .45rem; background: var(--s1); border-left: 3px solid var(--acc); }
+  .candidate-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: .45rem; }
+  .candidate-list article { display: grid; grid-template-columns: minmax(0, 1fr); gap: .45rem; background: var(--s1); border-left: 3px solid var(--acc); }
   .candidate-list article.selected { border-left-color: var(--ok); }
   .candidate-choice { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .8rem; align-items: center; width: 100%; padding: .7rem .8rem; color: var(--ink); text-align: left; background: transparent; border: 0; cursor: pointer; }
   .candidate-choice > span:first-child { display: grid; gap: .18rem; min-width: 0; }
@@ -309,12 +311,14 @@
   .technical p { margin: 0; color: var(--ink2); font-size: .9rem; }
   .lookup input { min-width: min(36rem, 100%); flex: 1; }
   input, select { color: var(--ink); background: var(--s1); border: 1px solid var(--rule); border-radius: 4px; padding: .48rem .6rem; font: 12.5px var(--mono); min-width: 0; }
-  .candidate { display: grid; gap: .2rem; padding: .8rem 1rem; background: var(--s1); border-left: 3px solid var(--acc); }
+  .candidate { display: grid; grid-template-columns: minmax(0, 1fr); gap: .2rem; overflow-wrap: anywhere; padding: .8rem 1rem; background: var(--s1); border-left: 3px solid var(--acc); }
   .candidate div { display: flex; gap: .7rem; flex-wrap: wrap; } .candidate span, small { color: var(--ink2); font: 11.5px var(--mono); }
   .h5 { color: var(--dim); font: 12px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
   details { min-width: 0; } summary { cursor: pointer; color: var(--acc); font: 12px var(--mono); }
   @media (max-width: 650px) {
     .browse > * { width: 100%; }
-    .candidate-choice, .relations a { display: flex; align-items: center; min-height: 44px; }
+    .candidate-choice { display: flex; align-items: center; min-height: 44px; }
+    /* A block, not a flex box, so a long link still ends in an ellipsis. */
+    .relations a { display: block; min-height: 44px; padding: 14px 0; }
   }
 </style>

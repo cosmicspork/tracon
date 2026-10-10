@@ -27,7 +27,7 @@ test('a reference this node has never seen says so where it is read', () => {
 
 test('references lead where the interface can follow them', () => {
   expect(refHref('personal', { kind: 'doc', value: 'meeting-ops' })).toBe('/docs/personal/meeting-ops')
-  expect(refHref('personal', { kind: 'work', value: 'abc' })).toBe('/work/abc')
+  expect(refHref('personal', { kind: 'work', value: 'abc' })).toBe('/tasks/abc')
   expect(refHref('personal', { kind: 'session', value: 's1' })).toBe('/sessions/s1')
   expect(refHref('personal', { kind: 'url', value: 'https://example.test' })).toBe('https://example.test')
   expect(refHref('personal', { kind: 'file', value: 'src/main.rs' })).toBeNull()

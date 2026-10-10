@@ -15,7 +15,7 @@
     if (state === 'blocked' && item.readiness.state === 'blocked') bits.push(blockersLine(item.readiness.by, titles))
     if (state === 'ready') bits.push(item.phase_plan_slug ? 'plan written' : 'no plan yet')
     if (state === 'insession' && holder) bits.push(`${holder.phase} on ${nodeLabel(store.nodes, holder.node_id)}`)
-    if (state === 'closed' && item.closed_by_session) bits.push(`closed by session ${item.closed_by_session.slice(-6)}`)
+    if (state === 'closed' && item.closed_by_session) bits.push(`closed by session ${item.closed_by_session.slice(0, 8)}`)
     if (item.discovered_from) bits.push(`discovered from ${short(item.discovered_from)}`)
     return bits.join(' · ')
   })
@@ -24,7 +24,7 @@
   )
 </script>
 
-<a class="row {state}" href={state === 'insession' && item.session_id ? `/sessions/${item.session_id}` : `/work/${item.id}`}>
+<a class="row {state}" href={state === 'insession' && item.session_id ? `/sessions/${item.session_id}` : `/tasks/${item.id}`}>
   <span class="bar"></span>
   <span class="mono pri" class:hi={item.priority >= 5}>p{item.priority} · {formatAge(item.created_ms, clock.now)}</span>
   <span class="t">

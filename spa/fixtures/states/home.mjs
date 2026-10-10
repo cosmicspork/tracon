@@ -379,6 +379,8 @@ const base = (o = {}) => {
     '/api/sessions': q.running ? sessionsOf(q) : sessionsOf(BASE_QUEUE),
     '/api/awake': { held: false, reason: null, method: 'logind', error: null, last_suspend: null },
     '/api/readiness': readiness({}),
+    // Nothing in the checkout the node would refuse to prepare.
+    '/api/preparation': (req) => ({ repo: req.query.repo, image: 'localhost/tracon-claude:2.5.0', image_source: 'harness image', devcontainer_image: null, lockfiles: [], install: null, prepare: [], egress: [], incompatible: [], ready: true }),
     ...o,
   }
 }
@@ -465,6 +467,8 @@ const clickText = (text) =>
 /** What Settings fetches beside the cards these states look at. */
 const settings = (o = {}) =>
   base({
+    '/api/config': { node_name: 'laptop', running: { harness_id: 'claude', harness_version: '2.5.0', node_name: 'laptop' }, external: { enabled: false } },
+    '/api/maintenance/data': { total_bytes: 3_412_000_000, kinds: [] },
     '/api/authority/grants': { policy: { version: 12, rules: [], trusted: true }, grants: [] },
     '/api/admin/access': { authenticated: true, token_configured: true, local: true },
     '/api/admin/mesh': {
@@ -678,6 +682,25 @@ export default [
       ],
     }),
     act: clickText('Technical details'),
+  },
+  {
+    id: 'home-node-cannot-run',
+    area: 'home',
+    route: '/',
+    title: 'Banner: the serving node cannot run tasks',
+    note: 'Its only harness reports another version than it pins: the banner names the gap and links to setup. The peer can still run, so the composer stays.',
+    api: base({
+      '/api/nodes': [node({ harness: { id: 'claude', pinned: '2.5.0', found: '2.3.1', mismatch: true } }), peer()],
+    }),
+  },
+  {
+    id: 'home-more',
+    area: 'home',
+    route: '/more',
+    title: 'More: the destinations the phone bar has no room for',
+    note: 'Memories, Evidence, Usage and Settings; the More tab is lit.',
+    api: base(),
+    sizes: ['phone'],
   },
   {
     id: 'home-stale-version',
@@ -1059,26 +1082,24 @@ export default [
     act: clickText('orbit-rate-limits'),
   },
 
-  // --- Readiness under the composer -------------------------------------------
+  // --- Readiness as a banner above the composer ------------------------------
   {
     id: 'home-readiness-ready',
     area: 'home',
     route: '/',
-    title: 'Readiness: all three paths ready, open',
+    title: 'Readiness: all three paths ready',
     since: '#387',
-    note: 'The ✓ investigate ✓ verify ✓ publish summary under the composer, expanded to "Ready to investigate, verify and publish."',
+    note: 'A ready repository shows nothing: no banner, no line under the composer.',
     api: base(),
-    act: async (page) => {
-      await page.locator('details.ready summary').click()
-    },
+    act: async (page) => page.waitForTimeout(600),
   },
   {
     id: 'home-readiness-gaps',
     area: 'home',
     route: '/',
-    title: 'Readiness: verify and publish lacking, open',
+    title: 'Readiness: verify and publish lacking',
     since: '#387',
-    note: 'No checks configured (verify ✗), a GitHub credential not bound (publish ✗) and two notes; each path lists only its own gaps.',
+    note: 'A banner above the composer: no checks configured (verify) and a GitHub credential not bound (publish), each named once with where to close it; notes are not gaps and are left out.',
     api: base({
       '/api/readiness': readiness({
         verify: pathReady(
@@ -1096,9 +1117,7 @@ export default [
         ),
       }),
     }),
-    act: async (page) => {
-      await page.locator('details.ready summary').click()
-    },
+    act: async (page) => page.locator('.banner.ready').waitFor(),
   },
   {
     id: 'home-readiness-not-a-repo',
@@ -1106,7 +1125,7 @@ export default [
     route: '/',
     title: 'Readiness: nothing ready (path is not a checkout)',
     since: '#387',
-    note: 'All three ✗: the repository path does not exist on this node, a long path that must wrap.',
+    note: 'A crit banner: the repository path does not exist on this node, a long path that must wrap; no link for gaps fixed in the repository itself.',
     api: base({
       '/api/readiness': (req) => {
         const gap = { key: 'repo', message: `${req.query.repo} is not a directory on this node` }
@@ -1121,9 +1140,7 @@ export default [
       '/api/queue': queue({ ended: [session({ id: 's-gone', repo_path: LONG_REPO, branch: 'feat/old', state: 'closed', end_reason: 'item_close', created_ms: -100000, updated_ms: -50000 })] }),
       '/api/sessions': [session({ id: 's-gone', repo_path: LONG_REPO, branch: 'feat/old', state: 'closed', end_reason: 'item_close', created_ms: -100000, updated_ms: -50000 })],
     }),
-    act: async (page) => {
-      await page.locator('details.ready summary').click()
-    },
+    act: async (page) => page.locator('.banner.ready').waitFor(),
   },
   {
     id: 'home-start-error',
@@ -1295,7 +1312,7 @@ export default [
   {
     id: 'home-push-devices',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: 'This device and registered devices',
     note: 'Push toggle, and four registered devices: this browser, a local one, a failing phone, a long user agent.',
     api: settings({
@@ -1312,7 +1329,7 @@ export default [
   {
     id: 'home-push-denied',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: 'Push enrollment: notifications blocked',
     since: '#403',
     note: 'Turning push on where the site is blocked: the stage message in the crit colour.',
@@ -1328,7 +1345,7 @@ export default [
   {
     id: 'home-push-service-refused',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: "Push enrollment: the browser's push service refused",
     since: '#403',
     note: 'Permission granted, the subscribe call rejected by the push service: the message names that stage and quotes the browser.',
@@ -1346,7 +1363,7 @@ export default [
   {
     id: 'home-push-node-refused',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: 'Push enrollment: the node did not record the device',
     since: '#403',
     note: 'Subscribed in the browser, then POST /api/push/subscriptions answered 500: "its storage failed: …".',

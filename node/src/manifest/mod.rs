@@ -47,6 +47,53 @@ pub use skill::{parse_source, read_package, SkillSource};
 /// discovers as `skills/**/SKILL.md` in its global config directory.
 pub const SKILL_DIR: &str = "skills";
 
+/// Where a built-in skill says it came from: the node itself, so an operator
+/// reading the pane can tell it from a package they imported.
+pub const BUILTIN_SOURCE: &str = "builtin";
+
+/// Skills the node ships to every channel, as `(name, SKILL.md)`.
+const BUILTIN_SKILLS: &[(&str, &str)] =
+    &[("repo-setup", include_str!("builtin/repo-setup/SKILL.md"))];
+
+/// The skills the node ships, in the shape an import produces.
+pub fn builtin_skills() -> Vec<SkillEntry> {
+    BUILTIN_SKILLS
+        .iter()
+        .map(|(name, text)| {
+            let files = vec![ManifestFile {
+                path: "SKILL.md".into(),
+                text: (*text).to_string(),
+            }];
+            let description = skill::frontmatter(text)
+                .map(|(_, description)| description)
+                .unwrap_or_default();
+            SkillEntry {
+                name: (*name).to_string(),
+                description,
+                source: BUILTIN_SOURCE.into(),
+                digest: skill::digest_of(&files),
+                warnings: vec![format!(
+                    "Ships with this node and changes when the node is upgraded. Import a \
+                     skill named `{name}` to replace it on this channel."
+                )],
+                files,
+            }
+        })
+        .collect()
+}
+
+/// A channel's imported skills with the node's own added, except where the
+/// operator imported one by the same name: theirs replaces the node's rather
+/// than colliding with it.
+pub fn with_builtins(mut skills: Vec<SkillEntry>) -> Vec<SkillEntry> {
+    for builtin in builtin_skills() {
+        if !skills.iter().any(|skill| skill.name == builtin.name) {
+            skills.push(builtin);
+        }
+    }
+    skills
+}
+
 /// The shape of the image's offline package cache, relative to
 /// `$XDG_CACHE_HOME/opencode`. A pure existence check at this path is the
 /// whole of OpenCode's offline resolution — no version verification, no
@@ -616,6 +663,34 @@ mod tests {
         });
         assert!(manifest.customization().is_empty());
         assert!(manifest.operator_notes().contains("Small commits."));
+    }
+
+    /// The node's own skill reaches every channel, parses the way an import
+    /// would, and gives way to an operator's skill of the same name rather
+    /// than tripping the duplicate refusal.
+    #[test]
+    fn the_builtin_setup_skill_is_added_unless_the_operator_imported_one() {
+        let skills = with_builtins(Vec::new());
+        let setup = skills
+            .iter()
+            .find(|skill| skill.name == "repo-setup")
+            .expect("the setup skill ships");
+        assert_eq!(setup.source, BUILTIN_SOURCE);
+        assert!(setup.description.contains("Set this repository up once"));
+        assert!(!setup.description.contains('<'));
+        assert!(!setup.files[0].text.contains("!`"));
+        assert!(setup.files[0].text.contains("run_notes"));
+        let manifest = build(inputs(skills)).unwrap();
+        assert!(manifest
+            .skill_files()
+            .iter()
+            .any(|(path, _)| path == "skills/repo-setup/SKILL.md"));
+        assert!(manifest.customization().contains("`repo-setup`"));
+
+        let theirs = skill("repo-setup", "the operator's own");
+        let skills = with_builtins(vec![theirs.clone()]);
+        assert_eq!(skills, vec![theirs]);
+        build(inputs(skills)).unwrap();
     }
 
     #[test]

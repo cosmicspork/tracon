@@ -705,6 +705,7 @@ export default [
     area,
     route: '/docs/personal/guide-release/edit',
     title: 'Editing, a change typed',
+    note: 'The editor fills the page below the header, scrolling inside itself; Save and Cancel sit at the foot of the window with no resize handle.',
     api: { '/api/docs/personal/guide-release': rich },
     act: async (page) => {
       await page.locator('textarea').press('End')
@@ -913,7 +914,7 @@ export default [
   {
     id: 'docs-transfer-inbox',
     area,
-    route: '/settings#maintenance',
+    route: '/sessions',
     title: 'Import a session, staged packages in every state',
     note: 'Fresh, imported, outcome unknown, failed-with-retry; a long candidate id and note.',
     api: { ...settingsSupport, '/api/transfers': { transfers } },
@@ -923,7 +924,7 @@ export default [
   {
     id: 'docs-transfer-inbox-empty',
     area,
-    route: '/settings#maintenance',
+    route: '/sessions',
     title: 'Import a session, nothing staged',
     api: { ...settingsSupport, '/api/transfers': { transfers: [] } },
     full: false,
@@ -932,7 +933,7 @@ export default [
   {
     id: 'docs-transfer-inbox-error',
     area,
-    route: '/settings#maintenance',
+    route: '/sessions',
     title: 'Import a session, list failed',
     note: 'The empty-state copy shows beside the error, and the error is grey (`.inbox > p` beats `.bad`).',
     api: { ...settingsSupport, '/api/transfers': { status: 500, body: { error: { code: 500, message: 'transfer inbox is unreadable: permission denied' } } } },

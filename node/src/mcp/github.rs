@@ -1,9 +1,10 @@
 //! GitHub, as narrow tools: a pull request's state with its checks and
 //! reviews, its review threads, one comment on it, one reply to a thread, the
 //! open pull request for a branch, the Actions runs for a branch or an exact
-//! commit with each run's jobs, the end of a job's log, and rerunning a run's
-//! failed jobs (asked) — what GitLab's pipeline tools give an agent, so CI is
-//! diagnosed and retried the same way on either forge. Opening a
+//! commit with each run's jobs, waiting for a run to move, the end of a job's
+//! log, and rerunning a run's failed jobs (asked) — what GitLab's pipeline
+//! tools give an agent, so CI is diagnosed, retried and followed the same way
+//! on either forge. Opening a
 //! pull request is the review path (`review::publish`); merging is
 //! `pr_merge`, which runs only with current scoped authority for the exact
 //! head SHA. Marking ready is not a tool. The token never leaves the node.
@@ -22,6 +23,7 @@ pub const PR_REPLY: &str = "pr_reply";
 pub const PR_FOR_BRANCH: &str = "pr_for_branch";
 pub const RUN_LOGS: &str = "run_logs";
 pub const RUN_RERUN: &str = "run_rerun";
+pub const RUN_WAIT: &str = "run_wait";
 
 /// Every tool here, each of which takes the repository as `repo`.
 pub const TOOLS: &[&str] = &[
@@ -34,6 +36,7 @@ pub const TOOLS: &[&str] = &[
     PR_FOR_BRANCH,
     RUN_LOGS,
     RUN_RERUN,
+    RUN_WAIT,
 ];
 
 /// What `repo` is. Optional in what a session on a GitHub repository is
@@ -144,12 +147,33 @@ pub fn definitions() -> Vec<Value> {
             "description": "Rerun a GitHub Actions run's failed jobs, as the web UI's \"Re-run \
                             failed jobs\" does. The operator is asked before this runs: the call \
                             returns `awaiting_operator` with an `approval_id` at once, and \
-                            approval_status reports the outcome.",
+                            approval_status reports the outcome. Once it ran, the node follows \
+                            the new attempt and run_wait waits for it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string", "description": REPO },
                     "run_id": { "type": "integer" },
+                },
+                "required": ["repo", "run_id"],
+            },
+        }),
+        json!({
+            "name": RUN_WAIT,
+            "description": "Wait for a GitHub Actions run to move: returns as soon as it or one \
+                            of its jobs changes state, when it has completed, or after wait_secs \
+                            (at most 45), with the same run and jobs as run_status with run_id \
+                            and a `state` token. Pass that token back as `since` so a change \
+                            between calls is not missed. A failed job's log is run_logs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": REPO },
+                    "run_id": { "type": "integer" },
+                    "attempt": { "type": "integer", "description": "The attempt run_rerun \
+                        started: an earlier attempt's result is not taken for this one's." },
+                    "since": { "type": "string", "description": "The `state` an earlier call returned." },
+                    "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
                 },
                 "required": ["repo", "run_id"],
             },
@@ -436,16 +460,33 @@ pub async fn call(
         }
         RUN_STATUS if args.get("run_id").is_some() => {
             let run = positive(args, "run_id")?;
-            let r = gh.get(&format!("{base}/actions/runs/{run}")).await?;
-            let jobs = gh
-                .get(&format!("{base}/actions/runs/{run}/jobs?per_page=100"))
-                .await?;
-            Ok(json!({
-                "run": run_summary(&r),
-                "jobs": jobs_summary(&jobs),
-                "more_jobs": jobs["total_count"].as_u64().unwrap_or(0)
-                    > jobs["jobs"].as_array().map_or(0, |j| j.len() as u64),
-            }))
+            run_with_jobs(&gh, &base, run).await
+        }
+        RUN_WAIT => {
+            let run = positive(args, "run_id")?;
+            let attempt = args.get("attempt").and_then(Value::as_i64).unwrap_or(0);
+            let since = args.get("since").and_then(Value::as_str);
+            let until = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(super::wait::wait_secs(args));
+            let mut baseline: Option<String> = since.map(str::to_string);
+            loop {
+                let mut now = run_with_jobs(&gh, &base, run).await?;
+                // Until GitHub has started the attempt asked for, the run
+                // still reads as the attempt before it, finished.
+                let started = now["run"]["attempt"].as_i64().unwrap_or(0) >= attempt;
+                let state = run_state_token(&now);
+                let changed = baseline.as_deref().is_some_and(|b| b != state);
+                let done = started && now["run"]["status"] == "completed";
+                let left = until.saturating_duration_since(tokio::time::Instant::now());
+                if (started && changed) || done || left.is_zero() {
+                    now["state"] = Value::from(state);
+                    now["changed"] = Value::from(started && changed);
+                    now["finished"] = Value::from(done);
+                    return Ok(now);
+                }
+                baseline.get_or_insert(state);
+                tokio::time::sleep(left.min(WAIT_EVERY)).await;
+            }
         }
         RUN_LOGS => {
             let job = positive(args, "job_id")?;
@@ -460,13 +501,18 @@ pub async fn call(
         }
         RUN_RERUN => {
             let run = positive(args, "run_id")?;
+            // The attempt this starts is the one after the run's latest, so
+            // a wait or a follow does not take the last attempt's result for
+            // its own.
+            let before = gh.get(&format!("{base}/actions/runs/{run}")).await?;
             if let Some(recheck) = before_mutation {
                 recheck()?;
             }
             gh.post_empty(&format!("{base}/actions/runs/{run}/rerun-failed-jobs"))
                 .await
                 .map_err(mutation_outcome_error)?;
-            Ok(json!({ "run_id": run, "rerun": "failed jobs" }))
+            let attempt = before["run_attempt"].as_i64().map(|a| a + 1);
+            Ok(json!({ "run_id": run, "rerun": "failed jobs", "attempt": attempt }))
         }
         RUN_STATUS => {
             let filter = match (
@@ -488,6 +534,48 @@ pub async fn call(
         }
         other => Err(format!("no github tool named {other}")),
     }
+}
+
+/// How often `run_wait` reads the run while it holds.
+const WAIT_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One run with its jobs, as `run_status` with `run_id` returns it. The jobs
+/// are the latest attempt's.
+async fn run_with_jobs(gh: &Client<'_>, base: &str, run: i64) -> Result<Value, String> {
+    let r = gh.get(&format!("{base}/actions/runs/{run}")).await?;
+    let jobs = gh
+        .get(&format!("{base}/actions/runs/{run}/jobs?per_page=100"))
+        .await?;
+    Ok(json!({
+        "run": run_summary(&r),
+        "jobs": jobs_summary(&jobs),
+        "more_jobs": jobs["total_count"].as_u64().unwrap_or(0)
+            > jobs["jobs"].as_array().map_or(0, |j| j.len() as u64),
+    }))
+}
+
+/// What `run_wait` compares: the run's attempt, status and conclusion, and
+/// each job's.
+fn run_state_token(run: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let r = &run["run"];
+    let mut seen = format!("{};{};{}", r["attempt"], r["status"], r["conclusion"]);
+    let mut jobs: Vec<(i64, String)> = run["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|j| {
+            (
+                j["id"].as_i64().unwrap_or(0),
+                format!("{}/{}", j["status"], j["conclusion"]),
+            )
+        })
+        .collect();
+    jobs.sort();
+    for (id, status) in jobs {
+        seen.push_str(&format!(";{id}={status}"));
+    }
+    hex::encode(&Sha256::digest(seen.as_bytes())[..8])
 }
 
 /// `owner/name`, validated before it reaches a URL.

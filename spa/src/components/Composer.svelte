@@ -3,18 +3,20 @@
   // harness starts. Creating durable work items and plans is explicit.
   import ModelPicker from './ModelPicker.svelte'
   import PreparationPreview from './PreparationPreview.svelte'
-  import ReadinessLine from './ReadinessLine.svelte'
+  import ReadinessBanner from './ReadinessBanner.svelte'
   import RepoPicker from './RepoPicker.svelte'
   import { api, ApiError } from '../lib/api'
   import { modelLabel, phaseDefaults } from '../lib/bindings'
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { digits, formatGrouped, formatTokens } from '../lib/format'
   import { recentModelValues } from '../lib/models'
+  import { preparationBlock } from '../lib/preparation'
+  import { cannotWork } from '../lib/readiness'
   import { eligibleNodes, harnessChoice, modelsForChannel, nodeHarnesses, nodeReadiness } from '../lib/nodes'
   import { repoLabel } from '../lib/repo'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { NodeInfo, WorkView } from '../lib/types'
+  import type { NodeInfo, PreparationPreview as Preparation, RepoReadiness, WorkView } from '../lib/types'
 
   let {
     item = null,
@@ -76,10 +78,37 @@
   const planLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'plan').model, models))
   const execLabel = $derived(modelLabel(phaseDefaults(channelInfo?.bindings, 'execute').model, models))
   const needsPlan = $derived(structured && phase === 'execute' && item !== null && !item.phase_plan_slug)
+  // This node's own answers about a checkout here: readiness says whether a
+  // session could work in it at all, preparation whether it could even be
+  // prepared. Either refusing holds Start; the node would refuse it anyway.
+  const local = $derived(selectedNode?.is_self === true && channel !== '' && repo.trim() !== '' && workspaceId === null)
+  let readiness = $state<RepoReadiness | null>(null)
+  let preparation = $state<Preparation | null>(null)
+  let prepTimer: ReturnType<typeof setTimeout> | undefined
+  $effect(() => {
+    const path = repo.trim()
+    clearTimeout(prepTimer)
+    preparation = null
+    if (!local || !path.startsWith('/')) return
+    // Typed paths change a keystroke at a time; ask once they settle.
+    prepTimer = setTimeout(async () => {
+      try {
+        const answer = await api.preparationPreview(path)
+        if (answer.repo === path) preparation = answer
+      } catch {
+        preparation = null
+      }
+    }, 300)
+    return () => clearTimeout(prepTimer)
+  })
+  const notWorkable = $derived(local ? cannotWork(readiness) : null)
+  const prepBlocked = $derived(local ? preparationBlock(preparation) : null)
   const ready = $derived(
     !blocked &&
       !atCeiling &&
       !needsPlan &&
+      notWorkable === null &&
+      prepBlocked === null &&
       channel !== '' &&
       (repo.trim() !== '' || workspaceId !== null) &&
       (item !== null || prompt.trim() !== '') &&
@@ -207,12 +236,19 @@
   }
 </script>
 
+<!-- Readiness is this node's answer about its own checkout; a peer's path
+     is not readable from here. A gap is a banner in the main column, above
+     the composer it concerns. -->
+{#if local}
+  <ReadinessBanner {channel} {repo} workItem={item?.id ?? null} bind:view={readiness} />
+{/if}
+
 <form class="comp" onsubmit={start}>
   {#if item}
     <div class="on-item">
       <span class="lbl">{phase === 'plan' ? 'Plan' : 'Execute'}</span>
       <span class="ttl">{item.title}</span>
-      <a href="/work/{item.id}">open item</a>
+      <a href="/tasks/{item.id}">open item</a>
     </div>
   {:else}
     <textarea
@@ -235,14 +271,12 @@
       <button type="button" class="lnk" onclick={() => (open = !open)}>{open ? 'close' : 'adjust'}</button>
     </div>
     <button class="btn p" type="submit" disabled={!ready}>
-      {#if busy}Starting…{:else if atCeiling}{channel} is at its ceiling{:else if structured}Start {item ? phase : 'plan'}{:else}Start session{/if}
+      {#if busy}Starting…{:else if atCeiling}{channel} is at its ceiling{:else if notWorkable}Cannot run here{:else if prepBlocked}Cannot prepare{:else if structured}Start {item ? phase : 'plan'}{:else}Start session{/if}
     </button>
   </div>
 
-  <!-- Readiness is this node's answer about its own checkout; a peer's path
-       is not readable from here. -->
-  {#if selectedNode?.is_self && channel && repo && !workspaceId}
-    <ReadinessLine {channel} {repo} workItem={item?.id ?? null} />
+  {#if prepBlocked && !open}
+    <small class="crit">{prepBlocked} · <button type="button" class="lnk" onclick={() => (open = true)}>show why</button></small>
   {/if}
 
   {#if open}
@@ -275,7 +309,7 @@
             targetId={selectedNode.id}
             onselect={selectLocalRepository}
           />
-          {#if repo && !workspaceId}<PreparationPreview {repo} />{/if}
+          {#if repo && !workspaceId}<PreparationPreview view={preparation} />{/if}
         </div>
       {:else}
         <div class="field">
@@ -393,7 +427,7 @@
   {#if error}
     <div class="banner crit">
       could not start <b>· {error}</b>
-      {#if savedItem}<i>What you typed is saved as a work item · <a href="/work/{savedItem}">open it</a></i>{/if}
+      {#if savedItem}<i>What you typed is saved as a work item · <a href="/tasks/{savedItem}">open it</a></i>{/if}
     </div>
   {/if}
 </form>

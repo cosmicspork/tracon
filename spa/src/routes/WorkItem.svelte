@@ -7,6 +7,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatBudget } from '../lib/format'
+  import { isNotFound } from '../lib/load'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
@@ -23,12 +24,15 @@
   let titles = $state<Map<string, string>>(new Map())
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  /** The last read failed for a reason other than the item not being there. */
+  let failed = $state(false)
   let busy = $state(false)
   let depInput = $state('')
 
   async function load() {
     try {
       const d = await api.workItem(id)
+      failed = false
       item = d.item
       brief = d.brief
       criteria = d.criteria
@@ -40,6 +44,7 @@
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
+      failed = !isNotFound(e)
     } finally {
       loaded = true
     }
@@ -86,21 +91,26 @@
   function remove() {
     return act(async () => {
       await api.deleteWork(id)
-      router.go('/work')
+      router.go('/tasks')
     })
   }
   function phaseLabel(s: Session): string {
     const end = s.end_reason === 'phase_done' ? (s.phase === 'plan' ? 'planned' : 'reviewed') : s.end_reason ?? s.state
-    return `${s.phase} ${short(s.id, 13)} · ${end}`
+    return `${s.phase} ${short(s.id)} · ${end}`
   }
 </script>
 
 {#if !loaded}
   <div class="empty">Loading…</div>
+{:else if !item && failed}
+  <div class="banner crit" role="alert">
+    Could not load this work item <b>· {error}</b>
+    <button class="lnk" onclick={() => { error = null; void load() }}>Retry</button>
+  </div>
 {:else if !item}
   <div class="banner crit">not found <b>· {error ?? `no work item ${id.slice(0, 8)}`}</b></div>
 {:else}
-  <div class="h4"><a class="lnk" href="/work">‹ Work</a></div>
+  <div class="h4"><a class="lnk" href="/tasks">‹ Tasks</a></div>
   <div class="head {ws}">
     <span class="bar"></span>
     <span class="t">
@@ -123,14 +133,14 @@
     <dd class="m">
       {#if item.deps.length === 0}nothing{:else}
         {#each item.deps as d (d)}
-          <span class="dep"><a href="/work/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if !surface.phone && item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
+          <span class="dep"><a href="/tasks/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if !surface.phone && item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
         {/each}
       {/if}
       {#if item.readiness.state === 'blocked'}<span class="why"> · {blockersLine(item.readiness.by, titles)}</span>{/if}
     </dd>
     {#if item.discovered_from}
       <dt>Discovered from</dt>
-      <dd class="m"><a href="/work/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{item.discovered_by_session ? ` · by session ${item.discovered_by_session.slice(-6)}` : ''}</dd>
+      <dd class="m"><a href="/tasks/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by session '}<a href="/sessions/{item.discovered_by_session}">{short(item.discovered_by_session)}</a>{/if}</dd>
     {/if}
     <dt>Sessions</dt>
     <dd class="m">
@@ -142,7 +152,7 @@
     </dd>
     {#if item.closed_by_session}
       <dt>Closed</dt>
-      <dd class="m">by session <a href="/sessions/{item.closed_by_session}">{item.closed_by_session.slice(-6)}</a> · {formatAge(item.updated_ms, clock.now)} ago</dd>
+      <dd class="m">by session <a href="/sessions/{item.closed_by_session}">{short(item.closed_by_session)}</a> · {formatAge(item.updated_ms, clock.now)} ago</dd>
     {/if}
   </dl>
 
@@ -156,19 +166,15 @@
   <CriteriaPanel {item} {criteria} onchange={load} />
   <ContextPanel {item} />
 
-  {#if sessions.length === 0}
-    <EvidenceLinks workItemId={item.id} channel={item.channel} />
-  {:else}
-    {#each sessions as session (session.id)}
-      <EvidenceLinks sessionId={session.id} channel={item.channel} />
-    {/each}
-  {/if}
+  <!-- One list for the item: the node's work item filter covers every
+       candidate its sessions captured, and each card names its session. -->
+  <EvidenceLinks workItemId={item.id} channel={item.channel} />
 
   {#if discovered.length}
     <div class="h5">Discovered from this item <b>{discovered.length}</b></div>
     <div class="chain">
       {#each discovered as d (d.id)}
-        <span>{short(item.id)}</span><span class="arr">→</span><a href="/work/{d.id}">{short(d.id)} {d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>
+        <span>{short(item.id)}</span><span class="arr">→</span><a href="/tasks/{d.id}">{short(d.id)} {d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>
       {/each}
     </div>
   {/if}

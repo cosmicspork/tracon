@@ -97,7 +97,7 @@
       <small class="intent"
         >{intent} · <a href="/sessions/{permission.session_id}">open the session</a
         >{#if permission.intent?.work_item_id}
-          · <a href="/work/{permission.intent.work_item_id}">the work item</a>{/if} ·
+          · <a href="/tasks/{permission.intent.work_item_id}">the work item</a>{/if} ·
         <a href="/sessions/{permission.session_id}#authority">why this is asked</a></small
       >
     {:else}
@@ -209,7 +209,7 @@
     box-sizing: border-box;
     font: 12.5px/1.45 var(--mono);
     color: var(--ink);
-    background: var(--s0);
+    background: var(--bg);
     border: 1px solid transparent;
     border-radius: 3px;
     padding: 8px;
@@ -228,7 +228,7 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     color: var(--ink);
-    background: var(--s0);
+    background: var(--bg);
     padding: 8px;
     border-radius: 3px;
   }

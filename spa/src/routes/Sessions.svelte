@@ -3,6 +3,7 @@
   // shows what landed lately; this is where the rest of it lives.
   import LoadGate from '../components/LoadGate.svelte'
   import SessionRow from '../components/SessionRow.svelte'
+  import TransferInbox from '../components/TransferInbox.svelte'
   import { api } from '../lib/api'
   import { isTerminalState } from '../lib/queue'
   import { store } from '../lib/store.svelte'
@@ -27,6 +28,12 @@
     void call.then(() => store.refetch()).catch(() => store.refetch())
   }
 </script>
+
+<!-- A session exported from another node arrives here: it becomes a session
+     of this node's own, so it is started where sessions are listed. -->
+<section class="import" id="import">
+  <TransferInbox />
+</section>
 
 <LoadGate status={store.loads.sessions} what="sessions" onretry={() => void store.refetch()} retrying={store.refetching}>
   <div class="h4">Running <b>{running.length}</b></div>
@@ -90,6 +97,11 @@
 </LoadGate>
 
 <style>
+  .import {
+    background: var(--s1);
+    border-radius: 4px;
+    padding: 10px 14px;
+  }
   .rows {
     display: flex;
     flex-direction: column;

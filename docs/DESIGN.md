@@ -224,8 +224,8 @@ operator's information, not the model's.
     under the operator's name, so they sit beside the diff and are edited like the
     description: by default the node pushes one commit holding exactly the reviewed
     tree, carrying the approved message, on the approved branch. A repository that
-    keeps its history pushes the agent's commits as written, listed for the operator
-    to read. A message or branch that breaks the repository's configured rules is
+    keeps its history pushes the agent's commits, listed for the operator to read
+    and each message editable like the squash's. A message or branch that breaks the repository's configured rules is
     refused at submit, so a bad one never reaches the card.
 14. **A verdict is never out of reach, and never disabled without a reason.** The
     verdict bar stays on screen however long the review, above the phone's tabs,

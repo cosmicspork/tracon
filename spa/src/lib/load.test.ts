@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
-import { combineLoads, errorText, hasAnswer, LOADED, LOADING, loadPhase, settledLoad } from './load'
+import { ApiError } from './api'
+import { combineLoads, errorText, hasAnswer, isNotFound, LOADED, LOADING, loadPhase, settledLoad } from './load'
 
 test('a list is loading, failed or answered', () => {
   expect(loadPhase(LOADING)).toBe('loading')
@@ -38,4 +39,10 @@ test('a settled snapshot answers, or fails keeping whether it ever answered', ()
 test('an error reads as its message', () => {
   expect(errorText(new Error('boom'))).toBe('boom')
   expect(errorText('plain')).toBe('plain')
+})
+
+test('only a 404 means not found', () => {
+  expect(isNotFound(new ApiError(404, 'no such approval'))).toBe(true)
+  expect(isNotFound(new ApiError(500, 'database is locked'))).toBe(false)
+  expect(isNotFound(new TypeError('Failed to fetch'))).toBe(false)
 })

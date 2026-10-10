@@ -2,6 +2,7 @@
   import { decideReport, type NarrativeReport } from '../lib/reports'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import { renderMessage } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
 
@@ -48,7 +49,8 @@
   <div><dt>Version</dt><dd>{report.head_sha.slice(0, 12)}</dd></div>
 </dl>
 
-<article class="body">{report.body}</article>
+<!-- The agent's Markdown, read as its session messages are: nothing fetched, links open beside. -->
+<article class="body md">{@html renderMessage(report.body)}</article>
 
 {#if report.state === 'acknowledged'}
   <div class="banner ok">acknowledged <b>· this records receipt only; no code was published</b>{#if report.verdict_reason} · {report.verdict_reason}{/if}</div>
@@ -79,7 +81,21 @@
   .meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 16px; margin: 0 0 20px; font: 12px var(--mono); }
   .meta div { min-width: 0; }
   dt { color: var(--dim); } dd { margin: 2px 0 0; overflow-wrap: anywhere; }
-  .body { white-space: pre-wrap; overflow-wrap: anywhere; border-block: 1px solid var(--rule); padding: 18px 0; line-height: 1.55; }
+  .body { overflow-wrap: anywhere; border-block: 1px solid var(--rule); padding: 18px 0; line-height: 1.55; max-width: 80ch; }
+  .md > :global(:first-child) { margin-top: 0; }
+  .md > :global(:last-child) { margin-bottom: 0; }
+  .md :global(p), .md :global(ul), .md :global(ol), .md :global(blockquote), .md :global(pre), .md :global(table) { margin: 0 0 0.8em; }
+  .md :global(ul), .md :global(ol) { padding-left: 2.5ch; }
+  .md :global(h1), .md :global(h2), .md :global(h3), .md :global(h4) { font-size: 1em; font-weight: 600; margin: 1.1em 0 0.4em; }
+  .md :global(h1), .md :global(h2) { font-size: 1.12em; }
+  .md :global(code) { font: 0.9em var(--mono); background: var(--s2); border-radius: 3px; padding: 0 3px; }
+  .md :global(pre) { background: var(--s2); border-radius: 4px; padding: 8px 10px; overflow-x: auto; }
+  .md :global(pre code) { background: none; padding: 0; overflow-wrap: normal; }
+  .md :global(table) { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+  .md :global(th), .md :global(td) { border: 1px solid var(--rule); padding: 2px 8px; text-align: left; }
+  .md :global(blockquote) { border-left: 2px solid var(--rule); padding-left: 1.5ch; color: var(--ink2); }
+  .md :global(a) { color: var(--acc); }
+  .md :global(.no-fetch) { color: var(--dim); }
   .decision { margin-top: 24px; }
   label { display: block; margin-top: 12px; font: 13px var(--sans); color: var(--ink2); }
   h2 { margin: 0 0 4px; font: 600 17px var(--sans); }

@@ -7,12 +7,16 @@
 
 import { exhaustionNote } from './exhaustion'
 import { formatDuration, formatTokens } from './format'
+import { callKind } from './transcript'
 import type { Event, SessionExhaustion } from './types'
 
 export interface ToolEntry {
   call: Event
   result?: Event
   progress?: string
+  /// The end of what a running call has printed so far, when the stream
+  /// carries it.
+  tail?: string
   /// What the call did, from its policy record: the harness labels every call
   /// `other`, and the policy has already worked out read, edit or execute.
   kind?: string
@@ -36,13 +40,17 @@ export interface LogEntry {
   tools?: ToolEntry[]
 }
 
-export function groupLog(events: Event[], progress: Map<string, string> = new Map()): LogEntry[] {
+export function groupLog(
+  events: Event[],
+  progress: Map<string, string> = new Map(),
+  tails: Map<string, string> = new Map(),
+): LogEntry[] {
   const out: LogEntry[] = []
   const openCalls = new Map<string, ToolEntry>()
 
   for (const e of events) {
     if (e.kind === 'tool_call') {
-      const entry: ToolEntry = { call: e, progress: progress.get(e.ref_id ?? '') }
+      const entry: ToolEntry = { call: e, progress: progress.get(e.ref_id ?? ''), tail: tails.get(e.ref_id ?? '') }
       const last = out[out.length - 1]
       if (last?.kind === 'tools') {
         last.tools!.push(entry)
@@ -178,13 +186,14 @@ export function groupOpen(tools: ToolEntry[]): boolean {
 export function groupSummary(tools: ToolEntry[]): string {
   const counts = new Map<string, number>()
   for (const t of tools) {
-    const kind = t.kind ?? (t.call.payload.kind as string) ?? 'tool'
+    const kind = callKind(t)
     counts.set(kind, (counts.get(kind) ?? 0) + 1)
   }
   const labels: Record<string, [string, string]> = {
     read: ['read %d file', 'read %d files'],
     edit: ['edited %d file', 'edited %d files'],
     execute: ['ran %d shell command', 'ran %d shell commands'],
+    search: ['ran %d search', 'ran %d searches'],
     think: ['updated the plan', 'updated the plan'],
     fetch: ['fetched %d page', 'fetched %d pages'],
     other: ['called %d tool', 'called %d tools'],

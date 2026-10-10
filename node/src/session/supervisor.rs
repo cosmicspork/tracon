@@ -865,6 +865,9 @@ impl Supervisor {
                     session_id: self.session_id.clone(),
                     tool_call_id: t.tool_call_id.clone(),
                     status: t.status.clone(),
+                    output: (!t.is_terminal())
+                        .then(|| output_tail(t.raw_output.as_ref()))
+                        .flatten(),
                 });
                 if t.is_terminal() {
                     let (output, truncated) = truncate(t.raw_output.as_ref());
@@ -921,18 +924,20 @@ impl Supervisor {
                             .unwrap_or(0)
                             + 1
                     });
-                    self.record(
-                        ek::PROVIDER_ERROR,
-                        None,
-                        json!({
-                            "provider": retry.provider,
-                            "status": retry.status,
-                            "message": retry.message,
-                            "attempt": attempt,
-                            "max_retries": retry.max_retries,
-                            "source": "harness",
-                        }),
-                    );
+                    let mut payload = json!({
+                        "provider": retry.provider,
+                        "status": retry.status,
+                        "message": retry.message,
+                        "attempt": attempt,
+                        "max_retries": retry.max_retries,
+                        "source": "harness",
+                    });
+                    // A retry that names no cause is kept as the harness sent
+                    // it, so it can be explained afterwards.
+                    if retry.unexplained() {
+                        payload["frame"] = json!(raw_frame(&v));
+                    }
+                    self.record(ek::PROVIDER_ERROR, None, payload);
                     let _ = self.watchdog_pause_if_needed().await;
                 } else if let Some(message) = step_failure(&v) {
                     self.record(
@@ -1667,6 +1672,36 @@ struct RetryNotice {
     max_retries: Option<i64>,
 }
 
+impl RetryNotice {
+    /// A notice that says nothing about why: no status, and no message or
+    /// only "unknown", as Claude Code sent once on 2026-10-08.
+    fn unexplained(&self) -> bool {
+        self.status.is_none()
+            && self.message.as_deref().is_none_or(|m| {
+                let m = m.trim();
+                m.is_empty() || m.eq_ignore_ascii_case("unknown")
+            })
+    }
+}
+
+/// The most of a harness frame an event keeps.
+const RAW_FRAME_MAX: usize = 8 * 1024;
+
+/// A harness frame as the text it arrived as, cut to [`RAW_FRAME_MAX`] on a
+/// character boundary.
+fn raw_frame(v: &serde_json::Value) -> String {
+    let mut s = serde_json::to_string(v).unwrap_or_default();
+    if s.len() > RAW_FRAME_MAX {
+        let mut cut = RAW_FRAME_MAX;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+        s.push('…');
+    }
+    s
+}
+
 /// Run a turn until it answers, goes `idle` without any harness activity, or
 /// passes `max` in all. `Err` is the timeout, whichever bound it was.
 async fn until_silent<F: std::future::Future>(
@@ -1790,6 +1825,27 @@ fn step_failure(v: &serde_json::Value) -> Option<String> {
         .unwrap_or("the harness gave up on this step without saying why")
         .to_string(),
     )
+}
+
+/// How much of a running call's output its progress frame carries.
+const OUTPUT_TAIL: usize = 2 * 1024;
+
+/// The end of what a running call has printed so far, as text, for the line
+/// that shows it while it runs. Nothing when it has printed nothing.
+fn output_tail(v: Option<&serde_json::Value>) -> Option<String> {
+    let text = match v? {
+        serde_json::Value::Null => return None,
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    let mut start = text.len().saturating_sub(OUTPUT_TAIL);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(text[start..].to_string())
 }
 
 fn truncate(v: Option<&serde_json::Value>) -> (Option<String>, bool) {
@@ -1985,6 +2041,24 @@ mod tests {
     }
 
     #[test]
+    fn a_running_call_shows_the_end_of_its_output() {
+        assert_eq!(output_tail(None), None);
+        assert_eq!(output_tail(Some(&json!(null))), None);
+        assert_eq!(output_tail(Some(&json!("  \n"))), None);
+        assert_eq!(
+            output_tail(Some(&json!("Compiling a\nCompiling b\n"))).as_deref(),
+            Some("Compiling a\nCompiling b\n")
+        );
+        let long = format!("{}end", "é".repeat(OUTPUT_TAIL));
+        let tail = output_tail(Some(&json!(long))).unwrap();
+        assert!(tail.len() <= OUTPUT_TAIL && tail.ends_with("end"));
+        assert_eq!(
+            output_tail(Some(&json!({ "stdout": "x" }))).as_deref(),
+            Some(r#"{"stdout":"x"}"#)
+        );
+    }
+
+    #[test]
     fn a_failed_step_is_recorded_with_its_cause() {
         // As the OpenCode adapter forwards `session.next.step.failed` for a
         // stream the gateway cut mid-answer.
@@ -2049,6 +2123,21 @@ mod tests {
         );
         // Anything else is not a retry, including a plain error.
         assert!(retry_notice(&json!({ "type": "system", "subtype": "init" })).is_none());
+        // Every notice above says why; one that does not is kept whole.
+        assert!(!claude.unexplained() && !bounded.unexplained() && !opencode.unexplained());
+        let unknown = retry_notice(&json!({
+            "type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10,
+            "error": "unknown"
+        }))
+        .expect("claude's api_retry");
+        assert!(unknown.unexplained());
+        let bare = retry_notice(&json!({ "type": "system", "subtype": "api_retry" })).unwrap();
+        assert!(bare.unexplained());
+        let frame = raw_frame(&json!({ "subtype": "api_retry", "error": "unknown" }));
+        assert!(frame.contains(r#""error":"unknown""#), "{frame}");
+        let long = raw_frame(&json!({ "error": "é".repeat(RAW_FRAME_MAX) }));
+        assert!(long.len() <= RAW_FRAME_MAX + '…'.len_utf8());
+        assert!(long.ends_with('…'));
         assert!(retry_notice(&json!({ "method": "session.next.error" })).is_none());
         assert!(retry_notice(&json!({ "method": "session.updated" })).is_none());
     }

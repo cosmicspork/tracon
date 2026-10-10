@@ -466,7 +466,8 @@ node pushes one commit holding the reviewed tree with the approved message on th
 approved branch. An update adds that commit to what the change holds, and when the
 revision merged its base (to resolve a conflict, say) the commit keeps that base as a
 second parent, so the forge sees it merged. `commits = "keep"` (in `[publish]`, a repository's entry, or the
-channel's `publish.commits` binding) pushes the agent's commits as written instead.
+channel's `publish.commits` binding) pushes the agent's commits instead: as written, or
+with the messages you edited on the review, each remade with the same tree, author and dates.
 Subject and branch rules (`style`) are off unless configured, and a submission that
 breaks them is refused before it reaches you.
 
@@ -497,8 +498,9 @@ which you are asked about like any other comment. CI reads the same on either
 forge: a run's jobs and the step that failed (`run_status` with `run_id` /
 `pipeline_status`), the runs at an exact commit (`run_status` with `sha` /
 `pipeline_list_by_sha`), and the end of a job's log (`run_logs` / `job_trace`, 16 KiB
-unless asked, at most 64) are unattended; rerunning a run's failed jobs (`run_rerun`)
-or playing a job (`job_play`) is asked. `tracon provenance <sha>`
+unless asked, at most 64) are unattended, and so is waiting for one to move (`run_wait` /
+`pipeline_wait`); rerunning a run's failed jobs (`run_rerun`) or playing a job
+(`job_play`) is asked, and the node follows the run or pipeline it started. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 

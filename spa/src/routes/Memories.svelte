@@ -215,6 +215,8 @@
   .t {
     min-width: 0;
     white-space: pre-wrap;
+    /* A path or hash with nowhere to break would widen the page. */
+    overflow-wrap: anywhere;
   }
   .t em {
     font: 11.5px var(--mono);
@@ -255,7 +257,6 @@
     align-items: center;
     white-space: nowrap;
   }
-  .btn.d { background: var(--crit); color: var(--bg); }
   .act.confirm {
     white-space: normal;
     flex-wrap: wrap;
@@ -273,6 +274,9 @@
     }
     .act {
       grid-column: 2;
+    }
+    .bar-mark {
+      grid-row: 1 / span 2;
     }
     .act.confirm {
       justify-content: flex-start;

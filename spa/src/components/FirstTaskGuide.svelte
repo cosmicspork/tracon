@@ -67,7 +67,7 @@
             This ready node is not a member of an open channel. Add it to one before starting work here.
           {:else}
             This node is not a task runner yet{localReadiness ? `: ${localReadiness.label.toLowerCase()}.` : '.'}
-            <a href="/settings#maintenance">Prepare it</a> if you want to run work here.
+            <a href="/settings#system">Prepare it</a> if you want to run work here.
           {/if}
         </p>
       {/if}
@@ -121,7 +121,7 @@
 
   <details class="device">
     <summary>Optional device setup</summary>
-    <p><a href="/settings#devices">Register this browser for notifications</a> if you want permission and review prompts here. It does not add a model or make a node eligible to run work.</p>
+    <p><a href="/settings#access">Register this browser for notifications</a> if you want permission and review prompts here. It does not add a model or make a node eligible to run work.</p>
   </details>
 </section>
 
@@ -131,7 +131,7 @@
     gap: 14px;
     max-width: 760px;
     padding: 16px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: 6px;
     background: var(--s1);
   }
@@ -180,7 +180,7 @@
     color: var(--ink);
     text-align: left;
     background: var(--s2);
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: 4px;
     cursor: pointer;
   }

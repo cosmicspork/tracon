@@ -5,6 +5,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import { isNotFound } from '../lib/load'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { nodeLabel } from '../lib/nodes'
@@ -32,7 +33,7 @@
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
-  import type { ReviewDraftFields } from '../lib/types'
+  import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
@@ -74,11 +75,20 @@
   /** The squashed commit's message, and what it was before you edited it. */
   let message = $state('')
   let proposedMessage = ''
+  /**
+   * Under `keep`: the message of each of the agent's commits open for
+   * editing, by sha. A commit not here ships as the agent wrote it.
+   */
+  let commitMessages = $state<Record<string, string>>({})
   /** The branch a new change is pushed to. */
   let branchName = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  /** The node said there is no such review, as opposed to failing to say. */
+  let missing = $state(false)
+  /** Bumped by Retry to read the review again. */
+  let attempt = $state(0)
   /** Unsent words, held by the node so another device or a reload finds them. */
   let draftSync: ReviewDraftSync | null = null
   let draftState = $state<DraftState>('clean')
@@ -100,9 +110,36 @@
     return from.body.trim() ? `${from.title.trim()}\n\n${from.body.trim()}` : from.title.trim()
   }
 
+  /** One of the agent's commits' messages, as it wrote it. */
+  function writtenMessage(c: ReviewCommit): string {
+    return c.body?.trim() ? `${c.subject}\n\n${c.body.trim()}` : c.subject
+  }
+
+  /** The commit messages edited away from what the agent wrote, by sha. */
+  function editedMessages(): Record<string, string> {
+    const edited: Record<string, string> = {}
+    for (const c of intent.commits ?? []) {
+      const now = commitMessages[c.sha]
+      if (now !== undefined && now.trim() !== writtenMessage(c).trim()) edited[c.sha] = now.trim()
+    }
+    return edited
+  }
+
+  function editCommit(c: ReviewCommit) {
+    commitMessages = { ...commitMessages, [c.sha]: writtenMessage(c) }
+  }
+
+  function revertCommit(sha: string) {
+    const { [sha]: _, ...rest } = commitMessages
+    commitMessages = rest
+  }
+
   $effect(() => {
     void id
+    void attempt
     loaded = false
+    missing = false
+    error = null
     openedFrom = router.previous
     draftSync?.stop()
     draftSync = null
@@ -137,6 +174,7 @@
         comment = intent.forge.comment ?? ''
         proposedMessage = proposedCommitMessage(intent, d.review.title, d.review.body)
         message = proposedMessage
+        commitMessages = {}
         try {
           branchName = JSON.parse(d.review.target)?.branch ?? ''
         } catch {
@@ -157,6 +195,7 @@
       })
       .catch((e) => {
         error = e instanceof Error ? e.message : String(e)
+        missing = isNotFound(e)
         loaded = true
       })
     // Release on navigating away. The node's sweeper covers a client that
@@ -180,6 +219,7 @@
       comment,
       message,
       branch: branchName,
+      messages: editedMessages(),
     }
   }
 
@@ -194,6 +234,12 @@
     if (d.comment !== undefined) comment = d.comment
     if (d.message !== undefined) message = d.message
     if (d.branch !== undefined) branchName = d.branch
+    // Written against an earlier revision, an edit of a commit this one no
+    // longer has is dropped.
+    if (d.messages !== undefined) {
+      const listed = new Set((intent.commits ?? []).map((c) => c.sha))
+      commitMessages = Object.fromEntries(Object.entries(d.messages).filter(([sha]) => listed.has(sha)))
+    }
   }
 
   // Every change to what the operator is writing is saved to the node after
@@ -349,6 +395,10 @@
   const summaryOnly = $derived(change !== null || describe)
   /** Whether the reviewed tree ships as one commit rather than the agent's. */
   const squashing = $derived(intent.squash_onto !== undefined)
+  /** Under `keep`: the commit messages you changed, by sha. */
+  const reworded = $derived.by(editedMessages)
+  /** Whether you can change the commit messages here. */
+  const rewordable = $derived(!squashing && !remoteOwner && !closed && !surface.phone)
   const outputs = $derived<ReviewOutputs>({
     description: describe ? { title: descTitle, body: descBody } : undefined,
     comment: commenting && comment.trim() ? comment : undefined,
@@ -358,6 +408,7 @@
         ? message.trim()
         : undefined,
     branch: change === null && branchName.trim() && branchName.trim() !== target?.branch ? branchName.trim() : undefined,
+    messages: !squashing && Object.keys(reworded).length ? reworded : undefined,
   })
   const files = $derived.by(() => {
     try {
@@ -555,8 +606,13 @@
 
 {#if !loaded}
   <div class="empty">Loading review…</div>
-{:else if !review}
+{:else if !review && missing}
   <div class="banner crit">not found <b>· {error ?? 'no such review'}</b></div>
+{:else if !review}
+  <div class="banner crit" role="alert">
+    Could not load this review <b>· {error}</b>
+    <button class="lnk" onclick={() => attempt++}>Retry</button>
+  </div>
 {:else if report}
   <ReportReview {report} />
 {:else}
@@ -618,6 +674,35 @@
       <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
     </div>
   {/if}
+  <!-- Before the evidence, prose and files: it is what saves reading them again. -->
+  {#if sinceReviewed}
+    <section class="since">
+      <div class="h4">
+        Since your last verdict
+        <b>{sinceReviewed.head_sha.slice(0, 8)} → {review.head_sha.slice(0, 8)}</b>
+      </div>
+      {#each sinceReviewed.responses as r, i (i)}
+        <div class="response">
+          <span class="said">{r.source === 'operator' ? 'You' : r.source} · {r.decision === 'revise' ? 'asked' : r.decision}{r.sent_edit ? ' · with an edit' : ''}</span>
+          <q>{r.reason || '(no reason given)'}</q>
+          <span class="answer">
+            {#if !r.answered_by}
+              not answered yet
+            {:else if r.files === null}
+              answered · the files it changed can no longer be read
+            {:else if r.files.length === 0}
+              answered with no change to the files
+            {:else}
+              answered in {r.files.map((f) => f.path).join(', ')}
+            {/if}
+          </span>
+        </div>
+      {/each}
+      {#if sinceReviewed.unavailable}
+        <p class="note dim">{sinceReviewed.unavailable}</p>
+      {/if}
+    </section>
+  {/if}
   {#if remoteOwner && !evidence}
     <!-- what the owner holds could not be read; the banner above says why -->
   {:else if !evidence}
@@ -636,7 +721,7 @@
           {#if requirements}
             <b>{requirements.title}</b>
             <p>{requirements.body || 'No additional requirement detail.'}</p>
-            <a href="/work/{requirements.id}">open work item</a>
+            <a href="/tasks/{requirements.id}">open work item</a>
           {:else}
             <p class="missing">No work item was linked when this review was captured.</p>
           {/if}
@@ -780,7 +865,7 @@
 
   <dl class="prov">
     <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
-    <div><dt>Item</dt><dd>{#if session?.work_item_id}<a href="/work/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
+    <div><dt>Item</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
     <div><dt>Policy</dt><dd>{session?.policy_version != null ? `working-agreements v${session.policy_version}` : '—'}</dd></div>
     <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : 'no review model bound'}</dd></div>
     <div><dt>Commit</dt><dd>{review.head_sha.slice(0, 8)}</dd></div>
@@ -889,12 +974,39 @@
   {#if intent.commits?.length || squashing}
     <div class="h4">
       Commits
-      <b>{squashing ? 'ships as one commit of the reviewed tree' : 'pushed as the agent wrote them'}</b>
+      <b
+        >{squashing
+          ? 'ships as one commit of the reviewed tree'
+          : Object.keys(reworded).length
+            ? `pushed with ${Object.keys(reworded).length === 1 ? 'one message' : `${Object.keys(reworded).length} messages`} edited here`
+            : 'pushed as the agent wrote them'}</b
+      >
     </div>
     {#if intent.commits?.length}
       <ul class="commits">
         {#each intent.commits as c (c.sha)}
-          <li class:squashed={squashing}><code>{c.sha.slice(0, 8)}</code> {c.subject}</li>
+          <li class:squashed={squashing}>
+            <div class="line">
+              <span class="subject"><code>{c.sha.slice(0, 8)}</code> {c.subject}</span>
+              {#if reworded[c.sha] !== undefined}<span class="chip warn">edited</span>{/if}
+              {#if rewordable && commitMessages[c.sha] === undefined}
+                <button class="lnk" disabled={busy || publishing} onclick={() => editCommit(c)}>Edit message</button>
+              {:else if rewordable}
+                <button class="lnk" disabled={busy || publishing} onclick={() => revertCommit(c.sha)}
+                  >{reworded[c.sha] !== undefined ? 'Undo' : 'Close'}</button
+                >
+              {/if}
+            </div>
+            {#if !squashing && commitMessages[c.sha] !== undefined}
+              <textarea
+                class="edit body mono"
+                aria-label={`message of ${c.sha.slice(0, 8)}`}
+                bind:value={commitMessages[c.sha]}
+                use:autogrow={commitMessages[c.sha]}
+                disabled={busy || publishing || !rewordable}
+              ></textarea>
+            {/if}
+          </li>
         {/each}
       </ul>
     {/if}
@@ -958,43 +1070,15 @@
       {/if}
     {/if}
   {:else}
-    {#if sinceReviewed}
-      <section class="since">
-        <div class="h4">
-          Since your last verdict
-          <b>{sinceReviewed.head_sha.slice(0, 8)} → {review.head_sha.slice(0, 8)}</b>
-        </div>
-        {#each sinceReviewed.responses as r, i (i)}
-          <div class="response">
-            <span class="said">{r.source === 'operator' ? 'You' : r.source} · {r.decision === 'revise' ? 'asked' : r.decision}{r.sent_edit ? ' · with an edit' : ''}</span>
-            <q>{r.reason || '(no reason given)'}</q>
-            <span class="answer">
-              {#if !r.answered_by}
-                not answered yet
-              {:else if r.files === null}
-                answered · the files it changed can no longer be read
-              {:else if r.files.length === 0}
-                answered with no change to the files
-              {:else}
-                answered in {r.files.map((f) => f.path).join(', ')}
-              {/if}
-            </span>
-          </div>
-        {/each}
-        {#if sinceReviewed.unavailable}
-          <p class="note dim">{sinceReviewed.unavailable}</p>
-        {/if}
-        {#if sinceReviewed.diff}
-          <div class="tabs" role="tablist">
-            <button role="tab" class:on={diffView === 'since'} aria-selected={diffView === 'since'} onclick={() => (diffView = 'since')}>
-              Since last verdict · {sinceReviewed.files?.length ?? 0} files
-            </button>
-            <button role="tab" class:on={diffView === 'full'} aria-selected={diffView === 'full'} onclick={() => (diffView = 'full')}>
-              Full change · {files.length} files
-            </button>
-          </div>
-        {/if}
-      </section>
+    {#if sinceReviewed?.diff}
+      <div class="tabs" role="tablist">
+        <button role="tab" class:on={diffView === 'since'} aria-selected={diffView === 'since'} onclick={() => (diffView = 'since')}>
+          Since last verdict · {sinceReviewed.files?.length ?? 0} files
+        </button>
+        <button role="tab" class:on={diffView === 'full'} aria-selected={diffView === 'full'} onclick={() => (diffView = 'full')}>
+          Full change · {files.length} files
+        </button>
+      </div>
     {/if}
     {#if diffView === 'since' && sinceReviewed?.diff}
       <Diff diff={sinceReviewed.diff} perFile={surface.phone} />
@@ -1576,9 +1660,29 @@
   }
   .commits li {
     padding: 3px 0;
+  }
+  .commits .line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .commits .subject {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .commits .chip.warn {
+    background: var(--wash-wait);
+    color: var(--wait);
+  }
+  .commits textarea {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 64px;
+    margin: 6px 0 4px;
   }
   .commits li.squashed {
     color: var(--dim);

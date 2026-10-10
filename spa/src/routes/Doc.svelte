@@ -211,7 +211,7 @@
     <a class="lnk" href="/docs">Documents</a>
     <span class="sep">/</span>
     {slug}
-    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}{error && !editing ? ` · ${error}` : ''}</b>
+    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : missing ? ' · new' : ''}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}{error && !editing ? ` · ${error}` : ''}</b>
     {#if doc?.format === 'html' && !loadError}
       <span class="r">
         <button class="lnk" onclick={() => (replacing = !replacing)}>{replacing ? 'Cancel replace' : 'Replace bundle'}</button>
@@ -240,6 +240,9 @@
   </div>
 
   {#if editing}
+    <!-- The editor takes the page below the header: the draft scrolls inside
+         it, and Save and Cancel stay at the foot of the window. -->
+    <div class="editor">
     {#if changedElsewhere && !conflict}
       <div class="banner dim">this document changed elsewhere while you were editing <b>· saving will show you the other version first</b></div>
     {/if}
@@ -254,10 +257,14 @@
       <button class="lnk" onclick={() => { editing = false; draft = doc?.body ?? draft; if (!doc) router.go('/docs') }}>Cancel</button>
       {#if error}<span class="err">{error}</span>{/if}
     </div>
+    </div>
   {:else if missing}
     <div class="empty">No document <code>{slug}</code> on {channel}.{#if !surface.phone} <button class="lnk" onclick={() => (editing = true)}>Write it.</button>{/if}</div>
   {:else if loadError}
-    <div class="empty err">Could not load this document: {loadError}</div>
+    <div class="banner crit" role="alert">
+      Could not load this document <b>· {loadError}</b>
+      <button class="lnk" onclick={() => void load()}>Retry</button>
+    </div>
   {:else if doc?.format === 'html'}
     <section class="html-doc">
       <div class="html-meta">
@@ -310,23 +317,32 @@
     letter-spacing: 0;
     text-transform: none;
   }
+  /* main is a column at least the window's height; the editor takes what
+     the header and any banner leave of it. */
+  .editor {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
   textarea {
+    flex: 1;
     width: 100%;
-    min-height: 60vh;
+    min-height: 12em;
     font: 13px/1.5 var(--mono);
     background: var(--s1);
     color: var(--ink);
     border: 0;
     border-radius: 4px;
     padding: 12px 14px;
-    resize: vertical;
+    resize: none;
     box-sizing: border-box;
   }
   .send {
     display: flex;
     gap: 14px;
     align-items: center;
-    margin-top: 10px;
   }
   .err {
     color: var(--crit);
@@ -351,8 +367,16 @@
   }
   .md {
     max-width: 72ch;
+    min-width: 0;
     line-height: 1.55;
     color: var(--ink);
+    /* An unbroken token or URL breaks where it must rather than widening the
+       page; code blocks and tables scroll inside themselves instead. */
+    overflow-wrap: anywhere;
+  }
+  .md :global(img) {
+    max-width: 100%;
+    height: auto;
   }
   .md :global(h1),
   .md :global(h2),
@@ -411,7 +435,9 @@
     border-collapse: collapse;
     font-size: 13px;
     display: block;
+    max-width: 100%;
     overflow-x: auto;
+    overflow-wrap: normal;
   }
   .md :global(th),
   .md :global(td) {

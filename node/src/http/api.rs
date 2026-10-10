@@ -6285,7 +6285,7 @@ fn build_manifest(s: &AppState, channel: &str) -> Result<crate::manifest::Launch
     let cfg = &s.cfg;
     crate::manifest::build(crate::manifest::Inputs {
         channel,
-        skills,
+        skills: crate::manifest::with_builtins(skills),
         instructions,
         agents,
         plugins: &cfg.launch.plugins,

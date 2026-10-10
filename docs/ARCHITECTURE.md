@@ -722,7 +722,11 @@ the commit pinned at submit — where the branch leaves its base for a new
 branch, or what the change's branch holds for an update, including an earlier
 squash the agent never had — with the candidate head's author and dates, so a
 resumed attempt makes the identical commit. `keep` pushes the agent's commits
-as written. The message and branch are bound by the publish grant's prose hash
+as written, unless the operator edited a commit's message (`messages` in the
+approved outputs, by the commit's sha): then that commit and those after it are
+remade in the publisher with the same trees, authors, committers and dates and
+their rewritten parents, so a resumed attempt makes the identical chain. A
+commit the branch already holds is not reworded by an update. The message and branch are bound by the publish grant's prose hash
 and target like the description, and a deterministic check (conventional type,
 imperative subject, length, kebab branch, no tracker keys — each off unless the
 repository's entry, the channel's `publish.style` binding or `[publish] style`
@@ -753,7 +757,11 @@ follows it again. It is a subscription of its own, so a pipeline outlives the me
 request whose merge triggered it. Following never retries, cancels or plays a job. An
 agent that wants to see it through itself calls `pipeline_wait`, a read that holds up
 to 45 s like `review_status` and returns as soon as the pipeline or a job moves, with a
-`state` token to pass back so a change between calls is not missed.
+`state` token to pass back so a change between calls is not missed. A GitHub Actions run
+the agent reran (`run_rerun`) is followed the same way, under the provider `github`: the
+rerun's result names the attempt it started, the run reads as pending until GitHub has
+begun that attempt (so the last attempt's failure is not taken for this one's), and
+`run_wait` is its `pipeline_wait`.
 
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a

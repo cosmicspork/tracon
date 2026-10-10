@@ -464,7 +464,7 @@ const MAINTENANCE = {
 }
 
 const holding = (kind, label, unit, count, bytes, del, propagation) => ({ kind, label, unit, count, bytes, delete: del, propagation })
-const RUNTIME = { path: '/settings#maintenance', label: 'Maintenance, under Runtime storage, once the session is archived' }
+const RUNTIME = { path: '/settings#system', label: 'System, under Runtime storage, once the session is archived' }
 const DATA = {
   database_bytes: 412_334_080,
   total_bytes: 6_948_120_576,
@@ -474,7 +474,7 @@ const DATA = {
     holding('evidence', 'Candidates and evidence', 'candidate', 342, 41_009_152, null, 'Nothing deletes evidence yet: a verdict is only as good as what it was given, and a review may already be published.'),
     holding('documents', 'Documents', 'document', 63, 4_812_800, { path: '/docs', label: 'Documents, one at a time' }, 'A delete replicates to every node on the document’s channel and to the hub. Each keeps a tombstone, the row with its content cleared, so the delete wins over an older copy arriving later.'),
     holding('memories', 'Memories', 'memory', 1, 812, { path: '/memories', label: 'Memories, one at a time' }, 'A delete replicates to every node on the memory’s channel and to the hub, each keeping a tombstone, and drops it from recall.'),
-    holding('work', 'Work items', 'work item', 118, 902_144, { path: '/work', label: 'Work, one item at a time' }, 'A delete replicates to every node on the item’s channel and to the hub, each keeping a tombstone. Sessions that worked on it keep their record.'),
+    holding('work', 'Work items', 'work item', 118, 902_144, { path: '/tasks', label: 'Tasks, one item at a time' }, 'A delete replicates to every node on the item’s channel and to the hub, each keeping a tombstone. Sessions that worked on it keep their record.'),
     holding('index', 'Search index', 'vector', 24_610, 25_165_824, null, 'Derived from documents and memories on this node: deleting one of them drops its vectors. Never replicated.'),
     holding('workspaces', 'Workspaces', 'workspace', 37, 5_402_198_016, RUNTIME, 'On this node only; nothing replicates a workspace. Removing one gives up resuming, exporting and restoring its session.'),
     holding('harness', 'Harness state', 'session', 211, 1_133_510_656, RUNTIME, 'On this node only. Removing a session’s directory gives up resuming it; the rows the node mirrored from the harness stay with the session.'),
@@ -845,10 +845,10 @@ export default [
   }),
 
   // --- Repositories ----------------------------------------------------------
-  S('repositories', '/settings#repositories', 'Repositories: two entries, built images', {
+  S('repositories', '/settings#channels', 'Repositories: two entries, built images', {
     note: 'Dockerfile entry with base and session images ready and sessions given egress, and `commits`/`style` the editor does not show; a pinned image entry with a long digest. Nothing is unsaved, so there is no Save button.',
   }),
-  S('repositories-builds', '/settings#repositories', 'Repositories: failed, building and warning builds', {
+  S('repositories-builds', '/settings#channels', 'Repositories: failed, building and warning builds', {
     note: 'Three entries (collapsed by default) — expanded here: failed build with output open, a building one, missing-tool warnings, the github upload caution.',
     over: {
       '/api/repos/environments': {
@@ -876,60 +876,60 @@ export default [
       await page.locator('.builds details').first().evaluate((el) => (el.open = true))
     },
   }),
-  S('repositories-empty', '/settings#repositories', 'Repositories: no entries', {
+  S('repositories-empty', '/settings#channels', 'Repositories: no entries', {
     over: { '/api/repos/environments': { ...REPO_ENV, entries: [] } },
   }),
-  S('repositories-new-invalid', '/settings#repositories', 'Repositories: a new entry with problems', {
+  S('repositories-new-invalid', '/settings#channels', 'Repositories: a new entry with problems', {
     note: 'Added a third entry: the two saved ones collapse, the new one is open with no repository named and a pinned image left empty; the first problem shows beside the disabled Save.',
     act: async (page) => {
       await click(page, '+ Add a repository')
       await page.locator('details.entry').last().locator('select').first().selectOption('image')
     },
   }),
-  S('repositories-new-collapses', '/settings#repositories', 'Repositories: typing a path into a third entry collapses it', {
+  S('repositories-new-collapses', '/settings#channels', 'Repositories: typing a path into a third entry collapses it', {
     note: 'Bug: with three or more entries, `open={!form.path || forms.length <= 2}` closes the new entry on its first keystroke.',
     act: async (page) => {
       await click(page, '+ Add a repository')
       await page.locator('details.entry').last().locator('input').first().fill('github.com/op/orbit')
     },
   }),
-  S('repositories-error', '/settings#repositories', 'Repositories: table could not be read', {
+  S('repositories-error', '/settings#channels', 'Repositories: table could not be read', {
     over: { '/api/repos/environments': fail(500, 'node.toml does not parse: TOML parse error at line 48, column 1: duplicate key `path` in table `repo`') },
   }),
-  S('repositories-loading', '/settings#repositories', 'Repositories: reading', {
+  S('repositories-loading', '/settings#channels', 'Repositories: reading', {
     over: { '/api/repos/environments': never },
     sizes: ['desktop'],
   }),
 
-  // --- Devices & notifications ----------------------------------------------
-  S('devices', '/settings#devices', 'Devices: push off, three registered devices', {
+  // --- Devices & notifications (in Access & devices) ----------------------------------------------
+  S('devices', '/settings#access', 'Devices: push off, three registered devices', {
     note: 'One device is this browser, one fails, one has a long user agent.',
     init: pushStub(),
   }),
-  S('devices-on', '/settings#devices', 'Devices: push on, test accepted', {
+  S('devices-on', '/settings#access', 'Devices: push on, test accepted', {
     init: pushStub({ subscribed: true }),
     over: { 'POST /api/push/test': { sent: [{ id: 'd-1', outcome: 'accepted', service_accepted: true }, { id: 'd-2', outcome: 'accepted', service_accepted: true }, { id: 'd-3', outcome: 'gone (410)', service_accepted: false }] } },
     act: (page) => click(page, 'Send a test'),
   }),
-  S('devices-denied', '/settings#devices', 'Devices: enrolment stopped at the permission prompt', {
+  S('devices-denied', '/settings#access', 'Devices: enrolment stopped at the permission prompt', {
     since: '#403',
     note: 'The failure note is now red and names the stage: notifications blocked for this site.',
     init: pushStub({ permission: 'denied' }),
     act: (page) => page.getByRole('checkbox').first().click(),
   }),
-  S('devices-push-service', '/settings#devices', 'Devices: the browser push service refused', {
+  S('devices-push-service', '/settings#access', 'Devices: the browser push service refused', {
     since: '#403',
     init: pushStub({ subscribeError: ['AbortError', 'Registration failed - push service error'] }),
     act: (page) => page.getByRole('checkbox').first().click(),
   }),
-  S('devices-node-failed', '/settings#devices', 'Devices: the node did not record the device', {
+  S('devices-node-failed', '/settings#access', 'Devices: the node did not record the device', {
     since: '#403',
     note: 'A 500 from POST /api/push/subscriptions: "its storage failed: …".',
     init: pushStub(),
     over: { 'POST /api/push/subscriptions': fail(500, 'database is locked') },
     act: (page) => page.getByRole('checkbox').first().click(),
   }),
-  S('devices-unsupported', '/settings#devices', 'Devices: push not available, none registered', {
+  S('devices-unsupported', '/settings#access', 'Devices: push not available, none registered', {
     init: pushStub({ noPush: true }),
     over: { '/api/push/subscriptions': { devices: [] } },
   }),
@@ -1061,30 +1061,33 @@ export default [
   }),
 
   // --- Data (#402) -------------------------------------------------------------
-  S('data', '/settings#data', 'Data: what the node holds, kind by kind', {
+  S('data', '/settings#system', 'Data: what the node holds, kind by kind', {
     since: '#402',
     note: 'Totals line, per-kind counts and sizes (GB workspaces, a single memory), delete links and propagation text.',
   }),
-  S('data-empty', '/settings#data', 'Data: a fresh node', {
+  S('data-empty', '/settings#system', 'Data: a fresh node', {
     since: '#402',
     over: { '/api/maintenance/data': { database_bytes: 98304, total_bytes: 98304, holdings: DATA.holdings.map((h) => ({ ...h, count: 0, bytes: 0 })) } },
   }),
-  S('data-error', '/settings#data', 'Data: inventory failed', {
+  S('data-error', '/settings#system', 'Data: inventory failed', {
     since: '#402',
     over: { '/api/maintenance/data': fail(500, 'walking /home/op/.local/state/tracon/workspaces: permission denied (os error 13) at workspaces/s-8c1f/node_modules/.cache') },
   }),
-  S('data-loading', '/settings#data', 'Data: counting', {
+  S('data-loading', '/settings#system', 'Data: counting', {
     since: '#402',
     over: { '/api/maintenance/data': never },
     sizes: ['desktop'],
   }),
 
-  // --- Maintenance -----------------------------------------------------------
-  S('maintenance', '/settings#maintenance', 'Maintenance: configuration, access, boundary, service, harness, transfers', {
-    note: 'Two harnesses (opencode image stale), capabilities (restart unavailable), external harness MCP lines per channel, transfer inbox.',
-    act: (page) => page.locator('details').filter({ hasText: 'Import a session' }).first().evaluate((el) => (el.open = true)).catch(() => {}),
+  // --- System and Access (Maintenance was split between them) -----------------
+  // The ids keep their old `maintenance` names so the audit history lines up.
+  S('maintenance', '/settings#system', 'System: configuration, boundary, service, harnesses, storage, data', {
+    note: 'Two harnesses (opencode image stale), capabilities (restart unavailable), runtime storage and the data inventory. The session transfer inbox is on Sessions now (docs-transfer-inbox).',
   }),
-  S('maintenance-refused', '/settings#maintenance', 'Maintenance: boundary refused, harness mismatch', {
+  S('access', '/settings#access', 'Access & devices: operator token, administrator access, devices, your own harness', {
+    note: 'What was the top and the tail of Maintenance (operator access, external harness MCP lines per channel) with Devices & notifications between.',
+  }),
+  S('maintenance-refused', '/settings#system', 'System: boundary refused, harness mismatch', {
     note: 'Node refused because the Podman gateway service is stopped (#377 starts it when found stopped; this is the case it could not), a harness version mismatch, service state unknown, setup check list.',
     over: {
       '/api/nodes': [
@@ -1114,17 +1117,18 @@ export default [
       await click(page, 'Restart this serving node…')
     },
   }),
-  S('maintenance-config-dirty', '/settings#maintenance', 'Maintenance: configuration edited, not yet saved', {
+  S('maintenance-config-dirty', '/settings#system', 'System: configuration edited, not yet saved', {
     note: 'Long node name typed, review cap changed: Save configuration enabled.',
     act: async (page) => {
       await page.locator('label').filter({ hasText: 'Node name' }).locator('input').fill('laptop-orbit-and-consulta-development-workstation')
       await page.locator('label').filter({ hasText: 'Review cap (lines)' }).locator('input').fill('6000')
     },
   }),
-  S('maintenance-config-error', '/settings#maintenance', 'Maintenance: node.toml unreadable, external off', {
+  S('maintenance-config-error', '/settings#system', 'System: node.toml unreadable', {
+    note: 'Node configuration says why; Your own harness says it cannot tell whether it is on, rather than loading forever.',
     over: { '/api/config': fail(500, 'TOML parse error at line 48, column 1\n   |\n48 | path = "github.com/op/orbit"\n   | ^\nduplicate key `path` in table `repo`') },
   }),
-  S('maintenance-token-confirm', '/settings#maintenance', 'Maintenance: create or rotate operator access', {
+  S('maintenance-token-confirm', '/settings#access', 'Access: create or rotate operator access', {
     act: async (page) => {
       await page.getByPlaceholder('https://node.tailnet.ts.net').fill('https://laptop.tail0a1b2.ts.net')
       await click(page, 'Create or rotate token')
@@ -1132,7 +1136,7 @@ export default [
     },
     full: false,
   }),
-  S('maintenance-storage', '/settings#maintenance', 'Maintenance: reclaimable storage found', {
+  S('maintenance-storage', '/settings#system', 'System: reclaimable storage found', {
     over: {
       'POST /api/maintenance/storage': {
         applied: false,
@@ -1153,7 +1157,7 @@ export default [
       await scrollTo(page, 'Runtime storage')
     },
   }),
-  S('maintenance-external-stopped', '/settings#maintenance', 'Maintenance: external broker access stopped on one channel', {
+  S('maintenance-external-stopped', '/settings#access', 'Access: external broker access stopped on one channel', {
     over: {
       '/api/channels': CHANNELS.map((c) => (c.name === 'work' ? { ...c, bindings: { ...c.bindings, external_stopped: true } } : c)),
     },
@@ -1165,7 +1169,7 @@ export default [
   }),
 
   // --- Cross-cutting ---------------------------------------------------------
-  S('remote', '/settings#maintenance', 'Reached remotely: banners and disabled controls', {
+  S('remote', '/settings#system', 'Reached remotely: banners and disabled controls', {
     note: 'Not loopback: the remote banner, disabled configuration, "blocked" notes, remote-admin note.',
     over: {
       '/api/nodes': [selfNode({ loopback: false }), peerNode(), goneNode()],

@@ -17,12 +17,12 @@
   import { providerChannelSeed } from '../lib/channel'
   import { connectableProviders } from '../lib/providers'
   import HubRollups from '../components/HubRollups.svelte'
-  import TransferInbox from '../components/TransferInbox.svelte'
   import AdminAccess from '../components/settings/AdminAccess.svelte'
   import Maintenance from '../components/settings/Maintenance.svelte'
   import DataHeld from '../components/settings/DataHeld.svelte'
   import Repositories from '../components/settings/Repositories.svelte'
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
+  import NodeList from '../components/settings/NodeList.svelte'
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
   import Card from '../components/settings/Card.svelte'
@@ -59,16 +59,16 @@
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
   const params = $derived(new URLSearchParams(router.search))
+  // Old anchors (#maintenance, #devices, #data, #repositories) are moved to
+  // the section that holds them now by the router; see lib/routes.ts.
   const sections = [
     ['general', 'General'],
     ['connections', 'Connections'],
-    ['channels', 'Channels'],
-    ['repositories', 'Repositories'],
-    ['devices', 'Devices & notifications'],
-    ['mesh', 'Mesh'],
+    ['channels', 'Channels & repositories'],
+    ['access', 'Access & devices'],
     ['policies', 'Permissions & policies'],
-    ['data', 'Data'],
-    ['maintenance', 'Maintenance'],
+    ['mesh', 'Mesh'],
+    ['system', 'System'],
   ] as const
   const activeSection = $derived(
     sections.find(([id]) => id === router.hash.slice(1))?.[0] ?? 'general',
@@ -644,7 +644,7 @@
 
 {#key adminRevision}
 <div class="panel" id="settings-{activeSection}" tabindex="-1">
-{#if ['mesh', 'policies', 'maintenance'].includes(activeSection)}
+{#if ['access', 'mesh', 'policies', 'system'].includes(activeSection)}
   <AdminAccess onunlock={() => adminRevision += 1} />
 {/if}
 
@@ -918,10 +918,59 @@
   {#if store.channels.length}<ChannelNotifications />{/if}
   <ChannelMeters />
   <LaunchManifest />
+  <Repositories />
 {/if}
 
-{#if activeSection === 'devices'}
+{#if activeSection === 'access'}
+  <Card title="Operator access" note="A token for reaching this node from another device. Creating a new one signs every other client out; this browser signs in with it.">
+    <label class="field">
+      <span>Address other devices use</span>
+      <input bind:value={publicUrl} placeholder="https://node.tailnet.ts.net" spellcheck="false" />
+    </label>
+    {#if rotatingToken}
+      <div class="grant-confirmation"><b>Create or replace operator access?</b><span>Other signed-in browsers and desktop clients lose access. The replacement is shown only here; save it immediately.</span><div class="acts"><button class="btn d" onclick={confirmIssueToken} disabled={busy !== ''}>{busy === 'token' ? 'Creating…' : 'Confirm new token'}</button><button class="lnk" onclick={() => (rotatingToken = false)} disabled={busy !== ''}>Cancel</button></div></div>
+    {:else}
+      <div class="acts"><button class="btn" onclick={() => (rotatingToken = true)} disabled={busy !== ''}>Create or rotate token</button></div>
+    {/if}
+    {#if issued}
+      <div class="issued"><p>{issued.applied ? 'Token created. Save it before leaving this page.' : 'Replacement prepared; activation is not confirmed. Keep this token until access is verified.'}</p><div class="qr">{@html issued.svg}</div><code>{issued.token}</code></div>
+    {/if}
+  </Card>
+
   <Notifications />
+
+  <Card title="Your own harness" note="Connect a terminal harness to this node's tools. It runs outside tracon's isolation boundary and never receives credentials.">
+    {#if !cfg && configError}
+      <small>Not known: <code>node.toml</code> could not be read, and it says whether this is on. Node configuration, under System, says why.</small>
+    {:else if !cfg}
+      <small>Loading…</small>
+    {:else if !cfg.external.enabled}
+      <small>Off. Set <code>[external] enabled = true</code> in serving-node <code>node.toml</code> and restart.</small>
+    {:else if externalChannels.length === 0}
+      <small>Create a shared channel first.</small>
+    {:else}
+      <div class="mcp">
+        {#each externalChannels as name (name)}
+          <div class="ext">
+            <code>claude mcp add-json --scope user tracon-{name} '{JSON.stringify({ type: 'http', url: `${origin}/mcp/external/${name}`, headersHelper: 'tracon external lane' })}'</code>
+            <div class="acts">
+              {#if externalStopped.has(name)}
+                <span class="chip bad">broker access stopped</span>
+                <button class="lnk" onclick={() => setExternalStopped(name, false)} disabled={busy !== ''}>Start broker access</button>
+              {:else if stoppingExternal === name}
+                <small>Refuse every external agent's calls on {name} until started again?</small>
+                <button class="btn d" onclick={() => setExternalStopped(name, true)} disabled={busy !== ''}>Stop broker access</button>
+                <button class="lnk" onclick={() => (stoppingExternal = '')} disabled={busy !== ''}>Cancel</button>
+              {:else}
+                <button class="lnk d" onclick={() => (stoppingExternal = name)} disabled={busy !== ''}>Stop broker access</button>
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+      <small>Use <code>submit_report</code> for an operator report and notification without Git or publication; <code>report_status</code> reads feedback. A <code>report_issue</code> draft against tracon is followed with <code>issue_report_status</code>.{#if !local} From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.{/if}</small>
+    {/if}
+  </Card>
 {/if}
 
 {#if activeSection === 'mesh'}
@@ -1013,6 +1062,7 @@
       <small>Which hub a node belongs to is decided on the serving node itself.</small>
     {/if}
   </Card>
+  <NodeList />
   <MeshAdministration />
   <HubRollups />
 {/if}
@@ -1088,15 +1138,7 @@
   {/if}
 {/if}
 
-{#if activeSection === 'repositories'}
-  <Repositories />
-{/if}
-
-{#if activeSection === 'data'}
-  <DataHeld />
-{/if}
-
-{#if activeSection === 'maintenance'}
+{#if activeSection === 'system'}
   <Card title="Node configuration" note="Host settings in the serving node's node.toml. Most take effect after a restart.">
     {#if form && cfg}
       <div class="grid">
@@ -1113,21 +1155,6 @@
     {:else if configError}
       <p class="why"><b>node.toml could not be read</b><i>{configError}</i></p>
     {:else}<div class="empty">Reading serving-node configuration…</div>{/if}
-  </Card>
-
-  <Card title="Operator access" note="A token for reaching this node from another device. Creating a new one signs every other client out; this browser signs in with it.">
-    <label class="field">
-      <span>Address other devices use</span>
-      <input bind:value={publicUrl} placeholder="https://node.tailnet.ts.net" spellcheck="false" />
-    </label>
-    {#if rotatingToken}
-      <div class="grant-confirmation"><b>Create or replace operator access?</b><span>Other signed-in browsers and desktop clients lose access. The replacement is shown only here; save it immediately.</span><div class="acts"><button class="btn d" onclick={confirmIssueToken} disabled={busy !== ''}>{busy === 'token' ? 'Creating…' : 'Confirm new token'}</button><button class="lnk" onclick={() => (rotatingToken = false)} disabled={busy !== ''}>Cancel</button></div></div>
-    {:else}
-      <div class="acts"><button class="btn" onclick={() => (rotatingToken = true)} disabled={busy !== ''}>Create or rotate token</button></div>
-    {/if}
-    {#if issued}
-      <div class="issued"><p>{issued.applied ? 'Token created. Save it before leaving this page.' : 'Replacement prepared; activation is not confirmed. Keep this token until access is verified.'}</p><div class="qr">{@html issued.svg}</div><code>{issued.token}</code></div>
-    {/if}
   </Card>
 
   <Maintenance>
@@ -1157,40 +1184,7 @@
     {/snippet}
   </Maintenance>
 
-  <Card title="Your own harness" note="Connect a terminal harness to this node's tools. It runs outside tracon's isolation boundary and never receives credentials.">
-    {#if !cfg}
-      <small>Loading…</small>
-    {:else if !cfg.external.enabled}
-      <small>Off. Set <code>[external] enabled = true</code> in serving-node <code>node.toml</code> and restart.</small>
-    {:else if externalChannels.length === 0}
-      <small>Create a shared channel first.</small>
-    {:else}
-      <div class="mcp">
-        {#each externalChannels as name (name)}
-          <div class="ext">
-            <code>claude mcp add-json --scope user tracon-{name} '{JSON.stringify({ type: 'http', url: `${origin}/mcp/external/${name}`, headersHelper: 'tracon external lane' })}'</code>
-            <div class="acts">
-              {#if externalStopped.has(name)}
-                <span class="chip bad">broker access stopped</span>
-                <button class="lnk" onclick={() => setExternalStopped(name, false)} disabled={busy !== ''}>Start broker access</button>
-              {:else if stoppingExternal === name}
-                <small>Refuse every external agent's calls on {name} until started again?</small>
-                <button class="btn d" onclick={() => setExternalStopped(name, true)} disabled={busy !== ''}>Stop broker access</button>
-                <button class="lnk" onclick={() => (stoppingExternal = '')} disabled={busy !== ''}>Cancel</button>
-              {:else}
-                <button class="lnk d" onclick={() => (stoppingExternal = name)} disabled={busy !== ''}>Stop broker access</button>
-              {/if}
-            </div>
-          </div>
-        {/each}
-      </div>
-      <small>Use <code>submit_report</code> for an operator report and notification without Git or publication; <code>report_status</code> reads feedback. A <code>report_issue</code> draft against tracon is followed with <code>issue_report_status</code>.{#if !local} From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.{/if}</small>
-    {/if}
-  </Card>
-
-  <Card title="Session transfer" note="Start an isolated continuation of a session exported from another node. No credentials move.">
-    <TransferInbox />
-  </Card>
+  <DataHeld />
 {/if}
 </div>
 {/key}

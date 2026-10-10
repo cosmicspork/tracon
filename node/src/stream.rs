@@ -40,6 +40,9 @@ pub enum Frame {
         session_id: String,
         tool_call_id: String,
         status: Option<String>,
+        /// The end of what a running call has printed so far, as text.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     Session(Box<SessionRow>),
     Queue {

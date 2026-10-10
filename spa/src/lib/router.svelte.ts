@@ -1,6 +1,8 @@
 // A hand-rolled history router: four destinations do not need SvelteKit, and
 // the node serves index.html for any path it does not own.
 
+import { redirect } from './routes'
+
 class Router {
   path = $state(location.pathname)
   /** The query, kept reactive: a screen addressed by `?item=` is navigated to
@@ -20,11 +22,10 @@ class Router {
   previous: string | null = null
 
   start() {
+    this.read()
     window.addEventListener('popstate', () => {
       this.previous = null
-      this.path = location.pathname
-      this.search = location.search
-      this.hash = location.hash
+      this.read()
       this.revision += 1
     })
     document.addEventListener('click', (e) => {
@@ -45,10 +46,17 @@ class Router {
       this.previous = current
       history.pushState(null, '', path)
     }
+    this.read()
+    this.revision += 1
+  }
+
+  /** Take the address bar as it is, first moving an old address to its new one. */
+  private read() {
+    const moved = redirect(location.pathname, location.search, location.hash)
+    if (moved) history.replaceState(history.state, '', moved)
     this.path = location.pathname
     this.search = location.search
     this.hash = location.hash
-    this.revision += 1
   }
 }
 

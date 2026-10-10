@@ -103,7 +103,6 @@
   details ul { margin-top: 6px; }
   .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; background: var(--wash-crit); border-radius: 4px; padding: 10px 11px; }
   .confirm p { flex-basis: 100%; color: var(--ink2); margin: 0; }
-  .btn.d { background: var(--crit); color: var(--bg); }
   .dim, .note, .error { margin: 0; font: 12px var(--mono); }
   .dim { color: var(--dim); }
   .note { color: var(--ok); }

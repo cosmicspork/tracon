@@ -18,7 +18,7 @@ export function setupSteps(s: {
 }): SetupStep[] {
   return [
     {
-      href: '/settings#maintenance',
+      href: '/settings#system',
       title: 'Prepare this node',
       detail: 'Start the isolated runtime and verify its boundary before connecting a model.',
       done: s.boundaryReady,

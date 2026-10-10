@@ -16,7 +16,9 @@
     usageMismatchLine,
     usageUnmeteredLine,
   } from '../lib/log'
+  import { clock } from '../lib/clock.svelte'
   import { formatTokens } from '../lib/format'
+  import { formatSpan, runFailures, runMs, transcript, type CallRow } from '../lib/transcript'
   import { renderMessage } from '../lib/markdown'
   import type { Event } from '../lib/types'
 
@@ -24,13 +26,18 @@
     events,
     openChunks,
     toolProgress,
+    toolOutput = new Map(),
+    root = null,
   }: {
     events: Event[]
     openChunks: Map<string, { kind: string; text: string }>
     toolProgress: Map<string, string>
+    toolOutput?: Map<string, string>
+    /** The session's worktree: paths inside it are shown from it. */
+    root?: string | null
   } = $props()
 
-  const entries = $derived(groupLog(events, toolProgress))
+  const entries = $derived(groupLog(events, toolProgress, toolOutput))
 
   let el = $state<HTMLElement | null>(null)
   let pinned = $state(true)
@@ -58,6 +65,27 @@
     return `${title} · ${status}${truncated}`
   }
 
+  /// "running · 9s", "failed · 1.2s", "0.4s": how a call ended and how long
+  /// it took.
+  function callMeta(state: CallRow['state'], ms: number | null): string {
+    const span = ms !== null ? formatSpan(ms) : ''
+    return [state === 'done' ? '' : state, span].filter(Boolean).join(' · ')
+  }
+
+  const GLYPH: Record<CallRow['state'], string> = { done: '✓', failed: '✗', running: '◌' }
+
+  /// One key opens every run on the screen, or folds them all when every one
+  /// is already open. Not while typing: the composer is on the same screen.
+  function onKey(e: KeyboardEvent) {
+    if (e.key !== 'o' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || !el) return
+    const target = e.target as HTMLElement | null
+    if (target?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return
+    const runs = [...el.querySelectorAll<HTMLDetailsElement>('details.run')]
+    if (!runs.length) return
+    const open = !runs.every((d) => d.open)
+    for (const d of runs) d.open = open
+  }
+
   function turnEnd(e: Event): string {
     const usage = e.payload.usage as { total_tokens?: number } | undefined
     const total = usage?.total_tokens
@@ -66,6 +94,20 @@
       : `turn ended · ${e.payload.stop_reason ?? ''}`
   }
 </script>
+
+<svelte:window onkeydown={onKey} />
+
+{#snippet callLine(c: CallRow)}
+  <details class="call" class:crit={c.state === 'failed'}>
+    <summary>
+      <!-- One child: on a phone a summary is a flex row. -->
+      <span class="line"><span class="st {c.state}">{GLYPH[c.state]}</span>{c.text}{#if callMeta(c.state, c.ms)}<span class="meta">{' · '}{callMeta(c.state, c.ms)}</span>{/if}</span>
+    </summary>
+    <div class="out">{c.output || 'no output recorded'}{c.truncated ? '\n… the node keeps only the start of a long output' : ''}</div>
+  </details>
+  {#if c.error}<div class="err">{c.error}</div>{/if}
+  {#if c.tail}<div class="tail">{c.tail}</div>{/if}
+{/snippet}
 
 <div class="log" bind:this={el} onscroll={onScroll}>
   {#each entries as entry, i (entry.event?.seq ?? `tools-${i}`)}
@@ -146,14 +188,22 @@
         {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
         {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}
         {#if changes.length}
-          <div class="mark" class:crit={e.payload.status === 'failed'}>pipeline {e.payload.pipeline_id} · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
+          <div class="mark" class:crit={e.payload.status === 'failed'}>{e.payload.provider === 'github' ? 'run' : 'pipeline'} {e.payload.pipeline_id} · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
         {/if}
       {:else if e.kind === 'work_closed'}
         <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>
       {:else if e.kind === 'review_verdict'}
         <div class="mark ok">verdict · {e.payload.verdict} · {e.payload.summary}</div>
       {:else if e.kind === 'provider_error'}
-        <div class="mark wait">{providerErrorLine(e.payload)}</div>
+        {#if typeof e.payload.frame === 'string' && e.payload.frame}
+          <!-- A retry that named no cause keeps what the harness sent. -->
+          <details class="fold">
+            <summary class="wait">{providerErrorLine(e.payload)}</summary>
+            <div class="raw">{e.payload.frame}</div>
+          </details>
+        {:else}
+          <div class="mark wait">{providerErrorLine(e.payload)}</div>
+        {/if}
       {:else if e.kind === 'gateway_refused'}
         <div class="mark crit">model call refused · {e.payload.provider} · {e.payload.reason}</div>
       {:else if e.kind === 'workspace_changed'}
@@ -218,16 +268,45 @@
     {:else}
       {@const tools = entry.tools!}
       {@const open = groupOpen(tools)}
-      <details class="fold tools" open={open || tools.length === 1}>
-        <summary>{groupSummary(tools)}</summary>
-        <div>
-          {#each tools as t (t.call.seq)}
-            <div class="tool" class:crit={t.result?.payload.status === 'failed'}>
-              {toolLine(t.call, t.result, t.progress)}
-            </div>
-          {/each}
-        </div>
-      </details>
+      <!-- Only a run still going reads the clock, so a finished log does not
+           re-render every second. -->
+      {@const now = open ? clock.now : 0}
+      {@const rows = transcript(tools, root, now)}
+      {#if tools.length === 1 && rows[0].kind === 'call'}
+        <div class="calls">{@render callLine(rows[0].call)}</div>
+      {:else}
+        {@const ms = runMs(tools, now)}
+        {@const failures = runFailures(tools, root)}
+        <details class="fold tools run" {open}>
+          <summary title="o opens or folds every run">{groupSummary(tools)}{ms !== null ? ` · ${formatSpan(ms)}` : ''}</summary>
+          <div class="calls">
+            {#each rows as row, j (j)}
+              {#if row.kind === 'call'}
+                {@render callLine(row.call)}
+              {:else}
+                <details class="call reads" class:crit={row.state === 'failed'}>
+                  <summary>
+                    <span class="line"><span class="st {row.state}">{GLYPH[row.state]}</span>{row.text}{#if callMeta(row.state, row.ms)}<span class="meta">{' · '}{callMeta(row.state, row.ms)}</span>{/if}</span>
+                  </summary>
+                  <div class="calls">
+                    {#each row.calls as c (c.entry.call.seq)}
+                      {@render callLine(c)}
+                    {/each}
+                  </div>
+                </details>
+              {/if}
+            {/each}
+          </div>
+        </details>
+        {#if failures.length}
+          <!-- A failure is never behind a click: folded, the run still names it. -->
+          <div class="fails">
+            {#each failures as f, j (j)}
+              <div><span class="st failed">{GLYPH.failed}</span>{f.text}{f.error ? ` · ${f.error}` : ''}</div>
+            {/each}
+          </div>
+        {/if}
+      {/if}
     {/if}
   {/each}
   {#each [...openChunks.values()] as chunk, i (i)}
@@ -361,10 +440,10 @@
   }
   .mark.crit,
   .tool.crit,
-  .fold summary.crit {
+  .fold > summary.crit {
     color: var(--crit);
   }
-  .fold summary.wait {
+  .fold > summary.wait {
     color: var(--wait);
   }
   /* What the session was not told, named above the text it was told. */
@@ -377,24 +456,24 @@
   .mark.ok {
     color: var(--ok);
   }
-  .fold summary {
+  .fold > summary {
     color: var(--dim);
     font-size: 12px;
     cursor: pointer;
     list-style: none;
   }
-  .fold summary::-webkit-details-marker {
+  .fold > summary::-webkit-details-marker {
     display: none;
   }
-  .fold summary::before {
+  .fold > summary::before {
     content: '▸';
     display: inline-block;
     width: 12px;
   }
-  .fold[open] summary::before {
+  .fold[open] > summary::before {
     content: '▾';
   }
-  .fold[open] summary {
+  .fold[open] > summary {
     color: var(--ink2);
   }
   .fold > div {
@@ -404,6 +483,10 @@
     color: var(--dim);
     white-space: pre-wrap;
   }
+  /* A harness frame is one long line of JSON. */
+  .fold > div.raw {
+    overflow-wrap: anywhere;
+  }
   /* The lines that say why a check failed, read out of the whole output. */
   .fold > div.failures {
     border-left-color: var(--crit);
@@ -412,6 +495,76 @@
   .fold .label {
     color: var(--dim);
     font-size: 11px;
+  }
+  /* The transcript: a line per call, each opening to its output. */
+  .log .calls {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    white-space: normal;
+  }
+  .call summary {
+    cursor: pointer;
+    list-style: none;
+    color: var(--ink2);
+    overflow-wrap: anywhere;
+  }
+  .call summary::-webkit-details-marker {
+    display: none;
+  }
+  .call.crit > summary {
+    color: var(--crit);
+  }
+  .st {
+    display: inline-block;
+    width: 2ch;
+    color: var(--dim);
+  }
+  .st.failed {
+    color: var(--crit);
+  }
+  .st.running {
+    color: var(--wait);
+  }
+  .meta {
+    color: var(--dim);
+  }
+  .call > .out {
+    margin: 2px 0 6px 2ch;
+    padding: 4px 0 4px 10px;
+    border-left: 1px solid var(--rule);
+    color: var(--dim);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 24em;
+    overflow-y: auto;
+  }
+  .call.reads > .calls {
+    margin-left: 2ch;
+  }
+  /* A failed call's first error line, and a running call's last output. */
+  .err,
+  .tail,
+  .fails {
+    margin-left: 2ch;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .err {
+    color: var(--crit);
+  }
+  .tail {
+    color: var(--dim);
+    white-space: pre-wrap;
+  }
+  .fails {
+    color: var(--crit);
+    margin-left: 18px;
+  }
+  /* Opened, the call shows its whole output; the run, each failure. */
+  .call[open] + .err,
+  .run[open] + .fails {
+    display: none;
   }
   .cursor {
     color: var(--ink2);

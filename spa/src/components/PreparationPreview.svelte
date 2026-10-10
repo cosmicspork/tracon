@@ -2,31 +2,12 @@
   // What preparing this checkout would do, and what in it the node will not
   // do, read before launch. A devcontainer hook or an install script is
   // explained here, with where its work belongs, rather than discovered as a
-  // failure (or a silent skip) once a session is running.
-  import { api } from '../lib/api'
+  // failure (or a silent skip) once a session is running. The launcher
+  // fetches it, since a blocking incompatibility also holds Start.
   import { incompatibilityCount, preparationLine } from '../lib/preparation'
   import type { PreparationPreview } from '../lib/types'
 
-  let { repo }: { repo: string } = $props()
-
-  let view = $state<PreparationPreview | null>(null)
-  let timer: ReturnType<typeof setTimeout> | undefined
-
-  $effect(() => {
-    const path = repo.trim()
-    clearTimeout(timer)
-    view = null
-    if (!path.startsWith('/')) return
-    timer = setTimeout(async () => {
-      try {
-        const answer = await api.preparationPreview(path)
-        if (answer.repo === path) view = answer
-      } catch {
-        view = null
-      }
-    }, 300)
-    return () => clearTimeout(timer)
-  })
+  let { view }: { view: PreparationPreview | null } = $props()
 
   const counts = $derived(view ? incompatibilityCount(view) : null)
 </script>

@@ -13,9 +13,11 @@
   import { opencodeShellPath } from '../lib/opencode'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
+  import { errorText, isNotFound } from '../lib/load'
   import { exhaustionNote } from '../lib/exhaustion'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
+  import { composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import {
@@ -46,6 +48,9 @@
   const box = draftBox((text) => api.saveDraft(id, text).catch(() => {}))
 
   const session = $derived(store.sessions.get(id))
+  /** Paused by an exhausted provider and left for the operator: the banner carries Resume. */
+  const held = $derived(session?.state === 'paused' && exhaustion?.outcome === 'held')
+  const controls = $derived(session ? sessionControls(session, held) : null)
   const waiting = $derived(store.waitingFor(id))
   const busy = $derived(session?.turn_active === 1)
   const owner = $derived(session ? nodeById(store.nodes, session.node_id) : undefined)
@@ -56,8 +61,17 @@
   let questions = $state<OperatorQuestion[]>([])
   let shownWork = $state<ShownWorkItem[]>([])
   let publications = $state<{ review_id: string; url: string }[]>([])
+  /** Why the session's own read failed, while the list has not shown it either. */
+  let readError = $state<{ missing: boolean; text: string } | null>(null)
   async function refreshQuestions() {
-    const result = await api.session(id)
+    let result
+    try {
+      result = await api.session(id)
+    } catch (e) {
+      readError = { missing: isNotFound(e), text: errorText(e) }
+      throw e
+    }
+    readError = null
     questions = result.questions
     usage = result.usage
     ceiling = result.ceiling
@@ -97,6 +111,7 @@
   $effect(() => {
     void store.open(id)
     restored = false
+    readError = null
     // The draft is asked for on its own: it is the one thing a reconnecting
     // client cannot reconstruct, and it should not wait on the rest.
     api
@@ -220,8 +235,10 @@
     }
   }
 
-  // A node restart ended this session; the work can be carried on once, as a
-  // new session on the same workspace. Once it has been, link to that one.
+  // A suspended session's work can be carried on once, as a new session on
+  // the same workspace; the node then closes this one. Once it has been, link
+  // to that one. An ended session is carried on from the continuation panel,
+  // which is the one place its Continue lives.
   const continuedAs = $derived(
     [...store.sessions.values()].find((s) => s.continued_from === id),
   )
@@ -294,16 +311,17 @@
     }
   }
 
+  const composer = $derived(composerState(inputReason, busy))
   const placeholder = $derived(
-    unreachable !== null
-      ? `${unreachable} — the prompt is sent when it returns`
-      : inputReason
-        ? `Input disabled: ${inputReason}`
-        : 'Send a prompt. Drafts are held on the node.',
+    unreachable !== null ? `${unreachable} — the prompt is sent when it returns` : composer.placeholder,
   )
 </script>
 
-{#if !session}
+{#if !session && readError?.missing}
+  <div class="banner crit">not found <b>· no session {id.slice(0, 8)}</b> <a class="lnk" href="/sessions">All sessions</a></div>
+{:else if !session && readError}
+  <div class="banner crit" role="alert">Could not load this session <b>· {readError.text} · trying again</b></div>
+{:else if !session}
   <div class="empty">Loading session…</div>
 {:else}
   <header class="sess">
@@ -362,7 +380,7 @@
       >
     {/if}
     {#if session.work_item_id}
-      <a class="mono" href="/work/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
+      <a class="mono" href="/tasks/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
     {/if}
     {#if canOpenOpencode}
       <button
@@ -380,16 +398,16 @@
         >OpenCode</a
       >
     {/if}
-    {#if !isTerminal(session.state)}
-      {#if session.state === 'paused'}
-        <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
-          >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
-        >
-      {:else if session.state !== 'starting'}
-        <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}
-          >{session.harness_id === 'external' ? 'Pause broker access' : 'Pause'}</button
-        >
-      {/if}
+    {#if controls?.resume}
+      <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
+        >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
+      >
+    {:else if controls?.pause}
+      <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}
+        >{session.harness_id === 'external' ? 'Pause broker access' : 'Pause'}</button
+      >
+    {/if}
+    {#if controls?.stop}
       <button class="lnk d" onclick={stop} disabled={unreachable !== null}
         >{confirmingKill
           ? 'Stop — tap again'
@@ -450,7 +468,12 @@
   {:else if session.state === 'waiting_on_check'}
     <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
   {:else if session.state === 'paused' && exhausted}
-    <div class="banner dim">paused · {exhausted.title} <b>· {exhausted.detail}</b></div>
+    <div class="banner dim">
+      paused · {exhausted.title} <b>· {exhausted.detail}</b>
+      {#if held}
+        <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}>Resume</button>
+      {/if}
+    </div>
   {:else if session.state === 'paused'}
     <div class="banner dim">
       {session.harness_id === 'external' ? 'broker access paused' : 'paused'}
@@ -477,10 +500,6 @@
       ended by a node restart <b>· you did not stop it; its workspace is kept</b>
       {#if continuedAs}
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
-      {:else if session.phase !== 'review'}
-        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
-          >Continue</button
-        >
       {/if}
     </div>
   {:else if session.end_reason === 'provider_exhausted'}
@@ -490,10 +509,6 @@
       >
       {#if continuedAs}
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
-      {:else if session.phase !== 'review'}
-        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
-          >Continue</button
-        >
       {/if}
     </div>
   {:else if session.end_reason === 'item_close'}
@@ -521,7 +536,7 @@
     <div class="banner dim">{unreachable} <b>· the log resumes when {owner?.name ?? 'it'} returns</b></div>
   {/if}
 
-  <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} />
+  <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} toolOutput={store.toolOutput} root={session.worktree_path} />
   <!-- Open by default once the session has ended: that is when what it came
        to is the question. -->
   <OutcomePanel {id} open={isTerminal(session.state) || router.hash === '#outcome'} />
@@ -550,7 +565,7 @@
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
   {#if isTerminal(session.state) && session.draft}
-    <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre>{session.draft}</pre></div>
+    <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre class="draft">{session.draft}</pre></div>
   {/if}
 
   {#if restored && !isTerminal(session.state)}
@@ -563,7 +578,7 @@
         bind:value={draft}
         oninput={onDraftInput}
         {placeholder}
-        disabled={inputReason !== null && !busy}
+        disabled={composer.disabled}
         onkeydown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void send()
         }}
@@ -614,7 +629,21 @@
     min-height: 58px;
     resize: vertical;
   }
+  /* Plainly not taking input: no resize grip, no text cursor. */
   textarea:disabled {
     color: var(--dim);
+    background: transparent;
+    outline: 1px dashed var(--rule);
+    outline-offset: -1px;
+    resize: none;
+    cursor: not-allowed;
+  }
+  /* Kept as typed, but wrapped: a long line would widen the page on a phone. */
+  .draft {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+    font: inherit;
   }
 </style>

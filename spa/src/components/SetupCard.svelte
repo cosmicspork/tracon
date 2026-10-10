@@ -49,7 +49,7 @@
     </div>
     <details>
       <summary>Optional device setup</summary>
-      <p><a class="optional" href="/settings#devices">Register this browser for notifications</a> after a task path is available. It does not make a runtime or model ready.</p>
+      <p><a class="optional" href="/settings#access">Register this browser for notifications</a> after a task path is available. It does not make a runtime or model ready.</p>
     </details>
   </div>
 
@@ -122,7 +122,7 @@
     gap: 2px;
     margin-top: 6px;
     padding-top: 10px;
-    border-top: 1px solid var(--line);
+    border-top: 1px solid var(--rule);
   }
   details {
     color: var(--ink2);

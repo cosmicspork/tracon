@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { incompatibilityCount, preparationLine } from './preparation'
+import { incompatibilityCount, preparationBlock, preparationLine } from './preparation'
 import type { PreparationPreview } from './types'
 
 const preview = (over: Partial<PreparationPreview>): PreparationPreview => ({
@@ -29,5 +29,13 @@ test('what would stop preparation is told apart from what is only passed over', 
   expect(incompatibilityCount(preview({}))).toBeNull()
   expect(incompatibilityCount(preview({ incompatible: [item(true), item(false), item(false)] }))).toBe(
     '1 would stop preparation · 2 not honoured',
+  )
+})
+
+test('a blocking incompatibility is said in a line; a passed-over one is not', () => {
+  expect(preparationBlock(null)).toBeNull()
+  expect(preparationBlock(preview({ incompatible: [item(false)] }))).toBeNull()
+  expect(preparationBlock(preview({ ready: false, incompatible: [item(false), item(true), item(true)] }))).toBe(
+    'preparation would stop: f · i r (+1 more)',
   )
 })

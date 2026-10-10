@@ -101,12 +101,18 @@
         <article>
           <div class="identity">
             <a href={evidencePath(item)}>Evidence · {item.candidate.head_sha.slice(0, 12)}</a>
-            <small>{item.candidate.channel} · captured {formatAge(item.candidate.captured_ms, clock.now)}</small>
+            <small
+              >{item.candidate.channel}{#if !sessionId && item.candidate.owner_session_id} · session <a
+                  class="session"
+                  href="/sessions/{encodeURIComponent(item.candidate.owner_session_id)}"
+                  >{item.candidate.owner_session_id.slice(0, 8)}</a
+                >{/if} · captured {formatAge(item.candidate.captured_ms, clock.now)}</small
+            >
           </div>
           {#if item.work_items.length || item.reviews.length}
             <div class="relations">
               {#each item.work_items as work (work.id)}
-                <a href="/work/{encodeURIComponent(work.id)}">Task · {work.title}</a>
+                <a href="/tasks/{encodeURIComponent(work.id)}">Task · {work.title}</a>
               {/each}
               {#each item.reviews as review (review.id)}
                 <a href="/reviews/{encodeURIComponent(review.id)}">Review · {review.title}</a>
@@ -131,14 +137,15 @@
   .list { display: grid; gap: .4rem; }
   article { display: grid; gap: .4rem; padding: .7rem .8rem; background: var(--s1); border-left: 3px solid var(--acc); }
   .identity { display: grid; gap: .15rem; min-width: 0; }
-  .identity a, .relations a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .identity > a, .relations a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   small { color: var(--ink2); font: 11px var(--mono); }
+  small .session { color: inherit; }
 
   .relations { display: flex; flex-wrap: wrap; gap: .45rem .7rem; }
   .relations a { color: var(--ink2); font: 12px var(--mono); }
   .notice { color: var(--wait); font: 12px var(--mono); }
   .more { color: var(--dim); font: 11px var(--mono); }
   @media (max-width: 650px) {
-    .identity a, .relations a { display: flex; align-items: center; min-height: 44px; }
+    .identity > a, .relations a { display: flex; align-items: center; min-height: 44px; }
   }
 </style>

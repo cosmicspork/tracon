@@ -109,6 +109,17 @@ export function nodeHarnesses(node: NodeInfo): HarnessState[] {
   return [{ ...node.harness, default: true, image: null, image_state: 'unknown' }]
 }
 
+/**
+ * A harness as a node row states it: the version found, and what was expected
+ * when that differs. The pinned version is what the node wants, not what it
+ * has, so a harness with nothing found never shows it as if installed.
+ */
+export function harnessFact(h: HarnessState): string {
+  if (h.found === null) return h.mismatch || h.image_state === 'missing' ? `${h.id} not installed` : `${h.id} not probed`
+  if (h.mismatch) return `${h.id} ${h.found} (expects ${h.pinned})`
+  return `${h.id} ${h.found}`
+}
+
 /** How a model's harness reads in the picker: the one it runs on, or `either`. */
 export function harnessTag(model: ModelOption): string | null {
   const harnesses = model.harnesses ?? []
@@ -160,6 +171,28 @@ export function modelsForChannel(
 export function eligibleNodes(nodes: NodeInfo[], channels: Record<string, string[]>, channel: string): NodeInfo[] {
   const bound = channels[channel]
   return nodes.filter((node) => (!bound || bound.includes(node.id)) && nodeReadiness(node).canRun)
+}
+
+/**
+ * Why the serving node cannot take work, for a banner on every screen, or
+ * null. A refused isolation check has a banner of its own. A node offering no
+ * model is worth one only while no other node can run either: a controller
+ * that sends its work to a ready peer is set up as intended.
+ */
+export function servingBanner(nodes: NodeInfo[]): { detail: string; href: string; action: string } | null {
+  const self = nodes.find((node) => node.is_self)
+  if (!self || self.state === 'refused') return null
+  const readiness = nodeReadiness(self)
+  if (readiness.canRun) return null
+  if (readiness.label === 'No model offered') {
+    if (nodes.some((node) => !node.is_self && nodeReadiness(node).canRun)) return null
+    return { detail: 'no connected provider offers it a model.', href: '/settings#connections', action: 'Connect a provider' }
+  }
+  return {
+    detail: readiness.detail.replace(/^This node /, 'it ').replace(/^This /, 'the '),
+    href: '/settings#system',
+    action: 'Review setup',
+  }
 }
 
 export function hubBanner(mesh: MeshState | null): string | null {

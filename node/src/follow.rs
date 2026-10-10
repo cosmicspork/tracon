@@ -22,6 +22,8 @@
 //! runs), and the pipeline finishing, failing or stopping at a manual job is
 //! pushed. It is followed on its own, so it outlives the request whose merge
 //! triggered it. Following a pipeline never retries, cancels or plays a job.
+//! A GitHub Actions run an agent reran (`run_rerun`) is followed the same
+//! way, from the attempt the rerun started.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -315,6 +317,10 @@ pub struct PipelineSnapshot {
     pub status: String,
     /// Each job by id.
     pub jobs: BTreeMap<i64, Job>,
+    /// A GitHub run's attempt: the one a rerun started, until GitHub has
+    /// started it, and the run's own after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +348,42 @@ impl PipelineSnapshot {
                     ))
                 })
                 .collect(),
+            attempt: None,
+        }
+    }
+
+    /// From `run_status` with `run_id`, in GitLab's words so one set of
+    /// changes reads both. A run still on an attempt before `attempt` has not
+    /// started the one being followed: it is pending, with no jobs yet.
+    pub fn from_github(status: &Value, attempt: Option<i64>) -> Self {
+        let run = &status["run"];
+        let seen = run["attempt"].as_i64();
+        if let (Some(want), Some(seen)) = (attempt, seen) {
+            if seen < want {
+                return Self {
+                    status: "pending".into(),
+                    jobs: BTreeMap::new(),
+                    attempt: Some(want),
+                };
+            }
+        }
+        Self {
+            status: github_status(&run["status"], &run["conclusion"]).into(),
+            jobs: status["jobs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|job| {
+                    Some((
+                        job["id"].as_i64()?,
+                        Job {
+                            name: job["name"].as_str().unwrap_or_default().to_string(),
+                            status: github_status(&job["status"], &job["conclusion"]).into(),
+                        },
+                    ))
+                })
+                .collect(),
+            attempt: seen.or(attempt),
         }
     }
 
@@ -350,12 +392,28 @@ impl PipelineSnapshot {
     }
 }
 
+/// A GitHub run's or job's status and conclusion in GitLab's words. A run
+/// waiting for someone to approve it is `manual`: nothing moves until a
+/// person does something.
+fn github_status(status: &Value, conclusion: &Value) -> &'static str {
+    match (status.as_str(), conclusion.as_str()) {
+        (Some("completed"), Some("success" | "neutral")) => "success",
+        (Some("completed"), Some("cancelled")) => "canceled",
+        (Some("completed"), Some("skipped" | "stale")) => "skipped",
+        (Some("completed"), Some("action_required")) => "manual",
+        (Some("completed"), _) => "failed",
+        (Some("in_progress"), _) => "running",
+        _ => "pending",
+    }
+}
+
 /// What a pipeline did between two looks, and whether it is worth a push:
 /// job results are recorded, the pipeline finishing, failing or stopping at
-/// a manual job is pushed too.
+/// a manual job is pushed too. `noun` is what the forge calls it.
 pub fn pipeline_changes(
     before: Option<&PipelineSnapshot>,
     now: &PipelineSnapshot,
+    noun: &str,
 ) -> (Vec<String>, bool) {
     let mut said = Vec::new();
     for (id, job) in &now.jobs {
@@ -374,10 +432,10 @@ pub fn pipeline_changes(
         return (said, false);
     }
     let pipeline = match now.status.as_str() {
-        "success" => "pipeline passed".to_string(),
-        "failed" => "pipeline failed".to_string(),
-        "canceled" => "pipeline canceled".to_string(),
-        "skipped" => "pipeline skipped".to_string(),
+        "success" => format!("{noun} passed"),
+        "failed" => format!("{noun} failed"),
+        "canceled" => format!("{noun} canceled"),
+        "skipped" => format!("{noun} skipped"),
         "manual" => {
             let waiting: Vec<String> = now
                 .jobs
@@ -405,13 +463,39 @@ fn caller_of(row: &PipelineFollowRow) -> CallContext {
     }
 }
 
+/// What a forge calls the thing being followed.
+fn noun_of(provider: &str) -> &'static str {
+    match provider {
+        "github" => "run",
+        _ => "pipeline",
+    }
+}
+
+/// One look at a followed pipeline or run, with `before`'s attempt as the
+/// least one a GitHub run must have reached.
 async fn look_at_pipeline(
     tools: &Tools,
     ctx: &CallContext,
+    provider: &str,
     project: &str,
     pipeline_id: i64,
-) -> Result<Value, String> {
-    gitlab::call(
+    before: Option<&PipelineSnapshot>,
+) -> Result<(PipelineSnapshot, Option<String>), String> {
+    if provider == "github" {
+        let status = github::call(
+            &tools.broker,
+            &tools.http,
+            ctx,
+            github::RUN_STATUS,
+            &json!({ "repo": project, "run_id": pipeline_id }),
+            None,
+        )
+        .await?;
+        let url = status["run"]["url"].as_str().map(str::to_string);
+        let attempt = before.and_then(|b| b.attempt);
+        return Ok((PipelineSnapshot::from_github(&status, attempt), url));
+    }
+    let status = gitlab::call(
         &tools.broker,
         &tools.http,
         ctx,
@@ -419,12 +503,14 @@ async fn look_at_pipeline(
         &json!({ "project": project, "pipeline_id": pipeline_id }),
         None,
     )
-    .await
+    .await?;
+    let url = status["web_url"].as_str().map(str::to_string);
+    Ok((PipelineSnapshot::from_gitlab(&status), url))
 }
 
-/// After `pipeline_run`, `job_play` or `deploy` succeeded: follow the
-/// pipeline it started for its caller, from what it looks like now, and say
-/// so in the result.
+/// After `pipeline_run`, `job_play`, `deploy` or `run_rerun` succeeded:
+/// follow the pipeline or run it started for its caller, from what it looks
+/// like now, and say so in the result.
 pub async fn subscribe(
     tools: &Tools,
     ctx: &CallContext,
@@ -435,30 +521,36 @@ pub async fn subscribe(
     let Some(access) = tools.session.get() else {
         return started;
     };
-    let pipeline_id = match name {
-        gitlab::PIPELINE_RUN => started["id"].as_i64(),
-        gitlab::JOB_PLAY => started["pipeline_id"].as_i64(),
-        _ => args["pipeline_id"].as_i64(),
+    let (provider, project, pipeline_id) = match name {
+        github::RUN_RERUN => ("github", &args["repo"], args["run_id"].as_i64()),
+        gitlab::PIPELINE_RUN => ("gitlab", &args["project"], started["id"].as_i64()),
+        gitlab::JOB_PLAY => ("gitlab", &args["project"], started["pipeline_id"].as_i64()),
+        _ => ("gitlab", &args["project"], args["pipeline_id"].as_i64()),
     };
-    let (Some(pipeline_id), Some(project)) = (pipeline_id, args["project"].as_str()) else {
+    let (Some(pipeline_id), Some(project)) = (pipeline_id, project.as_str()) else {
         return started;
     };
     // The baseline: what was already there when following began is not news.
-    let now = look_at_pipeline(tools, ctx, project, pipeline_id)
+    // A rerun's baseline is the attempt it started, not yet begun.
+    let rerun = PipelineSnapshot {
+        status: "pending".into(),
+        attempt: started["attempt"].as_i64(),
+        ..PipelineSnapshot::default()
+    };
+    let before = (name == github::RUN_RERUN).then_some(&rerun);
+    let now = look_at_pipeline(tools, ctx, provider, project, pipeline_id, before)
         .await
         .ok();
-    let snapshot = now.as_ref().map(|status| {
-        serde_json::to_value(PipelineSnapshot::from_gitlab(status)).unwrap_or_default()
-    });
-    let web_url = now
+    let snapshot = now
         .as_ref()
-        .and_then(|status| status["web_url"].as_str().map(str::to_string));
+        .map(|(snapshot, _)| serde_json::to_value(snapshot).unwrap_or_default());
+    let web_url = now.and_then(|(_, url)| url);
     let followed = access.store.follow_pipeline(&NewPipelineFollow {
         node_id: &ctx.node_id,
         channel: &ctx.channel,
         session_id: ctx.session_id(),
         lane: ctx.lane(),
-        provider: "gitlab",
+        provider,
         project,
         pipeline_id,
         started_by: name,
@@ -478,6 +570,7 @@ pub async fn subscribe(
         ek::PIPELINE_FOLLOW,
         Some(&id),
         json!({
+            "provider": provider,
             "project": project,
             "pipeline_id": pipeline_id,
             "url": web_url,
@@ -486,15 +579,22 @@ pub async fn subscribe(
         }),
     );
     if let Some(result) = started.as_object_mut() {
-        result.insert(
-            "following".into(),
+        let following = if provider == "github" {
+            json!({
+                "run_id": pipeline_id,
+                "note": "The node follows this run: each job result is recorded and the \
+                         operator is told when it finishes or fails. run_wait, with this \
+                         attempt, waits for it here.",
+            })
+        } else {
             json!({
                 "pipeline_id": pipeline_id,
                 "note": "The node follows this pipeline: each job result is recorded and the \
                          operator is told when it finishes, fails or stops at a manual job. \
                          pipeline_wait waits for it here.",
-            }),
-        );
+            })
+        };
+        result.insert("following".into(), following);
     }
     started
 }
@@ -529,6 +629,7 @@ pub async fn tick_pipelines(tools: &Tools) -> Vec<FollowedPipeline> {
                 ek::PIPELINE_FOLLOW,
                 Some(&row.id),
                 json!({
+                    "provider": row.provider,
                     "project": row.project,
                     "pipeline_id": row.pipeline_id,
                     "url": row.web_url,
@@ -537,19 +638,29 @@ pub async fn tick_pipelines(tools: &Tools) -> Vec<FollowedPipeline> {
             );
             continue;
         }
-        let now = match look_at_pipeline(tools, &ctx, &row.project, row.pipeline_id).await {
-            Ok(status) => PipelineSnapshot::from_gitlab(&status),
+        let before: Option<PipelineSnapshot> = row
+            .snapshot
+            .clone()
+            .and_then(|snapshot| serde_json::from_value(snapshot).ok());
+        let now = match look_at_pipeline(
+            tools,
+            &ctx,
+            &row.provider,
+            &row.project,
+            row.pipeline_id,
+            before.as_ref(),
+        )
+        .await
+        {
+            Ok((now, _)) => now,
             Err(error) => {
                 tracing::debug!(pipeline = %row.id, %error, "pipeline not read");
                 continue;
             }
         };
-        let before: Option<PipelineSnapshot> = row
-            .snapshot
-            .clone()
-            .and_then(|snapshot| serde_json::from_value(snapshot).ok());
         let moved = before.as_ref() != Some(&now);
-        let (said, push) = pipeline_changes(before.as_ref(), &now);
+        let noun = noun_of(&row.provider);
+        let (said, push) = pipeline_changes(before.as_ref(), &now, noun);
         let snapshot = serde_json::to_value(&now).unwrap_or_default();
         if let Err(error) =
             store.pipeline_follow_seen(&row.id, &snapshot, moved, now.finished(), now_ms())
@@ -565,6 +676,7 @@ pub async fn tick_pipelines(tools: &Tools) -> Vec<FollowedPipeline> {
             ek::PIPELINE_FOLLOW,
             Some(&row.id),
             json!({
+                "provider": row.provider,
                 "project": row.project,
                 "pipeline_id": row.pipeline_id,
                 "url": row.web_url,
@@ -575,7 +687,7 @@ pub async fn tick_pipelines(tools: &Tools) -> Vec<FollowedPipeline> {
         if push && crate::notify::channel_pushes(store, &row.channel) {
             let notification = crate::notify::Notification::pipeline(
                 row.session_id.as_deref(),
-                format!("{} pipeline {}", row.project, row.pipeline_id),
+                format!("{} {noun} {}", row.project, row.pipeline_id),
                 said.join(" · "),
                 &row.id,
             );
@@ -682,6 +794,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            attempt: None,
         }
     }
 
@@ -696,7 +809,7 @@ mod tests {
             &[(1, "build", "success"), (2, "test", "running")],
         );
         assert_eq!(
-            pipeline_changes(Some(&started), &built),
+            pipeline_changes(Some(&started), &built, "pipeline"),
             (vec!["`build` passed".to_string()], false)
         );
         let failed = pipeline(
@@ -708,7 +821,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            pipeline_changes(Some(&built), &failed),
+            pipeline_changes(Some(&built), &failed, "pipeline"),
             (
                 vec!["`test` failed".to_string(), "pipeline failed".to_string()],
                 true
@@ -720,13 +833,79 @@ mod tests {
             &[(1, "build", "success"), (4, "staging", "manual")],
         );
         assert_eq!(
-            pipeline_changes(Some(&built), &stopped),
+            pipeline_changes(Some(&built), &stopped, "pipeline"),
             (vec!["waiting on `staging` to be played".to_string()], true)
         );
         // Nothing moved, nothing said.
-        assert_eq!(pipeline_changes(Some(&built), &built), (vec![], false));
+        assert_eq!(
+            pipeline_changes(Some(&built), &built, "pipeline"),
+            (vec![], false)
+        );
         // Without a baseline every result so far is news.
-        assert_eq!(pipeline_changes(None, &built).0, ["`build` passed"]);
+        assert_eq!(
+            pipeline_changes(None, &built, "pipeline").0,
+            ["`build` passed"]
+        );
+    }
+
+    #[test]
+    fn a_github_run_reads_as_a_pipeline_from_the_attempt_followed() {
+        let run = |attempt: i64, status: &str, conclusion: Value, jobs: Value| {
+            json!({
+                "run": { "attempt": attempt, "status": status, "conclusion": conclusion },
+                "jobs": jobs,
+            })
+        };
+        // Right after a rerun the run still reads as the attempt before it.
+        let stale = run(
+            1,
+            "completed",
+            json!("failure"),
+            json!([{ "id": 1, "name": "test", "status": "completed", "conclusion": "failure" }]),
+        );
+        let waiting = PipelineSnapshot::from_github(&stale, Some(2));
+        assert_eq!(waiting.status, "pending");
+        assert!(waiting.jobs.is_empty());
+        assert!(!waiting.finished());
+        assert_eq!(waiting.attempt, Some(2));
+
+        let running = PipelineSnapshot::from_github(
+            &run(
+                2,
+                "in_progress",
+                Value::Null,
+                json!([
+                    { "id": 3, "name": "lint", "status": "completed", "conclusion": "success" },
+                    { "id": 4, "name": "test", "status": "in_progress", "conclusion": null },
+                ]),
+            ),
+            waiting.attempt,
+        );
+        assert_eq!(running.status, "running");
+        assert_eq!(
+            pipeline_changes(Some(&waiting), &running, "run"),
+            (vec!["`lint` passed".to_string()], false)
+        );
+        let failed = PipelineSnapshot::from_github(
+            &run(
+                2,
+                "completed",
+                json!("failure"),
+                json!([
+                    { "id": 3, "name": "lint", "status": "completed", "conclusion": "success" },
+                    { "id": 4, "name": "test", "status": "completed", "conclusion": "timed_out" },
+                ]),
+            ),
+            running.attempt,
+        );
+        assert!(failed.finished());
+        assert_eq!(
+            pipeline_changes(Some(&running), &failed, "run"),
+            (
+                vec!["`test` failed".to_string(), "run failed".to_string()],
+                true
+            )
+        );
     }
 
     #[test]

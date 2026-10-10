@@ -2,12 +2,14 @@ import { expect, test } from 'bun:test'
 import {
   eligibleNodes,
   harnessChoice,
+  harnessFact,
   harnessTag,
   hubBanner,
   modelsForChannel,
   nodeHarnesses,
   nodeLabel,
   nodeReadiness,
+  servingBanner,
   unreachableReason,
   upsertNode,
 } from './nodes'
@@ -161,4 +163,25 @@ test('only a model either harness runs offers a choice', () => {
   expect(harnessTag({ value: 'a', name: 'a', harnesses: ['claude'] })).toBe('claude')
   expect(harnessTag({ value: 'b', name: 'b', harnesses: ['opencode', 'claude'] })).toBe('either')
   expect(harnessTag({ value: 'c', name: 'c' })).toBeNull()
+})
+
+test('a harness row shows what was found, never the pinned version in its place', () => {
+  const h = { id: 'opencode', pinned: '1.4.2', default: false, image: null }
+  expect(harnessFact({ ...h, found: '1.4.2', mismatch: false, image_state: 'current' })).toBe('opencode 1.4.2')
+  expect(harnessFact({ ...h, found: '1.3.0', mismatch: true, image_state: 'stale' })).toBe('opencode 1.3.0 (expects 1.4.2)')
+  expect(harnessFact({ ...h, found: null, mismatch: true, image_state: 'missing' })).toBe('opencode not installed')
+  expect(harnessFact({ ...h, found: null, mismatch: false, image_state: 'unknown' })).toBe('opencode not probed')
+})
+
+test('a serving node that cannot run says so, unless a ready peer runs instead', () => {
+  const model = { value: 'anthropic/x', name: 'X' }
+  const self = node({ id: 'me', is_self: true, models: [model] })
+  expect(servingBanner([self])).toBeNull()
+  expect(servingBanner([{ ...self, state: 'refused' }])).toBeNull()
+  const mismatched = { ...self, harness: { id: 'claude', pinned: '2.5.0', found: '2.3.1', mismatch: true } }
+  expect(servingBanner([mismatched])?.detail).toBe('it expects 2.5.0, but found 2.3.1.')
+  expect(servingBanner([{ ...self, state: 'unknown' }])?.href).toBe('/settings#system')
+  const bare = { ...self, models: [] }
+  expect(servingBanner([bare])?.href).toBe('/settings#connections')
+  expect(servingBanner([bare, node({ id: 'p', models: [model] })])).toBeNull()
 })

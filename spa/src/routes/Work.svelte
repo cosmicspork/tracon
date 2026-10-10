@@ -60,7 +60,7 @@
       title = ''
       body = ''
       adding = false
-      router.go(`/work/${item.id}`)
+      router.go(`/tasks/${item.id}`)
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
     } finally {
@@ -70,7 +70,7 @@
 </script>
 
 <div class="h4">
-  Work
+  Tasks
   <b>{shown && channel ? `${items.length - closed.length} open on ${channel}${closed.length ? ` · ${closed.length} closed` : ''}` : `on ${channel || '…'}`}</b>
   <button class="btn p r" type="button" aria-expanded={adding} onclick={() => (adding = !adding)}>{adding ? 'Close form' : 'New work item'}</button>
 </div>

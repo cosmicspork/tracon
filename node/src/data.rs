@@ -59,8 +59,8 @@ struct Kind {
 }
 
 const RUNTIME_STORAGE: Delete = Delete {
-    path: "/settings#maintenance",
-    label: "Maintenance, under Runtime storage, once the session is archived",
+    path: "/settings#system",
+    label: "System, under Runtime storage, once the session is archived",
 };
 
 const KINDS: &[Kind] = &[
@@ -152,8 +152,8 @@ const KINDS: &[Kind] = &[
         tables: &["work_item"],
         dirs: &[],
         delete: Some(Delete {
-            path: "/work",
-            label: "Work, one item at a time",
+            path: "/tasks",
+            label: "Tasks, one item at a time",
         }),
         propagation: "A delete replicates to every node on the item's channel and to the hub, \
                       each keeping a tombstone. Sessions that worked on it keep their record.",

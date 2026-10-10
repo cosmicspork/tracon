@@ -1,0 +1,237 @@
+<script lang="ts">
+  // Every node this one knows, with what decides whether it can take work:
+  // readiness, harness versions, what runs there and what waits on an
+  // operator. It was a screen of its own; on one node it was a single row.
+  import { onMount } from 'svelte'
+  import Card from './Card.svelte'
+  import { api } from '../../lib/api'
+  import { attention } from '../../lib/attention'
+  import { formatBytes } from '../../lib/data'
+  import { clock } from '../../lib/clock.svelte'
+  import { formatAge } from '../../lib/format'
+  import { harnessFact, nodeHarnesses, nodeReadiness } from '../../lib/nodes'
+  import { store } from '../../lib/store.svelte'
+
+  const nodes = $derived(store.nodes)
+  const reachable = $derived(nodes.filter((node) => node.is_self || node.reachable).length)
+  const meshed = $derived(store.mesh !== null && store.mesh.hub.state !== 'disabled')
+
+  function running(id: string): number {
+    return store.queue.running.filter((session) => session.node_id === id).length
+  }
+
+  // Decisions only, for the same reason the rail counts decisions: a review
+  // the agent is revising on that node is not an operator waiting.
+  function waiting(id: string): number {
+    return attention({
+      permissions: store.queue.waiting.filter((permission) => permission.node_id === id),
+      reviews: store.queue.reviews.filter((review) => review.node_id === id),
+      nodes: store.nodes,
+      mesh: store.mesh,
+      now: clock.now,
+    }).count
+  }
+
+  // What the serving node holds; a peer's storage is its own to report.
+  let held = $state<number | null>(null)
+  onMount(() => {
+    api.data().then((data) => (held = data.total_bytes), () => (held = null))
+  })
+
+  function settingsLink(id: string): string {
+    return `/settings?node=${encodeURIComponent(id)}#connections`
+  }
+</script>
+
+<Card
+  title="Nodes"
+  note={meshed
+    ? `${nodes.length} enrolled · ${reachable} reachable. Readiness and harness versions as each node reports them.`
+    : 'This machine only; pair a hub above to add others. Readiness and harness versions as this node reports them.'}
+>
+  {#snippet actions()}
+    {#if meshed}<a class="lnk" href="/nodes/enroll">Enroll a new node</a>{/if}
+  {/snippet}
+  {#if nodes.length === 0}
+    <div class="empty">Waiting for the node…</div>
+  {:else}
+    <div class="rows">
+      {#each nodes as node (node.id)}
+        {@const readiness = nodeReadiness(node)}
+        {@const off = !node.is_self && !node.reachable}
+        {@const mismatch = nodeHarnesses(node).some((h) => h.mismatch)}
+        {@const waits = waiting(node.id)}
+        <!-- The bar is green only for a node that can take work. -->
+        <div class="node" class:bad={node.state === 'refused'} class:warn={mismatch} class:off class:idle={!readiness.canRun}>
+          <span class="bar"></span>
+          <div class="head">
+            <span class="nm">
+              {node.name || node.id.slice(0, 8)}
+              <small>{node.is_self ? 'serving node' : 'peer'} · {node.id.slice(0, 4)}…{node.id.slice(-4)}</small>
+            </span>
+            <span class="st">
+              <span class="l" class:off={!readiness.canRun} class:bad={node.state === 'refused'} class:warn={mismatch}>
+                <span class="chip" class:off={!readiness.canRun} class:bad={node.state === 'refused'} class:warn={mismatch}>{readiness.label}</span>
+                {#if off && node.last_seen_ms}
+                  · last seen {formatAge(node.last_seen_ms, clock.now)}
+                {:else}
+                  · {readiness.detail}
+                {/if}
+              </span>
+              <!-- One fact per item, so a long line wraps between facts and
+                   none is cut off by the ones before it. -->
+              <span class="detail">
+                {#each nodeHarnesses(node) as h (h.id)}<span>{harnessFact(h)}</span>{' '}{/each}
+                <span>{node.models.length} offered model{node.models.length === 1 ? '' : 's'}</span>
+                <span>{running(node.id)} running</span>
+                {#if waits}<span>{waits} awaiting an operator</span>{/if}
+                {#if node.is_self && held !== null}<span>holds <a class="lnk" href="/settings#system">{formatBytes(held)}</a></span>{/if}
+              </span>
+            </span>
+            <span class="actions">
+              <a class="lnk" href={settingsLink(node.id)}>Manage connections</a>
+              <a class="lnk" href="/usage">Usage</a>
+            </span>
+          </div>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</Card>
+
+<style>
+  .rows {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .node {
+    display: grid;
+    grid-template-columns: 3px minmax(0, 1fr);
+    gap: 0 14px;
+    background: var(--s2);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar {
+    grid-row: 1 / span 2;
+    align-self: stretch;
+    border-radius: 2px 0 0 2px;
+    background: var(--ok);
+  }
+  .node.bad .bar {
+    background: var(--crit);
+  }
+  .node.bad {
+    background: linear-gradient(90deg, var(--wash-crit), var(--s2) 42%);
+  }
+  .node.warn .bar {
+    background: var(--wait);
+  }
+  .node.warn {
+    background: linear-gradient(90deg, var(--wash-wait), var(--s2) 42%);
+  }
+  /* Cannot take work for a reason that is neither a refusal nor a version:
+     not yet checked, or nothing to run with. Grey, not green. */
+  .node.idle:not(.bad, .warn) .bar {
+    background: var(--dim);
+  }
+  /* Unreachable: dims, keeps its place, says when it was last seen. */
+  .node.off .bar {
+    background: var(--dim);
+  }
+  .node.off {
+    background: linear-gradient(90deg, var(--wash-dim), var(--s2) 42%);
+  }
+  .node.off .nm,
+  .node.off .st {
+    color: var(--dim);
+  }
+  .head {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr) auto;
+    gap: 0 14px;
+    align-items: center;
+    padding: 11px 14px 11px 0;
+    color: var(--ink);
+    min-width: 0;
+  }
+  .nm {
+    font-weight: 600;
+    min-width: 0;
+  }
+  .nm small {
+    display: block;
+    font: 11.5px var(--mono);
+    color: var(--dim);
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .st {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font: 12.5px var(--mono);
+    color: var(--ink2);
+    min-width: 0;
+  }
+  .st span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .st .l.bad {
+    color: var(--crit);
+  }
+  .st .l.warn {
+    color: var(--wait);
+  }
+  .st .l.off {
+    color: var(--dim);
+  }
+  /* Facts break between one another, never inside one, and the separator
+     stays at the end of the line it closes. */
+  .st .detail {
+    font: 12.5px var(--mono);
+    color: var(--ink2);
+    white-space: normal;
+    overflow: visible;
+  }
+  .detail > span:not(:last-child)::after {
+    content: '·';
+    margin-left: 0.7ch;
+  }
+  /* A figure in a line of text, not a phone-sized button. */
+  .detail .lnk {
+    display: inline;
+    min-height: 0;
+    font: inherit;
+  }
+  .actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    white-space: nowrap;
+  }
+  .node.bad .detail {
+    color: var(--crit);
+  }
+  .node.warn .detail {
+    color: var(--wait);
+  }
+  @media (max-width: 700px) {
+    .head {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 4px 12px;
+    }
+    .st {
+      grid-column: 1;
+    }
+    .actions {
+      grid-column: 1;
+      flex-wrap: wrap;
+    }
+  }
+</style>

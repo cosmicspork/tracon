@@ -65,6 +65,8 @@ class Store {
   openChunks = $state<Map<string, { kind: string; text: string }>>(new Map())
   /** Latest ephemeral status per tool call. */
   toolProgress = $state<Map<string, string>>(new Map())
+  /** What a running call has printed so far, for a stream that carries it. */
+  toolOutput = $state<Map<string, string>>(new Map())
   /**
    * Each snapshot's fetch: loading until it first answers, failed while its
    * latest refetch did. A snapshot that failed keeps its last value, so this
@@ -117,6 +119,7 @@ class Store {
         // ephemeral state, which the replayed events supersede.
         this.openChunks = new Map()
         this.toolProgress = new Map()
+        this.toolOutput = new Map()
         void this.refetch()
       }
       this.wasConnected = true
@@ -255,6 +258,7 @@ class Store {
     this.events = []
     this.openChunks = new Map()
     this.toolProgress = new Map()
+    this.toolOutput = new Map()
     await this.loadEvents(sessionId)
   }
 
@@ -306,6 +310,11 @@ class Store {
         const next = new Map(this.toolProgress)
         next.set(frame.tool_call_id, frame.status ?? '')
         this.toolProgress = next
+        if (typeof frame.output === 'string') {
+          const out = new Map(this.toolOutput)
+          out.set(frame.tool_call_id, frame.output)
+          this.toolOutput = out
+        }
         break
       }
       case 'session': {

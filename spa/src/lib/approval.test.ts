@@ -2,10 +2,13 @@ import { expect, test } from 'bun:test'
 import {
   approvalArguments,
   approvalFields,
+  CALLER_ONLY,
   changedArguments,
   editProblems,
+  grantsAccess,
   outcome,
   problemsByField,
+  resultRows,
   schemaFor,
 } from './approval'
 import { formValues, type JsonSchema } from './schema-form'
@@ -101,4 +104,32 @@ test('a settled approval says what became of it', () => {
   expect(outcome('pending')).toBeNull()
   expect(outcome('changes_requested')).toBe('Changes requested · nothing ran')
   expect(outcome('something_new')).toBe('something_new')
+})
+
+test('locked fields lead the form, in schema order', () => {
+  const fields = approvalFields(schema, args, ['text'], ['slug', 'if_hash'])
+  expect(fields.map((f) => f.key)).toEqual(['slug', 'if_hash', 'text', 'title', 'labels', 'count'])
+})
+
+test('a list edited one entry per line keeps commas inside an entry', () => {
+  const s: JsonSchema = { properties: { checks: { type: 'array', items: { type: 'string' } } } }
+  const original = { checks: ['a'] }
+  const fields = approvalFields(s, original, [], [])
+  const typed = 'rg -n "a, b" src\n\n  cargo test  \n'.split('\n')
+  expect(approvalArguments(fields, { checks: typed }, original)).toEqual({ checks: ['rg -n "a, b" src', 'cargo test'] })
+})
+
+test('an answer that opens a scope grants access instead of running an edit', () => {
+  expect(grantsAccess([{ kind: 'allow_once' }, { kind: 'reject_once' }])).toBe(false)
+  expect(grantsAccess([{ kind: 'allow_once' }, { kind: 'allow_session' }])).toBe(true)
+  expect(CALLER_ONLY).toContain('wait_secs')
+})
+
+test('a result reads as rows, with links where they are URLs', () => {
+  expect(resultRows({ url: 'https://x.test/1', id: 7, gone: null })).toEqual([
+    { key: 'url', value: 'https://x.test/1', href: 'https://x.test/1' },
+    { key: 'id', value: '7', href: null },
+  ])
+  expect(resultRows('done')).toBeNull()
+  expect(resultRows([1])).toBeNull()
 })

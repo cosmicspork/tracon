@@ -38,6 +38,7 @@ const ENTRY_FIELDS: &[&str] = &[
 ];
 
 const MAX_WHY_CHARS: usize = 1000;
+const MAX_RUN_NOTES_CHARS: usize = 4000;
 
 fn entry_properties() -> Value {
     let strings = |description: &str| json!({ "type": "array", "items": { "type": "string" }, "description": description });
@@ -80,6 +81,10 @@ pub fn definitions() -> Vec<Value> {
         "type": "string",
         "description": "What the trial showed, and anything you could not settle, in a few sentences the operator will read.",
     });
+    propose_properties["run_notes"] = json!({
+        "type": "string",
+        "description": "Optional: how to run the application and give it data, as plain text for the next session — the command that starts it, what it listens on, the seed or fixture that gives it data. Only what you saw work. Once the operator allows the proposal, these become a standing note on this channel, read by every session on it.",
+    });
     propose_properties["repo"] = json!({
         "type": "string",
         "description": "Filled in by the node: the repository this session works in.",
@@ -95,7 +100,8 @@ pub fn definitions() -> Vec<Value> {
                 settle, and the entry the node holds now. Hosts the operator opened to this session \
                 (`request_egress`) are suggested in `egress`. Then try the draft with repo_setup_try, \
                 fix what fails, and propose it with repo_setup_propose. How to run the application \
-                and give it data is not part of the entry: that stays with each task.",
+                and give it data is not part of the entry; propose it alongside as `run_notes`, \
+                which become the operator's standing notes on this channel.",
             "inputSchema": { "type": "object", "properties": {} },
         }),
         json!({
@@ -273,12 +279,40 @@ pub fn proposal(access: &SessionAccess, ctx: &CallContext, args: &Value) -> Resu
         let why: String = why.trim().chars().take(MAX_WHY_CHARS).collect();
         object.insert("why".into(), json!(why));
     }
+    match object
+        .get("run_notes")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some(notes) if !notes.is_empty() => {
+            let notes: String = notes.chars().take(MAX_RUN_NOTES_CHARS).collect();
+            object.insert("run_notes".into(), json!(notes));
+        }
+        _ => {
+            object.remove("run_notes");
+        }
+    }
     Ok(args)
 }
 
+/// The name the run notes for `repo` are kept under among the channel's
+/// operator notes: one per repository, so a later proposal replaces them.
+pub fn run_notes_name(repo: &std::path::Path) -> String {
+    let name = repo
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| repo.display().to_string());
+    format!("Running {name}")
+}
+
 /// Write an allowed proposal. Only an approval runs this.
+///
+/// The entry is the node's, for every channel; the run notes go to the
+/// operator notes of the channel the session asked from, the one place a
+/// session's standing text comes from. Notes are written after the entry, so
+/// a refused entry leaves no notes describing a setup that does not exist.
 pub fn write(access: &SessionAccess, ctx: &CallContext, args: &Value) -> Result<Value, String> {
-    let (_, repo) = session_repo(access, ctx)?;
+    let (session_id, repo) = session_repo(access, ctx)?;
     if args.get("repo").and_then(Value::as_str) != Some(&*repo.to_string_lossy()) {
         return Err("the proposal names a repository other than this session's".into());
     }
@@ -286,5 +320,34 @@ pub fn write(access: &SessionAccess, ctx: &CallContext, args: &Value) -> Result<
     let saved = repo_setup::save(access.manager.cfg(), &repo, entry)?;
     let repos = access.manager.cfg().repos();
     let written = repos.iter().find(|entry| entry.matches(&repo)).cloned();
-    Ok(json!({ "repo": saved, "entry": written }))
+    let mut out = json!({ "repo": saved, "entry": written });
+    let notes = args
+        .get("run_notes")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|notes| !notes.is_empty());
+    if let Some(notes) = notes {
+        let channel = access
+            .store
+            .get_session(&session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("this session is gone")?
+            .channel;
+        let name = run_notes_name(&repo);
+        access
+            .store
+            .manifest_put_text(
+                &channel,
+                crate::store::manifest::KIND_INSTRUCTION,
+                &name,
+                notes,
+            )
+            .map_err(|e| e.to_string())?;
+        out["run_notes"] = json!({
+            "channel": channel,
+            "name": name,
+            "note": "kept in this channel's operator notes; the next session launched on it reads them",
+        });
+    }
+    Ok(out)
 }

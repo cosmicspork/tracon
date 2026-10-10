@@ -163,7 +163,7 @@
   }
   code {
     font: 12px var(--mono);
-    background: var(--s0);
+    background: var(--bg);
     padding: 4px 6px;
     border-radius: 3px;
     user-select: all;
