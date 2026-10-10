@@ -874,7 +874,7 @@ export default [
     route: `/sessions/${S.exhaustedWait.id}`,
     title: 'Provider exhausted: held for the operator',
     since: '#384',
-    note: 'outcome held with the node\'s note; no reset time from the provider.',
+    note: 'outcome held with the node\'s note and a Resume in the banner (not in the header too); no reset time from the provider.',
     api: page(S.exhaustedWait, {
       events: [
         ...opening(S.exhaustedWait.id, { model: 'opus', branch: 'feat/exhaustion-policy' }),
@@ -905,7 +905,7 @@ export default [
     route: `/sessions/${S.suspended.id}`,
     title: 'Suspended after publishing',
     since: '#380',
-    note: 'Published banner (forge URL + review), suspended banner with Continue, published / session_suspended events in the log, input disabled.',
+    note: 'Published banner (forge URL + review), suspended banner with Continue, no Pause or Stop, published / session_suspended events in the log, input plainly disabled.',
     api: page(S.suspended, {
       events: publishedEvents(S.suspended.id),
       detail: { publications: [{ review_id: 'rev-9a8b7c6d', url: 'https://github.com/cosmic-example/orbit/pull/418' }] },
@@ -937,7 +937,7 @@ export default [
     route: `/sessions/${S.restart.id}`,
     title: 'Ended by a node restart, with Continue',
     since: '#375',
-    note: 'Banner: "ended by a node restart · you did not stop it" + Continue. Outcome opens (terminal). Continuation panel and the unsent prompt retained.',
+    note: 'Banner: "ended by a node restart · you did not stop it", no button of its own; the continuation panel holds the one Continue. Outcome opens (terminal). The unsent prompt retained.',
     api: page(S.restart, {
       events: [
         ...opening(S.restart.id, { branch: 'feat/awake-inhibitor', prompt: 'Hold a logind inhibitor while any session works; release it when none does.' }),
@@ -956,13 +956,13 @@ export default [
     route: `/sessions/${S.restart.id}`,
     title: 'Continue after a restart is refused (409)',
     since: '#375',
-    note: 'Click Continue in the banner; the node refuses: the refusal shows at the bottom, far from the button.',
+    note: 'Click Continue in the continuation panel, the one Continue an ended session has; the node refuses and the panel says why.',
     api: page(S.restart, {
       events: [...opening(S.restart.id, { branch: 'feat/awake-inhibitor' }), ev(S.restart.id, 'state', { state: 'closed' }, -17000000)],
-      api: { [`POST /api/sessions/${S.restart.id}/continue`]: fail(409, 'this session was already continued once; continue the latest attempt instead') },
+      api: { 'POST /api/continuation/continue': fail(409, 'session 1c2d3e4f-5061-4728-9930-4b5c6d7e8f90 already continues this one') },
     }),
     act: async (page) => {
-      await page.locator('.banner button', { hasText: 'Continue' }).click()
+      await page.locator('.cont button', { hasText: /^Continue$/ }).click()
     },
   },
   {

@@ -17,6 +17,7 @@
   import { exhaustionNote } from '../lib/exhaustion'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
+  import { composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import {
@@ -47,6 +48,9 @@
   const box = draftBox((text) => api.saveDraft(id, text).catch(() => {}))
 
   const session = $derived(store.sessions.get(id))
+  /** Paused by an exhausted provider and left for the operator: the banner carries Resume. */
+  const held = $derived(session?.state === 'paused' && exhaustion?.outcome === 'held')
+  const controls = $derived(session ? sessionControls(session, held) : null)
   const waiting = $derived(store.waitingFor(id))
   const busy = $derived(session?.turn_active === 1)
   const owner = $derived(session ? nodeById(store.nodes, session.node_id) : undefined)
@@ -231,8 +235,10 @@
     }
   }
 
-  // A node restart ended this session; the work can be carried on once, as a
-  // new session on the same workspace. Once it has been, link to that one.
+  // A suspended session's work can be carried on once, as a new session on
+  // the same workspace; the node then closes this one. Once it has been, link
+  // to that one. An ended session is carried on from the continuation panel,
+  // which is the one place its Continue lives.
   const continuedAs = $derived(
     [...store.sessions.values()].find((s) => s.continued_from === id),
   )
@@ -305,12 +311,9 @@
     }
   }
 
+  const composer = $derived(composerState(inputReason, busy))
   const placeholder = $derived(
-    unreachable !== null
-      ? `${unreachable} — the prompt is sent when it returns`
-      : inputReason
-        ? `Input disabled: ${inputReason}`
-        : 'Send a prompt. Drafts are held on the node.',
+    unreachable !== null ? `${unreachable} — the prompt is sent when it returns` : composer.placeholder,
   )
 </script>
 
@@ -395,16 +398,16 @@
         >OpenCode</a
       >
     {/if}
-    {#if !isTerminal(session.state)}
-      {#if session.state === 'paused'}
-        <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
-          >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
-        >
-      {:else if session.state !== 'starting'}
-        <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}
-          >{session.harness_id === 'external' ? 'Pause broker access' : 'Pause'}</button
-        >
-      {/if}
+    {#if controls?.resume}
+      <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
+        >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
+      >
+    {:else if controls?.pause}
+      <button class="lnk" onclick={() => void control('pause')} disabled={unreachable !== null || controlling}
+        >{session.harness_id === 'external' ? 'Pause broker access' : 'Pause'}</button
+      >
+    {/if}
+    {#if controls?.stop}
       <button class="lnk d" onclick={stop} disabled={unreachable !== null}
         >{confirmingKill
           ? 'Stop — tap again'
@@ -465,7 +468,12 @@
   {:else if session.state === 'waiting_on_check'}
     <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
   {:else if session.state === 'paused' && exhausted}
-    <div class="banner dim">paused · {exhausted.title} <b>· {exhausted.detail}</b></div>
+    <div class="banner dim">
+      paused · {exhausted.title} <b>· {exhausted.detail}</b>
+      {#if held}
+        <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}>Resume</button>
+      {/if}
+    </div>
   {:else if session.state === 'paused'}
     <div class="banner dim">
       {session.harness_id === 'external' ? 'broker access paused' : 'paused'}
@@ -492,10 +500,6 @@
       ended by a node restart <b>· you did not stop it; its workspace is kept</b>
       {#if continuedAs}
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
-      {:else if session.phase !== 'review'}
-        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
-          >Continue</button
-        >
       {/if}
     </div>
   {:else if session.end_reason === 'provider_exhausted'}
@@ -505,10 +509,6 @@
       >
       {#if continuedAs}
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
-      {:else if session.phase !== 'review'}
-        <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
-          >Continue</button
-        >
       {/if}
     </div>
   {:else if session.end_reason === 'item_close'}
@@ -578,7 +578,7 @@
         bind:value={draft}
         oninput={onDraftInput}
         {placeholder}
-        disabled={inputReason !== null && !busy}
+        disabled={composer.disabled}
         onkeydown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void send()
         }}
@@ -629,8 +629,14 @@
     min-height: 58px;
     resize: vertical;
   }
+  /* Plainly not taking input: no resize grip, no text cursor. */
   textarea:disabled {
     color: var(--dim);
+    background: transparent;
+    outline: 1px dashed var(--rule);
+    outline-offset: -1px;
+    resize: none;
+    cursor: not-allowed;
   }
   /* Kept as typed, but wrapped: a long line would widen the page on a phone. */
   .draft {
