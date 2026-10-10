@@ -4,10 +4,13 @@
     approvalArguments,
     approvalFields,
     asArguments,
+    CALLER_ONLY,
     changedArguments,
     editProblems,
+    grantsAccess,
     outcome,
     problemsByField,
+    resultRows,
     schemaFor,
     type ApprovalDetails,
   } from '../lib/approval'
@@ -100,6 +103,14 @@
   /** Arguments the tool's schema does not name: sent as they are, shown so nothing runs unseen. */
   const unnamed = $derived(Object.keys(original).filter((k) => !fields.some((f) => f.key === k)))
   const can = $derived(new Set((details?.options ?? []).map((o) => o.kind)))
+  /** Allowing opens a grant rather than running the call, so there is nothing to edit. */
+  const grant = $derived(grantsAccess(details?.options ?? []))
+  /** What the operator reads in a grant: what was asked, without the agent's own wait. */
+  const asked = $derived(
+    Object.keys(original).filter((k) => !CALLER_ONLY.includes(k) && original[k] !== null && original[k] !== ''),
+  )
+  const result = $derived(details?.result === null || details?.result === undefined ? null : details.result)
+  const rows = $derived(resultRows(result))
   const fallback = $derived(details?.approval.session_id ? `/sessions/${details.approval.session_id}` : '/')
 
   function html(text: string): string {
@@ -168,7 +179,7 @@
         >{a.tool} · {a.channel} · {pending
           ? lapsed
             ? 'expired · nothing ran'
-            : `${formatExpiry(a.expires_ms, clock.now)} · nothing is waiting; allowing it runs the call`
+            : `${formatExpiry(a.expires_ms, clock.now)} · ${grant ? 'nothing is open yet; allowing it grants the request' : 'nothing is waiting; allowing it runs the call'}`
           : a.state.replace('_', ' ')}</small
       >
     </span>
@@ -181,6 +192,14 @@
     {:else}
       <dt>Asked by</dt>
       <dd class="m">{details.lane ?? 'an external agent'}</dd>
+    {/if}
+    {#if a.decided_ms !== null}
+      <dt>Decided</dt>
+      <dd class="m">{formatAge(a.decided_ms, clock.now)} ago</dd>
+    {/if}
+    {#if a.finished_ms !== null}
+      <dt>{a.state === 'expired' ? 'Expired' : 'Finished'}</dt>
+      <dd class="m">{formatAge(a.finished_ms, clock.now)} ago</dd>
     {/if}
   </dl>
 
@@ -206,6 +225,22 @@
     <div class="banner dim">expired unanswered <b>· nothing ran; the agent can ask again</b></div>
   {/if}
 
+  {#if !pending && result !== null}
+    <div class="h4">Result <b>what the call returned</b></div>
+    {#if rows}
+      <dl class="kv result">
+        {#each rows as row (row.key)}
+          <dt>{row.key}</dt>
+          <dd class="m">
+            {#if row.href}<a href={row.href} target="_blank" rel="noopener noreferrer">{row.value}</a>{:else}{row.value}{/if}
+          </dd>
+        {/each}
+      </dl>
+    {:else}
+      <pre class="src">{typeof result === 'string' ? result : JSON.stringify(result, null, 2)}</pre>
+    {/if}
+  {/if}
+
   {#each prose as key (key)}
     <section class="doc">
       <div class="dochead">
@@ -222,7 +257,15 @@
     </section>
   {/each}
 
-  {#if open}
+  {#if open && grant}
+    <div class="h4">Request <b>as the agent asked it</b></div>
+    <dl class="kv">
+      {#each asked as key (key)}
+        <dt>{key}</dt>
+        <dd class:m={typeof original[key] !== 'string' || !String(original[key]).includes(' ')}>{display(original[key])}</dd>
+      {/each}
+    </dl>
+  {:else if open}
     <div class="h4">Arguments <b>edit before allowing if you want to</b></div>
     <div class="form">
       {#each fields as f (f.key)}
@@ -246,6 +289,17 @@
               spellcheck={f.kind === 'prose'}
               oninput={(e) => set(f.key, e.currentTarget.value)}
             ></textarea>
+          {:else if f.kind === 'tags'}
+            <!-- One entry per line: a comma can sit inside a command. -->
+            <textarea
+              class="list mono"
+              value={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
+              use:autogrow={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
+              placeholder="one per line"
+              disabled={busy}
+              spellcheck="false"
+              oninput={(e) => set(f.key, e.currentTarget.value.split('\n'))}
+            ></textarea>
           {:else if f.kind === 'boolean'}
             <input
               type="checkbox"
@@ -260,9 +314,8 @@
             </select>
           {:else}
             <input
-              value={Array.isArray(v) ? v.join(', ') : String(v ?? '')}
+              value={String(v ?? '')}
               inputmode={f.kind === 'integer' || f.kind === 'number' ? 'decimal' : undefined}
-              placeholder={f.kind === 'tags' ? 'comma separated' : ''}
               disabled={busy}
               oninput={(e) => set(f.key, e.currentTarget.value)}
             />
@@ -564,6 +617,11 @@
   .field textarea.mono {
     font: 12.5px/1.45 var(--mono);
   }
+  .field textarea.list {
+    min-height: 0;
+    white-space: pre;
+    overflow-x: auto;
+  }
   .field.bad input,
   .field.bad textarea,
   .field.bad select,
@@ -642,5 +700,23 @@
   }
   .decide small.err {
     flex-basis: 100%;
+  }
+  @media (max-width: 700px) {
+    .head {
+      grid-template-columns: 3px auto minmax(0, 1fr);
+      gap: 0 10px;
+      padding-right: 10px;
+    }
+    .doc {
+      padding: 10px 10px 4px;
+    }
+    .md :global(table) {
+      font-size: 12px;
+    }
+    .md :global(th),
+    .md :global(td) {
+      padding-right: 8px;
+      white-space: nowrap;
+    }
   }
 </style>

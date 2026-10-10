@@ -509,7 +509,7 @@ export default [
   at(ID.create, create, {
     id: 'approvals-issue-create-jira',
     title: 'Jira issue create: wiki markup rendered, labels as tags',
-    note: 'format jira_wiki: headings, numbered list, {{code}}, colour and {code} rendered. labels is a comma-separated input; project is locked.',
+    note: 'format jira_wiki: headings, numbered list, {{code}}, colour and {code} rendered. labels is one per line; project is locked and leads the form.',
   }),
   at(ID.unnamed, unnamed, {
     id: 'approvals-unnamed-args',
@@ -519,7 +519,7 @@ export default [
   at(ID.egress, egress, {
     id: 'approvals-egress',
     title: 'Egress request: four answers',
-    note: 'request_egress has Allow once / For this session / Save to the repository\'s egress / Reject, and no Request changes. host is locked; why is a one-line text input.',
+    note: 'request_egress has Allow once / For this session / Save to the repository\'s egress / Reject, and no Request changes. Allowing opens the host and the node reads no edit, so host and why show as asked and the agent\'s wait_secs not at all.',
   }),
   at(ID.service, service, {
     id: 'approvals-service-start',
@@ -531,7 +531,7 @@ export default [
     id: 'approvals-setup-propose',
     since: '#391',
     title: "Repository entry proposed from a session",
-    note: 'repo_setup_propose: why renders as a document, checks/prepare/egress as comma-separated inputs (commas inside a command would split it), long field descriptions, and a title from the first line of why.',
+    note: 'repo_setup_propose: why renders as a document, the locked repo leads the form, checks/prepare/egress are one entry per line (a comma inside a command stays in it), long field descriptions, and a title from the first line of why.',
   }),
   at(ID.propose, propose, {
     id: 'approvals-setup-propose-edited',
@@ -539,7 +539,7 @@ export default [
     title: 'Repository entry with an edited check list',
     note: 'Tags edit shows as a JSON-ish array diff in "What you changed".',
     act: async (page) => {
-      await inputOf(page, 'checks').fill('cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings, cargo nextest run --workspace')
+      await textareaOf(page, 'checks').fill('cargo fmt --check\ncargo clippy --workspace --all-targets -- -D warnings\ncargo nextest run --workspace\nrg -n "todo!(), unimplemented!()" src')
       await inputOf(page, 'timeout_secs').fill('2400')
     },
   }),
@@ -652,7 +652,7 @@ export default [
     {
       id: 'approvals-succeeded-edited',
       title: 'Allowed with edits and ran',
-      note: 'Green banner with the note, the document shows what ran, "What the operator changed" diff, and the agent\'s original arguments expanded.',
+      note: 'Green banner with the note, decided and finished times, the result with its link, the document shows what ran, "What the operator changed" diff, and the agent\'s original arguments expanded.',
       act: async (page) => {
         await page.locator('details.request summary').click()
       },
@@ -692,6 +692,20 @@ export default [
       since: '#401',
       title: 'Allowed, outcome uncertain',
       note: 'Red "the outcome could not be confirmed" banner.',
+    },
+  ),
+  at(
+    ID.egress,
+    settled(egress, {
+      state: 'succeeded',
+      answer_option_id: 'allow_session',
+      finished_ms: -59000,
+      result: { host: 'registry.npmjs.org', scope: 'session', for_secs: null },
+    }),
+    {
+      id: 'approvals-egress-allowed',
+      title: 'Egress allowed for the session',
+      note: 'Decided and finished times in the key list, and the result the node recorded: host and scope.',
     },
   ),
   at(ID.egress, settled(egress, { state: 'rejected', answer_option_id: 'reject_once', reason: 'Vendor the binary instead; the session should not reach npm.' }), {
