@@ -237,7 +237,7 @@ const READY = {
 
 const COMMITS = [
   { sha: 'a7c2e9f14b8d3062e5a1c7f9b4d2e8a0c3f6b1d9', subject: 'feat(gateway): add a token bucket per channel' },
-  { sha: '3e8b0d5a9c2f7e14b6a0d3c8f5e2b9a7d1c4e0f6', subject: 'test(gateway): bucket admits its capacity then refuses' },
+  { sha: '3e8b0d5a9c2f7e14b6a0d3c8f5e2b9a7d1c4e0f6', subject: 'test(gateway): bucket admits its capacity then refuses', body: 'Three calls on a bucket of three pass; the fourth is refused.' },
   { sha: HEAD, subject: 'fix(gateway): clamp the refill at capacity' },
 ]
 
@@ -725,6 +725,20 @@ export default [
       const msg = page.getByLabel('commit message')
       await msg.fill('feat(gateway): smooth bursts with a per-channel token bucket\n\nA call over `per_minute` is refused before it counts against the day.')
       await page.locator('label.branch input').fill('feat/gateway-burst-limit')
+      await settle(page)
+    },
+  }),
+
+  state('keep-edited', 'Commits pushed as the agent wrote them, one message edited', {
+    note: 'Under publish.commits = keep each commit has "Edit message"; the edited one shows its message in the squash editor\'s textarea, an "edited" chip and Undo, and the heading counts the edits.',
+    sizes: ['desktop'],
+    detail: raw(details({ intent: { forge: {}, commits: COMMITS } })),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Edit message' }).nth(1).click()
+      await page
+        .getByLabel('message of 3e8b0d5a')
+        .fill('test(gateway): admit a full bucket, then refuse\n\nThree calls on a bucket of three pass; the fourth is refused.')
+      await page.getByRole('button', { name: 'Edit message' }).first().click()
       await settle(page)
     },
   }),

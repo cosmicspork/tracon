@@ -33,7 +33,7 @@
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
-  import type { ReviewDraftFields } from '../lib/types'
+  import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
@@ -75,6 +75,11 @@
   /** The squashed commit's message, and what it was before you edited it. */
   let message = $state('')
   let proposedMessage = ''
+  /**
+   * Under `keep`: the message of each of the agent's commits open for
+   * editing, by sha. A commit not here ships as the agent wrote it.
+   */
+  let commitMessages = $state<Record<string, string>>({})
   /** The branch a new change is pushed to. */
   let branchName = $state('')
   let busy = $state(false)
@@ -103,6 +108,30 @@
     if (intent.forge.commit !== undefined) return intent.forge.commit
     const from = intent.forge.description ?? { title, body }
     return from.body.trim() ? `${from.title.trim()}\n\n${from.body.trim()}` : from.title.trim()
+  }
+
+  /** One of the agent's commits' messages, as it wrote it. */
+  function writtenMessage(c: ReviewCommit): string {
+    return c.body?.trim() ? `${c.subject}\n\n${c.body.trim()}` : c.subject
+  }
+
+  /** The commit messages edited away from what the agent wrote, by sha. */
+  function editedMessages(): Record<string, string> {
+    const edited: Record<string, string> = {}
+    for (const c of intent.commits ?? []) {
+      const now = commitMessages[c.sha]
+      if (now !== undefined && now.trim() !== writtenMessage(c).trim()) edited[c.sha] = now.trim()
+    }
+    return edited
+  }
+
+  function editCommit(c: ReviewCommit) {
+    commitMessages = { ...commitMessages, [c.sha]: writtenMessage(c) }
+  }
+
+  function revertCommit(sha: string) {
+    const { [sha]: _, ...rest } = commitMessages
+    commitMessages = rest
   }
 
   $effect(() => {
@@ -145,6 +174,7 @@
         comment = intent.forge.comment ?? ''
         proposedMessage = proposedCommitMessage(intent, d.review.title, d.review.body)
         message = proposedMessage
+        commitMessages = {}
         try {
           branchName = JSON.parse(d.review.target)?.branch ?? ''
         } catch {
@@ -189,6 +219,7 @@
       comment,
       message,
       branch: branchName,
+      messages: editedMessages(),
     }
   }
 
@@ -203,6 +234,12 @@
     if (d.comment !== undefined) comment = d.comment
     if (d.message !== undefined) message = d.message
     if (d.branch !== undefined) branchName = d.branch
+    // Written against an earlier revision, an edit of a commit this one no
+    // longer has is dropped.
+    if (d.messages !== undefined) {
+      const listed = new Set((intent.commits ?? []).map((c) => c.sha))
+      commitMessages = Object.fromEntries(Object.entries(d.messages).filter(([sha]) => listed.has(sha)))
+    }
   }
 
   // Every change to what the operator is writing is saved to the node after
@@ -358,6 +395,10 @@
   const summaryOnly = $derived(change !== null || describe)
   /** Whether the reviewed tree ships as one commit rather than the agent's. */
   const squashing = $derived(intent.squash_onto !== undefined)
+  /** Under `keep`: the commit messages you changed, by sha. */
+  const reworded = $derived.by(editedMessages)
+  /** Whether you can change the commit messages here. */
+  const rewordable = $derived(!squashing && !remoteOwner && !closed && !surface.phone)
   const outputs = $derived<ReviewOutputs>({
     description: describe ? { title: descTitle, body: descBody } : undefined,
     comment: commenting && comment.trim() ? comment : undefined,
@@ -367,6 +408,7 @@
         ? message.trim()
         : undefined,
     branch: change === null && branchName.trim() && branchName.trim() !== target?.branch ? branchName.trim() : undefined,
+    messages: !squashing && Object.keys(reworded).length ? reworded : undefined,
   })
   const files = $derived.by(() => {
     try {
@@ -932,12 +974,39 @@
   {#if intent.commits?.length || squashing}
     <div class="h4">
       Commits
-      <b>{squashing ? 'ships as one commit of the reviewed tree' : 'pushed as the agent wrote them'}</b>
+      <b
+        >{squashing
+          ? 'ships as one commit of the reviewed tree'
+          : Object.keys(reworded).length
+            ? `pushed with ${Object.keys(reworded).length === 1 ? 'one message' : `${Object.keys(reworded).length} messages`} edited here`
+            : 'pushed as the agent wrote them'}</b
+      >
     </div>
     {#if intent.commits?.length}
       <ul class="commits">
         {#each intent.commits as c (c.sha)}
-          <li class:squashed={squashing}><code>{c.sha.slice(0, 8)}</code> {c.subject}</li>
+          <li class:squashed={squashing}>
+            <div class="line">
+              <span class="subject"><code>{c.sha.slice(0, 8)}</code> {c.subject}</span>
+              {#if reworded[c.sha] !== undefined}<span class="chip warn">edited</span>{/if}
+              {#if rewordable && commitMessages[c.sha] === undefined}
+                <button class="lnk" disabled={busy || publishing} onclick={() => editCommit(c)}>Edit message</button>
+              {:else if rewordable}
+                <button class="lnk" disabled={busy || publishing} onclick={() => revertCommit(c.sha)}
+                  >{reworded[c.sha] !== undefined ? 'Undo' : 'Close'}</button
+                >
+              {/if}
+            </div>
+            {#if !squashing && commitMessages[c.sha] !== undefined}
+              <textarea
+                class="edit body mono"
+                aria-label={`message of ${c.sha.slice(0, 8)}`}
+                bind:value={commitMessages[c.sha]}
+                use:autogrow={commitMessages[c.sha]}
+                disabled={busy || publishing || !rewordable}
+              ></textarea>
+            {/if}
+          </li>
         {/each}
       </ul>
     {/if}
@@ -1591,9 +1660,29 @@
   }
   .commits li {
     padding: 3px 0;
+  }
+  .commits .line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .commits .subject {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .commits .chip.warn {
+    background: var(--wash-wait);
+    color: var(--wait);
+  }
+  .commits textarea {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 64px;
+    margin: 6px 0 4px;
   }
   .commits li.squashed {
     color: var(--dim);

@@ -657,6 +657,11 @@ export interface ReviewOutputs {
   draft?: boolean
   /** The message the squashed commit carries. */
   commit?: string
+  /**
+   * Under `keep`: the operator's message for each of the agent's commits
+   * they edited, by the commit's sha. A commit not named ships as written.
+   */
+  messages?: Record<string, string>
   /** The operator's rename of a new change's branch. */
   branch?: string
 }
@@ -665,6 +670,8 @@ export interface ReviewOutputs {
 export interface ReviewCommit {
   sha: string
   subject: string
+  /** The message after its subject. Absent on a revision listed before it was kept. */
+  body?: string
 }
 
 /** What the operator has written on a review and not sent yet. */
@@ -680,6 +687,8 @@ export interface ReviewDraftFields {
   /** The commit message and branch the change ships under. */
   message?: string
   branch?: string
+  /** Under `keep`: each commit's message, by sha, where it was edited. */
+  messages?: Record<string, string>
 }
 
 /** A review draft as the node holds it. */
