@@ -1,6 +1,6 @@
 // The work ledger (/work), one work item (/work/:id) with its continuation,
 // brief, criteria, context and evidence panels, and the composer a work item
-// sends a phase to (/?item=…&phase=…) with its readiness line and preparation
+// sends a phase to (/?item=…&phase=…) with its readiness banner and preparation
 // preview.
 //
 // Every item state overrides /api/work (the item page reads it for dependency
@@ -379,7 +379,7 @@ const plannedContinuation = continuation(planned, {
   actions: { continue_from: SID.plan, abandon: true },
 })
 
-// The composer reached from an item. Its readiness line and preparation
+// The composer reached from an item. Its readiness banner and preparation
 // preview answer for the repository the channel used last.
 const readinessAll = {
   channel: 'personal',
@@ -1187,12 +1187,9 @@ const states = [
     route: `/?item=${ID.export}&phase=plan`,
     title: 'Launch a plan from an item, adjust open',
     since: '#387',
-    note: 'item header in the composer, readiness line (all ready), preparation line under the repository, phase segment',
+    note: 'item header in the composer, no readiness banner (all ready), preparation line under the repository, phase segment',
     api: launchApi(ledger.find((i) => i.id === ID.export)),
-    act: async (page) => {
-      await openAdjust(page)
-      await openDetails('details.ready')(page)
-    },
+    act: openAdjust,
   },
   {
     id: 'work-launch-needs-plan',
@@ -1217,7 +1214,7 @@ const states = [
     route: `/?item=${ID.limits}&phase=execute`,
     title: 'Launch: verify and publish not ready',
     since: '#387',
-    note: 'the ✓/✗ summary and each path listing only what it adds; notes styled apart from gaps',
+    note: 'readiness banner above the composer: each gap once under the first path it stops, with where to close it',
     api: launchApi(planned, {
       readiness: {
         channel: 'personal',
@@ -1240,7 +1237,7 @@ const states = [
         },
       },
     }),
-    act: openDetails('details.ready'),
+    act: async (page) => page.locator('.banner.ready').waitFor(),
   },
   {
     id: 'work-launch-not-investigable',
@@ -1274,7 +1271,7 @@ const states = [
         },
       },
     }),
-    act: openDetails('details.ready'),
+    act: async (page) => page.locator('.banner.ready').waitFor(),
   },
   {
     id: 'work-launch-preparation-incompatible',

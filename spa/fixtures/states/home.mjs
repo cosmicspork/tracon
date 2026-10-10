@@ -1059,26 +1059,24 @@ export default [
     act: clickText('orbit-rate-limits'),
   },
 
-  // --- Readiness under the composer -------------------------------------------
+  // --- Readiness as a banner above the composer ------------------------------
   {
     id: 'home-readiness-ready',
     area: 'home',
     route: '/',
-    title: 'Readiness: all three paths ready, open',
+    title: 'Readiness: all three paths ready',
     since: '#387',
-    note: 'The ✓ investigate ✓ verify ✓ publish summary under the composer, expanded to "Ready to investigate, verify and publish."',
+    note: 'A ready repository shows nothing: no banner, no line under the composer.',
     api: base(),
-    act: async (page) => {
-      await page.locator('details.ready summary').click()
-    },
+    act: async (page) => page.waitForTimeout(600),
   },
   {
     id: 'home-readiness-gaps',
     area: 'home',
     route: '/',
-    title: 'Readiness: verify and publish lacking, open',
+    title: 'Readiness: verify and publish lacking',
     since: '#387',
-    note: 'No checks configured (verify ✗), a GitHub credential not bound (publish ✗) and two notes; each path lists only its own gaps.',
+    note: 'A banner above the composer: no checks configured (verify) and a GitHub credential not bound (publish), each named once with where to close it; notes are not gaps and are left out.',
     api: base({
       '/api/readiness': readiness({
         verify: pathReady(
@@ -1096,9 +1094,7 @@ export default [
         ),
       }),
     }),
-    act: async (page) => {
-      await page.locator('details.ready summary').click()
-    },
+    act: async (page) => page.locator('.banner.ready').waitFor(),
   },
   {
     id: 'home-readiness-not-a-repo',
@@ -1106,7 +1102,7 @@ export default [
     route: '/',
     title: 'Readiness: nothing ready (path is not a checkout)',
     since: '#387',
-    note: 'All three ✗: the repository path does not exist on this node, a long path that must wrap.',
+    note: 'A crit banner: the repository path does not exist on this node, a long path that must wrap; no link for gaps fixed in the repository itself.',
     api: base({
       '/api/readiness': (req) => {
         const gap = { key: 'repo', message: `${req.query.repo} is not a directory on this node` }
@@ -1121,9 +1117,7 @@ export default [
       '/api/queue': queue({ ended: [session({ id: 's-gone', repo_path: LONG_REPO, branch: 'feat/old', state: 'closed', end_reason: 'item_close', created_ms: -100000, updated_ms: -50000 })] }),
       '/api/sessions': [session({ id: 's-gone', repo_path: LONG_REPO, branch: 'feat/old', state: 'closed', end_reason: 'item_close', created_ms: -100000, updated_ms: -50000 })],
     }),
-    act: async (page) => {
-      await page.locator('details.ready summary').click()
-    },
+    act: async (page) => page.locator('.banner.ready').waitFor(),
   },
   {
     id: 'home-start-error',
