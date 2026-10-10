@@ -4,6 +4,7 @@
   import { externalAgent, formatAge, formatBudget, formatDuration } from '../lib/format'
   import { chipLabel, nodeById } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
+  import { sessionTone } from '../lib/tone'
   import type { Session } from '../lib/types'
 
   let {
@@ -13,15 +14,7 @@
 
   const failure = $derived(humanizeError(session.last_error))
 
-  const tone = $derived(
-    session.state === 'waiting_on_you' || session.state === 'paused'
-      ? 'wait'
-      : session.state === 'failed' || session.state === 'killed_budget'
-        ? 'crit'
-        : session.state === 'closed'
-          ? 'ok'
-          : 'run',
-  )
+  const tone = $derived(sessionTone(session))
   // A harness the operator runs themselves has no turn, no budget, and no
   // repository; saying "Running · main" of it would be three lies.
   const external = $derived(session.harness_id === 'external')
@@ -160,6 +153,9 @@
   .row.ok .bar {
     background: var(--ok);
   }
+  .row.dim .bar {
+    background: var(--dim);
+  }
   .row.wait {
     background: linear-gradient(90deg, var(--wash-wait), var(--s1) 42%);
   }
@@ -171,6 +167,9 @@
   }
   .row.ok {
     background: linear-gradient(90deg, var(--wash-ok), var(--s1) 42%);
+  }
+  .row.dim {
+    background: linear-gradient(90deg, var(--wash-dim), var(--s1) 42%);
   }
   .t {
     font-weight: 500;

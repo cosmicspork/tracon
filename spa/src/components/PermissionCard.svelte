@@ -209,7 +209,7 @@
     box-sizing: border-box;
     font: 12.5px/1.45 var(--mono);
     color: var(--ink);
-    background: var(--s0);
+    background: var(--bg);
     border: 1px solid transparent;
     border-radius: 3px;
     padding: 8px;
@@ -228,7 +228,7 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     color: var(--ink);
-    background: var(--s0);
+    background: var(--bg);
     padding: 8px;
     border-radius: 3px;
   }

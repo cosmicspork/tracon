@@ -295,7 +295,6 @@
   .remove-confirm { margin-top: 4px; border-top: 1px solid var(--rule); padding-top: 9px; }
   .remove-confirm p { color: var(--crit); }
   .choices + .btn, .confirm + .btn { justify-self: start; }
-  .btn.d { background: var(--crit); color: var(--bg); }
   .footnote { font: 12.5px var(--sans); color: var(--dim); }
   .empty { padding: 14px; border-radius: 4px; color: var(--dim); }
   @media (max-width: 700px) {

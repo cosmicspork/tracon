@@ -131,7 +131,7 @@
     gap: 14px;
     max-width: 760px;
     padding: 16px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: 6px;
     background: var(--s1);
   }
@@ -180,7 +180,7 @@
     color: var(--ink);
     text-align: left;
     background: var(--s2);
-    border: 1px solid var(--line);
+    border: 1px solid var(--rule);
     border-radius: 4px;
     cursor: pointer;
   }

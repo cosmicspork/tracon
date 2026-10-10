@@ -244,7 +244,7 @@
     font-size: 12.5px;
   }
   .err {
-    color: var(--red);
+    color: var(--crit);
     font-size: 12.5px;
   }
   .dim {

@@ -255,7 +255,6 @@
     align-items: center;
     white-space: nowrap;
   }
-  .btn.d { background: var(--crit); color: var(--bg); }
   .act.confirm {
     white-space: normal;
     flex-wrap: wrap;

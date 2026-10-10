@@ -173,7 +173,7 @@
     font-size: 11.5px;
   }
   .fail code {
-    color: var(--red);
+    color: var(--crit);
   }
   .old {
     opacity: 0.6;
@@ -186,7 +186,7 @@
     font-size: 12.5px;
   }
   .err {
-    color: var(--red);
+    color: var(--crit);
     font-size: 12.5px;
   }
   .dim {
