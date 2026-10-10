@@ -715,7 +715,7 @@ export default [
     area: 'insight',
     route: '/settings#mesh',
     title: 'Nodes: several peers in every state',
-    note: 'Ready, offline, isolation refused, runtime mismatch, isolation unknown, no model offered (provider disconnected).',
+    note: 'Ready, offline, isolation refused, runtime mismatch with a harness not installed, isolation unknown, no model offered (provider disconnected). Only ready nodes have a green bar; the serving row keeps "holds" with a decision waiting.',
     api: nodesApi({
       nodes: [
         self,
@@ -742,7 +742,7 @@ export default [
         }),
       ],
       queue: {
-        waiting: [permission('perm-a', 's-a', POD), permission('perm-b', 's-b', POD)],
+        waiting: [permission('perm-a', 's-a', POD), permission('perm-b', 's-b', POD), permission('perm-c', 's-c', SELF)],
         reviews: [],
         promotions: [],
         running: [session('s-a', POD), session('s-b', POD), session('s-c', SELF, { channel: 'personal' })],

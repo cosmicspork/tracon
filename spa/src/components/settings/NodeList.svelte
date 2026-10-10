@@ -9,7 +9,7 @@
   import { formatBytes } from '../../lib/data'
   import { clock } from '../../lib/clock.svelte'
   import { formatAge } from '../../lib/format'
-  import { nodeHarnesses, nodeReadiness } from '../../lib/nodes'
+  import { harnessFact, nodeHarnesses, nodeReadiness } from '../../lib/nodes'
   import { store } from '../../lib/store.svelte'
 
   const nodes = $derived(store.nodes)
@@ -60,7 +60,9 @@
         {@const readiness = nodeReadiness(node)}
         {@const off = !node.is_self && !node.reachable}
         {@const mismatch = nodeHarnesses(node).some((h) => h.mismatch)}
-        <div class="node" class:bad={node.state === 'refused'} class:warn={mismatch} class:off>
+        {@const waits = waiting(node.id)}
+        <!-- The bar is green only for a node that can take work. -->
+        <div class="node" class:bad={node.state === 'refused'} class:warn={mismatch} class:off class:idle={!readiness.canRun}>
           <span class="bar"></span>
           <div class="head">
             <span class="nm">
@@ -76,8 +78,14 @@
                   · {readiness.detail}
                 {/if}
               </span>
+              <!-- One fact per item, so a long line wraps between facts and
+                   none is cut off by the ones before it. -->
               <span class="detail">
-                {nodeHarnesses(node).map((h) => `${h.id} ${h.found ?? h.pinned}${h.mismatch ? ' (mismatch)' : ''}`).join(' · ')} · {node.models.length} offered model{node.models.length === 1 ? '' : 's'} · {running(node.id)} running{waiting(node.id) ? ` · ${waiting(node.id)} awaiting an operator` : ''}{#if node.is_self && held !== null} · holds <a class="lnk" href="/settings#data">{formatBytes(held)}</a>{/if}
+                {#each nodeHarnesses(node) as h (h.id)}<span>{harnessFact(h)}</span>{' '}{/each}
+                <span>{node.models.length} offered model{node.models.length === 1 ? '' : 's'}</span>
+                <span>{running(node.id)} running</span>
+                {#if waits}<span>{waits} awaiting an operator</span>{/if}
+                {#if node.is_self && held !== null}<span>holds <a class="lnk" href="/settings#data">{formatBytes(held)}</a></span>{/if}
               </span>
             </span>
             <span class="actions">
@@ -122,6 +130,11 @@
   }
   .node.warn {
     background: linear-gradient(90deg, var(--wash-wait), var(--s2) 42%);
+  }
+  /* Cannot take work for a reason that is neither a refusal nor a version:
+     not yet checked, or nothing to run with. Grey, not green. */
+  .node.idle:not(.bad, .warn) .bar {
+    background: var(--dim);
   }
   /* Unreachable: dims, keeps its place, says when it was last seen. */
   .node.off .bar {
@@ -178,9 +191,23 @@
   .st .l.off {
     color: var(--dim);
   }
-  .detail {
+  /* Facts break between one another, never inside one, and the separator
+     stays at the end of the line it closes. */
+  .st .detail {
     font: 12.5px var(--mono);
     color: var(--ink2);
+    white-space: normal;
+    overflow: visible;
+  }
+  .detail > span:not(:last-child)::after {
+    content: '·';
+    margin-left: 0.7ch;
+  }
+  /* A figure in a line of text, not a phone-sized button. */
+  .detail .lnk {
+    display: inline;
+    min-height: 0;
+    font: inherit;
   }
   .actions {
     display: flex;

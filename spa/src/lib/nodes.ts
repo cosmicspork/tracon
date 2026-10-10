@@ -109,6 +109,17 @@ export function nodeHarnesses(node: NodeInfo): HarnessState[] {
   return [{ ...node.harness, default: true, image: null, image_state: 'unknown' }]
 }
 
+/**
+ * A harness as a node row states it: the version found, and what was expected
+ * when that differs. The pinned version is what the node wants, not what it
+ * has, so a harness with nothing found never shows it as if installed.
+ */
+export function harnessFact(h: HarnessState): string {
+  if (h.found === null) return h.mismatch || h.image_state === 'missing' ? `${h.id} not installed` : `${h.id} not probed`
+  if (h.mismatch) return `${h.id} ${h.found} (expects ${h.pinned})`
+  return `${h.id} ${h.found}`
+}
+
 /** How a model's harness reads in the picker: the one it runs on, or `either`. */
 export function harnessTag(model: ModelOption): string | null {
   const harnesses = model.harnesses ?? []
