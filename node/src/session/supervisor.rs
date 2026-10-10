@@ -921,18 +921,20 @@ impl Supervisor {
                             .unwrap_or(0)
                             + 1
                     });
-                    self.record(
-                        ek::PROVIDER_ERROR,
-                        None,
-                        json!({
-                            "provider": retry.provider,
-                            "status": retry.status,
-                            "message": retry.message,
-                            "attempt": attempt,
-                            "max_retries": retry.max_retries,
-                            "source": "harness",
-                        }),
-                    );
+                    let mut payload = json!({
+                        "provider": retry.provider,
+                        "status": retry.status,
+                        "message": retry.message,
+                        "attempt": attempt,
+                        "max_retries": retry.max_retries,
+                        "source": "harness",
+                    });
+                    // A retry that names no cause is kept as the harness sent
+                    // it, so it can be explained afterwards.
+                    if retry.unexplained() {
+                        payload["frame"] = json!(raw_frame(&v));
+                    }
+                    self.record(ek::PROVIDER_ERROR, None, payload);
                     let _ = self.watchdog_pause_if_needed().await;
                 } else if let Some(message) = step_failure(&v) {
                     self.record(
@@ -1667,6 +1669,36 @@ struct RetryNotice {
     max_retries: Option<i64>,
 }
 
+impl RetryNotice {
+    /// A notice that says nothing about why: no status, and no message or
+    /// only "unknown", as Claude Code sent once on 2026-10-08.
+    fn unexplained(&self) -> bool {
+        self.status.is_none()
+            && self.message.as_deref().is_none_or(|m| {
+                let m = m.trim();
+                m.is_empty() || m.eq_ignore_ascii_case("unknown")
+            })
+    }
+}
+
+/// The most of a harness frame an event keeps.
+const RAW_FRAME_MAX: usize = 8 * 1024;
+
+/// A harness frame as the text it arrived as, cut to [`RAW_FRAME_MAX`] on a
+/// character boundary.
+fn raw_frame(v: &serde_json::Value) -> String {
+    let mut s = serde_json::to_string(v).unwrap_or_default();
+    if s.len() > RAW_FRAME_MAX {
+        let mut cut = RAW_FRAME_MAX;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+        s.push('…');
+    }
+    s
+}
+
 /// Run a turn until it answers, goes `idle` without any harness activity, or
 /// passes `max` in all. `Err` is the timeout, whichever bound it was.
 async fn until_silent<F: std::future::Future>(
@@ -2049,6 +2081,21 @@ mod tests {
         );
         // Anything else is not a retry, including a plain error.
         assert!(retry_notice(&json!({ "type": "system", "subtype": "init" })).is_none());
+        // Every notice above says why; one that does not is kept whole.
+        assert!(!claude.unexplained() && !bounded.unexplained() && !opencode.unexplained());
+        let unknown = retry_notice(&json!({
+            "type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10,
+            "error": "unknown"
+        }))
+        .expect("claude's api_retry");
+        assert!(unknown.unexplained());
+        let bare = retry_notice(&json!({ "type": "system", "subtype": "api_retry" })).unwrap();
+        assert!(bare.unexplained());
+        let frame = raw_frame(&json!({ "subtype": "api_retry", "error": "unknown" }));
+        assert!(frame.contains(r#""error":"unknown""#), "{frame}");
+        let long = raw_frame(&json!({ "error": "é".repeat(RAW_FRAME_MAX) }));
+        assert!(long.len() <= RAW_FRAME_MAX + '…'.len_utf8());
+        assert!(long.ends_with('…'));
         assert!(retry_notice(&json!({ "method": "session.next.error" })).is_none());
         assert!(retry_notice(&json!({ "method": "session.updated" })).is_none());
     }

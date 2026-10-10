@@ -153,7 +153,15 @@
       {:else if e.kind === 'review_verdict'}
         <div class="mark ok">verdict · {e.payload.verdict} · {e.payload.summary}</div>
       {:else if e.kind === 'provider_error'}
-        <div class="mark wait">{providerErrorLine(e.payload)}</div>
+        {#if typeof e.payload.frame === 'string' && e.payload.frame}
+          <!-- A retry that named no cause keeps what the harness sent. -->
+          <details class="fold">
+            <summary class="wait">{providerErrorLine(e.payload)}</summary>
+            <div class="raw">{e.payload.frame}</div>
+          </details>
+        {:else}
+          <div class="mark wait">{providerErrorLine(e.payload)}</div>
+        {/if}
       {:else if e.kind === 'gateway_refused'}
         <div class="mark crit">model call refused · {e.payload.provider} · {e.payload.reason}</div>
       {:else if e.kind === 'workspace_changed'}
@@ -403,6 +411,10 @@
     margin: 4px 0 0 4px;
     color: var(--dim);
     white-space: pre-wrap;
+  }
+  /* A harness frame is one long line of JSON. */
+  .fold > div.raw {
+    overflow-wrap: anywhere;
   }
   /* The lines that say why a check failed, read out of the whole output. */
   .fold > div.failures {
