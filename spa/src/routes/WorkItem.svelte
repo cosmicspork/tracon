@@ -7,6 +7,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatBudget } from '../lib/format'
+  import { isNotFound } from '../lib/load'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
@@ -23,12 +24,15 @@
   let titles = $state<Map<string, string>>(new Map())
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  /** The last read failed for a reason other than the item not being there. */
+  let failed = $state(false)
   let busy = $state(false)
   let depInput = $state('')
 
   async function load() {
     try {
       const d = await api.workItem(id)
+      failed = false
       item = d.item
       brief = d.brief
       criteria = d.criteria
@@ -40,6 +44,7 @@
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
+      failed = !isNotFound(e)
     } finally {
       loaded = true
     }
@@ -97,6 +102,11 @@
 
 {#if !loaded}
   <div class="empty">Loading…</div>
+{:else if !item && failed}
+  <div class="banner crit" role="alert">
+    Could not load this work item <b>· {error}</b>
+    <button class="lnk" onclick={() => { error = null; void load() }}>Retry</button>
+  </div>
 {:else if !item}
   <div class="banner crit">not found <b>· {error ?? `no work item ${id.slice(0, 8)}`}</b></div>
 {:else}

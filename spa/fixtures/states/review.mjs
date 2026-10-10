@@ -590,7 +590,7 @@ export default [
   }),
 
   state('server-error', 'The node failed reading it', {
-    note: 'A 500 is shown the same way as a missing review.',
+    note: 'Says the review could not be loaded, with Retry; not "not found".',
     detail: { status: 500, body: { error: { code: 500, message: 'database is locked' } } },
   }),
 

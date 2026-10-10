@@ -1256,7 +1256,7 @@ export default [
     area: 'sessions',
     route: '/sessions/00000000-dead-4bee-8000-000000000000',
     title: 'A session id the node does not know',
-    note: 'Session absent from the list and the detail 404s.',
+    note: 'Session absent from the list and the detail 404s: not found, with a link to the list, not a loading line forever.',
     api: {
       'GET /api/sessions': [S.idle],
       'GET /api/sessions/00000000-dead-4bee-8000-000000000000': fail(404, 'no such session'),
@@ -1264,6 +1264,21 @@ export default [
       'GET /api/sessions/00000000-dead-4bee-8000-000000000000/draft': fail(404, 'no such session'),
       'GET /api/queue': NO_QUEUE,
     },
+  },
+  {
+    id: 'sessions-read-error',
+    area: 'sessions',
+    route: '/sessions/00000000-dead-4bee-8000-000000000000',
+    title: 'A session the node fails to read (500)',
+    note: 'Could not load, with the node\'s words; the screen keeps trying.',
+    api: {
+      'GET /api/sessions': [S.idle],
+      'GET /api/sessions/00000000-dead-4bee-8000-000000000000': fail(500, 'database is locked'),
+      'GET /api/sessions/00000000-dead-4bee-8000-000000000000/events': [],
+      'GET /api/sessions/00000000-dead-4bee-8000-000000000000/draft': fail(500, 'database is locked'),
+      'GET /api/queue': NO_QUEUE,
+    },
+    sizes: ['desktop'],
   },
   {
     id: 'sessions-phone-stop-confirm',

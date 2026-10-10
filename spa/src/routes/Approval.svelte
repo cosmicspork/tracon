@@ -17,6 +17,7 @@
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
+  import { isNotFound } from '../lib/load'
   import { renderJiraWiki } from '../lib/jira-wiki'
   import { render } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
@@ -39,6 +40,8 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  /** The node said there is no such approval, as opposed to failing to say. */
+  let missing = $state(false)
   let decided = $state(false)
   /** The route this approval was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
@@ -55,8 +58,15 @@
       })
       .catch((e) => {
         error = e instanceof Error ? e.message : String(e)
+        missing = isNotFound(e)
         loaded = true
       })
+  }
+
+  function retry() {
+    loaded = false
+    error = null
+    void load()
   }
 
   $effect(() => {
@@ -64,6 +74,7 @@
     loaded = false
     details = null
     error = null
+    missing = false
     refused = {}
     said = ''
     decided = false
@@ -165,8 +176,13 @@
 
 {#if !loaded}
   <div class="empty">Loading approval…</div>
-{:else if !details}
+{:else if !details && missing}
   <div class="banner crit">not found <b>· {error ?? 'no such approval'}</b></div>
+{:else if !details}
+  <div class="banner crit" role="alert">
+    Could not load this approval <b>· {error}</b>
+    <button class="lnk" onclick={retry}>Retry</button>
+  </div>
 {:else}
   {@const a = details.approval}
   <div class="head" class:done={!open}>

@@ -1158,7 +1158,9 @@
   </Maintenance>
 
   <Card title="Your own harness" note="Connect a terminal harness to this node's tools. It runs outside tracon's isolation boundary and never receives credentials.">
-    {#if !cfg}
+    {#if !cfg && configError}
+      <small>Not known: <code>node.toml</code> could not be read, and it says whether this is on. Node configuration above says why.</small>
+    {:else if !cfg}
       <small>Loading…</small>
     {:else if !cfg.external.enabled}
       <small>Off. Set <code>[external] enabled = true</code> in serving-node <code>node.toml</code> and restart.</small>

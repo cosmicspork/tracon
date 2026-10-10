@@ -758,7 +758,7 @@ export default [
     area: 'approvals',
     route: '/approvals/0199f2ff-0000-7000-8000-000000000003',
     title: 'Approval read fails (500)',
-    note: 'A server error renders the same "not found" banner as a 404.',
+    note: 'Says the approval could not be loaded, with Retry; not "not found".',
     api: {
       'GET /api/approvals/*': { status: 500, body: { error: { code: 500, message: 'database is locked' } } },
       'POST /api/approvals/*/release': { status: 204, body: '' },

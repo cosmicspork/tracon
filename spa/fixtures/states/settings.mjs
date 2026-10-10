@@ -1121,7 +1121,8 @@ export default [
       await page.locator('label').filter({ hasText: 'Review cap (lines)' }).locator('input').fill('6000')
     },
   }),
-  S('maintenance-config-error', '/settings#maintenance', 'Maintenance: node.toml unreadable, external off', {
+  S('maintenance-config-error', '/settings#maintenance', 'Maintenance: node.toml unreadable', {
+    note: 'Node configuration says why; Your own harness says it cannot tell whether it is on, rather than loading forever.',
     over: { '/api/config': fail(500, 'TOML parse error at line 48, column 1\n   |\n48 | path = "github.com/op/orbit"\n   | ^\nduplicate key `path` in table `repo`') },
   }),
   S('maintenance-token-confirm', '/settings#maintenance', 'Maintenance: create or rotate operator access', {

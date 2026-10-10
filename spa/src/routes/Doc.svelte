@@ -211,7 +211,7 @@
     <a class="lnk" href="/docs">Documents</a>
     <span class="sep">/</span>
     {slug}
-    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : ' · new'}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}{error && !editing ? ` · ${error}` : ''}</b>
+    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : missing ? ' · new' : ''}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}{error && !editing ? ` · ${error}` : ''}</b>
     {#if doc?.format === 'html' && !loadError}
       <span class="r">
         <button class="lnk" onclick={() => (replacing = !replacing)}>{replacing ? 'Cancel replace' : 'Replace bundle'}</button>
@@ -261,7 +261,10 @@
   {:else if missing}
     <div class="empty">No document <code>{slug}</code> on {channel}.{#if !surface.phone} <button class="lnk" onclick={() => (editing = true)}>Write it.</button>{/if}</div>
   {:else if loadError}
-    <div class="empty err">Could not load this document: {loadError}</div>
+    <div class="banner crit" role="alert">
+      Could not load this document <b>· {loadError}</b>
+      <button class="lnk" onclick={() => void load()}>Retry</button>
+    </div>
   {:else if doc?.format === 'html'}
     <section class="html-doc">
       <div class="html-meta">

@@ -5,6 +5,7 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import { isNotFound } from '../lib/load'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { nodeLabel } from '../lib/nodes'
@@ -79,6 +80,10 @@
   let busy = $state(false)
   let error = $state<string | null>(null)
   let loaded = $state(false)
+  /** The node said there is no such review, as opposed to failing to say. */
+  let missing = $state(false)
+  /** Bumped by Retry to read the review again. */
+  let attempt = $state(0)
   /** Unsent words, held by the node so another device or a reload finds them. */
   let draftSync: ReviewDraftSync | null = null
   let draftState = $state<DraftState>('clean')
@@ -102,7 +107,10 @@
 
   $effect(() => {
     void id
+    void attempt
     loaded = false
+    missing = false
+    error = null
     openedFrom = router.previous
     draftSync?.stop()
     draftSync = null
@@ -157,6 +165,7 @@
       })
       .catch((e) => {
         error = e instanceof Error ? e.message : String(e)
+        missing = isNotFound(e)
         loaded = true
       })
     // Release on navigating away. The node's sweeper covers a client that
@@ -555,8 +564,13 @@
 
 {#if !loaded}
   <div class="empty">Loading review…</div>
-{:else if !review}
+{:else if !review && missing}
   <div class="banner crit">not found <b>· {error ?? 'no such review'}</b></div>
+{:else if !review}
+  <div class="banner crit" role="alert">
+    Could not load this review <b>· {error}</b>
+    <button class="lnk" onclick={() => attempt++}>Retry</button>
+  </div>
 {:else if report}
   <ReportReview {report} />
 {:else}

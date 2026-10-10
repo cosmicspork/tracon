@@ -3,6 +3,8 @@
 // nothing). Showing the empty state for the first two claims the node said
 // "nothing" when it has said nothing yet, or said something went wrong.
 
+import { ApiError } from './api'
+
 /** Whether a fetch has answered yet, and why its latest attempt failed. */
 export type LoadStatus = { loaded: boolean; error: string | null }
 
@@ -36,6 +38,16 @@ export function settledLoad(previous: LoadStatus, result: PromiseSettledResult<u
   return result.status === 'fulfilled'
     ? { loaded: true, error: null }
     : { loaded: previous.loaded, error: errorText(result.reason) }
+}
+
+/**
+ * Whether a failed read means the thing is not there. Only a 404 says so: a
+ * 500 or a dropped connection says nothing about whether it exists, and a
+ * screen that calls it "not found" sends the operator looking for the wrong
+ * fault.
+ */
+export function isNotFound(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404
 }
 
 export function errorText(e: unknown): string {

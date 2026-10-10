@@ -13,6 +13,7 @@
   import { opencodeShellPath } from '../lib/opencode'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
+  import { errorText, isNotFound } from '../lib/load'
   import { exhaustionNote } from '../lib/exhaustion'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
@@ -56,8 +57,17 @@
   let questions = $state<OperatorQuestion[]>([])
   let shownWork = $state<ShownWorkItem[]>([])
   let publications = $state<{ review_id: string; url: string }[]>([])
+  /** Why the session's own read failed, while the list has not shown it either. */
+  let readError = $state<{ missing: boolean; text: string } | null>(null)
   async function refreshQuestions() {
-    const result = await api.session(id)
+    let result
+    try {
+      result = await api.session(id)
+    } catch (e) {
+      readError = { missing: isNotFound(e), text: errorText(e) }
+      throw e
+    }
+    readError = null
     questions = result.questions
     usage = result.usage
     ceiling = result.ceiling
@@ -97,6 +107,7 @@
   $effect(() => {
     void store.open(id)
     restored = false
+    readError = null
     // The draft is asked for on its own: it is the one thing a reconnecting
     // client cannot reconstruct, and it should not wait on the rest.
     api
@@ -303,7 +314,11 @@
   )
 </script>
 
-{#if !session}
+{#if !session && readError?.missing}
+  <div class="banner crit">not found <b>· no session {id.slice(0, 8)}</b> <a class="lnk" href="/sessions">All sessions</a></div>
+{:else if !session && readError}
+  <div class="banner crit" role="alert">Could not load this session <b>· {readError.text} · trying again</b></div>
+{:else if !session}
   <div class="empty">Loading session…</div>
 {:else}
   <header class="sess">
