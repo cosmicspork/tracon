@@ -58,23 +58,15 @@ Needed for daily use, but not blocking it today.
 
 **Sessions and accounting**
 
-- [ ] A provider error the harness reports with no status and no message
-      (`message: "unknown"`, seen once on 2026-10-08) keeps the raw harness frame on the
-      event, so an unexplained retry can be explained afterwards.
-- [ ] `sessions::an_execute_session_starts_on_its_plan_without_a_nudge` failed once in CI
-      on `main` (7983cd17: the harness exited before the first prompt) and passes locally.
-      Find the race rather than retrying it.
+- [ ] While a tool call runs, its transcript line shows the tail of its output. The frame
+      carries it (`tool_update.output`, #436), but neither managed harness streams a
+      running call's output yet.
 - [ ] **`just check` passes on the operator's own machine.** Three OpenCode integration
       tests (`opencode_adversarial` ×2, `opencode_pty::a_real_shell_is_spawned_and_read_back_through_the_proxy`)
       fail on unmodified `main` on the desktop host with "Unexpected server error" from the
       `opencode` on its PATH (Homebrew, 1.18.30), so the recipe stops before the doc tests
       and the SPA. Find what differs from CI, and have the tests use the pinned binary or
       say why they skip.
-- [ ] **Help set up a repository once: the skill.** The draft, trial and proposal
-      tools exist (`repo_setup_*`). What remains: a built-in setup skill shipped through
-      channel manifests for managed harnesses, and optional free-text notes on how to run
-      the application and give it data, kept in the operator notes, so a recipe is set up
-      once rather than kept in step with the code.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
@@ -127,93 +119,11 @@ hit on a real task.
       nextest) and runs past five minutes on this machine. The session cache (#390) is not
       the answer: no check may build on what an agent wrote. A node-built cache of the
       default branch, made when the repository image is built and mounted read-only, is.
-- [ ] Edit each commit's message under `publish.commits = keep`. Squash (the default)
-      already ships one commit of the reviewed tree with the approved message and
-      branch; `keep` lists the agent's commits and checks their subjects but pushes
-      them as written.
 
-**Forge and tracker**
-
-- [ ] Follow a GitHub run the agent reran (`run_rerun`) the way a GitLab pipeline the
-      agent started is followed, once the item above lands: a `run_wait` read, the
-      job results recorded on the session, and a push when the run finishes or fails.
 
 **Node data**
 
-**Screens and navigation.** Found reviewing 0.29.0 on the desktop, 2026-10-08.
 
-- [ ] Readiness as main banners. The composer's `✓ investigate ✓ verify ✓ publish` line
-      and its "Ready to investigate, verify and publish." go. A path that is not ready gets
-      a banner in the main column, as a failed isolation check does, naming the gap and
-      where to close it; a ready repository shows nothing.
-- [ ] Top-level navigation without Work and Nodes. Tasks, Sessions, Evidence and Usage
-      become rail entries instead of tabs under Work (`/metrics` becomes `/usage`). Nodes
-      leaves the rail: on one node it is a single row and a pointer to Settings, and its
-      remaining facts (harness version mismatch, whether a node can run, running and
-      waiting counts, last seen) move into Settings → Mesh beside the members. A serving
-      node that cannot run says so in a banner. The phone's bottom bar keeps five slots
-      (Home, Tasks, Sessions, Documents, More) and More holds Memories, which it lacks
-      today, Evidence, Usage and Settings.
-- [ ] Document editing fills the page: the editor takes the height below the header with
-      Save and Cancel pinned, rather than a 60vh textarea with a resize handle.
-- [ ] Regroup Settings' nine sections. Maintenance has become a catch-all (node
-      configuration, the operator token, runtime setup, your own harness, session transfer,
-      the boundary, service and recovery). A likely shape: General; Connections; Channels
-      and repositories; Access and devices (operator token, administrator access,
-      notifications, your own harness); Permissions and policies; Mesh (hub, members, the
-      node list above); System (node configuration, runtime, service, data held, sweep).
-      Session transfer moves to Sessions as an import.
-- [ ] A session's tool calls as a transcript you scan, opened on demand. A run already
-      folds every call between two things the operator reads (a message, a prompt, a
-      card, a refusal, the end of a turn), and records nobody reads no longer split it.
-      What remains: opened, each call is one line with its path or command (from
-      `raw_input`), its status and duration, consecutive reads merged under one head, and
-      a call opens again to its output. A failed call's first error line shows without
-      opening anything; while a call runs, its line shows the tail of its output; folded,
-      the run says how long it took; one key opens or folds every run on the screen.
-      The design follows oh-my-pi's transcript (MIT, a terminal and React UI keyed to its
-      own tools); the code is tracon's own.
-
-**Screens, from the 0.29.0 audit**
-
-- [ ] Say what failed: a 500 on an approval or a review reads "not found", an unknown
-      session loads forever, a failed add reports a failed load, a document that failed
-      to load is labelled new, and the own-harness card loads forever when the
-      configuration cannot be read (`approvals-server-error`, `sessions-not-found`,
-      `work-new-form-refused`, `docs-doc-error`, `settings-maintenance-config-error`).
-- [ ] Session actions that match the state: a suspended or continued session still offers
-      Pause and Stop, the exhaustion "held" banner offers no action, a node-restarted
-      session has two Continue buttons on different endpoints, and the composer says input
-      is disabled while it is not (`sessions-suspended`, `sessions-exhausted-held`,
-      `sessions-node-restart`).
-- [ ] The approval page: a list of shell commands is edited as one comma-separated field,
-      so a comma inside a command splits it; locked targets sit between editable fields;
-      egress offers the tool's `wait_secs`; a decided approval shows no result and no time;
-      the head and tables are cramped on a phone (`approvals-setup-propose`,
-      `approvals-egress`, `approvals-succeeded-edited`).
-- [ ] Start stays enabled when readiness or preparation says the session cannot work
-      (`work-launch-not-investigable`, `work-launch-preparation-incompatible`).
-- [ ] Evidence and Memories overflow the page on a phone or with long content
-      (`insight-evidence-populated`, `insight-evidence-long`, `insight-memories-long`).
-- [ ] Node facts, wherever the navigation above puts them: a pinned version shown for a harness that is not installed, the "holds"
-      figure cut off whenever anything is waiting, and the healthy bar on nodes that cannot
-      run (`insight-nodes-several`, `insight-nodes-hub-connected`).
-- [ ] Shared styling: `--line`, `--red` and `--surface` are used but never defined, which
-      leaves the operator question and issue cards unstyled; every ended session is green
-      whatever ended it; destructive confirmations look neutral
-      (`home-decisions-all-kinds`, `home-session-end-reasons`,
-      `settings-maintenance-token-confirm`).
-- [ ] Phone layout: `<details>` summaries lose their disclosure marker, a retained prompt
-      widens the page, a document with an unbroken token or a wide image does too, and the
-      session list's columns do not line up (`home-permission-request-open`,
-      `sessions-node-restart`, `docs-doc-overflow`, `sessions-list`).
-- [ ] The rail footer cuts the keep-awake reason to "keeping awake · 1 s…", and its title
-      shows the method rather than the reason (`home-awake-held`).
-- [ ] Review: "Since your last verdict" comes after the evidence, prose, commits and files
-      it is meant to save reading, and a report's body shows its Markdown raw
-      (`review-since`, `review-report`).
-- [ ] Work item: one unlabelled evidence box per session, and session ids shortened four
-      ways on one page (`work-item-long`, `work-item-failed`).
 
 **OpenCode, contingent on the spike above**
 
@@ -349,6 +259,11 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       Code 2.1.295 holding an MCP call past five minutes. The last one could not be
       reproduced outside a session under 2.1.247 either, so the cause of the live cutoff
       is still unknown.
+- [ ] **The #436 additions, live**: the built-in `repo-setup` skill listed in a Claude Code
+      2.1.295 session in the harness image (it loads as `tracon:repo-setup` through
+      `--plugin-dir`, checked only against a local 2.1.296), a setup proposal whose run
+      notes appear in the next session's operator notes, and a review under
+      `publish.commits = keep` with an edited message pushed to a real forge.
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
