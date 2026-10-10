@@ -865,6 +865,9 @@ impl Supervisor {
                     session_id: self.session_id.clone(),
                     tool_call_id: t.tool_call_id.clone(),
                     status: t.status.clone(),
+                    output: (!t.is_terminal())
+                        .then(|| output_tail(t.raw_output.as_ref()))
+                        .flatten(),
                 });
                 if t.is_terminal() {
                     let (output, truncated) = truncate(t.raw_output.as_ref());
@@ -1824,6 +1827,27 @@ fn step_failure(v: &serde_json::Value) -> Option<String> {
     )
 }
 
+/// How much of a running call's output its progress frame carries.
+const OUTPUT_TAIL: usize = 2 * 1024;
+
+/// The end of what a running call has printed so far, as text, for the line
+/// that shows it while it runs. Nothing when it has printed nothing.
+fn output_tail(v: Option<&serde_json::Value>) -> Option<String> {
+    let text = match v? {
+        serde_json::Value::Null => return None,
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    let mut start = text.len().saturating_sub(OUTPUT_TAIL);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(text[start..].to_string())
+}
+
 fn truncate(v: Option<&serde_json::Value>) -> (Option<String>, bool) {
     let Some(v) = v else { return (None, false) };
     let s = serde_json::to_string(v).unwrap_or_default();
@@ -2014,6 +2038,24 @@ mod tests {
         assert!(!node_tool("mcp__other__doc_write"));
         assert!(!node_tool("Bash"));
         assert!(!node_tool("tracon_doc_write"));
+    }
+
+    #[test]
+    fn a_running_call_shows_the_end_of_its_output() {
+        assert_eq!(output_tail(None), None);
+        assert_eq!(output_tail(Some(&json!(null))), None);
+        assert_eq!(output_tail(Some(&json!("  \n"))), None);
+        assert_eq!(
+            output_tail(Some(&json!("Compiling a\nCompiling b\n"))).as_deref(),
+            Some("Compiling a\nCompiling b\n")
+        );
+        let long = format!("{}end", "é".repeat(OUTPUT_TAIL));
+        let tail = output_tail(Some(&json!(long))).unwrap();
+        assert!(tail.len() <= OUTPUT_TAIL && tail.ends_with("end"));
+        assert_eq!(
+            output_tail(Some(&json!({ "stdout": "x" }))).as_deref(),
+            Some(r#"{"stdout":"x"}"#)
+        );
     }
 
     #[test]
