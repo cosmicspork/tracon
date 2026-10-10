@@ -61,7 +61,7 @@
     <p>Sign in with this node’s operator token to unlock administration in this browser.</p>
   {:else if !access?.authenticated}
     <p>Create an operator token on this node to unlock administration. Remote clients cannot create the first token.</p>
-    {#if access?.local}<a class="lnk" href="/settings#maintenance">Create operator access in Maintenance</a>{/if}
+    {#if access?.local}<a class="lnk" href="/settings#access">Create operator access in Access &amp; devices</a>{/if}
   {/if}
 
   {#if access && !access.local}

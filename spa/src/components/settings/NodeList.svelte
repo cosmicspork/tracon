@@ -85,7 +85,7 @@
                 <span>{node.models.length} offered model{node.models.length === 1 ? '' : 's'}</span>
                 <span>{running(node.id)} running</span>
                 {#if waits}<span>{waits} awaiting an operator</span>{/if}
-                {#if node.is_self && held !== null}<span>holds <a class="lnk" href="/settings#data">{formatBytes(held)}</a></span>{/if}
+                {#if node.is_self && held !== null}<span>holds <a class="lnk" href="/settings#system">{formatBytes(held)}</a></span>{/if}
               </span>
             </span>
             <span class="actions">

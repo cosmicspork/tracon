@@ -190,7 +190,7 @@ export function servingBanner(nodes: NodeInfo[]): { detail: string; href: string
   }
   return {
     detail: readiness.detail.replace(/^This node /, 'it ').replace(/^This /, 'the '),
-    href: '/settings#maintenance',
+    href: '/settings#system',
     action: 'Review setup',
   }
 }

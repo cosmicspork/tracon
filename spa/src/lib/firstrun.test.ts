@@ -5,7 +5,7 @@ const fresh = { anyProviderConnected: false, modelOffered: false, anyChannel: fa
 
 test('a refused boundary remains the first local blocker', () => {
   const steps = setupSteps({ ...fresh, anyProviderConnected: true, modelOffered: true, anyChannel: true, memberChannel: true })
-  expect(nextStep(steps).href).toBe('/settings#maintenance')
+  expect(nextStep(steps).href).toBe('/settings#system')
 })
 
 test('preparation hands off to a local provider connection', () => {

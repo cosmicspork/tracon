@@ -214,7 +214,7 @@
     {#if store.node?.state === 'refused'}
       <div class="banner crit">
         Local tasks unavailable <b>· this node failed its isolation check.</b>
-        <a href="/settings#maintenance">Review setup</a>
+        <a href="/settings#system">Review setup</a>
         <details>
           <summary>Technical details</summary>
           <p>{store.node.failed_check}: {store.node.failed_detail}</p>

@@ -467,6 +467,8 @@ const clickText = (text) =>
 /** What Settings fetches beside the cards these states look at. */
 const settings = (o = {}) =>
   base({
+    '/api/config': { node_name: 'laptop', running: { harness_id: 'claude', harness_version: '2.5.0', node_name: 'laptop' }, external: { enabled: false } },
+    '/api/maintenance/data': { total_bytes: 3_412_000_000, kinds: [] },
     '/api/authority/grants': { policy: { version: 12, rules: [], trusted: true }, grants: [] },
     '/api/admin/access': { authenticated: true, token_configured: true, local: true },
     '/api/admin/mesh': {
@@ -1310,7 +1312,7 @@ export default [
   {
     id: 'home-push-devices',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: 'This device and registered devices',
     note: 'Push toggle, and four registered devices: this browser, a local one, a failing phone, a long user agent.',
     api: settings({
@@ -1327,7 +1329,7 @@ export default [
   {
     id: 'home-push-denied',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: 'Push enrollment: notifications blocked',
     since: '#403',
     note: 'Turning push on where the site is blocked: the stage message in the crit colour.',
@@ -1343,7 +1345,7 @@ export default [
   {
     id: 'home-push-service-refused',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: "Push enrollment: the browser's push service refused",
     since: '#403',
     note: 'Permission granted, the subscribe call rejected by the push service: the message names that stage and quotes the browser.',
@@ -1361,7 +1363,7 @@ export default [
   {
     id: 'home-push-node-refused',
     area: 'home',
-    route: '/settings#devices',
+    route: '/settings#access',
     title: 'Push enrollment: the node did not record the device',
     since: '#403',
     note: 'Subscribed in the browser, then POST /api/push/subscriptions answered 500: "its storage failed: …".',

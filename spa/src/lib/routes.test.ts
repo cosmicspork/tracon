@@ -20,4 +20,18 @@ test('the query rides along; a Nodes hash gives way to the Mesh section', () => 
 test('current addresses are left alone', () => {
   for (const path of ['/', '/tasks', '/tasks/wi-2', '/usage', '/sessions', '/settings', '/nodes/enroll', '/work/a/b'])
     expect(redirect(path)).toBeNull()
+  expect(redirect('/settings', '', '#mesh')).toBeNull()
+  expect(redirect('/settings', '', '#system')).toBeNull()
+})
+
+test('a Settings section folded into another opens the one that holds it now', () => {
+  expect(redirect('/settings', '', '#maintenance')).toBe('/settings#system')
+  expect(redirect('/settings', '', '#data')).toBe('/settings#system')
+  expect(redirect('/settings', '', '#devices')).toBe('/settings#access')
+  expect(redirect('/settings', '?node=abc', '#repositories')).toBe('/settings?node=abc#channels')
+})
+
+test('a section typed as a path opens as its anchor', () => {
+  expect(redirect('/settings/maintenance')).toBe('/settings#system')
+  expect(redirect('/settings/mesh/')).toBe('/settings#mesh')
 })

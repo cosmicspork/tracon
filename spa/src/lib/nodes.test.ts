@@ -180,7 +180,7 @@ test('a serving node that cannot run says so, unless a ready peer runs instead',
   expect(servingBanner([{ ...self, state: 'refused' }])).toBeNull()
   const mismatched = { ...self, harness: { id: 'claude', pinned: '2.5.0', found: '2.3.1', mismatch: true } }
   expect(servingBanner([mismatched])?.detail).toBe('it expects 2.5.0, but found 2.3.1.')
-  expect(servingBanner([{ ...self, state: 'unknown' }])?.href).toBe('/settings#maintenance')
+  expect(servingBanner([{ ...self, state: 'unknown' }])?.href).toBe('/settings#system')
   const bare = { ...self, models: [] }
   expect(servingBanner([bare])?.href).toBe('/settings#connections')
   expect(servingBanner([bare, node({ id: 'p', models: [model] })])).toBeNull()
