@@ -413,7 +413,7 @@ fn read_git(repo: &Path, commit: &str, prefix: &str) -> Result<Vec<ManifestFile>
 /// this reads the same two and refuses a file without them rather than
 /// inferring a name from the directory, which is a v2 behaviour the pinned v1
 /// does not have.
-fn frontmatter(text: &str) -> Result<(String, String), ManifestError> {
+pub(super) fn frontmatter(text: &str) -> Result<(String, String), ManifestError> {
     let body = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))

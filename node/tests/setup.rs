@@ -101,6 +101,7 @@ async fn a_proposal_is_written_only_once_the_operator_allows_it() {
             "prepare": ["cargo fetch --locked"],
             "egress": ["crates"],
             "why": "the trial passed",
+            "run_notes": "  `just dev` serves it on :8080; `just seed` loads the fixtures.  ",
         }),
     )
     .await
@@ -108,6 +109,8 @@ async fn a_proposal_is_written_only_once_the_operator_allows_it() {
     assert_eq!(asked["state"], "awaiting_operator", "{asked}");
     let id = asked["approval_id"].as_str().unwrap().to_string();
     assert!(!h.manager.cfg().repos().iter().any(|e| e.matches(&repo)));
+    let (_, notes, _) = h.store.manifest_contents("personal").unwrap();
+    assert!(notes.is_empty(), "the notes waited for the operator too");
 
     // Nothing an agent sends writes it: the write runs only from the card.
     let card = h.store.get_approval(&id).unwrap().unwrap();
@@ -137,6 +140,15 @@ async fn a_proposal_is_written_only_once_the_operator_allows_it() {
     assert!(!entry.session_egress);
     let file = tracon::config::Config::try_load().unwrap();
     assert!(file.repo.iter().any(|e| e.matches(&repo)));
+
+    // How to run it became a standing note on the session's channel.
+    let (_, notes, _) = h.store.manifest_contents("personal").unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].name, tracon::mcp::setup::run_notes_name(&repo));
+    assert_eq!(
+        notes[0].body,
+        "`just dev` serves it on :8080; `just seed` loads the fixtures."
+    );
 }
 
 #[tokio::test]

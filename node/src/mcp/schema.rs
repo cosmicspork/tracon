@@ -65,7 +65,12 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (work::CRITERIA_LINK, "markdown", &["value"], &["criterion"]),
     (review::SUBMIT_REPORT, "markdown", &["body"], &["report_id"]),
     (super::egress::REQUEST, "markdown", &[], &["host"]),
-    (super::setup::PROPOSE, "markdown", &["why"], &[]),
+    (
+        super::setup::PROPOSE,
+        "markdown",
+        &["why", "run_notes"],
+        &[],
+    ),
     (super::services::START, "markdown", &[], &["name"]),
     // The title names the status this id leads to, read when it was asked.
     (jira::ISSUE_TRANSITION, "markdown", &[], &["transition_id"]),

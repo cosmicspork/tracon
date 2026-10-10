@@ -72,6 +72,14 @@ impl ClaudeAdapter {
         }
     }
 
+    /// The launch manifest's skills, as a plugin the CLI loads for this
+    /// session only, relative to the state directory and sealed read-only.
+    /// `--setting-sources project` keeps the CLI from reading skills out of
+    /// its own config directory, so a plugin named on the command line is the
+    /// one way in that does not go through the worktree. Checked against
+    /// 2.1.296: the `system/init` frame lists them as `tracon:<name>`.
+    const PLUGIN_DIR: &'static str = "plugin";
+
     /// The argv for a headless session.
     ///
     /// `--permission-mode default` is load-bearing and must never become
@@ -114,6 +122,12 @@ impl ClaudeAdapter {
             argv.push("--mcp-config".into());
             argv.push(mcp_config(&spec.mcp_servers).to_string());
         }
+        argv.push("--plugin-dir".into());
+        argv.push(format!(
+            "{}/{}",
+            crate::session::materialize::state_target(&spec.harness_home, Self::layout()),
+            Self::PLUGIN_DIR
+        ));
         if let Some(file) = &spec.system_prompt_file {
             argv.push("--append-system-prompt-file".into());
             argv.push(file.clone());
@@ -739,6 +753,33 @@ impl HarnessAdapter for ClaudeAdapter {
         Self::layout()
     }
 
+    /// The plugin `--plugin-dir` names: a manifest and the channel's skills.
+    /// Staged even when there are no skills, so the directory the argv names
+    /// always exists.
+    fn scratch_files(&self, wiring: &crate::gateway::model::Wiring) -> Vec<(String, String)> {
+        let manifest = json!({
+            "name": "tracon",
+            "version": "1.0.0",
+            "description": "The skills this channel's launch manifest installed.",
+        });
+        let mut files = vec![(
+            format!("{}/.claude-plugin/plugin.json", Self::PLUGIN_DIR),
+            serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".into()),
+        )];
+        files.extend(
+            wiring
+                .manifest
+                .skill_files()
+                .into_iter()
+                .map(|(rel, text)| (format!("{}/{rel}", Self::PLUGIN_DIR), text)),
+        );
+        files
+    }
+
+    fn readonly_dirs(&self) -> Vec<String> {
+        vec![Self::PLUGIN_DIR.to_string()]
+    }
+
     /// `--setting-sources project` is what loads the repository's `CLAUDE.md`,
     /// and it loads `.claude/settings.json` with it: permission rules that
     /// allow tools without the node seeing the ask, and hooks and a status
@@ -925,6 +966,34 @@ mod tests {
             argv.contains("--append-system-prompt-file /root/.claude/orientation.md"),
             "{argv}"
         );
+    }
+
+    /// The manifest's skills reach Claude Code as a sealed plugin the argv
+    /// names, under the state directory rather than in the worktree.
+    #[test]
+    fn the_manifests_skills_are_staged_as_a_plugin_the_argv_names() {
+        let argv = ClaudeAdapter::cmd("c", &spec(), "sid").argv.join(" ");
+        assert!(argv.contains("--plugin-dir /root/.claude/plugin"), "{argv}");
+
+        let adapter = ClaudeAdapter::new(ClaudeAdapter::PINNED_VERSION);
+        assert_eq!(adapter.readonly_dirs(), ["plugin"]);
+        let mut wiring = crate::gateway::model::Wiring::default();
+        wiring.manifest.skills = crate::manifest::builtin_skills();
+        let files = adapter.scratch_files(&wiring);
+        let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "plugin/.claude-plugin/plugin.json",
+                "plugin/skills/repo-setup/SKILL.md"
+            ]
+        );
+        let plugin: Value = serde_json::from_str(&files[0].1).unwrap();
+        assert_eq!(plugin["name"], "tracon");
+
+        // No skills still stages the manifest, so the named directory exists.
+        let empty = adapter.scratch_files(&crate::gateway::model::Wiring::default());
+        assert_eq!(empty.len(), 1);
     }
 
     /// The node builds one neutral descriptor for every adapter; this one has
