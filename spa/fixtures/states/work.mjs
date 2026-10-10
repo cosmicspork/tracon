@@ -1264,7 +1264,7 @@ const states = [
     route: `/?item=${ID.limits}&phase=execute`,
     title: 'Launch: nothing ready (repository missing, node not ready)',
     since: '#387',
-    note: 'Start reads "Cannot run here" and is disabled; the readiness line says why.',
+    note: 'Start reads "Cannot run here" and is disabled; the readiness banner says why.',
     api: launchApi(planned, {
       readiness: {
         channel: 'personal',
@@ -1313,7 +1313,7 @@ const states = [
     area: 'work',
     route: `/?item=${ID.limits}&phase=execute`,
     title: 'Launch: preparation would refuse, adjust closed',
-    note: 'Start is disabled and the first thing that would stop preparation shows under the readiness line, with a link that opens adjust.',
+    note: 'Start is disabled and the first thing that would stop preparation shows above Start, with a link that opens adjust.',
     api: launchApi(planned, { preparation: PREP_BLOCKED }),
   },
   {

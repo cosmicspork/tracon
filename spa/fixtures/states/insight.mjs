@@ -116,7 +116,7 @@ const data = (total) => ({
   holdings: [
     { kind: 'sessions', label: 'Sessions', unit: 'session', count: 214, bytes: Math.round(total * 0.06), delete: null, propagation: 'Nothing deletes a session yet.' },
     { kind: 'events', label: 'Session logs', unit: 'event', count: 182_440, bytes: Math.round(total * 0.09), delete: null, propagation: 'Nothing deletes a log entry yet.' },
-    { kind: 'workspaces', label: 'Workspaces', unit: 'workspace', count: 9, bytes: Math.round(total * 0.67), delete: { path: '/settings#maintenance', label: 'Maintenance, under Runtime storage, once the session is archived' }, propagation: 'Local to this node.' },
+    { kind: 'workspaces', label: 'Workspaces', unit: 'workspace', count: 9, bytes: Math.round(total * 0.67), delete: { path: '/settings#system', label: 'System, under Runtime storage, once the session is archived' }, propagation: 'Local to this node.' },
   ],
 })
 

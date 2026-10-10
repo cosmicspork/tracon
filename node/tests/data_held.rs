@@ -34,7 +34,7 @@ async fn the_node_says_what_it_holds_and_where_each_kind_is_deleted() {
         .clone();
     assert_eq!(work["count"], 1);
     assert!(work["bytes"].as_i64().unwrap() > "Count me".len() as i64);
-    assert_eq!(work["delete"]["path"], "/work");
+    assert_eq!(work["delete"]["path"], "/tasks");
     let sessions = v["holdings"]
         .as_array()
         .unwrap()

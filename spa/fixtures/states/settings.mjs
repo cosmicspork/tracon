@@ -464,7 +464,7 @@ const MAINTENANCE = {
 }
 
 const holding = (kind, label, unit, count, bytes, del, propagation) => ({ kind, label, unit, count, bytes, delete: del, propagation })
-const RUNTIME = { path: '/settings#maintenance', label: 'Maintenance, under Runtime storage, once the session is archived' }
+const RUNTIME = { path: '/settings#system', label: 'System, under Runtime storage, once the session is archived' }
 const DATA = {
   database_bytes: 412_334_080,
   total_bytes: 6_948_120_576,
@@ -474,7 +474,7 @@ const DATA = {
     holding('evidence', 'Candidates and evidence', 'candidate', 342, 41_009_152, null, 'Nothing deletes evidence yet: a verdict is only as good as what it was given, and a review may already be published.'),
     holding('documents', 'Documents', 'document', 63, 4_812_800, { path: '/docs', label: 'Documents, one at a time' }, 'A delete replicates to every node on the document’s channel and to the hub. Each keeps a tombstone, the row with its content cleared, so the delete wins over an older copy arriving later.'),
     holding('memories', 'Memories', 'memory', 1, 812, { path: '/memories', label: 'Memories, one at a time' }, 'A delete replicates to every node on the memory’s channel and to the hub, each keeping a tombstone, and drops it from recall.'),
-    holding('work', 'Work items', 'work item', 118, 902_144, { path: '/work', label: 'Work, one item at a time' }, 'A delete replicates to every node on the item’s channel and to the hub, each keeping a tombstone. Sessions that worked on it keep their record.'),
+    holding('work', 'Work items', 'work item', 118, 902_144, { path: '/tasks', label: 'Tasks, one item at a time' }, 'A delete replicates to every node on the item’s channel and to the hub, each keeping a tombstone. Sessions that worked on it keep their record.'),
     holding('index', 'Search index', 'vector', 24_610, 25_165_824, null, 'Derived from documents and memories on this node: deleting one of them drops its vectors. Never replicated.'),
     holding('workspaces', 'Workspaces', 'workspace', 37, 5_402_198_016, RUNTIME, 'On this node only; nothing replicates a workspace. Removing one gives up resuming, exporting and restoring its session.'),
     holding('harness', 'Harness state', 'session', 211, 1_133_510_656, RUNTIME, 'On this node only. Removing a session’s directory gives up resuming it; the rows the node mirrored from the harness stay with the session.'),

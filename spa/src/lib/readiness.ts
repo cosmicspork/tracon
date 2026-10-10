@@ -51,11 +51,11 @@ export function allGaps(r: RepoReadiness): { purpose: PathReadiness['purpose']; 
 export function remedy(key: string): { href: string; label: string } | null {
   switch (key) {
     case 'launch':
-      return { href: '/settings#maintenance', label: 'Review setup' }
+      return { href: '/settings#system', label: 'Review setup' }
     case 'checks':
-      return { href: '/settings#repositories', label: 'Add checks in Settings' }
+      return { href: '/settings#channels', label: 'Add checks in Settings' }
     case 'image':
-      return { href: '/settings#repositories', label: 'Build it in Settings' }
+      return { href: '/settings#channels', label: 'Build it in Settings' }
     case 'credential':
       return { href: '/settings#connections', label: 'Bind a token in Settings' }
     default:
