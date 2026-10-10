@@ -97,6 +97,10 @@
     title={session.archived_ms ? 'Put this session back on the home' : 'Put this session away'}
     onclick={() => onarchive(session)}>{session.archived_ms ? 'unarchive' : 'archive'}</button
   >
+{:else}
+  <!-- Rows with and without the button sit in one list; the gap keeps their
+       columns where the archived rows' are. -->
+  <span class="arch gap" aria-hidden="true"></span>
 {/if}
 </div>
 
@@ -113,6 +117,7 @@
   }
   .arch {
     flex: none;
+    width: 84px;
     background: var(--s1);
     border: 0;
     border-radius: 4px;
@@ -120,6 +125,9 @@
     font: 12.5px var(--sans);
     padding: 0 12px;
     cursor: pointer;
+  }
+  .arch.gap {
+    background: none;
   }
   .arch:hover {
     color: var(--ink);
@@ -218,6 +226,10 @@
     .age,
     .row > .mono:last-child {
       display: none;
+    }
+    .arch {
+      width: 64px;
+      padding: 0;
     }
   }
 </style>

@@ -165,10 +165,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus
   input:not([type='checkbox']):not([type='radio']), select, textarea {
     min-height: 44px;
   }
+  /* A list item, not a flex box, so the disclosure marker stays; a summary
+     that draws its own marker sets its own display. */
   summary {
     min-height: 44px;
-    display: flex;
-    align-items: center;
+    display: list-item;
+    padding-block: 11px;
   }
   .empty { padding: 18px; }
 }

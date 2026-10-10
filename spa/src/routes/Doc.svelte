@@ -364,8 +364,16 @@
   }
   .md {
     max-width: 72ch;
+    min-width: 0;
     line-height: 1.55;
     color: var(--ink);
+    /* An unbroken token or URL breaks where it must rather than widening the
+       page; code blocks and tables scroll inside themselves instead. */
+    overflow-wrap: anywhere;
+  }
+  .md :global(img) {
+    max-width: 100%;
+    height: auto;
   }
   .md :global(h1),
   .md :global(h2),
@@ -424,7 +432,9 @@
     border-collapse: collapse;
     font-size: 13px;
     display: block;
+    max-width: 100%;
     overflow-x: auto;
+    overflow-wrap: normal;
   }
   .md :global(th),
   .md :global(td) {

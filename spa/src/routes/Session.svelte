@@ -550,7 +550,7 @@
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
   {#if isTerminal(session.state) && session.draft}
-    <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre>{session.draft}</pre></div>
+    <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre class="draft">{session.draft}</pre></div>
   {/if}
 
   {#if restored && !isTerminal(session.state)}
@@ -616,5 +616,13 @@
   }
   textarea:disabled {
     color: var(--dim);
+  }
+  /* Kept as typed, but wrapped: a long line would widen the page on a phone. */
+  .draft {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+    font: inherit;
   }
 </style>
