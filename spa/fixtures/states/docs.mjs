@@ -705,6 +705,7 @@ export default [
     area,
     route: '/docs/personal/guide-release/edit',
     title: 'Editing, a change typed',
+    note: 'The editor fills the page below the header, scrolling inside itself; Save and Cancel sit at the foot of the window with no resize handle.',
     api: { '/api/docs/personal/guide-release': rich },
     act: async (page) => {
       await page.locator('textarea').press('End')

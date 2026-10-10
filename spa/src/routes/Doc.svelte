@@ -240,6 +240,9 @@
   </div>
 
   {#if editing}
+    <!-- The editor takes the page below the header: the draft scrolls inside
+         it, and Save and Cancel stay at the foot of the window. -->
+    <div class="editor">
     {#if changedElsewhere && !conflict}
       <div class="banner dim">this document changed elsewhere while you were editing <b>· saving will show you the other version first</b></div>
     {/if}
@@ -253,6 +256,7 @@
       <button class="btn p" onclick={save} disabled={busy || loadError !== null || draft === (doc?.body ?? '')}>Save</button>
       <button class="lnk" onclick={() => { editing = false; draft = doc?.body ?? draft; if (!doc) router.go('/docs') }}>Cancel</button>
       {#if error}<span class="err">{error}</span>{/if}
+    </div>
     </div>
   {:else if missing}
     <div class="empty">No document <code>{slug}</code> on {channel}.{#if !surface.phone} <button class="lnk" onclick={() => (editing = true)}>Write it.</button>{/if}</div>
@@ -310,23 +314,32 @@
     letter-spacing: 0;
     text-transform: none;
   }
+  /* main is a column at least the window's height; the editor takes what
+     the header and any banner leave of it. */
+  .editor {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
   textarea {
+    flex: 1;
     width: 100%;
-    min-height: 60vh;
+    min-height: 12em;
     font: 13px/1.5 var(--mono);
     background: var(--s1);
     color: var(--ink);
     border: 0;
     border-radius: 4px;
     padding: 12px 14px;
-    resize: vertical;
+    resize: none;
     box-sizing: border-box;
   }
   .send {
     display: flex;
     gap: 14px;
     align-items: center;
-    margin-top: 10px;
   }
   .err {
     color: var(--crit);
