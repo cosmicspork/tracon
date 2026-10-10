@@ -91,7 +91,7 @@
   }
   function phaseLabel(s: Session): string {
     const end = s.end_reason === 'phase_done' ? (s.phase === 'plan' ? 'planned' : 'reviewed') : s.end_reason ?? s.state
-    return `${s.phase} ${short(s.id, 13)} · ${end}`
+    return `${s.phase} ${short(s.id)} · ${end}`
   }
 </script>
 
@@ -130,7 +130,7 @@
     </dd>
     {#if item.discovered_from}
       <dt>Discovered from</dt>
-      <dd class="m"><a href="/work/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{item.discovered_by_session ? ` · by session ${item.discovered_by_session.slice(-6)}` : ''}</dd>
+      <dd class="m"><a href="/work/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by session '}<a href="/sessions/{item.discovered_by_session}">{short(item.discovered_by_session)}</a>{/if}</dd>
     {/if}
     <dt>Sessions</dt>
     <dd class="m">
@@ -142,7 +142,7 @@
     </dd>
     {#if item.closed_by_session}
       <dt>Closed</dt>
-      <dd class="m">by session <a href="/sessions/{item.closed_by_session}">{item.closed_by_session.slice(-6)}</a> · {formatAge(item.updated_ms, clock.now)} ago</dd>
+      <dd class="m">by session <a href="/sessions/{item.closed_by_session}">{short(item.closed_by_session)}</a> · {formatAge(item.updated_ms, clock.now)} ago</dd>
     {/if}
   </dl>
 
@@ -156,13 +156,9 @@
   <CriteriaPanel {item} {criteria} onchange={load} />
   <ContextPanel {item} />
 
-  {#if sessions.length === 0}
-    <EvidenceLinks workItemId={item.id} channel={item.channel} />
-  {:else}
-    {#each sessions as session (session.id)}
-      <EvidenceLinks sessionId={session.id} channel={item.channel} />
-    {/each}
-  {/if}
+  <!-- One list for the item: the node's work item filter covers every
+       candidate its sessions captured, and each card names its session. -->
+  <EvidenceLinks workItemId={item.id} channel={item.channel} />
 
   {#if discovered.length}
     <div class="h5">Discovered from this item <b>{discovered.length}</b></div>

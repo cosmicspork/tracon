@@ -352,9 +352,13 @@ const evidence = (it, n = 2) => ({
   next_before: null,
 })
 
-// The evidence list is asked once per session on an item page (or once for the
-// item when it has none); only the sessions named here captured anything.
-const evidenceBy = (bySession) => (req) => bySession[req.query.session_id] ?? noEvidence
+// Evidence by the session that captured it. An item page asks once for the
+// item, which the node answers with every candidate its sessions captured; a
+// session's own page asks for that session.
+const evidenceBy = (bySession) => (req) =>
+  req.query.session_id
+    ? (bySession[req.query.session_id] ?? noEvidence)
+    : { items: Object.values(bySession).flatMap((page) => page.items), next_before: null }
 
 // The planned, worked-on item most panels are shown on.
 const planned = item({

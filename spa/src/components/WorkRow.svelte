@@ -15,7 +15,7 @@
     if (state === 'blocked' && item.readiness.state === 'blocked') bits.push(blockersLine(item.readiness.by, titles))
     if (state === 'ready') bits.push(item.phase_plan_slug ? 'plan written' : 'no plan yet')
     if (state === 'insession' && holder) bits.push(`${holder.phase} on ${nodeLabel(store.nodes, holder.node_id)}`)
-    if (state === 'closed' && item.closed_by_session) bits.push(`closed by session ${item.closed_by_session.slice(-6)}`)
+    if (state === 'closed' && item.closed_by_session) bits.push(`closed by session ${item.closed_by_session.slice(0, 8)}`)
     if (item.discovered_from) bits.push(`discovered from ${short(item.discovered_from)}`)
     return bits.join(' · ')
   })

@@ -176,7 +176,7 @@
         <li>
           <details>
             <summary class:moved={a.changes.length > 0} class:short={a.received.some((r) => r.delivery !== 'full')}>
-              <a href="/sessions/{a.session_id}">{a.session_id.slice(-6)}</a>
+              <a href="/sessions/{a.session_id}">{a.session_id.slice(0, 8)}</a>
               · {attemptLine(a)} · {formatAge(a.created_ms, clock.now)} ago
             </summary>
             {#if a.changes.length}
