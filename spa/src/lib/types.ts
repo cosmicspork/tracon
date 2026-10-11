@@ -31,6 +31,16 @@ export interface NodeInfo {
   default_channel?: string | null
   /** The release the node runs. Absent from older builds. */
   application_version?: string | null
+  /**
+   * The commit the node was built from when that is not the release itself;
+   * null for a release. Only on the serving node's row, and absent from older builds.
+   */
+  application_build?: string | null
+  /**
+   * The build of the interface the node embeds: empty for a release bundle,
+   * null when the bundle carries no id. Only on the serving node's row.
+   */
+  interface_build?: string | null
 }
 
 export interface ModelOption {

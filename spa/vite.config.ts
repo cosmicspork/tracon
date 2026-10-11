@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -56,18 +57,48 @@ const fixtureMode = Boolean(process.env.TRACON_FIXTURES)
 // The release this bundle belongs to, so a page left open across a node
 // upgrade can tell it is running the previous interface. Empty when built
 // without the workspace manifest; the page then never claims to be stale.
-const appVersion = (() => {
-  try {
-    const manifest = readFileSync(fileURLToPath(new URL('../Cargo.toml', import.meta.url)), 'utf8')
-    return /\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(manifest)?.[1] ?? ''
-  } catch {
-    return ''
+// Fixture mode pins it to the release the fixtures' node reports, so the
+// audit's states do not all turn stale when the version is bumped.
+const FIXTURE_RELEASE = '0.29.0'
+const appVersion = fixtureMode
+  ? FIXTURE_RELEASE
+  : (() => {
+      try {
+        const manifest = readFileSync(fileURLToPath(new URL('../Cargo.toml', import.meta.url)), 'utf8')
+        return /\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/.exec(manifest)?.[1] ?? ''
+      } catch {
+        return ''
+      }
+    })()
+
+// Which build of that release: the commit, unless it is the release's own
+// tag, by the same rule as the node's build.rs. Empty for a release and
+// without git. Written into dist/build-id as well, where the node embeds it
+// and reports it, so a page can tell whether the node now serves another one.
+const appBuild = (() => {
+  if (fixtureMode || !appVersion) return ''
+  const git = (...args: string[]) => {
+    try {
+      return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    } catch {
+      return ''
+    }
   }
+  if (git('tag', '--points-at', 'HEAD').split('\n').includes(`v${appVersion}`)) return ''
+  return git('rev-parse', '--short=12', 'HEAD')
 })()
 
+const buildId = (): Plugin => ({
+  name: 'tracon-build-id',
+  apply: 'build',
+  generateBundle() {
+    this.emitFile({ type: 'asset', fileName: 'build-id', source: `${appBuild}\n` })
+  },
+})
+
 export default defineConfig({
-  define: { __TRACON_VERSION__: JSON.stringify(appVersion) },
-  plugins: [svelte(), fixtureMode ? fixtures() : undefined].filter(Boolean) as PluginOption[],
+  define: { __TRACON_VERSION__: JSON.stringify(appVersion), __TRACON_BUILD__: JSON.stringify(appBuild) },
+  plugins: [svelte(), buildId(), fixtureMode ? fixtures() : undefined].filter(Boolean) as PluginOption[],
   build: {
     outDir: 'dist',
     emptyOutDir: true,

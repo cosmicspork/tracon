@@ -8,6 +8,14 @@ use rust_embed::Embed;
 #[folder = "../spa/dist"]
 struct Assets;
 
+/// The build of the interface this binary embeds, as the SPA's build wrote it
+/// into `build-id`: empty for a release bundle, `None` when the bundle carries
+/// no id (a placeholder, or one built before ids existed). A page compares its
+/// own against this to know whether a reload would change it.
+pub fn interface_build() -> Option<String> {
+    Assets::get("build-id").map(|file| String::from_utf8_lossy(&file.data).trim().to_string())
+}
+
 /// Serves the embedded SPA. Unknown paths fall back to `index.html` so the
 /// client-side router owns every route the API does not.
 pub async fn serve(uri: Uri) -> Response {

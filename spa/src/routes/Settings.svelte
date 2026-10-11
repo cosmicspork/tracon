@@ -47,6 +47,7 @@
   import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
   import { nodeHarnesses } from '../lib/nodes'
+  import { versionLabel } from '../lib/version'
   import type { HarnessState } from '../lib/types'
   import { exhaustionDefaults, exhaustionPatch, modelPatch, phaseDefaults } from '../lib/bindings'
   import { modelSummary, recentModelValues } from '../lib/models'
@@ -726,11 +727,11 @@
   {:else if !desktopUpdatesAvailable()}
     <Card title="Version" note="This page, and the release each node runs.">
       <dl class="facts">
-        <div><dt>This page</dt><dd>{__TRACON_VERSION__ ? `v${__TRACON_VERSION__}` : 'unknown build'}</dd></div>
+        <div><dt>This page</dt><dd>{versionLabel(__TRACON_VERSION__, __TRACON_BUILD__) || 'unknown build'}</dd></div>
         {#each store.nodes as node (node.id)}
           <div>
             <dt>{node.name}{node.is_self ? ' · serving' : ''}</dt>
-            <dd>{node.application_version ? `v${node.application_version}` : 'not reported'}{node.is_self || node.reachable ? '' : ' · last reported'}</dd>
+            <dd>{versionLabel(node.application_version, node.application_build) || 'not reported'}{node.is_self || node.reachable ? '' : ' · last reported'}</dd>
           </div>
         {/each}
       </dl>
