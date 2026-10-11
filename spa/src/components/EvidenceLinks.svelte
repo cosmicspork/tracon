@@ -102,7 +102,7 @@
           <div class="identity">
             <a href={evidencePath(item)}>Evidence · {item.candidate.head_sha.slice(0, 12)}</a>
             <small
-              >{item.candidate.channel}{#if !sessionId && item.candidate.owner_session_id} · session <a
+              >{item.candidate.channel}{#if !sessionId && item.candidate.owner_session_id}{' · '}session <a
                   class="session"
                   href="/sessions/{encodeURIComponent(item.candidate.owner_session_id)}"
                   >{item.candidate.owner_session_id.slice(0, 8)}</a

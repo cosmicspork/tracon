@@ -53,9 +53,9 @@
 <article class="body md">{@html renderMessage(report.body)}</article>
 
 {#if report.state === 'acknowledged'}
-  <div class="banner ok">acknowledged <b>· this records receipt only; no code was published</b>{#if report.verdict_reason} · {report.verdict_reason}{/if}</div>
+  <div class="banner ok">acknowledged <b>· this records receipt only; no code was published</b>{#if report.verdict_reason}{' · '}{report.verdict_reason}{/if}</div>
 {:else if report.state === 'revising'}
-  <div class="banner dim">changes requested <b>· the submitter must revise this narrative and call submit_report with this report id</b>{#if report.verdict_reason} · {report.verdict_reason}{/if}</div>
+  <div class="banner dim">changes requested <b>· the submitter must revise this narrative and call submit_report with this report id</b>{#if report.verdict_reason}{' · '}{report.verdict_reason}{/if}</div>
 {:else if waiting}
   <section class="decision">
     <h2>Operator decision</h2>

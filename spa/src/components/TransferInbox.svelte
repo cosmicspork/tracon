@@ -94,10 +94,10 @@
               {transfer.channel} · source node {transfer.origin_node.slice(0, 12)} ·
               {new Date(transfer.created_ms).toLocaleString()} · {transfer.files} files ·
               {transfer.documents} docs · {transfer.memories} memories
-              {#if transfer.note} · note: {transfer.note}{/if}
-              {#if transfer.import_state === 'imported'} · continuation {transfer.session_id?.slice(0, 12)} started{/if}
-              {#if transfer.import_state === 'preparing'} · import outcome unknown{/if}
-              {#if transfer.import_state === 'failed'} · previous import failed; retry is explicit{/if}
+              {#if transfer.note}{' · '}note: {transfer.note}{/if}
+              {#if transfer.import_state === 'imported'}{' · '}continuation {transfer.session_id?.slice(0, 12)} started{/if}
+              {#if transfer.import_state === 'preparing'}{' · '}import outcome unknown{/if}
+              {#if transfer.import_state === 'failed'}{' · '}previous import failed; retry is explicit{/if}
             </span>
           </div>
           <button

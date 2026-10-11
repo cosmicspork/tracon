@@ -124,6 +124,14 @@ export function decodeOutput(raw: unknown): string {
   }
 }
 
+/// Claude Code hands a failed call back wrapped in `<tool_use_error>` tags,
+/// which are for the model, not the operator. Only a wrapper around the whole
+/// output is taken off; the same text inside other output is left as printed.
+export function unwrapHarnessError(output: string): string {
+  const m = /^\s*<tool_use_error>([\s\S]*)<\/tool_use_error>\s*$/.exec(output)
+  return m ? m[1].trim() : output
+}
+
 const ERROR = /\b(error|errors|failed|failure|fatal|panic(ked)?|exception|denied|refused|not found|no such|cannot|can't|unable)\b/i
 
 function clip(line: string, max = 160): string {
@@ -168,7 +176,7 @@ function callMs(t: ToolEntry, now: number): number | null {
 
 export function callRow(t: ToolEntry, root?: string | null, now = 0): CallRow {
   const state = callState(t)
-  const output = decodeOutput(t.result?.payload.output)
+  const output = unwrapHarnessError(decodeOutput(t.result?.payload.output))
   return {
     entry: t,
     kind: callKind(t),
@@ -246,4 +254,10 @@ export function runFailures(tools: ToolEntry[], root?: string | null): { text: s
       const row = callRow(t, root)
       return { text: row.text, error: row.error }
     })
+}
+
+/// The calls of a run still waiting for their result: what a folded run shows
+/// under its summary while it works, so following a run never means opening it.
+export function runRunning(tools: ToolEntry[], root?: string | null, now = 0): CallRow[] {
+  return tools.filter((t) => !t.result).map((t) => callRow(t, root, now))
 }

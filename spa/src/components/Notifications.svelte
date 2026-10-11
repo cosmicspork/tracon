@@ -98,10 +98,9 @@
     <div class="devs">
       {#each devices as d (d.id)}
         <div class="dev" class:mine={d.mine}>
-          <span class="ua">{d.user_agent ?? 'unknown browser'}{#if d.mine} · this browser{:else if d.local} · this machine{/if}</span>
+          <span class="ua">{d.user_agent ?? 'unknown browser'}{#if d.mine}{' · '}this browser{:else if d.local} · this machine{/if}</span>
           <span class="dim">
-            {#if d.last_ok_ms}service accepted {formatAge(d.last_ok_ms, clock.now)} ago{:else}no accepted push yet{/if}{#if d.fail_count}
-              · {d.fail_count} failing{/if}
+            {#if d.last_ok_ms}service accepted {formatAge(d.last_ok_ms, clock.now)} ago{:else}no accepted push yet{/if}{#if d.fail_count}{' · '}{d.fail_count} failing{/if}
           </span>
           <button class="lnk d" onclick={() => forget(d)} disabled={busy}>Forget</button>
         </div>

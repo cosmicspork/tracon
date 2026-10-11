@@ -42,9 +42,7 @@
       {:else}
         · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
           ? ' · claimed'
-          : ''}{#if checks.length} · checks ✓{/if}{#if verdict}
-          · <span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}
-          · reviewing{/if}
+          : ''}{#if checks.length}{' · '}checks ✓{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}
       {/if}
     </small>
   </span>
