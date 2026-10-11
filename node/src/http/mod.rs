@@ -536,6 +536,13 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     store
         .reconcile_interrupted_runs()
         .context("reconcile interrupted checks")?;
+    match store.repair_search_index() {
+        Ok(true) => {
+            tracing::warn!("the full-text search index had drifted from its tables; rebuilt it")
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "could not check the full-text search index"),
+    }
     store
         .reconcile_repo_images()
         .context("reconcile interrupted image builds")?;

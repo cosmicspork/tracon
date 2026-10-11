@@ -364,6 +364,15 @@ fn span_of(title: &str, body: &str, offset: i64, len: i64) -> String {
     slice.trim().chars().take(400).collect()
 }
 
+/// The words a title, slug or query names, lowercased, for matching one
+/// against another. Words under three characters name nothing on their own.
+fn name_words(text: &str) -> std::collections::HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect()
+}
+
 /// Turn free text into an FTS5 query: each word quoted, any word may match,
 /// so punctuation in a question cannot break the syntax.
 pub fn fts_query(text: &str) -> String {
@@ -1259,6 +1268,26 @@ impl Store {
         Ok(out)
     }
 
+    /// Rebuild the document and memory full-text indexes where they no longer
+    /// match their tables, and say whether either needed it. Both are external
+    /// content indexes keyed on rowid, which triggers keep in step; anything
+    /// that writes around them leaves search answering from what used to be.
+    pub fn repair_search_index(&self) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut repaired = false;
+        for table in ["document_fts", "memory_fts"] {
+            let check = format!("INSERT INTO {table}({table}, rank) VALUES ('integrity-check', 1)");
+            if conn.execute(&check, []).is_err() {
+                conn.execute(
+                    &format!("INSERT INTO {table}({table}) VALUES ('rebuild')"),
+                    [],
+                )?;
+                repaired = true;
+            }
+        }
+        Ok(repaired)
+    }
+
     /// Documents matching free text, with a snippet, best first.
     pub fn doc_search(
         &self,
@@ -1315,9 +1344,22 @@ impl Store {
                 .collect::<std::result::Result<_, _>>()?;
             rows
         };
-        if near.is_empty() {
-            return Ok(hits);
+        if !near.is_empty() {
+            self.fold_in_neighbours(&mut hits, &near, channel, kind)?;
         }
+        self.rank_named_first(&mut hits, channel, kind, text)?;
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    /// Fold the vector index's neighbours into `hits`, best first.
+    fn fold_in_neighbours(
+        &self,
+        hits: &mut Vec<RecallHit>,
+        near: &std::collections::HashMap<&str, (usize, i64, i64)>,
+        channel: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<()> {
         // A document FTS already found is promoted rather than repeated.
         for h in hits.iter_mut() {
             if let Some((pos, ..)) = near.get(h.id.as_str()) {
@@ -1365,8 +1407,91 @@ impl Store {
                 .partial_cmp(&b.rank)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        hits.truncate(limit);
-        Ok(hits)
+        Ok(())
+    }
+
+    /// Put the documents a query names first: those whose title or slug holds
+    /// every significant word of it. bm25 weighs a word in a short title no
+    /// more than the same word repeated through long bodies, and a slug is not
+    /// indexed at all, so searching for `dogfood` or `note-tracon-dogfood` could
+    /// return everything but "Tracon dogfood failures". This reads titles and
+    /// slugs directly, so it holds even where the full-text index has drifted.
+    fn rank_named_first(
+        &self,
+        hits: &mut Vec<RecallHit>,
+        channel: Option<&str>,
+        kind: Option<&str>,
+        text: &str,
+    ) -> Result<()> {
+        let wanted = name_words(text);
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let named: Vec<(String, String, String)> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id, slug, title FROM document
+                 WHERE deleted = 0 AND archived = 0
+                   AND (?1 IS NULL OR channel = ?1) AND (?2 IS NULL OR kind = ?2)",
+            )?;
+            let rows = stmt
+                .query_map(params![channel, kind], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect::<std::result::Result<Vec<(String, String, String)>, _>>()?;
+            rows.into_iter()
+                .filter(|(_, slug, title)| {
+                    let mut have = name_words(title);
+                    have.extend(name_words(slug));
+                    wanted.iter().all(|w| have.contains(w))
+                })
+                .collect()
+        };
+        if named.is_empty() {
+            return Ok(());
+        }
+        let ids: std::collections::HashSet<&str> =
+            named.iter().map(|(id, ..)| id.as_str()).collect();
+        for (id, ..) in &named {
+            if hits.iter().any(|h| &h.id == id) {
+                continue;
+            }
+            let Some(row) = self.doc_by_id(id)? else {
+                continue;
+            };
+            hits.push(RecallHit {
+                kind: "document".into(),
+                id: row.id.clone(),
+                slug: Some(row.slug),
+                title: Some(row.title.clone()),
+                format: Some(row.format),
+                text: span_of(&row.title, &row.body, 0, 0),
+                scope: None,
+                confidence: None,
+                rank: 3.0,
+            });
+        }
+        // Named documents keep their order among themselves and go just ahead
+        // of the best of the rest, so the tier they share with other documents
+        // in recall is unchanged.
+        let floor = hits
+            .iter()
+            .filter(|h| !ids.contains(h.id.as_str()))
+            .map(|h| h.rank)
+            .fold(3.0f64, f64::min);
+        hits.sort_by(|a, b| {
+            let (an, bn) = (ids.contains(a.id.as_str()), ids.contains(b.id.as_str()));
+            bn.cmp(&an).then(
+                a.rank
+                    .partial_cmp(&b.rank)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+        let count = ids.len();
+        for (i, h) in hits.iter_mut().take(count).enumerate() {
+            h.rank = floor - 0.01 * (count - i) as f64;
+        }
+        Ok(())
     }
 
     // ---- memory ----
@@ -1725,6 +1850,86 @@ mod tests {
         json!({"channel": "personal", "scope": scope, "scope_ref": scope_ref, "kind": kind, "body": body,
                "source_session": null, "source_node": null, "confidence": confidence, "state": state,
                "created_ms": created_ms, "updated_ms": created_ms})
+    }
+
+    #[test]
+    fn a_word_in_the_title_or_slug_ranks_that_document_first() {
+        let s = Store::open_in_memory().unwrap();
+        // Long bodies that say the word over and over outweigh a short title
+        // in bm25 alone.
+        let chatter = "we dogfood it daily and the dogfood runs find things; ".repeat(20);
+        for i in 0..4 {
+            s.write_change(
+                "A",
+                "personal",
+                "document",
+                ChangeOp::Upsert,
+                &format!("chatter{i}"),
+                doc(
+                    "personal",
+                    &format!("repo-chatter{i}"),
+                    "repo",
+                    &format!("Chatter {i}"),
+                    &chatter,
+                ),
+            )
+            .unwrap();
+        }
+        s.write_change(
+            "A",
+            "personal",
+            "document",
+            ChangeOp::Upsert,
+            "dog",
+            doc(
+                "personal",
+                "note-tracon-dogfood",
+                "note",
+                "Tracon dogfood failures",
+                "A list.",
+            ),
+        )
+        .unwrap();
+        for query in ["dogfood", "Tracon dogfood failures", "note-tracon-dogfood"] {
+            let hits = s.doc_search(Some("personal"), None, query, 2).unwrap();
+            assert_eq!(hits[0].id, "dog", "{query}: {hits:?}");
+        }
+        // Not every word named: the title is no better than any other match.
+        let hits = s
+            .doc_search(Some("personal"), None, "dogfood chatter", 5)
+            .unwrap();
+        assert_ne!(hits[0].id, "dog");
+
+        // Found by its title even when the full-text index has lost it.
+        let rowid: i64 = s
+            .conn()
+            .query_row("SELECT rowid FROM document WHERE id = 'dog'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        s.conn()
+            .execute(
+                "INSERT INTO document_fts(document_fts, rowid, title, body)
+                 VALUES ('delete', ?1, 'Tracon dogfood failures', 'A list.')",
+                [rowid],
+            )
+            .unwrap();
+        let hits = s.doc_search(Some("personal"), None, "dogfood", 2).unwrap();
+        assert_eq!(hits[0].id, "dog");
+        assert_eq!(hits[0].text, "Tracon dogfood failures\n\nA list.");
+
+        // And the repair puts it back in the index.
+        assert!(s.repair_search_index().unwrap());
+        assert!(!s.repair_search_index().unwrap());
+        let indexed: i64 = s
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM document_fts WHERE document_fts MATCH 'failures'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
     }
 
     #[test]
