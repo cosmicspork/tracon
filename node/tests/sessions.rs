@@ -2024,6 +2024,75 @@ async fn varied_and_interleaved_tool_calls_are_not_repetition() {
     );
 }
 
+fn named_call(i: usize, title: &str, input: serde_json::Value) -> HarnessEvent {
+    HarnessEvent::ToolCall(tracon::adapter::types::ToolCall {
+        tool_call_id: format!("call-{i}"),
+        title: title.into(),
+        kind: Some("other".into()),
+        status: Some("pending".into()),
+        raw_input: Some(input),
+        content: vec![],
+        locations: vec![],
+    })
+}
+
+/// Waiting on a review is calling `review_status` again and again with the
+/// same id, as its description says; the same goes for the node's other
+/// status waits, under either harness's spelling. None of that is a loop, and
+/// a wait between two runs of a command is something happening between them.
+#[tokio::test]
+async fn polling_the_node_s_own_waits_is_not_repetition() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    let review = json!({ "review_id": "r-1" });
+    let mut calls = Vec::new();
+    for _ in 0..6 {
+        calls.push(("mcp__tracon__review_status", review.clone()));
+    }
+    for _ in 0..6 {
+        calls.push(("tracon_question_status", json!({ "question_id": "q-1" })));
+    }
+    for i in 0..5 {
+        calls.push(if i % 2 == 0 {
+            ("Bash", json!({ "command": "just test" }))
+        } else {
+            ("mcp__tracon__review_status", review.clone())
+        });
+    }
+    let total = calls.len();
+    for (i, (title, input)) in calls.into_iter().enumerate() {
+        rig.events.send(named_call(i, title, input)).await.unwrap();
+    }
+    assert!(rig.await_events("tool_call", total).await);
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    assert!(
+        !events.iter().any(|event| event.kind == "repetition"),
+        "a documented wait is not a runaway: {events:?}"
+    );
+}
+
+/// Only the node's own server is exempt: a tool of the same name on another
+/// MCP server repeated back to back is still worth saying out loud.
+#[tokio::test]
+async fn a_same_named_tool_on_another_server_is_still_repetition() {
+    state::isolate();
+    let rig = Rig::start(10_000, Duration::from_secs(60)).await;
+    for i in 0..3 {
+        rig.events
+            .send(named_call(
+                i,
+                "mcp__other__review_status",
+                json!({ "review_id": "r-1" }),
+            ))
+            .await
+            .unwrap();
+    }
+    assert!(
+        rig.await_events("repetition", 1).await,
+        "another server's tool is an ordinary call"
+    );
+}
+
 #[tokio::test]
 async fn a_session_over_budget_is_killed_at_turn_end() {
     state::isolate();

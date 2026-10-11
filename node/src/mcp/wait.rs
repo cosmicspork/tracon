@@ -32,6 +32,27 @@ pub fn wait_secs(args: &Value) -> u64 {
         .min(MAX_WAIT_SECS)
 }
 
+/// Whether a call to one of the node's own tools is a poll: a wait its
+/// description tells the agent to repeat, unchanged, until something moves.
+/// Each of these blocks for at most [`MAX_WAIT_SECS`] and then answers that it
+/// is still waiting, so a run of identical calls to one is how an agent waits
+/// on a person or a pipeline, not a loop. `repo_setup_try` is a poll only with
+/// the `trial_id` of a trial already running; without one it starts a trial.
+pub fn is_poll(tool: &str, args: Option<&Value>) -> bool {
+    match tool {
+        super::review::STATUS
+        | super::review::REPORT_STATUS
+        | super::operator::QUESTION_STATUS
+        | super::operator::REPORT_STATUS
+        | super::approvals::STATUS
+        | super::egress::REQUEST
+        | super::github::RUN_WAIT
+        | super::gitlab::PIPELINE_WAIT => true,
+        super::setup::TRY => args.is_some_and(|a| a.get("trial_id").is_some()),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +73,36 @@ mod tests {
         // Nonsense falls back to the default rather than blocking forever.
         assert_eq!(wait_secs(&json!({ "wait_secs": -1 })), MAX_WAIT_SECS);
         assert_eq!(wait_secs(&json!({ "wait_secs": "600" })), MAX_WAIT_SECS);
+    }
+
+    #[test]
+    fn only_documented_waits_are_polls() {
+        for tool in [
+            "review_status",
+            "report_status",
+            "question_status",
+            "issue_report_status",
+            "approval_status",
+            "request_egress",
+            "run_wait",
+            "pipeline_wait",
+        ] {
+            assert!(is_poll(tool, None), "{tool}");
+        }
+        assert!(is_poll(
+            "repo_setup_try",
+            Some(&json!({ "trial_id": "t-1" }))
+        ));
+        assert!(!is_poll("repo_setup_try", Some(&json!({}))));
+        assert!(!is_poll("repo_setup_try", None));
+        for tool in [
+            "submit_review",
+            "pr_status",
+            "run_status",
+            "service_status",
+            "doc_read",
+        ] {
+            assert!(!is_poll(tool, None), "{tool}");
+        }
     }
 }
