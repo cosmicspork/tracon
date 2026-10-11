@@ -741,6 +741,20 @@ async fn the_node_payload_says_whether_this_client_may_configure_it() {
     assert_eq!(v["loopback"], json!(true));
 }
 
+/// A build of unreleased code carries the release's version, so the node
+/// says which build it is, and which interface it embeds, beside it.
+#[tokio::test]
+async fn the_node_says_which_build_it_and_its_interface_are() {
+    let n = node();
+    let (_, v) = call(&n, "GET", "/api/node", Some(LOCAL), None).await;
+    let build = tracon::build_info::build();
+    assert_eq!(v["application_build"], json!(build));
+    assert!(v.get("interface_build").is_some(), "{v}");
+    let (_, health) = call(&n, "GET", "/api/health", Some(LOCAL), None).await;
+    assert_eq!(health["version"], json!(env!("CARGO_PKG_VERSION")));
+    assert_eq!(health["build"], json!(build));
+}
+
 fn session_on(id: &str, channel: &str, state: &str) -> tracon::store::SessionRow {
     tracon::store::SessionRow {
         id: id.into(),

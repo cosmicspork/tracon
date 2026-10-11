@@ -308,6 +308,7 @@ pub async fn list_nodes(
             if r.is_self == 1 {
                 v["loopback"] = json!(local);
                 v["default_channel"] = json!(s.cfg.session.default_channel);
+                build_facts(&mut v);
             }
             v
         })
@@ -592,14 +593,23 @@ pub async fn get_mesh_rollups(
 pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     let row = s.store().get_node(&s.node_id)?;
     let Some(n) = row else {
-        return Ok(
-            json!({ "id": s.node_id, "state": "unknown", "is_self": true, "reachable": true }),
-        );
+        let mut v =
+            json!({ "id": s.node_id, "state": "unknown", "is_self": true, "reachable": true });
+        build_facts(&mut v);
+        return Ok(v);
     };
     let mut v = node_row_json(&n);
     v["providers"] = json!(providers_json(s));
     v["default_channel"] = json!(s.cfg.session.default_channel);
+    build_facts(&mut v);
     Ok(v)
+}
+
+/// Which build this node and the interface it serves are, on its own row
+/// only: neither is carried to peers, whose rows keep the release alone.
+fn build_facts(v: &mut serde_json::Value) {
+    v["application_build"] = json!(crate::build_info::build());
+    v["interface_build"] = json!(super::spa::interface_build());
 }
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -5621,7 +5631,11 @@ pub async fn usage(
 }
 
 pub async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "build": crate::build_info::build(),
+    }))
 }
 
 fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: &[String]) -> bool {

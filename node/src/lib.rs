@@ -6,6 +6,7 @@ pub mod authority;
 pub mod awake;
 pub mod boundary;
 pub mod broker;
+pub mod build_info;
 pub mod config;
 pub mod continuation;
 pub mod corpus;

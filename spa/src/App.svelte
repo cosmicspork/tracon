@@ -28,7 +28,7 @@
   import { router } from './lib/router.svelte'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
-  import { staleInterface } from './lib/version'
+  import { staleInterface, versionLabel } from './lib/version'
 
   // A login QR lands with the token in the fragment. Stash it and strip the
   // address bar before anything else renders; if this browser is already
@@ -114,7 +114,12 @@
   const cannotRun = $derived(servingBanner(store.nodes))
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const staleVersion = $derived(
-    staleInterface(__TRACON_VERSION__, store.node?.application_version) ? store.node?.application_version : null,
+    staleInterface(
+      { version: __TRACON_VERSION__, build: __TRACON_BUILD__ },
+      { version: store.node?.application_version, build: store.node?.interface_build },
+    )
+      ? versionLabel(store.node?.application_version, store.node?.application_build)
+      : null,
   )
   /** No hub is a thing to do something about, so it links to doing it. */
   const noHub = $derived(!store.mesh?.hub || store.mesh.hub.state === 'disabled')
@@ -227,7 +232,7 @@
     {/if}
     {#if staleVersion}
       <div class="banner">
-        tracon {staleVersion} is running <b>· this page is still {__TRACON_VERSION__}.</b>
+        tracon {staleVersion} is running <b>· this page is still {versionLabel(__TRACON_VERSION__, __TRACON_BUILD__)}.</b>
         <button class="lnk" type="button" onclick={() => location.reload()}>Reload</button>
       </div>
     {/if}
