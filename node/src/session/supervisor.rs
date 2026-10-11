@@ -768,6 +768,16 @@ impl Supervisor {
     /// stuck agent from an agent doing repetitive work. Only repeated
     /// failure, counted separately, is allowed to fence a session.
     fn note_repetition(&mut self, call: &crate::adapter::types::ToolCall) {
+        // Waiting on the operator or a pipeline is done by calling the same
+        // status tool again, as its description says. That is not a loop,
+        // and it is something happening between the calls either side of it.
+        if own_tool_name(&call.title)
+            .is_some_and(|tool| crate::mcp::wait::is_poll(tool, call.raw_input.as_ref()))
+        {
+            self.last_tool_call = None;
+            self.repeated_tool_calls = 0;
+            return;
+        }
         let signature = json!({
             "title": call.title, "kind": call.kind, "raw_input": call.raw_input,
         })
@@ -1762,6 +1772,18 @@ fn node_tool(action: &str) -> bool {
         .is_some_and(|tool| !tool.is_empty())
 }
 
+/// The name of the node's own MCP tool a harness's call names, under either
+/// harness's spelling of it: Claude Code's `mcp__tracon__<tool>`, and
+/// OpenCode's flattened `tracon_<tool>` (`sanitize(server) + "_" + tool`,
+/// `docs/reference/opencode-v1.18.30/config-state.md` §5). The same tool on
+/// another server is not the node's.
+fn own_tool_name(title: &str) -> Option<&str> {
+    title
+        .strip_prefix("mcp__tracon__")
+        .or_else(|| title.strip_prefix("tracon_"))
+        .filter(|tool| !tool.is_empty())
+}
+
 /// Recognise a harness's own "the provider refused, I am retrying" notice.
 ///
 /// Two harnesses say it two ways and neither is in a schema the node shares:
@@ -2040,6 +2062,19 @@ mod tests {
         assert!(!node_tool("mcp__other__doc_write"));
         assert!(!node_tool("Bash"));
         assert!(!node_tool("tracon_doc_write"));
+    }
+
+    #[test]
+    fn the_node_s_own_tools_are_named_under_either_harness() {
+        assert_eq!(
+            own_tool_name("mcp__tracon__review_status"),
+            Some("review_status")
+        );
+        assert_eq!(own_tool_name("tracon_review_status"), Some("review_status"));
+        assert_eq!(own_tool_name("mcp__other__review_status"), None);
+        assert_eq!(own_tool_name("other_review_status"), None);
+        assert_eq!(own_tool_name("mcp__tracon__"), None);
+        assert_eq!(own_tool_name("review_status"), None);
     }
 
     #[test]
