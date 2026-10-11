@@ -4,7 +4,7 @@
     fallbackLine,
     groupLog,
     policyLine,
-    groupOpen,
+    groupRunning,
     groupSummary,
     providerErrorLine,
     repetitionLine,
@@ -18,7 +18,7 @@
   } from '../lib/log'
   import { clock } from '../lib/clock.svelte'
   import { formatTokens } from '../lib/format'
-  import { formatSpan, runFailures, runMs, transcript, type CallRow } from '../lib/transcript'
+  import { formatSpan, runFailures, runMs, runRunning, transcript, type CallRow } from '../lib/transcript'
   import { renderMessage } from '../lib/markdown'
   import type { Event } from '../lib/types'
 
@@ -267,17 +267,20 @@
       {/if}
     {:else}
       {@const tools = entry.tools!}
-      {@const open = groupOpen(tools)}
+      {@const live = groupRunning(tools)}
       <!-- Only a run still going reads the clock, so a finished log does not
            re-render every second. -->
-      {@const now = open ? clock.now : 0}
+      {@const now = live ? clock.now : 0}
       {@const rows = transcript(tools, root, now)}
       {#if tools.length === 1 && rows[0].kind === 'call'}
         <div class="calls">{@render callLine(rows[0].call)}</div>
       {:else}
         {@const ms = runMs(tools, now)}
         {@const failures = runFailures(tools, root)}
-        <details class="fold tools run" {open}>
+        <!-- Folded unless the operator opens it: binding `open` to the run
+             still going sprang it open at every call and shut at every result,
+             and undid the operator's own choice each time. -->
+        <details class="fold tools run">
           <summary title="o opens or folds every run">{groupSummary(tools)}{ms !== null ? ` · ${formatSpan(ms)}` : ''}</summary>
           <div class="calls">
             {#each rows as row, j (j)}
@@ -303,6 +306,15 @@
           <div class="fails">
             {#each failures as f, j (j)}
               <div><span class="st failed">{GLYPH.failed}</span>{f.text}{f.error ? ` · ${f.error}` : ''}</div>
+            {/each}
+          </div>
+        {/if}
+        {#if live}
+          <!-- What is running now, under the fold; hidden once the run is
+               open, where the same call is already in the list. -->
+          <div class="calls running">
+            {#each runRunning(tools, root, now) as c (c.entry.call.seq)}
+              {@render callLine(c)}
             {/each}
           </div>
         {/if}
@@ -561,9 +573,17 @@
     color: var(--crit);
     margin-left: 18px;
   }
-  /* Opened, the call shows its whole output; the run, each failure. */
+  /* Lined up with the failures above it: a call line's summary brings its
+     own indent. */
+  .running {
+    margin-left: 4px;
+  }
+  /* Opened, the call shows its whole output; the run, each failure and each
+     running call in its place. */
   .call[open] + .err,
-  .run[open] + .fails {
+  .run[open] + .fails,
+  .run[open] + .running,
+  .run[open] + .fails + .running {
     display: none;
   }
   .cursor {

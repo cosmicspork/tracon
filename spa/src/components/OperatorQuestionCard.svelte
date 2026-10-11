@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { renderMessage } from '../lib/markdown'
   import type { OperatorQuestion } from '../lib/types'
 
   let { question, done }: { question: OperatorQuestion; done?: () => void } = $props()
@@ -26,8 +27,10 @@
 </script>
 
 <article class="card">
-  <div class="label"><em>Operator question</em>{#if question.session_id} · <a href="/sessions/{question.session_id}">session</a>{/if}</div>
-  <p>{question.prompt}</p>
+  <div class="label"><em>Operator question</em>{#if question.session_id}{' · '}<a href="/sessions/{question.session_id}">session</a>{/if}</div>
+  <!-- An agent's words, rendered as its messages in the log are: Markdown,
+       with nothing fetched and embedded HTML escaped. -->
+  <div class="prompt md">{@html renderMessage(question.prompt)}</div>
   {#if choices.length}
     <div class="choices">{#each choices as choice}<button class="btn" onclick={() => submit(choice)} disabled={busy}>{choice}</button>{/each}</div>
   {/if}
@@ -53,7 +56,15 @@
   }
   .label { font: 12px var(--mono); color: var(--dim); }
   .label em { font: 500 14px var(--sans); font-style: normal; color: var(--wait); }
-  p { margin: .4rem 0 .7rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .prompt { margin: .4rem 0 .7rem; overflow-wrap: anywhere; }
+  .md > :global(:first-child) { margin-top: 0; }
+  .md > :global(:last-child) { margin-bottom: 0; }
+  .md :global(p), .md :global(ul), .md :global(ol), .md :global(pre), .md :global(blockquote) { margin: 4px 0; }
+  .md :global(ul), .md :global(ol) { padding-left: 2.5ch; }
+  .md :global(code) { background: var(--s2); border-radius: 3px; padding: 0 3px; font: 12.5px var(--mono); }
+  .md :global(pre) { background: var(--s2); border-radius: 4px; padding: 8px 10px; overflow-x: auto; }
+  .md :global(pre code) { background: none; padding: 0; }
+  .md :global(blockquote) { border-left: 2px solid var(--rule); padding-left: 1.5ch; color: var(--ink2); }
   form, .choices { display: flex; gap: 8px 12px; flex-wrap: wrap; align-items: center; }
   .choices { margin-bottom: 6px; }
   input {

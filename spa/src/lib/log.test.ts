@@ -9,7 +9,7 @@ import {
   missingLine,
   orientationContext,
   orientationLine,
-  groupOpen,
+  groupRunning,
   groupSummary,
   policyLine,
   providerErrorLine,
@@ -38,12 +38,14 @@ test('consecutive tool calls fold into one group', () => {
   ])
   expect(log.map((l) => l.kind)).toEqual(['leaf', 'tools', 'leaf'])
   expect(log[1].tools!.length).toBe(2)
-  expect(groupOpen(log[1].tools!)).toBe(false)
+  expect(groupRunning(log[1].tools!)).toBe(false)
 })
 
-test('a group stays open while a call lacks its result', () => {
-  const log = groupLog([ev('tool_call', 'a', { kind: 'execute' })])
-  expect(groupOpen(log[0].tools!)).toBe(true)
+test('a group is running while a call lacks its result, and stops when it lands', () => {
+  const running = groupLog([ev('tool_call', 'a', { kind: 'execute' })])
+  expect(groupRunning(running[0].tools!)).toBe(true)
+  const done = groupLog([ev('tool_call', 'a', { kind: 'execute' }), ev('tool_result', 'a', { status: 'completed' })])
+  expect(groupRunning(done[0].tools!)).toBe(false)
 })
 
 test('a permission request breaks the group at its true position', () => {

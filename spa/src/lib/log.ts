@@ -1,6 +1,8 @@
 // Turns the flat event log into what the session screen renders: consecutive
-// tool calls fold into one group, open while any of them lacks a result, and a
-// permission request breaks the group so it sits at its true position. Records
+// tool calls fold into one group, and a permission request breaks the group so
+// it sits at its true position. A group stays folded while a call in it runs:
+// the running call is shown under the fold, so a run does not spring open and
+// shut again with every call. Records
 // the log shows nobody (a call the policy allowed, usage, a plan update) never
 // break a run: every Claude Code call now carries a policy record, and letting
 // those through left no two calls side by side.
@@ -178,7 +180,9 @@ export function policyLine(e: Event): string {
     .join(' · ')
 }
 
-export function groupOpen(tools: ToolEntry[]): boolean {
+/// A run with a call still waiting for its result: it reads the clock, and
+/// its running calls show under the fold.
+export function groupRunning(tools: ToolEntry[]): boolean {
   return tools.some((t) => !t.result)
 }
 

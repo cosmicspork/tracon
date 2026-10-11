@@ -298,7 +298,7 @@ const question = (o = {}) => ({
   session_id: 's-run',
   channel: 'personal',
   node_id: SELF,
-  prompt: 'The v1 rate-limit route is still called by the mobile client. Keep it behind the new limiter, or remove it in this change?',
+  prompt: 'The v1 rate-limit route (`/api/v1/limits`) is still called by the mobile client. Keep it behind the new limiter, or remove it in this change?',
   choices_json: JSON.stringify(['Keep v1 behind the limiter', 'Remove v1 now']),
   request_key: null,
   state: 'unanswered',

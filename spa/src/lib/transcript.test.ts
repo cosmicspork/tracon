@@ -11,7 +11,9 @@ import {
   outputTail,
   runFailures,
   runMs,
+  runRunning,
   transcript,
+  unwrapHarnessError,
 } from './transcript'
 import type { Event } from './types'
 
@@ -167,4 +169,42 @@ test('a run with no times says nothing about how long it took', () => {
   const tools = run([{ seq: 1, node_id: 'n', session_id: 's', kind: 'tool_call', ref_id: 'x', payload: { title: 'Read' }, at_ms: 0, mono_ms: 0 }])
   expect(runMs(tools, 0)).toBeNull()
   expect(transcript(tools)[0].kind === 'call' && (transcript(tools)[0] as { call: { ms: number | null } }).call.ms).toBeNull()
+})
+
+test("Claude Code's error wrapper is taken off a failed call's output", () => {
+  expect(unwrapHarnessError('<tool_use_error>No changes to make: old_string and new_string are exactly the same.</tool_use_error>')).toBe(
+    'No changes to make: old_string and new_string are exactly the same.',
+  )
+  expect(unwrapHarnessError('\n<tool_use_error>Error: No such tool available: x</tool_use_error>\n')).toBe('Error: No such tool available: x')
+  // The tags inside other output are what the tool printed, and stay.
+  expect(unwrapHarnessError('grep found <tool_use_error> in log.ts')).toBe('grep found <tool_use_error> in log.ts')
+  expect(unwrapHarnessError('')).toBe('')
+
+  const tools = run(
+    call('e', 'Edit', 'edit', { file_path: `${ROOT}/spa/src/x.ts` }, 0, {
+      ms: 20,
+      failed: true,
+      output: '<tool_use_error>No changes to make: old_string and new_string are exactly the same.</tool_use_error>',
+    }),
+  )
+  const [row] = transcript(tools, ROOT)
+  expect(row.kind === 'call' && row.call.output).toBe('No changes to make: old_string and new_string are exactly the same.')
+  expect(runFailures(tools, ROOT)).toEqual([
+    { text: 'Edit spa/src/x.ts', error: 'No changes to make: old_string and new_string are exactly the same.' },
+  ])
+})
+
+test('a running run names its calls still going, and none once they land', () => {
+  const going = run([
+    ...call('a', 'Bash', 'execute', { command: 'ls' }, 0, { ms: 100, output: 'x' }),
+    ...call('b', 'Bash', 'execute', { command: 'just check' }, 200),
+  ])
+  const rows = runRunning(going, ROOT, T0 + 5_200)
+  expect(rows.map((r) => [r.text, r.state, r.ms])).toEqual([['Bash just check', 'running', 5_000]])
+
+  const landed = run([
+    ...call('a', 'Bash', 'execute', { command: 'ls' }, 0, { ms: 100, output: 'x' }),
+    ...call('b', 'Bash', 'execute', { command: 'just check' }, 200, { ms: 300 }),
+  ])
+  expect(runRunning(landed, ROOT)).toEqual([])
 })

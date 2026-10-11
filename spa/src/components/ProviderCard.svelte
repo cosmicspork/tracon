@@ -219,8 +219,7 @@
   <span class="pnm">
     {providerLabel(p.name)}
     <small
-      >{#if p.state === 'connected'}{p.kind === 'oauth' ? 'subscription' : 'api key'}{#if p.identity}
-          · {p.identity}{/if}{:else if shownState === 'pending'}waiting on you{:else}{p.can_login
+      >{#if p.state === 'connected'}{p.kind === 'oauth' ? 'subscription' : 'api key'}{#if p.identity}{' · '}{p.identity}{/if}{:else if shownState === 'pending'}waiting on you{:else}{p.can_login
           ? 'subscription'
           : 'api key'}{/if}</small
     >
@@ -231,7 +230,7 @@
     {/if}
     {#if p.state === 'connected'}
       <span class="l"
-        ><span class="chip">connected</span>{#if p.channels.length} · {p.channels.join(', ')}{:else} · no channel{/if}{#if isSelf && editable && !editingChannels}
+        ><span class="chip">connected</span>{#if p.channels.length}{' · '}{p.channels.join(', ')}{:else}{' · '}no channel{/if}{#if isSelf && editable && !editingChannels}
           · <button class="lnk" onclick={editChannels} disabled={busy}>edit channels</button>{/if}</span
       >
       {#if editingChannels}
@@ -341,7 +340,7 @@
       {/if}
     {:else}
       <span class="l off" class:bad={p.state === 'failed'}
-        ><span class="chip" class:off={p.state !== 'failed'} class:bad={p.state === 'failed'}>{p.state === 'failed' ? 'failed' : 'disconnected'}</span>{#if p.error} · {p.error}{/if}</span
+        ><span class="chip" class:off={p.state !== 'failed'} class:bad={p.state === 'failed'}>{p.state === 'failed' ? 'failed' : 'disconnected'}</span>{#if p.error}{' · '}{p.error}{/if}</span
       >
       {#if p.can_login}
         {#if channelChoices.length > 1}

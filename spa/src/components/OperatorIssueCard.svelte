@@ -31,7 +31,7 @@
   }
 </script>
 <article class="card">
-  <div class="label"><em>Issue draft</em> · {issue.state}{#if issue.session_id} · <a href="/sessions/{issue.session_id}">session</a>{/if}</div>
+  <div class="label"><em>Issue draft</em> · {issue.state}{#if issue.session_id}{' · '}<a href="/sessions/{issue.session_id}">session</a>{/if}</div>
   <h3>{issue.title}</h3>
   <details><summary>Exact outgoing issue body</summary><pre>{outgoingBody}</pre></details>
   <pre>{issue.body}</pre>
