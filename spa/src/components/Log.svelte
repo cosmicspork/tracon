@@ -15,6 +15,7 @@
     orientationLine,
     usageMismatchLine,
     usageUnmeteredLine,
+    worktreeLine,
   } from '../lib/log'
   import { clock } from '../lib/clock.svelte'
   import { formatTokens } from '../lib/format'
@@ -135,12 +136,7 @@
       {:else if e.kind === 'turn_end'}
         <div class="mark">{turnEnd(e)}</div>
       {:else if e.kind === 'worktree'}
-        <div class="sys">
-          worktree {e.payload.path} on {e.payload.branch} from {e.payload.base}{e.payload
-            .main_checkout_dirty
-            ? ' · main checkout is dirty and was left alone'
-            : ''}
-        </div>
+        <div class="sys">{worktreeLine(e.payload)}</div>
       {:else if e.kind === 'session_started'}
         <div class="sys">harness started · {e.payload.model}{e.payload.phase ? ` · ${e.payload.phase}` : ''}{e.payload.policy_version != null ? ` · policy v${e.payload.policy_version}` : ''}{sessionImage(e.payload)}</div>
       {:else if e.kind === 'egress_refused'}
