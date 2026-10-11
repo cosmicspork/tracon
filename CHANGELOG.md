@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.31.0](https://github.com/cosmicspork/tracon/compare/v0.30.0...v0.31.0) (2026-10-11)
+
+
+### Features
+
+* follow GitHub reruns, ship the setup skill, edit commit messages under keep, and fix the 0.29.0 audit screens ([#436](https://github.com/cosmicspork/tracon/issues/436)) ([1ee1218](https://github.com/cosmicspork/tracon/commit/1ee1218d369f94bb01521c7c26eba32bef233ca0))
+* **session:** prepare the workspace at launch and tell the session how it went ([#443](https://github.com/cosmicspork/tracon/issues/443)) ([ad4a4cb](https://github.com/cosmicspork/tracon/commit/ad4a4cbb77260731abafc180612839d831f3f634))
+* **spa:** read the node's own tool calls as what they do in the transcript ([#445](https://github.com/cosmicspork/tracon/issues/445)) ([e2f00b2](https://github.com/cosmicspork/tracon/commit/e2f00b2c72de1b9ebd3c1d73c6c58d352e7757da))
+
+
+### Bug Fixes
+
+* **mcp:** offer session tools without a null required list ([#440](https://github.com/cosmicspork/tracon/issues/440)) ([2789df3](https://github.com/cosmicspork/tracon/commit/2789df38bc7122c3ece7c1ad05f0ca76dd9fe8d8))
+* **session:** don't flag the node's documented wait polls as repetition ([#446](https://github.com/cosmicspork/tracon/issues/446)) ([821cc72](https://github.com/cosmicspork/tracon/commit/821cc72893fb136193cb37b157037953e8d38d76))
+* **session:** tell a harness its call was refused by policy, and log why an upstream send failed ([#441](https://github.com/cosmicspork/tracon/issues/441)) ([7c3ea99](https://github.com/cosmicspork/tracon/commit/7c3ea9977b1e03f94e342c38251a1a71ae213c95))
+* **spa:** keep a running tool run folded, strip harness error tags, and space operator card labels ([#439](https://github.com/cosmicspork/tracon/issues/439)) ([93deb28](https://github.com/cosmicspork/tracon/commit/93deb283447b242784f36862eba7370a13c4a39c))
+* **spa:** read the worktree line for every workspace source ([#444](https://github.com/cosmicspork/tracon/issues/444)) ([e96a168](https://github.com/cosmicspork/tracon/commit/e96a1687633ff954165b146740544393fba4e5cc))
+* tell a build of unreleased code from the release it follows ([#442](https://github.com/cosmicspork/tracon/issues/442)) ([6a9f5e2](https://github.com/cosmicspork/tracon/commit/6a9f5e2add4ccc4ffcf7023313aafcf7ee499d64))
+
 ## [0.30.0](https://github.com/cosmicspork/tracon/compare/v0.29.0...v0.30.0) (2026-10-09)
 
 
