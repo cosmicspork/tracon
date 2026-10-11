@@ -102,7 +102,10 @@ pub fn definitions(profiles: &[String]) -> Vec<Value> {
                 "description": "Which database connection to use.",
             });
             if required {
-                if let Some(r) = d["inputSchema"]["required"].as_array_mut() {
+                if let Some(r) = d["inputSchema"]
+                    .get_mut("required")
+                    .and_then(Value::as_array_mut)
+                {
                     r.push(json!("profile"));
                 }
             }

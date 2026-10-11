@@ -882,7 +882,14 @@ impl Tools {
                         Some(name) if forge_of_tool(name) == Some(repo.forge) => &[repo.argument()],
                         _ => &[],
                     };
-                    if let Some(required) = tool["inputSchema"]["required"].as_array_mut() {
+                    // `get_mut`, not indexing: `tool[..]["required"]` on a
+                    // schema without one inserts `null`, and Claude Code
+                    // drops every tool of a server offering one.
+                    if let Some(required) = tool
+                        .get_mut("inputSchema")
+                        .and_then(|schema| schema.get_mut("required"))
+                        .and_then(Value::as_array_mut)
+                    {
                         required.retain(|key| !defaulted.iter().any(|d| key == d));
                     }
                 }

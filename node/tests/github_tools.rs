@@ -659,3 +659,50 @@ async fn repo_is_optional_only_where_it_defaults() {
             .contains("defaults to that repository")
     );
 }
+
+/// Defaulting a session's repository edits `required` lists; it must not add
+/// one where a tool has none. A `"required": null` is not a JSON Schema, and
+/// Claude Code drops every tool of a server that offers one.
+#[tokio::test]
+async fn offered_schemas_hold_no_null() {
+    state::isolate();
+    let (t, _) = session_rig(r#""run_status""#).await;
+    fn nulls(v: &Value, at: &str, found: &mut Vec<String>) {
+        match v {
+            Value::Null => found.push(at.to_string()),
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    nulls(item, &format!("{at}[{i}]"), found);
+                }
+            }
+            Value::Object(fields) => {
+                for (k, item) in fields {
+                    nulls(item, &format!("{at}.{k}"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let external = CallContext::external(None, "work", "n1");
+    assert!(
+        t.list_offered(&external)
+            .iter()
+            .any(|d| d["inputSchema"].get("required").is_none()),
+        "a tool with nothing required is offered, or this proves nothing"
+    );
+    for caller in [
+        CallContext::session("s2", "work", "n1"),
+        CallContext::session("s3", "work", "n1"),
+        external,
+    ] {
+        let offered = t.list_offered(&caller);
+        let mut found = Vec::new();
+        for d in &offered {
+            nulls(d, d["name"].as_str().unwrap(), &mut found);
+            if let Some(required) = d["inputSchema"].get("required") {
+                assert!(required.is_array(), "{}: {required}", d["name"]);
+            }
+        }
+        assert!(found.is_empty(), "nulls offered: {found:?}");
+    }
+}
