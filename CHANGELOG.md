@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.1](https://github.com/cosmicspork/tracon/compare/v0.31.0...v0.31.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* guard a running node's sockets, find documents by title, retry dead model sends, and name a newer shipped policy ([#449](https://github.com/cosmicspork/tracon/issues/449)) ([24eaba5](https://github.com/cosmicspork/tracon/commit/24eaba501a7e8f19c4f77434a43d637e49060f0e))
+
 ## [0.31.0](https://github.com/cosmicspork/tracon/compare/v0.30.0...v0.31.0) (2026-10-11)
 
 
