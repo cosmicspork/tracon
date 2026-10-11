@@ -1,37 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Features
-
-* **corpus:** replicate HTML document bundles and render capability-scoped interactive previews
-* **onboarding:** put local runtime readiness first and keep hub pairing outside required setup
-* **metrics:** time to verified work, setup failures, interventions and waiting, per channel
-* **operator:** ask, notify, and report tools that survive disconnects and publish only what the operator inspected
-* **release:** provenance-attested, signed desktop releases with pinned build inputs and a bundled offline verifier
-* **forge:** bounded repository pages with explicit load-more and honest partial search
-* **authority:** scoped allow/ask/deny grants for merge, publish, ticket transition, and deploy, with signed policy deny always dominant
-* **runtime:** runtime-owned workspaces with no host bind mounts, bounded browser imports, export/download, and credential-free dependency preparation
-* **session:** optional workflow with work-item-free plain-prompt sessions, deterministic model defaults, and durable pause/resume/stop controls that fence a watchdog-protected external harness as well as a managed one
-* **review:** immutable candidates with reusable, image-bound check evidence, pinned requirements, attributed decisions, and linked demonstrations
-* **continuity:** signed candidate/context transfer packages bound to their candidate's identity and file tree, single-import reservation with runtime-workspace reuse on retry, and opt-in, revocation-aware hub-side channel rollups
-* **qa:** deploy a candidate to an authorized QA target by exact commit SHA, verify it with a network-scoped headless browser, and build repository-derived prototypes
-* **operator UI:** align desktop/mobile navigation, group Settings by scope, improve contrast and touch targets, and link empty states, usage explanations, and owner-scoped candidate evidence
-* **onboarding:** guide local and existing-mesh first tasks without requiring a local provider for peer execution; keep runner, channel, repository, model, and budget selections coherent
-* **administration:** add authenticated mesh membership and hub-sharing controls, guarded service recovery, and separate application, wire, runtime, and policy compatibility
-* **policy:** preview and apply exact signed bundles with a fixed comparison baseline, distinguish installed and running policy, and persist per-node authenticated rollout receipts
-* **reports:** accept repository-free narrative reports with revision-bound acknowledgement or requested changes, independently of publication and push-service acceptance
-
-### Bug Fixes
-
-* **permissions:** normalize managed-harness requests before applying read exemptions
-* **mesh:** carry the authenticated work-item change with peer compose requests so session creation cannot race work-item replication
-* **review:** reject cross-owner/channel report mirrors, stale decisions, and invalid review-session context; bind remote evidence reads to the actual owner and shared channel
-* **models:** filter channel choices by the connected provider that owns each model, including legacy peers without provider-scope metadata
-* **notifications:** distinguish browser subscriptions, shared channel rules, push-service acceptance, and operator acknowledgement
-* **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
-* **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
-
 ## [0.30.0](https://github.com/cosmicspork/tracon/compare/v0.29.0...v0.30.0) (2026-10-09)
 
 
