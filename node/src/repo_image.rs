@@ -596,6 +596,7 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
             &format!("tracon-w-{}", &id[..12]),
             tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
             &crate::review::checks::RunToCompletion,
+            "the base cache stays as it was",
         )
         .await;
         let _ = backend.remove_volume(&work).await;

@@ -457,6 +457,14 @@ preparation — and from nothing else: a session and another preparation each ho
 own grant, are refused each other's hosts, and never wait for one
 another. And the image's default user has to be able to write `/work` and `/cache`, which
 under rootless Podman means it runs as root.
+
+A session in its repository's image gets the same preparation before its harness starts:
+the `prepare` commands run on its workspace, with its own session cache writable and the
+same egress grant, so `node_modules` and the like are there when the agent arrives. It is
+bounded by the entry's `timeout_secs` and stopped with the session; a failure is recorded
+in the session's log and told to the agent in its orientation, and the session starts
+anyway. A session in the harness's own image has no cache to prepare against and is told
+the commands were not run.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -869,7 +877,8 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # checks = ["just check"]           # in place of [supervision] checks
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
 # prepare = ["bun install --frozen-lockfile"]  # run once before a run's checks, on a copy each check
-                                    # is then copied from, with a cache writable and `egress` reachable
+                                    # is then copied from, with a cache writable and `egress` reachable;
+                                    # and on a session's workspace before its harness starts
 # egress = ["npm"]                  # what `prepare` may reach: crates, npm, pypi, packagist, github, or a
                                     # literal host name. Empty is no egress at all
 # session_egress = true             # open `egress` to this repository's sessions too, so an agent can

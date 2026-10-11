@@ -747,6 +747,7 @@ async fn run(
                 &format!("tracon-t-{}", &id[..12]),
                 tokio::time::Instant::now() + timeout,
                 &crate::review::checks::RunToCompletion,
+                "the checks were not run",
             )
             .await;
             let step = Step {

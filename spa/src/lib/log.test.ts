@@ -313,3 +313,17 @@ test('a kind nobody taught the log still reads as words with its short fields', 
   expect(line.text).toBe('brand new kind · name postgres · ready true · count 3')
   expect(line.tone).toBe('sys')
 })
+
+test("a workspace's preparation reads as what it did and what it cost the start", () => {
+  const commands = ['cargo fetch --locked', 'cd spa && bun install --frozen-lockfile']
+  const lines: [Record<string, unknown>, string, string][] = [
+    [{ outcome: 'prepared', commands, ms: 11_200 }, 'workspace prepared · cargo fetch --locked · cd spa && bun install --frozen-lockfile · 11s', 'mark'],
+    [{ outcome: 'failed', commands, ms: 4_000, detail: 'preparation `cargo fetch --locked` failed (exit 101)' }, 'workspace not prepared · preparation failed · the session started without it · 4s', 'crit'],
+    [{ outcome: 'timed_out', commands, ms: 2_400_000, timeout_secs: 2400 }, 'workspace not prepared · timed out after 40m · the session started without it', 'crit'],
+    [{ outcome: 'cancelled', commands, ms: 900, reason: 'the session was stopped' }, 'workspace preparation stopped · the session was stopped', 'mark'],
+    [{ outcome: 'not_run', commands, ms: 0, reason: "the session runs in the harness's own image, not its repository's" }, "workspace not prepared · the session runs in the harness's own image, not its repository's", 'sys'],
+  ]
+  for (const [payload, text, tone] of lines) {
+    expect(eventLine(ev('workspace_prepared', null, payload))).toEqual({ text, tone: tone as 'mark' })
+  }
+})

@@ -1602,6 +1602,50 @@ impl Manager {
             .is_some_and(|row| row.state == SessionState::Starting.as_str()))
     }
 
+    /// Prepare a starting session's workspace (`prepare_session_workspace`)
+    /// and record how it went. `None` when the entry prepares nothing.
+    async fn prepare_workspace(
+        &self,
+        id: &str,
+        slug: &str,
+        workspace: &crate::workspace::Workspace,
+        cache: Option<&str>,
+        environment: &crate::environment::RepoEnvironment,
+        started: Instant,
+    ) -> Option<crate::environment::WorkspacePreparation> {
+        let preparation = prepare_session_workspace(
+            self.backend.as_ref(),
+            environment,
+            (&workspace.volume, cache),
+            &format!("tracon-s-{slug}"),
+            &Stopping {
+                store: &self.store,
+                id,
+            },
+        )
+        .await?;
+        if !matches!(
+            preparation.outcome,
+            crate::environment::PrepareOutcome::Prepared
+        ) {
+            tracing::warn!(
+                session = %id,
+                outcome = preparation.outcome.as_str(),
+                "the session's workspace was not prepared"
+            );
+        }
+        self.record(NewEvent {
+            session_id: id.to_string(),
+            work_item_id: None,
+            kind: ek::WORKSPACE_PREPARED.into(),
+            ref_id: None,
+            payload: preparation.payload(),
+            at_ms: now_ms(),
+            mono_ms: started.elapsed().as_millis() as i64,
+        });
+        Some(preparation)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn start(
         &self,
@@ -1749,6 +1793,43 @@ impl Manager {
                 },
             )
         };
+        // The repository's own image, with the harness layered on, so the
+        // session has the tools its checks will run with. Resolved from the
+        // repository the work came from, which a resumed session's
+        // `workspace://` path only leads back to.
+        let image = match crate::environment::origin_repo(&self.store, Some(id))
+            .ok()
+            .flatten()
+        {
+            Some(origin) => {
+                let announce = || {
+                    self.record(NewEvent {
+                        session_id: id.to_string(),
+                        work_item_id: None,
+                        kind: ek::REPO_IMAGE.into(),
+                        ref_id: None,
+                        payload: json!({ "status": "building", "repo": origin }),
+                        at_ms: now_ms(),
+                        mono_ms: started.elapsed().as_millis() as i64,
+                    })
+                };
+                crate::repo_image::session_image(
+                    &self.backend,
+                    &self.cfg,
+                    &self.store,
+                    &origin,
+                    (adapter.id(), adapter.pinned_version()),
+                    &announce,
+                )
+                .await
+            }
+            None => Default::default(),
+        };
+        // A first build takes minutes, and the operator may have stopped the
+        // session while it ran.
+        if !self.startable(id)? {
+            anyhow::bail!("the session was stopped before its harness started");
+        }
         // The operator's customization for this channel, resolved against the
         // provider set the wiring just settled and the policy the gate is
         // running. Built and recorded here, before anything is staged: a
@@ -1775,6 +1856,50 @@ impl Manager {
                     .ok()
             })
             .flatten();
+
+        // The repository's session cache: what its sessions fetched and
+        // compiled, kept for the next one and read by no check. It starts as
+        // a copy of the repository's base cache, so a first build does not
+        // begin by fetching what the default branch already needs. Only a
+        // session in its repository's image has one.
+        let session_cache = match &image.image {
+            Some(_) => {
+                let cache = crate::environment::session_cache_volume(
+                    &environment.cache_volume,
+                    &spec.channel,
+                );
+                if !self.backend.volume_exists(&cache).await {
+                    if let Err(error) = self
+                        .backend
+                        .clone_volume(&environment.cache_volume, &cache)
+                        .await
+                    {
+                        tracing::warn!(session = %id, %error, "session cache starts empty");
+                    }
+                }
+                Some(cache)
+            }
+            None => None,
+        };
+        // What an install writes beside the source (`node_modules`,
+        // `vendor/`, `.venv`) is in no cache and not in the workspace Git
+        // seeded, so the repository's own preparation runs on the workspace
+        // before the agent arrives. Its outcome goes in the orientation.
+        let prepared = self
+            .prepare_workspace(
+                id,
+                &slug,
+                &workspace,
+                session_cache.as_deref(),
+                &environment,
+                started,
+            )
+            .await;
+        if !self.startable(id)? {
+            self.tokens.lock().await.remove(id);
+            return Ok(());
+        }
+
         let mut wiring = wiring;
         let manifest = {
             let (skills, instructions, agents) = self.store.manifest_contents(&spec.channel)?;
@@ -1883,6 +2008,7 @@ impl Manager {
                         .as_ref()
                         .map(|_| environment.session_egress.as_slice()),
                     forge_repo: forge_repo.as_ref(),
+                    prepared: prepared.as_ref(),
                 },
             );
             (assembled, context.map(|(_, receipt)| receipt))
@@ -1966,68 +2092,17 @@ impl Manager {
         let container = format!("tracon-h-{slug}");
         let mut mounts = scratch.mounts;
         mounts.push(workspace.mount("/work", false));
-        // The repository's own image, with the harness layered on, so the
-        // session has the tools its checks will run with. Resolved from the
-        // repository the work came from, which a resumed session's
-        // `workspace://` path only leads back to.
-        let image = match crate::environment::origin_repo(&self.store, Some(id))
-            .ok()
-            .flatten()
-        {
-            Some(origin) => {
-                let announce = || {
-                    self.record(NewEvent {
-                        session_id: id.to_string(),
-                        work_item_id: None,
-                        kind: ek::REPO_IMAGE.into(),
-                        ref_id: None,
-                        payload: json!({ "status": "building", "repo": origin }),
-                        at_ms: now_ms(),
-                        mono_ms: started.elapsed().as_millis() as i64,
-                    })
-                };
-                crate::repo_image::session_image(
-                    &self.backend,
-                    &self.cfg,
-                    &self.store,
-                    &origin,
-                    (adapter.id(), adapter.pinned_version()),
-                    &announce,
-                )
-                .await
-            }
-            None => Default::default(),
-        };
-        // A first build takes minutes, and the operator may have stopped the
-        // session while it ran.
-        if !self.startable(id)? {
-            anyhow::bail!("the session was stopped before its harness started");
-        }
         let mut cache_env = Vec::new();
         let runner: Arc<dyn Runner> = match &image.image {
             Some(session_image) => {
-                // The repository's session cache: the agent installs and
-                // builds into it, so no check ever reads it, and the next
-                // session on the repository finds what this one compiled. It
-                // starts as a copy of the repository's base cache, so a first
-                // `cargo build` does not begin by fetching what the default
-                // branch already needs.
-                let cache = crate::environment::session_cache_volume(
-                    &environment.cache_volume,
-                    &spec.channel,
-                );
-                if !self.backend.volume_exists(&cache).await {
-                    if let Err(error) = self
-                        .backend
-                        .clone_volume(&environment.cache_volume, &cache)
-                        .await
-                    {
-                        tracing::warn!(session = %id, %error, "session cache starts empty");
-                    }
+                // The agent installs and builds into the session cache too,
+                // so the next session on the repository finds what this one
+                // compiled.
+                if let Some(cache) = session_cache {
+                    mounts.push(crate::runner::Mount::volume(cache, "/cache", false));
+                    cache_env = crate::environment::cache_env();
+                    cache_env.extend(crate::environment::session_build_env());
                 }
-                mounts.push(crate::runner::Mount::volume(cache, "/cache", false));
-                cache_env = crate::environment::cache_env();
-                cache_env.extend(crate::environment::session_build_env());
                 self.backend.runner_in(adapter.id(), session_image, mounts)
             }
             None => self.backend.runner_for(adapter.id(), mounts),
@@ -3522,6 +3597,81 @@ fn write_external_stop(
     Ok(())
 }
 
+/// Run the repository's `prepare` on a session's workspace volume before its
+/// harness starts, in the repository's image with the session's `cache`
+/// writable and the entry's own egress for exactly as long as it runs: the
+/// steps a candidate is prepared with before its checks. `None` when the
+/// entry prepares nothing; `NotRun` when the session has no cache to prepare
+/// against because it is not in its repository's image. A failure is the
+/// outcome, not an error: the session starts anyway, since it is the one that
+/// can fix what broke. The entry's own time limit bounds it, as it bounds a
+/// check's preparation, and `cancel` stops it sooner.
+pub(crate) async fn prepare_session_workspace(
+    backend: &dyn crate::boundary::Backend,
+    environment: &crate::environment::RepoEnvironment,
+    (workspace, cache): (&str, Option<&str>),
+    runner_name: &str,
+    cancel: &dyn crate::review::checks::Cancel,
+) -> Option<crate::environment::WorkspacePreparation> {
+    use crate::environment::PrepareOutcome;
+    use crate::review::checks::Stopped;
+    if environment.prepare.is_empty() {
+        return None;
+    }
+    let begun = Instant::now();
+    let outcome = match cache {
+        None => PrepareOutcome::NotRun(
+            "the session runs in the harness's own image, not its repository's".into(),
+        ),
+        Some(cache) => {
+            let runner = backend.runner(Vec::new());
+            let prepared = crate::review::checks::run_preparation(
+                backend,
+                runner.as_ref(),
+                environment,
+                (workspace, cache),
+                runner_name,
+                tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
+                cancel,
+                "the session starts without it",
+            )
+            .await;
+            match prepared {
+                Ok(()) => PrepareOutcome::Prepared,
+                Err(Stopped::Unprepared(detail)) => PrepareOutcome::Failed(detail),
+                Err(Stopped::TimedOut) => PrepareOutcome::TimedOut {
+                    after_secs: environment.timeout_secs,
+                },
+                Err(Stopped::Cancelled { reason, .. }) => PrepareOutcome::Cancelled(reason),
+            }
+        }
+    };
+    Some(crate::environment::WorkspacePreparation {
+        commands: environment.prepare.clone(),
+        outcome,
+        elapsed_ms: begun.elapsed().as_millis() as u64,
+    })
+}
+
+/// A starting session's preparation is no longer wanted once the session
+/// has left `starting`: the operator stopped it.
+struct Stopping<'a> {
+    store: &'a Store,
+    id: &'a str,
+}
+
+impl crate::review::checks::Cancel for Stopping<'_> {
+    fn cancelled(&self) -> Option<String> {
+        let starting = self
+            .store
+            .get_session(self.id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.state == SessionState::Starting.as_str());
+        (!starting).then(|| "the session was stopped".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3563,5 +3713,178 @@ mod tests {
         let text = kickoff(Phase::Review, None, Some("r-1")).unwrap();
         assert!(text.contains("`r-1`"), "{text}");
         assert!(text.contains("`review_verdict`"), "{text}");
+    }
+
+    fn preparing(prepare: &[&str], timeout_secs: u64) -> crate::environment::RepoEnvironment {
+        crate::environment::RepoEnvironment {
+            image: "local".into(),
+            image_source: "harness image",
+            checks: Vec::new(),
+            timeout_secs,
+            prepare: prepare.iter().map(|command| command.to_string()).collect(),
+            egress: Vec::new(),
+            session_egress: Vec::new(),
+            cache_volume: "tracon-cache-base-unused".into(),
+        }
+    }
+
+    /// A workspace and a cache volume `LocalBackend` resolves to directories.
+    fn volumes() -> (String, String) {
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        let (work, cache) = (
+            format!("tracon-workspace-{id}"),
+            format!("tracon-cache-r-{id}"),
+        );
+        for volume in [&work, &cache] {
+            std::fs::create_dir_all(crate::runner::local::local_runtime_path(volume)).unwrap();
+        }
+        (work, cache)
+    }
+
+    struct Stopped;
+
+    impl crate::review::checks::Cancel for Stopped {
+        fn cancelled(&self) -> Option<String> {
+            Some("the session was stopped".into())
+        }
+    }
+
+    async fn prepare(
+        environment: &crate::environment::RepoEnvironment,
+        (work, cache): (&str, Option<&str>),
+        cancel: &dyn crate::review::checks::Cancel,
+    ) -> Option<crate::environment::WorkspacePreparation> {
+        prepare_session_workspace(
+            &crate::runner::local::LocalBackend,
+            environment,
+            (work, cache),
+            "tracon-s-test",
+            cancel,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_repositorys_prepare_runs_on_the_session_workspace() {
+        use crate::environment::PrepareOutcome;
+        let (work, cache) = volumes();
+        let environment = preparing(&["touch prepared", "echo second > second"], 60);
+        let done = prepare(
+            &environment,
+            (&work, Some(&cache)),
+            &crate::review::checks::RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.outcome, PrepareOutcome::Prepared);
+        assert_eq!(done.commands, ["touch prepared", "echo second > second"]);
+        let dir = crate::runner::local::local_runtime_path(&work);
+        assert!(dir.join("prepared").is_file() && dir.join("second").is_file());
+        let payload = done.payload();
+        assert_eq!(payload["outcome"], "prepared");
+        assert_eq!(payload["commands"][1], "echo second > second");
+        assert!(payload["ms"].is_u64());
+        assert!(payload.get("detail").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_prepare_is_an_outcome_that_says_what_failed() {
+        use crate::environment::PrepareOutcome;
+        let (work, cache) = volumes();
+        let environment = preparing(&["echo boom >&2; exit 3", "touch never"], 60);
+        let done = prepare(
+            &environment,
+            (&work, Some(&cache)),
+            &crate::review::checks::RunToCompletion,
+        )
+        .await
+        .unwrap();
+        let PrepareOutcome::Failed(detail) = &done.outcome else {
+            panic!("{done:?}");
+        };
+        assert!(detail.contains("(exit 3)"), "{detail}");
+        assert!(detail.contains("the session starts without it"), "{detail}");
+        assert!(!detail.contains("the check was not run"), "{detail}");
+        assert!(detail.contains("boom"), "{detail}");
+        // A failed step ends the preparation: the next one never ran.
+        assert!(!crate::runner::local::local_runtime_path(&work)
+            .join("never")
+            .exists());
+        assert_eq!(done.payload()["outcome"], "failed");
+        assert_eq!(done.payload()["detail"], detail.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_prepare_that_hangs_gives_up_at_the_entrys_timeout() {
+        use crate::environment::PrepareOutcome;
+        let (work, cache) = volumes();
+        let environment = preparing(&["sleep 30"], 1);
+        let begun = Instant::now();
+        let done = prepare(
+            &environment,
+            (&work, Some(&cache)),
+            &crate::review::checks::RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.outcome, PrepareOutcome::TimedOut { after_secs: 1 });
+        assert!(
+            begun.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            begun.elapsed()
+        );
+        assert_eq!(done.payload()["timeout_secs"], 1);
+    }
+
+    #[tokio::test]
+    async fn stopping_the_session_stops_its_preparation() {
+        use crate::environment::PrepareOutcome;
+        let (work, cache) = volumes();
+        let environment = preparing(&["sleep 30"], 600);
+        let begun = Instant::now();
+        let done = prepare(&environment, (&work, Some(&cache)), &Stopped)
+            .await
+            .unwrap();
+        assert_eq!(
+            done.outcome,
+            PrepareOutcome::Cancelled("the session was stopped".into())
+        );
+        assert!(
+            begun.elapsed() < Duration::from_secs(15),
+            "{:?}",
+            begun.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_runs_without_commands_or_without_a_cache() {
+        use crate::environment::PrepareOutcome;
+        let (work, _) = volumes();
+        let none = prepare(
+            &preparing(&[], 60),
+            (&work, None),
+            &crate::review::checks::RunToCompletion,
+        )
+        .await;
+        assert_eq!(none, None);
+        let done = prepare(
+            &preparing(&["touch prepared"], 60),
+            (&work, None),
+            &crate::review::checks::RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(done.outcome, PrepareOutcome::NotRun(_)),
+            "{done:?}"
+        );
+        assert!(!crate::runner::local::local_runtime_path(&work)
+            .join("prepared")
+            .exists());
+        assert_eq!(done.payload()["outcome"], "not_run");
+        assert!(done.payload()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("harness"));
     }
 }

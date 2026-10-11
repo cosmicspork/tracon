@@ -89,7 +89,8 @@ pub struct RepoEnvironment {
     pub image_source: &'static str,
     pub checks: Vec<String>,
     pub timeout_secs: u64,
-    /// Commands run before each check, with `egress` reachable and the cache
+    /// Commands run before a run's checks, and on a session's workspace
+    /// before its harness starts, with `egress` reachable and the cache
     /// writable.
     pub prepare: Vec<String>,
     /// Literal hosts preparation may reach; presets already expanded.
@@ -255,6 +256,66 @@ pub fn session_cache_volume(base_cache: &str, channel: &str) -> String {
     hash.update([0]);
     hash.update(channel.as_bytes());
     format!("tracon-cache-r-{}", &hex::encode(hash.finalize())[..24])
+}
+
+/// What the repository's `prepare` did to a session's workspace before its
+/// harness started. Recorded in the session's log and told to the agent in
+/// its orientation, so neither has to find out by a check failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePreparation {
+    /// The entry's `prepare`, in order.
+    pub commands: Vec<String>,
+    pub outcome: PrepareOutcome,
+    /// What it added to the session's start, run or not.
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepareOutcome {
+    Prepared,
+    /// A command failed or could not run: what it said.
+    Failed(String),
+    TimedOut {
+        after_secs: u64,
+    },
+    /// The session was stopped while it ran.
+    Cancelled(String),
+    /// Nothing ran, and why.
+    NotRun(String),
+}
+
+impl PrepareOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PrepareOutcome::Prepared => "prepared",
+            PrepareOutcome::Failed(_) => "failed",
+            PrepareOutcome::TimedOut { .. } => "timed_out",
+            PrepareOutcome::Cancelled(_) => "cancelled",
+            PrepareOutcome::NotRun(_) => "not_run",
+        }
+    }
+}
+
+impl WorkspacePreparation {
+    /// The `workspace_prepared` event's payload.
+    pub fn payload(&self) -> Value {
+        let mut payload = serde_json::json!({
+            "outcome": self.outcome.as_str(),
+            "commands": self.commands,
+            "ms": self.elapsed_ms,
+        });
+        match &self.outcome {
+            PrepareOutcome::Failed(detail) => payload["detail"] = detail.as_str().into(),
+            PrepareOutcome::TimedOut { after_secs } => {
+                payload["timeout_secs"] = (*after_secs).into()
+            }
+            PrepareOutcome::Cancelled(reason) | PrepareOutcome::NotRun(reason) => {
+                payload["reason"] = reason.as_str().into()
+            }
+            PrepareOutcome::Prepared => {}
+        }
+        payload
+    }
 }
 
 /// Where a session keeps its build output, under the cache mount, so it

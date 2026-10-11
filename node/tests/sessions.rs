@@ -2819,7 +2819,7 @@ async fn orientation_with(
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
 ) -> Orientation {
-    orientation_setup(tag, launch_with, pinned_docs, false).await
+    orientation_setup(tag, launch_with, pinned_docs, false, &[]).await
 }
 
 /// The whole setup, optionally with a context the operator selected for the
@@ -2830,6 +2830,7 @@ async fn orientation_setup(
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
     with_context: bool,
+    prepare: &[&str],
 ) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
@@ -2918,6 +2919,14 @@ async fn orientation_setup(
     });
     let mut cfg = Config::default();
     cfg.session.worktree_root = dir.join("worktrees");
+    if !prepare.is_empty() {
+        cfg.repo.push(tracon::config::Repo {
+            path: repo.clone(),
+            image: Some("registry.example/toolchain:1".into()),
+            prepare: prepare.iter().map(|command| command.to_string()).collect(),
+            ..Default::default()
+        });
+    }
     let cfg = Arc::new(cfg);
     let tools = Arc::new(tracon::mcp::Tools {
         broker: Arc::new(Default::default()),
@@ -3176,6 +3185,78 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
     tracon::session::materialize::remove(&row.id);
 }
 
+/// A repository that prepares its dependencies has that preparation run on a
+/// session's workspace before the harness starts, and the session is told how
+/// it went. A harness that runs in its own image has no cache of the
+/// repository's to prepare against, so here nothing runs and the session is
+/// told so, in the log and in its orientation, before its first turn.
+#[tokio::test]
+async fn a_session_is_told_whether_its_workspace_was_prepared() {
+    state::isolate();
+    let Orientation { store, row, .. } =
+        orientation_setup("prepared", None, 0, false, &["make deps"]).await;
+    let mut events = Vec::new();
+    for _ in 0..300 {
+        events = store.events_after(&row.id, 0, 500).unwrap();
+        if events.iter().any(|e| e.kind == "orientation") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let at = |kind: &str| {
+        events
+            .iter()
+            .position(|e| e.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind}: {events:#?}"))
+    };
+    let prepared = &events[at("workspace_prepared")];
+    assert_eq!(
+        prepared.payload["outcome"], "not_run",
+        "{}",
+        prepared.payload
+    );
+    assert_eq!(prepared.payload["commands"], json!(["make deps"]));
+    assert!(prepared.payload["reason"]
+        .as_str()
+        .unwrap()
+        .contains("harness's own image"));
+    assert!(prepared.payload["ms"].is_u64());
+    // Recorded before the agent is told anything, so the log reads in the
+    // order the session met it.
+    assert!(at("workspace_prepared") < at("orientation"));
+    let text = events[at("orientation")].payload["text"].as_str().unwrap();
+    assert!(
+        text.contains("- Dependencies: this repository prepares with `make deps`; they were not run in `/work`"),
+        "{text}"
+    );
+    tracon::session::materialize::remove(&row.id);
+}
+
+/// A repository whose entry prepares nothing gets no preparation line at all.
+#[tokio::test]
+async fn a_repository_that_prepares_nothing_records_no_preparation() {
+    state::isolate();
+    let Orientation { store, row, .. } = orientation("unprepared").await;
+    let mut events = Vec::new();
+    for _ in 0..300 {
+        events = store.events_after(&row.id, 0, 500).unwrap();
+        if events.iter().any(|e| e.kind == "orientation") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let orientation = events
+        .iter()
+        .find(|e| e.kind == "orientation")
+        .expect("an orientation");
+    assert!(events.iter().all(|e| e.kind != "workspace_prepared"));
+    assert!(!orientation.payload["text"]
+        .as_str()
+        .unwrap()
+        .contains("Dependencies:"));
+    tracon::session::materialize::remove(&row.id);
+}
+
 /// A session is told where it is before its first prompt: the orientation
 /// is assembled on the node, recorded as an event, and handed to the harness
 /// as a system-prompt file rather than anything in the worktree.
@@ -3328,7 +3409,7 @@ async fn a_session_receives_its_items_selected_context_and_the_receipt_is_kept()
     state::isolate();
     let Orientation {
         store, item, row, ..
-    } = orientation_setup("context", None, 0, true).await;
+    } = orientation_setup("context", None, 0, true, &[]).await;
 
     let mut found = None;
     for _ in 0..300 {
@@ -4312,7 +4393,7 @@ async fn the_node_wakes_an_exhausted_session_or_carries_it_on() {
         adapter,
         row,
         ..
-    } = orientation_setup("exhausted-wake", None, 0, false).await;
+    } = orientation_setup("exhausted-wake", None, 0, false, &[]).await;
     manager.set_default_adapter(adapter.clone());
     let wait = |id: String, want: &'static str| {
         let store = store.clone();

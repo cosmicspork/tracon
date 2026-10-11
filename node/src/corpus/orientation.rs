@@ -114,6 +114,9 @@ pub struct Facts<'a> {
     /// resolved it. `None` for a local-only repository or a host that is
     /// neither forge, where there is nothing to name.
     pub forge_repo: Option<&'a crate::forge::ForgeRepo>,
+    /// What the repository's `prepare` did to the workspace before the
+    /// session started. `None` when its entry prepares nothing.
+    pub prepared: Option<&'a crate::environment::WorkspacePreparation>,
 }
 
 /// Context this orientation could not carry in full. Named, with the call
@@ -265,6 +268,9 @@ fn push_node(out: &mut String, facts: &Facts) {
                 .join(", ")
         )),
         None => {}
+    }
+    if let Some(prepared) = facts.prepared {
+        push_preparation(out, prepared, facts.worktree);
     }
     if facts.tools.is_empty() {
         out.push_str("- No node tools are offered on this channel.\n\n");
@@ -733,6 +739,52 @@ fn floor_char(s: &str, at: usize) -> usize {
     i
 }
 
+/// The repository's preparation, as it went for this workspace. Said so an
+/// agent whose check fails for want of `node_modules` knows why without
+/// spending a run to find out, and knows rerunning the commands is cheap.
+fn push_preparation(
+    out: &mut String,
+    prepared: &crate::environment::WorkspacePreparation,
+    worktree: &str,
+) {
+    use crate::environment::PrepareOutcome;
+    let commands = prepared
+        .commands
+        .iter()
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let secs = prepared.elapsed_ms.div_ceil(1000);
+    let warm = " The package caches under `/cache` are warm, so running them again, after a \
+                lockfile changes for instance, is fast.";
+    let said = match &prepared.outcome {
+        PrepareOutcome::Prepared => {
+            format!("they ran in `{worktree}` before you started ({secs}s).{warm}")
+        }
+        PrepareOutcome::Failed(detail) => format!(
+            "they ran in `{worktree}` before you started and failed, so what they install \
+             may be missing: {} Run them yourself to see the whole output.{warm}",
+            detail.lines().next().unwrap_or_default()
+        ),
+        PrepareOutcome::TimedOut { after_secs } => format!(
+            "they ran in `{worktree}` before you started and did not finish within \
+             {after_secs}s, so what they install may be missing. Run them yourself before \
+             building or testing.{warm}"
+        ),
+        PrepareOutcome::Cancelled(reason) => format!(
+            "they were stopped before they finished in `{worktree}` ({reason}). Run them \
+             yourself before building or testing.{warm}"
+        ),
+        PrepareOutcome::NotRun(reason) => format!(
+            "they were not run in `{worktree}`: {reason}. Run them yourself before building \
+             or testing."
+        ),
+    };
+    out.push_str(&format!(
+        "- Dependencies: this repository prepares with {commands}; {said}\n"
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,6 +859,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         assert!(missing.is_empty(), "{missing:?}");
@@ -885,6 +938,7 @@ mod tests {
                 context: None,
                 egress: None,
                 forge_repo: repo,
+                prepared: None,
             };
             let (text, _) = assemble(&store, &Policy::default(), &facts);
             let node = &text[text.find("## This node").unwrap()..];
@@ -1026,6 +1080,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -1086,6 +1141,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&"x".repeat(KNOWN_CHARS)), "{text}");
@@ -1129,6 +1185,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&ready_title), "ready work bypassed the cap");
@@ -1178,6 +1235,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("old guidance"), "{text}");
@@ -1225,6 +1283,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(
@@ -1277,6 +1336,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, _) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("should not appear"), "{text}");
@@ -1321,6 +1381,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         // All three pinned documents survive in full: none was capped,
@@ -1375,6 +1436,7 @@ mod tests {
                 context: None,
                 egress: None,
                 forge_repo: None,
+                prepared: None,
             }
         }
         let (bare, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
@@ -1451,6 +1513,7 @@ mod tests {
                 context: None,
                 egress: None,
                 forge_repo: None,
+                prepared: None,
             }
         }
 
@@ -1519,6 +1582,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
 
@@ -1612,6 +1676,7 @@ mod tests {
             context: Some((&delivered, &receipt)),
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -1663,6 +1728,7 @@ mod tests {
             context: None,
             egress: None,
             forge_repo: None,
+            prepared: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
         assert!(text.contains("## Working agreements"), "{text}");
@@ -1671,5 +1737,66 @@ mod tests {
             text.find("## Working agreements") < text.find("refused by policy"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_session_is_told_how_its_workspace_was_prepared() {
+        use crate::environment::{PrepareOutcome, WorkspacePreparation};
+        let told = |outcome: PrepareOutcome| {
+            let mut out = String::new();
+            push_preparation(
+                &mut out,
+                &WorkspacePreparation {
+                    commands: vec![
+                        "cargo fetch --locked".into(),
+                        "cd spa && bun install --frozen-lockfile".into(),
+                    ],
+                    outcome,
+                    elapsed_ms: 11_200,
+                },
+                "/work",
+            );
+            out
+        };
+        let named = "- Dependencies: this repository prepares with `cargo fetch --locked`, \
+                     `cd spa && bun install --frozen-lockfile`; ";
+        let warm = "The package caches under `/cache` are warm";
+
+        let ran = told(PrepareOutcome::Prepared);
+        assert!(ran.starts_with(named), "{ran}");
+        assert!(
+            ran.contains("they ran in `/work` before you started (12s)."),
+            "{ran}"
+        );
+        assert!(ran.contains(warm), "{ran}");
+
+        let failed = told(PrepareOutcome::Failed(
+            "preparation `cargo fetch --locked` failed (exit 101) in img (src); the session \
+             starts without it.\n\nerror: no matching package"
+                .into(),
+        ));
+        assert!(
+            failed.contains("and failed, so what they install may be missing"),
+            "{failed}"
+        );
+        // The sentence that names the command and its exit; not the output,
+        // which the agent can reproduce and the cap should not spend on.
+        assert!(failed.contains("(exit 101)"), "{failed}");
+        assert!(!failed.contains("no matching package"), "{failed}");
+        assert!(failed.contains(warm), "{failed}");
+
+        let slow = told(PrepareOutcome::TimedOut { after_secs: 2400 });
+        assert!(slow.contains("did not finish within 2400s"), "{slow}");
+
+        let skipped = told(PrepareOutcome::NotRun("no cache to prepare against".into()));
+        assert!(
+            skipped.contains("they were not run in `/work`: no cache"),
+            "{skipped}"
+        );
+        // Nothing was copied in for it to be warm.
+        assert!(!skipped.contains(warm), "{skipped}");
+        for text in [ran, failed, slow, skipped] {
+            assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
+        }
     }
 }

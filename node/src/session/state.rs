@@ -114,6 +114,10 @@ impl EndReason {
 pub mod event_kind {
     pub const SESSION_STARTED: &str = "session_started";
     pub const WORKTREE: &str = "worktree";
+    /// The repository's `prepare` ran on the workspace before the harness
+    /// started (`outcome`: prepared, failed, timed_out, cancelled, not_run;
+    /// `commands`, `ms`, and `detail` or `reason` when it did not prepare).
+    pub const WORKSPACE_PREPARED: &str = "workspace_prepared";
     /// The repository's image is being built before the harness can start in
     /// it (`status`, `repo`). Minutes, once per repository; the start event
     /// that follows says which image the session got.
