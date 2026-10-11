@@ -722,6 +722,7 @@ async fn prepare_candidate(
             &format!("tracon-p-{}", &hash(run_id)[..12]),
             tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
             cancel,
+            "the check was not run",
         )
         .await
     };
@@ -736,8 +737,11 @@ async fn prepare_candidate(
 }
 
 /// Run `prepare` on `work` with `cache` writable. Shared by a candidate's
-/// preparation and by the default branch's, which is what fills the base
-/// cache candidates start from.
+/// preparation, by the default branch's, which is what fills the base cache
+/// candidates start from, and by a session's workspace before its harness
+/// starts. `unprepared` is what a failure means to the caller, said after it
+/// ("the check was not run").
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_preparation(
     backend: &dyn Backend,
     runner: &dyn Runner,
@@ -746,6 +750,7 @@ pub(crate) async fn run_preparation(
     runner_name: &str,
     deadline: tokio::time::Instant,
     cancel: &dyn Cancel,
+    unprepared: &str,
 ) -> Result<(), Stopped> {
     let stopped = |stop: Option<String>, killed: &str| match stop {
         Some(reason) => Stopped::Cancelled {
@@ -790,7 +795,7 @@ pub(crate) async fn run_preparation(
             text.push_str(&String::from_utf8_lossy(&output.stderr));
             let said = output::with_failures(&output::failure_lines(&text), &tail(&text));
             return Err(Stopped::Unprepared(format!(
-                "preparation `{command}` failed (exit {}) in {} ({}); the check was not run.\n\n{}",
+                "preparation `{command}` failed (exit {}) in {} ({}); {unprepared}.\n\n{}",
                 output
                     .status
                     .code()

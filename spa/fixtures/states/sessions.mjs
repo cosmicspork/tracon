@@ -579,6 +579,26 @@ export default [
     }),
   },
   {
+    id: 'sessions-starting-prepare-failed',
+    area: 'sessions',
+    route: `/sessions/${S.starting.id}`,
+    title: "Starting: the repository's preparation failed",
+    note: 'The workspace_prepared line is red and its fold holds what preparation said; the session still starts.',
+    since: 'workspace preparation at launch',
+    api: page(S.starting, {
+      events: [
+        ev(S.starting.id, 'worktree', { workspace_id: S.starting.id, volume: `tracon-workspace-${S.starting.id}`, branch: 'fix/egress-retry', source: 'imported' }, -38000),
+        ev(S.starting.id, 'workspace_prepared', {
+          outcome: 'failed',
+          commands: ['cargo fetch --locked', 'cd web && bun install --frozen-lockfile'],
+          ms: 6400,
+          detail: 'preparation `cd web && bun install --frozen-lockfile` failed (exit 1) in localhost/tracon-repo-orbit (repository Dockerfile); the session starts without it.\n\nerror: lockfile had changes, but lockfile is frozen',
+        }, -31000),
+      ],
+      detail: { usage: { ...usageReconciled, state: null, gateway_tokens: 0, harness_tokens: 0, charged_tokens: 0, cache_read_tokens: 0 } },
+    }),
+  },
+  {
     id: 'sessions-running-working',
     area: 'sessions',
     route: `/sessions/${S.working.id}`,

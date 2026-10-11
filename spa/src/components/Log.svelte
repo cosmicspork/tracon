@@ -151,6 +151,13 @@
         <div class="mark">checks started · {((e.payload.commands as string[]) ?? []).join(' · ')}</div>
       {:else if e.kind === 'check_prepared'}
         <div class={e.payload.ok ? 'mark' : 'mark crit'}>dependencies {e.payload.ok ? 'prepared' : 'not prepared'} · once for this run · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</div>
+      {:else if e.kind === 'workspace_prepared' && e.payload.detail}
+        <!-- A failed preparation keeps what it said behind the line; the
+             others are a line from eventLine like any other kind. -->
+        <details class="fold" open>
+          <summary class="crit">{eventLine(e)?.text}</summary>
+          <div>{e.payload.detail}</div>
+        </details>
       {:else if e.kind === 'check_result'}
         <details class="fold" open={e.payload.ok !== true}>
           <summary class={e.payload.ok ? '' : 'crit'}>{e.payload.ok ? '✓' : '✗'} {e.payload.command} · exit {e.payload.exit ?? 'none'} · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</summary>

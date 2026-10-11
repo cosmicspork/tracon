@@ -333,6 +333,26 @@ export function eventLine(e: Event): EventLine | null {
       const who = str(p.source) === 'wake' ? 'resumed by the node' : 'resumed by the operator'
       return line('mark', [who, ownReason(p.reason)])
     }
+    case 'workspace_prepared': {
+      // The repository's own `prepare`, run on the workspace before the
+      // harness started; what it cost the start is said either way.
+      const took = num(p.ms) !== null ? formatDuration(num(p.ms)!) : ''
+      const commands = Array.isArray(p.commands) ? p.commands.filter((c): c is string => typeof c === 'string') : []
+      switch (str(p.outcome)) {
+        case 'prepared':
+          return line('mark', ['workspace prepared', commands.join(' · '), took])
+        case 'failed':
+          return line('crit', ['workspace not prepared', 'preparation failed', 'the session started without it', took])
+        case 'timed_out': {
+          const limit = num(p.timeout_secs)
+          return line('crit', ['workspace not prepared', limit !== null ? `timed out after ${formatDuration(limit * 1000)}` : 'timed out', 'the session started without it'])
+        }
+        case 'cancelled':
+          return line('mark', ['workspace preparation stopped', str(p.reason)])
+        default:
+          return line('sys', ['workspace not prepared', str(p.reason)])
+      }
+    }
     case 'published': {
       const url = str(p.url)
       return line('ok', ['published', url ? forgePath(url) : ''], url || undefined, url ? 'open' : undefined)
