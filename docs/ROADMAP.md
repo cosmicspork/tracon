@@ -48,9 +48,22 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 
 ## Now — start, build, ship from one node
 
-Empty. Everything found on the live runs through 2026-10-08 and in the 0.29.0 screen audit
-has landed (#419–#434). The audit's states stay in `spa/scripts/ui-audit.mjs`;
-`--state <name>` reproduces one.
+Everything found on the live runs through 2026-10-08 and in the 0.29.0 screen audit has
+landed (#419–#434). The audit's states stay in `spa/scripts/ui-audit.mjs`; `--state <name>`
+reproduces one. The 2026-10-10 validation of `main` on the node (#439–#446) left these:
+
+- [ ] **A second node must not take a running node's sockets.** A scratch node started
+      with its own state and config directories but the default `[gateway] harness_listen`
+      replaced `/run/user/1000/tracon/harness.sock` and `egress.sock` before failing on a
+      busy port. The running node kept listening on the unlinked inodes, so the gateway
+      could no longer reach it: no session MCP calls, no egress decisions, until a restart.
+      Before unlinking a socket path, try connecting to it, and refuse to start when
+      something answers.
+- [ ] **Model requests fail on a corrupted TLS record.** Transient 502s from the gateway now
+      log their cause (#441): `connection error: received fatal alert: BadRecordMac` on the
+      connection to `api.anthropic.com`. Two to three per session, each recovered on the
+      harness's first retry. Find whether it is a reused pooled connection or the path,
+      and retry it on a fresh connection in the gateway before the harness sees a 502.
 
 ## Next — the working loop, made comfortable
 
@@ -67,6 +80,12 @@ Needed for daily use, but not blocking it today.
       `opencode` on its PATH (Homebrew, 1.18.30), so the recipe stops before the doc tests
       and the SPA. Find what differs from CI, and have the tests use the pinned binary or
       say why they skip.
+- [ ] **Say when a newer policy bundle ships than the one installed.** The 2026-10-10
+      node ran a build carrying working agreements v18 under signed policy v17, and
+      nothing said so: the operator learned it when `run_wait`, an unattended read in v18,
+      asked for permission. Settings › Permissions & policies, and Home's readiness line,
+      should name the shipped version beside the installed one and offer the preview and
+      apply that already exist.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
@@ -123,7 +142,18 @@ hit on a real task.
 
 **Node data**
 
-
+- [ ] **`doc_search` misses a document by its own words.** On 2026-10-10 a search for
+      `dogfood`, from a session and from an external harness, did not return
+      `note-tracon-dogfood`, nor did its exact title "Tracon dogfood failures"; a session got
+      `repo-hounddogreading` instead. A longer query that day did find it. Check what the
+      index holds for that document (title, slug, first chunk), and make an exact word in
+      the title or slug rank it first.
+- [ ] **The model list follows what the operator saves.** Saving a provider's declared
+      models (Settings › Connections › Providers) writes `node.toml` and nothing else; the
+      pickers change only after `probe_models_into_store` runs again, on a passing
+      boundary check or the "Refresh models" button. Re-probe after saving models and
+      after connecting or removing a provider, and drop the button. Keep a retry only
+      where the last probe failed, saying why.
 
 **OpenCode, contingent on the spike above**
 
@@ -136,6 +166,11 @@ hit on a real task.
 - [ ] Let the model catalogue refresh. `models.opencode.ai` is not on the gateway's
       `allow_hosts`, so the harness's catalogue fetch is refused and its model list never
       updates; fetch it node-side and serve it, or allow the one host.
+- [ ] Tell an OpenCode agent why the node's policy refused its call. Claude Code now reads
+      "the node's policy refused this (rule …): <reason>" (#441); OpenCode's v1 permission
+      reply takes only `response`, so the same refusal reaches it as a bare `reject`.
+      Carry the reason another way (a tool result, or a message on the session) and keep
+      it distinct from the operator declining.
 
 ## Later — earned by the loop before it
 
@@ -176,6 +211,8 @@ wait until **Now** and **Next** have made a day's work unremarkable.
       grey errors, duplicated actions), text formatting (missing spaces after conditional
       fragments, raw Markdown and enum values from node strings, units and plurals), the
       work item's layout, and the mirrored-review and squash editors.
+- [ ] Home's composer line reads `personal · tracon ·adjust` on a phone: its separators
+      come from CSS, not the Svelte trim #439 fixed, and the last one loses its space.
 
 **The boundary, extended when a task needs it**
 
@@ -248,22 +285,22 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 - [ ] **A private repository end to end**, through preparation, agent work, checks in the
       project's toolchain image, and authorized publication to GitHub, with nothing in the
       published result naming tracon.
-- [ ] **The 0.29.0 live-session fixes, live** (#425, #428, #429): a resubmitted, published
-      review updating the pull request it opened, with and without `change`; an update
-      whose revision merged `main` clearing GitHub's conflict; and an `ask_operator` left
-      past 45 s in a node-started Claude Code session, answered and read back through
-      `question_status`. Each is proven against a fake forge or by test only.
-- [ ] **The 0.29.0 follow-ups, live** (#432, #433, #434): a provider key saved from its
-      Connections card and used by a session; a failed required check under the Podman
-      runner whose refusal names the failing test; and a node-started session on Claude
-      Code 2.1.295 holding an MCP call past five minutes. The last one could not be
-      reproduced outside a session under 2.1.247 either, so the cause of the live cutoff
-      is still unknown.
-- [ ] **The #436 additions, live**: the built-in `repo-setup` skill listed in a Claude Code
-      2.1.295 session in the harness image (it loads as `tracon:repo-setup` through
-      `--plugin-dir`, checked only against a local 2.1.296), a setup proposal whose run
-      notes appear in the next session's operator notes, and a review under
-      `publish.commits = keep` with an edited message pushed to a real forge.
+- [ ] **The 0.29.0 live-session fixes, live** (#428, #429): a resubmitted, published
+      review updating the pull request it opened, with and without `change`; and an update
+      whose revision merged `main` clearing GitHub's conflict. Each is proven against a
+      fake forge or by test only. (#425 is proven: on 2026-10-10 a node-started Claude
+      Code session's `ask_operator`, left unanswered for 178 s, was answered and read back
+      on its third `question_status` call.)
+- [ ] **The 0.29.0 follow-ups, live** (#432, #433): a provider key saved from its
+      Connections card and used by a session; and a failed required check under the Podman
+      runner whose refusal names the failing test. The five-minute MCP cutoff (#434) no
+      longer bites: no node tool holds a call past 45 s, and on 2026-10-10 a session on
+      Claude Code 2.1.295 waited out a 5 m 35 s `just check` through `review_status`
+      (#417) and published #444.
+- [ ] **The #436 additions, live**: a setup proposal whose run notes appear in the next
+      session's operator notes, and a review under `publish.commits = keep` with an edited
+      message pushed to a real forge. (The built-in skill is proven: a 2.1.295 session in
+      the repository's image listed it as `tracon:repo-setup` on 2026-10-10.)
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
