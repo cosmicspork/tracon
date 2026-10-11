@@ -49,6 +49,55 @@ fn upstream_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| streaming_client(UPSTREAM_CONNECT, UPSTREAM_IDLE))
 }
 
+/// The same client with no pool, for the one retry a failed send gets: a
+/// second try on the connection that just failed would fail the same way.
+fn fresh_upstream_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(UPSTREAM_CONNECT)
+            .read_timeout(UPSTREAM_IDLE)
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// Send `req`, and when it fails before any answer for a reason other than a
+/// timeout or its own body, send it once more on a fresh connection. Model
+/// calls die a few times a session on a corrupted TLS record
+/// (`received fatal alert: BadRecordMac`) and recover on the harness's first
+/// retry; doing that here keeps a 502 out of the transcript, and the log says
+/// whether the fresh connection helped, which tells a stale pooled connection
+/// from the path.
+async fn send_upstream(
+    req: reqwest::RequestBuilder,
+    fresh: &reqwest::Client,
+    provider: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let (client, request) = req.build_split();
+    let request = request?;
+    let again = request.try_clone();
+    let error = match client.execute(request).await {
+        Ok(response) => return Ok(response),
+        Err(error) => error,
+    };
+    let Some(again) = again.filter(|_| !error.is_timeout() && !error.is_body()) else {
+        return Err(error);
+    };
+    tracing::info!(
+        provider,
+        error = %error_chain(&error.without_url()),
+        "upstream send failed; retrying once on a fresh connection"
+    );
+    let retried = fresh.execute(again).await;
+    match &retried {
+        Ok(_) => tracing::info!(provider, "the retry on a fresh connection was answered"),
+        Err(_) => tracing::info!(provider, "the retry on a fresh connection failed too"),
+    }
+    retried
+}
+
 fn streaming_client(connect: Duration, idle: Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(connect)
@@ -668,7 +717,7 @@ pub async fn handle(
             return refuse(StatusCode::CONFLICT, &error.to_string());
         }
     }
-    let upstream = match req.send().await {
+    let upstream = match send_upstream(req, fresh_upstream_client(), &provider).await {
         Ok(r) => r,
         Err(e) => {
             let kind = send_failure_kind(&e);
@@ -1101,6 +1150,65 @@ impl Drop for Counted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An upstream that drops the first `drops` connections after reading the
+    /// request, then answers 200 on every later one. Returns its address and a
+    /// count of the connections it accepted.
+    async fn flaky_upstream(
+        drops: usize,
+    ) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut conn, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = conn.read(&mut buf).await;
+                    if n >= drops {
+                        let _ = conn
+                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                            .await;
+                    }
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    #[tokio::test]
+    async fn a_send_that_dies_is_retried_once_on_a_fresh_connection() {
+        let (addr, seen) = flaky_upstream(1).await;
+        let client = reqwest::Client::new();
+        let fresh = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let req = client.post(format!("http://{addr}/v1/messages")).body("{}");
+        let response = send_upstream(req, &fresh, "anthropic").await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "ok");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_send_that_dies_twice_fails_after_one_retry() {
+        let (addr, seen) = flaky_upstream(usize::MAX).await;
+        let client = reqwest::Client::new();
+        let fresh = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let req = client.post(format!("http://{addr}/v1/messages")).body("{}");
+        assert!(send_upstream(req, &fresh, "anthropic").await.is_err());
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
     use crate::config::SHAPE_OPENAI;
 
     #[derive(Debug)]
