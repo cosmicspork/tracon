@@ -1344,6 +1344,28 @@ async fn a_harness_request_cannot_be_answered_with_edited_arguments() {
     assert_eq!(rig.store.open_permissions().unwrap().len(), 1);
 }
 
+/// A call the node's policy refuses is answered as the policy's refusal, with
+/// the rule and its reason, so the harness does not tell the agent the
+/// operator declined it.
+#[tokio::test]
+async fn a_policy_refusal_reaches_the_harness_as_the_policys() {
+    state::isolate();
+    let rig = Rig::start_with_shipped_policy().await;
+    let answer = rig.request_command("cat /root/.claude/settings.json").await;
+    match tokio::time::timeout(Duration::from_secs(15), answer).await {
+        Ok(Ok(PermissionReply::Refused { rule, reason })) => {
+            assert_eq!(rule.as_deref(), Some("harness-settings"));
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains("settings")),
+                "{reason:?}"
+            );
+        }
+        other => panic!("expected the policy's refusal, got {other:?}"),
+    }
+    assert!(rig.kinds().iter().any(|k| k == "policy_denied"));
+    assert!(rig.store.open_permissions().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn an_unanswered_request_is_denied_by_default() {
     state::isolate();
@@ -1352,9 +1374,11 @@ async fn an_unanswered_request_is_denied_by_default() {
     let answer = rig.request_permission().await;
     assert!(rig.await_state("waiting_on_you").await);
 
+    // Withdrawn, which every adapter answers as a deny, and which Claude Code
+    // tells the agent as an expiry rather than as the operator declining.
     match tokio::time::timeout(Duration::from_secs(15), answer).await {
-        Ok(Ok(PermissionReply::Selected(o))) => assert_eq!(o, "reject_once"),
-        other => panic!("expected reject_once on expiry, got {other:?}"),
+        Ok(Ok(PermissionReply::Cancelled)) => {}
+        other => panic!("expected a withdrawn request on expiry, got {other:?}"),
     }
     assert!(rig.await_state("running").await);
     let kinds = rig.kinds();

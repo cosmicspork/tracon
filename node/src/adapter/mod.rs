@@ -321,6 +321,14 @@ pub enum PermissionReply {
         option_id: String,
         arguments: Value,
     },
+    /// Refused by the node itself, never shown to the operator: the signed
+    /// policy's denial, with the rule and the reason it gives. A harness that
+    /// can carry a message tells the agent this, so it does not read a policy
+    /// rule as the operator's choice.
+    Refused {
+        rule: Option<String>,
+        reason: Option<String>,
+    },
     Cancelled,
 }
 

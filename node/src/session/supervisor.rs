@@ -1114,12 +1114,14 @@ impl Supervisor {
         match decision.verdict {
             crate::policy::Verdict::Allow | crate::policy::Verdict::Deny => {
                 let allow = decision.verdict == crate::policy::Verdict::Allow;
-                let option = if allow {
-                    crate::adapter::types::OPTION_ALLOW_ONCE
+                let _ = reply.send(if allow {
+                    PermissionReply::Selected(crate::adapter::types::OPTION_ALLOW_ONCE.into())
                 } else {
-                    crate::adapter::types::OPTION_REJECT_ONCE
-                };
-                let _ = reply.send(PermissionReply::Selected(option.into()));
+                    PermissionReply::Refused {
+                        rule: decision.rule_id.clone(),
+                        reason: decision.reason.clone(),
+                    }
+                });
                 self.record(
                     if allow {
                         ek::POLICY_ALLOWED
@@ -1161,9 +1163,10 @@ impl Supervisor {
         let id = row.id.clone();
         if let Err(e) = self.store.insert_permission(&row) {
             tracing::error!(error = %e, "failed to record permission request");
-            let _ = reply.send(PermissionReply::Selected(
-                crate::adapter::types::OPTION_REJECT_ONCE.into(),
-            ));
+            let _ = reply.send(PermissionReply::Refused {
+                rule: None,
+                reason: Some("the node could not record the request to ask the operator".into()),
+            });
             return;
         }
         self.open.lock().await.insert(id.clone(), reply);
@@ -1263,10 +1266,9 @@ impl Supervisor {
             return;
         }
         for id in due {
+            // Unanswered, not declined: the harness says so.
             if let Some(sender) = self.open.lock().await.remove(&id) {
-                let _ = sender.send(PermissionReply::Selected(
-                    crate::adapter::types::OPTION_REJECT_ONCE.into(),
-                ));
+                let _ = sender.send(PermissionReply::Cancelled);
             }
             self.offered.remove(&id);
             let _ = self

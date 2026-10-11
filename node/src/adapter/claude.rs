@@ -616,6 +616,10 @@ fn control_response(id: &str, decision: PermissionReply) -> Value {
             "behavior": "deny",
             "message": "the operator declined this",
         }),
+        PermissionReply::Refused { rule, reason } => json!({
+            "behavior": "deny",
+            "message": refusal_message(rule.as_deref(), reason.as_deref()),
+        }),
         PermissionReply::Cancelled => json!({
             "behavior": "deny",
             "message": "no answer was given before this expired",
@@ -625,6 +629,20 @@ fn control_response(id: &str, decision: PermissionReply) -> Value {
         "type": "control_response",
         "response": { "subtype": "success", "request_id": id, "response": inner },
     })
+}
+
+/// What the agent reads when the node's policy, not the operator, refused a
+/// call: whose decision it was, the rule, and the rule's own reason.
+fn refusal_message(rule: Option<&str>, reason: Option<&str>) -> String {
+    let mut message = String::from("the node's policy refused this");
+    if let Some(rule) = rule.filter(|r| !r.is_empty()) {
+        message.push_str(&format!(" (rule `{rule}`)"));
+    }
+    if let Some(reason) = reason.filter(|r| !r.is_empty()) {
+        message.push_str(": ");
+        message.push_str(reason);
+    }
+    message
 }
 
 fn usage_of(v: &Value) -> Usage {
@@ -1079,6 +1097,45 @@ mod tests {
         // An expiry is a deny too: never a silent allow.
         let cancelled = control_response("r3", PermissionReply::Cancelled);
         assert_eq!(cancelled["response"]["response"]["behavior"], "deny");
+    }
+
+    /// The agent is told whose decision a deny was: the operator's answer on
+    /// a card, or the node's policy with the rule and its reason.
+    #[test]
+    fn a_policy_refusal_is_not_told_as_the_operators() {
+        let operator = control_response(
+            "r1",
+            PermissionReply::Selected(types::OPTION_REJECT_ONCE.into()),
+        );
+        assert_eq!(
+            operator["response"]["response"]["message"],
+            "the operator declined this"
+        );
+
+        let policy = control_response(
+            "r2",
+            PermissionReply::Refused {
+                rule: Some("harness-settings".into()),
+                reason: Some("The harness's settings are the node's, not the session's.".into()),
+            },
+        );
+        assert_eq!(policy["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            policy["response"]["response"]["message"],
+            "the node's policy refused this (rule `harness-settings`): The harness's settings are the node's, not the session's."
+        );
+
+        let bare = control_response(
+            "r3",
+            PermissionReply::Refused {
+                rule: None,
+                reason: None,
+            },
+        );
+        assert_eq!(
+            bare["response"]["response"]["message"],
+            "the node's policy refused this"
+        );
     }
 
     /// An unrecognised option id must not read as an allow. Anything that is

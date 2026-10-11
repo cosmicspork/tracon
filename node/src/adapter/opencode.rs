@@ -597,6 +597,7 @@ fn reply_body(decision: PermissionReply) -> Value {
         }
         PermissionReply::Selected(_)
         | PermissionReply::Edited { .. }
+        | PermissionReply::Refused { .. }
         | PermissionReply::Cancelled => {
             json!({ "response": "reject" })
         }
@@ -2192,6 +2193,10 @@ mod tests {
         for decision in [
             PermissionReply::Selected(types::OPTION_REJECT_ONCE.into()),
             PermissionReply::Selected("allow_always".into()),
+            PermissionReply::Refused {
+                rule: Some("harness-settings".into()),
+                reason: None,
+            },
             PermissionReply::Cancelled,
         ] {
             let body = reply_body(decision);
