@@ -48,22 +48,10 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 
 ## Now — start, build, ship from one node
 
-Everything found on the live runs through 2026-10-08 and in the 0.29.0 screen audit has
-landed (#419–#434). The audit's states stay in `spa/scripts/ui-audit.mjs`; `--state <name>`
-reproduces one. The 2026-10-10 validation of `main` on the node (#439–#446) left these:
-
-- [ ] **A second node must not take a running node's sockets.** A scratch node started
-      with its own state and config directories but the default `[gateway] harness_listen`
-      replaced `/run/user/1000/tracon/harness.sock` and `egress.sock` before failing on a
-      busy port. The running node kept listening on the unlinked inodes, so the gateway
-      could no longer reach it: no session MCP calls, no egress decisions, until a restart.
-      Before unlinking a socket path, try connecting to it, and refuse to start when
-      something answers.
-- [ ] **Model requests fail on a corrupted TLS record.** Transient 502s from the gateway now
-      log their cause (#441): `connection error: received fatal alert: BadRecordMac` on the
-      connection to `api.anthropic.com`. Two to three per session, each recovered on the
-      harness's first retry. Find whether it is a reused pooled connection or the path,
-      and retry it on a fresh connection in the gateway before the harness sees a 502.
+Everything found on the live runs through 2026-10-08, in the 0.29.0 screen audit and in
+the 2026-10-10 validation of `main` on the node has landed (#419–#434, #439–#446, #449).
+The audit's states stay in `spa/scripts/ui-audit.mjs`; `--state <name>` reproduces one.
+Nothing is open here until the next real run finds something.
 
 ## Next — the working loop, made comfortable
 
@@ -80,12 +68,6 @@ Needed for daily use, but not blocking it today.
       `opencode` on its PATH (Homebrew, 1.18.30), so the recipe stops before the doc tests
       and the SPA. Find what differs from CI, and have the tests use the pinned binary or
       say why they skip.
-- [ ] **Say when a newer policy bundle ships than the one installed.** The 2026-10-10
-      node ran a build carrying working agreements v18 under signed policy v17, and
-      nothing said so: the operator learned it when `run_wait`, an unattended read in v18,
-      asked for permission. Settings › Permissions & policies, and Home's readiness line,
-      should name the shipped version beside the installed one and offer the preview and
-      apply that already exist.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
@@ -142,12 +124,6 @@ hit on a real task.
 
 **Node data**
 
-- [ ] **`doc_search` misses a document by its own words.** On 2026-10-10 a search for
-      `dogfood`, from a session and from an external harness, did not return
-      `note-tracon-dogfood`, nor did its exact title "Tracon dogfood failures"; a session got
-      `repo-hounddogreading` instead. A longer query that day did find it. Check what the
-      index holds for that document (title, slug, first chunk), and make an exact word in
-      the title or slug rank it first.
 - [ ] **The model list follows what the operator saves.** Saving a provider's declared
       models (Settings › Connections › Providers) writes `node.toml` and nothing else; the
       pickers change only after `probe_models_into_store` runs again, on a passing
@@ -301,6 +277,12 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       session's operator notes, and a review under `publish.commits = keep` with an edited
       message pushed to a real forge. (The built-in skill is proven: a 2.1.295 session in
       the repository's image listed it as `tracon:repo-setup` on 2026-10-10.)
+- [ ] **The #449 fixes, live**: a scratch node started with the default
+      `harness_listen` beside a running one refusing to start while the first keeps its
+      sockets; `doc_search` for `dogfood` returning `note-tracon-dogfood` first; and the
+      node log after a few sessions saying whether the gateway's retry on a fresh
+      connection answered the `BadRecordMac` sends (a stale pooled connection) or failed
+      too (the path).
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
