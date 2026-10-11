@@ -902,7 +902,11 @@ impl Ingest {
             let option = match decision {
                 PermissionReply::Selected(option) => option,
                 PermissionReply::Edited { option_id, .. } => option_id,
-                PermissionReply::Cancelled => crate::adapter::types::OPTION_REJECT_ONCE.to_string(),
+                // OpenCode's reply carries no message, so a policy refusal
+                // reaches it as a plain reject.
+                PermissionReply::Refused { .. } | PermissionReply::Cancelled => {
+                    crate::adapter::types::OPTION_REJECT_ONCE.to_string()
+                }
             };
             let intent = uuid::Uuid::now_v7().to_string();
             let _ = store.opencode_intent_begin(

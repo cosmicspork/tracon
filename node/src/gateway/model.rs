@@ -239,6 +239,35 @@ pub fn harness_wiring(
     }
 }
 
+/// An error and every cause under it, outermost first, as one line. A cause
+/// that only repeats the line above it is left out.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut next = error.source();
+    while let Some(cause) = next {
+        let text = cause.to_string();
+        if parts.last().is_none_or(|last| !last.contains(&text)) {
+            parts.push(text);
+        }
+        next = cause.source();
+    }
+    parts.join(": ")
+}
+
+/// What kind of failure a send was, in words safe to hand the harness: no
+/// address, header or message text from the error itself.
+fn send_failure_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timed out"
+    } else if error.is_connect() {
+        "could not connect"
+    } else if error.is_body() {
+        "request body failed"
+    } else {
+        "connection failed"
+    }
+}
+
 fn refuse(status: StatusCode, reason: &str) -> Response {
     (
         status,
@@ -642,8 +671,15 @@ pub async fn handle(
     let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(provider, error = %e, "upstream unreachable");
-            return refuse(StatusCode::BAD_GATEWAY, "upstream unreachable");
+            let kind = send_failure_kind(&e);
+            // reqwest's own line ends at "error sending request"; the reason
+            // (refused, reset, DNS, TLS) is further down its source chain. The
+            // URL is left out: its query came from the harness.
+            tracing::warn!(provider, kind, error = %error_chain(&e.without_url()), "upstream unreachable");
+            return refuse(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream unreachable ({kind})"),
+            );
         }
     };
     let status = upstream.status();
@@ -1066,6 +1102,60 @@ impl Drop for Counted {
 mod tests {
     use super::*;
     use crate::config::SHAPE_OPENAI;
+
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn an_error_chain_names_every_cause_once() {
+        let error = Layer(
+            "error sending request",
+            Some(Box::new(Layer(
+                "client error (Connect)",
+                Some(Box::new(Layer(
+                    "Connection reset by peer (os error 104)",
+                    Some(Box::new(Layer(
+                        "Connection reset by peer (os error 104)",
+                        None,
+                    ))),
+                ))),
+            ))),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "error sending request: client error (Connect): Connection reset by peer (os error 104)"
+        );
+        assert_eq!(error_chain(&Layer("alone", None)), "alone");
+    }
+
+    /// A send that cannot connect says why in the log, and only its kind to
+    /// the harness.
+    #[tokio::test]
+    async fn a_failed_send_keeps_its_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let e = reqwest::Client::new()
+            .get(format!("http://{addr}/v1/messages?key=secret"))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(send_failure_kind(&e), "could not connect");
+        let chain = error_chain(&e.without_url());
+        assert!(chain.contains("error sending request"), "{chain}");
+        assert!(chain.len() > "error sending request".len(), "{chain}");
+        assert!(!chain.contains("secret"), "{chain}");
+    }
 
     /// A raw chunked HTTP server that writes `chunks` pieces `gap` apart.
     async fn trickle(chunks: usize, gap: Duration) -> String {
