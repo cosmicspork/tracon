@@ -1,56 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Features
-
-* **corpus:** replicate HTML document bundles and render capability-scoped interactive previews
-* **onboarding:** put local runtime readiness first and keep hub pairing outside required setup
-* **metrics:** time to verified work, setup failures, interventions and waiting, per channel
-* **operator:** ask, notify, and report tools that survive disconnects and publish only what the operator inspected
-* **release:** provenance-attested, signed desktop releases with pinned build inputs and a bundled offline verifier
-* **forge:** bounded repository pages with explicit load-more and honest partial search
-* **authority:** scoped allow/ask/deny grants for merge, publish, ticket transition, and deploy, with signed policy deny always dominant
-* **runtime:** runtime-owned workspaces with no host bind mounts, bounded browser imports, export/download, and credential-free dependency preparation
-* **session:** optional workflow with work-item-free plain-prompt sessions, deterministic model defaults, and durable pause/resume/stop controls that fence a watchdog-protected external harness as well as a managed one
-* **review:** immutable candidates with reusable, image-bound check evidence, pinned requirements, attributed decisions, and linked demonstrations
-* **continuity:** signed candidate/context transfer packages bound to their candidate's identity and file tree, single-import reservation with runtime-workspace reuse on retry, and opt-in, revocation-aware hub-side channel rollups
-* **qa:** deploy a candidate to an authorized QA target by exact commit SHA, verify it with a network-scoped headless browser, and build repository-derived prototypes
-* **operator UI:** align desktop/mobile navigation, group Settings by scope, improve contrast and touch targets, and link empty states, usage explanations, and owner-scoped candidate evidence
-* **onboarding:** guide local and existing-mesh first tasks without requiring a local provider for peer execution; keep runner, channel, repository, model, and budget selections coherent
-* **administration:** add authenticated mesh membership and hub-sharing controls, guarded service recovery, and separate application, wire, runtime, and policy compatibility
-* **policy:** preview and apply exact signed bundles with a fixed comparison baseline, distinguish installed and running policy, and persist per-node authenticated rollout receipts
-* **reports:** accept repository-free narrative reports with revision-bound acknowledgement or requested changes, independently of publication and push-service acceptance
-
-### Bug Fixes
-
-* **permissions:** normalize managed-harness requests before applying read exemptions
-* **mesh:** carry the authenticated work-item change with peer compose requests so session creation cannot race work-item replication
-* **review:** reject cross-owner/channel report mirrors, stale decisions, and invalid review-session context; bind remote evidence reads to the actual owner and shared channel
-* **models:** filter channel choices by the connected provider that owns each model, including legacy peers without provider-scope metadata
-* **notifications:** distinguish browser subscriptions, shared channel rules, push-service acceptance, and operator acknowledgement
-* **mobile:** prevent long node identities from widening mesh administration and preserve Settings navigation when sections change
-* **ci:** avoid false project-reference matches across pagination identifier boundaries while preserving private-reference checks
-
-## [0.31.0](https://github.com/cosmicspork/tracon/compare/v0.30.0...v0.31.0) (2026-10-11)
-
-
-### Features
-
-* follow GitHub reruns, ship the setup skill, edit commit messages under keep, and fix the 0.29.0 audit screens ([#436](https://github.com/cosmicspork/tracon/issues/436)) ([1ee1218](https://github.com/cosmicspork/tracon/commit/1ee1218d369f94bb01521c7c26eba32bef233ca0))
-* **session:** prepare the workspace at launch and tell the session how it went ([#443](https://github.com/cosmicspork/tracon/issues/443)) ([ad4a4cb](https://github.com/cosmicspork/tracon/commit/ad4a4cbb77260731abafc180612839d831f3f634))
-* **spa:** read the node's own tool calls as what they do in the transcript ([#445](https://github.com/cosmicspork/tracon/issues/445)) ([e2f00b2](https://github.com/cosmicspork/tracon/commit/e2f00b2c72de1b9ebd3c1d73c6c58d352e7757da))
-
-
-### Bug Fixes
-
-* **mcp:** offer session tools without a null required list ([#440](https://github.com/cosmicspork/tracon/issues/440)) ([2789df3](https://github.com/cosmicspork/tracon/commit/2789df38bc7122c3ece7c1ad05f0ca76dd9fe8d8))
-* **session:** don't flag the node's documented wait polls as repetition ([#446](https://github.com/cosmicspork/tracon/issues/446)) ([821cc72](https://github.com/cosmicspork/tracon/commit/821cc72893fb136193cb37b157037953e8d38d76))
-* **session:** tell a harness its call was refused by policy, and log why an upstream send failed ([#441](https://github.com/cosmicspork/tracon/issues/441)) ([7c3ea99](https://github.com/cosmicspork/tracon/commit/7c3ea9977b1e03f94e342c38251a1a71ae213c95))
-* **spa:** keep a running tool run folded, strip harness error tags, and space operator card labels ([#439](https://github.com/cosmicspork/tracon/issues/439)) ([93deb28](https://github.com/cosmicspork/tracon/commit/93deb283447b242784f36862eba7370a13c4a39c))
-* **spa:** read the worktree line for every workspace source ([#444](https://github.com/cosmicspork/tracon/issues/444)) ([e96a168](https://github.com/cosmicspork/tracon/commit/e96a1687633ff954165b146740544393fba4e5cc))
-* tell a build of unreleased code from the release it follows ([#442](https://github.com/cosmicspork/tracon/issues/442)) ([6a9f5e2](https://github.com/cosmicspork/tracon/commit/6a9f5e2add4ccc4ffcf7023313aafcf7ee499d64))
-
 ## [0.30.0](https://github.com/cosmicspork/tracon/compare/v0.29.0...v0.30.0) (2026-10-09)
 
 
