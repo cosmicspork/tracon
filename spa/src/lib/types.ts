@@ -41,6 +41,11 @@ export interface NodeInfo {
    * null when the bundle carries no id. Only on the serving node's row.
    */
   interface_build?: string | null
+  /**
+   * The policy version this node runs, and the one its build ships. Only on
+   * the serving node's row, and absent from older builds.
+   */
+  policy?: { running: number; trusted: boolean; shipped: number }
 }
 
 export interface ModelOption {

@@ -56,6 +56,16 @@ export interface PolicyStatus {
   installation: PolicyInstallation | null
   rollouts: PolicyRollout[]
   signing_key_present: boolean
+  /** The bundle this build ships. Absent from older builds. */
+  shipped?: { version: number; toml: string }
+}
+
+/** The shipped bundle's version when it is newer than what this node has
+ *  installed, else null. With nothing installed, setup offers it instead. */
+export function newerShipped(status: PolicyStatus): number | null {
+  const shipped = status.shipped?.version
+  const installed = status.installed?.policy.version
+  return shipped != null && installed != null && shipped > installed ? shipped : null
 }
 
 export const policyAdmin = {

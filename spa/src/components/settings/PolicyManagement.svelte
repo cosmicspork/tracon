@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { ApiError } from '../../lib/api'
-  import { policyAdmin, type PolicyRollout, type PolicyStatus, type SignedPolicyBundle } from '../../lib/policy-admin'
+  import { newerShipped, policyAdmin, type PolicyRollout, type PolicyStatus, type SignedPolicyBundle } from '../../lib/policy-admin'
   import { store } from '../../lib/store.svelte'
   import Card from './Card.svelte'
 
@@ -18,6 +18,7 @@
   let notice = $state('')
   let error = $state('')
   let setupConfirmed = $state(false)
+  let editOpen = $state(false)
 
   const peers = $derived(store.nodes.filter((node) => !node.is_self))
   const previewCurrent = $derived(
@@ -25,6 +26,7 @@
   )
   const local = $derived(store.node?.loopback === true)
   const canSign = $derived(local && status?.signing_key_present === true)
+  const newer = $derived(status ? newerShipped(status) : null)
 
   function installedHash(value: PolicyStatus | null) {
     return value?.installed?.bundle_sha256 ?? null
@@ -97,6 +99,15 @@
     } finally {
       busy = false
     }
+  }
+
+  /** Put the shipped bundle in the editor and sign a preview of it; applying
+   *  it is the same explicit step as for any edit. */
+  async function previewShipped() {
+    if (!status?.shipped) return
+    draft = status.shipped.toml
+    editOpen = true
+    await makePreview()
   }
 
   async function apply() {
@@ -221,6 +232,17 @@
       </div>
     </section>
 
+    {#if newer !== null && !status.installed_error}
+      <div class="shipped" role="status">
+        <p>This build ships working agreements <b>v{newer}</b>; v{status.installed?.policy.version} is installed, and decisions follow the installed one.</p>
+        {#if canSign}
+          <button class="btn" onclick={previewShipped} disabled={busy}>Preview shipped v{newer}</button>
+        {:else}
+          <p class="helper">{!local ? 'Open the signing node locally to preview and apply it.' : 'This node has no signing key. Apply it from the node that signed the installed policy.'}</p>
+        {/if}
+      </div>
+    {/if}
+
     {#if status.installed_error}
       <p class="bad" role="alert">The installed signed files cannot be verified: {status.installed_error}. They will not be overwritten by this panel.</p>
     {:else if !status.installed}
@@ -234,7 +256,7 @@
         </div>
       </details>
     {:else}
-      <details class="edit-policy">
+      <details class="edit-policy" bind:open={editOpen}>
         <summary>Edit policy</summary>
         <div class="details-body">
         <p class="helper">{!local ? 'Open the signing node locally to edit its policy.' : !status.signing_key_present ? 'This node has no signing key. Edit on the node that signed this policy, then roll it out here.' : 'Preview with the existing signing key, then apply the exact signed bytes. The key never leaves this node.'}</p>
@@ -345,6 +367,8 @@
   .btn.primary { background: var(--acc); color: var(--acc-ink); }
   .chip { font: 12px var(--mono); color: var(--ink2); }
   .chip::before { display: none; }
+  .shipped { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; border-left: 3px solid var(--wait); padding: .4rem .7rem; }
+  .shipped > p { flex: 1 1 20rem; }
   .ok { color: var(--ok); }
   .bad { color: var(--crit); }
   .dim { color: var(--ink2); }

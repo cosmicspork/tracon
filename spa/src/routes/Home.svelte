@@ -106,6 +106,12 @@
     }),
   )
   const refetch = () => void store.refetch()
+  // A build can ship newer working agreements than the signed bundle the node
+  // runs; nothing else says so until a read the newer one allows asks.
+  const policyBehind = $derived.by(() => {
+    const policy = store.node?.policy
+    return policy?.trusted && policy.shipped > policy.running ? policy : null
+  })
   function selectTask(nodeId: string, channel: string) {
     selectedNodeId = nodeId
     selectedChannel = channel
@@ -155,6 +161,9 @@
      whatever is typed in it, under the banner. -->
 {#if loadPhase(known) !== 'ready'}
   <LoadGate status={known} what="this node" onretry={refetch} retrying={store.refetching} />
+{/if}
+{#if policyBehind}
+  <div class="banner">This build ships working agreements v{policyBehind.shipped} <b>· v{policyBehind.running} is installed and still decides requests.</b> <a href="/settings#policies">Review and apply</a></div>
 {/if}
 {#if known.loaded}
   {#if canCompose}
