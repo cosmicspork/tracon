@@ -788,12 +788,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 tokio::spawn(crate::gateway::proxy::serve_granted(l, granted));
             }
             crate::config::HarnessListen::Unix(path) => {
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                let _ = std::fs::remove_file(&path);
-                let l = tokio::net::UnixListener::bind(&path)
-                    .with_context(|| format!("bind {}", path.display()))?;
+                let l = bind_unix_exclusive(&path)?;
                 tokio::spawn(crate::gateway::proxy::serve_granted_unix(l, granted));
             }
         }
@@ -810,13 +805,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             });
         }
         crate::config::HarnessListen::Unix(path) => {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            // A socket left by a previous run refuses a fresh bind.
-            let _ = std::fs::remove_file(path);
-            let l = tokio::net::UnixListener::bind(path)
-                .with_context(|| format!("bind {}", path.display()))?;
+            let l = bind_unix_exclusive(path)?;
             tokio::spawn(async move {
                 let _ = axum::serve(l, harness_app).await;
             });
@@ -1194,6 +1183,26 @@ pub(crate) async fn verify_node(
     Ok(row)
 }
 
+/// Bind a Unix socket at `path`, replacing one a previous run left behind but
+/// never one a running node still answers on. Unlinking a live socket leaves
+/// its node listening on an inode nothing can reach, so a second node started
+/// with the default listen paths would cut the first off from the gateway.
+fn bind_unix_exclusive(path: &std::path::Path) -> Result<tokio::net::UnixListener> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if std::os::unix::net::UnixStream::connect(path).is_ok() {
+        anyhow::bail!(
+            "{} is in use by another running node; stop it, or give this node its own \
+             [gateway] harness_listen",
+            path.display()
+        );
+    }
+    // A socket left by a previous run refuses a fresh bind.
+    let _ = std::fs::remove_file(path);
+    tokio::net::UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))
+}
+
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
@@ -1212,7 +1221,26 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_is_local, hostname};
+    use super::{bind_unix_exclusive, host_is_local, hostname};
+
+    #[tokio::test]
+    async fn a_live_socket_is_refused_and_a_stale_one_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run").join("harness.sock");
+        let first = bind_unix_exclusive(&path).unwrap();
+
+        // Something answers: the path is left alone and the bind refused.
+        let err = bind_unix_exclusive(&path).unwrap_err().to_string();
+        assert!(err.contains("in use by another running node"), "{err}");
+        assert!(tokio::net::UnixStream::connect(&path).await.is_ok());
+
+        // Nothing answers once the first listener is gone: the stale path is
+        // replaced.
+        drop(first);
+        assert!(path.exists());
+        let _second = bind_unix_exclusive(&path).unwrap();
+        assert!(tokio::net::UnixStream::connect(&path).await.is_ok());
+    }
 
     #[test]
     fn hostname_strips_scheme_port_and_brackets() {
