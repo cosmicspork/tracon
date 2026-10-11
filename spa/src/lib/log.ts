@@ -9,6 +9,7 @@
 
 import { exhaustionNote } from './exhaustion'
 import { formatDuration, formatTokens } from './format'
+import { toolName } from './nodetools'
 import { callKind } from './transcript'
 import type { Event, SessionExhaustion } from './types'
 
@@ -135,7 +136,7 @@ export function providerErrorLine(payload: Record<string, unknown>): string {
 /// then-test loop looks like.
 export function repetitionLine(payload: Record<string, unknown>): string {
   const count = typeof payload.count === 'number' ? payload.count : 0
-  const title = typeof payload.title === 'string' && payload.title ? payload.title : 'the same tool call'
+  const title = typeof payload.title === 'string' && payload.title ? toolName(payload.title) : 'the same tool call'
   return `same call ${count}× in a row · ${title} · recorded, not paused`
 }
 
@@ -226,6 +227,7 @@ export function groupSummary(tools: ToolEntry[]): string {
     search: ['ran %d search', 'ran %d searches'],
     think: ['updated the plan', 'updated the plan'],
     fetch: ['fetched %d page', 'fetched %d pages'],
+    node: ['called the node once', 'called the node %d times'],
     other: ['called %d tool', 'called %d tools'],
   }
   const parts: string[] = []

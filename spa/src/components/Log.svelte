@@ -68,9 +68,9 @@
 
   /// "running · 9s", "failed · 1.2s", "0.4s": how a call ended and how long
   /// it took.
-  function callMeta(state: CallRow['state'], ms: number | null): string {
+  function callMeta(state: CallRow['state'], ms: number | null, note = ''): string {
     const span = ms !== null ? formatSpan(ms) : ''
-    return [state === 'done' ? '' : state, span].filter(Boolean).join(' · ')
+    return [note, state === 'done' ? '' : state, span].filter(Boolean).join(' · ')
   }
 
   const GLYPH: Record<CallRow['state'], string> = { done: '✓', failed: '✗', running: '◌' }
@@ -102,7 +102,7 @@
   <details class="call" class:crit={c.state === 'failed'}>
     <summary>
       <!-- One child: on a phone a summary is a flex row. -->
-      <span class="line"><span class="st {c.state}">{GLYPH[c.state]}</span>{c.text}{#if callMeta(c.state, c.ms)}<span class="meta">{' · '}{callMeta(c.state, c.ms)}</span>{/if}</span>
+      <span class="line"><span class="st {c.state}">{GLYPH[c.state]}</span>{c.text}{#if callMeta(c.state, c.ms, c.note)}<span class="meta">{' · '}{callMeta(c.state, c.ms, c.note)}</span>{/if}</span>
     </summary>
     <div class="out">{c.output || 'no output recorded'}{c.truncated ? '\n… the node keeps only the start of a long output' : ''}</div>
   </details>

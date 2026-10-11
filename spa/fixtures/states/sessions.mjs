@@ -190,6 +190,29 @@ function transcriptEvents(sid) {
   ]
 }
 
+// The node's own tools as Claude Code calls them: a document read, a review
+// submitted and waited on through its check, a question to the operator, the
+// pull request's state, and another MCP server's tool beside them.
+function nodeToolEvents(sid) {
+  const review = '01a128ee-0940-7cf0-85e7-a5f3aa718404'
+  const waiting = (state, secs) => JSON.stringify({ review_id: review, state, still_waiting: true, message: `Still running the required checks (${secs}s so far).` }, null, 2)
+  return [
+    ...opening(sid, { prompt: 'Fix the worktree line for imported workspaces, then submit it.' }),
+    ...claudeCall(sid, 'toolu_n1', 'mcp__tracon__doc_read', 'other', { slug: 'note-tracon-dogfood' }, -900000, 120, { output: JSON.stringify({ slug: 'note-tracon-dogfood', title: 'Tracon dogfood failures' }) }),
+    ...claudeCall(sid, 'toolu_n2', 'mcp__tracon__ask_operator', 'other', { request_id: 'validate-in-session-2', question: 'In-session ask_operator test: answer anything once a minute has passed.' }, -880000, 45000, { output: JSON.stringify({ question_id: 'q-1', state: 'unanswered', still_waiting: true }, null, 2) }),
+    ...claudeCall(sid, 'toolu_n3', 'mcp__tracon__question_status', 'other', { question_id: 'q-1' }, -834000, 38000, { output: JSON.stringify({ question_id: 'q-1', state: 'answered', answer: { text: 'Answered after a minute.' } }, null, 2) }),
+    ...claudeCall(sid, 'toolu_n4', 'mcp__tracon__submit_review', 'other', { title: 'fix(spa): read the worktree line for every workspace source', body: '…' }, -790000, 45000, { output: JSON.stringify({ review_id: review, state: 'checking' }, null, 2) }),
+    ...claudeCall(sid, 'toolu_n5', 'mcp__tracon__review_status', 'other', { review_id: review }, -744000, 45000, { output: waiting('checking', 91) }),
+    ...claudeCall(sid, 'toolu_n6', 'mcp__tracon__review_status', 'other', { review_id: review }, -698000, 45000, { output: waiting('checking', 138) }),
+    ...claudeCall(sid, 'toolu_n7', 'mcp__tracon__review_status', 'other', { review_id: review }, -652000, 45000, { output: waiting('checking', 185) }),
+    ev(sid, 'repetition', { what: 'tool_call', count: 3, title: 'mcp__tracon__review_status', kind: 'other', paused: false }, -607000),
+    ...claudeCall(sid, 'toolu_n8', 'mcp__tracon__review_status', 'other', { review_id: review }, -606000, 30000, { output: JSON.stringify({ review_id: review, state: 'approved', published: 'https://github.com/acme/orbit/pull/443' }, null, 2) }),
+    ...claudeCall(sid, 'toolu_n9', 'mcp__tracon__pr_status', 'other', { number: 443 }, -570000, 400, { output: JSON.stringify({ number: 443, state: 'open', mergeable: true }) }),
+    ...claudeCall(sid, 'toolu_n10', 'mcp__probe__ping_it', 'other', { url: 'https://orbit.example.com/health' }, -560000, 90, { output: 'pong' }),
+    ...claudeCall(sid, 'toolu_n11', 'mcp__tracon__run_wait', 'other', { run_id: 37854905007 }, -40000, 0),
+  ]
+}
+
 function workTurn(sid, at = -2620000) {
   return [
     ev(sid, 'thought', { text: 'The ceiling check in metrics.rs already counts tokens per channel per day. A limiter can reuse that window instead of keeping its own.' }, at),
@@ -644,6 +667,18 @@ export default [
       await page.keyboard.press('o')
       await page.locator('details.call.reads > summary').first().click()
       await page.locator('details.call.crit > summary').first().click()
+    },
+  },
+  {
+    id: 'sessions-transcript-node-tools',
+    area: 'sessions',
+    route: `/sessions/${S.transcript.id}`,
+    title: "The node's own tools in the transcript, every run opened",
+    note: 'mcp__tracon__ calls read as what they do ("Wait for review 01a128ee · checking"), the repetition notice names the tool in words, and another MCP server keeps its name.',
+    since: 'feat/transcript-node-tool-lines',
+    api: page(S.transcript, { events: nodeToolEvents(S.transcript.id) }),
+    act: async (page) => {
+      await page.keyboard.press('o')
     },
   },
   {

@@ -5,6 +5,7 @@
 // `groupLog` decides where a run starts and ends; this only says what is in it.
 
 import type { ToolEntry } from './log'
+import { mcpTool, nodeCallNote, nodeCallText, nodeTool, spaced } from './nodetools'
 
 export type CallState = 'running' | 'done' | 'failed'
 
@@ -13,6 +14,8 @@ export interface CallRow {
   kind: string
   /** The line as read: "Read src/lib/log.ts", "Bash just test". */
   text: string
+  /** What a node tool's answer said, in a word or two: "checking", "answered". */
+  note: string
   state: CallState
   /** How long it took, or has been running; null when the log cannot say. */
   ms: number | null
@@ -57,9 +60,12 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v.trim() : ''
 }
 
-/// read, edit, execute, search, fetch, think or other: the policy's word
-/// when it gave one, else the harness's, else the tool's name.
+/// read, edit, execute, search, fetch, think, node or other: the policy's
+/// word when it gave one, else the harness's, else the tool's name. A call to
+/// the node's own tools is `node` whatever the policy called it, so that a
+/// document read never folds in with the files a run read.
 export function callKind(t: ToolEntry): string {
+  if (nodeTool(str(t.call.payload.title))) return 'node'
   const given = [t.kind, str(t.call.payload.kind)].find((k) => k && k !== 'other')
   if (given) return given
   const name = str(t.call.payload.title).split(/[\s:]/)[0].toLowerCase()
@@ -95,6 +101,13 @@ export function callTarget(rawInput: unknown, root?: string | null): string {
 /// its target ("Read node/src/x.rs") is left as it is.
 export function callText(t: ToolEntry, root?: string | null): string {
   const title = str(t.call.payload.title) || t.call.ref_id || 'a tool'
+  const node = nodeTool(title)
+  if (node) return nodeCallText(node, t.call.payload.raw_input)
+  const mcp = mcpTool(title)
+  if (mcp) {
+    const target = callTarget(t.call.payload.raw_input, root)
+    return [`${spaced(mcp.tool)} (${mcp.server})`, target].filter(Boolean).join(' ')
+  }
   const target = callTarget(t.call.payload.raw_input, root)
   return target && !title.includes(target) ? `${title} ${target}` : title
 }
@@ -181,6 +194,7 @@ export function callRow(t: ToolEntry, root?: string | null, now = 0): CallRow {
     entry: t,
     kind: callKind(t),
     text: callText(t, root),
+    note: callNote(t, output),
     state,
     ms: callMs(t, now),
     output,
@@ -188,6 +202,12 @@ export function callRow(t: ToolEntry, root?: string | null, now = 0): CallRow {
     error: state === 'failed' ? firstErrorLine(output) : '',
     tail: state === 'running' ? outputTail(decodeOutput(t.tail)) : '',
   }
+}
+
+/// A node tool's state out of its answer; nothing for any other call.
+function callNote(t: ToolEntry, output: string): string {
+  const node = t.result ? nodeTool(str(t.call.payload.title)) : null
+  return node ? nodeCallNote(node, output) : ''
 }
 
 function worst(calls: CallRow[]): CallState {

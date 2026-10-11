@@ -208,3 +208,27 @@ test('a running run names its calls still going, and none once they land', () =>
   ])
   expect(runRunning(landed, ROOT)).toEqual([])
 })
+
+test("a call to the node's own tools reads as what it does, with its answer's state", () => {
+  const answer = JSON.stringify({ state: 'checking', review_id: '01a128ee-0940' }, null, 2)
+  const tools = run([
+    ...call('n1', 'mcp__tracon__review_status', 'read', { review_id: '01a128ee-0940-7cf0-85e7-a5f3aa718404' }, 0, { ms: 45_000, output: answer }),
+    ...call('n2', 'mcp__tracon__doc_read', 'read', { slug: 'note-tracon-dogfood' }, 46_000, { ms: 50, output: '{}' }),
+    ...call('n3', 'tracon_ask_operator', 'other', { question: 'Which database?' }, 47_000),
+    ...call('m1', 'mcp__probe__ping_it', 'other', { url: 'https://example.com' }, 48_000, { ms: 10 }),
+  ])
+  const rows = transcript(tools)
+  // A document read stays its own line: it is not one of the files a run read.
+  expect(rows.map((r) => r.kind)).toEqual(['call', 'call', 'call', 'call'])
+  const calls = rows.map((r) => (r.kind === 'call' ? r.call : null))
+  expect(calls[0]?.text).toBe('Wait for review 01a128ee')
+  expect(calls[0]?.note).toBe('checking')
+  expect(calls[0]?.kind).toBe('node')
+  expect(calls[1]?.text).toBe('Read document note-tracon-dogfood')
+  expect(calls[1]?.note).toBe('')
+  expect(calls[2]?.text).toBe('Ask the operator · Which database?')
+  expect(calls[2]?.state).toBe('running')
+  expect(calls[3]?.text).toBe('Ping it (probe) https://example.com')
+  expect(calls[3]?.kind).toBe('other')
+  expect(groupSummary(tools)).toBe('Called the node 3 times, called 1 tool')
+})
