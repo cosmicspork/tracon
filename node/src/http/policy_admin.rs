@@ -90,6 +90,12 @@ pub async fn status(
         "installation": installation,
         "rollouts": rollouts,
         "signing_key_present": bundle::Paths::signing_key().is_file(),
+        // What this build ships, so a newer one than the installed bundle can
+        // be previewed and applied through the same signed path.
+        "shipped": {
+            "version": crate::policy::Policy::shipped_version(),
+            "toml": crate::policy::WORKING_AGREEMENTS,
+        },
     })))
 }
 

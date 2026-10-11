@@ -616,6 +616,13 @@ impl Policy {
         policy
     }
 
+    /// The version of the bundle this binary ships, for saying when it is
+    /// newer than the one installed.
+    pub fn shipped_version() -> u32 {
+        static VERSION: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *VERSION.get_or_init(|| Self::shipped().version)
+    }
+
     pub fn shipped_shared() -> std::sync::Arc<parking_lot::RwLock<Self>> {
         std::sync::Arc::new(parking_lot::RwLock::new(Self::shipped()))
     }

@@ -601,6 +601,16 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     let mut v = node_row_json(&n);
     v["providers"] = json!(providers_json(s));
     v["default_channel"] = json!(s.cfg.session.default_channel);
+    // The policy this node runs beside the one its build ships, so Home can
+    // say when a newer bundle is waiting to be applied. Read without waiting:
+    // a caller may already hold the policy, and the line can wait a frame.
+    if let Some(policy) = s.tools.policy.try_read() {
+        v["policy"] = json!({
+            "running": policy.version,
+            "trusted": policy.trusted,
+            "shipped": crate::policy::Policy::shipped_version(),
+        });
+    }
     build_facts(&mut v);
     Ok(v)
 }
