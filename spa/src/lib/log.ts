@@ -139,6 +139,32 @@ export function repetitionLine(payload: Record<string, unknown>): string {
   return `same call ${count}× in a row · ${title} · recorded, not paused`
 }
 
+/// "workspace imported · on feat/x · volume tracon-workspace-9f3" — where the
+/// session's files came from. The node records one shape per source: a
+/// workspace in a runtime volume names its volume and has no path, while a
+/// host worktree names its path and the base it started from. Only the parts
+/// the node recorded are said; a field it left out is left out of the line.
+export function worktreeLine(payload: Record<string, unknown>): string {
+  const source = str(payload.source)
+  const path = str(payload.path)
+  const said: Record<string, string> = { imported: 'workspace imported', resumed: 'workspace resumed' }
+  const head =
+    said[source] ?? (source ? `workspace ${source.replace(/_/g, ' ')}` : path ? 'host worktree' : 'workspace')
+  const branch = str(payload.branch)
+  const base = str(payload.base)
+  const volume = str(payload.volume)
+  return [
+    head,
+    path,
+    branch ? `on ${branch}` : '',
+    base ? `from ${base}` : '',
+    volume ? `volume ${volume}` : '',
+    payload.main_checkout_dirty === true ? 'main checkout is dirty and was left alone' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
 /// Where the harness is running, appended to the start line. Said only when
 /// there is something to say: the repository's image, or why a repository
 /// that has one is not being used. A session in the plain harness image, with
