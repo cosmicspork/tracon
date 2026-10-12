@@ -576,6 +576,9 @@ read-only. That cache is the run's own, copied from the repository's base cache 
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
 which may run the candidate's own scripts, can reach its own evidence and nobody else's.
+A preparation that fails runs no check: it is reported once, with the failing command,
+its exit status and its output, each check it kept from running is recorded `not_run`
+(never a pass, never reusable), and the refusal names preparation rather than a check.
 Sessions get a cache of their own, one per repository and channel, that outlives each
 session: it starts as a copy of the base, and what an agent fetches or compiles into it
 (Cargo's output goes there through `CARGO_TARGET_DIR`) is there for the channel's next

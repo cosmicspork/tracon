@@ -340,6 +340,30 @@ test('a kind nobody taught the log still reads as words with its short fields', 
   expect(line.tone).toBe('sys')
 })
 
+test("a check run's preparation reads as itself, and a failed one names its command and the checks it kept from running", () => {
+  expect(eventLine(ev('check_prepared', null, { ok: true, ms: 11_200 }))).toEqual({
+    text: 'dependencies prepared · once for this run · 11s',
+    tone: 'mark',
+  })
+  const failed = {
+    ok: false,
+    ms: 4_000,
+    reason: 'preparation failed: `composer install` (exit 100)',
+    command: 'composer install',
+    exit: 100,
+    not_run: ['./vendor/bin/pint --test', './vendor/bin/pest'],
+  }
+  expect(eventLine(ev('check_prepared', null, failed))).toEqual({
+    text: 'preparation failed: `composer install` (exit 100) · no check was run: ./vendor/bin/pint --test, ./vendor/bin/pest · 4s',
+    tone: 'crit',
+  })
+  // Recorded before a failure carried its reason: still never a check's.
+  expect(eventLine(ev('check_prepared', null, { ok: false, ms: 0 }))).toEqual({
+    text: 'preparation failed · no check was run · 0s',
+    tone: 'crit',
+  })
+})
+
 test("a workspace's preparation reads as what it did and what it cost the start", () => {
   const commands = ['cargo fetch --locked', 'cd spa && bun install --frozen-lockfile']
   const lines: [Record<string, unknown>, string, string][] = [

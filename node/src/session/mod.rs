@@ -3824,7 +3824,7 @@ pub(crate) async fn prepare_session_workspace(
             .await;
             match prepared {
                 Ok(()) => PrepareOutcome::Prepared,
-                Err(Stopped::Unprepared(detail)) => PrepareOutcome::Failed(detail),
+                Err(Stopped::Unprepared(failure)) => PrepareOutcome::Failed(failure.to_string()),
                 Err(Stopped::TimedOut) => PrepareOutcome::TimedOut {
                     after_secs: environment.timeout_secs,
                 },

@@ -195,8 +195,9 @@ pub mod event_kind {
     /// All nonempty operator-required checks passed (or exact immutable
     /// evidence was reused) for this candidate.
     pub const CANDIDATE_VERIFIED: &str = "candidate_verified";
-    /// A submission was refused before a review existed: over the cap, or a
-    /// check failed (`reason`).
+    /// A submission was refused before a review existed: over the cap, a
+    /// check failed, or the checks' preparation failed (`reason`; `stage` is
+    /// `prepare` for the last).
     pub const REVIEW_REJECTED: &str = "review_rejected";
     /// A review session gave its verdict on the review it was spawned for.
     pub const REVIEW_VERDICT: &str = "review_verdict";
@@ -251,6 +252,10 @@ pub mod event_kind {
     pub const CHECK_NOT_RUNNABLE: &str = "check_not_runnable";
     /// The candidate's dependencies were prepared for this run's checks
     /// (`ok`, `ms`): once, before the first check that actually executed.
+    /// A failed preparation also carries `reason`, `command`, `exit`,
+    /// `message`, `tail`, and the checks it kept from running (`not_run`),
+    /// which get no `check_result` of their own: their evidence rows are
+    /// `not_run`, never a pass and never reusable.
     pub const CHECK_PREPARED: &str = "check_prepared";
     /// A mediated mutation's outcome could not be determined — a prompt whose
     /// dispatch never reported, a node that restarted with one in flight — or
