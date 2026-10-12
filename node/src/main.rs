@@ -2550,6 +2550,9 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
                     line.push_str(&format!(" provider={p}"));
                 }
                 line.push_str(&format!(" channels={}", c.channels.join(",")));
+                if !c.repos.is_empty() {
+                    line.push_str(&format!(" repos={}", c.repos.join(",")));
+                }
                 if !c.nodes.is_empty() {
                     line.push_str(&format!(
                         " nodes={}",

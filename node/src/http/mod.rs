@@ -617,6 +617,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let backend = boundary::backend_for(&cfg).await;
     tracing::info!(runtime = backend.kind(), "boundary backend");
     let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref(), backend.as_ref()).await?;
+    crate::broker::lend_to_preparation(broker.clone(), &node_id);
     let cleaned = crate::session::reconcile_after_restart(&store, &node_id, backend.as_ref()).await;
     match store.reconcile_operator_issue_publications() {
         Ok(0) => {}

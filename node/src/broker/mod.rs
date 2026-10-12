@@ -43,6 +43,16 @@ pub enum BrokerError {
     NotBound { name: String, channel: String },
     #[error("credential {name} is not bound to this node")]
     NotOnThisNode { name: String },
+    #[error("credential {name} does not name repository {repo} in its `repos`")]
+    NotForRepo { name: String, repo: String },
+    #[error("credential {name} is a model credential, not environment")]
+    NotEnv { name: String },
+    #[error("credentials {first} and {second} both set {key}")]
+    Overlap {
+        first: String,
+        second: String,
+        key: String,
+    },
     #[error("credential store: {0}")]
     Io(#[from] std::io::Error),
     #[error("credential store is malformed: {0}")]
@@ -77,6 +87,12 @@ pub struct Credential {
     /// "consulta on the work node only" is this field.
     #[serde(default)]
     pub nodes: Vec<String>,
+    /// Repositories, written as a `[[repo]]` entry's `path`, whose
+    /// default-branch preparation may be lent this credential's `env` when
+    /// their entry names it in `prepare_credentials`. Empty means none: the
+    /// entry naming a credential does not release it on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
     /// `env` (default), `api_key`, or `oauth`.
     #[serde(default = "default_kind")]
     pub kind: String,
@@ -113,6 +129,7 @@ impl std::fmt::Debug for Credential {
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("channels", &self.channels)
             .field("nodes", &self.nodes)
+            .field("repos", &self.repos)
             .field("kind", &self.kind)
             .field("provider", &self.provider)
             .field("expires_ms", &self.expires_ms)
@@ -133,6 +150,7 @@ impl Default for Credential {
             env: BTreeMap::new(),
             channels: Vec::new(),
             nodes: Vec::new(),
+            repos: Vec::new(),
             kind: default_kind(),
             provider: None,
             expires_ms: None,
@@ -376,6 +394,7 @@ impl Broker {
                     "provider": c.provider,
                     "channels": c.channels,
                     "nodes": c.nodes,
+                    "repos": c.repos,
                     "identity": c.identity,
                     "expires_ms": c.expires_ms,
                     "env_keys": c.env.keys().collect::<Vec<_>>(),
@@ -460,6 +479,45 @@ impl Broker {
         node_id: &str,
     ) -> Result<BTreeMap<String, String>, BrokerError> {
         Ok(self.usable(name, channel, node_id)?.env.clone())
+    }
+
+    /// Environment for the preparation that warms `repo`'s base cache from its
+    /// default branch, the one preparation that runs no code an agent wrote.
+    /// Bound by the repository rather than by a channel: what it fetches is
+    /// copied into every channel's sessions on that repository, and no
+    /// session ever runs with the credential. Only an `env` credential is
+    /// lent, and only to a repository it names itself.
+    pub fn preparation_env(
+        &self,
+        name: &str,
+        repo: &Path,
+        node_id: &str,
+    ) -> Result<BTreeMap<String, String>, BrokerError> {
+        let cred = self
+            .credentials
+            .get(name)
+            .ok_or_else(|| BrokerError::Unknown(name.to_string()))?;
+        if !cred.allows_node(node_id) {
+            return Err(BrokerError::NotOnThisNode {
+                name: name.to_string(),
+            });
+        }
+        if cred.kind != KIND_ENV {
+            return Err(BrokerError::NotEnv {
+                name: name.to_string(),
+            });
+        }
+        if !cred
+            .repos
+            .iter()
+            .any(|bound| crate::config::repo_path_matches(Path::new(bound), repo))
+        {
+            return Err(BrokerError::NotForRepo {
+                name: name.to_string(),
+                repo: repo.display().to_string(),
+            });
+        }
+        Ok(cred.env.clone())
     }
 
     /// The gateway's way out: headers for one provider request on behalf of a
@@ -592,6 +650,63 @@ impl Broker {
             .map(|(n, _)| n.as_str())
             .collect()
     }
+
+    /// Every credential `names` lends `repo`'s default-branch preparation, as
+    /// one environment: all of them or none, and refused when two set the
+    /// same variable, since which one won would be an accident of order.
+    pub fn preparation_env_all(
+        &self,
+        names: &[String],
+        repo: &Path,
+        node_id: &str,
+    ) -> Result<Vec<(String, String)>, BrokerError> {
+        let mut env: BTreeMap<String, (String, &str)> = BTreeMap::new();
+        for name in names {
+            for (key, value) in self.preparation_env(name, repo, node_id)? {
+                if let Some((_, first)) = env.get(&key) {
+                    return Err(BrokerError::Overlap {
+                        first: first.to_string(),
+                        second: name.clone(),
+                        key,
+                    });
+                }
+                env.insert(key, (value, name));
+            }
+        }
+        Ok(env
+            .into_iter()
+            .map(|(key, (value, _))| (key, value))
+            .collect())
+    }
+}
+
+/// The node's broker and id, for the one reader no request carries them to:
+/// the warm-up of a repository's base cache, which an image build starts.
+/// Installed once by `serve`; a process that never serves lends nothing.
+static LENT_TO_PREPARATION: std::sync::OnceLock<(SharedBroker, String)> =
+    std::sync::OnceLock::new();
+
+/// Make this the broker preparation borrows from. The first wins.
+pub fn lend_to_preparation(broker: SharedBroker, node_id: &str) {
+    let _ = LENT_TO_PREPARATION.set((broker, node_id.to_string()));
+}
+
+/// The environment `names` lend `repo`'s default-branch preparation, read from
+/// the broker as it is now, so a credential imported in Settings applies to
+/// the next warm-up without a restart.
+pub fn preparation_env_for(repo: &Path, names: &[String]) -> Result<Vec<(String, String)>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (broker, node_id) = LENT_TO_PREPARATION
+        .get()
+        .ok_or("the node's credential broker is not loaded in this process")?;
+    let broker = broker
+        .read()
+        .map_err(|_| "the credential broker is unavailable".to_string())?;
+    broker
+        .preparation_env_all(names, repo, node_id)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -674,6 +789,96 @@ mod tests {
             broker().env_for("nope", "work", "node-a").unwrap_err(),
             BrokerError::Unknown(_)
         ));
+    }
+
+    /// A registry credential reaches a repository's default-branch
+    /// preparation only when the credential itself names that repository:
+    /// a `[[repo]]` entry naming it is not enough, a channel binding is not a
+    /// repository binding, and a model credential is never lent as
+    /// environment.
+    #[test]
+    fn preparation_is_lent_only_what_names_its_repository() {
+        let b: Broker = toml::from_str(
+            r#"
+            [credentials.nova]
+            repos = ["github.com/acme/shop"]
+            [credentials.nova.env]
+            COMPOSER_AUTH = '{"http-basic":{"nova.laravel.com":{"username":"a@b.c","password":"nova-licence-key"}}}'
+
+            [credentials.npm]
+            repos = ["/src/shop"]
+            [credentials.npm.env]
+            NPM_TOKEN = "npm_abc"
+
+            [credentials.clash]
+            repos = ["github.com/acme/shop"]
+            [credentials.clash.env]
+            COMPOSER_AUTH = "{}"
+
+            [credentials.channel_only]
+            channels = ["work"]
+            [credentials.channel_only.env]
+            TOKEN = "t"
+
+            [credentials.model]
+            kind = "api_key"
+            provider = "anthropic"
+            repos = ["/src/shop"]
+            [credentials.model.env]
+            API_KEY = "sk-x"
+            "#,
+        )
+        .unwrap();
+        let clone = Path::new("/var/lib/tracon/repos/github.com/acme/shop");
+        let env = b.preparation_env("nova", clone, "node-a").unwrap();
+        assert!(env["COMPOSER_AUTH"].contains("nova.laravel.com"));
+        assert!(b
+            .preparation_env("npm", Path::new("/src/shop"), "node-a")
+            .is_ok());
+        // Matched as a `[[repo]]` path is: whole components, never characters.
+        assert!(matches!(
+            b.preparation_env("nova", Path::new("/r/github.com/acme/shop2"), "node-a"),
+            Err(BrokerError::NotForRepo { .. })
+        ));
+        assert!(matches!(
+            b.preparation_env("channel_only", clone, "node-a"),
+            Err(BrokerError::NotForRepo { .. })
+        ));
+        assert!(matches!(
+            b.preparation_env("model", Path::new("/src/shop"), "node-a"),
+            Err(BrokerError::NotEnv { .. })
+        ));
+        assert!(matches!(
+            b.preparation_env("absent", clone, "node-a"),
+            Err(BrokerError::Unknown(_))
+        ));
+
+        // Several are one environment, all or nothing.
+        let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let both = Path::new("/src/shop");
+        let mut b = b;
+        let mut nova = b.get("nova").unwrap().clone();
+        nova.repos.push("/src/shop".into());
+        b.put("nova", nova);
+        let env = b
+            .preparation_env_all(&names(&["nova", "npm"]), both, "node-a")
+            .unwrap();
+        let keys: Vec<&str> = env.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, ["COMPOSER_AUTH", "NPM_TOKEN"]);
+        assert!(matches!(
+            b.preparation_env_all(&names(&["nova", "channel_only"]), both, "node-a"),
+            Err(BrokerError::NotForRepo { .. })
+        ));
+        assert!(matches!(
+            b.preparation_env_all(&names(&["nova", "clash"]), clone, "node-a"),
+            Err(BrokerError::Overlap { .. })
+        ));
+
+        // The binding is shown with the rest, and a value never is.
+        let summaries = serde_json::to_string(&b.summaries()).unwrap();
+        assert!(summaries.contains("github.com/acme/shop"));
+        assert!(!summaries.contains("npm_abc") && !summaries.contains("nova-licence-key"));
+        assert!(!format!("{b:?}").contains("npm_abc"));
     }
 
     #[test]

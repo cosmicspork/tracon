@@ -653,6 +653,16 @@ pub struct Repo {
     /// them from it for as long as it runs.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub session_egress: bool,
+    /// Credentials in the node's broker whose environment the node lends to
+    /// the one preparation it runs on the default branch, which fills the
+    /// base cache every candidate and session starts from: a private
+    /// registry's token, read by Composer from `COMPOSER_AUTH` or by npm
+    /// through `.npmrc`. Never given to a candidate's preparation, a
+    /// session's, or any check, all of which run code an agent can change.
+    /// Each must also name this repository in its own `repos`, so naming a
+    /// credential here does not by itself release it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prepare_credentials: Vec<String>,
     /// How this repository's commits reach the forge, in place of the
     /// channel's and `[publish] commits`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -698,17 +708,7 @@ pub fn egress_presets() -> Vec<(&'static str, &'static [&'static str])> {
 impl Repo {
     /// Whether this entry is the one for `repo`.
     pub fn matches(&self, repo: &Path) -> bool {
-        let configured = expand_home(&self.path);
-        let want: Vec<_> = configured.components().collect();
-        if want.is_empty() {
-            return false;
-        }
-        let have: Vec<_> = repo.components().collect();
-        // Component-wise, never textual: `…/name` must not match `…/name2`.
-        if configured.is_absolute() {
-            return have == want;
-        }
-        have.len() >= want.len() && have[have.len() - want.len()..] == want[..]
+        repo_path_matches(&self.path, repo)
     }
 
     /// The literal hosts `egress` names, presets expanded, in the order
@@ -739,6 +739,23 @@ impl Repo {
         }
         Ok(hosts)
     }
+}
+
+/// Whether `configured`, written as a `[[repo]]` entry's `path`, names `repo`: an
+/// absolute path must equal the repository root, a relative one matches a
+/// path suffix.
+pub fn repo_path_matches(configured: &Path, repo: &Path) -> bool {
+    let configured = expand_home(configured);
+    let want: Vec<_> = configured.components().collect();
+    if want.is_empty() {
+        return false;
+    }
+    let have: Vec<_> = repo.components().collect();
+    // Component-wise, never textual: `…/name` must not match `…/name2`.
+    if configured.is_absolute() {
+        return have == want;
+    }
+    have.len() >= want.len() && have[have.len() - want.len()..] == want[..]
 }
 
 /// A plain DNS name: no scheme, port, path, wildcard or pattern. The scoped
@@ -813,6 +830,32 @@ pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
         }
         if entry.timeout_secs == Some(0) {
             return Err(format!("repo {named}: timeout_secs must be at least 1"));
+        }
+        if !entry.prepare_credentials.is_empty() {
+            if entry
+                .prepare_credentials
+                .iter()
+                .any(|name| name.trim().is_empty() || name.trim() != name)
+            {
+                return Err(format!(
+                    "repo {named}: prepare_credentials names a credential by an empty or padded name"
+                ));
+            }
+            // The only preparation that is lent them is the one that warms
+            // the base cache from the default branch, and the node runs that
+            // only after building the image an entry's Dockerfile names.
+            if entry.dockerfile.is_none() {
+                return Err(format!(
+                    "repo {named}: prepare_credentials are lent only to the default branch's \
+                     preparation, which runs when the node builds this repository's image; \
+                     name a dockerfile"
+                ));
+            }
+            if entry.prepare.is_empty() {
+                return Err(format!(
+                    "repo {named}: prepare_credentials has no prepare command to lend them to"
+                ));
+            }
         }
         let path = expand_home(&entry.path);
         if seen.contains(&path) {
@@ -2249,6 +2292,48 @@ mod tests {
         }])
         .unwrap_err()
         .contains("no dockerfile"));
+    }
+
+    /// Credentials are lent only to the default branch's preparation, which
+    /// runs after the node builds the entry's Dockerfile. An entry that could
+    /// never lend them says so at load rather than leaving a registry to
+    /// refuse an install later.
+    #[test]
+    fn prepare_credentials_need_a_built_image_and_a_preparation() {
+        let lending = |dockerfile: Option<&str>, prepare: &[&str], names: &[&str]| Repo {
+            path: PathBuf::from("/srv/code/app"),
+            dockerfile: dockerfile.map(str::to_string),
+            prepare: prepare.iter().map(|c| c.to_string()).collect(),
+            prepare_credentials: names.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        };
+        let install = ["composer install --no-interaction"];
+        validate_repos(&[lending(Some("Dockerfile"), &install, &["nova"])]).unwrap();
+        assert!(validate_repos(&[lending(None, &install, &["nova"])])
+            .unwrap_err()
+            .contains("name a dockerfile"));
+        assert!(
+            validate_repos(&[lending(Some("Dockerfile"), &[], &["nova"])])
+                .unwrap_err()
+                .contains("no prepare command")
+        );
+        for bad in ["", " nova"] {
+            assert!(
+                validate_repos(&[lending(Some("Dockerfile"), &install, &[bad])])
+                    .unwrap_err()
+                    .contains("empty or padded")
+            );
+        }
+        // Left out of the file when there are none, so an entry that never
+        // named any reads as it did.
+        let plain = toml::to_string(&lending(Some("Dockerfile"), &install, &[])).unwrap();
+        assert!(!plain.contains("prepare_credentials"), "{plain}");
+        let parsed: Repo = toml::from_str(
+            "path = \"/srv/code/app\"\ndockerfile = \"Dockerfile\"\nprepare = [\"x\"]\n\
+             prepare_credentials = [\"nova\"]\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.prepare_credentials, ["nova"]);
     }
 
     /// The table a running node resolves against is the file's until the

@@ -342,6 +342,75 @@ pub fn cache_env() -> Vec<(String, String)> {
     .collect()
 }
 
+/// Environment lent from the broker to one preparation, and what it takes out
+/// of anything that preparation says. Only the default branch's preparation
+/// is lent any (`prepare_credentials`); every other preparation runs with
+/// none.
+#[derive(Clone, Default)]
+pub struct PrepareSecrets {
+    env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for PrepareSecrets {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_list()
+            .entries(self.env.iter().map(|(key, _)| key))
+            .finish()
+    }
+}
+
+/// The shortest value redaction looks for. A shorter one (a `1`, a `true`) is
+/// configuration rather than a secret, and replacing it everywhere would make
+/// the output unreadable.
+const SHORTEST_REDACTED: usize = 6;
+
+impl PrepareSecrets {
+    pub fn new(env: Vec<(String, String)>) -> Self {
+        Self { env }
+    }
+
+    pub fn env(&self) -> &[(String, String)] {
+        &self.env
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.env.is_empty()
+    }
+
+    /// `text` with every lent value taken out, and every string inside one
+    /// that is JSON (`COMPOSER_AUTH`), since a tool that echoes a password
+    /// echoes the password, not the document it came in.
+    pub fn redact(&self, text: &str) -> String {
+        fn leaves(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::String(text) => out.push(text.clone()),
+                Value::Array(items) => items.iter().for_each(|item| leaves(item, out)),
+                Value::Object(fields) => fields.values().for_each(|item| leaves(item, out)),
+                _ => {}
+            }
+        }
+        let mut needles = Vec::new();
+        for (_, value) in &self.env {
+            needles.push(value.clone());
+            if let Ok(parsed) = serde_json::from_str::<Value>(value) {
+                leaves(&parsed, &mut needles);
+            }
+        }
+        needles.retain(|needle| needle.len() >= SHORTEST_REDACTED);
+        // The whole document before its parts, so it is replaced in one piece.
+        needles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        needles.dedup();
+        let mut text = text.to_string();
+        for needle in &needles {
+            if text.contains(needle.as_str()) {
+                text = text.replace(needle.as_str(), "[redacted]");
+            }
+        }
+        text
+    }
+}
+
 /// A preparation's way out, and the proxy variables that send its container
 /// through it instead of through the harness proxy. Dropping it closes it.
 pub struct ScopedEgress {
@@ -841,6 +910,38 @@ mod tests {
             app.cache_volume,
             environment_for(&cfg, &store, Some(Path::new("/src/app"))).cache_volume
         );
+    }
+
+    /// What a lent credential's preparation says is read with its values
+    /// taken out, whole or in part, and the lent environment never prints.
+    #[test]
+    fn lent_values_are_taken_out_of_what_preparation_says() {
+        let auth = r#"{"http-basic":{"nova.laravel.com":{"username":"ops@example.com","password":"nova-licence-key"}}}"#;
+        let secrets = PrepareSecrets::new(vec![
+            ("COMPOSER_AUTH".into(), auth.into()),
+            ("NPM_TOKEN".into(), "npm_0123456789".into()),
+            ("COMPOSER_NO_INTERACTION".into(), "1".into()),
+        ]);
+        let said = format!(
+            "env: {auth}\npassword nova-licence-key rejected for ops@example.com\n\
+             //registry.npmjs.org/:_authToken=npm_0123456789\nstep 1 of 1\n"
+        );
+        let read = secrets.redact(&said);
+        for secret in [
+            "nova-licence-key",
+            "ops@example.com",
+            "npm_0123456789",
+            "http-basic",
+        ] {
+            assert!(!read.contains(secret), "{secret} survived: {read}");
+        }
+        // A value too short to be a secret is left where it is.
+        assert!(read.contains("step 1 of 1"), "{read}");
+        assert_eq!(read.matches("[redacted]").count(), 4, "{read}");
+        assert!(PrepareSecrets::default().is_empty());
+        assert_eq!(PrepareSecrets::default().redact(&said), said);
+        let shown = format!("{secrets:?}");
+        assert!(shown.contains("NPM_TOKEN") && !shown.contains("npm_0123456789"));
     }
 
     #[test]

@@ -25,8 +25,8 @@ pub const TRY: &str = "repo_setup_try";
 pub const PROPOSE: &str = "repo_setup_propose";
 
 /// The fields of an entry an agent may draft. Not `path`, which the node
-/// takes from the session, and not `session_egress`, which is the
-/// operator's alone.
+/// takes from the session, and not `session_egress` or
+/// `prepare_credentials`, which are the operator's alone.
 const ENTRY_FIELDS: &[&str] = &[
     "image",
     "dockerfile",

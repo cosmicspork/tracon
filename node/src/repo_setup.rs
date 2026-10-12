@@ -120,6 +120,10 @@ pub fn draft_from_tree(
         // sessions is the operator's call, made in Settings or on an egress
         // card, and a proposal keeps whatever the entry says now.
         session_egress: current.is_some_and(|entry| entry.session_egress),
+        // Nor which credentials its default branch's preparation is lent.
+        prepare_credentials: current
+            .map(|entry| entry.prepare_credentials.clone())
+            .unwrap_or_default(),
         timeout_secs: current.and_then(|entry| entry.timeout_secs),
         ..Default::default()
     };
@@ -532,7 +536,9 @@ pub async fn draft(
 
 /// Write `entry` as the table's entry for `repo`, in place of the one that
 /// matches it now or after the rest. Only an approved proposal calls this.
-/// What the entry says about its sessions' egress is kept as it was.
+/// What the entry says about its sessions' egress, and which credentials it
+/// lends its default branch's preparation, is kept as it was: neither is an
+/// agent's to propose.
 pub fn save(cfg: &Config, repo: &Path, entry: Repo) -> Result<String, String> {
     let _edit = Config::edit_lock();
     let mut file = Config::try_load()?;
@@ -542,6 +548,7 @@ pub fn save(cfg: &Config, repo: &Path, entry: Repo) -> Result<String, String> {
             *current = Repo {
                 path: current.path.clone(),
                 session_egress: current.session_egress,
+                prepare_credentials: current.prepare_credentials.clone(),
                 ..entry
             };
             current.path.display().to_string()
@@ -550,6 +557,7 @@ pub fn save(cfg: &Config, repo: &Path, entry: Repo) -> Result<String, String> {
             entries.push(Repo {
                 path: repo.to_path_buf(),
                 session_egress: false,
+                prepare_credentials: Vec::new(),
                 ..entry
             });
             repo.display().to_string()
@@ -958,13 +966,16 @@ mod tests {
         let current = Repo {
             path: "github.com/o/r".into(),
             session_egress: true,
+            prepare_credentials: vec!["npm-private".into()],
             ..Default::default()
         };
         let (entry, _, notes) = draft_from_tree(Path::new("/x"), root, Some(&current), &[]);
         assert_eq!(entry.checks.unwrap(), ["pnpm run check", "pnpm run lint"]);
-        // The entry it would replace keeps its path and its sessions' egress.
+        // The entry it would replace keeps its path, its sessions' egress,
+        // and the credentials it lends its default branch's preparation.
         assert_eq!(entry.path, Path::new("github.com/o/r"));
         assert!(entry.session_egress);
+        assert_eq!(entry.prepare_credentials, ["npm-private"]);
         assert!(entry.image.is_none());
         assert!(notes.iter().any(|n| n.contains("by tag")), "{notes:?}");
         assert!(notes.iter().any(|n| n.contains("compose")), "{notes:?}");
