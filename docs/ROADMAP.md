@@ -279,10 +279,10 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       the repository's image listed it as `tracon:repo-setup` on 2026-10-10.)
 - [ ] **The #449 fixes, live**: a scratch node started with the default
       `harness_listen` beside a running one refusing to start while the first keeps its
-      sockets; `doc_search` for `dogfood` returning `note-tracon-dogfood` first; and the
-      node log after a few sessions saying whether the gateway's retry on a fresh
-      connection answered the `BadRecordMac` sends (a stale pooled connection) or failed
-      too (the path).
+      sockets; `doc_search` for a word in a document's title returning that document
+      first; and the node log after a few sessions saying whether the gateway's retry on
+      a fresh connection answered the `BadRecordMac` sends (a stale pooled connection) or
+      failed too (the path).
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
