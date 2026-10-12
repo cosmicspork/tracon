@@ -43,6 +43,12 @@ async fn stub(
     ));
     let path = uri.path();
     let ok = |v: Value| (axum::http::StatusCode::OK, Json(v));
+    if path.ends_with("/dispatches") {
+        bodies
+            .lock()
+            .unwrap()
+            .push(serde_json::from_str(&body).unwrap_or(Value::Null));
+    }
     if (method.as_str(), path) == ("POST", "/graphql") {
         let sent: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         bodies.lock().unwrap().push(sent.clone());
@@ -122,6 +128,36 @@ async fn stub(
         }
         ("POST", "/repos/owner/name/actions/runs/900/rerun-failed-jobs") => {
             (axum::http::StatusCode::CREATED, Json(json!({})))
+        }
+        ("GET", "/repos/owner/name/git/ref/tags/v1") => ok(json!({ "ref": "refs/tags/v1" })),
+        ("GET", "/repos/owner/name/branches/main") => ok(json!({ "name": "main" })),
+        ("GET", "/repos/owner/name/actions/workflows/renovate.yaml/runs") => {
+            ok(json!({ "workflow_runs": [{ "id": 940 }] }))
+        }
+        ("POST", "/repos/owner/name/actions/workflows/renovate.yaml/dispatches") => ok(json!({
+            "workflow_run_id": 950,
+            "run_url": "https://api.github.test/repos/owner/name/actions/runs/950",
+            "html_url": "https://github.test/owner/name/actions/runs/950",
+        })),
+        // An older GitHub that does not say which run it started: the run
+        // appears in the list after the dispatch.
+        ("GET", "/repos/owner/name/actions/workflows/quiet.yml/runs") => {
+            let dispatched = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(m, p, ..)| m == "POST" && p.ends_with("quiet.yml/dispatches"));
+            ok(if dispatched {
+                json!({ "workflow_runs": [
+                    { "id": 961, "html_url": "https://github.test/owner/name/actions/runs/961" },
+                    { "id": 940 },
+                ] })
+            } else {
+                json!({ "workflow_runs": [{ "id": 940 }] })
+            })
+        }
+        ("POST", "/repos/owner/name/actions/workflows/quiet.yml/dispatches") => {
+            (axum::http::StatusCode::NO_CONTENT, Json(Value::Null))
         }
         _ => (
             axum::http::StatusCode::NOT_FOUND,
@@ -514,6 +550,116 @@ async fn rerunning_failed_jobs_waits_on_the_operator() {
             )
         ]
     );
+}
+
+fn dispatching(workflows: &[&str]) -> Arc<tracon::config::Config> {
+    Arc::new(tracon::config::Config {
+        github: tracon::config::Github {
+            dispatch: [(
+                "owner/name".to_string(),
+                workflows.iter().map(|w| w.to_string()).collect(),
+            )]
+            .into(),
+        },
+        ..Default::default()
+    })
+}
+
+/// Starting a workflow is asked; a workflow the node's configuration does
+/// not list is refused before anyone is asked, and a tag is refused before
+/// anything is sent.
+#[tokio::test]
+async fn a_workflow_is_dispatched_only_when_listed_and_asked() {
+    state::isolate();
+    let (mut t, seen, bodies) = rig_with_bodies().await;
+    let c = ctx("work");
+    let args = json!({ "repo": "owner/name", "workflow": "renovate.yaml", "ref": "main",
+                       "inputs": { "LOG_LEVEL": "debug" } });
+
+    // Nothing listed: refused outright, not asked.
+    let (err, v) = call(&t, &c, "run_dispatch", args.clone()).await;
+    assert!(err);
+    let said = v.as_str().unwrap_or_default();
+    assert!(said.contains("[github] dispatch"), "{v}");
+    assert!(!said.contains("approval"), "{v}");
+
+    t.cfg = dispatching(&["renovate.yaml", "quiet.yml"]);
+    let (err, v) = call(&t, &c, "run_dispatch", args.clone()).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+
+    t.policy = allowing(r#""run_dispatch""#);
+    let mut release = args.clone();
+    release["workflow"] = json!("release.yml");
+    let (err, v) = call(&t, &c, "run_dispatch", release).await;
+    assert!(
+        err && v.as_str().unwrap_or_default().contains("[github] dispatch"),
+        "{v}"
+    );
+    let mut production = args.clone();
+    production["inputs"] = json!({ "TARGET": "production" });
+    let (err, v) = call(&t, &c, "run_dispatch", production).await;
+    assert!(
+        err && v.as_str().unwrap_or_default().contains("names production"),
+        "{v}"
+    );
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+
+    let mut tag = args.clone();
+    tag["ref"] = json!("v1");
+    let (err, v) = call(&t, &c, "run_dispatch", tag).await;
+    assert!(
+        err && v.as_str().unwrap_or_default().contains("is a tag"),
+        "{v}"
+    );
+    assert!(
+        !seen.lock().unwrap().iter().any(|(m, ..)| m == "POST"),
+        "a tag is not dispatched"
+    );
+    seen.lock().unwrap().clear();
+
+    let (err, v) = call(&t, &c, "run_dispatch", args).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["run_id"], 950);
+    assert_eq!(v["url"], "https://github.test/owner/name/actions/runs/950");
+    let calls: Vec<(String, String)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(m, p, ..)| (m.clone(), p.clone()))
+        .collect();
+    assert_eq!(
+        calls.last().unwrap(),
+        &(
+            "POST".to_string(),
+            "/repos/owner/name/actions/workflows/renovate.yaml/dispatches".to_string()
+        )
+    );
+    let sent = bodies.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        sent,
+        json!({ "ref": "main", "inputs": { "LOG_LEVEL": "debug" }, "return_run_details": true })
+    );
+}
+
+/// A GitHub that answers 204 without the run leaves the node to find it.
+#[tokio::test]
+async fn a_dispatch_github_does_not_name_is_found_in_the_list() {
+    state::isolate();
+    let (mut t, _) = rig().await;
+    t.cfg = dispatching(&["quiet.yml"]);
+    t.policy = allowing(r#""run_dispatch""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work"),
+        "run_dispatch",
+        json!({ "repo": "owner/name", "workflow": "quiet.yml", "ref": "main" }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["run_id"], 961);
+    assert_eq!(v["url"], "https://github.test/owner/name/actions/runs/961");
 }
 
 /// A session on `owner/name` (resolved from its checkout's `origin` into the

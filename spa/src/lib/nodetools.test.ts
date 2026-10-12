@@ -54,6 +54,8 @@ test('forge calls name the change, run or pipeline', () => {
   expect(nodeCallText('run_wait', { run_id: 5 })).toBe('Wait for CI run 5')
   expect(nodeCallText('mr_status', { project: 'g/p', iid: 7 })).toBe('Merge request !7')
   expect(nodeCallText('pipeline_wait', { pipeline_id: 88 })).toBe('Wait for pipeline 88')
+  expect(nodeCallText('run_dispatch', { workflow: 'renovate.yaml', ref: 'main' })).toBe('Start workflow renovate.yaml on main')
+  expect(nodeCallText('pipeline_retry', { pipeline_id: 88 })).toBe('Retry pipeline 88')
   expect(nodeCallText('issue', { key: 'OPS-12' })).toBe('Issue OPS-12')
   expect(nodeCallText('issue_transition', { key: 'OPS-12', transition_id: '21' })).toBe('Move OPS-12')
   // A number the call left out leaves no dangling mark.

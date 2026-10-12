@@ -1,7 +1,8 @@
 //! GitLab, as narrow tools: read a merge request's state and its discussions,
 //! comment on it or reply to one discussion, find the open one for a branch,
 //! read a pipeline and a job's log, list the pipelines that ran at an exact
-//! commit and play a manual job in one, and run a pipeline on a branch.
+//! commit and play a manual job in one, run a pipeline on a branch, and
+//! retry a pipeline's failed jobs (`super::parity` maps each to GitHub's).
 //! Opening a merge request is the review path (`review::publish`); merging
 //! (`mr_merge`) and playing a deploy job (`deploy`) run only with current
 //! scoped authority. Marking ready is not a tool. A pipeline on a tag, which is how a
@@ -29,6 +30,7 @@ pub const DEPLOY: &str = "deploy";
 pub const MR_DISCUSSIONS: &str = "mr_discussions";
 pub const MR_REPLY: &str = "mr_reply";
 pub const MR_FOR_BRANCH: &str = "mr_for_branch";
+pub const PIPELINE_RETRY: &str = "pipeline_retry";
 
 /// Every tool here, each of which takes the repository as `project`.
 pub const TOOLS: &[&str] = &[
@@ -45,6 +47,7 @@ pub const TOOLS: &[&str] = &[
     MR_DISCUSSIONS,
     MR_REPLY,
     MR_FOR_BRANCH,
+    PIPELINE_RETRY,
 ];
 
 /// What `project` is. Optional in what a session on a GitLab repository is
@@ -222,6 +225,23 @@ pub fn definitions() -> Vec<Value> {
                     "variables": { "type": "object", "description": "Pipeline variables, name to string value. Values are sent as given; a number or boolean is refused, so quote it." },
                 },
                 "required": ["project", "ref"],
+            },
+        }),
+        json!({
+            "name": PIPELINE_RETRY,
+            "description": "Retry a pipeline's failed and canceled jobs, as the web UI's Retry \
+                            does. Never a pipeline on a tag, or one whose variables name \
+                            production: those deploys are run by hand. The operator is asked \
+                            before this runs: the call returns `awaiting_operator` with an \
+                            `approval_id` at once, and approval_status reports the outcome. Once \
+                            it ran, the node follows the pipeline and pipeline_wait waits for it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": PROJECT },
+                    "pipeline_id": { "type": "integer" },
+                },
+                "required": ["project", "pipeline_id"],
             },
         }),
         json!({
@@ -579,6 +599,49 @@ pub async fn call(
             }
             Ok(json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"] }))
         }
+        PIPELINE_RETRY => {
+            let id = args
+                .get("pipeline_id")
+                .and_then(Value::as_i64)
+                .filter(|id| *id > 0)
+                .ok_or("pipeline_id is required")?;
+            let p = get(http, token, &format!("{project_url}/pipelines/{id}")).await?;
+            if p["tag"] == true {
+                return Err(format!(
+                    "pipeline {id} ran on the tag {}; a pipeline on a tag is a release, and \
+                     that is run by hand",
+                    p["ref"]
+                ));
+            }
+            // A retry runs with the variables the pipeline was started with,
+            // so they are held to what pipeline_run would have accepted.
+            let variables = get(
+                http,
+                token,
+                &format!("{project_url}/pipelines/{id}/variables"),
+            )
+            .await
+            .map_err(|e| format!("pipeline {id}'s variables could not be checked: {e}"))?;
+            if let Some(name) = names_production(&variables) {
+                return Err(format!(
+                    "pipeline {id}'s variable {name} names production; a production deploy \
+                     is run by hand"
+                ));
+            }
+            if let Some(recheck) = before_mutation {
+                recheck()?;
+            }
+            let v = write(
+                http.post(format!("{project_url}/pipelines/{id}/retry")),
+                token,
+                &json!({}),
+            )
+            .await?;
+            Ok(
+                json!({ "id": v["id"], "status": v["status"], "web_url": v["web_url"],
+                       "retried": "failed jobs" }),
+            )
+        }
         DEPLOY => {
             let pipeline_id = args
                 .get("pipeline_id")
@@ -804,6 +867,21 @@ fn pipeline_variables(v: Option<&Value>) -> Result<Vec<Value>, String> {
         .collect()
 }
 
+/// The first of a pipeline's variables (GitLab's `[{key, value}]`) whose
+/// value names production.
+fn names_production(variables: &Value) -> Option<&str> {
+    variables
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|v| {
+            v["value"]
+                .as_str()
+                .is_some_and(|value| value.to_ascii_lowercase().contains("production"))
+        })
+        .map(|v| v["key"].as_str().unwrap_or("?"))
+}
+
 /// The last `max` bytes of a log, cut on a character boundary.
 fn tail(log: &str, max: usize) -> (&str, bool) {
     if log.len() <= max {
@@ -969,6 +1047,20 @@ mod tests {
         let ok = pipeline_variables(Some(&json!({ "DEPLOY": "staging", "N": "2" }))).unwrap();
         assert_eq!(ok.len(), 2);
         assert!(pipeline_variables(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_retried_pipeline_keeps_its_variables_so_they_are_held_to_the_same_rule() {
+        let vars = json!([
+            { "key": "N", "value": "2" },
+            { "key": "TARGET", "value": "eu-PRODUCTION" },
+        ]);
+        assert_eq!(names_production(&vars), Some("TARGET"));
+        assert_eq!(
+            names_production(&json!([{ "key": "N", "value": "2" }])),
+            None
+        );
+        assert_eq!(names_production(&Value::Null), None);
     }
 
     #[test]

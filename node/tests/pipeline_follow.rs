@@ -5,7 +5,10 @@
 
 #[path = "support/mod.rs"]
 mod support;
-use support::{harness::harness, rows::session_row};
+use support::{
+    harness::{harness, harness_with},
+    rows::session_row,
+};
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -56,6 +59,21 @@ async fn stub(forge: Shared) -> String {
                     "id": id, "ref": "main", "sha": "abc", "status": f.status,
                     "source": "api", "web_url": "https://gitlab.test/p/9",
                 }))
+            }),
+        )
+        .route(
+            "/api/v4/projects/42/pipelines/{id}/variables",
+            get(|| async { Json(json!([{ "key": "N", "value": "2" }])) }),
+        )
+        .route(
+            "/api/v4/projects/42/pipelines/{id}/retry",
+            post(|State(f): State<Shared>, Path(id): Path<i64>| async move {
+                let mut f = f.lock().unwrap();
+                // GitLab retries in the request: the failed job is
+                // replaced by a new one, pending.
+                f.status = "pending".into();
+                f.jobs = vec![(3, "build", "pending")];
+                Json(json!({ "id": id, "status": "pending", "web_url": "https://gitlab.test/p/9" }))
             }),
         )
         .route(
@@ -111,7 +129,7 @@ async fn rig() -> (support::harness::Harness, Shared, CallContext) {
         verdict = "allow"
         reason = "Under test."
         kinds = ["tool"]
-        matches = ["pipeline_run", "pipeline_wait"]
+        matches = ["pipeline_run", "pipeline_retry", "pipeline_wait"]
         "#,
     )
     .unwrap();
@@ -183,6 +201,33 @@ async fn a_pipeline_the_session_ran_is_followed_until_it_stops() {
         reads,
         "a pipeline waiting on a person is not read again"
     );
+}
+
+#[tokio::test]
+async fn a_pipeline_the_session_retried_is_followed_from_the_retry() {
+    let (h, forge, ctx) = rig().await;
+    set(&forge, "failed", &[(1, "build", "failed")]);
+    let retried = h
+        .tools
+        .call(
+            &ctx,
+            "pipeline_retry",
+            &json!({ "project": "42", "pipeline_id": 9 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried["id"], 9);
+    assert_eq!(retried["following"]["pipeline_id"], 9);
+    let follows = h.store.pipelines_followed("n1").unwrap();
+    assert_eq!(follows.len(), 1);
+    assert_eq!(follows[0].started_by, "pipeline_retry");
+
+    // The failure it retried is the baseline, not news.
+    assert!(tracon::follow::tick_pipelines(&h.tools).await.is_empty());
+    set(&forge, "success", &[(3, "build", "success")]);
+    let done = tracon::follow::tick_pipelines(&h.tools).await;
+    assert_eq!(done[0].changes, ["`build` passed", "pipeline passed"]);
+    assert!(done[0].pushed);
 }
 
 #[tokio::test]
@@ -267,6 +312,21 @@ async fn github_stub(run: SharedRun) -> String {
                     })
                     .collect();
                 Json(json!({ "total_count": jobs.len(), "jobs": jobs }))
+            }),
+        )
+        .route(
+            "/repos/o/n/branches/main",
+            get(|| async { Json(json!({ "name": "main" })) }),
+        )
+        .route(
+            "/repos/o/n/actions/workflows/ci.yml/runs",
+            get(|| async { Json(json!({ "workflow_runs": [] })) }),
+        )
+        .route(
+            "/repos/o/n/actions/workflows/ci.yml/dispatches",
+            post(|| async {
+                Json(json!({ "workflow_run_id": 901,
+                             "html_url": "https://github.test/o/n/actions/runs/901" }))
             }),
         )
         .route(
@@ -381,4 +441,79 @@ async fn a_run_the_session_reran_is_followed_from_the_attempt_it_started() {
         h.store.pipelines_followed("n1").unwrap().is_empty(),
         "a finished run is no longer followed"
     );
+}
+
+#[tokio::test]
+async fn a_run_the_session_dispatched_is_followed() {
+    let h = harness_with(tracon::config::Config {
+        github: tracon::config::Github {
+            dispatch: [("o/n".to_string(), vec!["ci.yml".to_string()])].into(),
+        },
+        ..Default::default()
+    })
+    .await;
+    let run = SharedRun::default();
+    *run.lock().unwrap() = Run {
+        attempt: 1,
+        status: "queued",
+        conclusion: None,
+        jobs: vec![],
+    };
+    let base = github_stub(run.clone()).await;
+    h.tools.broker.write().unwrap().put(
+        "gh",
+        Credential {
+            env: BTreeMap::from([
+                ("GH_TOKEN".to_string(), "t".to_string()),
+                ("GITHUB_API".to_string(), base),
+            ]),
+            channels: vec!["personal".to_string()],
+            ..Credential::default()
+        },
+    );
+    *h.tools.policy.write() = toml::from_str(
+        r#"
+        version = 9
+        [[rule]]
+        id = "test-allow"
+        verdict = "allow"
+        reason = "Under test."
+        kinds = ["tool"]
+        matches = ["run_dispatch"]
+        "#,
+    )
+    .unwrap();
+    let node = h.manager.node_id().to_string();
+    h.store
+        .insert_session(&session_row("s1", &node, "personal"))
+        .unwrap();
+    let ctx = CallContext::session("s1", "personal", node);
+
+    let started = h
+        .tools
+        .call(
+            &ctx,
+            "run_dispatch",
+            &json!({ "repo": "o/n", "workflow": "ci.yml", "ref": "main" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started["run_id"], 901);
+    assert_eq!(started["following"]["run_id"], 901);
+    let follows = h.store.pipelines_followed("n1").unwrap();
+    assert_eq!(follows.len(), 1);
+    assert_eq!(
+        (follows[0].provider.as_str(), follows[0].started_by.as_str()),
+        ("github", "run_dispatch")
+    );
+
+    *run.lock().unwrap() = Run {
+        attempt: 1,
+        status: "completed",
+        conclusion: Some("failure"),
+        jobs: vec![(51, "renovate", "completed", Some("failure"))],
+    };
+    let done = tracon::follow::tick_pipelines(&h.tools).await;
+    assert_eq!(done[0].changes, ["`renovate` failed", "run failed"]);
+    assert!(h.store.pipelines_followed("n1").unwrap().is_empty());
 }

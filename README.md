@@ -507,8 +507,21 @@ forge: a run's jobs and the step that failed (`run_status` with `run_id` /
 `pipeline_status`), the runs at an exact commit (`run_status` with `sha` /
 `pipeline_list_by_sha`), and the end of a job's log (`run_logs` / `job_trace`, 16 KiB
 unless asked, at most 64) are unattended, and so is waiting for one to move (`run_wait` /
-`pipeline_wait`); rerunning a run's failed jobs (`run_rerun`) or playing a job
-(`job_play`) is asked, and the node follows the run or pipeline it started. `tracon provenance <sha>`
+`pipeline_wait`). Every CI write is asked, and the node follows the run or pipeline it
+started: retrying the failed jobs (`run_rerun` / `pipeline_retry`), starting a run on a
+branch (`run_dispatch` / `pipeline_run`), and on GitLab playing a manual job (`job_play`)
+or, under a scoped grant, a deployment job at an exact commit (`deploy`). Starting a run
+never takes a tag or a value naming production, and `run_dispatch` starts only a
+workflow you list for the repository:
+
+```toml
+[github.dispatch]                   # what run_dispatch may start; anything else is refused before you are asked
+"owner/name" = ["renovate.yaml"]    # file names in .github/workflows
+```
+
+A channel holding both credentials is offered both forges' tools; a session's own
+repository only fills in the `repo` or `project` argument for its forge's tools, it
+hides neither set. `tracon provenance <sha>`
 answers, later, which model, which prompts, which approval and which policy shipped
 a commit.
 
@@ -940,6 +953,9 @@ commits = "squash"                  # one commit of the reviewed tree; "keep" pu
 # max_subject = 72
 # kebab_branch = true               # feat/lowercase-words
 # no_ticket_keys = true             # no PROJ-123 in the subject or branch
+
+[github.dispatch]                   # the workflows run_dispatch may start, by repository; none unless listed
+# "owner/name" = ["renovate.yaml"]  # file names in .github/workflows; read at startup
 
 [mesh]
 # hub_url = "https://hub.example.com"   # set by tracon mesh init / enroll

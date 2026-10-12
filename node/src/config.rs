@@ -17,6 +17,8 @@ pub struct Config {
     pub session: SessionDefaults,
     pub consulta: Consulta,
     pub publish: Publish,
+    /// What the GitHub tools may start on their own (`run_dispatch`).
+    pub github: Github,
     pub mesh: Mesh,
     pub runtime: Runtime,
     /// Per-repository environment: image, checks, preparation and its egress.
@@ -961,6 +963,30 @@ pub enum Commits {
     Keep,
 }
 
+/// What the GitHub tools may start. Only the operator's file says this: the
+/// danger in starting a GitHub workflow is the workflow, not the ref, since
+/// a release or a publish runs on `main` like any other branch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Github {
+    /// The workflow files `run_dispatch` may start, by repository
+    /// (`owner/name`, matched without regard to case) and file name as it
+    /// sits in `.github/workflows/`. A workflow not listed is refused, so a
+    /// repository not named here can start nothing.
+    pub dispatch: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl Github {
+    /// Whether `run_dispatch` may start `workflow` in `repo`.
+    pub fn may_dispatch(&self, repo: &str, workflow: &str) -> bool {
+        self.dispatch
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(repo))
+            .flat_map(|(_, files)| files)
+            .any(|file| file == workflow)
+    }
+}
+
 /// How the node runs the consulta sidecar. It stays a Python process because
 /// Oracle's client is a glibc blob and the node is a static musl binary; the
 /// pure-Python driver is what makes a read-only Oracle path possible at all.
@@ -1396,6 +1422,7 @@ impl Default for Config {
                 egress_port: 7424,
                 harness_listen: HarnessListen::default(),
             },
+            github: Github::default(),
             consulta: Consulta {
                 command: "uv".into(),
                 args: vec![
@@ -2221,6 +2248,33 @@ mod tests {
     /// operator saves one through the node, and theirs from then on — for
     /// everything sharing that `Config`, without a restart. A copy taken
     /// earlier keeps what it saw.
+    #[test]
+    fn a_workflow_is_dispatched_only_where_the_file_lists_it() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [github.dispatch]
+            "cosmicspork/homelab" = ["renovate.yaml"]
+            "#,
+        )
+        .unwrap();
+        assert!(cfg
+            .github
+            .may_dispatch("cosmicspork/homelab", "renovate.yaml"));
+        assert!(cfg
+            .github
+            .may_dispatch("CosmicSpork/Homelab", "renovate.yaml"));
+        assert!(!cfg
+            .github
+            .may_dispatch("cosmicspork/homelab", "release.yml"));
+        assert!(!cfg
+            .github
+            .may_dispatch("cosmicspork/homelab", "Renovate.yaml"));
+        assert!(!cfg
+            .github
+            .may_dispatch("cosmicspork/tracon", "renovate.yaml"));
+        assert!(!Config::default().github.may_dispatch("o/n", "ci.yml"));
+    }
+
     #[test]
     fn a_table_saved_through_the_node_replaces_the_loaded_one_live() {
         let entry = |path: &str| Repo {

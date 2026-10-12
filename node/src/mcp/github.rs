@@ -2,9 +2,12 @@
 //! reviews, its review threads, one comment on it, one reply to a thread, the
 //! open pull request for a branch, the Actions runs for a branch or an exact
 //! commit with each run's jobs, waiting for a run to move, the end of a job's
-//! log, and rerunning a run's failed jobs (asked) — what GitLab's pipeline
-//! tools give an agent, so CI is diagnosed, retried and followed the same way
-//! on either forge. Opening a
+//! log, rerunning a run's failed jobs (asked), and starting a workflow on a
+//! branch (asked, and only a workflow the node's `[github] dispatch` lists).
+//! That is what GitLab's pipeline tools give an agent, so CI is diagnosed,
+//! retried, started and followed the same way on either forge
+//! (`super::parity` holds the mapping and fails a test when a tool has no
+//! decision). Opening a
 //! pull request is the review path (`review::publish`); merging is
 //! `pr_merge`, which runs only with current scoped authority for the exact
 //! head SHA. Marking ready is not a tool. The token never leaves the node.
@@ -24,6 +27,7 @@ pub const PR_FOR_BRANCH: &str = "pr_for_branch";
 pub const RUN_LOGS: &str = "run_logs";
 pub const RUN_RERUN: &str = "run_rerun";
 pub const RUN_WAIT: &str = "run_wait";
+pub const RUN_DISPATCH: &str = "run_dispatch";
 
 /// Every tool here, each of which takes the repository as `repo`.
 pub const TOOLS: &[&str] = &[
@@ -37,6 +41,7 @@ pub const TOOLS: &[&str] = &[
     RUN_LOGS,
     RUN_RERUN,
     RUN_WAIT,
+    RUN_DISPATCH,
 ];
 
 /// What `repo` is. Optional in what a session on a GitHub repository is
@@ -156,6 +161,30 @@ pub fn definitions() -> Vec<Value> {
                     "run_id": { "type": "integer" },
                 },
                 "required": ["repo", "run_id"],
+            },
+        }),
+        json!({
+            "name": RUN_DISPATCH,
+            "description": "Start a GitHub Actions workflow on a branch through its \
+                            workflow_dispatch trigger, as the web UI's \"Run workflow\" does. \
+                            Only a workflow the node's configuration lists for this repository, \
+                            never on a tag, and never with an input naming production: those \
+                            are run by hand. The operator is asked before this runs: the call \
+                            returns `awaiting_operator` with an `approval_id` at once, and \
+                            approval_status reports the outcome. Once it ran, the node follows \
+                            the run it started and run_wait waits for it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": REPO },
+                    "workflow": { "type": "string", "description": "The workflow's file name \
+                        in .github/workflows, e.g. renovate.yaml." },
+                    "ref": { "type": "string", "description": "The branch." },
+                    "inputs": { "type": "object", "description": "Workflow inputs, name to \
+                        string value. Values are sent as given; a number or boolean is refused, \
+                        so quote it." },
+                },
+                "required": ["repo", "workflow", "ref"],
             },
         }),
         json!({
@@ -514,6 +543,75 @@ pub async fn call(
             let attempt = before["run_attempt"].as_i64().map(|a| a + 1);
             Ok(json!({ "run_id": run, "rerun": "failed jobs", "attempt": attempt }))
         }
+        RUN_DISPATCH => {
+            let Dispatch {
+                workflow,
+                branch,
+                inputs,
+            } = dispatch_request(args)?;
+            // A name that is a tag is a release, and GitHub would resolve a
+            // name that is both; either way it is run by hand.
+            if gh
+                .get(&format!("{base}/git/ref/tags/{branch}"))
+                .await
+                .is_ok()
+            {
+                return Err(format!(
+                    "{branch} is a tag; a workflow on a tag is a release, and that is run by hand"
+                ));
+            }
+            gh.get(&format!("{base}/branches/{branch}"))
+                .await
+                .map_err(|e| format!("{branch} is not a branch of {repo}: {e}"))?;
+            let runs = format!(
+                "{base}/actions/workflows/{workflow}/runs?branch={branch}\
+                 &event=workflow_dispatch&per_page=20"
+            );
+            let before = gh
+                .get(&runs)
+                .await
+                .map_err(|e| format!("no workflow {workflow} in {repo}: {e}"))?;
+            if let Some(recheck) = before_mutation {
+                recheck()?;
+            }
+            let v = gh
+                .post(
+                    &format!("{base}/actions/workflows/{workflow}/dispatches"),
+                    &json!({ "ref": branch, "inputs": inputs, "return_run_details": true }),
+                )
+                .await
+                .map_err(mutation_outcome_error)?;
+            let mut started = v["workflow_run_id"]
+                .as_i64()
+                .map(|id| (id, v["html_url"].clone()));
+            // A GitHub that answers 204 without the run (an older Enterprise
+            // Server) leaves the node to find it: the newest dispatched run
+            // of this workflow on this branch that was not there before.
+            for _ in 0..FIND_TRIES {
+                if started.is_some() {
+                    break;
+                }
+                tokio::time::sleep(FIND_EVERY).await;
+                if let Ok(now) = gh.get(&runs).await {
+                    started = new_run(&before, &now);
+                }
+            }
+            let mut out = json!({ "repo": repo, "workflow": workflow, "ref": branch });
+            match started {
+                Some((id, url)) => {
+                    out["run_id"] = Value::from(id);
+                    out["url"] = url;
+                }
+                None => {
+                    out["run_id"] = Value::Null;
+                    out["note"] = Value::from(
+                        "GitHub started the workflow but did not say which run, and none \
+                         appeared yet; run_status with this branch finds it.",
+                    );
+                }
+            }
+            Ok(out)
+        }
         RUN_STATUS => {
             let filter = match (
                 args.get("branch").and_then(Value::as_str),
@@ -538,6 +636,129 @@ pub async fn call(
 
 /// How often `run_wait` reads the run while it holds.
 const WAIT_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long `run_dispatch` looks for the run it started when GitHub does
+/// not say which it is: a dispatched run is listed within seconds.
+const FIND_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+const FIND_TRIES: usize = 10;
+
+/// A `run_dispatch` call as it will be sent.
+pub struct Dispatch<'a> {
+    pub workflow: &'a str,
+    pub branch: &'a str,
+    pub inputs: serde_json::Map<String, Value>,
+}
+
+/// A `run_dispatch` call checked before anything is sent: the workflow named
+/// by its file, a branch name rather than a full ref or a path, and inputs
+/// that are strings, none naming production (the same rule `pipeline_run`
+/// holds GitLab's variables to). Whether the workflow is one the node may
+/// start is [`dispatch_refusal`]'s, which has the configuration; whether the
+/// branch is a branch and not a tag is asked of GitHub when it runs.
+pub fn dispatch_request(args: &Value) -> Result<Dispatch<'_>, String> {
+    let workflow = args
+        .get("workflow")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|w| is_workflow_file(w))
+        .ok_or("workflow is required, as its file name in .github/workflows (e.g. ci.yml)")?;
+    let branch = args
+        .get("ref")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .ok_or("ref is required (a branch)")?;
+    if !is_ref(branch)
+        || branch.starts_with("refs/")
+        || branch.starts_with('/')
+        || branch.ends_with('/')
+        || branch.contains("..")
+    {
+        return Err(format!("{branch} is not a branch name"));
+    }
+    Ok(Dispatch {
+        workflow,
+        branch,
+        inputs: dispatch_inputs(args.get("inputs"))?,
+    })
+}
+
+/// Why the node will not start this workflow, decided before the operator is
+/// asked and again before it runs: anything [`dispatch_request`] refuses, or
+/// a workflow `[github] dispatch` does not list for the repository. A release
+/// runs as a workflow on `main`, so the ref alone cannot keep it out.
+pub fn dispatch_refusal(cfg: &crate::config::Github, args: &Value) -> Option<String> {
+    let repo = match repo(args) {
+        Ok(repo) => repo,
+        Err(e) => return Some(e),
+    };
+    let request = match dispatch_request(args) {
+        Ok(request) => request,
+        Err(e) => return Some(e),
+    };
+    (!cfg.may_dispatch(repo, request.workflow)).then(|| {
+        format!(
+            "{} is not a workflow this node starts in {repo}; the operator lists the ones \
+             it may under [github] dispatch in node.toml",
+            request.workflow
+        )
+    })
+}
+
+/// A workflow's file name in `.github/workflows`, safe in a URL path.
+fn is_workflow_file(s: &str) -> bool {
+    s.len() <= 255
+        && !s.starts_with('.')
+        && (s.ends_with(".yml") || s.ends_with(".yaml"))
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Workflow inputs as GitHub takes them: name to string. A value naming
+/// production is refused here, before anything is sent: that is the deploy
+/// that is run by hand, whatever the workflow.
+fn dispatch_inputs(v: Option<&Value>) -> Result<serde_json::Map<String, Value>, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return Ok(Default::default());
+    };
+    let map = v
+        .as_object()
+        .ok_or("inputs is an object of name to value")?;
+    for (k, v) in map {
+        // Anything else would be sent as its JSON text, which is not the
+        // value that was approved.
+        let value = v
+            .as_str()
+            .ok_or_else(|| format!("input {k} must be a string, e.g. \"{v}\""))?;
+        if value.to_ascii_lowercase().contains("production") {
+            return Err(format!(
+                "input {k} names production; a production deploy is run by hand"
+            ));
+        }
+    }
+    Ok(map.clone())
+}
+
+/// The run a dispatch started, when GitHub did not say: the newest listed in
+/// `now` that `before` did not have, with its URL.
+fn new_run(before: &Value, now: &Value) -> Option<(i64, Value)> {
+    let ids = |v: &Value| -> Vec<i64> {
+        v["workflow_runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r["id"].as_i64())
+            .collect()
+    };
+    let seen = ids(before);
+    now["workflow_runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["id"].as_i64().is_some_and(|id| !seen.contains(&id)))
+        .max_by_key(|r| r["id"].as_i64())
+        .map(|r| (r["id"].as_i64().unwrap_or_default(), r["html_url"].clone()))
+}
 
 /// One run with its jobs, as `run_status` with `run_id` returns it. The jobs
 /// are the latest attempt's.
@@ -935,6 +1156,78 @@ mod tests {
         assert_eq!(jobs[1]["failed_steps"], json!([]));
         assert_eq!(tail("abcdef", 3), ("def", true));
         assert_eq!(tail("ab", 3), ("ab", false));
+    }
+
+    #[test]
+    fn a_dispatch_is_a_listed_workflow_on_a_branch_with_string_inputs() {
+        let cfg = crate::config::Github {
+            dispatch: [("o/n".to_string(), vec!["renovate.yaml".to_string()])].into(),
+        };
+        let ok = json!({ "repo": "o/n", "workflow": "renovate.yaml", "ref": "main",
+                         "inputs": { "LOG_LEVEL": "debug", "N": "2" } });
+        assert_eq!(dispatch_refusal(&cfg, &ok), None);
+        let d = dispatch_request(&ok).unwrap();
+        assert_eq!(
+            (d.workflow, d.branch, d.inputs.len()),
+            ("renovate.yaml", "main", 2)
+        );
+
+        // Deny by default: a workflow, or a repository, the file does not list.
+        for (repo, workflow) in [("o/n", "release.yml"), ("o/other", "renovate.yaml")] {
+            let e = dispatch_refusal(
+                &cfg,
+                &json!({ "repo": repo, "workflow": workflow, "ref": "main" }),
+            )
+            .unwrap();
+            assert!(e.contains("[github] dispatch"), "{e}");
+        }
+        let e = dispatch_refusal(
+            &Default::default(),
+            &json!({ "repo": "o/n", "workflow": "renovate.yaml", "ref": "main" }),
+        );
+        assert!(e.is_some());
+
+        for workflow in [
+            "",
+            "../ci.yml",
+            ".github/workflows/ci.yml",
+            "ci",
+            "1234",
+            ".x.yml",
+        ] {
+            let args = json!({ "repo": "o/n", "workflow": workflow, "ref": "main" });
+            assert!(dispatch_request(&args).is_err(), "{workflow}");
+        }
+        for branch in ["", "refs/tags/v1", "a..b", "/main", "main/", "a b", "x?y=1"] {
+            let args = json!({ "repo": "o/n", "workflow": "ci.yml", "ref": branch });
+            assert!(dispatch_request(&args).is_err(), "{branch}");
+        }
+        assert!(
+            dispatch_request(&json!({ "repo": "o/n", "workflow": "ci.yml", "ref": "feat/x" }))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_dispatch_input_is_a_string_and_never_names_production() {
+        let e = dispatch_inputs(Some(&json!({ "TARGET": "Production" }))).unwrap_err();
+        assert!(e.contains("TARGET"), "{e}");
+        for value in [json!(2), json!(true), json!({ "a": 1 }), json!(["x"])] {
+            let e = dispatch_inputs(Some(&json!({ "N": value }))).unwrap_err();
+            assert!(e.contains("N must be a string"), "{e}");
+        }
+        assert!(dispatch_inputs(None).unwrap().is_empty());
+        assert!(dispatch_inputs(Some(&json!("x"))).is_err());
+    }
+
+    #[test]
+    fn the_run_a_dispatch_started_is_the_newest_one_not_there_before() {
+        let before = json!({ "workflow_runs": [{ "id": 10 }, { "id": 9 }] });
+        assert_eq!(new_run(&before, &before), None);
+        let now = json!({ "workflow_runs": [
+            { "id": 12, "html_url": "u12" }, { "id": 11, "html_url": "u11" }, { "id": 10 },
+        ] });
+        assert_eq!(new_run(&before, &now), Some((12, json!("u12"))));
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod gitlab;
 pub mod jira;
 pub mod memory;
 pub mod operator;
+pub mod parity;
 pub mod review;
 pub mod schema;
 pub mod services;
@@ -343,6 +344,11 @@ impl Tools {
                 "consequential calls require a valid operation_id and canonical arguments".into(),
             );
         }
+        // A workflow the node does not start is refused before the operator
+        // is asked about it, not after.
+        if let Some(refusal) = self.refusal_before_asking(name, args) {
+            return Err(refusal);
+        }
         if !plan_write {
             let decision = self.decide(ctx, name, args);
             match decision.verdict {
@@ -381,6 +387,9 @@ impl Tools {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),
             );
+        }
+        if let Some(refusal) = self.refusal_before_asking(name, args) {
+            return Err(refusal);
         }
         self.revalidate_consequential(ctx, name, args, gated.one_shot)?;
         let action_record = self.begin_consequential(ctx, name, args, gated.one_shot)?;
@@ -449,7 +458,8 @@ impl Tools {
             | gitlab::DEPLOY
             | gitlab::MR_DISCUSSIONS
             | gitlab::MR_REPLY
-            | gitlab::MR_FOR_BRANCH => {
+            | gitlab::MR_FOR_BRANCH
+            | gitlab::PIPELINE_RETRY => {
                 gitlab::call(
                     &self.broker,
                     &self.http,
@@ -536,7 +546,8 @@ impl Tools {
             | github::PR_FOR_BRANCH
             | github::RUN_LOGS
             | github::RUN_RERUN
-            | github::RUN_WAIT => {
+            | github::RUN_WAIT
+            | github::RUN_DISPATCH => {
                 github::call(
                     &self.broker,
                     &self.http,
@@ -558,7 +569,12 @@ impl Tools {
         };
         let result = match (name, result) {
             (
-                gitlab::PIPELINE_RUN | gitlab::JOB_PLAY | gitlab::DEPLOY | github::RUN_RERUN,
+                gitlab::PIPELINE_RUN
+                | gitlab::JOB_PLAY
+                | gitlab::DEPLOY
+                | gitlab::PIPELINE_RETRY
+                | github::RUN_RERUN
+                | github::RUN_DISPATCH,
                 Ok(started),
             ) => Ok(crate::follow::subscribe(self, ctx, name, args, started).await),
             (_, result) => result,
@@ -934,6 +950,15 @@ impl Tools {
                 .filter(|repo| repo.forge == forge)
         });
         Ok(with_provider_defaults(name, args, repo.as_ref()))
+    }
+
+    /// What the node's own configuration refuses whatever the policy or the
+    /// operator says: a workflow `[github] dispatch` does not list.
+    fn refusal_before_asking(&self, name: &str, args: &Value) -> Option<String> {
+        match name {
+            github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.github, args),
+            _ => None,
+        }
     }
 
     fn is_review_session(&self, ctx: &CallContext) -> bool {
@@ -1924,6 +1949,24 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             short("source_sha")
         ),
         github::RUN_RERUN => format!("{name} {}: failed jobs of run {}", id("repo"), id("run_id")),
+        gitlab::PIPELINE_RETRY => format!(
+            "{name} {}: failed jobs of pipeline {}",
+            id("project"),
+            id("pipeline_id")
+        ),
+        github::RUN_DISPATCH => {
+            let inputs: Vec<&str> = args
+                .get("inputs")
+                .and_then(Value::as_object)
+                .map(|v| v.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            let head = format!("{name} {}: {} on {}", id("repo"), id("workflow"), id("ref"));
+            if inputs.is_empty() {
+                head
+            } else {
+                format!("{head} with {}", inputs.join(", "))
+            }
+        }
         services::START => format!("{name} {}", id("name")),
         setup::PROPOSE => with(format!("{name} {}", id("repo")), first_line("why")),
         _ => return None,
@@ -1993,6 +2036,17 @@ mod tests {
         assert_eq!(
             summarize(github::RUN_RERUN, &rerun),
             "run_rerun o/n: failed jobs of run 11893472205"
+        );
+        let retry = json!({ "project": "g/p", "pipeline_id": 12 });
+        assert_eq!(
+            summarize(gitlab::PIPELINE_RETRY, &retry),
+            "pipeline_retry g/p: failed jobs of pipeline 12"
+        );
+        let dispatch = json!({ "repo": "o/n", "workflow": "renovate.yaml", "ref": "main",
+                               "inputs": { "LOG_LEVEL": "debug" } });
+        assert_eq!(
+            summarize(github::RUN_DISPATCH, &dispatch),
+            "run_dispatch o/n: renovate.yaml on main with LOG_LEVEL"
         );
         let service = json!({ "name": "postgres", "wait_secs": 30 });
         assert_eq!(
