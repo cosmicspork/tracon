@@ -393,7 +393,11 @@ session already running keeps the image and the egress it started with. Hand edi
 Or let a session draft it. `repo_setup_draft` reads the default branch (its devcontainer,
 lockfiles, a `just check` recipe or `package.json` scripts) and drafts the entry with where
 each field came from. `repo_setup_try` runs a draft the way required checks run, in a fresh
-container. `repo_setup_propose` puts it to you on a card, which you may edit. The node
+container. A draft that names a Dockerfile is tried in the image built from it, never in the
+harness image instead. An image this node already built from the same Dockerfile and context
+is reused; building a new one is yours to allow on a card, because the build runs with the
+network outside the boundary, and the entry you later allow uses that image rather than
+building it again. `repo_setup_propose` puts it to you on a card, which you may edit. The node
 writes the entry only when you allow it, and a proposal never opens the repository's
 egress to its sessions. Hosts you opened to the session while it tried are suggested in
 `egress`.

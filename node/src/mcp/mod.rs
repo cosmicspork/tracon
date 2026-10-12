@@ -318,6 +318,14 @@ impl Tools {
                 let asked = setup::proposal(access, ctx, args)?;
                 return self.request_approval(ctx, name, &asked).await;
             }
+            if name == setup::TRY {
+                // Building a repository's Dockerfile runs it with the network,
+                // outside the boundary: the operator's, as when they name one
+                // in an entry themselves.
+                if let Some(asked) = setup::build_to_ask(access, ctx, args).await? {
+                    return self.request_approval(ctx, name, &asked).await;
+                }
+            }
             return setup::call(access, ctx, name, args).await;
         }
         if name == show::SHOW {
@@ -506,6 +514,18 @@ impl Tools {
                     .get()
                     .ok_or("repository setup is not available on this node")?;
                 setup::write(access, ctx, args)
+            }
+            setup::TRY => {
+                if !gated.one_shot {
+                    return Err(format!(
+                        "{name} builds an image only once the operator allows it"
+                    ));
+                }
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("repository setup is not available on this node")?;
+                setup::start_allowed(access, ctx, args)
             }
             work::WORK_READY
             | work::WORK_DISCOVER
@@ -1926,6 +1946,12 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         github::RUN_RERUN => format!("{name} {}: failed jobs of run {}", id("repo"), id("run_id")),
         services::START => format!("{name} {}", id("name")),
         setup::PROPOSE => with(format!("{name} {}", id("repo")), first_line("why")),
+        setup::TRY => format!(
+            "{name} {}: build {} from {}",
+            id("repo"),
+            id("dockerfile"),
+            id("build_source")
+        ),
         _ => return None,
     })
 }

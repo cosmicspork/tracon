@@ -18,6 +18,13 @@
 //! tried, and asking for it (`request_egress`) is how it becomes reachable.
 //! Hosts the operator opened to the session that way are suggested in the
 //! draft's `egress`.
+//!
+//! A draft that names a Dockerfile is tried in the image built from it, never
+//! in the harness image in its place: a toolchain that is missing there says
+//! nothing about the draft. An image this node already built from the same
+//! Dockerfile and context is reused. Building one runs the Dockerfile with the
+//! network, outside the boundary, so it is the operator's to allow, as it is
+//! when they write the entry themselves.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -565,7 +572,7 @@ pub fn save(cfg: &Config, repo: &Path, entry: Repo) -> Result<String, String> {
 /// One step of a trial.
 #[derive(Debug, Clone, Serialize)]
 pub struct Step {
-    /// `prepare` or `check`.
+    /// `build`, `prepare` or `check`.
     pub phase: &'static str,
     pub command: String,
     pub ok: bool,
@@ -626,9 +633,50 @@ fn update(id: &str, change: impl FnOnce(&mut Trial)) {
     }
 }
 
+/// The image the operator is asked to build before `entry` can be tried: the
+/// recipe its Dockerfile names on the default branch, when this node has built
+/// nothing from it yet. `None` when the trial needs no build, when the
+/// operator's own entry already names this recipe (the node builds that one
+/// unasked anyway), and when it cannot have one (no builder, a Dockerfile the
+/// default branch does not hold), which the trial itself then reports.
+pub async fn build_needed(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    repo: &Path,
+    entry: &Repo,
+) -> Option<crate::repo_image::Recipe> {
+    if entry.image.is_some() || entry.dockerfile.is_none() {
+        return None;
+    }
+    let builder = backend.image_builder()?;
+    let recipe = crate::repo_image::recipe(repo, entry).await.ok()?;
+    if held_recipe(cfg, repo).await.as_deref() == Some(&recipe.hash) {
+        return None;
+    }
+    match crate::repo_image::already_built(builder, store, repo, &recipe.hash).await {
+        Some(_) => None,
+        None => Some(recipe),
+    }
+}
+
+/// The recipe of the Dockerfile the operator's entry for `repo` names, if it
+/// names one: what the node builds for it without asking.
+async fn held_recipe(cfg: &Config, repo: &Path) -> Option<String> {
+    let held = crate::repo_image::building_entry(cfg, repo)?;
+    crate::repo_image::recipe(repo, &held)
+        .await
+        .ok()
+        .map(|recipe| recipe.hash)
+}
+
 /// Start trying `entry` for `repo` on behalf of `session_id`, with
 /// preparation reaching only `reachable` of the hosts the entry names. The
 /// trial runs on; read it back with [`trial`].
+///
+/// `build` is the recipe the operator allowed this trial to build, when they
+/// did: without it, a Dockerfile this node has not built stops the trial.
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     backend: Arc<dyn Backend>,
     cfg: Arc<Config>,
@@ -637,6 +685,7 @@ pub fn start(
     repo: PathBuf,
     entry: Repo,
     reachable: impl Fn(&str) -> bool,
+    build: Option<String>,
 ) -> Result<Trial, String> {
     let hosts = entry.egress_hosts()?;
     let (egress_tried, egress_not_tried): (Vec<String>, Vec<String>) =
@@ -682,6 +731,7 @@ pub fn start(
             &repo,
             &entry,
             egress_tried,
+            build.as_deref(),
         )
         .await;
         update(&id, |trial| {
@@ -700,6 +750,7 @@ pub fn start(
 /// cache of the trial's own, then run each check on a copy of the result
 /// with the cache read-only and no egress — the shape a required check
 /// runs in. Every volume is removed when it ends.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     backend: &dyn Backend,
     cfg: &Config,
@@ -708,12 +759,24 @@ async fn run(
     repo: &Path,
     entry: &Repo,
     egress: Vec<String>,
+    build: Option<&str>,
 ) -> Result<(), String> {
     let (_, commit) = crate::repo_image::default_commit(repo).await?;
     let mut environment = crate::environment::environment_with(cfg, store, Some(repo), Some(entry));
     environment.egress = egress;
+    update(id, |trial| trial.commit = Some(commit.clone()));
+    if entry.image.is_none() && entry.dockerfile.is_some() {
+        // What `environment_with` found is the image of the entry the node
+        // holds, if any; the draft's own recipe is what is tried.
+        let Some(image) = dockerfile_image(backend, cfg, store, id, repo, entry, build).await?
+        else {
+            return Ok(());
+        };
+        environment.cache_volume = crate::environment::base_cache_volume(Some(repo), &image);
+        environment.image = image;
+        environment.image_source = crate::environment::REPOSITORY_DOCKERFILE;
+    }
     update(id, |trial| {
-        trial.commit = Some(commit.clone());
         trial.image = Some(environment.image.clone());
         trial.image_source = Some(environment.image_source.to_string());
     });
@@ -852,6 +915,107 @@ async fn run(
     let _ = backend.remove_volume(&work).await;
     let _ = backend.remove_volume(&cache).await;
     outcome
+}
+
+/// The image a trial of `entry`, which names a Dockerfile, runs in: one this
+/// node already built from the same recipe, or the one built now, when the
+/// operator allowed this trial to build `build` or their own entry names the
+/// same recipe. `None` when that build failed, which is the trial's `build`
+/// step rather than an error.
+async fn dockerfile_image(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    id: &str,
+    repo: &Path,
+    entry: &Repo,
+    build: Option<&str>,
+) -> Result<Option<String>, String> {
+    let builder = backend.image_builder().ok_or_else(|| {
+        format!(
+            "the {} runtime cannot build images, so a `dockerfile` cannot be tried on this \
+             node; name a digest-pinned `image` instead",
+            backend.kind()
+        )
+    })?;
+    let recipe = crate::repo_image::recipe(repo, entry).await?;
+    if let Some(image) = crate::repo_image::already_built(builder, store, repo, &recipe.hash).await
+    {
+        return Ok(Some(image));
+    }
+    let held = held_recipe(cfg, repo).await.as_deref() == Some(&recipe.hash);
+    match build {
+        _ if held => {}
+        None => {
+            return Err(format!(
+                "no image is built from {} on this node yet; call repo_setup_try again to ask \
+                 the operator to build it",
+                recipe.dockerfile
+            ))
+        }
+        Some(allowed) if allowed != recipe.hash => {
+            return Err(format!(
+                "{} or its build context changed on {} since the operator allowed the build; \
+                 call repo_setup_try again to ask for this one",
+                recipe.dockerfile, recipe.source_ref
+            ))
+        }
+        Some(_) => {}
+    }
+    update(id, |trial| {
+        trial.image_source = Some(format!(
+            "{} (building)",
+            crate::environment::REPOSITORY_DOCKERFILE
+        ))
+    });
+    let started = std::time::Instant::now();
+    let built = match held {
+        // The entry's own image, built as its next run would build it.
+        true => {
+            let ensured = crate::repo_image::ensure_base(backend, cfg, store, repo, false).await;
+            match crate::repo_image::already_built(builder, store, repo, &recipe.hash).await {
+                Some(image) => Ok(image),
+                None => Err(match ensured {
+                    crate::repo_image::Ensured::Stale { error, .. } => error,
+                    crate::repo_image::Ensured::Unavailable { reason } => reason,
+                    _ => "the image built is not the one this trial read".into(),
+                }),
+            }
+        }
+        false => crate::repo_image::build_for_trial(builder, cfg, store, repo, &recipe)
+            .await
+            .map(|built| built.image)
+            .map_err(|failure| format!("{}\n{}", failure.log_tail, failure.error)),
+    };
+    let step = Step {
+        phase: "build",
+        command: format!(
+            "build {} from {} ({})",
+            recipe.dockerfile,
+            recipe.source_ref,
+            recipe
+                .source_commit
+                .get(..12)
+                .unwrap_or(&recipe.source_commit)
+        ),
+        ok: built.is_ok(),
+        exit: None,
+        ms: started.elapsed().as_millis() as u64,
+        tail: match &built {
+            Ok(_) => String::new(),
+            Err(said) => tail(said),
+        },
+    };
+    update(id, |trial| {
+        if !step.ok {
+            trial.image_source = Some(format!(
+                "{} (build failed)",
+                crate::environment::REPOSITORY_DOCKERFILE
+            ));
+        }
+        trial.steps.push(step)
+    });
+    Ok(built.ok())
 }
 
 /// The last lines of what a step printed: enough to see why it failed.

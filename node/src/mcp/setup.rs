@@ -5,9 +5,11 @@
 //!
 //! Drafting reads and trying runs nothing a session could not: the trial is
 //! the default branch, prepared with egress only to hosts this session can
-//! already reach. Neither is asked. A proposal always is, whatever the
-//! policy says: the node writes the entry when the operator allows it, and
-//! the operator may edit it on the card first.
+//! already reach. Neither is asked, except a trial of a Dockerfile this node
+//! has built nothing from: building it runs with the network, outside the
+//! boundary, so that trial is held for the operator first. A proposal always
+//! is, whatever the policy says: the node writes the entry when the operator
+//! allows it, and the operator may edit it on the card first.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -23,6 +25,12 @@ use crate::{
 pub const DRAFT: &str = "repo_setup_draft";
 pub const TRY: &str = "repo_setup_try";
 pub const PROPOSE: &str = "repo_setup_propose";
+
+/// What a trial held for the operator builds, beside the entry's own fields
+/// and `repo`: where on the default branch the Dockerfile was read, and the
+/// recipe hash an allowed trial builds and nothing else.
+const BUILD_SOURCE: &str = "build_source";
+const BUILD_RECIPE: &str = "build_recipe";
 
 /// The fields of an entry an agent may draft. Not `path`, which the node
 /// takes from the session, and not `session_egress`, which is the
@@ -113,10 +121,13 @@ pub fn definitions() -> Vec<Value> {
                  none to try the draft. Preparation reaches only the `egress` hosts this session can \
                  already reach; the rest are listed in `egress_not_tried`, and asking for one with \
                  request_egress is how it becomes reachable (and suggested in the next draft). A \
-                 `dockerfile` the node has not built yet is tried in the harness image, which the \
-                 result says. Blocks for up to {} seconds and returns the trial: `running` (call \
-                 again with its `trial_id`), `passed`, or `failed` with each step's exit and the end \
-                 of its output. One trial runs per session at a time.",
+                 `dockerfile` is tried in the image built from it on the default branch, reused when \
+                 this node already built the same Dockerfile and context. Building one is the \
+                 operator's to allow: the call then returns `awaiting_operator` with an approval_id, \
+                 approval_status gives the started trial once they allow it, and its `build` step \
+                 says how the build went. Blocks for up to {} seconds and returns the trial: \
+                 `running` (call again with its `trial_id`), `passed`, or `failed` with each step's \
+                 exit and the end of its output. One trial runs per session at a time.",
                 super::wait::MAX_WAIT_SECS
             ),
             "inputSchema": { "type": "object", "properties": try_properties },
@@ -222,32 +233,8 @@ pub async fn call(
                         );
                         return Ok(out);
                     }
-                    let entry = match entry_from(args, &repo)? {
-                        Some(entry) => entry,
-                        None => {
-                            let approved = approved_hosts(access, &session_id);
-                            repo_setup::draft(cfg, &repo, &approved).await?.entry
-                        }
-                    };
-                    let grants = access
-                        .manager
-                        .egress_grants()
-                        .filter(|grants| grants.holds_session(&session_id));
-                    let reachable = |host: &str| {
-                        grants
-                            .as_ref()
-                            .is_some_and(|grants| grants.session_allows(&session_id, host))
-                    };
-                    repo_setup::start(
-                        access.manager.backend().clone(),
-                        cfg.clone(),
-                        access.store.clone(),
-                        &session_id,
-                        repo,
-                        entry,
-                        reachable,
-                    )?
-                    .id
+                    let entry = try_entry(access, &session_id, &repo, args).await?;
+                    start_trial(access, &session_id, repo, entry, None)?.id
                 }
             };
             let deadline =
@@ -262,6 +249,125 @@ pub async fn call(
         }
         _ => Err(format!("{name} is not a setup tool")),
     }
+}
+
+/// The entry a trial tries: the fields the arguments name, or the draft.
+async fn try_entry(
+    access: &SessionAccess,
+    session_id: &str,
+    repo: &std::path::Path,
+    args: &Value,
+) -> Result<Repo, String> {
+    match entry_from(args, repo)? {
+        Some(entry) => Ok(entry),
+        None => {
+            let approved = approved_hosts(access, session_id);
+            Ok(repo_setup::draft(access.manager.cfg(), repo, &approved)
+                .await?
+                .entry)
+        }
+    }
+}
+
+fn start_trial(
+    access: &SessionAccess,
+    session_id: &str,
+    repo: PathBuf,
+    entry: Repo,
+    build: Option<String>,
+) -> Result<repo_setup::Trial, String> {
+    let grants = access
+        .manager
+        .egress_grants()
+        .filter(|grants| grants.holds_session(session_id));
+    let reachable = |host: &str| {
+        grants
+            .as_ref()
+            .is_some_and(|grants| grants.session_allows(session_id, host))
+    };
+    repo_setup::start(
+        access.manager.backend().clone(),
+        access.manager.cfg().clone(),
+        access.store.clone(),
+        session_id,
+        repo,
+        entry,
+        reachable,
+        build,
+    )
+}
+
+/// The trial to hold for the operator, when this call would start one that
+/// has to build its Dockerfile first: the entry it tries, written out in
+/// full so a later draft cannot change what was allowed, with what the build
+/// is of. `None` for every other call to the tool, which runs at once.
+pub async fn build_to_ask(
+    access: &SessionAccess,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Option<Value>, String> {
+    if args.get("trial_id").and_then(Value::as_str).is_some() {
+        return Ok(None);
+    }
+    let (session_id, repo) = session_repo(access, ctx)?;
+    if repo_setup::running_for(&session_id).is_some() {
+        return Ok(None);
+    }
+    let entry = try_entry(access, &session_id, &repo, args).await?;
+    let (backend, cfg) = (access.manager.backend(), access.manager.cfg());
+    let Some(recipe) =
+        repo_setup::build_needed(backend.as_ref(), cfg, &access.store, &repo, &entry).await
+    else {
+        return Ok(None);
+    };
+    let mut asked = serde_json::to_value(&entry).map_err(|e| e.to_string())?;
+    let object = asked.as_object_mut().ok_or("the entry is not an object")?;
+    object.retain(|field, _| ENTRY_FIELDS.contains(&field.as_str()));
+    object.insert("repo".into(), json!(repo.display().to_string()));
+    object.insert(
+        BUILD_SOURCE.into(),
+        json!(format!(
+            "{} at {}",
+            recipe.source_ref,
+            recipe
+                .source_commit
+                .get(..12)
+                .unwrap_or(&recipe.source_commit)
+        )),
+    );
+    object.insert(BUILD_RECIPE.into(), json!(recipe.hash));
+    Ok(Some(asked))
+}
+
+/// Start a trial the operator allowed to build its Dockerfile. It builds
+/// only the recipe they were shown; the trial runs on, and the agent reads
+/// it with the `trial_id` this returns.
+pub fn start_allowed(
+    access: &SessionAccess,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
+    let (session_id, repo) = session_repo(access, ctx)?;
+    if args.get("repo").and_then(Value::as_str) != Some(&*repo.to_string_lossy()) {
+        return Err("the trial names a repository other than this session's".into());
+    }
+    let recipe = args
+        .get(BUILD_RECIPE)
+        .and_then(Value::as_str)
+        .ok_or("the trial names no build")?;
+    let entry = entry_from(args, &repo)?.ok_or("the trial names no field")?;
+    if let Some(running) = repo_setup::running_for(&session_id) {
+        return Err(format!(
+            "trial {} is still running for this session; nothing was built",
+            running.id
+        ));
+    }
+    let trial = start_trial(access, &session_id, repo, entry, Some(recipe.to_string()))?;
+    let mut out = serde_json::to_value(&trial).map_err(|e| e.to_string())?;
+    out["next"] = json!(format!(
+        "The image is building. Call {TRY} with this trial_id to wait for the trial."
+    ));
+    Ok(out)
 }
 
 /// The proposal as it is put to the operator: the arguments as asked, with

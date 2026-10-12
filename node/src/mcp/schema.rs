@@ -72,6 +72,19 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
         &[],
     ),
     (super::services::START, "markdown", &[], &["name"]),
+    // A trial held to build its Dockerfile builds what the card shows.
+    (
+        super::setup::TRY,
+        "markdown",
+        &[],
+        &[
+            "dockerfile",
+            "context",
+            "image",
+            "build_source",
+            "build_recipe",
+        ],
+    ),
     // The title names the status this id leads to, read when it was asked.
     (jira::ISSUE_TRANSITION, "markdown", &[], &["transition_id"]),
 ];
