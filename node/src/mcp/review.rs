@@ -1630,14 +1630,33 @@ async fn run_checks(
     .await;
     manager.set_checking(session_id, false);
     let report = report?;
+    let not_run: Vec<&str> = report
+        .results
+        .iter()
+        .filter(|result| result.outcome == "not_run")
+        .map(|result| result.command.as_str())
+        .collect();
     if let Some(prepared) = &report.prepared {
-        manager.record_event(
-            session_id,
-            ek::CHECK_PREPARED,
-            json!({ "candidate_id": candidate.id, "ok": prepared.ok, "ms": prepared.ms }),
-        );
+        let mut payload =
+            json!({ "candidate_id": candidate.id, "ok": prepared.ok, "ms": prepared.ms });
+        // A failed preparation is reported once, here, with what failed and
+        // which checks it kept from running, rather than as each check's
+        // result: none of them ran.
+        if let Some(failure) = &prepared.failure {
+            payload["reason"] = json!(failure.reason());
+            payload["command"] = json!(failure.command);
+            payload["exit"] = json!(failure.exit);
+            payload["message"] = json!(failure.message);
+            payload["tail"] = json!(failure.output);
+            payload["not_run"] = json!(not_run);
+        }
+        manager.record_event(session_id, ek::CHECK_PREPARED, payload);
     }
-    for result in &report.results {
+    for result in report
+        .results
+        .iter()
+        .filter(|result| result.outcome != "not_run")
+    {
         manager.record_event(
             session_id,
             ek::CHECK_RESULT,
@@ -1684,6 +1703,45 @@ async fn run_checks(
                 }),
             );
         }
+    }
+    // A failed preparation ran no check, so the refusal names preparation
+    // and what it said, never a check that did not run. Whether the cause is
+    // the change (a manifest or lockfile) or the environment (a registry it
+    // cannot reach, a credential it lacks) is for its output to tell.
+    if let Some(failure) = report
+        .prepared
+        .as_ref()
+        .and_then(|prepared| prepared.failure.as_ref())
+    {
+        let reason = failure.reason();
+        manager.record_event(
+            session_id,
+            ek::REVIEW_REJECTED,
+            json!({
+                "candidate_id": candidate.id,
+                "reason": reason,
+                "stage": "prepare",
+                "command": failure.command,
+                "exit": failure.exit,
+            }),
+        );
+        let checks = not_run
+            .iter()
+            .map(|command| format!("`{command}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let said = if failure.output.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{}", failure.output)
+        };
+        return Err(format!(
+            "{reason}, in {} ({}). No check was run ({checks}), so nothing was verified. If \
+             your change broke preparation (a manifest or lockfile), fix that and submit again; \
+             if it is the environment (a host it cannot reach, a credential it lacks), tell the \
+             operator rather than changing the code to work around it.{said}",
+            report.image, report.image_source,
+        ));
     }
     // A check the image has no tool for establishes nothing about the
     // candidate. It is reported as the environment's failing, with the image

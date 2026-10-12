@@ -1218,6 +1218,89 @@ exit 101"#
     assert!(!tail.contains("refills_to_capacity"), "{tail}");
 }
 
+/// A preparation that fails runs no check, and is reported as itself: once,
+/// with the command, its exit and what it said, while every check it kept
+/// from running is recorded as not run rather than as a check cut short. The
+/// refusal names preparation, never a check that did not run.
+#[tokio::test]
+async fn a_failed_preparation_is_reported_as_itself_and_runs_no_check() {
+    state::isolate();
+    let name = test_name!();
+    let f = fixture_with(name, WITH_GH, |c| {
+        c.repo = vec![tracon::config::Repo {
+            path: "prepfail".into(),
+            checks: Some(vec!["test -f a.txt".into(), "true".into()]),
+            prepare: vec!["echo 'repo.example: 401 Unauthorized' >&2; exit 100".into()],
+            ..Default::default()
+        }];
+    })
+    .await;
+    // The fixture's workspace, traced back to a repository the entry names.
+    f.store
+        .insert_session(&{
+            let mut r = support::rows::session_row(&format!("s1-{name}"), "n1", "work");
+            r.repo_path = "/src/prepfail".into();
+            r
+        })
+        .unwrap();
+
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        err.starts_with(
+            "preparation failed: `echo 'repo.example: 401 Unauthorized' >&2; exit 100` (exit 100)"
+        ),
+        "{v}"
+    );
+    assert!(
+        err.contains("No check was run (`test -f a.txt`, `true`)"),
+        "{err}"
+    );
+    assert!(err.contains("401 Unauthorized"), "{err}");
+    assert!(!err.contains("check interrupted"), "{err}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+
+    let events = f.store.events_after("s1", 0, 500).unwrap();
+    let prepared = events
+        .iter()
+        .find(|e| e.kind == "check_prepared")
+        .expect("the preparation is reported");
+    assert_eq!(prepared.payload["ok"], false);
+    assert_eq!(prepared.payload["exit"], 100);
+    assert_eq!(
+        prepared.payload["command"],
+        "echo 'repo.example: 401 Unauthorized' >&2; exit 100"
+    );
+    assert!(prepared.payload["tail"]
+        .as_str()
+        .is_some_and(|tail| tail.contains("401 Unauthorized")));
+    assert_eq!(
+        prepared.payload["not_run"],
+        json!(["test -f a.txt", "true"])
+    );
+    assert!(
+        !events.iter().any(|e| e.kind == "check_result"),
+        "a check that never started has no result of its own"
+    );
+    let rejected = events
+        .iter()
+        .find(|e| e.kind == "review_rejected")
+        .expect("the submission is refused");
+    assert_eq!(
+        rejected.payload["reason"],
+        "preparation failed: `echo 'repo.example: 401 Unauthorized' >&2; exit 100` (exit 100)"
+    );
+    assert_eq!(rejected.payload["stage"], "prepare");
+
+    let runs = f.store.check_runs_for_session("s1").unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(
+        runs.iter().all(|run| run.outcome == "not_run"),
+        "{:?}",
+        runs.iter().map(|run| &run.outcome).collect::<Vec<_>>()
+    );
+}
+
 /// A repository's `[[repo]]` entry replaces the node-wide checks for work
 /// that came from it, and its `prepare` commands run first on the very copy
 /// the check then sees. The node-wide check here can only fail, and the

@@ -145,8 +145,13 @@
         <div class="sys">building the repository's image · the harness starts in it when it is ready, which takes minutes the first time</div>
       {:else if e.kind === 'check_started'}
         <div class="mark">checks started · {((e.payload.commands as string[]) ?? []).join(' · ')}</div>
-      {:else if e.kind === 'check_prepared'}
-        <div class={e.payload.ok ? 'mark' : 'mark crit'}>dependencies {e.payload.ok ? 'prepared' : 'not prepared'} · once for this run · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</div>
+      {:else if e.kind === 'check_prepared' && e.payload.ok !== true && (e.payload.message || e.payload.tail)}
+        <!-- A failed preparation keeps what it said behind the line, as a
+             workspace's does; a prepared one is a line from eventLine. -->
+        <details class="fold" open>
+          <summary class="crit">{eventLine(e)?.text}</summary>
+          <div>{[e.payload.message, e.payload.tail].filter(Boolean).join('\n\n')}</div>
+        </details>
       {:else if e.kind === 'workspace_prepared' && e.payload.detail}
         <!-- A failed preparation keeps what it said behind the line; the
              others are a line from eventLine like any other kind. -->

@@ -483,7 +483,7 @@ export interface CandidateCheckRun {
   execution_image: string | null
   inputs_json: string | null
   reuse_key: string | null
-  outcome: 'running' | 'passed' | 'failed' | 'not_runnable' | 'interrupted' | 'cancelled' | 'reused'
+  outcome: 'running' | 'passed' | 'failed' | 'not_runnable' | 'not_run' | 'interrupted' | 'cancelled' | 'reused'
   source_outcome: string | null
   exit_code: number | null
   log: string
@@ -904,7 +904,7 @@ export interface CriterionLink {
   kind: LinkKind | RetiredLinkKind
   value: string
   refs: BriefRef[]
-  /** For a check: `passed`, `failed`, `running`, `interrupted`, `cancelled`. */
+  /** For a check: `passed`, `failed`, `running`, `not_run`, `interrupted`, `cancelled`. */
   outcome?: string
   run_id?: string
   /** Why this link contributes no result, said plainly. */

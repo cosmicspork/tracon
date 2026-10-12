@@ -63,8 +63,10 @@ pub struct CheckResult {
     pub command: String,
     pub ok: bool,
     pub exit: Option<i32>,
-    /// `passed`, `failed`, `not_runnable`, `interrupted`, `cancelled`, or
-    /// `reused`.
+    /// `passed`, `failed`, `not_runnable`, `not_run`, `interrupted`,
+    /// `cancelled`, or `reused`. `not_run` is a check that never started
+    /// because the candidate's preparation failed: it says nothing about the
+    /// check, and the run's [`Preparation`] says what failed.
     pub outcome: String,
     /// The last few KiB of the output, or the retained output of reused
     /// evidence.
@@ -113,6 +115,56 @@ pub struct CheckReport {
 pub struct Preparation {
     pub ok: bool,
     pub ms: u64,
+    /// What failed, when it did. Every check of the run is then `not_run`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<PrepareFailure>,
+}
+
+/// Why a preparation did not complete.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PrepareFailure {
+    /// The `prepare` command that failed or could not be run; `None` when
+    /// preparation stopped before or between its commands (staging, egress,
+    /// its time limit).
+    pub command: Option<String>,
+    /// The command's exit status, when it ran and exited.
+    pub exit: Option<i32>,
+    /// What went wrong, in one sentence.
+    pub message: String,
+    /// What the command said: its failure lines and the end of its output.
+    pub output: String,
+}
+
+impl PrepareFailure {
+    fn said(message: impl Into<String>) -> Self {
+        Self {
+            command: None,
+            exit: None,
+            message: message.into(),
+            output: String::new(),
+        }
+    }
+
+    /// The one line a rejection or a not-run check carries: preparation, and
+    /// the command and exit status where there are both.
+    pub fn reason(&self) -> String {
+        match (&self.command, self.exit) {
+            (Some(command), Some(exit)) => {
+                format!("preparation failed: `{command}` (exit {exit})")
+            }
+            _ => format!("preparation failed: {}", self.message),
+        }
+    }
+}
+
+impl std::fmt::Display for PrepareFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.output.is_empty() {
+            write!(f, "{}", self.message)
+        } else {
+            write!(f, "{}\n\n{}", self.message, self.output)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -484,16 +536,18 @@ pub async fn run_required(
                 format!("could not run: {error}"),
                 json!({ "execution_backend": backend.kind(), "runner_error": error.to_string() }),
             ),
-            // Nothing about the candidate was established: the check never
-            // started. `interrupted` is never a pass and never reusable.
-            Err(Stopped::Unprepared(message)) => (
-                "interrupted",
+            // Nothing about the check was established: it never started.
+            // The preparation, reported once for the run, is what failed;
+            // `not_run` is never a pass and never reusable.
+            Err(Stopped::Unprepared(failure)) => (
+                "not_run",
                 None,
-                message,
+                format!("not run: {}", failure.reason()),
                 json!({
                     "execution_backend": backend.kind(),
-                    "interrupted": "preparation",
+                    "not_run": "preparation",
                     "prepared_with": environment.prepare,
+                    "preparation": failure,
                 }),
             ),
             // The deadline arm already killed the runtime.
@@ -508,7 +562,13 @@ pub async fn run_required(
                 }),
             ),
         };
-        let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        // A check that never started took no time of its own; what preparation
+        // took is the run's, reported once.
+        let duration_ms = if outcome == "not_run" {
+            0
+        } else {
+            i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+        };
         let missing_tool = metadata
             .get("missing_tool")
             .and_then(|tool| tool.as_str())
@@ -589,6 +649,10 @@ pub async fn run_required(
         prepared: prepared.map(|(outcome, ms)| Preparation {
             ok: outcome.is_ok(),
             ms,
+            failure: match outcome {
+                Err(Stopped::Unprepared(failure)) => Some(failure),
+                _ => None,
+            },
         }),
     })
 }
@@ -628,7 +692,7 @@ pub(crate) enum Stopped {
     },
     TimedOut,
     /// Preparation did not complete, so the check was never started.
-    Unprepared(String),
+    Unprepared(PrepareFailure),
 }
 
 impl std::fmt::Display for Stopped {
@@ -712,7 +776,9 @@ async fn prepare_candidate(
     };
     let steps = async {
         staged.await.map_err(|error| {
-            Stopped::Unprepared(format!("could not stage preparation: {error}"))
+            Stopped::Unprepared(PrepareFailure::said(format!(
+                "could not stage preparation: {error}"
+            )))
         })?;
         run_preparation(
             backend,
@@ -722,7 +788,7 @@ async fn prepare_candidate(
             &format!("tracon-p-{}", &hash(run_id)[..12]),
             tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
             cancel,
-            "the check was not run",
+            "no check was run",
         )
         .await
     };
@@ -731,7 +797,15 @@ async fn prepare_candidate(
         Err(stopped) => {
             release_check_volume(backend, &ready.work).await;
             release_check_volume(backend, &ready.cache).await;
-            Err(stopped)
+            // Preparation's own time limit ran out: that is preparation
+            // failing, not a check timing out.
+            Err(match stopped {
+                Stopped::TimedOut => Stopped::Unprepared(PrepareFailure::said(format!(
+                    "timed out after {}s",
+                    environment.timeout_secs
+                ))),
+                stopped => stopped,
+            })
         }
     }
 }
@@ -740,7 +814,7 @@ async fn prepare_candidate(
 /// preparation, by the default branch's, which is what fills the base cache
 /// candidates start from, and by a session's workspace before its harness
 /// starts. `unprepared` is what a failure means to the caller, said after it
-/// ("the check was not run").
+/// ("no check was run").
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_preparation(
     backend: &dyn Backend,
@@ -761,7 +835,8 @@ pub(crate) async fn run_preparation(
     };
     // This preparation's own grant: nothing to wait for, and nothing another
     // run's hosts can widen.
-    let egress = scoped_egress(backend, &environment.egress).map_err(Stopped::Unprepared)?;
+    let egress = scoped_egress(backend, &environment.egress)
+        .map_err(|error| Stopped::Unprepared(PrepareFailure::said(error)))?;
     for (step, command) in environment.prepare.iter().enumerate() {
         let name = format!("{runner_name}-p{step}");
         let running = runner.capture_name(&name);
@@ -788,23 +863,27 @@ pub(crate) async fn run_preparation(
         .await
         .map_err(|stop| stopped(stop, &running))?;
         let output = finished.map_err(|error| {
-            Stopped::Unprepared(format!("could not run preparation `{command}`: {error}"))
+            Stopped::Unprepared(PrepareFailure {
+                command: Some(command.clone()),
+                ..PrepareFailure::said(format!("could not run preparation `{command}`: {error}"))
+            })
         })?;
         if !output.status.success() {
             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
             text.push_str(&String::from_utf8_lossy(&output.stderr));
-            let said = output::with_failures(&output::failure_lines(&text), &tail(&text));
-            return Err(Stopped::Unprepared(format!(
-                "preparation `{command}` failed (exit {}) in {} ({}); {unprepared}.\n\n{}",
-                output
-                    .status
-                    .code()
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "none".into()),
-                environment.image,
-                environment.image_source,
-                said
-            )));
+            let code = output.status.code();
+            return Err(Stopped::Unprepared(PrepareFailure {
+                command: Some(command.clone()),
+                exit: code,
+                message: format!(
+                    "preparation `{command}` failed (exit {}) in {} ({}); {unprepared}.",
+                    code.map(|code| code.to_string())
+                        .unwrap_or_else(|| "none".into()),
+                    environment.image,
+                    environment.image_source,
+                ),
+                output: output::with_failures(&output::failure_lines(&text), &tail(&text)),
+            }));
         }
     }
     Ok(())
@@ -1767,8 +1846,9 @@ mod tests {
     }
 
     /// A preparation that fails stops the execution there. The check is never
-    /// started, the result says what failed and where, the gateway is closed,
-    /// and nothing about it is evidence a later submission could borrow.
+    /// started and is recorded as not run, the preparation says what failed
+    /// and where, the gateway is closed, and nothing about it is evidence a
+    /// later submission could borrow.
     #[tokio::test]
     async fn a_failed_preparation_never_runs_the_check_or_becomes_evidence() {
         let (store, cfg, candidate) = prepared_repo("prep2");
@@ -1794,20 +1874,43 @@ mod tests {
             assert!(!report.all_required_passed);
             assert!(!report.reused);
             let result = &report.results[0];
-            assert_eq!(result.outcome, "interrupted");
+            assert_eq!(result.outcome, "not_run");
+            assert_eq!(result.exit, None);
+            assert_eq!(
+                result.tail,
+                "not run: preparation failed: `bun install --frozen-lockfile` (exit 1)"
+            );
+            let failure = report
+                .prepared
+                .as_ref()
+                .and_then(|prepared| prepared.failure.as_ref())
+                .expect("the preparation says what failed");
+            assert_eq!(
+                failure.command.as_deref(),
+                Some("bun install --frozen-lockfile")
+            );
+            assert_eq!(failure.exit, Some(1));
             assert!(
-                result
-                    .tail
+                failure
+                    .message
                     .contains("preparation `bun install --frozen-lockfile` failed (exit 1)"),
                 "{}",
-                result.tail
+                failure.message
             );
-            assert!(result.tail.contains("403 Forbidden"), "{}", result.tail);
             assert!(
-                result.tail.contains("the check was not run"),
+                failure.message.contains("no check was run"),
                 "{}",
-                result.tail
+                failure.message
             );
+            assert!(
+                failure.output.contains("403 Forbidden"),
+                "{}",
+                failure.output
+            );
+            for row in store.check_runs_for_session("s-app").unwrap() {
+                assert_eq!(row.outcome, "not_run");
+                assert_eq!(row.duration_ms, Some(0));
+            }
         }
         assert_eq!(
             *recorded.log.lock().unwrap(),
@@ -1966,13 +2069,13 @@ mod tests {
         assert!(report
             .prepared
             .as_ref()
-            .is_some_and(|prepared| !prepared.ok));
+            .is_some_and(|prepared| !prepared.ok && prepared.failure.is_some()));
         assert_eq!(report.results.len(), 2);
         assert!(report
             .results
             .iter()
-            .all(|result| result.outcome == "interrupted"
-                && result.tail.contains("the check was not run")));
+            .all(|result| result.outcome == "not_run"
+                && result.tail.starts_with("not run: preparation failed")));
         assert_eq!(failing.commands.lock().unwrap().len(), 1);
     }
 

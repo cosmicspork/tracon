@@ -385,6 +385,19 @@ export function eventLine(e: Event): EventLine | null {
           return line('sys', ['workspace not prepared', str(p.reason)])
       }
     }
+    case 'check_prepared': {
+      // The candidate's `prepare`, run once before a submission's checks. A
+      // failure is reported here, once: the checks it kept from running get
+      // no result of their own.
+      const took = num(p.ms) !== null ? formatDuration(num(p.ms)!) : ''
+      if (p.ok === true) return line('mark', ['dependencies prepared', 'once for this run', took])
+      const notRun = Array.isArray(p.not_run) ? p.not_run.filter((c): c is string => typeof c === 'string') : []
+      return line('crit', [
+        str(p.reason) || 'preparation failed',
+        notRun.length ? `no check was run: ${notRun.join(', ')}` : 'no check was run',
+        took,
+      ])
+    }
     case 'published': {
       const url = str(p.url)
       return line('ok', ['published', url ? forgePath(url) : ''], url || undefined, url ? 'open' : undefined)
