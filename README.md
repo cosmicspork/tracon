@@ -982,6 +982,7 @@ dim = 1024                          # must match the model; changing it rebuilds
 # provider = "anthropic"            # instead of base_url: through the gateway, so the channel ceiling applies
 batch = 16
 timeout_secs = 60
+min_similarity = 0.45               # cosine floor for a semantic match; model-dependent
 ```
 
 For `[embed]`, a local `llama-server --embedding -m <model>.gguf` is enough; BGE-M3
