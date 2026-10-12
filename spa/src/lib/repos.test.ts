@@ -131,4 +131,5 @@ test('a build reads as what it is and how it stands', () => {
   expect(buildLine({ ...build, kind: 'session:claude', source_ref: '', source_commit: '' })).toBe(
     'session image (claude) · ready',
   )
+  expect(buildLine({ ...build, kind: 'trial' })).toBe('image tried by a session from origin/main 5a2bcd4d15b3 · ready')
 })

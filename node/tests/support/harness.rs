@@ -31,6 +31,12 @@ pub async fn harness() -> Harness {
 }
 
 pub async fn harness_with(cfg: Config) -> Harness {
+    harness_on(cfg, Arc::new(tracon::runner::local::LocalBackend)).await
+}
+
+/// As `harness_with`, on a backend of the test's own: one that can build
+/// images, say, which the local backend cannot.
+pub async fn harness_on(cfg: Config, backend: Arc<dyn tracon::boundary::Backend>) -> Harness {
     super::state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
     store.ensure_peer_node("n1").unwrap();
@@ -50,7 +56,7 @@ pub async fn harness_with(cfg: Config) -> Harness {
         "n1".into(),
         tools.clone(),
         Default::default(),
-        Arc::new(tracon::runner::local::LocalBackend),
+        backend,
     );
     let _ = tools.session.set(tracon::mcp::SessionAccess {
         store: store.clone(),

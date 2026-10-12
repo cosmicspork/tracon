@@ -23,6 +23,11 @@ use crate::store::{RepoImageStart, Store};
 /// The image checks and preparation run in.
 pub const BASE: &str = "base";
 
+/// An image built for `repo_setup_try` from a drafted entry's Dockerfile.
+/// Never what a repository's checks or sessions run in: an entry with the
+/// same recipe adopts it as its `BASE` instead of building it again.
+pub const TRIAL: &str = "trial";
+
 /// Bumped when `normalised` changes what it adds, so every repository's image
 /// is rebuilt with the new layer.
 const NORMALISER: &str = "1";
@@ -664,6 +669,8 @@ async fn ensure_with(
         Ok(recipe) => recipe,
         Err(error) => return fallback(error),
     };
+    // A trial the operator allowed may already have built this recipe.
+    let mut tried = None;
     if !force {
         if let Some(row) = standing
             .as_ref()
@@ -671,10 +678,11 @@ async fn ensure_with(
         {
             return Ensured::Current(row.image.clone());
         }
+        tried = built_for_trial(builder, store, repo, &recipe.hash).await;
         let latest = store.latest_repo_image(&repo_path, BASE).ok().flatten();
-        if let Some(failed) =
-            latest.filter(|row| row.status == "failed" && row.recipe_hash == recipe.hash)
-        {
+        if let Some(failed) = latest.filter(|row| {
+            tried.is_none() && row.status == "failed" && row.recipe_hash == recipe.hash
+        }) {
             return fallback(format!("{}; `tracon repo build` tries again", failed.error));
         }
     }
@@ -690,8 +698,14 @@ async fn ensure_with(
         Ok(id) => id,
         Err(error) => return fallback(error.to_string()),
     };
-    tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image");
-    match build(builder, cfg, repo, &recipe).await {
+    let built = match tried {
+        Some(tried) => Ok(tried),
+        None => {
+            tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image");
+            build(builder, cfg, repo, &recipe).await
+        }
+    };
+    match built {
         Ok(built) => {
             let warnings = missing_tools(runner, &built.image, commands).await;
             let _ = store.finish_repo_image(&id, Ok(&built.image), &built.log_tail, &warnings);
@@ -705,6 +719,115 @@ async fn ensure_with(
             tracing::warn!(repo = %repo.display(), error = %failure.error, "repository image build failed");
             let _ = store.finish_repo_image(&id, Err(&failure.error), &failure.log_tail, &[]);
             fallback(failure.error)
+        }
+    }
+}
+
+/// The image a trial built from `recipe_hash`, if the runtime still holds it.
+async fn built_for_trial(
+    builder: &dyn ImageBuilder,
+    store: &Store,
+    repo: &Path,
+    recipe_hash: &str,
+) -> Option<BuiltImage> {
+    let row = store
+        .ready_repo_image(&repo.to_string_lossy(), TRIAL)
+        .ok()
+        .flatten()
+        .filter(|row| row.recipe_hash == recipe_hash)?;
+    builder.exists(&row.image).await.then_some(BuiltImage {
+        image: row.image,
+        log_tail: row.log_tail,
+    })
+}
+
+/// An image this node already built from `recipe_hash`, which a trial of the
+/// same Dockerfile and context runs in without building anything: the
+/// repository's own, or one an earlier trial built.
+pub async fn already_built(
+    builder: &dyn ImageBuilder,
+    store: &Store,
+    repo: &Path,
+    recipe_hash: &str,
+) -> Option<String> {
+    let base = store
+        .ready_repo_image(&repo.to_string_lossy(), BASE)
+        .ok()
+        .flatten()
+        .filter(|row| row.recipe_hash == recipe_hash);
+    if let Some(row) = base {
+        if builder.exists(&row.image).await {
+            return Some(row.image);
+        }
+    }
+    built_for_trial(builder, store, repo, recipe_hash)
+        .await
+        .map(|built| built.image)
+}
+
+/// Build `recipe` for a trial of a drafted entry, exactly as `ensure_base`
+/// would build it, and record it as the repository's `TRIAL` image. Nothing
+/// runs a repository's checks or sessions in it; an entry with this recipe
+/// adopts it later rather than building it again.
+///
+/// A build runs with the network, outside the boundary, so only a trial the
+/// operator allowed calls this. Only the newest trial image is kept.
+pub async fn build_for_trial(
+    builder: &dyn ImageBuilder,
+    cfg: &Config,
+    store: &Store,
+    repo: &Path,
+    recipe: &Recipe,
+) -> Result<BuiltImage, BuildFailure> {
+    let failed = |error: String| BuildFailure {
+        error,
+        log_tail: String::new(),
+    };
+    let lock = build_lock(repo);
+    let _building = lock.lock().await;
+    // Built while this waited for the lock: by an earlier trial, or by the
+    // repository's own entry.
+    if let Some(image) = already_built(builder, store, repo, &recipe.hash).await {
+        return Ok(BuiltImage {
+            image,
+            log_tail: String::new(),
+        });
+    }
+    let repo_path = repo.to_string_lossy();
+    let previous = store.ready_repo_image(&repo_path, TRIAL).ok().flatten();
+    let started = RepoImageStart {
+        repo_path: &repo_path,
+        kind: TRIAL,
+        recipe_hash: &recipe.hash,
+        source_ref: &recipe.source_ref,
+        source_commit: &recipe.source_commit,
+        parent_image: "",
+    };
+    let id = store
+        .start_repo_image(&started)
+        .map_err(|error| failed(error.to_string()))?;
+    tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image for a trial");
+    match build(builder, cfg, repo, recipe).await {
+        Ok(built) => {
+            let _ = store.finish_repo_image(&id, Ok(&built.image), &built.log_tail, &[]);
+            // The trial image this replaces, unless the repository's own
+            // entry has since adopted it.
+            let base = store.ready_repo_image(&repo_path, BASE).ok().flatten();
+            let adopted = |old: &crate::store::RepoImageRow| {
+                base.as_ref().is_some_and(|base| {
+                    base.image == old.image || base.recipe_hash == old.recipe_hash
+                })
+            };
+            if let Some(old) = previous.filter(|old| old.image != built.image && !adopted(old)) {
+                builder.remove(&old.image).await;
+                builder.remove(&source_tag(repo, &old.recipe_hash)).await;
+            }
+            Ok(built)
+        }
+        Err(failure) => {
+            tracing::warn!(repo = %repo.display(), error = %failure.error, "trial image build failed");
+            let _ = store.finish_repo_image(&id, Err(&failure.error), &failure.log_tail, &[]);
+            Err(failure)
         }
     }
 }
@@ -1001,6 +1124,78 @@ mod tests {
 
     /// A Dockerfile that stops building does not take the repository's image
     /// away, and is not rebuilt on every ask.
+    /// A trial builds exactly what the entry's own build would, records it
+    /// beside the repository's image rather than as it, and an entry with the
+    /// same recipe then adopts it instead of building it again.
+    #[tokio::test]
+    async fn an_entry_adopts_the_image_a_trial_built_from_its_recipe() {
+        let tmp = checkout();
+        let repo = tmp.path();
+        let repo_path = repo.to_string_lossy();
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let cfg = Config::default();
+
+        let first = recipe(repo, &entry(repo)).await.unwrap();
+        assert_eq!(
+            already_built(&builder, &store, repo, &first.hash).await,
+            None
+        );
+        let tried = build_for_trial(&builder, &cfg, &store, repo, &first)
+            .await
+            .unwrap();
+        assert_eq!(builder.builds.lock().unwrap().len(), 2);
+        assert_eq!(
+            already_built(&builder, &store, repo, &first.hash).await,
+            Some(tried.image.clone())
+        );
+        // Tried, not taken: nothing runs the repository's work in it yet.
+        assert!(store.ready_repo_image(&repo_path, BASE).unwrap().is_none());
+        // Asked again, it is not built twice.
+        build_for_trial(&builder, &cfg, &store, repo, &first)
+            .await
+            .unwrap();
+        assert_eq!(builder.builds.lock().unwrap().len(), 2);
+
+        assert_eq!(
+            ensure(&builder, &store, repo, false).await,
+            Ensured::Rebuilt(tried.image.clone())
+        );
+        assert_eq!(
+            builder.builds.lock().unwrap().len(),
+            2,
+            "adopted, not rebuilt"
+        );
+        let base = store.ready_repo_image(&repo_path, BASE).unwrap().unwrap();
+        assert_eq!(base.image, tried.image);
+        assert_eq!(base.recipe_hash, first.hash);
+
+        // A later trial of another recipe keeps only its own trial image, and
+        // never removes the one the entry adopted.
+        let mut images = Vec::new();
+        for conf in ["b", "c"] {
+            sh(
+                repo,
+                &format!(
+                    "echo {conf} > .devcontainer/tool.conf && git commit -qam {conf} \
+                     && git update-ref refs/remotes/origin/main HEAD"
+                ),
+            );
+            let next = recipe(repo, &entry(repo)).await.unwrap();
+            assert_ne!(next.hash, first.hash);
+            images.push(
+                build_for_trial(&builder, &cfg, &store, repo, &next)
+                    .await
+                    .unwrap()
+                    .image,
+            );
+        }
+        let removed = builder.removed.lock().unwrap();
+        assert!(!removed.contains(&tried.image), "{removed:?}");
+        assert!(removed.contains(&images[0]), "{removed:?}");
+        assert!(!removed.contains(&images[1]), "{removed:?}");
+    }
+
     #[tokio::test]
     async fn a_failed_build_keeps_the_last_image_and_is_not_retried_unasked() {
         let tmp = checkout();

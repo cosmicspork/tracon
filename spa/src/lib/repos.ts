@@ -132,7 +132,12 @@ export function acceptsUploads(egress: string[], presets: [string, string[]][]):
 
 /// One line for a build: what it is and how it stands.
 export function buildLine(build: RepoImageBuild): string {
-  const what = build.kind === 'base' ? 'image' : `session image (${build.kind.replace('session:', '')})`
+  const what =
+    build.kind === 'base'
+      ? 'image'
+      : build.kind === 'trial'
+        ? 'image tried by a session'
+        : `session image (${build.kind.replace('session:', '')})`
   const from = build.source_ref ? ` from ${build.source_ref} ${build.source_commit.slice(0, 12)}` : ''
   if (build.status === 'building') return `${what}${from} · building…`
   if (build.status === 'failed') return `${what}${from} · failed: ${build.error}`

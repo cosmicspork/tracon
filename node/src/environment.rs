@@ -159,12 +159,6 @@ pub fn environment_with(
         },
         _ => (harness_image(cfg), "harness image"),
     };
-    let mut hash = Sha256::new();
-    if let Some(repo) = repo {
-        hash.update(repo.as_os_str().as_encoded_bytes());
-    }
-    hash.update([0]);
-    hash.update(image.as_bytes());
     RepoEnvironment {
         checks: checks
             .iter()
@@ -186,10 +180,22 @@ pub fn environment_with(
             .filter(|entry| entry.session_egress && entry.egress_hosts().is_ok())
             .map(|entry| entry.egress.clone())
             .unwrap_or_default(),
-        cache_volume: format!("tracon-cache-base-{}", &hex::encode(hash.finalize())[..24]),
+        cache_volume: base_cache_volume(repo, &image),
         image,
         image_source,
     }
+}
+
+/// The base dependency cache of `repo` prepared in `image`: one per image,
+/// because what one toolchain fetched and built another may not read.
+pub fn base_cache_volume(repo: Option<&Path>, image: &str) -> String {
+    let mut hash = Sha256::new();
+    if let Some(repo) = repo {
+        hash.update(repo.as_os_str().as_encoded_bytes());
+    }
+    hash.update([0]);
+    hash.update(image.as_bytes());
+    format!("tracon-cache-base-{}", &hex::encode(hash.finalize())[..24])
 }
 
 impl RepoEnvironment {
