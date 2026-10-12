@@ -10,10 +10,13 @@
   const choices = $derived.by(() => {
     try { return JSON.parse(question.choices_json) as string[] } catch { return [] }
   })
-  async function submit(value = answer) {
-    if (!value.trim() || busy) return
+  // The note goes with a picked choice, or alone as the answer: a choice
+  // such as "Other" is worth little without the words that explain it.
+  async function submit(choice?: string) {
+    const text = answer.trim()
+    if ((!choice && !text) || busy) return
     busy = true; error = null
-    try { await api.answerOperatorQuestion(question.id, value); done?.() }
+    try { await api.answerOperatorQuestion(question.id, { choice, text: text || undefined }); done?.() }
     catch (e) { error = e instanceof Error ? e.message : String(e) }
     finally { busy = false }
   }
@@ -31,18 +34,22 @@
   <!-- An agent's words, rendered as its messages in the log are: Markdown,
        with nothing fetched and embedded HTML escaped. -->
   <div class="prompt md">{@html renderMessage(question.prompt)}</div>
-  {#if choices.length}
-    <div class="choices">{#each choices as choice}<button class="btn" onclick={() => submit(choice)} disabled={busy}>{choice}</button>{/each}</div>
-  {/if}
-  {#if !choices.length}
-    <form onsubmit={(e) => { e.preventDefault(); void submit() }}>
-      <input bind:value={answer} placeholder="Free-text answer" disabled={busy} />
-      <button class="btn p" type="submit" disabled={busy || !answer.trim()}>Answer</button>
-      <button type="button" class="lnk d" onclick={cancel} disabled={busy}>Cancel question</button>
-    </form>
-  {:else}
+  <!-- The note comes first, so it is there to fill before a choice sends it. -->
+  <form class:choosing={choices.length > 0} onsubmit={(e) => { e.preventDefault(); void submit() }}>
+    <input
+      bind:value={answer}
+      placeholder={choices.length ? 'Optional note, sent with a choice or on its own' : 'Free-text answer'}
+      aria-label={choices.length ? 'Note' : 'Answer'}
+      disabled={busy}
+    />
+    {#each choices as choice}
+      <button type="button" class="btn" onclick={() => submit(choice)} disabled={busy}>{choice}</button>
+    {/each}
+    <button class="btn" class:p={!choices.length} type="submit" disabled={busy || !answer.trim()}>
+      {choices.length ? 'Send note only' : 'Answer'}
+    </button>
     <button type="button" class="lnk d" onclick={cancel} disabled={busy}>Cancel question</button>
-  {/if}
+  </form>
   {#if error}<div class="error">{error}</div>{/if}
 </article>
 
@@ -65,8 +72,9 @@
   .md :global(pre) { background: var(--s2); border-radius: 4px; padding: 8px 10px; overflow-x: auto; }
   .md :global(pre code) { background: none; padding: 0; }
   .md :global(blockquote) { border-left: 2px solid var(--rule); padding-left: 1.5ch; color: var(--ink2); }
-  form, .choices { display: flex; gap: 8px 12px; flex-wrap: wrap; align-items: center; }
-  .choices { margin-bottom: 6px; }
+  form { display: flex; gap: 8px 12px; flex-wrap: wrap; align-items: center; }
+  /* With choices, the note takes its own line above them. */
+  .choosing input { flex-basis: 100%; }
   input {
     flex: 1 1 12rem;
     min-width: 0;

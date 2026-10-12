@@ -154,10 +154,29 @@ impl Store {
 fn answer_text(json: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(json) {
         Ok(serde_json::Value::String(s)) => s,
-        Ok(v) => ["choice", "text", "answer", "value"]
-            .iter()
-            .find_map(|k| v[*k].as_str().map(str::to_string))
-            .unwrap_or_else(|| v.to_string()),
+        // A choice with a note says both.
+        Ok(v) => match (v["choice"].as_str(), v["text"].as_str()) {
+            (Some(choice), Some(text)) => format!("{choice}: {text}"),
+            _ => ["choice", "text", "answer", "value"]
+                .iter()
+                .find_map(|k| v[*k].as_str().map(str::to_string))
+                .unwrap_or_else(|| v.to_string()),
+        },
         Err(_) => json.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::answer_text;
+
+    #[test]
+    fn a_question_answer_reads_as_its_choice_text_or_both() {
+        assert_eq!(answer_text(r#"{"choice":"skip"}"#), "skip");
+        assert_eq!(answer_text(r#"{"text":"ask Sam"}"#), "ask Sam");
+        assert_eq!(
+            answer_text(r#"{"choice":"skip","text":"the key lands Monday"}"#),
+            "skip: the key lands Monday"
+        );
     }
 }

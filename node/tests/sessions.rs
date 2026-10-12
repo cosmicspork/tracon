@@ -3772,12 +3772,13 @@ async fn a_plan_session_that_ends_its_turn_on_a_question_is_held_and_given_the_a
         &h.operator,
         "POST",
         &format!("/api/operator/questions/{question}/answer"),
-        Some(json!({ "answer": "right" })),
+        Some(json!({ "choice": "right", "text": "left is flooded" })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let prompt = h.delivered(&question).await;
-    assert!(prompt.contains("\"text\": \"right\""), "{prompt}");
+    assert!(prompt.contains("\"choice\": \"right\""), "{prompt}");
+    assert!(prompt.contains("\"text\": \"left is flooded\""), "{prompt}");
     assert!(prompt.contains("Which way?"), "{prompt}");
     assert!(prompt.contains("Nothing else is waiting"), "{prompt}");
 
