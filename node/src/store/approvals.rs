@@ -244,6 +244,17 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Every approval a session asked for, in any state, oldest first.
+    pub fn approvals_of_session(&self, session_id: &str) -> Result<Vec<ApprovalRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT * FROM approval WHERE session_id=?1 ORDER BY created_ms ASC")?;
+        let rows = stmt
+            .query_map([session_id], ApprovalRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// The egress asks the operator allowed for `session_id`, oldest first:
     /// what a repository set up from that session is suggested to reach.
     pub fn allowed_egress_asks(&self, session_id: &str) -> Result<Vec<ApprovalRow>> {

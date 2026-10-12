@@ -551,7 +551,11 @@ returns `unanswered` with a `question_id`, and `question_status` carries the wai
 in 45-second calls, so no client gives up on the call first. The question
 survives the call returning, the client disconnecting, or the node restarting:
 an answer given meanwhile is kept for the next status call, and a retry with the
-same `request_id` picks it up instead of asking twice. Silence is
+same `request_id` picks it up instead of asking twice. The agent need not keep
+polling, either: a session whose turn ends while a question, a review, or a call
+it asked you to allow is still undecided is held as *waiting on you* instead of
+ending (a plan session that has written its plan included), and your decision
+reaches it as its next prompt. Silence is
 not consent, and an answer widens nothing. `notify_operator` asks for a real
 push to your devices — title, message, and a link back — rate-limited and
 deduplicated, and reports only what the push service said, never that you saw

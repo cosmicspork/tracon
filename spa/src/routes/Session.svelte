@@ -200,6 +200,13 @@
     return cmds[done] ?? cmds.at(-1) ?? null
   })
   const checkElapsed = $derived(checkStarted ? formatAge(checkStarted.at_ms, clock.now) : '')
+  // How many decisions a session held between turns, or put away by a node
+  // that stopped under it, is waiting on: what its latest state change named.
+  const waitingOn = $derived.by(() => {
+    const last = [...store.events].reverse().find((e) => e.kind === 'state')
+    const on = last?.payload.waiting_on
+    return last?.payload.state === session?.state && Array.isArray(on) ? on.length : 0
+  })
 
   async function stop() {
     // Immediate in the browser; confirmed on the phone, where a stray thumb is
@@ -479,9 +486,20 @@
       {session.harness_id === 'external' ? 'broker access paused' : 'paused'}
       <b>· {session.harness_id === 'external' ? 'the external host process continues; Tracon cannot control it' : 'new prompts, tools, and model requests are fenced until resume or stop'}</b>
     </div>
+  {:else if session.state === 'waiting_on_you' && waitingOn > 0}
+    <div class="banner dim">
+      waiting on you <b
+        >· it ended its turn on {waitingOn === 1 ? 'a decision' : `${waitingOn} decisions`} it asked you for; each comes
+        back to it as its next prompt</b
+      >
+    </div>
   {:else if session.state === 'suspended'}
     <div class="banner dim">
-      suspended <b>· its work is published and it went idle; container stopped, egress revoked, workspace kept</b>
+      suspended <b
+        >· {waitingOn > 0
+          ? 'the node stopped while it waited on you; once you have decided, it carries on as a new session'
+          : 'its work is published and it went idle; container stopped, egress revoked, workspace kept'}</b
+      >
       {#if continuedAs}
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
       {:else}

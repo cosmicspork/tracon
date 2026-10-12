@@ -174,6 +174,20 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
+    /// Every question a session asked, in any state, oldest first: what it
+    /// is still waiting on and what it has been answered.
+    pub fn operator_questions_of_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<OperatorQuestionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT * FROM operator_question WHERE session_id=?1 ORDER BY created_ms")?;
+        let rows = stmt
+            .query_map([session_id], OperatorQuestionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
     /// Answer and record the intervention in one transaction. A duplicate
     /// answer cannot create a second metrics event.
     pub fn answer_operator_question(

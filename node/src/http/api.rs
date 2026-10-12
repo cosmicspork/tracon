@@ -2840,8 +2840,27 @@ async fn decide_review_inner(
     decide_local(&s, &id, b).await.map(Json)
 }
 
-/// The verdict as executed on the owning node.
+/// The verdict as executed on the owning node. A session held on the review
+/// takes the verdict as its next prompt.
 pub(crate) async fn decide_local(
+    s: &AppState,
+    id: &str,
+    b: VerdictBody,
+) -> ApiResult<serde_json::Value> {
+    let decided = decide_review_here(s, id, b).await;
+    if decided.is_ok() {
+        if let Ok(Some(session_id)) = s
+            .store()
+            .get_review(id)
+            .map(|r| r.and_then(|r| r.session_id))
+        {
+            s.manager.wait_moved(&session_id).await;
+        }
+    }
+    decided
+}
+
+async fn decide_review_here(
     s: &AppState,
     id: &str,
     b: VerdictBody,
@@ -3457,6 +3476,10 @@ pub async fn answer_operator_question(
             "this question was already answered or cancelled".into(),
         ));
     }
+    // A session held on this question takes the answer as its next prompt.
+    if let Some(session_id) = question.session_id.as_deref() {
+        s.manager.wait_moved(session_id).await;
+    }
     Ok(Json(json!({ "answered": true })))
 }
 
@@ -3469,6 +3492,13 @@ pub async fn cancel_operator_question(
             StatusCode::CONFLICT,
             "this question was already answered or cancelled".into(),
         ));
+    }
+    if let Some(session_id) = s
+        .store()
+        .operator_question(&id)?
+        .and_then(|question| question.session_id)
+    {
+        s.manager.wait_moved(&session_id).await;
     }
     Ok(Json(json!({ "cancelled": true })))
 }

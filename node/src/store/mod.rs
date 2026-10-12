@@ -1143,6 +1143,23 @@ impl Store {
         Ok(raw.and_then(|payload| serde_json::from_str(&payload).ok()))
     }
 
+    /// The payload of this session's latest event of `kind`.
+    pub fn last_event_payload(
+        &self,
+        session_id: &str,
+        kind: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let conn = self.conn.lock().unwrap();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM event WHERE session_id = ?1 AND kind = ?2 ORDER BY seq DESC LIMIT 1",
+                rusqlite::params![session_id, kind],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(raw.and_then(|payload| serde_json::from_str(&payload).ok()))
+    }
+
     pub fn has_event(&self, session_id: &str, kind: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n: i64 = conn.query_row(

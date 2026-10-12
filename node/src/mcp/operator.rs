@@ -33,10 +33,12 @@ pub fn definitions() -> Vec<Value> {
                  choices. Waits up to {MAX_WAIT_SECS} seconds for the answer and returns \
                  `answered` with it, `cancelled` if the operator withdrew the question, or \
                  `unanswered` with `still_waiting: true` and a `question_id` when they have not \
-                 answered yet. The question stays in their queue either way, and an answer given \
-                 later is kept: call {QUESTION_STATUS} with the question_id to keep waiting. A \
-                 stable request_id recovers the same question after a reconnect or restart. An \
-                 answer never grants access."
+                 answered yet. The question stays in their queue either way: call \
+                 {QUESTION_STATUS} with the question_id to keep waiting. In a session the node \
+                 runs you may instead end your turn: the session stays open while the question \
+                 is unanswered, and the node brings the answer back to you as your next prompt. \
+                 A stable request_id recovers the same question after a reconnect or restart. \
+                 An answer never grants access."
             ),
             "inputSchema": {
                 "type": "object",
@@ -57,7 +59,10 @@ pub fn definitions() -> Vec<Value> {
                  answered or cancelled, or after up to {MAX_WAIT_SECS} seconds, with every id's \
                  state — `unanswered` while the operator has not answered, `answered` with the \
                  `answer`, or `cancelled` when they withdrew it without answering. \
-                 `still_waiting` is true when nothing was decided; call again to keep waiting."
+                 `still_waiting` is true when nothing was decided; call again to keep waiting, \
+                 or, in a session the node runs, end your turn: the session stays open while a \
+                 question is unanswered and the node brings the answer back to you as your next \
+                 prompt."
             ),
             "inputSchema": {
                 "type": "object",
@@ -112,19 +117,24 @@ pub async fn call(
     args: &Value,
 ) -> Result<Value, String> {
     match name {
-        ASK => ask(store, ctx, args).await,
+        ASK => ask(store, manager, ctx, args).await,
         NOTIFY => notify_operator(store, manager, cfg, ctx, args).await,
         REPORT => report(store, ctx, args),
         REPORT_STATUS => report_status(store, ctx, args).await,
         QUESTION_STATUS => {
             let ids = ids(args, "question_id", "question_ids")?;
-            question_status(store, ctx, &ids, args).await
+            question_status(store, manager, ctx, &ids, args).await
         }
         _ => Err(format!("no operator tool named {name}")),
     }
 }
 
-async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
+async fn ask(
+    store: &Arc<Store>,
+    manager: &crate::session::Manager,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
     let request_key = text(args, "request_id", true)?;
     if request_key.len() > 128
         || !request_key
@@ -182,7 +192,7 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
             stored
         }
     };
-    question_status(store, ctx, &[row.id], args).await
+    question_status(store, manager, ctx, &[row.id], args).await
 }
 
 /// Where the caller's questions stand, waiting up to the caller's
@@ -192,6 +202,7 @@ async fn ask(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Valu
 /// answer given in between.
 async fn question_status(
     store: &Arc<Store>,
+    manager: &crate::session::Manager,
     ctx: &CallContext,
     ids: &[String],
     args: &Value,
@@ -215,7 +226,20 @@ async fn question_status(
         }
         let decided = rows.iter().any(|row| row.state != "unanswered");
         if decided || tokio::time::Instant::now() >= deadline {
-            let views: Vec<Value> = rows.iter().map(question_view).collect();
+            // What this call returns decided, the session has been told: the
+            // node does not bring it back as a prompt as well.
+            if let Some(session_id) = ctx.session_id() {
+                for row in rows.iter().filter(|row| row.state != "unanswered") {
+                    manager
+                        .waits()
+                        .tell(session_id, &crate::session::waits::question_key(row));
+                }
+            }
+            let in_session = ctx.session_id().is_some();
+            let views: Vec<Value> = rows
+                .iter()
+                .map(|row| question_view(row, in_session))
+                .collect();
             return Ok(if args.get("question_ids").is_some() {
                 json!({ "questions": views, "still_waiting": !decided })
             } else {
@@ -228,7 +252,10 @@ async fn question_status(
     }
 }
 
-fn question_view(row: &OperatorQuestionRow) -> Value {
+/// What `question_status` says of one question. `in_session` when the caller
+/// is a session the node runs, which the node holds open while the question
+/// waits and brings the answer back to.
+pub(crate) fn question_view(row: &OperatorQuestionRow, in_session: bool) -> Value {
     match row.state.as_str() {
         "answered" => json!({
             "question_id": row.id,
@@ -249,9 +276,10 @@ fn question_view(row: &OperatorQuestionRow) -> Value {
             "request_id": row.request_key,
             "state": state,
             "message": format!(
-                "The operator has not answered yet. The question stays in their queue and an \
-                 answer given meanwhile is kept. Call {QUESTION_STATUS} with this question_id to \
-                 keep waiting; each call waits up to {MAX_WAIT_SECS} seconds."
+                "The operator has not answered yet; the question stays in their queue. Call \
+                 {QUESTION_STATUS} with this question_id to keep waiting; each call waits up \
+                 to {MAX_WAIT_SECS} seconds.{}",
+                crate::session::waits::brought_back(in_session)
             ),
         }),
     }

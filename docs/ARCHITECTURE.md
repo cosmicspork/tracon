@@ -701,6 +701,32 @@ a handle, and a status tool carries the wait: `ask_operator` returns a
 an `approval_id` that `approval_status` reads, and `submit_review` a `review_id`
 that `review_status` reads. The state lives in the store, not in the call, so a dropped or timed-out
 call loses nothing and an answer given in between is read by the next status call.
+
+**The node owns the wait, not the agent.** Nothing makes an agent call a status tool
+again: it can end its turn on `still_waiting`, and a session whose turn ended used to
+be finished with — a plan session closed `phase_done` on its plan, and the question
+it was waiting on became unanswerable with it. So at the end of every turn, and on a
+5-second tick between turns, the supervisor reads what the session waits on
+(`session::waits`): its unanswered questions, its undecided reviews and narrative
+reports (checks still running included), and the gated calls it asked the operator
+to allow. A session with one open is not ended and its phase is not marked done: it
+is held as `waiting_on_you`, harness and container kept, and the idle suspension of
+published sessions passes it by. Each decision — answered, cancelled, approved,
+changes requested, rejected, published, checks failed, run, expired — goes back to
+it as its next prompt carrying what the status tool would return, together with
+what is still open. Whatever a status call already returned decided counts as told
+and is not sent twice. Once nothing is open and nothing untold remains, the turn's
+end does what it always did; a closed work item still ends the session at once. A
+decision the API makes nudges the supervisor; the tick is the backstop for one
+nothing announced. Egress asks are not held on: a refused connection raises one
+whether or not the agent wants the host. Nor are issue drafts, which say outright
+that they do not pause the work.
+
+A node that stops (or a restart that finds one) puts a held, idle session away as
+`suspended` with what it was waiting on in its `state` event, rather than closing it
+`node_restart`; its questions stay answerable. Once everything it waited on is
+decided, the node carries it on as a new session on its workspace whose handoff
+note carries each decision.
 `question_status` follows `issue_report_status`'s ownership rule and is dispatched
 before the policy is consulted for the same reason.
 

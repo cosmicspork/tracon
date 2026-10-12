@@ -893,6 +893,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 // A session waiting out its provider's limit is woken here,
                 // and one bound for its fallback is carried on.
                 manager.wake_exhausted().await;
+                // A session the node stopped under while it waited on the
+                // operator is carried on once they have decided.
+                manager.continue_held().await;
                 let stale = store
                     .stale_claims(grace.as_millis() as i64)
                     .unwrap_or_default();

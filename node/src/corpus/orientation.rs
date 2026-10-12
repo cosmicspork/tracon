@@ -370,7 +370,10 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
                  It ends when you write the plan as document `{slug}` with `doc_write` \
                  (that slug alone needs no approval). Say what will change, where, how it \
                  is verified, and what you are unsure of. An execute session follows and \
-                 reads only that document and this item.\n\n"
+                 reads only that document and this item. A question you asked with \
+                 `ask_operator` that is still unanswered keeps this session open after \
+                 the plan is written: the answer comes back to you as a prompt, and you \
+                 revise the plan with it then.\n\n"
             ));
         }
         "execute" => {
