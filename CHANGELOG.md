@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.2](https://github.com/cosmicspork/tracon/compare/v0.31.1...v0.31.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **session:** hold a session whose turn ends on an open wait, and bring the decision back as a prompt ([#453](https://github.com/cosmicspork/tracon/issues/453)) ([927c146](https://github.com/cosmicspork/tracon/commit/927c146ccae5f496a97ebc8c839418d97695d55e))
+
 ## [0.31.1](https://github.com/cosmicspork/tracon/compare/v0.31.0...v0.31.1) (2026-10-11)
 
 
