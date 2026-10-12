@@ -212,6 +212,9 @@ impl Embedder {
 
 /// The nearest indexed chunks to a query, or nothing at all when this node
 /// does not embed, the endpoint is down, or the query embeds to nothing.
+/// Only chunks at least `[embed] min_similarity` alike are near: callers admit
+/// a neighbour as a hit on its position alone, so a far one would read as a
+/// match.
 ///
 /// Nothing here returns an error. Semantic search is an addition to FTS, and a
 /// node whose embedding endpoint is unreachable must answer the query with the
@@ -230,10 +233,14 @@ pub async fn neighbours(
     }
     let e = Embedder::new(cfg.clone(), store.clone(), http.clone());
     match e.embed_query(text, token).await {
-        Ok(v) if !v.is_empty() => Neighbours {
-            hits: store.vec_search(channel, &v, limit).unwrap_or_default(),
-            degraded: false,
-        },
+        Ok(v) if !v.is_empty() => {
+            let mut hits = store.vec_search(channel, &v, limit).unwrap_or_default();
+            hits.retain(|n| similarity(n.distance) >= cfg.embed.min_similarity);
+            Neighbours {
+                hits,
+                degraded: false,
+            }
+        }
         Ok(_) => Neighbours::default(),
         Err(err) => {
             // Configured but unreachable is worth saying out loud: the results
@@ -246,6 +253,12 @@ pub async fn neighbours(
             }
         }
     }
+}
+
+/// Cosine similarity from the index's distance, which is L2 over unit
+/// vectors: `d² = 2 - 2·cos`.
+fn similarity(distance: f64) -> f64 {
+    1.0 - distance * distance / 2.0
 }
 
 /// What the vector leg found, and whether it was able to look at all.

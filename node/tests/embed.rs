@@ -732,3 +732,61 @@ async fn a_rebuild_on_a_node_that_does_not_embed_is_refused() {
         .unwrap_err();
     assert!(err.to_string().contains("[embed] is off"), "{err}");
 }
+
+/// A query that means nothing in this corpus must find nothing. The vector
+/// index always has a nearest chunk, however far, so without a similarity
+/// floor every query came back with whichever document happened to be least
+/// unlike it, ranked as a match.
+#[tokio::test]
+async fn a_query_nothing_resembles_finds_nothing() {
+    state::isolate();
+    let (_stub, base) = stub().await;
+    let (store, _e) = setup(&base);
+    doc(&store, "d1", "personal", "guide-testing", "Running the suite",
+        "# Running the suite\n\nRun pest before pushing. It is the whole workspace, and nothing else runs it.\n");
+    let cfg = config(&base);
+    let e = Embedder::new(cfg.clone(), store.clone(), reqwest::Client::new());
+    indexed(&e, &store).await;
+
+    // No topic word, and no word of the document either: the stub embeds it
+    // orthogonally to everything indexed.
+    let question = "note-zxqv-plork";
+    let near = tracon::embed::neighbours(
+        &cfg,
+        &store,
+        &reqwest::Client::new(),
+        "t",
+        Some("personal"),
+        question,
+        8,
+    )
+    .await;
+    let hits = store
+        .doc_search_hybrid(Some("personal"), None, question, 8, &near.hits)
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "an unrelated document came back: {hits:#?}"
+    );
+
+    // The floor must not cost the semantic match it exists beside.
+    let question = "how do I check my work";
+    let near = tracon::embed::neighbours(
+        &cfg,
+        &store,
+        &reqwest::Client::new(),
+        "t",
+        Some("personal"),
+        question,
+        8,
+    )
+    .await;
+    let hits = store
+        .doc_search_hybrid(Some("personal"), None, question, 8, &near.hits)
+        .unwrap();
+    assert_eq!(
+        hits.first().and_then(|h| h.slug.as_deref()),
+        Some("guide-testing"),
+        "{hits:#?}"
+    );
+}

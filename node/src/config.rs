@@ -445,6 +445,12 @@ pub struct Embed {
     /// How many chunks to embed in one request.
     pub batch: usize,
     pub timeout_secs: u64,
+    /// The cosine similarity below which a neighbour is not a match. The index
+    /// always has a nearest chunk, however unrelated, so without a floor every
+    /// query returns something. Model-dependent: under Qwen3-Embedding-0.6B,
+    /// chunks of unrelated documents score about 0.3 against each other. -1
+    /// turns the floor off.
+    pub min_similarity: f64,
 }
 
 impl Default for Embed {
@@ -460,6 +466,7 @@ impl Default for Embed {
             provider: None,
             batch: 16,
             timeout_secs: 60,
+            min_similarity: 0.45,
         }
     }
 }
