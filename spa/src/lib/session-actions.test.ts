@@ -16,10 +16,20 @@ test('a live session offers what its state takes', () => {
 })
 
 test('the prompt box says it is disabled only when it is', () => {
-  expect(composerState(null, false)).toEqual({ disabled: false, placeholder: 'Send a prompt. Drafts are held on the node.' })
-  expect(composerState('paused', false)).toEqual({ disabled: true, placeholder: 'Input disabled: paused' })
+  expect(composerState(null, false)).toEqual({
+    disabled: false,
+    placeholder: 'Send a prompt. Drafts are held on the node.',
+    queues: false,
+  })
+  expect(composerState('paused', false)).toEqual({ disabled: true, placeholder: 'Input disabled: paused', queues: false })
+})
+
+test('a running turn takes a message to queue rather than refusing it', () => {
   const typing = composerState('a turn is running', true)
   expect(typing.disabled).toBe(false)
+  expect(typing.queues).toBe(true)
   expect(typing.placeholder).not.toContain('disabled')
-  expect(typing.placeholder).toBe('A turn is running. Type the next prompt; Send opens when that clears.')
+  expect(typing.placeholder).toBe(
+    'A turn is running. Queue a message: the agent gets it in its next tracon tool result, or when the turn ends.',
+  )
 })

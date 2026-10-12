@@ -405,7 +405,13 @@ pub fn provenance(store: &Store, sha: &str) -> Result<Option<Value>, crate::stor
     };
     let prompts: Vec<Value> = events
         .iter()
-        .filter(|e| e.kind == "user_prompt")
+        // A message the operator queued mid-turn is theirs whether it reached
+        // the agent in a tool result or as the next prompt; that prompt names
+        // it rather than repeating it.
+        .filter(|e| {
+            e.kind == "prompt_queued"
+                || (e.kind == "user_prompt" && e.payload.get("queued").is_none())
+        })
         .map(|e| json!({ "at_ms": e.at_ms, "text": e.payload["text"] }))
         .collect();
     let answers: Vec<Value> = events

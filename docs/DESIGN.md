@@ -181,7 +181,10 @@ operator's information, not the model's.
    unsent reason and edited prose until a verdict clears them; the review screen says
    whether its draft is saved, and when another device saved first it shows both and
    asks which to keep. Diff edits live in desktop local storage until submitted;
-   losing one costs a re-edit on the machine least likely to be evicted.
+   losing one costs a re-edit on the machine least likely to be evicted. A prompt
+   sent while a turn runs is queued on the node rather than refused, and reaches the
+   agent once: appended to the next node tool result the session gets, or as the
+   next prompt when the turn ends. The log says which, and when.
 2. **Claim grace.** A claim releases 60 seconds after its client disconnects: a
    dropped socket does not zero the attention count; a closed laptop does.
 3. **One node mode.** A node enforces or refuses to run harnesses. No advisory

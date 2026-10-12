@@ -13,6 +13,8 @@
     missingLine,
     orientationContext,
     orientationLine,
+    queuedDeliveries,
+    queuedStatus,
     usageMismatchLine,
     usageUnmeteredLine,
     worktreeLine,
@@ -39,6 +41,23 @@
   } = $props()
 
   const entries = $derived(groupLog(events, toolProgress, toolOutput))
+  // Where each message the operator queued mid-turn went, and whether the
+  // session ended before it could go anywhere.
+  const deliveries = $derived(queuedDeliveries(events))
+  const ended = $derived.by(() => {
+    const last = events.findLast((e) => e.kind === 'state')
+    return ['closed', 'killed_budget', 'failed'].includes(String(last?.payload.state ?? ''))
+  })
+
+  function queuedLine(e: Event): string {
+    const delivery = deliveries.get(String(e.payload.message_id ?? ''))
+    const at = delivery ? new Date(delivery.at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+    return queuedStatus(delivery, ended, at)
+  }
+
+  function queuedCount(e: Event): number {
+    return Array.isArray(e.payload.queued) ? e.payload.queued.length : 0
+  }
 
   let el = $state<HTMLElement | null>(null)
   let pinned = $state(true)
@@ -114,8 +133,16 @@
   {#each entries as entry, i (entry.event?.seq ?? `tools-${i}`)}
     {#if entry.kind === 'leaf'}
       {@const e = entry.event!}
-      {#if e.kind === 'user_prompt'}
+      {#if e.kind === 'user_prompt' && queuedCount(e) > 0}
+        <!-- The text is on the queued lines above, each saying where it went. -->
+        <div class="sys">{queuedCount(e) === 1 ? 'your queued message' : `your ${queuedCount(e)} queued messages`} sent as the next prompt</div>
+      {:else if e.kind === 'user_prompt'}
         <div class="you"><span class="prompt">›</span><div class="md">{@html renderMessage(text(e))}</div></div>
+      {:else if e.kind === 'prompt_queued'}
+        <div class="you queued">
+          <span class="prompt">›</span>
+          <div class="md">{@html renderMessage(text(e))}<div class="meta" class:wait={!deliveries.has(String(e.payload.message_id ?? ''))}>{queuedLine(e)}</div></div>
+        </div>
       {:else if e.kind === 'message'}
         <div class="msg md">{@html renderMessage(text(e))}</div>
       {:else if e.kind === 'thought'}
@@ -354,6 +381,13 @@
   .you .md {
     min-width: 0;
     flex: 1;
+  }
+  /* Queued: the operator's words, with where they went said under them. */
+  .you.queued .meta {
+    font-size: 12px;
+  }
+  .you.queued .meta.wait {
+    color: var(--wait);
   }
   .msg {
     color: var(--ink);

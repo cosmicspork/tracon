@@ -9,6 +9,8 @@ import {
   missingLine,
   orientationContext,
   orientationLine,
+  queuedDeliveries,
+  queuedStatus,
   groupRunning,
   groupSummary,
   policyLine,
@@ -352,4 +354,29 @@ test("a workspace's preparation reads as what it did and what it cost the start"
   for (const [payload, text, tone] of lines) {
     expect(eventLine(ev('workspace_prepared', null, payload))).toEqual({ text, tone: tone as 'mark' })
   }
+})
+
+test('a queued message says where it went, or that it is still waiting', () => {
+  const at = (kind: string, payload: Record<string, unknown>, at_ms: number) => ({ ...ev(kind, null, payload), at_ms })
+  const events = [
+    at('prompt_queued', { message_id: 'm1', text: 'use staging' }, 1),
+    at('prompt_queued', { message_id: 'm2', text: 'rerun it' }, 2),
+    at('prompt_queued', { message_id: 'm3', text: 'and say so' }, 3),
+    at('prompt_delivered', { message_ids: ['m1'], tool: 'review_status' }, 4),
+    at('user_prompt', { text: 'rerun it', queued: ['m2'] }, 5),
+  ]
+  const delivered = queuedDeliveries(events)
+  expect(delivered.get('m1')).toEqual({ via: 'tool', tool: 'review_status', at_ms: 4 })
+  expect(delivered.get('m2')).toEqual({ via: 'prompt', at_ms: 5 })
+  expect(delivered.has('m3')).toBe(false)
+  expect(queuedStatus(delivered.get('m1'), false, '14:02')).toBe('delivered · in the review_status result · 14:02')
+  expect(queuedStatus(delivered.get('m2'), false)).toBe('delivered · as the next prompt')
+  expect(queuedStatus(undefined, false)).toBe(
+    'queued · the agent gets it in its next tracon tool result, or when this turn ends',
+  )
+  expect(queuedStatus(undefined, true)).toBe('queued · never delivered: the session ended first')
+  expect(eventLine(events[3])?.text).toBe('your queued message reached the agent · in the review_status result')
+  expect(eventLine(ev('prompt_delivered', null, { message_ids: ['a', 'b'], tool: 'run_wait' }))?.text).toBe(
+    'your 2 queued messages reached the agent · in the run_wait result',
+  )
 })

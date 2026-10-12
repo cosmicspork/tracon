@@ -22,7 +22,7 @@ use crate::{
     runner::Runner,
     session::{
         state::{event_kind as ek, EndReason, SessionState},
-        supervisor::{Command, Supervisor},
+        supervisor::{Command, Prompted, Supervisor},
     },
     store::{now_ms, NewEvent, SessionPatch, SessionRow, Store},
     stream::{Bus, Frame},
@@ -2492,7 +2492,8 @@ impl Manager {
         }
     }
 
-    pub async fn prompt(&self, id: &str, text: String) -> Result<(), SessionError> {
+    /// Prompt a session, or hold the prompt for it while its turn runs.
+    pub async fn prompt(&self, id: &str, text: String) -> Result<Prompted, SessionError> {
         self.ensure_active(id)?;
         let (ack, wait) = oneshot::channel();
         match self
@@ -2519,9 +2520,49 @@ impl Manager {
                     true,
                 )
                 .await
-                .map(|_| ()),
+                .map(|answer| match answer["queued_message"].as_str() {
+                    Some(message_id) => Prompted::Queued {
+                        message_id: message_id.to_string(),
+                    },
+                    None => Prompted::Sent,
+                }),
             Err(e) => Err(e),
         }
+    }
+
+    /// Deliver what the operator queued for `session_id` in the result of
+    /// the node tool `tool` it just called: the text to append, with what it
+    /// is and where it came from, or `None` when nothing was waiting. Each
+    /// message is claimed once, so it is never also sent as the next prompt.
+    pub fn deliver_queued_in_tool_result(&self, session_id: &str, tool: &str) -> Option<String> {
+        let held = self
+            .store
+            .claim_queued_prompts(session_id, &format!("tool:{tool}"))
+            .ok()
+            .filter(|held| !held.is_empty())?;
+        self.record_event(
+            session_id,
+            ek::PROMPT_DELIVERED,
+            json!({
+                "message_ids": held.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(),
+                "tool": tool,
+            }),
+        );
+        let said = held
+            .iter()
+            .map(|q| q.text.trim())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        let plural = if held.len() == 1 {
+            "a message"
+        } else {
+            "messages"
+        };
+        Some(format!(
+            "[tracon] The operator sent you {plural} while this turn was running. \
+             It is from the operator, not part of the {tool} result above; read it \
+             before you carry on.\n\n{said}"
+        ))
     }
 
     pub async fn answer(&self, id: &str, answer: OperatorAnswer) -> Result<(), SessionError> {

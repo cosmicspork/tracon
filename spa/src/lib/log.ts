@@ -92,6 +92,39 @@ export function groupLog(
   return out
 }
 
+/// Where a message the operator queued mid-turn went: the node tool whose
+/// result carried it to the agent, or the prompt that started the next turn.
+export interface QueuedDelivery {
+  via: 'tool' | 'prompt'
+  tool?: string
+  at_ms: number
+}
+
+/// Every queued message that has reached the agent, by its id.
+export function queuedDeliveries(events: Event[]): Map<string, QueuedDelivery> {
+  const out = new Map<string, QueuedDelivery>()
+  const ids = (v: unknown) => (Array.isArray(v) ? v.filter((id): id is string => typeof id === 'string') : [])
+  for (const e of events) {
+    if (e.kind === 'prompt_delivered') {
+      for (const id of ids(e.payload.message_ids)) out.set(id, { via: 'tool', tool: str(e.payload.tool), at_ms: e.at_ms })
+    } else if (e.kind === 'user_prompt') {
+      for (const id of ids(e.payload.queued)) out.set(id, { via: 'prompt', at_ms: e.at_ms })
+    }
+  }
+  return out
+}
+
+/// What became of a queued message, for the line that shows it. `at` is the
+/// delivery time as the screen shows times.
+export function queuedStatus(delivery: QueuedDelivery | undefined, ended: boolean, at = ''): string {
+  if (!delivery)
+    return ended
+      ? 'queued · never delivered: the session ended first'
+      : 'queued · the agent gets it in its next tracon tool result, or when this turn ends'
+  const where = delivery.via === 'tool' ? `in the ${delivery.tool || 'tool'} result` : 'as the next prompt'
+  return ['delivered', where, at].filter(Boolean).join(' · ')
+}
+
 /// Both sides of a usage disagreement on one line: "usage disagrees · gateway
 /// 10.0k · harness 12 · charged 10.0k". Never one number: the operator is the
 /// one who can say which source is wrong, and they cannot do that from a
@@ -353,6 +386,11 @@ function forgePath(url: string): string {
 export function eventLine(e: Event): EventLine | null {
   const p = e.payload
   switch (e.kind) {
+    case 'prompt_delivered': {
+      const n = Array.isArray(p.message_ids) ? p.message_ids.length : 1
+      const what = n === 1 ? 'your queued message reached the agent' : `your ${n} queued messages reached the agent`
+      return line('mark', [what, `in the ${str(p.tool) || 'tool'} result`])
+    }
     case 'session_paused': {
       const source = str(p.source)
       // The exhaustion line just before says what the provider did and what

@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use crate::{
     adapter::HarnessAdapter,
     config::{Config, Provider},
-    session::{Manager, NewSession, Phase, SessionError},
+    session::{supervisor::Prompted, Manager, NewSession, Phase, SessionError},
     store::Store,
     transfers::{self, ContextSelection, SignedTransfer, TransferError},
 };
@@ -1609,13 +1609,19 @@ pub struct PromptBody {
     text: String,
 }
 
+/// `POST /api/sessions/{id}/prompt`. A session whose turn is running holds
+/// the prompt rather than refusing it: the answer says which, and a queued
+/// one names the message whose delivery the log will show.
 pub async fn prompt(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<PromptBody>,
-) -> ApiResult<StatusCode> {
-    s.manager.prompt(&id, b.text).await?;
-    Ok(StatusCode::ACCEPTED)
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let body = match s.manager.prompt(&id, b.text).await? {
+        Prompted::Sent => json!({ "queued": false }),
+        Prompted::Queued { message_id } => json!({ "queued": true, "message_id": message_id }),
+    };
+    Ok((StatusCode::ACCEPTED, Json(body)))
 }
 #[derive(Deserialize)]
 pub struct SessionControlBody {
@@ -5765,7 +5771,12 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 .manager
                 .prompt(&session_id, text)
                 .await
-                .map(|_| json!({ "accepted": true }))
+                .map(|prompted| match prompted {
+                    Prompted::Sent => json!({ "accepted": true }),
+                    Prompted::Queued { message_id } => {
+                        json!({ "accepted": true, "queued_message": message_id })
+                    }
+                })
                 .map_err(Into::into),
             C::Answer {
                 permission_id,

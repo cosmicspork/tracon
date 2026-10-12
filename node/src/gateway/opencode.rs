@@ -1249,7 +1249,7 @@ async fn mediate(
             // prompt typed into the native UI is the same event as one typed
             // into tracon's.
             match s.manager.prompt(session_id, text).await {
-                Ok(()) => (
+                Ok(_) => (
                     StatusCode::ACCEPTED,
                     axum::Json(json!({ "ok": true, "mediated_by": "tracon" })),
                 )

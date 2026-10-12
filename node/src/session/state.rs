@@ -149,7 +149,17 @@ pub mod event_kind {
     /// `inhibitor_held`). An interruption, not a gap: the session's waiting
     /// cards had their deadlines moved on by the same time.
     pub const HOST_SUSPENDED: &str = "host_suspended";
+    /// The operator's prompt. `queued` lists the queued messages
+    /// (`prompt_queued`) it carries when it is their delivery at a turn's end.
     pub const USER_PROMPT: &str = "user_prompt";
+    /// The operator sent a prompt while a turn was running (`message_id`,
+    /// `text`). Held by the node, not refused: it reaches the agent in the
+    /// next node tool result or as the next prompt, whichever comes first.
+    pub const PROMPT_QUEUED: &str = "prompt_queued";
+    /// Queued messages reached the agent in a node tool's result
+    /// (`message_ids`, `tool`). Delivery as the next prompt is the
+    /// `user_prompt` naming them in `queued`.
+    pub const PROMPT_DELIVERED: &str = "prompt_delivered";
     pub const MESSAGE: &str = "message";
     pub const THOUGHT: &str = "thought";
     pub const TOOL_CALL: &str = "tool_call";
