@@ -626,8 +626,10 @@ export const api = {
   nodeProviderCode: (nodeId: string, name: string, code: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),
   operatorQuestions: () => call<{ questions: OperatorQuestion[] }>('GET', '/api/operator/questions'),
-  answerOperatorQuestion: (id: string, answer: string) =>
-    call<{ answered: boolean }>('POST', `/api/operator/questions/${id}/answer`, { answer }),
+  /** An answer picks one of the question's choices, says something in the
+      operator's own words, or both. */
+  answerOperatorQuestion: (id: string, answer: { choice?: string; text?: string }) =>
+    call<{ answered: boolean }>('POST', `/api/operator/questions/${id}/answer`, answer),
   cancelOperatorQuestion: (id: string) =>
     call<{ cancelled: boolean }>('POST', `/api/operator/questions/${id}/cancel`),
   operatorIssues: () => call<{ issues: OperatorIssue[] }>('GET', '/api/operator/issues'),

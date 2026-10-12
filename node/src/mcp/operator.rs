@@ -29,8 +29,12 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": ASK,
             "description": format!(
-                "Ask the operator a free-text question, optionally choosing from explicit \
-                 choices. Waits up to {MAX_WAIT_SECS} seconds for the answer and returns \
+                "Ask the operator a free-text question, optionally offering explicit \
+                 choices. The operator can always write free text as well as, or instead of, \
+                 picking a choice, so offer only real options and never an \"Other\" choice to \
+                 make room for an explanation. An answer is `{{choice, text}}`: `choice` is the \
+                 offered choice they picked and `text` what they wrote; either may be absent, \
+                 never both. Waits up to {MAX_WAIT_SECS} seconds for the answer and returns \
                  `answered` with it, `cancelled` if the operator withdrew the question, or \
                  `unanswered` with `still_waiting: true` and a `question_id` when they have not \
                  answered yet. The question stays in their queue either way: call \
@@ -58,7 +62,8 @@ pub fn definitions() -> Vec<Value> {
                  `question_ids` to wait on several: the call returns as soon as any of them is \
                  answered or cancelled, or after up to {MAX_WAIT_SECS} seconds, with every id's \
                  state — `unanswered` while the operator has not answered, `answered` with the \
-                 `answer`, or `cancelled` when they withdrew it without answering. \
+                 `answer` (`{{choice, text}}`, either of which may be absent), or `cancelled` \
+                 when they withdrew it without answering. \
                  `still_waiting` is true when nothing was decided; call again to keep waiting, \
                  or, in a session the node runs, end your turn: the session stays open while a \
                  question is unanswered and the node brings the answer back to you as your next \
@@ -260,11 +265,7 @@ pub(crate) fn question_view(row: &OperatorQuestionRow, in_session: bool) -> Valu
         "answered" => json!({
             "question_id": row.id,
             "state": "answered",
-            "answer": row
-                .answer_json
-                .as_deref()
-                .and_then(|v| serde_json::from_str::<Value>(v).ok())
-                .unwrap_or(Value::Null),
+            "answer": answer_view(row),
         }),
         "cancelled" => json!({
             "question_id": row.id,
@@ -283,6 +284,32 @@ pub(crate) fn question_view(row: &OperatorQuestionRow, in_session: bool) -> Valu
             ),
         }),
     }
+}
+
+/// A question's answer as `{choice, text}`. Answers stored before an answer
+/// could carry both kept a picked choice as `{text}`; that reads as the
+/// choice it was.
+fn answer_view(row: &OperatorQuestionRow) -> Value {
+    let Some(mut answer) = row
+        .answer_json
+        .as_deref()
+        .and_then(|v| serde_json::from_str::<Value>(v).ok())
+    else {
+        return Value::Null;
+    };
+    if let Some(fields) = answer.as_object_mut() {
+        let choices: Vec<String> = serde_json::from_str(&row.choices_json).unwrap_or_default();
+        let legacy_choice = !fields.contains_key("choice")
+            && fields
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| choices.iter().any(|c| c == text));
+        if legacy_choice {
+            let text = fields.remove("text").unwrap();
+            fields.insert("choice".into(), text);
+        }
+    }
+    answer
 }
 
 async fn notify_operator(

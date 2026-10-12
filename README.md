@@ -546,7 +546,9 @@ that a peer has none.
 
 Three tools let an agent reach you without pretending a question is a permission.
 `ask_operator` posts a free-text question, optionally with choices, and waits up
-to 45 seconds for you to answer it from the queue or the session. Past that it
+to 45 seconds for you to answer it from the queue or the session. You can always
+write a note, beside a choice or instead of one, so the answer is `{choice, text}`
+with either part optional. Past that it
 returns `unanswered` with a `question_id`, and `question_status` carries the wait
 in 45-second calls, so no client gives up on the call first. The question
 survives the call returning, the client disconnecting, or the node restarting:

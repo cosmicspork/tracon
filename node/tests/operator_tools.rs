@@ -638,7 +638,129 @@ async fn a_waiting_status_call_is_released_by_the_answer() {
         .unwrap()
         .unwrap();
     assert_eq!(answered["state"], "answered", "{answered}");
-    assert_eq!(answered["answer"]["text"], "fork");
+    // The single-field form picks the choice on a question that has them.
+    assert_eq!(
+        answered["answer"],
+        json!({ "choice": "fork" }),
+        "{answered}"
+    );
+}
+
+impl Rig {
+    async fn answer_with(&self, id: &str, body: Value) -> (axum::http::StatusCode, Value) {
+        support::http::call(
+            &self.operator,
+            "POST",
+            &format!("/api/operator/questions/{id}/answer"),
+            Some(body),
+        )
+        .await
+    }
+
+    async fn ask_choices(&self, request_id: &str) -> String {
+        let asked = self
+            .call(
+                "ask_operator",
+                json!({ "request_id": request_id, "question": "retry?",
+                        "choices": ["retry", "skip"], "wait_secs": 0 }),
+            )
+            .await
+            .unwrap();
+        asked["question_id"].as_str().unwrap().to_string()
+    }
+
+    async fn answer_of(&self, id: &str) -> Value {
+        let read = self
+            .call(
+                "question_status",
+                json!({ "question_id": id, "wait_secs": 0 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read["state"], "answered", "{read}");
+        read["answer"].clone()
+    }
+}
+
+/// A question with choices still takes the operator's own words: beside a
+/// choice, or instead of one. A choice must still be one that was offered.
+#[tokio::test]
+async fn a_question_with_choices_takes_free_text_too() {
+    state::isolate();
+    let rig = rig();
+
+    let both = rig.ask_choices("q-both").await;
+    let (status, body) = rig
+        .answer_with(
+            &both,
+            json!({ "choice": "skip", "text": "  the key lands Monday " }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        rig.answer_of(&both).await,
+        json!({ "choice": "skip", "text": "the key lands Monday" })
+    );
+
+    let text_only = rig.ask_choices("q-text").await;
+    let (status, body) = rig
+        .answer_with(
+            &text_only,
+            json!({ "choice": "", "text": "neither: ask Sam" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        rig.answer_of(&text_only).await,
+        json!({ "text": "neither: ask Sam" })
+    );
+
+    let refused = rig.ask_choices("q-refused").await;
+    for (body, want) in [
+        (json!({ "choice": "maybe", "text": "x" }), 422),
+        (json!({ "choice": " ", "text": "" }), 400),
+        (json!({}), 400),
+        (json!({ "answer": "retry", "text": "x" }), 400),
+        (json!({ "answer": "maybe" }), 422),
+        (json!({ "text": "x".repeat(8 * 1024 + 1) }), 400),
+    ] {
+        let (status, reply) = rig.answer_with(&refused, body.clone()).await;
+        assert_eq!(status.as_u16(), want, "{body} -> {reply}");
+    }
+    assert_eq!(
+        rig.store.open_operator_questions().unwrap().len(),
+        1,
+        "a refused answer leaves the question open"
+    );
+}
+
+/// Before an answer could carry both, a picked choice was stored as
+/// `{text}`. It reads back as the choice it was; free text on a question
+/// without choices stays text.
+#[tokio::test]
+async fn an_answer_stored_before_choice_and_text_reads_as_a_choice() {
+    state::isolate();
+    let rig = rig();
+    let picked = rig.ask_choices("q-legacy").await;
+    rig.store
+        .answer_operator_question(&picked, r#"{"text":"retry"}"#)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rig.answer_of(&picked).await, json!({ "choice": "retry" }));
+
+    let free = rig
+        .call(
+            "ask_operator",
+            json!({ "request_id": "q-legacy-free", "question": "why?", "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    let free = free["question_id"].as_str().unwrap().to_string();
+    rig.store
+        .answer_operator_question(&free, r#"{"text":"retry"}"#)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rig.answer_of(&free).await, json!({ "text": "retry" }));
 }
 
 /// The client dropping the call (its timeout, a restart) takes nothing with

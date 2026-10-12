@@ -3414,9 +3414,17 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     })))
 }
 
+/// An answer picks one of the question's choices, says something in the
+/// operator's own words, or both. `answer` is the older single-field form:
+/// on a question with choices it is the choice, otherwise it is the text.
 #[derive(Deserialize)]
 pub struct OperatorAnswerBody {
-    pub answer: String,
+    #[serde(default)]
+    pub answer: Option<String>,
+    #[serde(default)]
+    pub choice: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 pub async fn operator_questions(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
@@ -3450,26 +3458,13 @@ pub async fn answer_operator_question(
             ));
         }
     }
-    let answer = b.answer.trim();
-    if answer.is_empty() || answer.len() > 8 * 1024 {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "answer must be 1–8192 bytes".into(),
-        ));
-    }
     let choices: Vec<String> = serde_json::from_str(&question.choices_json).map_err(|_| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
             "stored question choices are invalid".into(),
         )
     })?;
-    if !choices.is_empty() && !choices.iter().any(|choice| choice == answer) {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "answer must select one offered choice".into(),
-        ));
-    }
-    let answer = json!({ "text": answer }).to_string();
+    let answer = operator_answer(&choices, b)?.to_string();
     if s.store().answer_operator_question(&id, &answer)?.is_none() {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -3481,6 +3476,51 @@ pub async fn answer_operator_question(
         s.manager.wait_moved(session_id).await;
     }
     Ok(Json(json!({ "answered": true })))
+}
+
+/// The stored answer: `{choice, text}`, each present only when given, and
+/// at least one of them. A choice must be one the question offered.
+fn operator_answer(choices: &[String], b: OperatorAnswerBody) -> ApiResult<serde_json::Value> {
+    fn given(v: Option<String>) -> Option<String> {
+        v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    }
+    let (choice, text) = match b.answer {
+        Some(_) if b.choice.is_some() || b.text.is_some() => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "send `answer`, or `choice` and `text`, not both".into(),
+            ))
+        }
+        Some(answer) if choices.is_empty() => (None, given(Some(answer))),
+        Some(answer) => (given(Some(answer)), None),
+        None => (given(b.choice), given(b.text)),
+    };
+    if choice.is_none() && text.is_none() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "an answer needs a choice or some text".into(),
+        ));
+    }
+    if text.as_ref().is_some_and(|t| t.len() > 8 * 1024) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "answer text must be at most 8192 bytes".into(),
+        ));
+    }
+    let mut answer = serde_json::Map::new();
+    if let Some(choice) = choice {
+        if !choices.contains(&choice) {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "answer must select one offered choice".into(),
+            ));
+        }
+        answer.insert("choice".into(), choice.into());
+    }
+    if let Some(text) = text {
+        answer.insert("text".into(), text.into());
+    }
+    Ok(serde_json::Value::Object(answer))
 }
 
 pub async fn cancel_operator_question(
