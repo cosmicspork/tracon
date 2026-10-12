@@ -84,8 +84,12 @@ pub enum Command {
         idle_ms: i64,
     },
     /// End the session once the running turn finishes (now, if none is):
-    /// the work item closed, or the phase's artifact landed.
+    /// the work item closed, or the phase's artifact landed. A phase that is
+    /// done still waits for what the session asked the operator.
     EndAfterTurn(EndReason),
+    /// Something this session waits on may have been decided: look now
+    /// rather than at the next tick.
+    WaitMoved,
     /// A permission request that did not come from the harness: a brokered
     /// tool call the policy wants the operator to decide. Same queue, same
     /// expiry, same answer path.
@@ -190,6 +194,11 @@ pub struct Supervisor {
     grants: std::collections::HashSet<String>,
     /// The grant each open request offered, by permission id.
     offered: HashMap<String, crate::policy::SessionGrant>,
+    /// What this session waits on the operator for, and what it was told.
+    waits: crate::session::waits::Waits,
+    /// Why the last decision could not be brought back, so a refusal that
+    /// repeats on every tick is recorded once.
+    delivery_error: Option<String>,
 }
 
 impl Supervisor {
@@ -225,6 +234,12 @@ impl Supervisor {
             checks: Vec::new(),
             grants: Default::default(),
             offered: HashMap::new(),
+            waits: crate::session::waits::Waits::new(
+                store.clone(),
+                Default::default(),
+                Default::default(),
+            ),
+            delivery_error: None,
             self_tx,
             runner,
             container,
@@ -257,6 +272,14 @@ impl Supervisor {
             .map(|c| c.trim().to_string())
             .filter(|c| !c.is_empty())
             .collect();
+        self
+    }
+
+    /// The node's view of what its sessions wait on: the checks it runs and
+    /// what each session has been told. Without it a supervisor still sees
+    /// what the store holds.
+    pub fn with_waits(mut self, waits: crate::session::waits::Waits) -> Self {
+        self.waits = waits;
         self
     }
 
@@ -457,9 +480,18 @@ impl Supervisor {
                             if self.check_budget().await {
                                 break;
                             }
-                            if let Some(reason) = self.end_after_turn.take() {
+                            // A closed item ends the session whatever it
+                            // waits on; a finished phase waits with it.
+                            if let Some(reason) = self
+                                .end_after_turn
+                                .take_if(|reason| *reason != EndReason::PhaseDone)
+                            {
                                 killed_by_us = true;
                                 self.shutdown(reason).await;
+                                break;
+                            }
+                            if self.settle_waits().await {
+                                killed_by_us = true;
                                 break;
                             }
                         }
@@ -472,9 +504,21 @@ impl Supervisor {
                                 .is_some_and(|s| s.turn_active != 0);
                             if turning {
                                 self.end_after_turn = Some(reason);
+                            } else if reason == EndReason::PhaseDone {
+                                self.end_after_turn = Some(reason);
+                                if self.settle_waits().await {
+                                    killed_by_us = true;
+                                    break;
+                                }
                             } else {
                                 killed_by_us = true;
                                 self.shutdown(reason).await;
+                                break;
+                            }
+                        }
+                        Some(Command::WaitMoved) => {
+                            if self.settle_waits().await {
+                                killed_by_us = true;
                                 break;
                             }
                         }
@@ -488,6 +532,22 @@ impl Supervisor {
                         }
                         Some(Command::End(reason)) => {
                             killed_by_us = true;
+                            // The node is stopping under a session that is
+                            // only waiting on the operator: nothing of it is
+                            // running to be lost, so it is put away with its
+                            // waits, and carried on once they are decided.
+                            if reason == EndReason::NodeRestart && self.active_turn.is_none() {
+                                let mut open = self.waits.open(&self.session_id);
+                                open.retain(crate::session::waits::Wait::survives_restart);
+                                if !open.is_empty() {
+                                    self.suspend(json!({
+                                        "reason": "the node stopped while this session waited on the operator",
+                                        "waiting_on": open.iter().map(|w| w.handle()).collect::<Vec<_>>(),
+                                    }))
+                                    .await;
+                                    break;
+                                }
+                            }
                             self.shutdown(reason).await;
                             break;
                         }
@@ -500,13 +560,20 @@ impl Supervisor {
                                     .is_some_and(|s| s.state == SessionState::Running.as_str() && s.turn_active == 0);
                             if idle {
                                 killed_by_us = true;
-                                self.suspend(idle_ms).await;
+                                self.suspend(json!({ "idle_ms": idle_ms })).await;
                                 break;
                             }
                         }
                         None => break,
                     },
-                    _ = ticker.tick() => self.expire_permissions().await,
+                    _ = ticker.tick() => {
+                        self.expire_permissions().await;
+                        // The backstop for a decision nothing announced.
+                        if self.settle_waits().await {
+                            killed_by_us = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -745,6 +812,104 @@ impl Supervisor {
             return true;
         }
         false
+    }
+
+    /// Between turns, see to what the session waits on the operator for. A
+    /// decision it has not been told is brought back as its next prompt. A
+    /// wait still open holds it, as `waiting_on_you`, rather than letting it
+    /// end: the agent may end its turn on an open wait, and the node owns the
+    /// wait from there. With neither, a finished phase ends the session.
+    /// `true` when the session ended here.
+    async fn settle_waits(&mut self) -> bool {
+        if self.active_turn.is_some() || self.paused_turn.is_some() {
+            return false;
+        }
+        let Ok(Some(row)) = self.store.get_session(&self.session_id) else {
+            return false;
+        };
+        let state = SessionState::from_stored(&row.state);
+        // Checks in flight own the state until they settle; a fenced or
+        // ended session is not this method's to move.
+        if !matches!(state, SessionState::Running | SessionState::WaitingOnYou)
+            || row.turn_active != 0
+            || !self.open.lock().await.is_empty()
+        {
+            return false;
+        }
+        let (open, decided): (Vec<_>, Vec<_>) = self
+            .waits
+            .of(&self.session_id)
+            .into_iter()
+            .partition(crate::session::waits::Wait::is_open);
+        let untold: Vec<_> = decided
+            .into_iter()
+            .filter(|w| !self.waits.was_told(&self.session_id, &w.key))
+            .collect();
+        if !untold.is_empty() {
+            let text = crate::session::waits::prompt(&untold, &open);
+            match self.on_prompt(text).await {
+                Ok(()) => {
+                    self.delivery_error = None;
+                    for wait in &untold {
+                        self.waits.tell(&self.session_id, &wait.key);
+                    }
+                }
+                Err(error) => {
+                    if self.delivery_error.as_deref() != Some(error.as_str()) {
+                        self.record(
+                            ek::ERROR,
+                            None,
+                            json!({
+                                "error": format!("could not bring the operator's decision back: {error}"),
+                                "source": "waits",
+                            }),
+                        );
+                        self.delivery_error = Some(error);
+                    }
+                    if state == SessionState::Running {
+                        self.hold(&untold);
+                    }
+                }
+            }
+            return false;
+        }
+        if !open.is_empty() {
+            if state == SessionState::Running {
+                self.hold(&open);
+            }
+            return false;
+        }
+        if let Some(reason) = self.end_after_turn.take() {
+            self.shutdown(reason).await;
+            return true;
+        }
+        if state == SessionState::WaitingOnYou {
+            self.set_state(SessionState::Running, None);
+        }
+        false
+    }
+
+    /// Hold the session on what it waits for: not ended, not working, and
+    /// saying so.
+    fn hold(&self, waits: &[crate::session::waits::Wait]) {
+        let moved = self.store.update_session_if(
+            &self.session_id,
+            SessionState::Running.as_str(),
+            SessionPatch::state(SessionState::WaitingOnYou.as_str()),
+        );
+        if !matches!(moved, Ok(true)) {
+            return;
+        }
+        self.record(
+            ek::STATE,
+            None,
+            json!({
+                "state": SessionState::WaitingOnYou.as_str(),
+                "end_reason": null,
+                "waiting_on": waits.iter().map(|w| w.handle()).collect::<Vec<_>>(),
+            }),
+        );
+        self.publish_session();
     }
 
     async fn watchdog_pause_if_needed(&mut self) -> bool {
@@ -1325,7 +1490,13 @@ impl Supervisor {
         if s.budget_tokens > 0 && s.tokens_used >= s.budget_tokens {
             return Err("session is over budget".into());
         }
-        if s.state != SessionState::Running.as_str() {
+        // A session held between turns on what it asked the operator takes a
+        // prompt like an idle one: the decision it brings, or the operator's
+        // own word. One waiting on a permission mid-turn does not.
+        let held = s.state == SessionState::WaitingOnYou.as_str()
+            && self.active_turn.is_none()
+            && self.open.lock().await.is_empty();
+        if s.state != SessionState::Running.as_str() && !held {
             return Err(format!("session is {}", s.state));
         }
         // A prompt depends on knowing whether the last one landed. While that
@@ -1339,6 +1510,9 @@ impl Supervisor {
                      prompting again could duplicate a turn the harness may already be running"
                 ));
             }
+        }
+        if held {
+            self.set_state(SessionState::Running, None);
         }
         self.next_turn = self.next_turn.wrapping_add(1);
         let turn_id = self.next_turn;
@@ -1591,7 +1765,10 @@ impl Supervisor {
     /// Not an end: the row stays non-terminal and says `suspended`, and what
     /// it held (the harness, its container, its egress grant, its token) goes
     /// with this supervisor. The workspace is the runtime's and stays.
-    async fn suspend(&mut self, idle_ms: i64) {
+    /// `detail` says why: how long a published session sat idle (`idle_ms`),
+    /// or what a session the node stopped under was waiting on
+    /// (`waiting_on`), which is what carries it on once that is decided.
+    async fn suspend(&mut self, detail: serde_json::Value) {
         let _ = self.store.update_session_unless(
             &self.session_id,
             SessionState::TERMINAL,
@@ -1601,12 +1778,12 @@ impl Supervisor {
                 ..Default::default()
             },
         );
-        self.record(ek::SESSION_SUSPENDED, None, json!({ "idle_ms": idle_ms }));
-        self.record(
-            ek::STATE,
-            None,
-            json!({ "state": SessionState::Suspended.as_str(), "end_reason": null }),
-        );
+        let mut state = json!({ "state": SessionState::Suspended.as_str(), "end_reason": null });
+        if let Some(waiting_on) = detail.get("waiting_on") {
+            state["waiting_on"] = waiting_on.clone();
+        }
+        self.record(ek::SESSION_SUSPENDED, None, detail);
+        self.record(ek::STATE, None, state);
         self.publish_session();
         let _ = tokio::time::timeout(CANCEL_TIMEOUT, self.handle.close()).await;
         self.remove_container().await;

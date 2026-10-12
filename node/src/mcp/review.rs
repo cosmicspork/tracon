@@ -136,7 +136,10 @@ pub fn definitions() -> Vec<Value> {
                  and how long they have run; if they fail it returns `state: \
                  \"submit_failed\"` with the same message submit_review would have \
                  refused with, and nothing was submitted. On approval the node publishes \
-                 the approved text itself and returns where it landed."
+                 the approved text itself and returns where it landed. In a session the \
+                 node runs you need not poll: end your turn and the session stays open \
+                 while the review is undecided, and the node brings its outcome back to \
+                 you as your next prompt."
             ),
             "inputSchema": {
                 "type": "object",
@@ -151,7 +154,10 @@ pub fn definitions() -> Vec<Value> {
             "name": REPORT_STATUS,
             "description": "Wait for a standalone report's operator decision. It never publishes \
                             code. An acknowledgement records receipt only; requested changes \
-                            returns notes for a new submit_report with the same report_id.",
+                            returns notes for a new submit_report with the same report_id. In a \
+                            session the node runs you need not poll: end your turn and the \
+                            session stays open until the operator decides, and the node brings \
+                            the decision back to you as your next prompt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -202,7 +208,7 @@ pub async fn call(
         SUBMIT => submit(store, manager, ctx, args).await,
         STATUS => status(store, manager, ctx, args).await,
         SUBMIT_REPORT => submit_report(store, manager, ctx, args).await,
-        REPORT_STATUS => report_status(store, ctx, args).await,
+        REPORT_STATUS => report_status(store, manager, ctx, args).await,
         VERDICT => verdict(store, manager, ctx, args).await,
         other => Err(format!("no tool named {other}")),
     }
@@ -740,6 +746,8 @@ async fn submit(
                 )
             });
             entry.finish(outcome, recorded);
+            // A session held on these checks hears how they went.
+            manager.wait_moved(&session_id).await;
         }
     });
     // Nothing else waits on this slot now: a retry finds the running entry.
@@ -752,7 +760,16 @@ async fn submit(
         deadline
     };
     match entry.wait(deadline).await {
-        Some(outcome) => outcome,
+        Some(outcome) => {
+            // Answered here, so there is nothing for the node to bring back.
+            manager
+                .waits()
+                .tell(session_id, &crate::session::waits::checks_key(&entry));
+            if let Ok(Some(review)) = store.get_review(&entry.handle) {
+                told_review(manager, ctx, &review);
+            }
+            outcome
+        }
         None => {
             let mut response = checking(&entry);
             if let (Some(response), Some(extras)) =
@@ -1891,9 +1908,109 @@ async fn verdict(
     Ok(json!({ "review_id": review_id, "recorded": true }))
 }
 
+/// What `report_status` answers for a narrative report the operator has
+/// decided, or `None` while it waits on them.
+pub(crate) fn decided_report_view(report: &ReviewRow) -> Option<Value> {
+    match report.state.as_str() {
+        crate::store::reports::ACKNOWLEDGED => Some(json!({
+            "report_id": report.id,
+            "state": "acknowledged",
+            "note": report.verdict_reason,
+            "message": "The operator acknowledged this report. This records receipt only; no code was published.",
+        })),
+        "revising" => Some(json!({
+            "report_id": report.id,
+            "state": "changes_requested",
+            "notes": report.verdict_reason,
+            "message": "The operator requested changes. Revise the narrative and call submit_report with this report_id; do not submit code for publication.",
+        })),
+        _ => None,
+    }
+}
+
+/// What `review_status` answers for a review the operator has decided, or
+/// `None` while it waits on them.
+pub(crate) fn decided_review_view(r: &ReviewRow) -> Option<Value> {
+    match r.state.as_str() {
+        "revising" => {
+            // A patch means the operator edited the diff rather than
+            // describing the change. Applying it verbatim is the point:
+            // it is what they want, and the agent is still the hand that
+            // writes it to the worktree.
+            let message = if r.revision_patch.is_some() {
+                "Changes were requested, with an edited diff. Apply `patch` to the \
+                 worktree exactly as given (`git apply`), make any further changes the \
+                 notes ask for, commit, then call submit_review again with this \
+                 review_id."
+            } else {
+                "Changes were requested. Make them, commit, then call submit_review \
+                 again with this review_id."
+            };
+            Some(json!({
+                "review_id": r.id,
+                "state": "changes_requested",
+                "notes": r.verdict_reason,
+                "patch": r.revision_patch,
+                "message": message,
+            }))
+        }
+        "approved" | "rejected" => Some(json!({
+            "review_id": r.id,
+            "state": r.state,
+            // The approved text, which may not be what was submitted.
+            "title": r.approved_title(),
+            "body": r.approved_body(),
+            "reason": r.verdict_reason,
+            "published": r.publish_result,
+        })),
+        _ => None,
+    }
+}
+
+/// What `review_status` answers for a submission whose checks failed before
+/// a review was recorded — what `submit_review` would have refused with, had
+/// it waited — unless the review it would have revised was decided since.
+/// `None` while the checks run, or when they did not fail that way.
+pub(crate) fn submit_failed_view(
+    store: &Store,
+    entry: &crate::mcp::checking::Entry,
+) -> Option<Value> {
+    let Some(Err(reason)) = entry.outcome() else {
+        return None;
+    };
+    if entry.recorded() {
+        return None;
+    }
+    let decided = store
+        .get_review(&entry.handle)
+        .ok()
+        .flatten()
+        .is_some_and(|r| matches!(r.state.as_str(), "approved" | "rejected"));
+    (!decided).then(|| {
+        json!({
+            "review_id": entry.handle,
+            "state": "submit_failed",
+            "candidate_id": entry.candidate_id,
+            "checks": entry.commands,
+            "message": reason,
+        })
+    })
+}
+
+/// The calling session has now been told what became of this review: the
+/// node need not bring it back as a prompt.
+fn told_review(manager: &Manager, ctx: &CallContext, review: &ReviewRow) {
+    if let Some(session_id) = ctx.session_id() {
+        manager
+            .waits()
+            .tell(session_id, &crate::session::waits::review_key(review));
+    }
+}
+
 /// Poll a narrative report without implying that it could publish anything.
 async fn report_status(
     store: &Arc<Store>,
+    manager: &Manager,
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
@@ -1912,37 +2029,25 @@ async fn report_status(
         if report.kind != crate::store::reports::KIND {
             return Err("report_id names a code review; call review_status instead".into());
         }
-        match report.state.as_str() {
-            crate::store::reports::ACKNOWLEDGED => {
-                return Ok(json!({
-                    "report_id": report.id,
-                    "state": "acknowledged",
-                    "note": report.verdict_reason,
-                    "message": "The operator acknowledged this report. This records receipt only; no code was published.",
-                }));
-            }
-            "revising" => {
-                return Ok(json!({
-                    "report_id": report.id,
-                    "state": "changes_requested",
-                    "notes": report.verdict_reason,
-                    "message": "The operator requested changes. Revise the narrative and call submit_report with this report_id; do not submit code for publication.",
-                }));
-            }
-            _ if tokio::time::Instant::now() >= deadline => {
-                return Ok(json!({
-                    "report_id": report.id,
-                    "state": report.state,
-                    "still_waiting": true,
-                    "waited_secs": wait,
-                    "message": format!(
-                        "Still waiting on an operator acknowledgement. The wait is capped at \
-                         {MAX_WAIT_SECS} seconds; call report_status again with the same report_id."
-                    ),
-                }));
-            }
-            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        if let Some(view) = decided_report_view(&report) {
+            told_review(manager, ctx, &report);
+            return Ok(view);
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(json!({
+                "report_id": report.id,
+                "state": report.state,
+                "still_waiting": true,
+                "waited_secs": wait,
+                "message": format!(
+                    "Still waiting on an operator acknowledgement. The wait is capped at \
+                     {MAX_WAIT_SECS} seconds; call report_status again with the same \
+                     report_id.{}",
+                    crate::session::waits::brought_back(ctx.session_id().is_some())
+                ),
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 
@@ -1965,37 +2070,25 @@ async fn status(
         .get(&id)
         .filter(|entry| Some(entry.session_id.as_str()) == ctx.session_id())
     {
-        match entry.wait(deadline).await {
-            None => {
-                let mut response = checking(&entry);
-                response["still_waiting"] = json!(true);
-                response["waited_secs"] = json!(wait);
-                response["message"] = json!(format!(
-                    "Still running the required checks ({}s so far); nothing reaches the \
-                     operator until they pass. The wait is capped at {MAX_WAIT_SECS} seconds; \
-                     call review_status again with the same review_id.",
-                    entry.running_secs()
-                ));
-                return Ok(response);
-            }
-            // What the submission would have refused with, had it waited —
-            // unless the review it would have revised was decided since.
-            Some(Err(reason)) if !entry.recorded() => {
-                let decided = store
-                    .get_review(&id)
-                    .map_err(|e| e.to_string())?
-                    .is_some_and(|r| matches!(r.state.as_str(), "approved" | "rejected"));
-                if !decided {
-                    return Ok(json!({
-                        "review_id": id,
-                        "state": "submit_failed",
-                        "candidate_id": entry.candidate_id,
-                        "checks": entry.commands,
-                        "message": reason,
-                    }));
-                }
-            }
-            Some(_) => {}
+        if entry.wait(deadline).await.is_none() {
+            let mut response = checking(&entry);
+            response["still_waiting"] = json!(true);
+            response["waited_secs"] = json!(wait);
+            response["message"] = json!(format!(
+                "Still running the required checks ({}s so far); nothing reaches the \
+                 operator until they pass. The wait is capped at {MAX_WAIT_SECS} seconds; \
+                 call review_status again with the same review_id.{}",
+                entry.running_secs(),
+                crate::session::waits::brought_back(true)
+            ));
+            return Ok(response);
+        }
+        if let Some(view) = submit_failed_view(store, &entry) {
+            manager.waits().tell(
+                &entry.session_id,
+                &crate::session::waits::checks_key(&entry),
+            );
+            return Ok(view);
         }
     }
 
@@ -2012,57 +2105,27 @@ async fn status(
                 "that id is a standalone narrative report; call report_status instead".into(),
             );
         }
-        match r.state.as_str() {
-            "revising" => {
-                // A patch means the operator edited the diff rather than
-                // describing the change. Applying it verbatim is the point:
-                // it is what they want, and the agent is still the hand that
-                // writes it to the worktree.
-                let message = if r.revision_patch.is_some() {
-                    "Changes were requested, with an edited diff. Apply `patch` to the \
-                     worktree exactly as given (`git apply`), make any further changes the \
-                     notes ask for, commit, then call submit_review again with this \
-                     review_id."
-                } else {
-                    "Changes were requested. Make them, commit, then call submit_review \
-                     again with this review_id."
-                };
-                return Ok(json!({
-                    "review_id": r.id,
-                    "state": "changes_requested",
-                    "notes": r.verdict_reason,
-                    "patch": r.revision_patch,
-                    "message": message,
-                }));
-            }
-            "approved" | "rejected" => {
-                return Ok(json!({
-                    "review_id": r.id,
-                    "state": r.state,
-                    // The approved text, which may not be what was submitted.
-                    "title": r.approved_title(),
-                    "body": r.approved_body(),
-                    "reason": r.verdict_reason,
-                    "published": r.publish_result,
-                }));
-            }
-            _ if tokio::time::Instant::now() >= deadline => {
-                return Ok(json!({
-                    "review_id": r.id,
-                    "state": r.state,
-                    "still_waiting": true,
-                    "waited_secs": wait,
-                    "message": format!(
-                        "Still waiting on a human; the review is {}. The wait is capped at \
-                         {MAX_WAIT_SECS} seconds so this call returns before your MCP client \
-                         times out — asking for longer will not help. Call review_status again \
-                         with the same review_id to keep waiting.",
-                        r.state,
-                    ),
-                }));
-            }
-            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        if let Some(view) = decided_review_view(&r) {
+            told_review(manager, ctx, &r);
+            return Ok(view);
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(json!({
+                "review_id": r.id,
+                "state": r.state,
+                "still_waiting": true,
+                "waited_secs": wait,
+                "message": format!(
+                    "Still waiting on a human; the review is {}. The wait is capped at \
+                     {MAX_WAIT_SECS} seconds so this call returns before your MCP client \
+                     times out — asking for longer will not help. Call review_status again \
+                     with the same review_id to keep waiting.{}",
+                    r.state,
+                    crate::session::waits::brought_back(ctx.session_id().is_some())
+                ),
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 

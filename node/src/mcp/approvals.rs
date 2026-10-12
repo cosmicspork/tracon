@@ -27,7 +27,10 @@ pub fn definitions() -> Vec<Value> {
              `failed` or `uncertain` with the reason, `rejected` with the operator's reason, \
              `changes_requested` with their `notes`, or `expired`. A rejected or \
              changes_requested call did not run: revise it as the operator said and call \
-             the tool again, which asks anew. Call again to keep waiting."
+             the tool again, which asks anew. Call again to keep waiting, or, in a session \
+             the node runs, end your turn: the session stays open while a call you asked \
+             for waits on the operator, and the node brings what became of it back to you \
+             as your next prompt."
         ),
         "inputSchema": {
             "type": "object",
@@ -72,6 +75,14 @@ pub async fn status(
             .iter()
             .any(|a| a.state != PENDING && a.state != RUNNING);
         if decided || tokio::time::Instant::now() >= deadline {
+            if let Some(session_id) = ctx.session_id() {
+                for row in rows.iter().filter(|a| a.is_settled()) {
+                    access
+                        .manager
+                        .waits()
+                        .tell(session_id, &crate::session::waits::approval_key(row));
+                }
+            }
             let views: Vec<Value> = rows.iter().map(view).collect();
             let still_waiting = !decided;
             return Ok(if args.get("approval_ids").is_some() {
@@ -108,7 +119,8 @@ fn ids(args: &Value) -> Result<Vec<String>, String> {
         .ok_or_else(|| "approval_id or approval_ids is required".into())
 }
 
-fn view(a: &ApprovalRow) -> Value {
+/// What `approval_status` says of one approval.
+pub(crate) fn view(a: &ApprovalRow) -> Value {
     let state = if a.state == PENDING {
         "still_waiting"
     } else {

@@ -9,6 +9,7 @@ pub mod materialize;
 pub mod opencode_state;
 pub mod state;
 pub mod supervisor;
+pub mod waits;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration, time::Instant};
 
@@ -169,6 +170,37 @@ fn restart_note(old: &SessionRow) -> String {
         old.id,
     );
     handoff(old, &why)
+}
+
+/// What a session carrying on one the node put away while it waited on the
+/// operator is told: the handoff, then what the operator decided, as the
+/// status tools returned it.
+fn held_note(old: &SessionRow, waited: &[waits::Wait]) -> String {
+    let why = format!(
+        "This session continues session {}, which was waiting on the operator when the node \
+         it ran on stopped or restarted, and was put away until they decided. You inherit \
+         none of its context",
+        old.id,
+    );
+    let mut note = handoff(old, &why);
+    let (open, decided): (Vec<_>, Vec<_>) = waited.iter().cloned().partition(waits::Wait::is_open);
+    if !decided.is_empty() {
+        note.push_str(
+            "\n\nWhat it was waiting on was decided. Each result below is what its status \
+             tool returned; the ids belong to the earlier session.\n",
+        );
+        note.push_str(&waits::decisions(&decided));
+    }
+    if !open.is_empty() {
+        note.push_str(
+            "\n\nStill undecided when this session started, and asked by the earlier session, \
+             so not yours to poll — ask again if you still need them:\n\n",
+        );
+        for wait in &open {
+            note.push_str(&format!("- {} `{}` — {}\n", wait.tool, wait.id, wait.about));
+        }
+    }
+    note
 }
 
 fn exhausted_note(old: &SessionRow, fallback: Option<&str>) -> String {
@@ -388,6 +420,8 @@ pub struct Manager {
     /// Required checks `submit_review` started, owned by the node rather
     /// than by the call that asked for them.
     checking: Arc<crate::mcp::checking::Checking>,
+    /// What each session has been told of the decisions it waited on.
+    told: Arc<waits::Told>,
 }
 
 impl Manager {
@@ -433,7 +467,13 @@ impl Manager {
             previews: Arc::new(crate::http::preview::PreviewTokens::default()),
             egress: Arc::default(),
             checking: Arc::default(),
+            told: Arc::default(),
         }
+    }
+
+    /// What the sessions here wait on the operator for.
+    pub fn waits(&self) -> waits::Waits {
+        waits::Waits::new(self.store.clone(), self.checking.clone(), self.told.clone())
     }
 
     /// The required checks `submit_review` has running, and what the recent
@@ -549,7 +589,9 @@ impl Manager {
     pub async fn continue_interrupted(&self, id: &str) -> Result<SessionRow, SessionError> {
         let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         let suspended = old.state == SessionState::Suspended.as_str();
-        let note = if suspended {
+        let note = if let Some(waited) = suspended.then(|| self.held_on(&old.id)).flatten() {
+            held_note(&old, &waited)
+        } else if suspended {
             published_note(&old, &self.store.session_publications(&old.id)?)
         } else {
             match old.end_reason.as_deref() {
@@ -662,6 +704,88 @@ impl Manager {
         Ok(row)
     }
 
+    /// What a suspended session was put away waiting on, as those waits stand
+    /// now; `None` for one put away for sitting idle.
+    fn held_on(&self, id: &str) -> Option<Vec<waits::Wait>> {
+        let payload = self
+            .store
+            .last_event_payload(id, ek::STATE)
+            .ok()
+            .flatten()?;
+        if payload["state"] != SessionState::Suspended.as_str() {
+            return None;
+        }
+        let ids: Vec<&str> = payload["waiting_on"]
+            .as_array()?
+            .iter()
+            .filter_map(|w| w["id"].as_str())
+            .collect();
+        Some(
+            self.waits()
+                .of(id)
+                .into_iter()
+                .filter(|w| ids.contains(&w.id.as_str()))
+                .collect(),
+        )
+    }
+
+    /// Something `session_id` waits on may have been decided. A live session
+    /// looks now; one put away waiting on the operator is carried on once
+    /// nothing it waits on is open.
+    pub async fn wait_moved(&self, session_id: &str) {
+        if self.send(session_id, Command::WaitMoved).await.is_ok() {
+            return;
+        }
+        if let Ok(Some(row)) = self.store.get_session(session_id) {
+            if row.node_id == self.node_id && row.state == SessionState::Suspended.as_str() {
+                // Starting a session is not the deciding caller's to wait on.
+                let manager = self.clone();
+                tokio::spawn(async move {
+                    manager.continue_held_one(&row).await;
+                });
+            }
+        }
+    }
+
+    /// Carry on each session here that was put away waiting on the operator
+    /// — the node stopped under it — once everything it waited on has been
+    /// decided: a new session on its workspace, told each decision.
+    pub async fn continue_held(&self) {
+        let Ok(rows) = self
+            .store
+            .list_sessions(Some(SessionState::Suspended.as_str()))
+        else {
+            return;
+        };
+        for row in rows.iter().filter(|row| row.node_id == self.node_id) {
+            self.continue_held_one(row).await;
+        }
+    }
+
+    async fn continue_held_one(&self, old: &SessionRow) -> Option<SessionRow> {
+        // The sweep and a decision can both get here for one session; it is
+        // carried on once.
+        static CONTINUING: Mutex<()> = Mutex::const_new(());
+        let _one = CONTINUING.lock().await;
+        let old = self.store.get_session(&old.id).ok().flatten()?;
+        if old.state != SessionState::Suspended.as_str() {
+            return None;
+        }
+        let old = &old;
+        let waited = self.held_on(&old.id)?;
+        if !self.waits().open(&old.id).is_empty() {
+            return None;
+        }
+        let note = held_note(old, &waited);
+        match self.continue_work(old, None, note, None).await {
+            Ok(row) => Some(row),
+            Err(error) => {
+                tracing::warn!(session = %old.id, %error, "could not carry on a session whose waits were decided");
+                None
+            }
+        }
+    }
+
     /// Put away every live session here whose work is published and which has
     /// sat idle for `idle`: no turn, nothing waiting, nothing recorded. Its
     /// supervisor stops the harness and container and its egress grant goes
@@ -690,7 +814,9 @@ impl Manager {
                 .unwrap_or_default()
                 .iter()
                 .any(|p| p.session_id.as_deref() == Some(id.as_str()));
-            if waiting {
+            // Nor is one waiting on the operator's decision, which comes
+            // back to it as a prompt.
+            if waiting || !self.waits().open(&id).is_empty() {
                 continue;
             }
             let last = self
@@ -1369,7 +1495,12 @@ impl Manager {
                     )));
                 }
             }
-            if let Some(holder) = view.session_id {
+            // A suspended session still holds its item; the session carrying
+            // it on takes the item over as the suspended one ends.
+            if let Some(holder) = view
+                .session_id
+                .filter(|holder| spec.continued_from.as_deref() != Some(holder.as_str()))
+            {
                 return Err(SessionError::InSession(holder));
             }
             let requires_plan = bindings["phases"]["execute"]["requires_plan"]
@@ -2286,15 +2417,18 @@ impl Manager {
             Some(ingest) => sup.with_ingest(ingest),
             None => sup,
         }
-        .with_checks(environment.checks);
+        .with_checks(environment.checks)
+        .with_waits(self.waits());
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let native = self.native.clone();
         let native_events = self.native_events.clone();
+        let waits = self.waits();
         let sid = id.to_string();
         tokio::spawn(async move {
             sup.run(events, cmd_rx).await;
             live.lock().await.remove(&sid);
+            waits.forget(&sid);
             // The token dies with the session; a later call with it is refused.
             tokens.lock().await.remove(&sid);
             // And its way out with it.
@@ -2498,6 +2632,9 @@ impl Manager {
             }),
         );
         self.publish_queue().await;
+        if let Some(session_id) = &approval.session_id {
+            self.wait_moved(session_id).await;
+        }
     }
 
     /// Whether an approved call may still run for this session. A session
@@ -3516,6 +3653,55 @@ pub async fn reconcile_after_restart(
             let mut names = crate::sidecars::containers(store, &s.id);
             names.push(container.clone());
             backend.reconcile(&names).await;
+        }
+        // Between turns, waiting only on the operator: nothing of it was
+        // running to be lost. It is put away with what it waits on, and
+        // carried on once that is decided (`Manager::continue_held`).
+        let idle = s.turn_active == 0
+            && matches!(
+                state::SessionState::from_stored(&s.state),
+                state::SessionState::Running | state::SessionState::WaitingOnYou
+            );
+        // The checks a restart interrupted are gone with the process; what
+        // the store holds is what is still open.
+        let open = if idle {
+            waits::open(store, &Default::default(), &s.id)
+        } else {
+            Vec::new()
+        };
+        if !open.is_empty() {
+            let waiting_on: Vec<_> = open.iter().map(waits::Wait::handle).collect();
+            let _ = store.update_session(
+                &s.id,
+                SessionPatch {
+                    state: Some(state::SessionState::Suspended.as_str().into()),
+                    turn_active: Some(false),
+                    ..Default::default()
+                },
+            );
+            for (kind, payload) in [
+                (
+                    ek::SESSION_SUSPENDED,
+                    json!({ "reason": "the node restarted while this session waited on the operator",
+                            "waiting_on": waiting_on }),
+                ),
+                (
+                    ek::STATE,
+                    json!({ "state": "suspended", "end_reason": null, "waiting_on": waiting_on }),
+                ),
+            ] {
+                let _ = store.append_event(&NewEvent {
+                    session_id: s.id.clone(),
+                    work_item_id: None,
+                    kind: kind.into(),
+                    ref_id: None,
+                    payload,
+                    at_ms: now_ms(),
+                    mono_ms: 0,
+                });
+            }
+            cleaned.push(s.id);
+            continue;
         }
         let _ = store.update_session(
             &s.id,

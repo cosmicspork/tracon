@@ -102,6 +102,17 @@ impl Checking {
         self.entries.lock().unwrap().get(handle).cloned()
     }
 
+    /// The entries `session_id` submitted, running or recently settled.
+    pub fn of_session(&self, session_id: &str) -> Vec<Arc<Entry>> {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.session_id == session_id)
+            .cloned()
+            .collect()
+    }
+
     /// Checks still running under `key`.
     pub fn running(&self, key: &str) -> Option<Arc<Entry>> {
         self.entries

@@ -3595,6 +3595,420 @@ async fn writing_the_plan_document_ends_the_plan_phase() {
     tracon::session::materialize::remove(&row.id);
 }
 
+// ---- a session's turn ends on an open wait ------------------------------
+
+/// A plan session, its harness's MCP route, and the operator's API.
+struct Held {
+    o: Orientation,
+    harness: axum::Router,
+    operator: axum::Router,
+    token: String,
+}
+
+impl Held {
+    async fn new(tag: &str) -> Self {
+        let o = orientation(tag).await;
+        o.manager.set_default_adapter(o.adapter.clone());
+        // The kickoff turn has run and the session is idle, its own tool
+        // token registered before the test's replaces it.
+        for _ in 0..1200 {
+            let s = o.store.get_session(&o.row.id).unwrap().unwrap();
+            if s.state == "running"
+                && s.turn_active == 0
+                && o.store.has_event(&o.row.id, "turn_end").unwrap()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let state = AppState {
+            manager: o.manager.clone(),
+            cfg: o.cfg.clone(),
+            adapter: o.adapter.clone(),
+            node_id: "n1".into(),
+            tools: o.tools.clone(),
+            mesh: None,
+            auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+            enroll: Default::default(),
+        };
+        let harness = tracon::http::harness_router(state.clone());
+        let operator = tracon::http::router(state);
+        let token = o
+            .manager
+            .register_tool_token_for_test(&o.row.id, "personal")
+            .await;
+        Self {
+            o,
+            harness,
+            operator,
+            token,
+        }
+    }
+
+    /// Call one of the node's tools as the session's harness would.
+    async fn tool(&self, name: &str, arguments: Value) -> Value {
+        let (st, v) = mcp_call(
+            &self.harness,
+            &self.o.row.id,
+            &self.token,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                   "params":{"name": name, "arguments": arguments}}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_ne!(v["result"]["isError"], true, "{name}: {v}");
+        let text = v["result"]["content"][0]["text"].as_str().unwrap_or("null");
+        serde_json::from_str(text).unwrap_or_else(|_| json!(text))
+    }
+
+    fn session(&self) -> tracon::store::SessionRow {
+        self.o.store.get_session(&self.o.row.id).unwrap().unwrap()
+    }
+
+    /// Wait, past the supervisor's own tick, for the session to satisfy `ok`.
+    async fn until(
+        &self,
+        ok: impl Fn(&tracon::store::SessionRow) -> bool,
+        what: &str,
+    ) -> tracon::store::SessionRow {
+        for _ in 0..1200 {
+            let s = self.session();
+            if ok(&s) {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("session never {what}: {:?}", self.session());
+    }
+
+    fn prompts(&self) -> Vec<String> {
+        self.o
+            .store
+            .events_after(&self.o.row.id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user_prompt")
+            .map(|e| e.payload["text"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The prompt the node brought back with a decision, once it has.
+    async fn delivered(&self, containing: &str) -> String {
+        for _ in 0..1200 {
+            if let Some(p) = self
+                .prompts()
+                .into_iter()
+                .find(|p| p.contains("The operator has decided") && p.contains(containing))
+            {
+                return p;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no decision was brought back: {:?}", self.prompts());
+    }
+
+    fn write_plan(&self) -> impl std::future::Future<Output = Value> + '_ {
+        let slug = tracon::corpus::work::plan_slug(&self.o.item.id);
+        self.tool(
+            "doc_write",
+            json!({"slug": slug, "body": "# Plan\n\n1. Do it."}),
+        )
+    }
+}
+
+/// The live case on 0.31.1: a plan session asks the operator, polls, writes
+/// its plan and ends its turn. It used to close `phase_done` at once and the
+/// question with it. Now it is held waiting on the operator, a further turn
+/// that ends with the question still open holds it again, and the answer
+/// comes back to it as its next prompt. Only then does the phase end.
+#[tokio::test]
+async fn a_plan_session_that_ends_its_turn_on_a_question_is_held_and_given_the_answer() {
+    state::isolate();
+    let h = Held::new("held-question").await;
+    let asked = h
+        .tool(
+            "ask_operator",
+            json!({ "request_id": "which-way", "question": "Which way?",
+                    "choices": ["left", "right", "neither"], "wait_secs": 0 }),
+        )
+        .await;
+    assert_eq!(asked["still_waiting"], true, "{asked}");
+    let message = asked["message"].as_str().unwrap();
+    assert!(message.contains("question_status"), "{message}");
+    assert!(message.contains("end your turn"), "{message}");
+    assert!(!message.contains("is kept"), "{message}");
+    let question = asked["question_id"].as_str().unwrap().to_string();
+
+    h.write_plan().await;
+    let s = h
+        .until(|s| s.state == "waiting_on_you", "held on its question")
+        .await;
+    assert_eq!(s.end_reason, None);
+    let held =
+        h.o.store
+            .last_event_payload(&h.o.row.id, "state")
+            .unwrap()
+            .unwrap();
+    assert_eq!(held["waiting_on"][0]["id"], question.as_str(), "{held}");
+    // Past the supervisor's tick: still held, not ended.
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert_eq!(h.session().state, "waiting_on_you");
+
+    // The operator can still talk to it, and a turn that ends with the
+    // question open holds it again rather than ending the phase.
+    h.o.manager
+        .prompt(&h.o.row.id, "while you wait: anything else?".into())
+        .await
+        .unwrap();
+    h.until(
+        |s| s.state == "waiting_on_you" && s.turn_active == 0,
+        "held again after its turn",
+    )
+    .await;
+    assert!(h.prompts().iter().any(|p| p.contains("anything else")));
+
+    // The answer is accepted for the held session and comes back to it.
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/operator/questions/{question}/answer"),
+        Some(json!({ "answer": "right" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.delivered(&question).await;
+    assert!(prompt.contains("\"text\": \"right\""), "{prompt}");
+    assert!(prompt.contains("Which way?"), "{prompt}");
+    assert!(prompt.contains("Nothing else is waiting"), "{prompt}");
+
+    // With nothing left open, the turn that took the answer ends the phase.
+    let s = h.until(|s| s.state == "closed", "closed").await;
+    assert_eq!(s.end_reason.as_deref(), Some("phase_done"));
+    assert_eq!(
+        h.prompts()
+            .iter()
+            .filter(|p| p.contains("The operator has decided"))
+            .count(),
+        1,
+        "the answer is brought back once"
+    );
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A decision the agent already read from its status call is not brought
+/// back again: the phase ends as soon as nothing is open.
+#[tokio::test]
+async fn an_answer_the_agent_already_read_is_not_brought_back() {
+    state::isolate();
+    let h = Held::new("held-read").await;
+    let asked = h
+        .tool(
+            "ask_operator",
+            json!({ "request_id": "read-it", "question": "Go?", "wait_secs": 0 }),
+        )
+        .await;
+    let question = asked["question_id"].as_str().unwrap().to_string();
+    let (status, _) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/operator/questions/{question}/answer"),
+        Some(json!({ "answer": "go" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let read = h
+        .tool(
+            "question_status",
+            json!({ "question_id": question, "wait_secs": 0 }),
+        )
+        .await;
+    assert_eq!(read["answer"]["text"], "go", "{read}");
+
+    h.write_plan().await;
+    let s = h.until(|s| s.state == "closed", "closed").await;
+    assert_eq!(s.end_reason.as_deref(), Some("phase_done"));
+    assert!(
+        !h.prompts()
+            .iter()
+            .any(|p| p.contains("The operator has decided")),
+        "{:?}",
+        h.prompts()
+    );
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A review the session submitted holds it the same way, and the verdict —
+/// here a rejection with its reason — is what comes back.
+#[tokio::test]
+async fn a_session_held_on_its_review_is_given_the_verdict() {
+    state::isolate();
+    let h = Held::new("held-review").await;
+    let review = uuid::Uuid::now_v7().to_string();
+    h.o.store
+        .insert_review(&tracon::store::ReviewRow {
+            id: review.clone(),
+            session_id: Some(h.o.row.id.clone()),
+            node_id: "n1".into(),
+            channel: "personal".into(),
+            kind: "pr".into(),
+            title: "feat: the ledger".into(),
+            body: String::new(),
+            edited_title: None,
+            edited_body: None,
+            provider: "github".into(),
+            target: "{}".into(),
+            diff: "+x".into(),
+            files: "[]".into(),
+            head_sha: "abc".into(),
+            base_ref: "main".into(),
+            added: 1,
+            removed: 0,
+            state: "new".into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: now_ms(),
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+            lane: None,
+        })
+        .unwrap();
+
+    // An idle session holding an undecided review is held by the next tick.
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    h.write_plan().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.session().state, "waiting_on_you", "the phase waits too");
+
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/reviews/{review}/verdict"),
+        Some(json!({ "verdict": "reject", "reason": "not this way" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.delivered(&review).await;
+    assert!(prompt.contains("review_status"), "{prompt}");
+    assert!(prompt.contains("\"state\": \"rejected\""), "{prompt}");
+    assert!(prompt.contains("not this way"), "{prompt}");
+    let s = h.until(|s| s.state == "closed", "closed").await;
+    assert_eq!(s.end_reason.as_deref(), Some("phase_done"));
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A node that stops under a held session puts it away with what it waits
+/// on, rather than ending it: the question stays answerable, and once it is
+/// answered the work carries on as a new session told the answer.
+#[tokio::test]
+async fn a_node_stopping_under_a_held_session_carries_it_on_once_answered() {
+    state::isolate();
+    let h = Held::new("held-restart").await;
+    let asked = h
+        .tool(
+            "ask_operator",
+            json!({ "request_id": "after-restart", "question": "Keep the ledger?",
+                    "wait_secs": 0 }),
+        )
+        .await;
+    let question = asked["question_id"].as_str().unwrap().to_string();
+    h.write_plan().await;
+    h.until(|s| s.state == "waiting_on_you", "held").await;
+
+    h.o.manager.shutdown_all().await;
+    let s = h.until(|s| s.state == "suspended", "put away").await;
+    assert_eq!(s.end_reason, None);
+    // Nothing to carry on yet: the question is still open.
+    h.o.manager.continue_held().await;
+    assert_eq!(h.session().state, "suspended");
+
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/operator/questions/{question}/answer"),
+        Some(json!({ "answer": "yes" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let s = h.until(|s| s.state == "closed", "carried on").await;
+    assert_eq!(s.end_reason.as_deref(), Some("continued"));
+    let next =
+        h.o.store
+            .list_sessions(None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.continued_from.as_deref() == Some(h.o.row.id.as_str()))
+            .expect("a continuation");
+    let first = first_prompt(&h.o.store, &next.id).await;
+    assert!(first.contains(&h.o.row.id), "{first}");
+    assert!(first.contains("Keep the ledger?"), "{first}");
+    assert!(first.contains("\"text\": \"yes\""), "{first}");
+    h.o.manager.kill(&next.id).await.ok();
+    tracon::session::materialize::remove(&h.o.row.id);
+    tracon::session::materialize::remove(&next.id);
+}
+
+/// A restart that finds a session held between turns on an open question
+/// puts it away with what it waits on; one cut off mid-turn still ends as
+/// `node_restart`.
+#[tokio::test]
+async fn a_restart_puts_a_held_session_away_rather_than_ending_it() {
+    state::isolate();
+    let store = Harness::new(0).await.store;
+    let ask = |session: &str| tracon::store::OperatorQuestionRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        session_id: Some(session.to_string()),
+        channel: "personal".into(),
+        node_id: "n1".into(),
+        request_key: Some("q".into()),
+        prompt: "Which way?".into(),
+        choices_json: "[]".into(),
+        state: "unanswered".into(),
+        answer_json: None,
+        created_ms: now_ms(),
+        answered_ms: None,
+    };
+    let held = insert_running_session(&store, 0);
+    store
+        .update_session(&held, tracon::store::SessionPatch::state("waiting_on_you"))
+        .unwrap();
+    let question = store.insert_operator_question(&ask(&held)).unwrap();
+    let mid_turn = insert_running_session(&store, 0);
+    store
+        .update_session(
+            &mid_turn,
+            tracon::store::SessionPatch {
+                turn_active: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store.insert_operator_question(&ask(&mid_turn)).unwrap();
+
+    tracon::session::reconcile_after_restart(&store, "n1", &tracon::runner::local::LocalBackend)
+        .await;
+
+    let row = store.get_session(&held).unwrap().unwrap();
+    assert_eq!(row.state, "suspended");
+    assert_eq!(row.end_reason, None);
+    let state = store.last_event_payload(&held, "state").unwrap().unwrap();
+    assert_eq!(
+        state["waiting_on"][0]["id"],
+        question.id.as_str(),
+        "{state}"
+    );
+    assert_eq!(state["waiting_on"][0]["tool"], "question_status", "{state}");
+    let row = store.get_session(&mid_turn).unwrap().unwrap();
+    assert_eq!(row.state, "closed");
+    assert_eq!(row.end_reason.as_deref(), Some("node_restart"));
+}
+
 /// A harness that starts and then never finishes its handshake, so what the
 /// test watches is the node's own startup bound and cleanup rather than an
 /// adapter's.
