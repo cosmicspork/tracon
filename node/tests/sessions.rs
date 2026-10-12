@@ -839,7 +839,7 @@ fn insert_session_for_item(store: &Arc<Store>, budget: i64, item: Option<&str>) 
 // a git repo in the way.
 
 use std::time::{Duration, Instant};
-use tracon::session::supervisor::{Command, Supervisor};
+use tracon::session::supervisor::{Command, Prompted, Supervisor};
 
 /// The supervisor tears down its container on exit; these tests have none.
 struct NoRunner;
@@ -1553,7 +1553,7 @@ async fn a_stale_permission_behind_a_paused_turns_completion_is_drained_before_r
         .unwrap();
     // The prompt call itself never resolves (`BlockingHandle`); registering
     // the turn does, so no background completion can race what follows.
-    assert_eq!(prompt_wait.await.unwrap(), Ok(()));
+    assert_eq!(prompt_wait.await.unwrap(), Ok(Prompted::Sent));
 
     let (pause_ack, pause_wait) = oneshot::channel();
     rig.commands
@@ -2154,7 +2154,7 @@ impl Rig {
             })
             .await
             .unwrap();
-        assert_eq!(done.await.unwrap(), Ok(()));
+        assert_eq!(done.await.unwrap(), Ok(Prompted::Sent));
     }
 
     /// Close the open turn with what the harness says it spent.
@@ -5072,5 +5072,227 @@ async fn a_fallback_policy_without_a_fallback_is_refused_at_create() {
         h.store.exhaustion(id).unwrap().unwrap().policy,
         "pause",
         "the run's choice wins over the channel's"
+    );
+}
+
+/// A harness whose turns end only when the test lets them, and which writes
+/// down every prompt it was sent, so a test can hold a turn open and still see
+/// what reached the agent afterwards.
+struct GatedAdapter {
+    prompts: Arc<std::sync::Mutex<Vec<String>>>,
+    release: Arc<tokio::sync::Semaphore>,
+    tx: Arc<Mutex<Option<mpsc::Sender<HarnessEvent>>>>,
+}
+
+struct GatedHandle {
+    prompts: Arc<std::sync::Mutex<Vec<String>>>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait]
+impl HarnessHandle for GatedHandle {
+    fn harness_session_id(&self) -> &str {
+        "gated"
+    }
+    fn compat(&self) -> tracon::adapter::HarnessCompat {
+        tracon::adapter::HarnessCompat {
+            agent: "fake".into(),
+            version: "1.0.0".into(),
+            protocol: "fake/1".into(),
+        }
+    }
+    async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
+        self.prompts.lock().unwrap().push(text);
+        self.release.acquire().await.unwrap().forget();
+        Ok(TurnResult {
+            stop_reason: "end_turn".into(),
+            usage: tracon::adapter::types::Usage {
+                input_tokens: 5,
+                output_tokens: 5,
+                total_tokens: 10,
+                cached_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        })
+    }
+    async fn cancel(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn close(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl HarnessAdapter for GatedAdapter {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+    fn pinned_version(&self) -> &str {
+        "1.0.0"
+    }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        tracon::adapter::ProtocolSupport {
+            name: "fake",
+            min: 1,
+            max: 1,
+        }
+    }
+    async fn version(
+        &self,
+        _r: &dyn Runner,
+    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
+        Ok(tracon::adapter::HarnessVersion {
+            found: "1.0.0".into(),
+            pinned: "1.0.0".into(),
+        })
+    }
+    async fn probe_models(
+        &self,
+        _r: &dyn Runner,
+        _wiring: &tracon::gateway::model::Wiring,
+    ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
+        Ok(Vec::new())
+    }
+    async fn launch(
+        &self,
+        _runner: &dyn Runner,
+        _spec: tracon::adapter::LaunchSpec,
+    ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
+        let (tx, rx) = mpsc::channel(64);
+        *self.tx.lock().await = Some(tx);
+        Ok((
+            Box::new(GatedHandle {
+                prompts: self.prompts.clone(),
+                release: self.release.clone(),
+            }),
+            rx,
+        ))
+    }
+}
+
+/// #459: the operator could not say anything to a session while its turn ran
+/// (a session polling `review_status` stays in one turn until the verdict),
+/// because a prompt mid-turn was refused with 409. It is held instead and
+/// reaches the agent once: in the next node tool result the session gets, or,
+/// if no tool call comes first, as the prompt after the turn ends.
+#[tokio::test]
+async fn a_prompt_sent_mid_turn_is_queued_and_reaches_the_agent_once() {
+    state::isolate();
+    let gated = Arc::new(GatedAdapter {
+        prompts: Default::default(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+        tx: Default::default(),
+    });
+    let o = orientation_with("queued-prompt", Some(gated.clone()), 0).await;
+    let id = o.row.id.clone();
+    let session = || o.store.get_session(&id).unwrap().unwrap();
+    let prompts = || gated.prompts.lock().unwrap().clone();
+    // The kickoff turn is running and stays running.
+    for _ in 0..1200 {
+        if session().turn_active == 1 && prompts().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(session().turn_active, 1, "{:?}", session());
+
+    let state = AppState {
+        manager: o.manager.clone(),
+        cfg: o.cfg.clone(),
+        adapter: o.adapter.clone(),
+        node_id: "n1".into(),
+        tools: o.tools.clone(),
+        mesh: None,
+        auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
+    };
+    let harness = tracon::http::harness_router(state.clone());
+    let operator = tracon::http::router(state);
+    let token = o
+        .manager
+        .register_tool_token_for_test(&id, "personal")
+        .await;
+    let send = |text: &'static str| {
+        let operator = operator.clone();
+        let uri = format!("/api/sessions/{id}/prompt");
+        async move {
+            let (status, body) =
+                support::http::call(&operator, "POST", &uri, Some(json!({ "text": text }))).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["queued"], true, "{body}");
+            body["message_id"].as_str().unwrap().to_string()
+        }
+    };
+
+    // Queued, not refused, and said so in the log.
+    let first = send("use the staging database, not prod").await;
+    let queued = o.store.last_event_payload(&id, "prompt_queued").unwrap();
+    assert_eq!(queued.as_ref().unwrap()["message_id"], first.as_str());
+
+    // The session's next node tool call carries it, after the tool's own
+    // result.
+    let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "recall", "arguments": {"query": "tests"}}});
+    let (status, answer) = mcp_call(&harness, &id, &token, call.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let content = answer["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2, "{answer}");
+    let note = content[1]["text"].as_str().unwrap();
+    assert!(note.contains("The operator sent you a message"), "{note}");
+    assert!(note.contains("not part of the recall result"), "{note}");
+    assert!(
+        note.contains("use the staging database, not prod"),
+        "{note}"
+    );
+    let delivered = o
+        .store
+        .last_event_payload(&id, "prompt_delivered")
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered["message_ids"], json!([first]));
+    assert_eq!(delivered["tool"], "recall");
+    // Once: the next call carries nothing.
+    let (_, again) = mcp_call(&harness, &id, &token, call).await;
+    assert_eq!(
+        again["result"]["content"].as_array().unwrap().len(),
+        1,
+        "{again}"
+    );
+
+    // A message no tool call picked up is the prompt after the turn ends.
+    let second = send("then rerun the migration").await;
+    let third = send("and say what changed").await;
+    gated.release.add_permits(1);
+    for _ in 0..1200 {
+        if prompts().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        prompts().len(),
+        2,
+        "never sent the queued messages: {:?}",
+        session()
+    );
+    assert_eq!(
+        prompts()[1],
+        "then rerun the migration\n\nand say what changed",
+        "in the order they were sent, and the one already delivered not again"
+    );
+    let prompt = o
+        .store
+        .events_after(&id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "user_prompt")
+        .unwrap();
+    assert_eq!(prompt.payload["queued"], json!([second, third]));
+    assert_eq!(o.store.queued_prompt_count(&id).unwrap(), 0);
+    assert_eq!(
+        session().turn_active,
+        1,
+        "the queued prompt is a turn of its own"
     );
 }

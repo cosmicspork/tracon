@@ -22,15 +22,23 @@ export function sessionControls(s: Pick<Session, 'state'>, held = false): Sessio
 }
 
 /**
- * The prompt box: whether it takes typing, and what its placeholder says.
- * `reason` is why a prompt cannot be sent now; while a turn runs the box
- * still takes the next prompt, so it must not say input is disabled.
+ * The prompt box: whether it takes typing, what its placeholder says, and
+ * whether Send queues. `reason` is why a prompt cannot start a turn now;
+ * `busy` is a turn or the checks running, when the node holds a prompt for
+ * the agent instead of refusing it, so the box stays open and says so.
  */
-export function composerState(reason: string | null, turnRunning: boolean): { disabled: boolean; placeholder: string } {
-  if (reason === null) return { disabled: false, placeholder: 'Send a prompt. Drafts are held on the node.' }
-  if (turnRunning) {
+export function composerState(
+  reason: string | null,
+  busy: boolean,
+): { disabled: boolean; placeholder: string; queues: boolean } {
+  if (reason === null) return { disabled: false, placeholder: 'Send a prompt. Drafts are held on the node.', queues: false }
+  if (busy) {
     const said = reason.charAt(0).toUpperCase() + reason.slice(1)
-    return { disabled: false, placeholder: `${said}. Type the next prompt; Send opens when that clears.` }
+    return {
+      disabled: false,
+      placeholder: `${said}. Queue a message: the agent gets it in its next tracon tool result, or when the turn ends.`,
+      queues: true,
+    }
   }
-  return { disabled: true, placeholder: `Input disabled: ${reason}` }
+  return { disabled: true, placeholder: `Input disabled: ${reason}`, queues: false }
 }

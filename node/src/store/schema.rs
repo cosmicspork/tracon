@@ -1348,6 +1348,20 @@ const MIGRATIONS: &[&str] = &[
         updated_ms  INTEGER NOT NULL
     );
     "#,
+    // 59: what the operator sent a session while its turn was running. Held
+    // until it reaches the agent, in a node tool's result or as the next
+    // prompt; `delivered_ms` is set once, by whichever gets there first.
+    r#"
+    CREATE TABLE queued_prompt (
+        id            TEXT PRIMARY KEY,
+        session_id    TEXT NOT NULL,
+        text          TEXT NOT NULL,
+        created_ms    INTEGER NOT NULL,
+        delivered_ms  INTEGER,
+        delivered_via TEXT
+    );
+    CREATE INDEX queued_prompt_pending ON queued_prompt(session_id, delivered_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

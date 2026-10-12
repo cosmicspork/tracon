@@ -42,9 +42,40 @@ pub async fn handle(
         return rpc_error(StatusCode::CONFLICT, &error.to_string());
     }
     match s.tools.handle(&ctx, &msg).await {
-        Some(response) => (StatusCode::OK, Json(response)),
+        Some(mut response) => {
+            if let Some(session_id) = ctx.session_id() {
+                with_queued_prompts(&s, session_id, &msg, &mut response);
+            }
+            (StatusCode::OK, Json(response))
+        }
         // A notification: accepted, nothing to say back.
         None => (StatusCode::OK, Json(json!({}))),
+    }
+}
+
+/// Append what the operator sent while this session's turn was running to
+/// the result of the node tool it just called. A session waiting on a
+/// verdict sits in one long turn of `review_status` or `run_wait` calls, and
+/// this is how the operator's word reaches it there, whatever the harness.
+/// Whatever is still undelivered when the turn ends is sent as the next
+/// prompt instead; a message is claimed once, so it is never both.
+fn with_queued_prompts(s: &AppState, session_id: &str, msg: &Value, response: &mut Value) {
+    if msg.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return;
+    }
+    let Some(content) = response
+        .get_mut("result")
+        .and_then(|r| r.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let tool = msg
+        .pointer("/params/name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    if let Some(text) = s.manager.deliver_queued_in_tool_result(session_id, tool) {
+        content.push(json!({ "type": "text", "text": text }));
     }
 }
 

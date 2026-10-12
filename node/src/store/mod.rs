@@ -38,6 +38,7 @@ pub mod outcome;
 pub mod pipeline_follow;
 pub mod policy_rollouts;
 pub mod publication;
+pub mod queued_prompt;
 pub mod repo_image;
 pub mod reports;
 pub mod review_draft;

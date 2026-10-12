@@ -318,7 +318,9 @@
     }
   }
 
-  const composer = $derived(composerState(inputReason, busy))
+  // A turn or the checks running: the node holds a prompt for the agent
+  // rather than refusing it.
+  const composer = $derived(composerState(inputReason, busy || session?.state === 'waiting_on_check'))
   const placeholder = $derived(
     unreachable !== null ? `${unreachable} — the prompt is sent when it returns` : composer.placeholder,
   )
@@ -601,8 +603,8 @@
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void send()
         }}
       ></textarea>
-      <button class="btn p" type="submit" disabled={inputReason !== null || !draft.trim()}>
-        Send
+      <button class="btn p" type="submit" disabled={(inputReason !== null && !composer.queues) || !draft.trim()}>
+        {composer.queues ? 'Queue' : 'Send'}
       </button>
     </form>
   {/if}

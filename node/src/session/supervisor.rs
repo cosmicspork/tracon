@@ -47,12 +47,22 @@ const WATCHDOG_FAILURE_LIMIT: u8 = 3;
 /// with edits between the runs, and that is work, not a runaway.
 const REPETITION_RUN: u32 = 3;
 
+/// What became of an operator's prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prompted {
+    /// Dispatched: it started the session's next turn.
+    Sent,
+    /// A turn was running, so it is held until it reaches the agent: in the
+    /// next node tool result the session receives, or as the next prompt.
+    Queued { message_id: String },
+}
+
 /// Commands the HTTP layer sends to a running session.
 #[derive(Debug)]
 pub enum Command {
     Prompt {
         text: String,
-        ack: oneshot::Sender<Result<(), String>>,
+        ack: oneshot::Sender<Result<Prompted, String>>,
     },
     Answer {
         permission_id: String,
@@ -411,7 +421,7 @@ impl Supervisor {
                     },
                     cmd = commands.recv() => match cmd {
                         Some(Command::Prompt { text, ack }) => {
-                            let _ = ack.send(self.on_prompt(text).await);
+                            let _ = ack.send(self.on_operator_prompt(text).await);
                         }
                         Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
                             let _ = ack.send(self.on_answer(&permission_id, &option_id, arguments).await);
@@ -872,6 +882,16 @@ impl Supervisor {
                 }
             }
             return false;
+        }
+        // What the operator sent while the last turn ran, before anything
+        // holds or ends the session on its own account.
+        match self.deliver_queued().await {
+            Ok(true) => {
+                self.delivery_error = None;
+                return false;
+            }
+            Ok(false) => {}
+            Err(error) => self.queued_delivery_failed(error),
         }
         if !open.is_empty() {
             if state == SessionState::Running {
@@ -1478,7 +1498,109 @@ impl Supervisor {
         self.publish_queue();
     }
 
+    /// An operator's prompt. A session that can take one now is sent it; one
+    /// whose turn is still running, or whose checks are, holds it for the
+    /// agent instead of refusing it. Once anything is held, a later prompt
+    /// queues behind it, so what the operator said arrives in the order they
+    /// said it.
+    async fn on_operator_prompt(&mut self, text: String) -> Result<Prompted, String> {
+        let s = self
+            .store
+            .get_session(&self.session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("session is gone")?;
+        let state = SessionState::from_stored(&s.state);
+        let queueable = matches!(
+            state,
+            SessionState::Running | SessionState::WaitingOnYou | SessionState::WaitingOnCheck
+        );
+        let busy = s.turn_active != 0 || state == SessionState::WaitingOnCheck;
+        let behind = self
+            .store
+            .queued_prompt_count(&self.session_id)
+            .map_err(|e| e.to_string())?
+            > 0;
+        if !queueable || !(busy || behind) {
+            return self.on_prompt(text).await.map(|()| Prompted::Sent);
+        }
+        if s.budget_tokens > 0 && s.tokens_used >= s.budget_tokens {
+            return Err("session is over budget".into());
+        }
+        let queued = self
+            .store
+            .queue_prompt(&self.session_id, &text)
+            .map_err(|e| e.to_string())?;
+        // Sent, as far as the operator's box is concerned: the node holds it
+        // now, and a draft save still in flight must not bring it back.
+        let _ = self.store.set_draft(&self.session_id, None);
+        self.record(
+            ek::PROMPT_QUEUED,
+            Some(queued.id.clone()),
+            json!({ "message_id": queued.id, "text": text }),
+        );
+        if !busy {
+            // Idle with older messages still held: send them all now. If the
+            // session cannot take a prompt yet they stay held, and the next
+            // look between turns tries again.
+            if let Err(error) = self.deliver_queued().await {
+                self.queued_delivery_failed(error);
+            }
+        }
+        Ok(Prompted::Queued {
+            message_id: queued.id,
+        })
+    }
+
+    /// Send what the operator queued during a turn as the next prompt.
+    /// `Ok(true)` when a turn started with it. Claimed before the dispatch,
+    /// so a node tool call from the turn it starts cannot deliver it again,
+    /// and put back if the dispatch is refused.
+    async fn deliver_queued(&mut self) -> Result<bool, String> {
+        let held = self
+            .store
+            .claim_queued_prompts(&self.session_id, "prompt")
+            .map_err(|e| e.to_string())?;
+        if held.is_empty() {
+            return Ok(false);
+        }
+        let ids: Vec<String> = held.iter().map(|q| q.id.clone()).collect();
+        let text = held
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        match self.dispatch_prompt(text, ids.clone()).await {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let _ = self.store.release_queued_prompts(&ids);
+                Err(error)
+            }
+        }
+    }
+
+    /// Say once why queued messages could not be sent; they stay held.
+    fn queued_delivery_failed(&mut self, error: String) {
+        if self.delivery_error.as_deref() == Some(error.as_str()) {
+            return;
+        }
+        self.record(
+            ek::ERROR,
+            None,
+            json!({
+                "error": format!("could not send the operator's queued message: {error}"),
+                "source": "queued_prompt",
+            }),
+        );
+        self.delivery_error = Some(error);
+    }
+
     async fn on_prompt(&mut self, text: String) -> Result<(), String> {
+        self.dispatch_prompt(text, Vec::new()).await
+    }
+
+    /// Start a turn with `text`. `queued` names the queued messages it
+    /// carries, when it is their delivery.
+    async fn dispatch_prompt(&mut self, text: String, queued: Vec<String>) -> Result<(), String> {
         let s = self
             .store
             .get_session(&self.session_id)
@@ -1525,8 +1647,12 @@ impl Supervisor {
             },
         );
         // Sent is sent: the operator's box is empty from here, and a draft
-        // save still in flight from the client must not resurrect it.
-        let _ = self.store.set_draft(&self.session_id, None);
+        // save still in flight from the client must not resurrect it. Queued
+        // messages left the box when they were queued; what is in it now is
+        // something newer.
+        if queued.is_empty() {
+            let _ = self.store.set_draft(&self.session_id, None);
+        }
         // Open the turn's usage ledger before anything can spend against it.
         // The gateway attributes every model call to the session's current
         // turn, so the row has to exist first or the first call of the turn
@@ -1544,7 +1670,11 @@ impl Supervisor {
         self.prompt_intent = self.ingest.as_ref().map(|ingest| {
             ingest.intent_begin(crate::store::intent_kind::PROMPT, None, Some(text.as_str()))
         });
-        self.record(ek::USER_PROMPT, None, json!({ "text": text }));
+        let mut payload = json!({ "text": text });
+        if !queued.is_empty() {
+            payload["queued"] = json!(queued);
+        }
+        self.record(ek::USER_PROMPT, None, payload);
         self.publish_session();
 
         let handle = self.handle.clone();
