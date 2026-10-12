@@ -897,7 +897,9 @@ mod tests {
         }
         for name in [
             "pipeline_run",
+            "pipeline_retry",
             "run_rerun",
+            "run_dispatch",
             "pr_comment",
             "mr_comment",
             "pr_reply",

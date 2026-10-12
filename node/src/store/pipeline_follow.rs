@@ -1,7 +1,8 @@
 //! Pipelines an agent started, followed until they finish.
 //!
-//! `pipeline_run`, `job_play` and `deploy` subscribe their caller to the
-//! pipeline they start; the node reads it on the same tick it follows
+//! `pipeline_run`, `job_play`, `deploy` and `pipeline_retry` subscribe their
+//! caller to the pipeline they start, and `run_rerun` and `run_dispatch` to
+//! the GitHub Actions run; the node reads it on the same tick it follows
 //! published requests (`crate::follow`), so a pipeline outlives whatever
 //! triggered it. A row is the subscription and the last thing seen of it.
 

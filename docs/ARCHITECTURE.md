@@ -775,7 +775,7 @@ submitting session (a harness the operator runs) has nothing to hang the events 
 is not followed.
 
 **A pipeline the agent started is followed for whoever started it.** A successful
-`pipeline_run`, `job_play` or `deploy` subscribes its caller to the pipeline it started
+`pipeline_run`, `pipeline_retry`, `job_play` or `deploy` subscribes its caller to the pipeline it started
 (a `pipeline_follow` row, with what the pipeline looked like right after as the
 baseline) and says so in its result. The same two-minute tick reads it through the
 brokered credential: each job that passed, failed or was canceled is a `pipeline_follow`
@@ -787,10 +787,25 @@ request whose merge triggered it. Following never retries, cancels or plays a jo
 agent that wants to see it through itself calls `pipeline_wait`, a read that holds up
 to 45 s like `review_status` and returns as soon as the pipeline or a job moves, with a
 `state` token to pass back so a change between calls is not missed. A GitHub Actions run
-the agent reran (`run_rerun`) is followed the same way, under the provider `github`: the
-rerun's result names the attempt it started, the run reads as pending until GitHub has
-begun that attempt (so the last attempt's failure is not taken for this one's), and
-`run_wait` is its `pipeline_wait`.
+the agent reran (`run_rerun`) or started (`run_dispatch`) is followed the same way, under
+the provider `github`: the rerun's result names the attempt it started, the run reads as
+pending until GitHub has begun that attempt (so the last attempt's failure is not taken
+for this one's), and `run_wait` is its `pipeline_wait`. GitHub names the run a dispatch
+started; one that does not (an older Enterprise Server answering 204) leaves the node to
+find it as the newest dispatched run of that workflow and branch that was not listed
+before the call, and a dispatch whose run never appears is not followed.
+
+**The two forges' tools are kept in step by a table, not by convention.**
+`mcp::parity` maps each operation to its GitHub tool and its GitLab tool, or to the
+reason one forge has none (GitHub Actions has no manual job to play, and no existing
+deployment job to play at an exact SHA), and a test fails when a tool is added to
+either forge without that decision. The names stay each forge's own (`pr_*` and `run_*`,
+`mr_*` and `pipeline_*`), since those are the names agents know from `gh` and `glab`.
+On GitHub the danger in starting CI is the workflow rather than the ref: a release runs
+as a workflow on `main`. So `run_dispatch` starts only a workflow `[github] dispatch`
+lists for the repository in `node.toml`, and refuses any other before the operator is
+asked; refusing tags and inputs naming production, as `pipeline_run` does, is not enough
+on its own.
 
 **Publication is two side effects the node cannot take back, so it writes down
 what it is about to do before it does it.** Approval imports the candidate into a

@@ -16,14 +16,15 @@
 //! would need the node reachable from the forge — and only for reviews a
 //! session submitted, since the events hang on that session.
 //!
-//! A pipeline an agent started (`pipeline_run`, `job_play`, `deploy`) is
-//! followed on the same tick, for whoever started it: each job result is an
-//! event on that session (or the channel's log, for a harness the operator
-//! runs), and the pipeline finishing, failing or stopping at a manual job is
-//! pushed. It is followed on its own, so it outlives the request whose merge
+//! A pipeline an agent started (`pipeline_run`, `job_play`, `deploy`,
+//! `pipeline_retry`) is followed on the same tick, for whoever started it:
+//! each job result is an event on that session (or the channel's log, for a
+//! harness the operator runs), and the pipeline finishing, failing or
+//! stopping at a manual job is pushed. It is followed on its own, so it outlives the request whose merge
 //! triggered it. Following a pipeline never retries, cancels or plays a job.
-//! A GitHub Actions run an agent reran (`run_rerun`) is followed the same
-//! way, from the attempt the rerun started.
+//! A GitHub Actions run an agent reran (`run_rerun`) or started
+//! (`run_dispatch`) is followed the same way, a rerun from the attempt it
+//! started.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -508,7 +509,8 @@ async fn look_at_pipeline(
     Ok((PipelineSnapshot::from_gitlab(&status), url))
 }
 
-/// After `pipeline_run`, `job_play`, `deploy` or `run_rerun` succeeded:
+/// After `pipeline_run`, `job_play`, `deploy`, `pipeline_retry`, `run_rerun`
+/// or `run_dispatch` succeeded:
 /// follow the pipeline or run it started for its caller, from what it looks
 /// like now, and say so in the result.
 pub async fn subscribe(
@@ -523,6 +525,9 @@ pub async fn subscribe(
     };
     let (provider, project, pipeline_id) = match name {
         github::RUN_RERUN => ("github", &args["repo"], args["run_id"].as_i64()),
+        // GitHub may not have said which run it started; then there is
+        // nothing to follow.
+        github::RUN_DISPATCH => ("github", &args["repo"], started["run_id"].as_i64()),
         gitlab::PIPELINE_RUN => ("gitlab", &args["project"], started["id"].as_i64()),
         gitlab::JOB_PLAY => ("gitlab", &args["project"], started["pipeline_id"].as_i64()),
         _ => ("gitlab", &args["project"], args["pipeline_id"].as_i64()),
@@ -583,8 +588,8 @@ pub async fn subscribe(
             json!({
                 "run_id": pipeline_id,
                 "note": "The node follows this run: each job result is recorded and the \
-                         operator is told when it finishes or fails. run_wait, with this \
-                         attempt, waits for it here.",
+                         operator is told when it finishes or fails. run_wait waits for it \
+                         here, given the attempt when a rerun started one.",
             })
         } else {
             json!({

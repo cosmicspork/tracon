@@ -35,6 +35,7 @@ export const NODE_TOOLS = new Set([
   'run_logs',
   'run_rerun',
   'run_wait',
+  'run_dispatch',
   // GitLab
   'mr_status',
   'mr_comment',
@@ -46,6 +47,7 @@ export const NODE_TOOLS = new Set([
   'pipeline_wait',
   'pipeline_list_by_sha',
   'pipeline_run',
+  'pipeline_retry',
   'job_trace',
   'job_play',
   'deploy',
@@ -201,6 +203,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return `Rerun CI run ${run}`
     case 'run_wait':
       return `Wait for CI run ${run}`
+    case 'run_dispatch':
+      return sp('Start workflow', str(a.workflow), str(a.ref) ? `on ${str(a.ref)}` : '')
     case 'mr_status':
       return `Merge request !${mr}`
     case 'mr_comment':
@@ -221,6 +225,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return `Pipelines at ${str(a.sha).slice(0, 7)}`
     case 'pipeline_run':
       return sp('Run a pipeline', str(a.ref) ? `on ${str(a.ref)}` : '')
+    case 'pipeline_retry':
+      return `Retry pipeline ${pipeline}`
     case 'job_trace':
       return `Log of job ${job}`
     case 'job_play':
