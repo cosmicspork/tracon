@@ -1413,8 +1413,8 @@ impl Store {
     /// Put the documents a query names first: those whose title or slug holds
     /// every significant word of it. bm25 weighs a word in a short title no
     /// more than the same word repeated through long bodies, and a slug is not
-    /// indexed at all, so searching for `dogfood` or `note-tracon-dogfood` could
-    /// return everything but "Tracon dogfood failures". This reads titles and
+    /// indexed at all, so searching for `runbook` or `note-deploy-runbook` could
+    /// return everything but "Deploy runbook". This reads titles and
     /// slugs directly, so it holds even where the full-text index has drifted.
     fn rank_named_first(
         &self,
@@ -1857,7 +1857,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         // Long bodies that say the word over and over outweigh a short title
         // in bm25 alone.
-        let chatter = "we dogfood it daily and the dogfood runs find things; ".repeat(20);
+        let chatter = "we follow the runbook daily and the runbook steps find things; ".repeat(20);
         for i in 0..4 {
             s.write_change(
                 "A",
@@ -1880,43 +1880,43 @@ mod tests {
             "personal",
             "document",
             ChangeOp::Upsert,
-            "dog",
+            "named",
             doc(
                 "personal",
-                "note-tracon-dogfood",
+                "note-deploy-runbook",
                 "note",
-                "Tracon dogfood failures",
+                "Deploy runbook",
                 "A list.",
             ),
         )
         .unwrap();
-        for query in ["dogfood", "Tracon dogfood failures", "note-tracon-dogfood"] {
+        for query in ["runbook", "Deploy runbook", "note-deploy-runbook"] {
             let hits = s.doc_search(Some("personal"), None, query, 2).unwrap();
-            assert_eq!(hits[0].id, "dog", "{query}: {hits:?}");
+            assert_eq!(hits[0].id, "named", "{query}: {hits:?}");
         }
         // Not every word named: the title is no better than any other match.
         let hits = s
-            .doc_search(Some("personal"), None, "dogfood chatter", 5)
+            .doc_search(Some("personal"), None, "runbook chatter", 5)
             .unwrap();
-        assert_ne!(hits[0].id, "dog");
+        assert_ne!(hits[0].id, "named");
 
         // Found by its title even when the full-text index has lost it.
         let rowid: i64 = s
             .conn()
-            .query_row("SELECT rowid FROM document WHERE id = 'dog'", [], |r| {
+            .query_row("SELECT rowid FROM document WHERE id = 'named'", [], |r| {
                 r.get(0)
             })
             .unwrap();
         s.conn()
             .execute(
                 "INSERT INTO document_fts(document_fts, rowid, title, body)
-                 VALUES ('delete', ?1, 'Tracon dogfood failures', 'A list.')",
+                 VALUES ('delete', ?1, 'Deploy runbook', 'A list.')",
                 [rowid],
             )
             .unwrap();
-        let hits = s.doc_search(Some("personal"), None, "dogfood", 2).unwrap();
-        assert_eq!(hits[0].id, "dog");
-        assert_eq!(hits[0].text, "Tracon dogfood failures\n\nA list.");
+        let hits = s.doc_search(Some("personal"), None, "runbook", 2).unwrap();
+        assert_eq!(hits[0].id, "named");
+        assert_eq!(hits[0].text, "Deploy runbook\n\nA list.");
 
         // And the repair puts it back in the index.
         assert!(s.repair_search_index().unwrap());
@@ -1924,7 +1924,7 @@ mod tests {
         let indexed: i64 = s
             .conn()
             .query_row(
-                "SELECT count(*) FROM document_fts WHERE document_fts MATCH 'failures'",
+                "SELECT count(*) FROM document_fts WHERE document_fts MATCH 'deploy'",
                 [],
                 |r| r.get(0),
             )
