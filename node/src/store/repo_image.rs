@@ -123,6 +123,17 @@ impl Store {
         Ok(())
     }
 
+    /// Forget the session layers of `repo_path` that failed, so the next
+    /// session tries each again. What the operator's `tracon repo build`
+    /// means for them: a failure stands against its key until then.
+    pub fn forget_failed_session_layers(&self, repo_path: &str) -> Result<usize> {
+        Ok(self.repo_image_conn()?.execute(
+            "DELETE FROM repo_image WHERE repo_path = ?1 AND kind LIKE 'session:%' \
+             AND status = 'failed'",
+            params![repo_path],
+        )?)
+    }
+
     /// Record the image a build stands on once it is known: for a
     /// repository's own image, the image built from its Dockerfile before the
     /// node's layer, by digest, so it can be removed by what it was rather

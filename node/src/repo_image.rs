@@ -148,6 +148,17 @@ fn cool(repo: &Path, key: &str, error: &str) -> String {
     retry_note(error, until)
 }
 
+/// What `tracon repo build` clears besides the repository's own recipe:
+/// every session layer that failed, and every builder outage still cooling
+/// for the repository, so its next session tries again at once.
+fn forget_session_failures(store: &Store, repo: &Path) {
+    let _ = store.forget_failed_session_layers(&repo.to_string_lossy());
+    cooldowns()
+        .lock()
+        .unwrap()
+        .retain(|(cooling, _), _| cooling != repo);
+}
+
 fn warm(repo: &Path, key: &str) {
     cooldowns()
         .lock()
@@ -165,7 +176,7 @@ pub fn building_entry(cfg: &Config, repo: &Path) -> Option<Repo> {
 }
 
 /// The recipe `entry` names, as the repository's default branch has it now.
-pub async fn recipe(repo: &Path, entry: &Repo) -> Result<Recipe, String> {
+pub async fn recipe(repo: &Path, entry: &Repo, run_as: &RunAs) -> Result<Recipe, String> {
     let dockerfile = entry
         .dockerfile
         .clone()
@@ -201,6 +212,12 @@ pub async fn recipe(repo: &Path, entry: &Repo) -> Result<Recipe, String> {
     let mut hash = Sha256::new();
     for part in [NORMALISER, &dockerfile, &blob, &context, &context_tree] {
         hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    // Podman's recipe hashes what it always did, so the images it already
+    // built keep their keys; any other profile adds itself.
+    if let Some(profile) = run_as.key() {
+        hash.update(profile.as_bytes());
         hash.update([0]);
     }
     Ok(Recipe {
@@ -258,26 +275,93 @@ fn image_name(repo: &Path) -> String {
     }
 }
 
+/// Who a run in a repository's image is, which decides what the node's layer
+/// over it does. Part of every key built from it, so an image made for one
+/// runtime is never taken for the other's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunAs {
+    /// Podman: root with every capability dropped, at home in `/root`.
+    Root,
+    /// A Kubernetes pod: this uid and group, never root (the pod says
+    /// `runAsNonRoot`), with this home.
+    Pod { uid: i64, home: String },
+}
+
+impl RunAs {
+    /// The profile `[runtime] kind` runs repository images with.
+    pub fn of(cfg: &Config) -> Self {
+        match cfg.runtime.kind {
+            crate::config::RuntimeKind::Podman => RunAs::Root,
+            crate::config::RuntimeKind::Kubernetes => RunAs::Pod {
+                uid: cfg.runtime.kubernetes.uid,
+                home: cfg.runtime.kubernetes.harness_home.clone(),
+            },
+        }
+    }
+
+    /// What a key adds for this profile. Nothing for Podman, whose keys
+    /// (and so the images already built under them) stay as they were.
+    fn key(&self) -> Option<String> {
+        match self {
+            RunAs::Root => None,
+            RunAs::Pod { uid, home } => Some(format!("pod:{uid}:{home}")),
+        }
+    }
+
+    fn home(&self) -> &str {
+        match self {
+            RunAs::Root => "/root",
+            RunAs::Pod { home, .. } => home,
+        }
+    }
+}
+
 /// The node's layer over a repository's own image, so every run in it meets
 /// the same thing whatever the Dockerfile ended on.
 ///
 /// A dev environment usually ends as an unprivileged user in that user's
-/// home. Runs here are root with every capability dropped, in `/work`, which
-/// root owns: without `USER 0:0` nothing could write the workspace. An
-/// `ENTRYPOINT` (a devcontainer's process supervisor) would swallow the
-/// command a run names. And a login shell on some bases resets `PATH` for
-/// root, losing what the Dockerfile's `ENV PATH` added; the profile line puts
-/// it back.
-fn normalised(source: &str) -> String {
-    format!(
-        "FROM {source}\n\
-         USER 0:0\n\
-         ENV HOME=/root\n\
-         RUN mkdir -p /work /cache && if [ -d /etc/profile.d ]; then \
-         printf 'export PATH=\"%s\"\\n' \"$PATH\" > /etc/profile.d/zz-tracon-path.sh; fi\n\
-         WORKDIR /work\n\
-         ENTRYPOINT []\n"
-    )
+/// home. Under Podman runs are root with every capability dropped, in
+/// `/work`, which root owns: without `USER 0:0` nothing could write the
+/// workspace. An `ENTRYPOINT` (a devcontainer's process supervisor) would
+/// swallow the command a run names. And a login shell on some bases resets
+/// `PATH` for root, losing what the Dockerfile's `ENV PATH` added; the
+/// profile line puts it back.
+///
+/// A pod is never root: it runs as the configured uid, which owns `/work`,
+/// `/cache` and the harness's home here, and the image says so with its last
+/// `USER`. The uid is given a name where the image has none for it, because
+/// Git, SSH and some package managers refuse to run as a uid with no passwd
+/// entry. What the repository installed has to be readable and executable
+/// by that uid, which nothing here can arrange after the fact (see
+/// ARCHITECTURE, "the recipe is configuration").
+fn normalised(source: &str, run_as: &RunAs) -> String {
+    match run_as {
+        RunAs::Root => format!(
+            "FROM {source}\n\
+             USER 0:0\n\
+             ENV HOME=/root\n\
+             RUN mkdir -p /work /cache && if [ -d /etc/profile.d ]; then \
+             printf 'export PATH=\"%s\"\\n' \"$PATH\" > /etc/profile.d/zz-tracon-path.sh; fi\n\
+             WORKDIR /work\n\
+             ENTRYPOINT []\n"
+        ),
+        RunAs::Pod { uid, home } => format!(
+            "FROM {source}\n\
+             USER 0:0\n\
+             RUN mkdir -p /work /cache {home} && chown {uid}:{uid} /work /cache \
+             && chown -R {uid}:{uid} {home} \
+             && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/passwd 2>/dev/null; then \
+             echo 'harness:x:{uid}:{uid}::{home}:/bin/sh' >> /etc/passwd; fi \
+             && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/group 2>/dev/null; then \
+             echo 'harness:x:{uid}:' >> /etc/group; fi \
+             && if [ -d /etc/profile.d ]; then \
+             printf 'export PATH=\"%s\"\\n' \"$PATH\" > /etc/profile.d/zz-tracon-path.sh; fi\n\
+             ENV HOME={home}\n\
+             WORKDIR /work\n\
+             USER {uid}:{uid}\n\
+             ENTRYPOINT []\n"
+        ),
+    }
 }
 
 /// How a harness goes onto a repository's image: what is copied out of the
@@ -286,32 +370,55 @@ fn normalised(source: &str) -> String {
 /// way. OpenCode's image is an entrypoint and a toolchain profile the launch
 /// manifest records, and it stays in it.
 struct HarnessLayer {
-    lines: &'static str,
-    probe: &'static str,
+    lines: String,
+    probe: String,
 }
 
-fn harness_layer(harness_id: &str) -> Option<HarnessLayer> {
+fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
     match harness_id {
-        crate::adapter::claude::ClaudeAdapter::ID => Some(HarnessLayer {
-            lines:
-                "COPY --from=harness /usr/local/bin/claude /usr/local/bin/claude\n\
-                    ENV CLAUDE_CONFIG_DIR=/root/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n",
-            probe: "claude --version && git --version",
-        }),
+        crate::adapter::claude::ClaudeAdapter::ID => {
+            // By path, as the session launches it: a `claude` the
+            // repository's image put earlier on `PATH` proves nothing.
+            let binary = crate::adapter::claude::ClaudeAdapter::BINARY;
+            let probe = format!("{binary} --version && git --version");
+            Some(HarnessLayer {
+                lines: format!(
+                    "COPY --from=harness {binary} {binary}\n\
+                     ENV CLAUDE_CONFIG_DIR={}/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n",
+                    run_as.home()
+                ),
+                probe: match run_as {
+                    RunAs::Root => probe,
+                    RunAs::Pod { .. } => format!("{probe} && {} --version", POD_INIT),
+                },
+            })
+        }
         _ => None,
     }
 }
+
+/// Where a pod's session image keeps its init. Copied from the harness
+/// image's statically linked `tini`, so it runs on any base, and kept out of
+/// the paths a repository's own image installs to.
+const POD_INIT: &str = crate::runner::kube::SESSION_INIT;
 
 /// Bumped when the session layer itself changes.
 const SESSION_LAYER: &str = "1";
 
 /// The harness over a repository's image. The node's own layer is applied
 /// again because the image may be one the operator pinned by hand, which
-/// never had it.
-fn layered(base: &str, harness_image: &str, layer: &HarnessLayer) -> String {
+/// never had it. A pod also gets an init: a pod's first process is PID 1,
+/// which no signal it does not handle reaches and which has to reap what
+/// the harness's tools leave behind, and Podman's `--init` has no pod
+/// equivalent.
+fn layered(base: &str, harness_image: &str, layer: &HarnessLayer, run_as: &RunAs) -> String {
+    let init = match run_as {
+        RunAs::Root => String::new(),
+        RunAs::Pod { .. } => format!("COPY --from=harness /usr/bin/tini-static {POD_INIT}\n"),
+    };
     format!(
-        "FROM {harness_image} AS harness\n{}{}",
-        normalised(base),
+        "FROM {harness_image} AS harness\n{}{}{init}",
+        normalised(base, run_as),
         layer.lines
     )
 }
@@ -369,7 +476,8 @@ pub async fn session_image(
     else {
         return SessionImage::default();
     };
-    let Some(layer) = harness_layer(harness_id) else {
+    let run_as = RunAs::of(cfg);
+    let Some(layer) = harness_layer(harness_id, &run_as) else {
         return SessionImage::aside(format!(
             "the {harness_id} harness runs in its own image; it is not layered onto a repository's"
         ));
@@ -397,7 +505,7 @@ pub async fn session_image(
             };
             match standing {
                 Some(row) => {
-                    let moved = recipe(repo, entry)
+                    let moved = recipe(repo, entry, &run_as)
                         .await
                         .is_ok_and(|recipe| recipe.hash != row.recipe_hash);
                     if moved {
@@ -428,6 +536,7 @@ pub async fn session_image(
         version: harness_version,
         image: backend.harness_image(cfg, harness_id),
         layer,
+        run_as,
     };
     ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await
 }
@@ -437,6 +546,7 @@ struct SessionHarness<'a> {
     version: &'a str,
     image: String,
     layer: HarnessLayer,
+    run_as: RunAs,
 }
 
 async fn ensure_session_with(
@@ -457,14 +567,30 @@ async fn ensure_session_with(
     // Keyed on what the harness's tag names now: a harness upgrade rebuilds
     // this layer and leaves the repository's image, and its evidence, alone.
     let Some(harness_image) = builder.identity(&harness.image).await else {
-        return unlayered(format!(
-            "the harness image {} is missing; `tracon setup` builds it",
-            harness.image
-        ));
+        // A builder that cannot reach its registry cannot find anything, and
+        // says why; a harness image a pod pulls is the release's, which no
+        // `tracon setup` makes.
+        if let Some(why) = builder.unavailable().await {
+            return unlayered(why);
+        }
+        return unlayered(match harness.run_as {
+            RunAs::Root => format!(
+                "the harness image {} is missing; `tracon setup` builds it",
+                harness.image
+            ),
+            RunAs::Pod { .. } => format!(
+                "the harness image {} could not be found in its registry",
+                harness.image
+            ),
+        });
     };
     let mut hash = Sha256::new();
-    for part in [SESSION_LAYER, base, &harness_image, harness.layer.lines] {
+    for part in [SESSION_LAYER, base, &harness_image, &harness.layer.lines] {
         hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    if let Some(profile) = harness.run_as.key() {
+        hash.update(profile.as_bytes());
         hash.update([0]);
     }
     let key = hex::encode(hash.finalize());
@@ -544,8 +670,11 @@ async fn build_session(
     };
     let stage = stage_dir(builder).map_err(|e| staged(e.to_string()))?;
     let containerfile = stage.path().join("Session.Containerfile");
-    std::fs::write(&containerfile, layered(base, harness_image, &harness.layer))
-        .map_err(|e| staged(e.to_string()))?;
+    std::fs::write(
+        &containerfile,
+        layered(base, harness_image, &harness.layer, &harness.run_as),
+    )
+    .map_err(|e| staged(e.to_string()))?;
     let empty = stage.path().join("empty");
     std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
     let built = builder
@@ -559,7 +688,9 @@ async fn build_session(
         .await?;
     let probe = runner
         .run_capture(RunnerCommand {
-            argv: ["sh", "-c", harness.layer.probe].map(String::from).to_vec(),
+            argv: ["sh", "-c", &harness.layer.probe]
+                .map(String::from)
+                .to_vec(),
             image: Some(built.image.clone()),
             name: format!("tracon-probe-{}", uuid::Uuid::now_v7().simple()),
             ..Default::default()
@@ -604,6 +735,9 @@ pub async fn ensure_base(
     repo: &Path,
     force: bool,
 ) -> Ensured {
+    if force {
+        forget_session_failures(store, repo);
+    }
     let Some(entry) = building_entry(cfg, repo) else {
         return Ensured::Unconfigured;
     };
@@ -752,7 +886,7 @@ async fn ensure_with(
         },
         None => Ensured::Unavailable { reason: error },
     };
-    let recipe = match recipe(repo, entry).await {
+    let recipe = match recipe(repo, entry, &RunAs::of(cfg)).await {
         Ok(recipe) => recipe,
         Err(error) => return fallback(error),
     };
@@ -1100,7 +1234,8 @@ async fn build(
         .await?;
 
     let layer = stage.path().join("Normalised.Containerfile");
-    std::fs::write(&layer, normalised(&source.image)).map_err(|e| staged(e.to_string()))?;
+    std::fs::write(&layer, normalised(&source.image, &RunAs::of(cfg)))
+        .map_err(|e| staged(e.to_string()))?;
     let empty = stage.path().join("empty");
     std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
     let built = match builder
@@ -1212,6 +1347,8 @@ mod tests {
         same_digest: bool,
         /// Fail every build from this many builds on.
         fail_from: StdMutex<Option<usize>>,
+        /// Find no image by tag, as a registry that holds none.
+        missing: StdMutex<bool>,
     }
 
     #[async_trait]
@@ -1261,6 +1398,9 @@ mod tests {
             !*self.pruned.lock().unwrap()
         }
         async fn identity(&self, image: &str) -> Option<String> {
+            if *self.missing.lock().unwrap() {
+                return None;
+            }
             let digest = hex::encode(Sha256::digest(image));
             Some(format!("{image}@sha256:{digest}"))
         }
@@ -1432,7 +1572,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let builder = FakeBuilder::default();
         let path = repo.to_string_lossy();
-        let hash = recipe(repo, &entry(repo)).await.unwrap().hash;
+        let hash = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap().hash;
 
         *builder.down.lock().unwrap() = Some("buildkitd did not answer, so no".into());
         let ensured = ensure(&builder, &store, repo, false).await;
@@ -1619,7 +1759,7 @@ mod tests {
         let builder = FakeBuilder::default();
         let cfg = Config::default();
 
-        let first = recipe(repo, &entry(repo)).await.unwrap();
+        let first = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
         assert_eq!(
             already_built(&builder, &store, repo, &first.hash).await,
             None
@@ -1664,7 +1804,7 @@ mod tests {
                      && git update-ref refs/remotes/origin/main HEAD"
                 ),
             );
-            let next = recipe(repo, &entry(repo)).await.unwrap();
+            let next = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
             assert_ne!(next.hash, first.hash);
             images.push(
                 build_for_trial(&builder, &cfg, &store, repo, &next)
@@ -1825,12 +1965,27 @@ mod tests {
         "localhost/tracon-repo-app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn claude(image: &str) -> SessionHarness<'static> {
+        claude_as(image, RunAs::Root)
+    }
+
+    fn claude_as(image: &str, run_as: RunAs) -> SessionHarness<'static> {
         SessionHarness {
             id: "claude",
             version: "2.1.295",
             image: image.to_string(),
-            layer: harness_layer("claude").unwrap(),
+            layer: harness_layer("claude", &run_as).unwrap(),
+            run_as,
         }
+    }
+
+    fn pod() -> RunAs {
+        RunAs::of(&kubernetes())
+    }
+
+    fn kubernetes() -> Config {
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg
     }
 
     /// The harness goes onto the repository's image as a layer, proven to run
@@ -1974,70 +2129,68 @@ mod tests {
         assert!(unbuildable.note.unwrap().contains("cannot build images"));
     }
 
+    /// A runtime that pulls its harness images from a registry and builds
+    /// with `builder`.
+    struct Pulling {
+        builder: FakeBuilder,
+    }
+    #[async_trait]
+    impl Backend for Pulling {
+        fn kind(&self) -> &'static str {
+            "pulling"
+        }
+        async fn setup(
+            &self,
+            _cfg: &Config,
+            _rebuild: bool,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        async fn check_all(&self, _cfg: &Config, _deep: bool) -> crate::boundary::BoundaryReport {
+            crate::boundary::BoundaryReport { checks: Vec::new() }
+        }
+        fn runner(&self, _extra: Vec<crate::runner::Mount>) -> Arc<dyn Runner> {
+            Arc::new(ProbeRunner::saying("1 (Claude Code)", 0))
+        }
+        fn runner_for(&self, _id: &str, _extra: Vec<crate::runner::Mount>) -> Arc<dyn Runner> {
+            Arc::new(ProbeRunner::saying("1 (Claude Code)", 0))
+        }
+        fn image_builder(&self) -> Option<&dyn ImageBuilder> {
+            Some(&self.builder)
+        }
+        fn harness_image(&self, _cfg: &Config, harness_id: &str) -> String {
+            format!("ghcr.io/cosmicspork/tracon-harness-{harness_id}:9")
+        }
+        fn runs_sessions_in_repository_images(&self) -> bool {
+            true
+        }
+        async fn import_volume(
+            &self,
+            _volume: &str,
+            _source: &Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        async fn export_volume(
+            &self,
+            _volume: &str,
+            _destination: &Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        fn harness_host(&self) -> String {
+            "localhost".into()
+        }
+        fn harness_home(&self) -> String {
+            "/home/harness".into()
+        }
+        async fn reconcile(&self, _names: &[String]) {}
+    }
+
     /// A runtime that pulls its harness images from a registry names the one
     /// a layered build copies the harness from, not Podman's local name.
     #[tokio::test]
     async fn the_layer_copies_the_harness_from_the_runtimes_own_image() {
-        struct Pulling {
-            builder: FakeBuilder,
-        }
-        #[async_trait]
-        impl Backend for Pulling {
-            fn kind(&self) -> &'static str {
-                "pulling"
-            }
-            async fn setup(
-                &self,
-                _cfg: &Config,
-                _rebuild: bool,
-            ) -> Result<(), crate::boundary::BoundaryError> {
-                Ok(())
-            }
-            async fn check_all(
-                &self,
-                _cfg: &Config,
-                _deep: bool,
-            ) -> crate::boundary::BoundaryReport {
-                crate::boundary::BoundaryReport { checks: Vec::new() }
-            }
-            fn runner(&self, _extra: Vec<crate::runner::Mount>) -> Arc<dyn Runner> {
-                Arc::new(ProbeRunner::saying("1 (Claude Code)", 0))
-            }
-            fn runner_for(&self, _id: &str, _extra: Vec<crate::runner::Mount>) -> Arc<dyn Runner> {
-                Arc::new(ProbeRunner::saying("1 (Claude Code)", 0))
-            }
-            fn image_builder(&self) -> Option<&dyn ImageBuilder> {
-                Some(&self.builder)
-            }
-            fn harness_image(&self, _cfg: &Config, harness_id: &str) -> String {
-                format!("ghcr.io/cosmicspork/tracon-harness-{harness_id}:9")
-            }
-            fn runs_sessions_in_repository_images(&self) -> bool {
-                true
-            }
-            async fn import_volume(
-                &self,
-                _volume: &str,
-                _source: &Path,
-            ) -> Result<(), crate::boundary::BoundaryError> {
-                Ok(())
-            }
-            async fn export_volume(
-                &self,
-                _volume: &str,
-                _destination: &Path,
-            ) -> Result<(), crate::boundary::BoundaryError> {
-                Ok(())
-            }
-            fn harness_host(&self) -> String {
-                "localhost".into()
-            }
-            fn harness_home(&self) -> String {
-                "/home/harness".into()
-            }
-            async fn reconcile(&self, _names: &[String]) {}
-        }
-
         let pulling = Arc::new(Pulling {
             builder: FakeBuilder::default(),
         });
@@ -2076,7 +2229,7 @@ mod tests {
     #[test]
     fn the_claude_layer_carries_what_the_harness_image_sets() {
         let image = include_str!("../../containers/harness-claude/Containerfile");
-        let layer = harness_layer("claude").unwrap().lines;
+        let layer = harness_layer("claude", &RunAs::Root).unwrap().lines;
         assert!(image.contains("/usr/local/bin/claude"));
         for variable in [
             "CLAUDE_CONFIG_DIR=/root/.claude",
@@ -2098,7 +2251,7 @@ mod tests {
             exported, 3,
             "the harness image sets something the layer does not"
         );
-        assert!(harness_layer("opencode").is_none());
+        assert!(harness_layer("opencode", &RunAs::Root).is_none());
     }
 
     #[test]
@@ -2111,5 +2264,318 @@ mod tests {
             .trim_start_matches("localhost/")
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
+    }
+
+    /// What Podman builds is exactly what it built before runtimes had
+    /// profiles: the same layer text, the same probe, and the same keys, so
+    /// no image a Podman node already built is rebuilt or orphaned.
+    #[tokio::test]
+    async fn podmans_layers_and_keys_are_what_they_always_were() {
+        let source = "localhost/tracon-repo-app-src@sha256:abc";
+        let normalised_text = r#"FROM localhost/tracon-repo-app-src@sha256:abc
+USER 0:0
+ENV HOME=/root
+RUN mkdir -p /work /cache && if [ -d /etc/profile.d ]; then printf 'export PATH="%s"\n' "$PATH" > /etc/profile.d/zz-tracon-path.sh; fi
+WORKDIR /work
+ENTRYPOINT []
+"#;
+        assert_eq!(normalised(source, &RunAs::Root), normalised_text);
+        let layer = harness_layer("claude", &RunAs::Root).unwrap();
+        let lines = "COPY --from=harness /usr/local/bin/claude /usr/local/bin/claude\n\
+                     ENV CLAUDE_CONFIG_DIR=/root/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n";
+        assert_eq!(layer.lines, lines);
+        assert_eq!(
+            layer.probe,
+            "/usr/local/bin/claude --version && git --version"
+        );
+        assert_eq!(
+            layered(source, "localhost/h@sha256:def", &layer, &RunAs::Root),
+            format!("FROM localhost/h@sha256:def AS harness\n{normalised_text}{lines}")
+        );
+
+        // The recipe hashes the parts it always did, and nothing else.
+        let tmp = checkout();
+        let repo = tmp.path();
+        let recipe = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
+        let dir = repo.to_string_lossy();
+        let blob = crate::review::resolve(&dir, "HEAD:.devcontainer/Dockerfile")
+            .await
+            .unwrap();
+        let mut hash = Sha256::new();
+        for part in [
+            "1",
+            ".devcontainer/Dockerfile",
+            &blob,
+            ".devcontainer",
+            &recipe.context_tree,
+        ] {
+            hash.update(part.as_bytes());
+            hash.update([0]);
+        }
+        assert_eq!(recipe.hash, hex::encode(hash.finalize()));
+
+        // And so does the session layer's key.
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
+        let harness = claude("localhost/tracon-harness-claude");
+        ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        let identity = builder.identity("localhost/tracon-harness-claude").await;
+        let mut hash = Sha256::new();
+        for part in ["1", BASE_IMAGE, &identity.unwrap(), lines] {
+            hash.update(part.as_bytes());
+            hash.update([0]);
+        }
+        let row = store
+            .ready_repo_image(&repo.to_string_lossy(), "session:claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.recipe_hash, hex::encode(hash.finalize()));
+    }
+
+    /// A pod is never root: its layer gives the harness uid the workspace,
+    /// the cache and its home, ends as that uid, and the session layer adds a
+    /// static init the probe proves runs. Its keys are its own.
+    #[tokio::test]
+    async fn a_pod_layer_runs_as_the_harness_uid_with_an_init() {
+        let source = "localhost/tracon-repo-app-src@sha256:abc";
+        assert_eq!(
+            normalised(source, &pod()),
+            r#"FROM localhost/tracon-repo-app-src@sha256:abc
+USER 0:0
+RUN mkdir -p /work /cache /home/harness && chown 65532:65532 /work /cache && chown -R 65532:65532 /home/harness && if ! grep -q '^[^:]*:[^:]*:65532:' /etc/passwd 2>/dev/null; then echo 'harness:x:65532:65532::/home/harness:/bin/sh' >> /etc/passwd; fi && if ! grep -q '^[^:]*:[^:]*:65532:' /etc/group 2>/dev/null; then echo 'harness:x:65532:' >> /etc/group; fi && if [ -d /etc/profile.d ]; then printf 'export PATH="%s"\n' "$PATH" > /etc/profile.d/zz-tracon-path.sh; fi
+ENV HOME=/home/harness
+WORKDIR /work
+USER 65532:65532
+ENTRYPOINT []
+"#
+        );
+        let layer = harness_layer("claude", &pod()).unwrap();
+        assert!(layer
+            .lines
+            .contains("ENV CLAUDE_CONFIG_DIR=/home/harness/.claude "));
+        assert_eq!(
+            layer.probe,
+            "/usr/local/bin/claude --version && git --version && /usr/libexec/tracon/tini --version"
+        );
+        let text = layered(source, "ghcr.io/h@sha256:def", &layer, &pod());
+        assert!(text.starts_with("FROM ghcr.io/h@sha256:def AS harness\n"));
+        assert!(
+            text.ends_with("COPY --from=harness /usr/bin/tini-static /usr/libexec/tracon/tini\n")
+        );
+        assert!(!text.contains("/root"), "{text}");
+        // Nothing after the last `USER` makes the harness root again.
+        let last_user = text.rfind("\nUSER ").unwrap();
+        assert!(text[last_user..].starts_with("\nUSER 65532:65532\n"));
+        assert!(!text[last_user..].contains("RUN "), "{text}");
+        assert_eq!(crate::runner::kube::SESSION_INIT, POD_INIT);
+
+        // The uid and the home are the configured ones.
+        let mut cfg = kubernetes();
+        cfg.runtime.kubernetes.uid = 1000;
+        cfg.runtime.kubernetes.harness_home = "/home/agent".into();
+        let other = normalised(source, &RunAs::of(&cfg));
+        assert!(other.contains("chown 1000:1000 /work /cache && chown -R 1000:1000 /home/agent"));
+        assert!(other.contains("'harness:x:1000:1000::/home/agent:/bin/sh'"));
+        assert!(other.contains("ENV HOME=/home/agent\n") && other.contains("USER 1000:1000\n"));
+
+        let tmp = checkout();
+        let repo = tmp.path();
+        let podman = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
+        let kube = recipe(repo, &entry(repo), &pod()).await.unwrap();
+        let elsewhere = recipe(repo, &entry(repo), &RunAs::of(&cfg)).await.unwrap();
+        assert_ne!(podman.hash, kube.hash);
+        assert_ne!(kube.hash, elsewhere.hash);
+        assert_eq!(
+            (podman.context_tree, podman.source_commit),
+            (kube.context_tree, kube.source_commit)
+        );
+    }
+
+    /// On Kubernetes the repository's image is built with the pod's layer,
+    /// and a session's harness is layered over it from the harness image in
+    /// its registry, probed, and kept apart from what Podman would build from
+    /// the same base.
+    #[tokio::test]
+    async fn a_kubernetes_session_is_layered_with_the_pods_profile() {
+        let tmp = checkout();
+        let repo = tmp.path();
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let cfg = kubernetes();
+        let Ensured::Rebuilt(base) = ensure_with(
+            &builder,
+            &LocalRunner,
+            &cfg,
+            &store,
+            repo,
+            &entry(repo),
+            &[],
+            false,
+        )
+        .await
+        else {
+            panic!("the first ensure builds");
+        };
+        {
+            let builds = builder.builds.lock().unwrap();
+            assert!(
+                builds[1].1.contains("USER 65532:65532\n"),
+                "{}",
+                builds[1].1
+            );
+            assert!(builds[1].1.contains("ENV HOME=/home/harness\n"));
+        }
+        let kube_recipe = base_row(&store, repo).recipe_hash;
+        assert_eq!(
+            kube_recipe,
+            recipe(repo, &entry(repo), &pod()).await.unwrap().hash
+        );
+
+        let pulling = Arc::new(Pulling {
+            builder: FakeBuilder::default(),
+        });
+        let backend: Arc<dyn Backend> = pulling.clone();
+        let sessions = Arc::new(Store::open_in_memory().unwrap());
+        let entries = vec![Repo {
+            path: "/src/app".into(),
+            image: Some(base.clone()),
+            ..Default::default()
+        }];
+        let ask = |cfg: Config| {
+            let (backend, sessions) = (backend.clone(), sessions.clone());
+            async move {
+                session_image(
+                    &backend,
+                    &Arc::new(cfg),
+                    &sessions,
+                    Path::new("/src/app"),
+                    ("claude", "1"),
+                    &|| {},
+                )
+                .await
+            }
+        };
+        let on_kube = ask(Config {
+            repo: entries.clone(),
+            ..kubernetes()
+        })
+        .await;
+        let image = on_kube.image.clone().expect("layered on Kubernetes");
+        assert_eq!(on_kube.toolchain_image.as_deref(), Some(base.as_str()));
+        {
+            let builds = pulling.builder.builds.lock().unwrap();
+            let text = &builds[0].1;
+            assert!(
+                text.starts_with("FROM ghcr.io/cosmicspork/tracon-harness-claude:9@sha256:"),
+                "{text}"
+            );
+            assert!(text.contains(&format!("FROM {base}\n")));
+            assert!(text.contains("USER 65532:65532\n"));
+            assert!(text.contains("COPY --from=harness /usr/local/bin/claude"));
+            assert!(text.contains("/usr/bin/tini-static /usr/libexec/tracon/tini"));
+        }
+
+        // Asked again on Kubernetes, nothing is built; asked on Podman, the
+        // same base is a different layer, never the pod's.
+        let again = ask(Config {
+            repo: entries.clone(),
+            ..kubernetes()
+        })
+        .await;
+        assert_eq!(again.image.as_deref(), Some(image.as_str()));
+        assert_eq!(pulling.builder.builds.lock().unwrap().len(), 1);
+        let on_podman = ask(Config {
+            repo: entries,
+            ..Default::default()
+        })
+        .await;
+        assert_ne!(on_podman.image, Some(image));
+        let builds = pulling.builder.builds.lock().unwrap();
+        assert_eq!(builds.len(), 2);
+        assert!(builds[1].1.contains("USER 0:0\nENV HOME=/root\n"));
+        assert!(!builds[1].1.contains("tini"));
+    }
+
+    /// A harness image the builder cannot find leaves the session in the
+    /// harness's own image, saying why in the runtime's terms: the builder's
+    /// own reason when it cannot reach anything, and on a pod never advice
+    /// to build what a release publishes.
+    #[tokio::test]
+    async fn a_harness_image_that_cannot_be_found_says_why() {
+        let repo = Path::new("/src/app");
+        let builder = FakeBuilder::default();
+        *builder.missing.lock().unwrap() = true;
+        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
+        let store = Store::open_in_memory().unwrap();
+        let ask = |run_as: RunAs| {
+            let harness = claude_as("ghcr.io/cosmicspork/tracon-harness-claude:9", run_as);
+            let (builder, runner, store) = (&builder, &runner, &store);
+            async move {
+                ensure_session_with(builder, runner, store, repo, BASE_IMAGE, &harness)
+                    .await
+                    .note
+                    .unwrap()
+            }
+        };
+        assert!(ask(RunAs::Root).await.contains("`tracon setup` builds it"));
+        let pod_note = ask(pod()).await;
+        assert!(
+            pod_note.contains("could not be found in its registry"),
+            "{pod_note}"
+        );
+        *builder.down.lock().unwrap() = Some("buildkitd refused the connection".into());
+        assert_eq!(ask(pod()).await, "buildkitd refused the connection");
+        assert!(builder.builds.lock().unwrap().is_empty());
+    }
+
+    /// A session layer that failed stands against its key, and a builder
+    /// that could not fetch what it starts from cools down without being
+    /// held against it; `tracon repo build` (a forced `ensure_base`) clears
+    /// both for the repository, so its next session tries again at once.
+    #[tokio::test]
+    async fn repo_build_lets_a_failed_session_layer_try_again() {
+        let repo = Path::new("/src/retry-app");
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let harness = claude_as("ghcr.io/cosmicspork/tracon-harness-claude:9", pod());
+
+        // A registry that could not be reached: nothing recorded, cooling.
+        *builder.broken.lock().unwrap() = true;
+        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
+        let got = ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(got.note.unwrap().contains("buildkitd did not answer"));
+        assert!(store
+            .latest_repo_image("/src/retry-app", "session:claude")
+            .unwrap()
+            .is_none());
+        *builder.broken.lock().unwrap() = false;
+        let cooling =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(cooling.note.unwrap().contains("tried again in"));
+
+        // A layer whose probe failed: recorded, and not retried unasked.
+        forget_session_failures(&store, repo);
+        let failing = ProbeRunner::saying("sh: claude: not found", 127);
+        let failed =
+            ensure_session_with(&builder, &failing, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(failed.note.unwrap().contains("does not run"));
+        let builds = builder.builds.lock().unwrap().len();
+        let again =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(again.image.is_none());
+        assert_eq!(builder.builds.lock().unwrap().len(), builds);
+
+        // `tracon repo build` clears it, even for an entry with nothing of
+        // its own to build.
+        let backend = crate::runner::local::LocalBackend;
+        assert_eq!(
+            ensure_base(&backend, &Config::default(), &store, repo, true).await,
+            Ensured::Unconfigured
+        );
+        let retried =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(retried.image.is_some(), "{retried:?}");
+        assert_eq!(builder.builds.lock().unwrap().len(), builds + 1);
     }
 }

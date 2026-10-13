@@ -102,7 +102,7 @@ pub async fn build(
             s.manager.backend().kind()
         )));
     }
-    let recipe = repo_image::recipe(&repo, &entry)
+    let recipe = repo_image::recipe(&repo, &entry, &repo_image::RunAs::of(&s.cfg))
         .await
         .map_err(unprocessable)?;
     let since_ms = crate::store::now_ms();

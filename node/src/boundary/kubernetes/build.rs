@@ -327,6 +327,43 @@ pub fn pushed_digest(metadata: &str) -> Result<String, String> {
     Ok(digest.to_string())
 }
 
+/// What a failed build printed, when it failed fetching an image or a token
+/// from a registry for a reason of the registry's or the network's (a rate
+/// limit, a server error, a name that did not resolve, a connection the
+/// egress policy dropped) rather than the recipe's. `None` for a step of the
+/// Dockerfile that failed (whatever its own output says), and for an image
+/// that is not there or a credential that is refused, which are the recipe's
+/// or the operator's to fix and are not retried on their own.
+pub fn fetch_failure(log: &str) -> Option<String> {
+    const PASSING: &[&str] = &[
+        "429",
+        "too many requests",
+        "500 internal server error",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "dial tcp",
+        "no such host",
+        "i/o timeout",
+        "tls handshake timeout",
+        "connection reset",
+        "connection refused",
+        "context deadline exceeded",
+        "deadlineexceeded",
+        "unexpected eof",
+    ];
+    log.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("failed to solve")
+                && !lower.contains("did not complete successfully")
+                && PASSING.iter().any(|marker| lower.contains(marker))
+        })
+        .map(|line| line.chars().take(400).collect())
+}
+
 /// Without a tag: what a digest is appended to.
 fn untagged(name: &str) -> &str {
     match name.rsplit_once(':') {
@@ -380,10 +417,22 @@ impl ImageBuilder for BuildKitBuilder {
                     transient: true,
                     ..failure(unusable(&why), &log)
                 },
-                Ok(_) => failure(
-                    format!("buildctl build exited {}", out.status.code().unwrap_or(-1)),
-                    &log,
-                ),
+                Ok(_) => match fetch_failure(&String::from_utf8_lossy(&log)) {
+                    // A registry that was busy or could not be reached
+                    // said nothing about the recipe: tried again after
+                    // the cooldown rather than held against it.
+                    Some(said) => BuildFailure {
+                        transient: true,
+                        ..failure(
+                            format!("the build could not fetch what it starts from: {said}"),
+                            &log,
+                        )
+                    },
+                    None => failure(
+                        format!("buildctl build exited {}", out.status.code().unwrap_or(-1)),
+                        &log,
+                    ),
+                },
             });
         }
         let digest = std::fs::read_to_string(&metadata)
@@ -687,6 +736,66 @@ mod tests {
         assert!(failed.log_tail.contains("no such package"));
         // The recipe's own failure: remembered against it.
         assert!(!failed.transient);
+
+        // A registry that could not be reached while the build fetched its
+        // source is not the recipe's failure.
+        let fetching = |said: &str| {
+            let mut config = at_fake.clone();
+            config.buildctl = stub(
+                tmp.path(),
+                &format!(
+                    "if [ \"$5\" = debug ]; then printf 'ID PLATFORMS\\nw linux/amd64\\n'; exit 0; fi\n\
+                     echo '{said}' >&2; exit 1"
+                ),
+            );
+            config
+        };
+        for (said, transient) in [
+            (
+                "error: failed to solve: ghcr.io/cosmicspork/tracon-harness-claude:9: failed to \
+                 resolve source metadata for ghcr.io/cosmicspork/tracon-harness-claude:9: failed \
+                 to do request: Head https://ghcr.io/v2/: dial tcp: lookup ghcr.io: no such host",
+                true,
+            ),
+            (
+                "error: failed to solve: failed to fetch anonymous token: unexpected status from \
+                 GET request to https://auth.docker.io/token: 429 Too Many Requests",
+                true,
+            ),
+            (
+                "error: failed to solve: docker.io/library/nope:1: failed to resolve source \
+                 metadata for docker.io/library/nope:1: docker.io/library/nope:1: not found",
+                false,
+            ),
+            (
+                "error: failed to solve: process \"/bin/sh -c curl x\" did not complete \
+                 successfully: exit code: 7 (connection refused)",
+                false,
+            ),
+        ] {
+            let failed = BuildKitBuilder::new_for_test(&fetching(said))
+                .unwrap()
+                .with_registry(fake_registry())
+                .build(ImageBuild {
+                    tag: "localhost/tracon-repo-a:t",
+                    containerfile: &containerfile,
+                    context: tmp.path(),
+                    labels: &[],
+                    timeout: Duration::from_secs(30),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(failed.transient, transient, "{said}: {}", failed.error);
+            if transient {
+                assert!(
+                    failed
+                        .error
+                        .starts_with("the build could not fetch what it starts from: "),
+                    "{}",
+                    failed.error
+                );
+            }
+        }
 
         config.buildctl = stub(tmp.path(), "echo 'error: connection refused' >&2; exit 1");
         let failed = BuildKitBuilder::new_for_test(&config)

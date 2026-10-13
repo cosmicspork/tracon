@@ -2036,8 +2036,9 @@ impl Manager {
                 &workspace,
                 session_cache.as_deref().ok_or_else(|| {
                     // Said precisely: on a runtime that cannot build images (a
-                    // Kubernetes node, today) this is every session, and the
-                    // reason is the runtime's, not the repository's.
+                    // Kubernetes node without a builder) this is every
+                    // session, and the reason is the runtime's, not the
+                    // repository's.
                     let why = image
                         .note
                         .as_deref()
@@ -2248,21 +2249,13 @@ impl Manager {
         let container = format!("tracon-h-{slug}");
         let mut mounts = scratch.mounts;
         mounts.push(workspace.mount("/work", false));
-        let mut cache_env = Vec::new();
-        let runner: Arc<dyn Runner> = match &image.image {
-            Some(session_image) => {
-                // The agent installs and builds into the session cache too,
-                // so the next session on the repository finds what this one
-                // compiled.
-                if let Some(cache) = session_cache {
-                    mounts.push(crate::runner::Mount::volume(cache, "/cache", false));
-                    cache_env = crate::environment::cache_env();
-                    cache_env.extend(crate::environment::session_build_env());
-                }
-                self.backend.runner_in(adapter.id(), session_image, mounts)
-            }
-            None => self.backend.runner_for(adapter.id(), mounts),
-        };
+        let (runner, cache_env) = session_runner(
+            self.backend.as_ref(),
+            adapter.id(),
+            image.image.as_deref(),
+            session_cache,
+            mounts,
+        );
 
         // Record the container name before it exists: it is deterministic, and a
         // launch that fails after the container is created would otherwise leave
@@ -3843,6 +3836,31 @@ fn write_external_stop(
     Ok(())
 }
 
+/// The runner a session's harness starts in, and the environment its cache
+/// adds. A session in its repository's image runs there, on any runtime, with
+/// its cache at `/cache` and the variables that send package managers and
+/// builds into it: the agent installs and builds into the session cache too,
+/// so the next session on the repository finds what this one compiled. One in
+/// its harness's own image has no cache and gets neither.
+pub fn session_runner(
+    backend: &dyn crate::boundary::Backend,
+    harness_id: &str,
+    image: Option<&str>,
+    cache: Option<String>,
+    mut mounts: Vec<crate::runner::Mount>,
+) -> (Arc<dyn Runner>, Vec<(String, String)>) {
+    let Some(image) = image else {
+        return (backend.runner_for(harness_id, mounts), Vec::new());
+    };
+    let mut cache_env = Vec::new();
+    if let Some(cache) = cache {
+        mounts.push(crate::runner::Mount::volume(cache, "/cache", false));
+        cache_env = crate::environment::cache_env();
+        cache_env.extend(crate::environment::session_build_env());
+    }
+    (backend.runner_in(harness_id, image, mounts), cache_env)
+}
+
 /// What a session's harness is given as its environment: the wiring's base
 /// URLs and Git's settings in the open, and its secrets as secret
 /// environment, which never reaches a pod spec or an argv. Those are the
@@ -3877,7 +3895,7 @@ pub fn harness_environment(
 /// outcome, not an error: the session starts anyway, since it is the one that
 /// can fix what broke. The entry's own time limit bounds it, as it bounds a
 /// check's preparation, and `cancel` stops it sooner.
-pub(crate) async fn prepare_session_workspace(
+pub async fn prepare_session_workspace(
     backend: &dyn crate::boundary::Backend,
     environment: &crate::environment::RepoEnvironment,
     (workspace, cache): (&str, Result<&str, String>),

@@ -630,10 +630,18 @@ against the same check definitions attaches to the run instead of starting anoth
 restart interrupts whatever was still `running` and closes the sessions that asked for
 it, like every other live session. An entry may name the repository's Dockerfile instead of an
 image: the node then builds it (`crate::repo_image`) from the **default branch**, read
-through Git's object store and never from a working tree, adds one layer of its own
-(root, `/work`, no entrypoint), and records the digest it built in its own state — the
-recipe is configuration, the digest is not, because a locally built image has a
-different one on every node. A check run builds first when the recipe has moved; an
+through Git's object store and never from a working tree, adds one layer of its own,
+and records the digest it built in its own state — the recipe is configuration, the
+digest is not, because a locally built image has a different one on every node. The
+layer depends on who a run is (`repo_image::RunAs`). Under Podman it is root with no
+capabilities in `/work`, `HOME=/root`, no entrypoint. A pod is never root: there the
+layer makes `/work`, `/cache` and `harness_home` owned by `[runtime.kubernetes] uid`
+(65532), sets `HOME` to that home, ends on `USER 65532:65532` and clears the
+entrypoint, and the pod says `runAsNonRoot` with the same uid. That makes a contract the
+node cannot enforce: what the repository's Dockerfile installs must be readable and
+executable by any uid. The profile is part of the recipe's hash and of the session
+layer's key (only where it is not Podman's, so Podman's existing digests keep their
+keys), so an image built for one runtime is never used by the other. A check run builds first when the recipe has moved; an
 approval only reads, so it cannot start a build, and a merged Dockerfile change is a
 different execution image and therefore different evidence. Image builds are the one
 place repository-authored commands run with the network and outside the boundary,
@@ -650,7 +658,13 @@ recipe, and a registry's superseded image is kept one generation longer for pods
 still about to pull it. A session runs in the same image with the
 harness layered on: a second image, `FROM` the repository's by digest with the harness
 binary copied out of the harness image, keyed on both digests and probed before any
-session is told to launch in it. Checks stay on the repository's image, so a harness
+session is told to launch in it. On Kubernetes the builder is BuildKit, the harness is
+copied from the release's harness image in its registry, and the layer also copies that
+image's static `tini` to `/usr/libexec/tracon/tini`, which the session's pod runs as
+`tini --` in front of the harness: a pod's first process is PID 1, which ignores
+signals it does not handle and inherits orphans, and Kubernetes has nothing like
+Podman's `--init`. The probe runs in a pod as the harness uid. Only a Claude Code
+session is layered; OpenCode stays in its own image. Checks stay on the repository's image, so a harness
 upgrade rebuilds only the layer and no evidence moves. The session's start event
 records the image it ran in, the repository image under it, and the reason when it ran
 in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`
