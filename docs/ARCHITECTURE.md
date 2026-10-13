@@ -124,7 +124,10 @@ original beside it.
 **Live keys and the restart owed.** Every part of the node holds the `Arc<Config>` it was
 given at start; inside it a `ConfigHandle` carries the newest file the node has taken in.
 An edit through the node swaps it at once, and a file changed by another process (the
-CLI, an editor) is taken in at the next 15-second look. Code reads a live key through
+CLI, an editor) is taken in by the 15-second tick once two looks in a row see the same
+version. That look takes the `[[repo]]` writers' lock, so it can wait behind an
+`update_repos` that is itself waiting on `node.toml.lock` held by a CLI process; the tick
+is delayed, not lost, and carries on once the CLI releases the lock. Code reads a live key through
 `Config::live()`, which is the configuration the node started with with only the
 schema's live keys laid over it from the newest file, so a reader that also touches a
 restart key still sees what is running. Live today: `[[repo]]`, the `[session]` defaults
