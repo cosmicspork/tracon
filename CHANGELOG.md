@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.32.0](https://github.com/cosmicspork/tracon/compare/v0.31.2...v0.32.0) (2026-10-13)
+
+
+### Features
+
+* lend registry credentials to the default branch's preparation ([#466](https://github.com/cosmicspork/tracon/issues/466)) ([4845bc1](https://github.com/cosmicspork/tracon/commit/4845bc1cce43ad9df25f6ed31a09de068a52939b))
+* **mcp:** add run_dispatch and pipeline_retry, and enforce forge tool parity ([#467](https://github.com/cosmicspork/tracon/issues/467)) ([4a5bc7e](https://github.com/cosmicspork/tracon/commit/4a5bc7e3a4dc96d9b0462f3d8acbb120e7299d9c))
+* **operator:** let an answer carry free text beside a choice ([#463](https://github.com/cosmicspork/tracon/issues/463)) ([5b0483f](https://github.com/cosmicspork/tracon/commit/5b0483f30c325f2e937da28e614e3f70655a9342))
+* **session:** queue an operator's prompt sent while a turn runs ([#469](https://github.com/cosmicspork/tracon/issues/469)) ([18a8535](https://github.com/cosmicspork/tracon/commit/18a85356351896e7c25fbad3f00a12a9ec8d0434))
+
+
+### Bug Fixes
+
+* **checks:** report a failed preparation as itself, not as interrupted checks ([#465](https://github.com/cosmicspork/tracon/issues/465)) ([835e83e](https://github.com/cosmicspork/tracon/commit/835e83ef3d2428512f6279d71976b4bc403578f4))
+* **embed:** drop vector neighbours below a similarity floor ([#464](https://github.com/cosmicspork/tracon/issues/464)) ([349e3d5](https://github.com/cosmicspork/tracon/commit/349e3d55c16b7eab7da43bc13c14b3a3c40eba79))
+* **setup:** build a trial's Dockerfile instead of trying it in the harness image ([#468](https://github.com/cosmicspork/tracon/issues/468)) ([9f044a6](https://github.com/cosmicspork/tracon/commit/9f044a65b6d8b05cdb328f3fa56dfe9da91302f0))
+
 ## [0.31.2](https://github.com/cosmicspork/tracon/compare/v0.31.1...v0.31.2) (2026-10-12)
 
 
