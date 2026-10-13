@@ -1209,6 +1209,7 @@ impl Runner for FakeRunner {
 
 pub fn spec() -> LaunchSpec {
     LaunchSpec {
+        secret_env: Default::default(),
         cwd_in_runner: "/work".into(),
         model: "anthropic/claude-x".into(),
         container_name: "tracon-h-test".into(),

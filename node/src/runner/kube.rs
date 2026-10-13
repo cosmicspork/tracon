@@ -20,12 +20,15 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{AttachParams, DeleteParams, LogParams, PostParams};
+use kube::api::{AttachParams, DeleteParams, LogParams};
 use kube::{Api, Client};
 
 use super::toolchain::image_entrypoint;
 use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::{Config, KubeResources, PodSizing};
+
+mod secret;
+pub use secret::{secret_name, SecretRights, PID_LABEL, RUN_LABEL, SWEEP_GRACE};
 
 pub const ROLE_LABEL: &str = "tracon.dev/role";
 pub const SESSION_LABEL: &str = "tracon.dev/session";
@@ -313,18 +316,21 @@ impl KubeSpec {
         // by HOME and XDG, which its adapter sets) gets none invented for it,
         // and a value the command sets itself is not also set here: two
         // entries for one name is a rule about ordering rather than a choice.
-        .filter(|(k, _)| !k.is_empty() && !cmd.env.iter().any(|(name, _)| name == k))
+        .filter(|(k, _)| !k.is_empty() && !cmd.sets(k))
         .map(|(k, v)| EnvVar {
             name: k.into(),
             value: Some(v),
             ..Default::default()
         })
         .collect::<Vec<_>>();
-        env.extend(cmd.env.iter().map(|(k, v)| EnvVar {
+        env.extend(cmd.plain_env().map(|(k, v)| EnvVar {
             name: k.clone(),
             value: Some(v.clone()),
             ..Default::default()
         }));
+        // Secret environment is named, never rendered: see `secret`.
+        cmd.secret_env.validate()?;
+        env.extend(secret::env_refs(name, cmd));
         let mut labels = std::collections::BTreeMap::new();
         labels.insert(ROLE_LABEL.to_string(), "harness".to_string());
         labels.insert(SESSION_LABEL.to_string(), name.to_string());
@@ -459,6 +465,9 @@ pub struct KubeRunner {
     /// answers from this only for the same reference: an `imageID` is
     /// evidence about the image that ran, never about another.
     last_image: tokio::sync::Mutex<Option<(String, String)>>,
+    /// Whether this node may keep a run's secret environment in a Secret.
+    /// Unknown until the boundary check says, and a refusal until then.
+    secret_rights: SecretRights,
 }
 
 /// How often a started pod is asked whether it has finished. A check runs for
@@ -501,6 +510,7 @@ impl KubeRunner {
             client,
             spec,
             last_image: tokio::sync::Mutex::new(None),
+            secret_rights: SecretRights::default(),
         }
     }
 
@@ -777,10 +787,12 @@ impl Runner for KubeRunner {
         let pod = self.spec.pod(&name, &cmd, false)?;
         let pods = self.pods();
         self.remove(&name).await;
-        pods.create(&PostParams::default(), &pod)
-            .await
-            .map_err(|e| RunnerError::Other(format!("create pod {name}: {e}")))?;
-        if let Err(e) = self.wait_started(&name).await {
+        let mut env = self.create_pod(&name, &pod, &cmd).await?;
+        let started = self.wait_started(&name).await;
+        // Started or not, the Secret has done its work: the kubelet read it
+        // into the container's environment when it created the container.
+        secret::release(&mut env).await;
+        if let Err(e) = started {
             self.remove(&name).await;
             return Err(e);
         }
@@ -863,15 +875,17 @@ impl Runner for KubeRunner {
         let pod = self.spec.capture_pod(&name, &cmd)?;
         let pods = self.pods();
         self.remove(&name).await;
-        pods.create(&PostParams::default(), &pod)
-            .await
-            .map_err(|e| RunnerError::Other(format!("create pod {name}: {e}")))?;
+        // Dropped with this future before it is released, the guard deletes
+        // the Secret as `removal` deletes the pod.
+        let mut env = self.create_pod(&name, &pod, &cmd).await?;
         let mut removal = PodRemoval {
             pods: pods.clone(),
             name: name.clone(),
             armed: true,
         };
-        let result = match self.wait_started(&name).await {
+        let started = self.wait_started(&name).await;
+        secret::release(&mut env).await;
+        let result = match started {
             Ok(()) => match self.wait_finished(&name).await {
                 Ok(finished) => self.captured(&name, finished).await,
                 Err(e) => Err(e),
@@ -891,6 +905,7 @@ impl Runner for KubeRunner {
 
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
         self.remove(name).await;
+        self.remove_env(name).await;
         Ok(())
     }
 
@@ -1055,6 +1070,75 @@ mod tests {
                 .map(String::as_str),
             Some("harness")
         );
+    }
+
+    /// Secret environment is a reference to the run's own Secret, never a
+    /// value, and the harness proxy it replaces is not also set.
+    #[test]
+    fn secret_env_is_referenced_not_rendered() {
+        let mut c = cmd();
+        c.secret_env = crate::runner::SecretEnv::new(vec![
+            (
+                "HTTPS_PROXY".into(),
+                "http://s:pw-0123456789@tracon-gw:7424".into(),
+            ),
+            ("COMPOSER_AUTH".into(), r#"{"http-basic":{}}"#.into()),
+        ]);
+        let pod = spec().pod("tracon-w-1", &c, false).unwrap();
+        let rendered = serde_json::to_string(&pod).unwrap();
+        assert!(!rendered.contains("pw-0123456789"), "{rendered}");
+        assert!(!rendered.contains("http-basic"), "{rendered}");
+        let env = pod.spec.unwrap().containers[0].env.clone().unwrap();
+        let proxy: Vec<_> = env.iter().filter(|e| e.name == "HTTPS_PROXY").collect();
+        assert_eq!(proxy.len(), 1);
+        let selector = proxy[0]
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
+        assert_eq!(selector.name, "tracon-w-1-env");
+        assert_eq!(selector.key, "HTTPS_PROXY");
+        assert_eq!(selector.optional, Some(false));
+        // The other proxy variables are the harness's as before.
+        assert!(
+            env.iter()
+                .any(|e| e.name == "HTTP_PROXY"
+                    && e.value.as_deref() == Some("http://tracon-gw:8888"))
+        );
+
+        c.secret_env = crate::runner::SecretEnv::new(vec![("A=B".into(), "x".into())]);
+        assert!(spec().pod("tracon-w-1", &c, false).is_err());
+    }
+
+    /// A captured run carries its secret environment by reference as a
+    /// session does, and is still sized as a command, with a TMPDIR a lent
+    /// value does not displace.
+    #[test]
+    fn a_capture_pod_keeps_secret_refs_and_command_sizing() {
+        let mut c = cmd();
+        c.secret_env = crate::runner::SecretEnv::new(vec![(
+            "COMPOSER_AUTH".into(),
+            r#"{"http-basic":{}}"#.into(),
+        )]);
+        let pod = spec().capture_pod("tracon-w-2", &c).unwrap();
+        let rendered = serde_json::to_string(&pod).unwrap();
+        assert!(!rendered.contains("http-basic"), "{rendered}");
+        let container = pod.spec.unwrap().containers[0].clone();
+        let env = container.env.unwrap();
+        let auth = env.iter().find(|e| e.name == "COMPOSER_AUTH").unwrap();
+        let selector = auth
+            .value_from
+            .as_ref()
+            .and_then(|v| v.secret_key_ref.as_ref())
+            .unwrap();
+        assert_eq!(selector.name, "tracon-w-2-env");
+        assert!(env
+            .iter()
+            .any(|e| e.name == "TMPDIR" && e.value.as_deref() == Some(SCRATCH_MOUNT)));
+        let requests = container.resources.unwrap().requests.unwrap();
+        assert_eq!(requests["memory"].0, "2Gi");
     }
 
     #[test]

@@ -990,6 +990,7 @@ mod live {
                 binary: binary.to_string(),
             };
             let spec = LaunchSpec {
+                secret_env: Default::default(),
                 cwd_in_runner: work.to_string_lossy().into_owned(),
                 container_name: container.clone(),
                 harness_home: root.join("home").to_string_lossy().into_owned(),

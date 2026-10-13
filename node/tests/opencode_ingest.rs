@@ -111,6 +111,7 @@ fn kinds(store: &Store) -> Vec<String> {
 
 fn launch_spec(cursor: Arc<dyn DurableCursor>) -> LaunchSpec {
     LaunchSpec {
+        secret_env: Default::default(),
         cursor: Some(cursor),
         ..support::fake_opencode::spec()
     }

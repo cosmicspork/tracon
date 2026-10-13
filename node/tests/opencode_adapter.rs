@@ -375,6 +375,7 @@ async fn the_pinned_binary_starts_sealed() {
         launched: Arc::new(Mutex::new(None)),
     };
     let spec = || LaunchSpec {
+        secret_env: Default::default(),
         cwd_in_runner: work.to_string_lossy().into_owned(),
         model: "anthropic/claude-x".into(),
         container_name: format!("tracon-opencode-live-{}", std::process::id()),

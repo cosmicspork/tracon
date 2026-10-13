@@ -1,6 +1,13 @@
 //! A fake Kubernetes API, enough of `pods` for the Kubernetes runner: create,
 //! get, delete and logs, with each pod's life told by a `Script` rather than
-//! by a kubelet.
+//! by a kubelet. Enough of `secrets` for a run's own Secret: create, list,
+//! patch (a merge of metadata; data stays immutable) and delete, every call
+//! recorded. And `selfsubjectaccessreviews`, allowing everything a test has
+//! not denied.
+//!
+//! A kubelet's one rule about Secrets is kept: a pod whose `secretKeyRef`
+//! names a Secret or key that does not exist when it is created never starts
+//! (`CreateContainerConfigError`).
 //!
 //! The client is handed the router itself as its transport (`client`), so no
 //! socket is opened and a `start_paused` test drives a pod through minutes of
@@ -14,16 +21,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use k8s_openapi::api::authorization::v1::{SelfSubjectAccessReview, SubjectAccessReviewStatus};
 use k8s_openapi::api::core::v1::{
     ContainerState, ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting,
-    ContainerStatus, Pod, PodStatus,
+    ContainerStatus, Pod, PodStatus, Secret,
 };
-use serde_json::json;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+use serde_json::{json, Value};
 use tokio::time::Instant;
 
 /// One pod's life from the moment it is created: `pending` waiting to start
@@ -114,6 +123,18 @@ struct Inner {
     pods: HashMap<String, Stored>,
     created: Vec<Pod>,
     deleted: Vec<String>,
+    secrets: HashMap<String, Secret>,
+    secrets_created: Vec<Secret>,
+    secrets_deleted: Vec<String>,
+    /// `(secret, merge patch body)`, in order.
+    secret_patches: Vec<(String, Value)>,
+    /// For each pod created, the Secrets that existed at that moment.
+    secrets_at_pod_create: Vec<(String, Vec<String>)>,
+    /// `(resource, verb)` an access review answers no to.
+    denied: Vec<(String, String)>,
+    /// A Secret request answers 403, as the API does for a Role without
+    /// the rule, whatever the access reviews say.
+    secrets_forbidden: bool,
 }
 
 #[derive(Clone)]
@@ -146,6 +167,22 @@ impl KubeApi {
         self
     }
 
+    /// Access reviews answer no to `verb` on `resource`.
+    pub fn deny(self, resource: &str, verb: &str) -> Self {
+        self.inner
+            .lock()
+            .unwrap()
+            .denied
+            .push((resource.into(), verb.into()));
+        self
+    }
+
+    /// Every Secret request is refused 403.
+    pub fn forbid_secrets(self) -> Self {
+        self.inner.lock().unwrap().secrets_forbidden = true;
+        self
+    }
+
     pub fn router(&self) -> Router {
         Router::new()
             .route("/api/v1/namespaces/{ns}/pods", get(list).post(create))
@@ -154,7 +191,67 @@ impl KubeApi {
                 get(read).delete(delete),
             )
             .route("/api/v1/namespaces/{ns}/pods/{name}/log", get(logs))
+            .route(
+                "/api/v1/namespaces/{ns}/secrets",
+                get(list_secrets).post(create_secret),
+            )
+            .route(
+                "/api/v1/namespaces/{ns}/secrets/{name}",
+                get(read_secret).delete(delete_secret).patch(patch_secret),
+            )
+            .route(
+                "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+                post(review),
+            )
             .with_state(self.clone())
+    }
+
+    /// Every Secret as it was created, in order.
+    pub fn secrets_created(&self) -> Vec<Secret> {
+        self.inner.lock().unwrap().secrets_created.clone()
+    }
+
+    /// The names of the Secrets that existed and were deleted, in order.
+    pub fn secrets_deleted(&self) -> Vec<String> {
+        self.inner.lock().unwrap().secrets_deleted.clone()
+    }
+
+    /// The Secrets that exist now, as they stand (patches applied).
+    pub fn secrets_live(&self) -> Vec<Secret> {
+        let inner = self.inner.lock().unwrap();
+        let mut live: Vec<Secret> = inner.secrets.values().cloned().collect();
+        live.sort_by(|a, b| a.metadata.name.cmp(&b.metadata.name));
+        live
+    }
+
+    pub fn secret_patches(&self) -> Vec<(String, Value)> {
+        self.inner.lock().unwrap().secret_patches.clone()
+    }
+
+    /// For each pod, by name, the Secrets that existed when it was created.
+    pub fn secrets_at_pod_create(&self) -> Vec<(String, Vec<String>)> {
+        self.inner.lock().unwrap().secrets_at_pod_create.clone()
+    }
+
+    /// Put a Secret in place as if an earlier node had made it.
+    pub fn insert_secret(&self, secret: Secret) {
+        let name = secret.metadata.name.clone().unwrap_or_default();
+        self.inner.lock().unwrap().secrets.insert(name, secret);
+    }
+
+    /// Put a pod in place as if an earlier node had made it, with `script`'s
+    /// life counted from now.
+    pub fn insert_pod(&self, mut pod: Pod, script: Script) {
+        let name = pod.metadata.name.clone().unwrap_or_default();
+        pod.metadata.uid = Some(uuid::Uuid::now_v7().to_string());
+        self.inner.lock().unwrap().pods.insert(
+            name,
+            Stored {
+                pod,
+                created: Instant::now(),
+                script,
+            },
+        );
     }
 
     /// A client whose transport is this API, in process.
@@ -302,13 +399,21 @@ async fn create(
         );
     }
     pod.metadata.namespace = Some(ns);
+    pod.metadata.uid = Some(uuid::Uuid::now_v7().to_string());
     inner.created.push(pod.clone());
+    let mut existing: Vec<String> = inner.secrets.keys().cloned().collect();
+    existing.sort();
+    inner.secrets_at_pod_create.push((name.clone(), existing));
     let script = inner
         .scripts
         .iter()
         .find(|(prefix, _)| name.starts_with(prefix.as_str()))
         .map(|(_, script)| script.clone())
         .unwrap_or_else(|| inner.default.clone());
+    let script = match missing_secret_ref(&inner.secrets, &pod) {
+        Some(_) => Script::never_starts("CreateContainerConfigError"),
+        None => script,
+    };
     let stored = Stored {
         pod,
         created: Instant::now(),
@@ -367,4 +472,212 @@ async fn logs(State(api): State<KubeApi>, Path((_ns, name)): Path<(String, Strin
         stored.script.logs.clone(),
     )
         .into_response()
+}
+
+/// The first `secretKeyRef` in `pod` naming a Secret or a key that does not
+/// exist, as a kubelet would refuse it.
+fn missing_secret_ref(secrets: &HashMap<String, Secret>, pod: &Pod) -> Option<String> {
+    let containers = pod.spec.as_ref()?.containers.iter();
+    for container in containers {
+        for var in container.env.iter().flatten() {
+            let Some(selector) = var
+                .value_from
+                .as_ref()
+                .and_then(|from| from.secret_key_ref.as_ref())
+            else {
+                continue;
+            };
+            let found = secrets
+                .get(&selector.name)
+                .and_then(|s| s.data.as_ref())
+                .is_some_and(|data| data.contains_key(&selector.key));
+            if !found {
+                return Some(format!("{}/{}", selector.name, selector.key));
+            }
+        }
+    }
+    None
+}
+
+fn secrets_forbidden(name: &str) -> Response {
+    status_error(
+        StatusCode::FORBIDDEN,
+        "Forbidden",
+        format!(
+            "secrets \"{name}\" is forbidden: User \"system:serviceaccount:tracon:tracon-node\" \
+             cannot access resource \"secrets\""
+        ),
+    )
+}
+
+fn secret_not_found(name: &str) -> Response {
+    status_error(
+        StatusCode::NOT_FOUND,
+        "NotFound",
+        format!("secrets \"{name}\" not found"),
+    )
+}
+
+async fn create_secret(
+    State(api): State<KubeApi>,
+    Path(ns): Path<String>,
+    Json(mut secret): Json<Secret>,
+) -> Response {
+    let name = secret.metadata.name.clone().unwrap_or_default();
+    let mut inner = api.inner.lock().unwrap();
+    if inner.secrets_forbidden {
+        return secrets_forbidden(&name);
+    }
+    if inner.secrets.contains_key(&name) {
+        return status_error(
+            StatusCode::CONFLICT,
+            "AlreadyExists",
+            format!("secrets \"{name}\" already exists"),
+        );
+    }
+    secret.metadata.namespace = Some(ns);
+    secret.metadata.uid = Some(uuid::Uuid::now_v7().to_string());
+    secret.metadata.creation_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+    inner.secrets_created.push(secret.clone());
+    inner.secrets.insert(name, secret.clone());
+    (StatusCode::CREATED, Json(secret)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ListQuery {
+    #[serde(rename = "labelSelector")]
+    label_selector: Option<String>,
+}
+
+/// `key` or `key=value`, comma-separated: the subset of selectors the node
+/// uses.
+fn selects(selector: &str, secret: &Secret) -> bool {
+    let labels = secret.metadata.labels.clone().unwrap_or_default();
+    selector
+        .split(',')
+        .filter(|term| !term.is_empty())
+        .all(|term| match term.split_once('=') {
+            Some((key, value)) => labels.get(key).is_some_and(|v| v == value),
+            None => labels.contains_key(term),
+        })
+}
+
+/// Metadata only, as a `PartialObjectMetadataList`: what the node asks for,
+/// and all a list of Secrets needs to say to it.
+async fn list_secrets(State(api): State<KubeApi>, Query(query): Query<ListQuery>) -> Response {
+    let inner = api.inner.lock().unwrap();
+    if inner.secrets_forbidden {
+        return secrets_forbidden("");
+    }
+    let selector = query.label_selector.unwrap_or_default();
+    let items: Vec<Value> = inner
+        .secrets
+        .values()
+        .filter(|secret| selects(&selector, secret))
+        .map(|secret| {
+            json!({
+                "apiVersion": "meta.k8s.io/v1",
+                "kind": "PartialObjectMetadata",
+                "metadata": secret.metadata,
+            })
+        })
+        .collect();
+    Json(json!({
+        "kind": "PartialObjectMetadataList",
+        "apiVersion": "meta.k8s.io/v1",
+        "metadata": {},
+        "items": items,
+    }))
+    .into_response()
+}
+
+async fn read_secret(
+    State(api): State<KubeApi>,
+    Path((_ns, name)): Path<(String, String)>,
+) -> Response {
+    let inner = api.inner.lock().unwrap();
+    if inner.secrets_forbidden {
+        return secrets_forbidden(&name);
+    }
+    match inner.secrets.get(&name) {
+        Some(secret) => Json(secret.clone()).into_response(),
+        None => secret_not_found(&name),
+    }
+}
+
+async fn delete_secret(
+    State(api): State<KubeApi>,
+    Path((_ns, name)): Path<(String, String)>,
+) -> Response {
+    let mut inner = api.inner.lock().unwrap();
+    if inner.secrets_forbidden {
+        return secrets_forbidden(&name);
+    }
+    match inner.secrets.remove(&name) {
+        Some(secret) => {
+            inner.secrets_deleted.push(name);
+            Json(secret).into_response()
+        }
+        None => secret_not_found(&name),
+    }
+}
+
+/// A JSON merge patch of `metadata`. `data` of an immutable Secret is
+/// refused, as the API refuses it.
+async fn patch_secret(
+    State(api): State<KubeApi>,
+    Path((_ns, name)): Path<(String, String)>,
+    body: String,
+) -> Response {
+    let Ok(patch) = serde_json::from_str::<Value>(&body) else {
+        return status_error(StatusCode::BAD_REQUEST, "BadRequest", "not JSON".into());
+    };
+    let mut inner = api.inner.lock().unwrap();
+    if inner.secrets_forbidden {
+        return secrets_forbidden(&name);
+    }
+    let Some(secret) = inner.secrets.get(&name).cloned() else {
+        return secret_not_found(&name);
+    };
+    if secret.immutable == Some(true)
+        && (patch.get("data").is_some() || patch.get("stringData").is_some())
+    {
+        return status_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid",
+            format!("Secret \"{name}\" is invalid: data: Forbidden: field is immutable when `immutable` is set"),
+        );
+    }
+    let mut merged = serde_json::to_value(&secret).unwrap();
+    if let (Some(into), Some(from)) = (
+        merged.get_mut("metadata").and_then(Value::as_object_mut),
+        patch.get("metadata").and_then(Value::as_object),
+    ) {
+        for (key, value) in from {
+            into.insert(key.clone(), value.clone());
+        }
+    }
+    let merged: Secret = serde_json::from_value(merged).unwrap();
+    inner.secret_patches.push((name.clone(), patch));
+    inner.secrets.insert(name, merged.clone());
+    Json(merged).into_response()
+}
+
+async fn review(
+    State(api): State<KubeApi>,
+    Json(mut review): Json<SelfSubjectAccessReview>,
+) -> Response {
+    let inner = api.inner.lock().unwrap();
+    let attributes = review.spec.resource_attributes.clone().unwrap_or_default();
+    let resource = attributes.resource.unwrap_or_default();
+    let verb = attributes.verb.unwrap_or_default();
+    let allowed = !inner
+        .denied
+        .iter()
+        .any(|(r, v)| *r == resource && *v == verb);
+    review.status = Some(SubjectAccessReviewStatus {
+        allowed,
+        ..Default::default()
+    });
+    (StatusCode::CREATED, Json(review)).into_response()
 }

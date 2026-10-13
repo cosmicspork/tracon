@@ -419,9 +419,11 @@ impl PrepareSecrets {
 
 /// A preparation's way out, and the proxy variables that send its container
 /// through it instead of through the harness proxy. Dropping it closes it.
+/// The variables carry the grant's credentials, so they travel as secret
+/// environment.
 pub struct ScopedEgress {
     _grant: Option<crate::boundary::EgressGrant>,
-    pub env: Vec<(String, String)>,
+    pub secret_env: crate::runner::SecretEnv,
 }
 
 /// What a session is told when it asks for a host its repository does not
@@ -523,7 +525,7 @@ pub fn scoped_egress(backend: &dyn Backend, hosts: &[String]) -> Result<ScopedEg
     if hosts.is_empty() {
         return Ok(ScopedEgress {
             _grant: None,
-            env: Vec::new(),
+            secret_env: Default::default(),
         });
     }
     let grant = backend
@@ -535,7 +537,7 @@ pub fn scoped_egress(backend: &dyn Backend, hosts: &[String]) -> Result<ScopedEg
         })
         .map_err(|error| format!("could not open preparation egress: {error}"))?;
     Ok(ScopedEgress {
-        env: grant.env(),
+        secret_env: grant.env(),
         _grant: Some(grant),
     })
 }
@@ -647,13 +649,13 @@ pub async fn prepare(
     let egress = scoped_egress(backend, &environment.egress).map_err(EnvironmentError::Runtime)?;
     let mut env = cache_env();
     env.push(("HOME".into(), "/cache/home".into()));
-    env.extend(egress.env.iter().cloned());
     let runner = backend.runner(Vec::new());
     let started = Instant::now();
     let output = runner
         .run_capture(RunnerCommand {
             argv: vec!["sh".into(), "-lc".into(), plan.command.clone()],
             env,
+            secret_env: egress.secret_env.clone(),
             mounts: vec![
                 workspace.mount("/work", false),
                 Mount::volume(plan.cache_volume.clone(), "/cache", false),
@@ -700,6 +702,7 @@ pub async fn verify(
             .run_capture(RunnerCommand {
                 argv: vec!["sh".into(), "-lc".into(), command.clone()],
                 env: Vec::new(),
+                secret_env: Default::default(),
                 mounts: vec![
                     workspace.mount("/work", true),
                     Mount::volume(prepared.cache_volume.clone(), "/cache", true),

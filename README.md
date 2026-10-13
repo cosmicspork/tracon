@@ -474,7 +474,10 @@ is refused at the warm-up, and the warm-up does not run. Read the secret from th
 environment (`COMPOSER_AUTH`, or an `.npmrc` line like
 `//npm.pkg.github.com/:_authToken=${NPM_TOKEN}`) and never write it to a file: the cache
 the warm-up fills is copied into every session on the repository. What preparation
-prints is shown with the lent values taken out. Two limits follow from lending it so
+prints is shown with the lent values taken out. The values never appear on a `podman run`
+command line or in a Kubernetes pod spec: Podman is given each name with `--env NAME` and
+the value in its own environment, and Kubernetes reads them from a Secret of the run's own
+(see [As a Kubernetes pod](#as-a-kubernetes-pod)). Two limits follow from lending it so
 narrowly. A candidate that adds or upgrades a private package cannot fetch it, so that
 change is checked after it merges and `tracon repo build <repo>` warms the cache again.
 And the warm-up runs whatever the default branch's install runs, so a Composer plugin or
@@ -1231,6 +1234,22 @@ names its own requests and memory limit (`[runtime.kubernetes.resources]`, sized
 default for one shared 4 vCPU / 8 GB node), so a namespace's LimitRange never
 substitutes its defaults. Each pod also gets a memory-backed `/dev/shm` for browsers
 and an emptyDir at `/tmp` that `TMPDIR` names.
+
+The node's Role (`deploy/kubernetes/base/role.yaml`) is what the `runtime` check
+asserts. Pods (create, get, list, watch, delete), `pods/attach` (create, get),
+`pods/log` (get) and NetworkPolicies (get) are required, and a node without them
+refuses to run harnesses. Secrets (create, patch, delete, list) are optional. They
+let a run that carries a credential keep it out of its pod spec, which anyone with
+`get pods` in the namespace can read. That covers a lent `prepare_credentials` value
+and an egress grant's proxy URL. Each such run gets an immutable Secret of its own,
+`<pod>-env`, labelled `tracon.dev/run=<pod>`, which the pod reads with
+`secretKeyRef`. The Secret is owned by the pod, so the cluster removes it if the node
+dies first. The node deletes it as soon as the pod has started, or when a run that
+never started ends. Without the Secrets rule the check still passes and says so, and
+every run carrying a credential is refused with the rule to add. No value is ever
+written into a pod spec instead. The rights make the node able to read every Secret in
+its namespace, so keep nothing else there that a harness should not reach through a
+compromised node.
 
 ### From source
 

@@ -2264,9 +2264,7 @@ impl Manager {
             ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
         ]);
         harness_env.extend(cache_env);
-        if let Some(egress) = &egress {
-            harness_env.extend(egress.env());
-        }
+        let harness_secret_env = egress.as_ref().map(|e| e.env()).unwrap_or_default();
 
         // The supervisor's channel exists before the harness does, because the
         // ingestion layer needs it: a permission reconciliation re-raises goes
@@ -2303,6 +2301,7 @@ impl Manager {
                     mcp_servers,
                     tools: self.cfg.harness.tools.clone(),
                     env: harness_env,
+                    secret_env: harness_secret_env,
                     system_prompt_file: Some(scratch.orientation_path.clone()),
                 },
             ),

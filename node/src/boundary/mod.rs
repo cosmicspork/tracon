@@ -73,12 +73,15 @@ impl EgressGrant {
 
     /// The proxy variables that send a container through this grant instead
     /// of the harness proxy. Both spellings: curl and Git read the lowercase
-    /// names, and most package managers read either.
-    pub fn env(&self) -> Vec<(String, String)> {
+    /// names, and most package managers read either. Secret, because the URL
+    /// carries the grant's password: whoever reads it is served the grant's
+    /// hosts for as long as it is held.
+    pub fn env(&self) -> crate::runner::SecretEnv {
         ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"]
             .into_iter()
             .map(|name| (name.to_string(), self.url()))
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 

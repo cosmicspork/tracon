@@ -139,6 +139,7 @@ impl ClaudeAdapter {
         RunnerCommand {
             argv,
             env: spec.env.clone(),
+            secret_env: spec.secret_env.clone(),
             workdir: Some(spec.cwd_in_runner.clone()),
             name: name.into(),
             ..Default::default()
@@ -944,6 +945,7 @@ mod tests {
 
     fn spec() -> LaunchSpec {
         LaunchSpec {
+            secret_env: Default::default(),
             cwd_in_runner: "/work".into(),
             model: "opus".into(),
             container_name: "c".into(),

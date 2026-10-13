@@ -611,7 +611,22 @@ which may run the candidate's own scripts, can reach its own evidence and nobody
 That warm-up is also the only preparation lent a registry credential: the entry's
 `prepare_credentials` name `env` credentials in the broker, each of which must name the
 repository in its own `repos`, and their environment goes into the warm-up's commands
-and is taken out of what they print. A private package therefore reaches candidates and
+and is taken out of what they print. It travels as secret environment
+(`RunnerCommand::secret_env`), as every egress grant's proxy URL does, since that URL
+carries the grant's password. Neither is ever written where another reader finds it.
+Podman is given each name as `--env NAME` with the value in the `podman` process's own
+environment, which only the node's user can read, rather than on an argv any local user
+can list. An env-file was the alternative and would leave the values on disk if the node
+died before removing it. On Kubernetes, where a pod spec is readable by anyone with
+`get pods`, each run gets an immutable Secret, `<pod>-env`, labelled with its pod. It is
+created before the pod (a pod naming a missing Secret never starts), referenced with
+`secretKeyRef`, and given the pod as its owner so the cluster removes it if the node dies.
+It is deleted once the pod has started, because the kubelet has read it by then and a
+pod that never restarts never reads it again. A run that ends before it starts (a
+failure, a kill, a dropped caller) deletes it on the way out, and the boundary check and
+`reconcile` sweep any a dead node left. The Secrets rights are optional in the `runtime`
+check. A node without them refuses a run carrying secret environment and never
+downgrades it to a plaintext value. A private package therefore reaches candidates and
 sessions as cached bytes, never as a token, and a candidate that needs one the cache
 does not hold fails its preparation rather than being lent the credential.
 A preparation that fails runs no check: it is reported once, with the failing command,
