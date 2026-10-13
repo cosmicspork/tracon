@@ -673,15 +673,22 @@ the entrypoint links into OpenCode's cache so it never downloads one, and its ow
 `/opt/tracon/bin/node`. That Node is on no `PATH`: the toolchain profile names it in front
 of each JavaScript tool, so the agent's shell keeps the repository's `node` and the tools
 keep theirs, and a tool whose interpreter does not run on the image is reported
-`unavailable` in the session's launch status rather than failing the session. The layer
+`unavailable` in the session's launch status rather than failing the session. Claude Code's layer now begins the same way OpenCode's does (`repo_image::layer_guard`).
+It removes `/etc/claude-code`, the managed-settings directory Claude Code reads on Linux
+whatever its environment says, whose policy outranks the node's flags, and any `.claude` or
+`.claude.json` in the harness's home. It refuses `CLAUDE_*` and `ANTHROPIC_*` variables
+other than the three every session sets for itself, as well as `NODE_OPTIONS` and the
+loader and `BUN_*` variables below. The launch states `BUN_OPTIONS` empty, because Claude
+Code's binary is Bun and a `--preload` there runs a script inside it. Its probe checks that
+the binary, and a pod's init, resolve to themselves. The OpenCode layer
 also removes what a repository's image could use to configure OpenCode under the node:
 `/etc/opencode`, which OpenCode reads whatever its environment says, and anything already
 at `/opt/tracon`, whose seed the entrypoint copies into the configuration directory. It
 refuses, naming what it found, an image whose environment sets an `OPENCODE_*` or `BUN_*`
 variable, `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH` (each would reach the harness
 wherever the launch sets no value of its own), one with a non-empty `/etc/ld.so.preload`,
-and one where `/opt`, `/usr`, `/usr/local`, `/usr/local/bin` or `/usr/libexec` is a
-symbolic link that would send the copied files somewhere the image chose, such as the
+and one where `/opt`, `/usr`, `/usr/local`, `/usr/local/bin`, `/usr/libexec` or
+`/usr/libexec/tracon` is a symbolic link that would send the copied files somewhere the image chose, such as the
 workspace. The probe then checks that the entrypoint, the binary and the baked node each
 resolve to themselves. The launch sets `BUN_BE_BUN=0`, because the binary is Bun and that
 variable would make it run a `serve` script from the worktree with the server password in
