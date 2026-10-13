@@ -464,6 +464,7 @@ async fn an_admin_action_is_confirmed_once_for_exactly_that_request() {
     assert_eq!(refused.kind(), "step_up_required");
     let step_up = &refused.body["step_up"];
     assert_eq!(step_up["action"], "POST /api/authority/grants");
+    assert_eq!(step_up["summary"], "Create an authority grant");
     assert_eq!(step_up["op_hash"].as_str().unwrap().len(), 64);
     assert_eq!(
         step_up["options"]["publicKey"]["userVerification"],

@@ -2,9 +2,11 @@
   // The confirmation every admin action from off the node asks for. The
   // button is the user gesture the passkey sheet needs, which is why this is
   // a prompt and not something run silently behind the request.
+  import { confirming } from '../lib/passkey'
   import { stepUp } from '../lib/stepup.svelte'
 
   const pending = $derived(stepUp.pending)
+  const what = $derived(pending ? confirming(pending.stepUp) : null)
 
   function onkey(e: KeyboardEvent) {
     if (e.key === 'Escape' && pending && !stepUp.busy) stepUp.cancel()
@@ -21,7 +23,8 @@
         This changes who can use this node or what it holds for them, so it is confirmed on this
         device each time.
       </p>
-      {#if pending.stepUp.action}<code class="action">{pending.stepUp.action}</code>{/if}
+      {#if what?.headline}<p class="what" data-testid="step-up-summary">{what.headline}</p>{/if}
+      {#if what?.detail}<code class="action">{what.detail}</code>{/if}
       {#if !stepUp.supported}
         <p class="err">
           This browser cannot use passkeys. Make this change from a browser that can, or at the node
@@ -73,6 +76,11 @@
     color: var(--ink2);
     font-size: 13.5px;
     line-height: 1.5;
+  }
+  .what {
+    color: var(--ink);
+    font: 500 14px var(--sans);
+    overflow-wrap: anywhere;
   }
   .action {
     font: 12.5px var(--mono);

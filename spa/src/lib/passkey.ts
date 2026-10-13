@@ -229,3 +229,12 @@ export function deviceLabel(userAgent: string): string {
   if (/Linux/.test(userAgent)) return 'Linux'
   return 'Passkey'
 }
+
+/** What the step-up prompt names as being confirmed: the node's own line for
+ * it, with the request it guards beneath; or the request alone when the node
+ * gave no line. */
+export function confirming(stepUp: { summary?: string; action?: string }): { headline: string | null; detail: string | null } {
+  const summary = stepUp.summary?.trim() || null
+  const action = stepUp.action?.trim() || null
+  return summary ? { headline: summary, detail: action } : { headline: action, detail: null }
+}

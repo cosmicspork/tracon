@@ -2059,8 +2059,6 @@ pub struct AnswerBody {
     notes: Option<String>,
 }
 
-/// An answer the node cannot act on as sent is a 422 that names each field,
-/// so the operator can fix their edit and answer again; nothing was decided.
 /// Whether answering approval `id` with `option_id` changes the node rather
 /// than letting one call run, and if so, what it changes. Allowing a
 /// repository setup proposal writes its `[[repo]]` entry (checks, preparation,
@@ -2074,25 +2072,57 @@ pub(crate) fn admin_answer(
     s: &AppState,
     id: &str,
     option_id: &str,
-) -> ApiResult<Option<&'static str>> {
+) -> ApiResult<Option<AdminAnswer>> {
     let Some(approval) = s.store().get_approval(id)? else {
         return Ok(None);
     };
     let allow = option_id == crate::adapter::types::OPTION_ALLOW_ONCE;
+    // The summary is the stored approval's, never the answer's: it says what
+    // the operator is confirming in the node's words.
+    let args: serde_json::Value = serde_json::from_str(&approval.arguments).unwrap_or_default();
+    let field = |key: &str| args[key].as_str().unwrap_or("").trim().to_string();
+    let repo = field("repo");
+    let repo = if repo.is_empty() {
+        "this repository".to_string()
+    } else {
+        repo
+    };
     Ok(match approval.tool.as_str() {
-        crate::mcp::setup::PROPOSE if allow => {
-            Some("allowing a repository setup proposal writes node.toml")
-        }
-        crate::mcp::setup::TRY if allow => {
-            Some("allowing a Dockerfile trial builds it with the network, outside the boundary")
-        }
+        crate::mcp::setup::PROPOSE if allow => Some(AdminAnswer {
+            what: "allowing a repository setup proposal writes node.toml",
+            summary: format!("Allow repository setup for {repo}"),
+        }),
+        crate::mcp::setup::TRY if allow => Some(AdminAnswer {
+            what: "allowing a Dockerfile trial builds it with the network, outside the boundary",
+            summary: {
+                let dockerfile = field("dockerfile");
+                let dockerfile = if dockerfile.is_empty() {
+                    "its Dockerfile".to_string()
+                } else {
+                    dockerfile
+                };
+                format!("Build {dockerfile} for {repo} with the network")
+            },
+        }),
         crate::mcp::egress::REQUEST if option_id == crate::store::approvals::OPTION_ALLOW_REPO => {
-            Some("allowing a host for the repository saves it to the repository's egress")
+            Some(AdminAnswer {
+                what: "allowing a host for the repository saves it to the repository's egress",
+                summary: format!("Save {} to the repository's egress", field("host")),
+            })
         }
         _ => None,
     })
 }
 
+/// An approval answer that is an admin action: why, and what the operator
+/// is confirming, in a line.
+pub(crate) struct AdminAnswer {
+    pub what: &'static str,
+    pub summary: String,
+}
+
+/// An answer the node cannot act on as sent is a 422 that names each field,
+/// so the operator can fix their edit and answer again; nothing was decided.
 pub async fn answer_permission(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -2113,7 +2143,7 @@ pub async fn answer_permission(
     // boundary is an admin action: away from the node it needs a passkey,
     // bound to this answer (option and any edited arguments included).
     match admin_answer(&s, &id, &b.option_id) {
-        Ok(Some(what)) => {
+        Ok(Some(AdminAnswer { what, summary })) => {
             let held_elsewhere = s
                 .store()
                 .get_approval(&id)
@@ -2124,12 +2154,20 @@ pub async fn answer_permission(
                 return ApiError::new(
                     StatusCode::FORBIDDEN,
                     format!(
-                        "{what}, so it is answered on the node that holds it: a peer cannot                          confirm an admin action for another node yet"
+                        "{what}, so it is answered on the node that holds it: a peer cannot \
+                         confirm an admin action for another node yet"
                     ),
                 )
                 .into_response();
             }
-            if let Err(refusal) = super::passkey::authorize(&s, &parts, &body).await {
+            let summary = if b.arguments.is_some() {
+                format!("{summary}, as edited")
+            } else {
+                summary
+            };
+            if let Err(refusal) =
+                super::passkey::authorize_as(&s, &parts, &body, Some(summary)).await
+            {
                 return refusal.into_response();
             }
         }
@@ -3499,10 +3537,9 @@ pub async fn external_stop(
 }
 
 /// `POST /api/external/{channel}/start` (and, as before, `DELETE .../stop`):
-/// allow external harnesses on the channel again.
-/// Reopen a channel to external harnesses. Stopping is ordinary; reopening
-/// hands the node's tools back to a harness outside the boundary, so it is an
-/// admin action.
+/// allow external harnesses on the channel again. Stopping is ordinary;
+/// reopening hands the node's tools back to a harness outside the boundary,
+/// so it is an admin action.
 pub async fn external_start(
     State(s): State<AppState>,
     Path(channel): Path<String>,
@@ -5860,7 +5897,7 @@ fn authorise_forwarded(
             // A passkey confirms an admin action on the node it is enrolled
             // with; a peer's answer carries none, so these are refused until
             // the mesh has a signed admin path of its own.
-            if let Some(what) = admin_answer(s, permission_id, option_id)? {
+            if let Some(AdminAnswer { what, .. }) = admin_answer(s, permission_id, option_id)? {
                 return Err(ApiError(
                     StatusCode::FORBIDDEN,
                     format!(

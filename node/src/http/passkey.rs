@@ -328,6 +328,76 @@ fn open_assertion(
 /// proof for exactly this request. Otherwise the refusal says what would
 /// confirm it, opening the challenge when a passkey can.
 pub async fn authorize(s: &AppState, parts: &Parts, body: &[u8]) -> Result<(), Refusal> {
+    authorize_as(
+        s,
+        parts,
+        body,
+        route_summary(&parts.method, parts.uri.path()),
+    )
+    .await
+}
+
+/// What a route does, in a line, for the prompt that confirms it. From the
+/// route the node is about to run, never from anything the client says about
+/// it; `None` where the method and path say it well enough.
+pub fn route_summary(method: &Method, path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let m = method.as_str();
+    let text = match (m, segs.as_slice()) {
+        ("POST", ["api", "auth", "token"]) => "Replace the operator token".to_string(),
+        ("DELETE", ["api", "auth", "token"]) => "Remove the operator token".to_string(),
+        ("POST", ["api", "authority", "grants"]) => "Create an authority grant".to_string(),
+        ("DELETE", ["api", "authority", "grants", _]) => "Revoke an authority grant".to_string(),
+        ("PUT", ["api", "channels", name, "bindings"]) => format!("Change {name}'s bindings"),
+        ("POST", ["api", "credentials", "import"]) => "Import credentials".to_string(),
+        ("POST", ["api", "credentials", name, "share"]) => format!("Share the {name} credential"),
+        ("PUT", ["api", "credentials", "forge", forge]) => format!("Set the {forge} token"),
+        ("DELETE", ["api", "credentials", "forge", forge]) => format!("Remove the {forge} token"),
+        ("POST", ["api", "providers", name, "connect"])
+        | ("POST", ["api", "nodes", _, "providers", name, "connect"]) => {
+            format!("Sign in to {name}")
+        }
+        ("POST", ["api", "providers", name, "disconnect"])
+        | ("POST", ["api", "nodes", _, "providers", name, "disconnect"]) => {
+            format!("Sign out of {name}")
+        }
+        ("PUT", ["api", "providers", name, "key"]) => format!("Set the {name} API key"),
+        ("PUT", ["api", "providers", name, "channels"]) => {
+            format!("Change which channels {name} serves")
+        }
+        ("POST", ["api", "boundary", "setup"]) => "Set up the boundary".to_string(),
+        ("POST", ["api", "admin", "mesh", "invitations"]) => {
+            "Invite a node to the mesh".to_string()
+        }
+        ("POST", ["api", "admin", "mesh", "invitations", _, "admit"]) => {
+            "Admit a node to the mesh".to_string()
+        }
+        ("DELETE", ["api", "admin", "mesh", "members", _]) => {
+            "Remove a node from the mesh".to_string()
+        }
+        ("POST", ["api", "admin", "mesh", "hub-share"]) => {
+            "Share channels with the hub".to_string()
+        }
+        ("POST", ["api", "external", channel, "start"])
+        | ("DELETE", ["api", "external", channel, "stop"]) => {
+            format!("Reopen {channel} to external harnesses")
+        }
+        ("POST", ["api", "passkeys", "register", "options"]) => "Add a passkey".to_string(),
+        ("DELETE", ["api", "passkeys", _]) => "Remove a passkey".to_string(),
+        _ => return None,
+    };
+    // Path segments are percent-encoded and bounded only by the URL; keep
+    // the line short and printable.
+    Some(text.chars().filter(|c| !c.is_control()).take(120).collect())
+}
+
+/// [`authorize`], with the line the prompt shows for what is confirmed.
+pub async fn authorize_as(
+    s: &AppState,
+    parts: &Parts,
+    body: &[u8],
+    summary: Option<String>,
+) -> Result<(), Refusal> {
     let session = match caller(s, parts) {
         Caller::Local => return Ok(()),
         Caller::Session(h) => h,
@@ -365,6 +435,9 @@ pub async fn authorize(s: &AppState, parts: &Parts, body: &[u8]) -> Result<(), R
     limited(s, &session)?;
     let mut step_up = open_assertion(s, &rp, &session, &op)?;
     step_up["action"] = json!(format!("{} {}", parts.method, parts.uri.path()));
+    if let Some(summary) = summary {
+        step_up["summary"] = json!(summary);
+    }
     Err(Refusal::Required { message, step_up })
 }
 
@@ -878,6 +951,25 @@ mod tests {
             op_hash(&Method::PUT, "/a", Some("b"), b""),
             op_hash(&Method::PUT, "/a\nb", None, b"")
         );
+    }
+
+    #[test]
+    fn a_route_says_what_it_does() {
+        assert_eq!(
+            route_summary(&Method::POST, "/api/auth/token").as_deref(),
+            Some("Replace the operator token")
+        );
+        assert_eq!(
+            route_summary(&Method::POST, "/api/nodes/n2/providers/anthropic/connect").as_deref(),
+            Some("Sign in to anthropic")
+        );
+        assert_eq!(
+            route_summary(&Method::PUT, "/api/channels/personal/bindings").as_deref(),
+            Some("Change personal's bindings")
+        );
+        assert_eq!(route_summary(&Method::GET, "/api/auth/token"), None);
+        let long = format!("/api/credentials/{}/share", "x".repeat(500));
+        assert!(route_summary(&Method::POST, &long).unwrap().chars().count() <= 120);
     }
 
     #[test]

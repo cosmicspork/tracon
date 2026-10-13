@@ -22,6 +22,7 @@ const seen = {
   authenticator_credentials: null,
   listed: null,
   step_up_action: null,
+  step_up_summary: null,
   removed: false,
   failed_at: null,
   error: null,
@@ -94,6 +95,7 @@ try {
   const prompt = page.getByTestId('step-up')
   await prompt.waitFor({ timeout })
   seen.step_up_action = (await prompt.locator('.action').textContent())?.trim() ?? null
+  seen.step_up_summary = (await prompt.getByTestId('step-up-summary').textContent())?.trim() ?? null
   await page.getByTestId('step-up-confirm').click()
   await prompt.waitFor({ state: 'detached', timeout })
   step = 'removed'

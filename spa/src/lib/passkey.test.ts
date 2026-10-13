@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { ApiError, call, setStepUpHandler, STEP_UP_HEADER, type StepUp } from './api'
 import {
   ceremonyProblem,
+  confirming,
   creationOptions,
   deviceLabel,
   enrollmentLive,
@@ -184,5 +185,18 @@ describe('an admin action the node wants confirmed', () => {
     expect(err.kind).toBe('step_up_unavailable')
     expect(err.reason).toBe('no_public_origin')
     expect(err.message).toBe('set public_origin')
+  })
+})
+
+describe('what the prompt says is being confirmed', () => {
+  test('the node’s line leads, the request beneath it', () => {
+    expect(confirming({ summary: 'Allow repository setup for /w/x', action: 'POST /api/permissions/a1/answer' })).toEqual({
+      headline: 'Allow repository setup for /w/x',
+      detail: 'POST /api/permissions/a1/answer',
+    })
+  })
+  test('without a line, the request alone', () => {
+    expect(confirming({ action: 'POST /api/x' })).toEqual({ headline: 'POST /api/x', detail: null })
+    expect(confirming({ summary: '  ', action: 'POST /api/x' })).toEqual({ headline: 'POST /api/x', detail: null })
   })
 })

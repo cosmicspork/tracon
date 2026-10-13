@@ -328,3 +328,35 @@ async fn parallel_refusals_raise_one_ask() {
     assert_eq!(named.len(), 1, "{named:?}");
     assert_eq!(h.store.open_permission_views().unwrap().len(), 1);
 }
+
+/// An approval past its expiry is over even before the sweep marks it so.
+/// Saving a host to the repository writes before the answer is decided, so
+/// the expiry is checked first: nothing is written, nothing is opened.
+#[tokio::test]
+async fn an_expired_ask_saves_nothing_to_the_repository() {
+    let h = harness().await;
+    let proxy = session_proxy(&h).await;
+    let live = named_approval(&connect(&proxy, HOST).await);
+    let mut expired = h.store.get_approval(&live).unwrap().unwrap();
+    expired.id = "expired-ask".into();
+    expired.request_key = "expired-ask".into();
+    expired.expires_ms = tracon::store::now_ms() - 1;
+    h.store.insert_approval(&expired).unwrap();
+
+    let (status, body) = answer(&h, "expired-ask", json!({ "option_id": "allow_repo" })).await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.to_string().contains("expired"), "{body}");
+    assert!(!proxy.grants.session_allows("s1", HOST));
+    assert!(
+        !h.manager
+            .cfg()
+            .repos()
+            .iter()
+            .any(|entry| entry.egress.iter().any(|host| host == HOST)),
+        "the host was saved"
+    );
+    assert_eq!(
+        h.store.get_approval("expired-ask").unwrap().unwrap().state,
+        "pending"
+    );
+}

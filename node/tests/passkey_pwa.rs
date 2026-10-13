@@ -165,6 +165,7 @@ async fn a_paired_phone_enrolls_a_passkey_and_confirms_an_admin_action_with_it()
     // Removing it was refused, confirmed by the prompt, and then done.
     let action = saw["step_up_action"].as_str().unwrap_or_default();
     assert!(action.starts_with("DELETE /api/passkeys/"), "{ctx}");
+    assert_eq!(saw["step_up_summary"], "Remove a passkey", "{ctx}");
     assert_eq!(saw["removed"], true, "{ctx}");
     assert_eq!(store.passkey_count().unwrap(), 0);
     let calls: Vec<(String, String, u64)> = saw["api"]

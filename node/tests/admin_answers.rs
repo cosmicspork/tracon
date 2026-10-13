@@ -152,14 +152,14 @@ fn admin_answers(h: &Harness) -> Vec<(&'static str, &'static str)> {
         "propose",
         "repo_setup_propose",
         "n1",
-        json!({ "checks": ["just check"] }),
+        json!({ "checks": ["just check"], "repo": "/work/x" }),
     );
     approval(
         h,
         "trial",
         "repo_setup_try",
         "n1",
-        json!({ "dockerfile": "Dockerfile" }),
+        json!({ "dockerfile": "Dockerfile", "repo": "/work/x" }),
     );
     approval(
         h,
@@ -188,6 +188,15 @@ async fn an_admin_answer_from_afar_needs_a_passkey_bound_to_it() {
             "{id}: {refused}"
         );
         assert_eq!(state_of(&h, id), "pending", "{id}");
+        // The prompt says what is being confirmed, in the node's words from
+        // the stored approval.
+        let summary = refused["step_up"]["summary"].as_str().unwrap_or_default();
+        let expected = match id {
+            "propose" => "Allow repository setup for /work/x",
+            "trial" => "Build Dockerfile for /work/x with the network",
+            _ => "Save example.org to the repository's egress",
+        };
+        assert_eq!(summary, expected, "{id}: {refused}");
 
         let step_up = &refused["step_up"];
         let credential = key.get(&step_up["options"]);
@@ -203,10 +212,15 @@ async fn an_admin_answer_from_afar_needs_a_passkey_bound_to_it() {
         assert_eq!(s, StatusCode::OK, "{id}: {finished}");
         let proof = finished["proof"].as_str().unwrap().to_string();
 
-        // A proof for this answer does not allow it with other arguments.
+        // A proof for this answer does not allow it with other arguments,
+        // and the prompt for those says they were edited.
         let edited = json!({ "option_id": option, "arguments": { "checks": ["curl evil"] } });
         let (s, v) = send(&h, "POST", &uri, REMOTE, &edited, Some(&proof)).await;
         assert_eq!(v["error"]["kind"], "step_up_required", "{id}: {s} {v}");
+        assert_eq!(
+            v["step_up"]["summary"].as_str().unwrap_or_default(),
+            format!("{expected}, as edited")
+        );
 
         // The answer it was made for goes past the gate.
         let (s, v) = send(&h, "POST", &uri, REMOTE, &body, Some(&proof)).await;

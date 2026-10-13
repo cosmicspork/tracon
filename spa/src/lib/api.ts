@@ -123,6 +123,9 @@ export interface StepUp {
   expires_ms: number
   /** `METHOD /path`, to say what is being confirmed. */
   action?: string
+  /** What is being confirmed, in a line, in the node's own words (from the
+      route or the stored approval, never from this client). */
+  summary?: string
 }
 
 /** The header a retried admin request carries its proof in. */
