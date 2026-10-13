@@ -1624,7 +1624,83 @@ export interface RepoEnvironments {
   can_build: boolean
   /** Preset name, and the hosts it opens. */
   presets: [string, string[]][]
-  entries: { entry: RepoEntry; builds: RepoImageBuild[] }[]
+  entries: { entry: RepoEntry; builds: RepoImageBuild[]; hold?: CredentialHold | null }[]
+}
+
+/**
+ * An entry that keeps lending credentials to a preparation a peer's recipe
+ * changed: nothing is built or warmed for it until the operator starts it.
+ */
+export interface CredentialHold {
+  path: string
+  offer_id: string
+  sender_node: string
+  repo: string
+  credentials: string[]
+  /** What the hold is on; a start names it, and is refused for another. */
+  lending_hash: string
+  created_ms: number
+}
+
+/**
+ * A repository recipe as it travels between nodes: the repository's forge
+ * identity and how to build, prepare and check it. Never an image, a digest,
+ * a credential name or a path on the sender's machine.
+ */
+export interface RepoRecipe {
+  repo: string
+  dockerfile?: string
+  context?: string
+  checks?: string[]
+  prepare: string[]
+  egress: string[]
+  session_egress: boolean
+  timeout_secs?: number
+}
+
+/** A recipe a channel co-member offered this node, held for its operator. */
+export interface RecipeOffer {
+  id: string
+  sender_node: string
+  sender_name: string
+  channel: string
+  repo: string
+  recipe: RepoRecipe
+  note: string | null
+  received_ms: number
+  expires_ms: number
+  /** `accepting` while an accept holds it; `withdrawn` once its sender left the channel. */
+  state: 'pending' | 'accepting' | 'accepted' | 'declined' | 'superseded' | 'expired' | 'withdrawn'
+  decided_ms: number | null
+  /** The `[[repo]]` path an accepted offer was written to. */
+  decided_path: string | null
+}
+
+/** An offer against the entry it would change. */
+export interface RecipeOfferView {
+  offer: RecipeOffer
+  target: { path: string; exists: boolean }
+  before: RepoEntry | null
+  after: RepoEntry
+  changes: { field: string; before: unknown; after: unknown }[]
+  notes: string[]
+  /** The entry's own fields (never offered) it still has after the offer. */
+  kept: string[]
+  /** What becomes of credentials the entry lends its preparation. */
+  credentials: { state: 'none' | 'unaffected' | 'dropped' | 'kept' | 'still_held'; names: string[] }
+  replace_image: boolean
+  keep_credentials: boolean
+  /** Names exactly this review; an accept must carry it. */
+  viewed_hash: string
+}
+
+/** What one node made of an offer this node sent it. */
+export interface RecipeOfferResult {
+  node: string
+  name: string
+  state: 'offered' | 'queued' | 'refused'
+  offer_id?: string
+  detail?: string
 }
 
 /** One thing an operator put in a channel's launch manifest. */

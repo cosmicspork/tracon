@@ -35,6 +35,7 @@ struct Node {
     client: Arc<MeshClient>,
     adapter: Arc<FakeAdapter>,
     broker: tracon::broker::SharedBroker,
+    cfg: Arc<Config>,
 }
 
 async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
@@ -128,6 +129,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
     carry(providers.list_public());
     providers.set_on_publish(Box::new(carry));
     state.manager.set_providers(providers);
+    let cfg = state.cfg.clone();
     Node {
         id,
         app: tracon::http::router(state),
@@ -135,6 +137,7 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
         client,
         adapter,
         broker,
+        cfg,
     }
 }
 
@@ -996,4 +999,211 @@ async fn an_absent_owner_queues_a_prompt_and_an_older_one_is_named() {
     assert_eq!(st, StatusCode::ACCEPTED, "{v}");
     assert_eq!(v["queued"], true, "{v}");
     assert_eq!(v["owner"], gi.as_str(), "{v}");
+}
+
+/// A request from the node's own machine, which the operator API's
+/// `Loopback` and `LocalOrAdministrator` gates read from the peer address.
+async fn call_locally(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", "127.0.0.1:7420")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            body.map(|b| b.to_string()).unwrap_or_default(),
+        ))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// A recipe offered from A reaches B over the hub as a sealed command, is
+/// staged there for B's operator with nothing applied, and carries nothing
+/// that is A's alone. B holds A to the channel the offer names, and A offers
+/// only to that channel's members.
+#[tokio::test]
+async fn a_recipe_offered_to_a_co_member_is_staged_there_and_nothing_local_leaks() {
+    state::isolate();
+    let (a, b) = pair_with(&["private"], None).await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    wait_for("both to learn who is in personal", || {
+        [&a, &b].iter().all(|n| {
+            n.store
+                .nodes_in_channel("personal")
+                .is_ok_and(|m| m.contains(&ai) && m.contains(&bi))
+        })
+    })
+    .await;
+    let digest = format!("localhost/app@sha256:{}", "c".repeat(64));
+    a.cfg.live_repo.set(vec![
+        tracon::config::Repo {
+            path: "github.com/acme/app".into(),
+            dockerfile: Some(".devcontainer/Dockerfile".into()),
+            checks: Some(vec!["just check".into()]),
+            prepare: vec!["composer install".into()],
+            egress: vec!["packagist".into()],
+            prepare_credentials: vec!["nova".into()],
+            ..Default::default()
+        },
+        tracon::config::Repo {
+            path: "/var/home/op/src/pinned".into(),
+            image: Some(digest.clone()),
+            prepare: vec!["cp /var/home/op/.npmrc .".into()],
+            ..Default::default()
+        },
+    ]);
+
+    let (st, v) = call_locally(
+        &a.app,
+        "POST",
+        "/api/repos/offer",
+        Some(json!({
+            "path": "github.com/acme/app",
+            "channel": "personal",
+            "note": "what CI runs",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["results"][0]["node"], bi.as_str(), "{v}");
+    assert_eq!(v["results"][0]["state"], "offered", "{v}");
+    assert_eq!(v["results"][0]["name"], "beta", "{v}");
+    let offer_id = v["results"][0]["offer_id"].as_str().unwrap().to_string();
+
+    let offers = b.store.recipe_offers(10).unwrap();
+    assert_eq!(offers.len(), 1);
+    let staged = &offers[0];
+    assert_eq!(staged.id, offer_id);
+    assert_eq!(staged.sender_node, ai);
+    assert_eq!(staged.channel, "personal");
+    assert_eq!(staged.repo, "github.com/acme/app");
+    assert_eq!(staged.state, "pending");
+    assert_eq!(staged.note.as_deref(), Some("what CI runs"));
+    let wire = staged.recipe.to_string();
+    for leaked in [
+        "nova",
+        "prepare_credentials",
+        "sha256",
+        "image",
+        "/var/home",
+    ] {
+        assert!(!wire.contains(leaked), "{leaked} reached B: {wire}");
+    }
+    // Staged is all: B's own table is untouched.
+    assert!(b.cfg.repos().is_empty());
+
+    // An offer of the pinned entry is refused at A: its preparation names
+    // a path in A's operator's home, and its image never travels anyway.
+    let (st, v) = call_locally(
+        &a.app,
+        "POST",
+        "/api/repos/offer",
+        Some(json!({
+            "path": "/var/home/op/src/pinned",
+            "repo": "github.com/acme/pinned",
+            "channel": "personal",
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(v.to_string().contains("home directory"), "{v}");
+
+    // A is not in `private`, so it offers nothing there...
+    let (st, v) = call_locally(
+        &a.app,
+        "POST",
+        "/api/repos/offer",
+        Some(json!({ "path": "github.com/acme/app", "channel": "private" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    // ...and a sender claiming it anyway is refused by B.
+    let result = a
+        .client
+        .command(
+            &bi,
+            Command::RecipeOffer {
+                recipe: json!({ "repo": "github.com/acme/app" }),
+                from_channel: "private".into(),
+                note: None,
+                not_after_ms: tracon::store::now_ms() + 60_000,
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(refused_with(&result, "not a member"), "{result:?}");
+    assert_eq!(b.store.recipe_offers(10).unwrap().len(), 1);
+
+    // A newer offer for the same repository replaces the one B's operator
+    // has not decided.
+    let (st, v) = call_locally(
+        &a.app,
+        "POST",
+        "/api/repos/offer",
+        Some(json!({ "repo": "github.com/acme/app", "channel": "personal", "to_nodes": [bi] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["results"][0]["state"], "offered", "{v}");
+    let offers = b.store.recipe_offers(10).unwrap();
+    assert_eq!(offers.len(), 2);
+    assert_eq!(offers[1].state, "superseded");
+    assert_eq!(offers[0].state, "pending");
+
+    // B's operator sees it, sender named.
+    let (st, v) = call_locally(&b.app, "GET", "/api/repos/offers", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["offers"][0]["sender_name"], "alpha", "{v}");
+}
+
+/// A peer that last said it runs an older build, and so cannot read the
+/// offer, is named for it rather than reported as silent.
+#[tokio::test]
+async fn an_offer_to_an_older_build_says_so() {
+    state::isolate();
+    let ghost = identity(3);
+    let gi = ghost.node_id();
+    let (a, _b) = pair_with(&[], Some(&ghost)).await;
+    wait_for("A to learn the silent member's key", || {
+        a.client.peer_key(&gi).is_some() && a.store.get_node(&gi).ok().flatten().is_some()
+    })
+    .await;
+    let mut row = a.store.get_node(&gi).unwrap().unwrap();
+    row.app_version = Some("0.31.0".into());
+    a.store.put_node(&row).unwrap();
+    let result = a
+        .client
+        .command(
+            &gi,
+            Command::RecipeOffer {
+                recipe: json!({ "repo": "github.com/acme/app" }),
+                from_channel: "personal".into(),
+                note: None,
+                not_after_ms: tracon::store::now_ms() + 60_000,
+            },
+            Duration::from_millis(300),
+        )
+        .await;
+    assert!(
+        matches!(&result, Err(CommandError::OlderPeer { peer, .. }) if peer == "0.31.0"),
+        "{result:?}"
+    );
 }

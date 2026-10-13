@@ -993,7 +993,7 @@ impl MeshClient {
             if self.store.get_node(id).ok().flatten().is_none() {
                 let _ = self.store.put_node(&NodeRow {
                     id: id.to_string(),
-                    name: m["name"].as_str().unwrap_or("").to_string(),
+                    name: super::recipe::without_hidden(m["name"].as_str().unwrap_or("")),
                     state: "unknown".into(),
                     failed_check: None,
                     failed_detail: None,

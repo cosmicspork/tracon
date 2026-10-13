@@ -5987,6 +5987,15 @@ fn authorise_forwarded(
                 _ => Ok(()),
             }
         }
+        // A recipe is offered among the members of an ordinary channel,
+        // never to every node on `@mesh`.
+        C::RecipeOffer { from_channel, .. } if from_channel.starts_with('@') => Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "a recipe is offered on an ordinary channel, to its members".into(),
+        )),
+        C::RecipeOffer { from_channel, .. } => {
+            sender_in_channel(s, sender, from_channel, "recipe offer")
+        }
         _ => Ok(()),
     }
 }
@@ -6053,6 +6062,15 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 crate::http::evidence::forwarded_candidates(self, sender, query)
             }
             C::ReviewDetail { request } => forwarded_review_detail(self, sender, request).await,
+            C::RecipeOffer {
+                recipe,
+                from_channel,
+                note,
+                not_after_ms,
+            } => {
+                super::recipes::receive(self, sender, recipe, from_channel, note, not_after_ms)
+                    .await
+            }
             C::Create { spec, work_item } => {
                 async {
                     let spec: NewSession = serde_json::from_value(spec).map_err(|error| {
