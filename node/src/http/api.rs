@@ -199,7 +199,7 @@ pub async fn list_authority_grants(
 
 pub async fn create_authority_grant(
     State(s): State<AppState>,
-    Json(b): Json<AuthorityGrantBody>,
+    super::auth::AdminAction(Json(b)): super::auth::AdminAction<Json<AuthorityGrantBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let action = b.action.trim();
     if !crate::authority::valid_action(action) {
@@ -283,6 +283,7 @@ pub async fn create_authority_grant(
 pub async fn revoke_authority_grant(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     if !s.store().authority_grant_revoke(&id)? {
         return Err(ApiError::new(
@@ -369,7 +370,7 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
 pub async fn put_channel_bindings(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(patch): Json<serde_json::Value>,
+    super::auth::AdminAction(Json(patch)): super::auth::AdminAction<Json<serde_json::Value>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let row = s.store().channel_get(&name)?.ok_or(ApiError(
         StatusCode::NOT_FOUND,
@@ -5163,7 +5164,7 @@ pub struct ForgeCredentialBody {
 pub async fn put_forge_credential(
     State(s): State<AppState>,
     Path(forge): Path<String>,
-    Json(body): Json<ForgeCredentialBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ForgeCredentialBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let forge = forge_credential(&forge)?;
     let token = body.token.trim();
@@ -5215,6 +5216,7 @@ pub async fn put_forge_credential(
 pub async fn delete_forge_credential(
     State(s): State<AppState>,
     Path(forge): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     let forge = forge_credential(&forge)?;
     let key = crate::mesh::identity::load_or_generate()
@@ -5249,7 +5251,7 @@ pub struct ShareBody {
 pub async fn share_credential(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(body): Json<ShareBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ShareBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let to = body.to;
     if to == s.node_id {
@@ -5342,7 +5344,7 @@ pub async fn connect_provider(
     State(s): State<AppState>,
     super::auth::Local(local): super::auth::Local,
     Path(name): Path<String>,
-    body: Option<Json<ConnectBody>>,
+    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<ConnectBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let local_callback = callback_allowed(&s, local, body.local_callback);
@@ -5404,7 +5406,7 @@ pub struct ProviderKeyBody {
 pub async fn put_provider_key(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(body): Json<ProviderKeyBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ProviderKeyBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let key = body.key.trim();
     if key.is_empty() {
@@ -5423,7 +5425,7 @@ pub async fn put_provider_key(
 pub async fn set_provider_channels(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(body): Json<ChannelsBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ChannelsBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let channels = chosen_channels(s.store(), body.channels, false)?;
     providers_of(&s)?
@@ -5456,6 +5458,7 @@ async fn code_local(s: &AppState, name: &str, code: &str) -> ApiResult<serde_jso
 pub async fn disconnect_provider(
     State(s): State<AppState>,
     Path(name): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     disconnect_local(&s, &name).await.map(Json)
 }
@@ -5506,7 +5509,7 @@ pub async fn node_connect_provider(
     State(s): State<AppState>,
     super::auth::Local(local): super::auth::Local,
     Path((node_id, name)): Path<(String, String)>,
-    body: Option<Json<ConnectBody>>,
+    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<ConnectBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     if node_id == s.node_id {
@@ -5554,6 +5557,7 @@ pub async fn node_provider_code(
 pub async fn node_disconnect_provider(
     State(s): State<AppState>,
     Path((node_id, name)): Path<(String, String)>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     if node_id == s.node_id {
         return disconnect_local(&s, &name).await.map(Json);
@@ -6223,7 +6227,7 @@ pub struct SetupBody {
 /// nothing useful to show mid-flight that the verdict does not say better.
 pub async fn run_setup(
     State(s): State<AppState>,
-    body: Option<Json<SetupBody>>,
+    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<SetupBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rebuild = body.map(|b| b.rebuild).unwrap_or(false);
     let backend = s.manager.backend().clone();
@@ -6278,7 +6282,7 @@ pub struct ImportBody {
 /// file would have held, and it is never written to disk in the clear.
 pub async fn import_credentials(
     State(s): State<AppState>,
-    Json(body): Json<ImportBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ImportBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let parsed = crate::broker::Broker::parse_text(&body.toml)
         .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;

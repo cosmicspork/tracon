@@ -4,7 +4,7 @@
 
 #[path = "support/mod.rs"]
 mod support;
-use support::http::call;
+use support::http::{call, call_local};
 use support::state;
 
 use std::sync::Arc;
@@ -417,7 +417,7 @@ async fn bindings_merge_by_dotted_key_and_the_channel_reports_its_ceiling() {
         .channel_put("work", b"ring", r#"{"providers":["anthropic"]}"#)
         .unwrap();
     let app = app(store.clone()).await;
-    let (st, v) = call(
+    let (st, v) = call_local(
         &app,
         "PUT",
         "/api/channels/work/bindings",
@@ -433,7 +433,7 @@ async fn bindings_merge_by_dotted_key_and_the_channel_reports_its_ceiling() {
     assert_eq!(v["bindings"]["phases"]["execute"]["requires_plan"], false);
     assert_eq!(v["handed_to"], 0, "standalone: nobody to hand to");
     // A null removes; a nested set keeps its siblings.
-    let (_, v) = call(
+    let (_, v) = call_local(
         &app,
         "PUT",
         "/api/channels/work/bindings",
@@ -464,7 +464,7 @@ async fn bindings_merge_by_dotted_key_and_the_channel_reports_its_ceiling() {
         .unwrap();
     assert_eq!(work["ceiling"]["state"], "near");
     assert_eq!(work["ceiling"]["usage_today"], 850);
-    let (st, _) = call(
+    let (st, _) = call_local(
         &app,
         "PUT",
         "/api/channels/nope/bindings",

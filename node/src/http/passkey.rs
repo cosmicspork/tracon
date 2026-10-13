@@ -1,0 +1,845 @@
+//! Passkeys: what confirms an admin action made from off the node's machine.
+//!
+//! The cookie a paired browser holds is enough to use the node. It is not
+//! enough to change who may use it, what credentials it lends, or whom it
+//! meshes with: off this machine, each such action ([`AdminAction`]) must be
+//! confirmed by a passkey assertion made for that action and no other.
+//!
+//! - **Pairing.** Spending the operator token (`tracon auth issue --url`)
+//!   gives a browser its cookie and opens a short window
+//!   ([`ENROLL_WINDOW_MS`]) in which that session may enroll the node's
+//!   *first* passkey without one. After that, adding or removing a passkey is
+//!   itself an admin action. A leaked token therefore stops being an admin
+//!   credential the moment the operator has enrolled.
+//! - **Step-up.** An admin request without a confirmation is refused with a
+//!   typed `step_up_required` that carries an assertion challenge bound to
+//!   `op_hash`, the hash of exactly that request ([`op_hash`]). The client
+//!   asserts, receives a single-use proof bound to the same `op_hash` and its
+//!   own cookie session, and sends the request again with the proof in
+//!   [`STEP_UP_HEADER`]. Challenge and proof each live two minutes and are
+//!   spent once.
+//! - **Local.** A request that [is local](super::auth::is_local) passes
+//!   without one: the operator at the node's own machine (or through
+//!   `kubectl port-forward`) is the recovery root, and the desktop app never
+//!   sees a prompt.
+//! - **Bearer.** A bearer token never confirms anything off this machine: a
+//!   confirmation belongs to a cookie session, and a bearer request has none.
+//!
+//! The relying party is pinned to `[auth] public_origin`. Without one the
+//! node cannot say which origin its passkeys belong to, so every passkey
+//! route and every remote admin action refuses, saying so.
+
+use std::time::Duration;
+
+use axum::{
+    body::{Body, Bytes},
+    extract::{FromRequest, OriginalUri, Path, Request, State},
+    http::{request::Parts, HeaderMap, Method, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use base64::Engine;
+use rand::RngCore;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use webauthn_rs::prelude::{
+    Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
+    RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
+};
+
+use super::{
+    api::{ApiError, AppState},
+    auth::{self, COOKIE},
+};
+use crate::{
+    config::Config,
+    store::{now_ms, CeremonyPurpose, CeremonyRow, PasskeyRow},
+};
+
+/// The header a retried admin request carries its step-up proof in.
+pub const STEP_UP_HEADER: &str = "x-tracon-step-up";
+/// How long a challenge may be answered.
+pub const CHALLENGE_TTL_MS: i64 = 2 * 60 * 1000;
+/// How long a proof may be spent once its assertion verified.
+pub const PROOF_TTL_MS: i64 = 2 * 60 * 1000;
+/// How long after pairing a session may enroll the node's first passkey.
+pub const ENROLL_WINDOW_MS: i64 = 15 * 60 * 1000;
+/// The largest admin request body the node hashes. Every admin body is a
+/// small JSON object; a credentials paste is the largest.
+const MAX_ADMIN_BODY: usize = 1024 * 1024;
+/// What a local caller's ceremonies are bound to in place of a cookie.
+/// Never a session hash, which is 64 hex digits.
+const LOCAL: &str = "local";
+/// The longest name a passkey may be given.
+const MAX_LABEL: usize = 64;
+
+/// The operation a confirmation is for: the hash of the request's method,
+/// target (path and query), the version it expects to change (`If-Match`,
+/// when it sends one) and its exact body bytes. The client never computes
+/// it: the node hashes the request it refused and the request it is sent
+/// again, and the two must agree.
+pub fn op_hash(method: &Method, target: &str, expected: Option<&str>, body: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"tracon-admin-op/1\n");
+    h.update(method.as_str().as_bytes());
+    h.update(b"\n");
+    h.update(target.as_bytes());
+    h.update(b"\n");
+    h.update(expected.unwrap_or("").as_bytes());
+    h.update(b"\n");
+    h.update(hex::encode(Sha256::digest(body)).as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// The request target as the client sent it: path and query.
+fn target(parts: &Parts) -> String {
+    let uri = parts
+        .extensions
+        .get::<OriginalUri>()
+        .map(|o| &o.0)
+        .unwrap_or(&parts.uri);
+    uri.path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string())
+}
+
+fn expected(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+}
+
+fn parts_op_hash(parts: &Parts, body: &[u8]) -> String {
+    op_hash(
+        &parts.method,
+        &target(parts),
+        expected(&parts.headers),
+        body,
+    )
+}
+
+/// The relying party this node's passkeys belong to, from `[auth]
+/// public_origin`, or why there is none.
+pub fn relying_party(cfg: &Config) -> Result<Webauthn, Refusal> {
+    let Some(origin) = cfg.public_origin() else {
+        return Err(Refusal::unavailable(
+            "no_public_origin",
+            "passkeys need [auth] public_origin: set it to the https origin this node is reached at, then restart",
+        ));
+    };
+    let url = Url::parse(&origin).map_err(|_| {
+        Refusal::unavailable("no_public_origin", "[auth] public_origin is not a URL")
+    })?;
+    let Some(rp_id) = url.domain().map(str::to_owned) else {
+        return Err(Refusal::unavailable(
+            "no_public_origin",
+            "[auth] public_origin must name a domain",
+        ));
+    };
+    WebauthnBuilder::new(&rp_id, &url)
+        .and_then(|b| {
+            b.rp_name("tracon")
+                .timeout(Duration::from_millis(CHALLENGE_TTL_MS as u64))
+                .build()
+        })
+        .map_err(|e| {
+            Refusal::unavailable(
+                "no_public_origin",
+                format!("[auth] public_origin cannot anchor passkeys: {e}"),
+            )
+        })
+}
+
+/// Who is asking, as far as passkeys are concerned.
+enum Caller {
+    /// At the node's own machine.
+    Local,
+    /// A browser with a live cookie session (its hash).
+    Session(String),
+    /// Anything else: a bearer token, or no credential the guard knew.
+    Other,
+}
+
+fn caller(s: &AppState, parts: &Parts) -> Caller {
+    if auth::parts_are_local(parts) {
+        return Caller::Local;
+    }
+    let Some(secret) = auth::cookie_value(&parts.headers, COOKIE) else {
+        return Caller::Other;
+    };
+    let h = auth::hash(secret);
+    match s.store().auth_session_live(&h, now_ms()) {
+        Ok(Some(_)) => Caller::Session(h),
+        _ => Caller::Other,
+    }
+}
+
+/// Why an admin action or a passkey route did not go ahead.
+pub enum Refusal {
+    /// Confirm with a passkey: the challenge for exactly this request.
+    Required {
+        message: String,
+        step_up: Value,
+    },
+    /// No confirmation could satisfy this request as it stands.
+    Unavailable {
+        reason: &'static str,
+        message: String,
+    },
+    Api(ApiError),
+}
+
+impl Refusal {
+    fn unavailable(reason: &'static str, message: impl Into<String>) -> Self {
+        Refusal::Unavailable {
+            reason,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<ApiError> for Refusal {
+    fn from(e: ApiError) -> Self {
+        Refusal::Api(e)
+    }
+}
+
+impl From<crate::store::StoreError> for Refusal {
+    fn from(e: crate::store::StoreError) -> Self {
+        Refusal::Api(ApiError::from(e))
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        // The same `error` object every other refusal carries, so a client
+        // that knows nothing of passkeys still shows the message; `kind` is
+        // what one that does acts on.
+        match self {
+            Refusal::Required { message, step_up } => (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": { "code": 403, "kind": "step_up_required", "message": message },
+                    "step_up": step_up,
+                })),
+            )
+                .into_response(),
+            Refusal::Unavailable { reason, message } => (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": {
+                        "code": 403,
+                        "kind": "step_up_unavailable",
+                        "reason": reason,
+                        "message": message,
+                    },
+                })),
+            )
+                .into_response(),
+            Refusal::Api(e) => e.into_response(),
+        }
+    }
+}
+
+fn internal(e: impl std::fmt::Display) -> Refusal {
+    Refusal::Api(ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        e.to_string(),
+    ))
+}
+
+fn limited(s: &AppState, parts: &Parts) -> Result<(), Refusal> {
+    if s.auth.allow_ceremony(auth::parts_peer(parts), now_ms()) {
+        Ok(())
+    } else {
+        Err(Refusal::Api(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many passkey prompts; wait a few minutes",
+        )))
+    }
+}
+
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn random_secret() -> String {
+    let mut raw = [0u8; 32];
+    rand::rng().fill_bytes(&mut raw);
+    b64(&raw)
+}
+
+/// Every enrolled passkey, as the verifier wants them.
+fn enrolled(s: &AppState) -> Result<Vec<(PasskeyRow, Passkey)>, Refusal> {
+    s.store()
+        .passkeys()?
+        .into_iter()
+        .map(|row| {
+            let passkey: Passkey = serde_json::from_str(&row.passkey).map_err(internal)?;
+            Ok((row, passkey))
+        })
+        .collect()
+}
+
+/// Open an assertion for `op_hash` on behalf of `session`.
+fn open_assertion(
+    s: &AppState,
+    rp: &Webauthn,
+    session: &str,
+    op_hash: &str,
+) -> Result<Value, Refusal> {
+    let passkeys: Vec<Passkey> = enrolled(s)?.into_iter().map(|(_, p)| p).collect();
+    if passkeys.is_empty() {
+        return Err(Refusal::unavailable(
+            "no_passkey",
+            "no passkey is enrolled on this node; add one in Settings, or do this at the node",
+        ));
+    }
+    let (options, state) = rp
+        .start_passkey_authentication(&passkeys)
+        .map_err(internal)?;
+    let now = now_ms();
+    let id = random_secret();
+    let expires_ms = now + CHALLENGE_TTL_MS;
+    s.store().ceremony_insert(
+        &CeremonyRow {
+            id: id.clone(),
+            purpose: CeremonyPurpose::Assert,
+            op_hash: Some(op_hash.to_string()),
+            session_hash: session.to_string(),
+            granted_by: None,
+            label: None,
+            state: serde_json::to_string(&state).map_err(internal)?,
+            created_ms: now,
+            expires_ms,
+        },
+        now,
+    )?;
+    Ok(json!({
+        "op_hash": op_hash,
+        "challenge_id": id,
+        "options": options,
+        "expires_ms": expires_ms,
+    }))
+}
+
+/// Whether this admin request may go ahead: local, or confirmed by a step-up
+/// proof for exactly this request. Otherwise the refusal says what would
+/// confirm it, opening the challenge when a passkey can.
+pub async fn authorize(s: &AppState, parts: &Parts, body: &[u8]) -> Result<(), Refusal> {
+    let session = match caller(s, parts) {
+        Caller::Local => return Ok(()),
+        Caller::Session(h) => h,
+        Caller::Other => {
+            return Err(Refusal::unavailable(
+                "no_session",
+                "an admin action from off the node needs a passkey, and a bearer token cannot \
+                 present one: confirm it from a signed-in browser, or run it at the node",
+            ))
+        }
+    };
+    let rp = relying_party(&s.cfg)?;
+    let op = parts_op_hash(parts, body);
+    let mut message = "confirm this with your passkey".to_string();
+    if let Some(proof) = parts
+        .headers
+        .get(STEP_UP_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if s.store()
+            .proof_spend(&auth::hash(proof.trim()), &op, &session, now_ms())?
+        {
+            return Ok(());
+        }
+        message = "that confirmation was for another action, has expired, or was already used; \
+                   confirm this one with your passkey"
+            .into();
+    }
+    limited(s, parts)?;
+    let mut step_up = open_assertion(s, &rp, &session, &op)?;
+    step_up["action"] = json!(format!("{} {}", parts.method, parts.uri.path()));
+    Err(Refusal::Required { message, step_up })
+}
+
+/// A request that changes who may use the node or what it holds for them.
+///
+/// Wraps the handler's body extractor: `AdminAction(Json(body)):
+/// AdminAction<Json<T>>`, or `AdminAction(()): AdminAction` for a request
+/// with no body. It reads the body once, decides with [`authorize`], and
+/// hands the same bytes to the inner extractor, so what was confirmed is what
+/// the handler parses.
+pub struct AdminAction<T = ()>(pub T);
+
+impl<T, M> FromRequest<AppState, M> for AdminAction<T>
+where
+    T: FromRequest<AppState, M>,
+    M: Send + 'static,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &AppState) -> Result<Self, Self::Rejection> {
+        let (parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, MAX_ADMIN_BODY)
+            .await
+            .map_err(|_| {
+                ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+                    .into_response()
+            })?;
+        authorize(state, &parts, &bytes)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let req = Request::from_parts(parts, Body::from(bytes));
+        T::from_request(req, state)
+            .await
+            .map(AdminAction)
+            .map_err(IntoResponse::into_response)
+    }
+}
+
+/// Whether `session` may enroll the node's first passkey without one: none is
+/// enrolled yet, and it paired within [`ENROLL_WINDOW_MS`].
+fn enrollment_closes(s: &AppState, session: &str, now: i64) -> Result<Option<i64>, Refusal> {
+    if s.store().passkey_count()? > 0 {
+        return Ok(None);
+    }
+    let Some(row) = s.store().auth_session_live(session, now)? else {
+        return Ok(None);
+    };
+    Ok(row
+        .paired_ms
+        .map(|paired| paired + ENROLL_WINDOW_MS)
+        .filter(|closes| *closes > now))
+}
+
+/// A stable WebAuthn user handle for this node's operator. Not a secret:
+/// it groups this node's passkeys under one account in a password manager.
+fn user_handle(node_id: &str) -> Uuid {
+    let digest = Sha256::digest(format!("tracon operator {node_id}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn clean_label(label: Option<&str>) -> String {
+    let label: String = label
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_LABEL)
+        .collect();
+    if label.is_empty() {
+        "Passkey".into()
+    } else {
+        label
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RegisterOptionsBody {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// `POST /api/passkeys/register/options`: begin enrolling a passkey. Allowed
+/// at the node, in a freshly paired session's window while none is enrolled,
+/// and otherwise as an admin action.
+pub async fn register_options(
+    State(s): State<AppState>,
+    parts: Parts,
+    body: Bytes,
+) -> Result<Json<Value>, Refusal> {
+    let now = now_ms();
+    let (session, granted_by) = match caller(&s, &parts) {
+        Caller::Local => (LOCAL.to_string(), "local"),
+        Caller::Session(h) => {
+            if enrollment_closes(&s, &h, now)?.is_some() {
+                (h, "window")
+            } else if s.store().passkey_count()? == 0 {
+                return Err(Refusal::unavailable(
+                    "enrollment_closed",
+                    "the window to enroll this node's first passkey has closed: pair again \
+                     (`tracon auth issue --url` on the node) and enroll within 15 minutes",
+                ));
+            } else {
+                authorize(&s, &parts, &body).await?;
+                (h, "step_up")
+            }
+        }
+        Caller::Other => {
+            return Err(Refusal::unavailable(
+                "no_session",
+                "passkeys are enrolled from a signed-in browser",
+            ))
+        }
+    };
+    let rp = relying_party(&s.cfg)?;
+    let parsed: RegisterOptionsBody = if body.is_empty() {
+        RegisterOptionsBody::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("bad body: {e}"))
+        })?
+    };
+    limited(&s, &parts)?;
+    let exclude: Vec<_> = enrolled(&s)?
+        .iter()
+        .map(|(_, p)| p.cred_id().clone())
+        .collect();
+    let rp_id = rp.get_allowed_origins()[0]
+        .domain()
+        .unwrap_or_default()
+        .to_string();
+    let (options, state) = rp
+        .start_passkey_registration(
+            user_handle(&s.node_id),
+            "operator",
+            &format!("tracon operator on {rp_id}"),
+            Some(exclude),
+        )
+        .map_err(internal)?;
+    let mut options = serde_json::to_value(options).map_err(internal)?;
+    // A discoverable credential is what a phone's passkey manager makes and
+    // syncs; asking for one is a preference, never a requirement, so a
+    // security key without resident-key storage still enrolls.
+    options["publicKey"]["authenticatorSelection"]["residentKey"] = json!("preferred");
+    let id = random_secret();
+    let expires_ms = now + CHALLENGE_TTL_MS;
+    s.store().ceremony_insert(
+        &CeremonyRow {
+            id: id.clone(),
+            purpose: CeremonyPurpose::Register,
+            op_hash: None,
+            session_hash: session,
+            granted_by: Some(granted_by.into()),
+            label: Some(clean_label(parsed.label.as_deref())),
+            state: serde_json::to_string(&state).map_err(internal)?,
+            created_ms: now,
+            expires_ms,
+        },
+        now,
+    )?;
+    Ok(Json(json!({
+        "challenge_id": id,
+        "options": options,
+        "expires_ms": expires_ms,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct RegisterFinishBody {
+    challenge_id: String,
+    credential: RegisterPublicKeyCredential,
+}
+
+/// What a registered passkey's own record says about it: its counter and
+/// backup flags.
+fn facts(passkey: &Passkey) -> Result<(i64, bool, bool), Refusal> {
+    let v = serde_json::to_value(passkey).map_err(internal)?;
+    let cred = &v["cred"];
+    Ok((
+        cred["counter"].as_i64().unwrap_or(0),
+        cred["backup_eligible"].as_bool().unwrap_or(false),
+        cred["backup_state"].as_bool().unwrap_or(false),
+    ))
+}
+
+/// `POST /api/passkeys/register/finish`: verify the new credential and
+/// enroll it.
+pub async fn register_finish(
+    State(s): State<AppState>,
+    parts: Parts,
+    Json(body): Json<RegisterFinishBody>,
+) -> Result<Json<Value>, Refusal> {
+    let session = match caller(&s, &parts) {
+        Caller::Local => LOCAL.to_string(),
+        Caller::Session(h) => h,
+        Caller::Other => {
+            return Err(Refusal::unavailable(
+                "no_session",
+                "passkeys are enrolled from a signed-in browser",
+            ))
+        }
+    };
+    let rp = relying_party(&s.cfg)?;
+    limited(&s, &parts)?;
+    let now = now_ms();
+    let Some(row) =
+        s.store()
+            .ceremony_take(&body.challenge_id, CeremonyPurpose::Register, &session, now)?
+    else {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::GONE,
+            "this enrollment expired or was already used; start again",
+        )));
+    };
+    let state: PasskeyRegistration = serde_json::from_str(&row.state).map_err(internal)?;
+    let passkey = rp
+        .finish_passkey_registration(&body.credential, &state)
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("the passkey did not verify: {e}"),
+            )
+        })?;
+    let (sign_count, backup_eligible, backup_state) = facts(&passkey)?;
+    // What the browser said the authenticator is reached by. A hint for the
+    // list, nothing more: the verifier keeps transports only from an
+    // attestation it trusts, and passkeys are enrolled without one.
+    let transports = body
+        .credential
+        .response
+        .transports
+        .as_ref()
+        .and_then(|t| serde_json::to_string(t).ok());
+    let id = b64(passkey.cred_id());
+    let label = row.label.clone().unwrap_or_else(|| "Passkey".into());
+    let enrolled = s.store().passkey_insert(
+        &PasskeyRow {
+            id: id.clone(),
+            passkey: serde_json::to_string(&passkey).map_err(internal)?,
+            sign_count,
+            backup_eligible,
+            backup_state,
+            transports,
+            label: label.clone(),
+            created_ms: now,
+            last_used_ms: None,
+        },
+        // The pairing window admits the first passkey only, decided with
+        // the insert: of two paired clients racing, one wins.
+        row.granted_by.as_deref() == Some("window"),
+    )?;
+    if !enrolled {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::CONFLICT,
+            "a passkey was enrolled on this node first (or this one already is); \
+             adding another needs a confirmation with it",
+        )));
+    }
+    tracing::info!(passkey = %id, %label, granted_by = ?row.granted_by, "passkey enrolled");
+    Ok(Json(json!({ "id": id, "label": label })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssertOptionsBody {
+    op_hash: String,
+}
+
+/// `POST /api/passkeys/assert/options`: a fresh challenge for an operation
+/// the client was told the hash of, when the one it was handed has expired.
+pub async fn assert_options(
+    State(s): State<AppState>,
+    parts: Parts,
+    Json(body): Json<AssertOptionsBody>,
+) -> Result<Json<Value>, Refusal> {
+    let Caller::Session(session) = caller(&s, &parts) else {
+        return Err(Refusal::unavailable(
+            "no_session",
+            "confirmations belong to a signed-in browser session",
+        ));
+    };
+    let op = body.op_hash.trim().to_ascii_lowercase();
+    if op.len() != 64 || !op.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "op_hash must be a hex SHA-256",
+        )));
+    }
+    let rp = relying_party(&s.cfg)?;
+    limited(&s, &parts)?;
+    Ok(Json(open_assertion(&s, &rp, &session, &op)?))
+}
+
+#[derive(Deserialize)]
+pub struct AssertFinishBody {
+    challenge_id: String,
+    credential: PublicKeyCredential,
+}
+
+/// `POST /api/passkeys/assert/finish`: verify the assertion and hand back a
+/// single-use proof for the operation it was made for.
+pub async fn assert_finish(
+    State(s): State<AppState>,
+    parts: Parts,
+    Json(body): Json<AssertFinishBody>,
+) -> Result<Json<Value>, Refusal> {
+    let Caller::Session(session) = caller(&s, &parts) else {
+        return Err(Refusal::unavailable(
+            "no_session",
+            "confirmations belong to a signed-in browser session",
+        ));
+    };
+    let rp = relying_party(&s.cfg)?;
+    limited(&s, &parts)?;
+    let now = now_ms();
+    let Some(row) =
+        s.store()
+            .ceremony_take(&body.challenge_id, CeremonyPurpose::Assert, &session, now)?
+    else {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::GONE,
+            "this confirmation expired or was already used; try the action again",
+        )));
+    };
+    let state: PasskeyAuthentication = serde_json::from_str(&row.state).map_err(internal)?;
+    let result = rp
+        .finish_passkey_authentication(&body.credential, &state)
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::FORBIDDEN,
+                format!("the passkey did not verify: {e}"),
+            )
+        })?;
+    // Still enrolled now, not only when the challenge was opened: a passkey
+    // removed in between confirms nothing.
+    let used = b64(result.cred_id());
+    let Some((enrolled_row, mut passkey)) =
+        enrolled(&s)?.into_iter().find(|(row, _)| row.id == used)
+    else {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "that passkey is no longer enrolled on this node",
+        )));
+    };
+    passkey.update_credential(&result);
+    s.store().passkey_used(
+        &enrolled_row.id,
+        &serde_json::to_string(&passkey).map_err(internal)?,
+        i64::from(result.counter()),
+        result.backup_eligible(),
+        result.backup_state(),
+        now,
+    )?;
+    let proof = random_secret();
+    let expires_ms = now + PROOF_TTL_MS;
+    s.store()
+        .ceremony_prove(&row.id, &auth::hash(&proof), expires_ms)?;
+    Ok(Json(json!({
+        "proof": proof,
+        "op_hash": row.op_hash,
+        "expires_ms": expires_ms,
+    })))
+}
+
+/// `GET /api/passkeys`: what is enrolled, what they belong to, and whether
+/// this session may still enroll the first without one.
+pub async fn list(State(s): State<AppState>, parts: Parts) -> Result<Json<Value>, Refusal> {
+    let now = now_ms();
+    let rows = s.store().passkeys()?;
+    let local = auth::parts_are_local(&parts);
+    let closes = match caller(&s, &parts) {
+        Caller::Session(h) => enrollment_closes(&s, &h, now)?,
+        _ => None,
+    };
+    let rp = relying_party(&s.cfg);
+    let (relying_party, unavailable) = match &rp {
+        Ok(rp) => (
+            Some(json!({
+                "id": rp.get_allowed_origins()[0].domain(),
+                "origin": rp.get_allowed_origins()[0].origin().ascii_serialization(),
+            })),
+            None,
+        ),
+        Err(Refusal::Unavailable { message, .. }) => (None, Some(message.clone())),
+        Err(_) => (None, None),
+    };
+    Ok(Json(json!({
+        "passkeys": rows,
+        "local": local,
+        "relying_party": relying_party,
+        "unavailable": unavailable,
+        "enrollment": {
+            "open": closes.is_some(),
+            "closes_ms": closes,
+        },
+    })))
+}
+
+/// `DELETE /api/passkeys/{id}`: remove a passkey. An admin action: off this
+/// machine, confirmed with a passkey (possibly the one being removed).
+pub async fn delete(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    AdminAction(()): AdminAction,
+) -> Result<Json<Value>, Refusal> {
+    if !s.store().passkey_delete(&id)? {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "no passkey by that ID",
+        )));
+    }
+    tracing::info!(passkey = %id, "passkey removed");
+    Ok(Json(json!({ "removed": id })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_op_hash_binds_every_part_of_the_request() {
+        let base = op_hash(&Method::PUT, "/api/auth/token", None, b"{\"a\":1}");
+        assert_eq!(base.len(), 64);
+        assert_eq!(
+            base,
+            op_hash(&Method::PUT, "/api/auth/token", None, b"{\"a\":1}")
+        );
+        for other in [
+            op_hash(&Method::POST, "/api/auth/token", None, b"{\"a\":1}"),
+            op_hash(&Method::PUT, "/api/auth/tokens", None, b"{\"a\":1}"),
+            op_hash(&Method::PUT, "/api/auth/token?x=1", None, b"{\"a\":1}"),
+            op_hash(&Method::PUT, "/api/auth/token", Some("v1"), b"{\"a\":1}"),
+            op_hash(&Method::PUT, "/api/auth/token", None, b"{\"a\":2}"),
+            op_hash(&Method::PUT, "/api/auth/token", None, b"{\"a\": 1}"),
+        ] {
+            assert_ne!(base, other);
+        }
+        // The separators keep one field from bleeding into the next.
+        assert_ne!(
+            op_hash(&Method::PUT, "/a", Some("b"), b""),
+            op_hash(&Method::PUT, "/a\nb", None, b"")
+        );
+    }
+
+    #[test]
+    fn a_label_is_bounded_and_printable() {
+        assert_eq!(clean_label(None), "Passkey");
+        assert_eq!(clean_label(Some("  \n ")), "Passkey");
+        assert_eq!(clean_label(Some(" iPhone\u{7}  ")), "iPhone");
+        assert_eq!(clean_label(Some(&"x".repeat(200))).len(), MAX_LABEL);
+    }
+
+    #[test]
+    fn the_user_handle_is_stable_per_node() {
+        assert_eq!(user_handle("n1"), user_handle("n1"));
+        assert_ne!(user_handle("n1"), user_handle("n2"));
+    }
+
+    #[test]
+    fn no_public_origin_means_no_relying_party() {
+        let cfg = Config::default();
+        assert!(matches!(
+            relying_party(&cfg),
+            Err(Refusal::Unavailable {
+                reason: "no_public_origin",
+                ..
+            })
+        ));
+        let mut cfg = Config::default();
+        cfg.auth.public_origin = Some("https://tracon.example.org".into());
+        let rp = relying_party(&cfg).ok().expect("a relying party");
+        assert_eq!(
+            rp.get_allowed_origins()[0].as_str(),
+            "https://tracon.example.org/"
+        );
+        let mut cfg = Config::default();
+        cfg.auth.public_origin = Some("http://localhost:5173".into());
+        assert!(relying_party(&cfg).is_ok());
+    }
+}

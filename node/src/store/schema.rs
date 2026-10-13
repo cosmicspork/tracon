@@ -1392,6 +1392,52 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX config_audit_at ON config_audit(at_ms);
     "#,
+    // 62: passkeys, which confirm an admin action made from off the node's
+    // machine (`http::passkey`). Node-local, and never in
+    // `tracon_sync::TABLES`: a passkey is enrolled with one node's relying
+    // party and confirms actions on that node only.
+    //
+    // `auth_session.paired_ms` is when a client exchanged the operator token
+    // for its cookie, so a freshly paired phone may enroll the first passkey
+    // within a short window. A row from before this has none and no window.
+    //
+    // `webauthn_credential.passkey` is the verifier's own record of the
+    // credential (its public key, counter and flags), as JSON; the columns
+    // beside it repeat what the interface lists. `webauthn_challenge` is one
+    // ceremony in flight: single use, short-lived, bound to the cookie
+    // session that asked for it and, for an assertion, to the one operation
+    // it confirms. A finished assertion leaves a step-up proof on its row,
+    // stored as a hash, single use too.
+    r#"
+    ALTER TABLE auth_session ADD COLUMN paired_ms INTEGER;
+    CREATE TABLE webauthn_credential (
+        id              TEXT PRIMARY KEY,
+        passkey         TEXT NOT NULL,
+        sign_count      INTEGER NOT NULL DEFAULT 0,
+        backup_eligible INTEGER NOT NULL DEFAULT 0,
+        backup_state    INTEGER NOT NULL DEFAULT 0,
+        transports      TEXT,
+        label           TEXT NOT NULL,
+        created_ms      INTEGER NOT NULL,
+        last_used_ms    INTEGER
+    );
+    CREATE TABLE webauthn_challenge (
+        id               TEXT PRIMARY KEY,
+        purpose          TEXT NOT NULL CHECK (purpose IN ('register', 'assert')),
+        op_hash          TEXT,
+        session_hash     TEXT NOT NULL,
+        granted_by       TEXT,
+        label            TEXT,
+        state            TEXT NOT NULL,
+        created_ms       INTEGER NOT NULL,
+        expires_ms       INTEGER NOT NULL,
+        used_ms          INTEGER,
+        proof_hash       TEXT UNIQUE,
+        proof_expires_ms INTEGER,
+        proof_used_ms    INTEGER
+    );
+    CREATE INDEX webauthn_challenge_expiry ON webauthn_challenge(expires_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

@@ -3,8 +3,9 @@
 //! These routes deliberately sit apart from the ordinary operator surface.
 //! Mesh administration requires an explicit [`Administrator`] session; its
 //! bounded invitation, admission, removal, and selected-key handoff flows work
-//! for an authenticated remote PWA. Host lifecycle and fixed boundary checks
-//! additionally require [`Loopback`].
+//! for an authenticated remote PWA, each confirmed there by a passkey
+//! ([`AdminAction`]). Host lifecycle and fixed boundary checks additionally
+//! require [`Loopback`].
 
 use axum::{
     extract::{Path, State},
@@ -16,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::{
     api::{self, ApiError, ApiResult, AppState},
-    auth::{self, Administrator, Loopback},
+    auth::{self, AdminAction, Administrator, Loopback},
 };
 
 fn enrollment_error(error: crate::mesh::enroll::EnrollError) -> ApiError {
@@ -308,7 +309,7 @@ fn checked_channels(s: &AppState, channels: Vec<String>) -> ApiResult<Vec<String
 pub async fn create_invitation(
     _admin: Administrator,
     State(s): State<AppState>,
-    Json(body): Json<InvitationBody>,
+    AdminAction(Json(body)): AdminAction<Json<InvitationBody>>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     if body
         .ttl_secs
@@ -389,7 +390,7 @@ pub async fn admit_invitation(
     _admin: Administrator,
     State(s): State<AppState>,
     Path(code): Path<String>,
-    Json(body): Json<Confirmation>,
+    AdminAction(Json(body)): AdminAction<Json<Confirmation>>,
 ) -> ApiResult<Json<Value>> {
     if !body.confirm {
         return Err(ApiError::new(
@@ -495,7 +496,7 @@ pub async fn remove_member(
     _admin: Administrator,
     State(s): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<Confirmation>,
+    AdminAction(Json(body)): AdminAction<Json<Confirmation>>,
 ) -> ApiResult<Json<Value>> {
     if !body.confirm {
         return Err(ApiError::new(
@@ -539,7 +540,7 @@ pub struct HubShareBody {
 pub async fn share_with_hub(
     _admin: Administrator,
     State(s): State<AppState>,
-    Json(body): Json<HubShareBody>,
+    AdminAction(Json(body)): AdminAction<Json<HubShareBody>>,
 ) -> ApiResult<Json<Value>> {
     if !body.confirm {
         return Err(ApiError::new(
