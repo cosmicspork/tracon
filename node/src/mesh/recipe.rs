@@ -22,6 +22,9 @@ use crate::config::Repo;
 /// How long an offer waits for its operator before it lapses.
 pub const OFFER_TTL_MS: i64 = 14 * 24 * 3600 * 1000;
 
+/// The least time an offer is staged for: one lapsing sooner is refused.
+pub const MIN_OFFER_TTL_MS: i64 = 3600 * 1000;
+
 /// How many undecided offers one sender may have staged here at once. A
 /// newer offer for the same repository replaces its older one, so this
 /// bounds a peer offering many repositories, not one offered often.
@@ -71,6 +74,10 @@ pub struct Choices {
     /// Keep lending the entry's `prepare_credentials` to a preparation the
     /// offer changes. Off unless asked for: see [`Credentials::Dropped`].
     pub keep_credentials: bool,
+    /// Not the operator's choice but the entry's state: it is [`held`], so
+    /// its preparation is a peer's the operator has not started, and an
+    /// offer that leaves it as it is does not make it any less so.
+    pub held: bool,
 }
 
 /// What becomes of the credentials an entry lends its default branch's
@@ -90,22 +97,35 @@ pub enum Credentials {
     /// The operator chose to keep lending them to the changed preparation.
     /// The node then builds nothing until the operator starts it.
     KeptOnChange(Vec<String>),
+    /// The entry was held and the offer leaves its preparation as it is: it
+    /// stays held, building nothing until the operator starts it.
+    StillHeld(Vec<String>),
 }
 
 impl Credentials {
     pub fn names(&self) -> &[String] {
         match self {
             Credentials::None => &[],
-            Credentials::Unaffected(n) | Credentials::Dropped(n) | Credentials::KeptOnChange(n) => {
-                n
-            }
+            Credentials::Unaffected(n)
+            | Credentials::Dropped(n)
+            | Credentials::KeptOnChange(n)
+            | Credentials::StillHeld(n) => n,
         }
     }
 
     /// Whether a build may start on its own once the offer is written: not
-    /// while credentials are lent to a preparation a peer just changed.
+    /// while credentials are lent to a peer's preparation the operator has
+    /// not started.
     pub fn allows_build(&self) -> bool {
-        !matches!(self, Credentials::KeptOnChange(_))
+        !self.holds()
+    }
+
+    /// Whether the entry is held once the offer is written.
+    pub fn holds(&self) -> bool {
+        matches!(
+            self,
+            Credentials::KeptOnChange(_) | Credentials::StillHeld(_)
+        )
     }
 }
 
@@ -285,6 +305,14 @@ impl RepoRecipe {
             || was.context != entry.context;
         let credentials = if lent.is_empty() {
             Credentials::None
+        } else if !preparation_changed && choices.held {
+            notes.push(format!(
+                "This entry is held: it keeps lending {} to a peer's preparation you have not \
+                 started, and the offer leaves that preparation as it is. It stays held; nothing \
+                 is built until you start it.",
+                lent.join(", ")
+            ));
+            Credentials::StillHeld(lent)
         } else if !preparation_changed {
             notes.push(format!(
                 "This node keeps lending {} to the default branch's preparation, which the offer \
@@ -442,8 +470,8 @@ fn local_path(command: &str) -> Option<String> {
 
 /// Whether an egress entry is, or could be read as, an address rather than a
 /// host name: anything `inet_aton` accepts (one to four parts, each decimal,
-/// octal or `0x` hex, as in `127.1` or `0x7f.0.0.1`), any `0x` label, or a
-/// last label of digits, which no top-level domain is. An address names a
+/// octal or `0x` hex, as in `127.1` or `0x7f.0.0.1`), or a last label of
+/// digits, which no top-level domain is. An address names a
 /// machine on someone's network, not a registry.
 pub fn address_like(host: &str) -> bool {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -459,7 +487,6 @@ pub fn address_like(host: &str) -> bool {
                     .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit())))
     };
     (labels.len() <= 4 && labels.iter().all(|l| numeric(l)))
-        || labels.iter().any(|l| l.starts_with("0x"))
         || labels
             .last()
             .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()))
@@ -487,16 +514,14 @@ pub fn without_hidden(text: &str) -> String {
         .collect()
 }
 
-/// What credentials an entry lends would be lent to: its preparation, the
-/// hosts that reaches, the image it runs in, and the credentials. A hold is
-/// on exactly this; an entry edited since no longer matches it.
+/// What a hold is on: the commands credentials are lent to, and the
+/// credentials. An operator who rewrites either at the node has decided what
+/// runs with what, and the hold lapses; one who narrows the egress or changes
+/// the Dockerfile has not, and it stands.
 pub fn lending_hash(entry: &Repo) -> String {
     use sha2::{Digest, Sha256};
     let lent = json!({
         "prepare": entry.prepare,
-        "egress": entry.egress,
-        "dockerfile": entry.dockerfile,
-        "context": entry.context,
         "prepare_credentials": entry.prepare_credentials,
     });
     hex::encode(Sha256::digest(lent.to_string().as_bytes()))
@@ -714,6 +739,7 @@ mod tests {
     const KEEP_IMAGE: Choices = Choices {
         replace_image: false,
         keep_credentials: false,
+        held: false,
     };
 
     #[test]
@@ -833,6 +859,35 @@ mod tests {
         }
     }
 
+    /// An offer onto a held entry that leaves its preparation as it is does
+    /// not release it.
+    #[test]
+    fn a_held_entry_stays_held_when_the_preparation_is_unchanged() {
+        let mine = entry();
+        let same = RepoRecipe {
+            checks: Some(vec!["just all".into()]),
+            timeout_secs: Some(5),
+            ..RepoRecipe::from_entry(&mine, "github.com/acme/app")
+        };
+        let held = Choices {
+            held: true,
+            ..KEEP_IMAGE
+        };
+        let applied = same.apply(Some(&mine), mine.path.clone(), held);
+        assert_eq!(
+            applied.credentials,
+            Credentials::StillHeld(vec!["nova".into()])
+        );
+        assert!(!applied.credentials.allows_build());
+        assert_eq!(applied.entry.prepare_credentials, ["nova"]);
+        // Changed, it is dropped unless kept, as for any entry.
+        let changed = offered().apply(Some(&mine), mine.path.clone(), held);
+        assert_eq!(
+            changed.credentials,
+            Credentials::Dropped(vec!["nova".into()])
+        );
+    }
+
     #[test]
     fn changes_name_only_what_differs() {
         let before = entry();
@@ -871,7 +926,6 @@ mod tests {
             "017700000001",
             "0177.0.0.1",
             "169.254.169.254.",
-            "registry.0x10",
             "evil.example.123",
         ] {
             assert!(address_like(address), "{address}");
@@ -928,6 +982,11 @@ mod tests {
         let mut edited = mine.clone();
         edited.prepare.push("npm test".into());
         assert!(held(&store, &edited).is_none());
+        // Narrowing what it reaches, or the image, is not deciding what runs.
+        let mut narrowed = mine.clone();
+        narrowed.egress = vec!["npm".into()];
+        narrowed.dockerfile = Some("Other".into());
+        assert!(held(&store, &narrowed).is_some());
         let mut lends_nothing = mine.clone();
         lends_nothing.prepare_credentials.clear();
         assert!(held(&store, &lends_nothing).is_none());

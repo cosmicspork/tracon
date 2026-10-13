@@ -492,7 +492,9 @@ comments and its own fields, except that credentials the entry lends its prepara
 dropped when the offer changes what that preparation runs or reaches, unless you choose
 to keep them: the repository is then held, and nothing builds or warms its cache with
 them until you start its build from Settings, which asks for your passkey off the node
-and says what it lends. The node then builds and pins
+and says what it lends. A later offer that leaves that preparation as it is keeps the
+repository held; rewriting its `prepare` or its credentials yourself ends the hold. The
+node then builds and pins
 its own image. An undecided offer is replaced by a newer one from the same node for the
 same repository, is withdrawn if that node leaves the channel, and lapses after 14 days.
 

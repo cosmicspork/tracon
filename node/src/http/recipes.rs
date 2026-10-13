@@ -23,7 +23,8 @@ use super::auth::{AdminAction, LocalOrAdministrator};
 use crate::config::{Config, Repo};
 use crate::mesh::forward::CommandError;
 use crate::mesh::recipe::{
-    self, Applied, Choices, Credentials, RepoRecipe, MAX_PENDING_PER_SENDER, OFFER_TTL_MS,
+    self, Applied, Choices, Credentials, RepoRecipe, MAX_PENDING_PER_SENDER, MIN_OFFER_TTL_MS,
+    OFFER_TTL_MS,
 };
 use crate::store::now_ms;
 use crate::store::recipe_offers::{CredentialHoldRow, RecipeOfferRow, Staged, MAX_OFFERS_PER_HOUR};
@@ -218,6 +219,13 @@ pub(super) async fn receive(
             "this offer lapsed before it arrived",
         ));
     }
+    // An operator is given time to read an offer, not rushed into one.
+    if expires_ms - now < MIN_OFFER_TTL_MS {
+        return Err(ApiError::new(
+            StatusCode::GONE,
+            "this offer lapses within the hour; an offer stays open long enough to be read",
+        ));
+    }
     let row = RecipeOfferRow {
         id: uuid::Uuid::now_v7().to_string(),
         sender_node: sender.to_string(),
@@ -328,6 +336,7 @@ impl Placement {
         Choices {
             replace_image: self.replace_image,
             keep_credentials: self.keep_credentials,
+            held: false,
         }
     }
 }
@@ -362,13 +371,14 @@ async fn prepare(s: &AppState, id: &str, placement: &Placement) -> ApiResult<Pre
     let repos = s.cfg.repos();
     let target = target(&s.cfg, &repos, &offered, placement.path.as_deref()).await?;
     let before = target.index.map(|i| repos[i].clone());
-    let applied = offered.apply(before.as_ref(), target.path.clone(), placement.choices());
-    let hash = viewed_hash(
-        &target.path,
-        before.is_some(),
-        &applied.entry,
-        placement.choices(),
-    );
+    let choices = Choices {
+        held: before
+            .as_ref()
+            .is_some_and(|entry| recipe::held(s.store(), entry).is_some()),
+        ..placement.choices()
+    };
+    let applied = offered.apply(before.as_ref(), target.path.clone(), choices);
+    let hash = viewed_hash(&target.path, before.is_some(), &applied.entry, choices);
     Ok(Prepared {
         row,
         offered,
@@ -390,6 +400,7 @@ fn viewed_hash(path: &Path, exists: bool, after: &Repo, choices: Choices) -> Str
         "after": after,
         "replace_image": choices.replace_image,
         "keep_credentials": choices.keep_credentials,
+        "held": choices.held,
     });
     hex::encode(Sha256::digest(seen.to_string().as_bytes()))
 }
@@ -427,6 +438,7 @@ fn credentials_json(credentials: &Credentials) -> Value {
         Credentials::Unaffected(n) => ("unaffected", &n[..]),
         Credentials::Dropped(n) => ("dropped", &n[..]),
         Credentials::KeptOnChange(n) => ("kept", &n[..]),
+        Credentials::StillHeld(n) => ("still_held", &n[..]),
     };
     json!({ "state": state, "names": names })
 }
@@ -504,6 +516,9 @@ pub async fn accept(
 struct StartBody {
     /// The held entry's `path`, as the table writes it.
     path: String,
+    /// The hold's `lending_hash`, as Settings showed it: the start is for
+    /// that hold, and is refused if the entry is held on anything else now.
+    lending_hash: String,
 }
 
 /// `POST /api/repos/holds/start {path}`: start the build an accepted offer
@@ -531,13 +546,31 @@ pub async fn start_held(State(s): State<AppState>, req: Request) -> Response {
         return ApiError::new(StatusCode::NOT_FOUND, format!("{} is not held", body.path))
             .into_response();
     };
-    if let Err(refusal) =
-        super::passkey::authorize_as(&s, &parts, &bytes, Some(start_summary(&hold))).await
-    {
+    if hold.lending_hash != body.lending_hash {
+        return ApiError::new(
+            StatusCode::CONFLICT,
+            "the entry is held on another preparation than the one shown; read it again",
+        )
+        .into_response();
+    }
+    let summary = start_summary(&hold, &node_name(&s, &hold.sender_node));
+    if let Err(refusal) = super::passkey::authorize_as(&s, &parts, &bytes, Some(summary)).await {
         return refusal.into_response();
     }
-    match s.store().credential_hold_release(&hold.path) {
-        Ok(_) => {}
+    // Only the hold that was confirmed: one renewed on something else in
+    // the meantime stays.
+    match s
+        .store()
+        .credential_hold_release_matching(&hold.path, &body.lending_hash)
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return ApiError::new(
+                StatusCode::CONFLICT,
+                "the hold changed while it was confirmed; read it again",
+            )
+            .into_response()
+        }
         Err(e) => return ApiError::from(e).into_response(),
     }
     let building = start_build(&s, &entry);
@@ -596,16 +629,23 @@ fn summary_line(sender: &str, repo: &str, fields: &[String], credentials: &Crede
             n.join(", ")
         ),
         Credentials::Dropped(n) => format!("Stops lending {}: {what}", n.join(", ")),
+        Credentials::StillHeld(n) => format!(
+            "STILL HELD, lending {} only once you start its build: {what}",
+            n.join(", ")
+        ),
     };
     // The prompt shows a line, not a document.
     line.chars().take(240).collect()
 }
 
-/// The prompt for starting a held build: what is lent, to what.
-fn start_summary(hold: &CredentialHoldRow) -> String {
+/// The prompt for starting a held build: what is lent, to whose
+/// preparation, for which entry.
+fn start_summary(hold: &CredentialHoldRow, sender: &str) -> String {
     format!(
-        "Build {} with the offered preparation, lending {}",
+        "Build {} ({}) with the preparation {} offered, lending {}",
+        hold.path,
         hold.repo,
+        recipe::display_name(sender),
         hold.credentials.join(", ")
     )
     .chars()
@@ -634,7 +674,9 @@ async fn commit(
         ..
     } = prepared;
     let path = target.path.clone();
-    let choices = decision.placement.choices();
+    let key = path.to_string_lossy().to_string();
+    // What a failed write must leave as it was.
+    let previous = s.store().credential_hold(&key)?;
     let actor = format!("recipe offer from {}", node_name(s, &row.sender_node));
     let written = crate::config::edit::update_repos(&s.cfg, s.store(), &actor, |entries| {
         // Found again in the table as it is under the lock, by path, and
@@ -642,6 +684,10 @@ async fn commit(
         let index = entries
             .iter()
             .position(|entry| same_path(&entry.path, &path));
+        let choices = Choices {
+            held: index.is_some_and(|i| recipe::held(s.store(), &entries[i]).is_some()),
+            ..decision.placement.choices()
+        };
         let applied = offered.apply(index.map(|i| &entries[i]), path.clone(), choices);
         if viewed_hash(&path, index.is_some(), &applied.entry, choices) != decision.viewed_hash {
             return Err(stale());
@@ -653,30 +699,57 @@ async fn commit(
         crate::config::validate_repos(entries).map_err(unprocessable)?;
         // Held before the file or the live table names the new preparation,
         // so nothing can build and warm it with the credentials in between.
-        if let Credentials::KeptOnChange(names) = &applied.credentials {
-            s.store().credential_hold_put(&CredentialHoldRow {
-                path: path.to_string_lossy().into(),
-                offer_id: id.to_string(),
-                sender_node: row.sender_node.clone(),
-                repo: row.repo.clone(),
-                credentials: names.clone(),
-                lending_hash: recipe::lending_hash(&applied.entry),
-                created_ms: now_ms(),
-            })?;
+        // A hold that stands is renewed on the entry as now written, still
+        // naming the peer whose preparation it is.
+        match &applied.credentials {
+            Credentials::KeptOnChange(names) => {
+                s.store().credential_hold_put(&CredentialHoldRow {
+                    path: key.clone(),
+                    offer_id: id.to_string(),
+                    sender_node: row.sender_node.clone(),
+                    repo: row.repo.clone(),
+                    credentials: names.clone(),
+                    lending_hash: recipe::lending_hash(&applied.entry),
+                    created_ms: now_ms(),
+                })?;
+            }
+            Credentials::StillHeld(names) => {
+                let standing = s.store().credential_hold(&key)?;
+                s.store().credential_hold_put(&CredentialHoldRow {
+                    path: key.clone(),
+                    offer_id: standing
+                        .as_ref()
+                        .map_or_else(|| id.to_string(), |h| h.offer_id.clone()),
+                    sender_node: standing
+                        .as_ref()
+                        .map_or_else(|| row.sender_node.clone(), |h| h.sender_node.clone()),
+                    repo: row.repo.clone(),
+                    credentials: names.clone(),
+                    lending_hash: recipe::lending_hash(&applied.entry),
+                    created_ms: standing.as_ref().map_or_else(now_ms, |h| h.created_ms),
+                })?;
+            }
+            _ => {}
         }
         Ok::<_, ApiError>(applied)
     });
     let (applied, outcome) = match written {
         Ok(written) => written,
         Err(error) => {
+            match &previous {
+                Some(hold) => s.store().credential_hold_put(hold)?,
+                None => {
+                    s.store().credential_hold_release(&key)?;
+                }
+            }
             s.store().recipe_offer_release(id)?;
             return Err(error);
         }
     };
-    if !matches!(applied.credentials, Credentials::KeptOnChange(_)) {
-        // Whatever an earlier accept held, the entry now lends nothing to a
-        // preparation the operator has not started.
-        s.store().credential_hold_release(&path.to_string_lossy())?;
+    if !applied.credentials.holds() {
+        // The entry now lends nothing to a peer's preparation the operator
+        // has not started: either nothing at all, or what it lent before.
+        s.store().credential_hold_release(&key)?;
     }
     if !s
         .store()
@@ -931,17 +1004,23 @@ mod tests {
         assert!(!kept.contains('\u{202E}'));
         assert!(kept.contains("…"));
         assert_eq!(
-            start_summary(&CredentialHoldRow {
-                path: "github.com/acme/hdr".into(),
-                offer_id: "o".into(),
-                sender_node: "n".into(),
-                repo: "github.com/acme/hdr".into(),
-                credentials: vec!["nova".into()],
-                lending_hash: String::new(),
-                created_ms: 0,
-            }),
-            "Build github.com/acme/hdr with the offered preparation, lending nova"
+            start_summary(
+                &CredentialHoldRow {
+                    path: "github.com/acme/hdr".into(),
+                    offer_id: "o".into(),
+                    sender_node: "n".into(),
+                    repo: "github.com/acme/hdr".into(),
+                    credentials: vec!["nova".into()],
+                    lending_hash: String::new(),
+                    created_ms: 0,
+                },
+                "lap\u{202E}top"
+            ),
+            "Build github.com/acme/hdr (github.com/acme/hdr) with the preparation laptop offered, \
+             lending nova"
         );
+        assert!(line(Credentials::StillHeld(vec!["nova".into()]))
+            .starts_with("STILL HELD, lending nova only once you start its build: accept"));
     }
 
     /// The reviewed identity covers every choice that shapes the write.

@@ -50,12 +50,12 @@
     return loaded?.entries.find((item) => item.entry.path === path)?.hold ?? null
   }
 
-  async function startHeld(path: string) {
+  async function startHeld(path: string, lendingHash: string) {
     if (busy) return
     busy = `start:${path}`
     note = ''
     try {
-      const started = await api.startHeldBuild(path)
+      const started = await api.startHeldBuild(path, lendingHash)
       note = started.building ? 'Building with the offered preparation now.' : 'Released: the next session or check builds it.'
       await load(false)
     } catch (cause) {
@@ -254,7 +254,7 @@
               Held: this entry keeps lending {hold.credentials.join(', ')} to a preparation a peer's recipe changed, so
               nothing is built or warmed for it until you start it. Checks and sessions use the image it last built.
             </p>
-            <button class="btn p" type="button" onclick={() => void startHeld(form.path)} disabled={busy !== '' || dirty}>
+            <button class="btn p" type="button" onclick={() => void startHeld(form.path, hold.lending_hash)} disabled={busy !== '' || dirty}>
               {busy === `start:${form.path}` ? 'Starting…' : `Start the build, lending ${hold.credentials.join(', ')}`}
             </button>
           </div>

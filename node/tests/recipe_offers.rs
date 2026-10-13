@@ -199,7 +199,7 @@ fn offer(recipe: Value, channel: &str, not_after_ms: i64) -> Command {
 }
 
 fn later() -> i64 {
-    tracon::store::now_ms() + 3_600_000
+    tracon::store::now_ms() + 2 * 3_600_000
 }
 
 /// Stage `recipe` as `PEER` would, through the executor a mesh command runs.
@@ -446,7 +446,18 @@ async fn credentials_are_kept_only_when_asked_and_then_nothing_builds() {
         .credential_hold("github.com/acme/hdr")
         .unwrap()
         .is_some());
-    let start = json!({ "path": "github.com/acme/hdr" });
+    let hash = v["entries"][0]["hold"]["lending_hash"].clone();
+    let start = json!({ "path": "github.com/acme/hdr", "lending_hash": hash });
+    // A start for a hold it does not describe is refused, and leaves it.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/repos/holds/start",
+        LOCAL,
+        Some(json!({ "path": "github.com/acme/hdr", "lending_hash": "other" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
     let (s, v) = call(
         &n,
         "POST",
@@ -487,6 +498,58 @@ async fn credentials_are_kept_only_when_asked_and_then_nothing_builds() {
         .is_none());
     let (s, _) = call(&n, "POST", "/api/repos/holds/start", LOCAL, Some(start)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// A held entry stays held when a later offer leaves its preparation as it
+/// is: an accept that changes only the checks or the time limit, or that
+/// sends the same recipe again, builds nothing and keeps the hold, so the
+/// peer's preparation still waits for the operator's start.
+#[tokio::test]
+async fn a_later_offer_onto_a_held_entry_keeps_it_held() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let id = staged(&n, recipe()).await;
+    let (s, v) = accept(&n, &id, LOCAL, json!({ "keep_credentials": true })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let first = n
+        .store
+        .credential_hold("github.com/acme/hdr")
+        .unwrap()
+        .unwrap();
+
+    let mut checks_only = recipe();
+    checks_only["checks"] = json!(["just all"]);
+    checks_only["timeout_secs"] = json!(1800);
+    for (what, again) in [
+        ("checks and time limit", checks_only),
+        ("the same recipe", recipe()),
+    ] {
+        let id = staged(&n, again).await;
+        let seen = review(&n, &id, "").await;
+        assert_eq!(seen["credentials"]["state"], "still_held", "{what}: {seen}");
+        assert!(
+            seen["notes"].to_string().contains("stays held"),
+            "{what}: {seen}"
+        );
+        let (s, v) = accept(&n, &id, LOCAL, json!({})).await;
+        assert_eq!(s, StatusCode::OK, "{what}: {v}");
+        assert_eq!(v["building"], false, "{what}: {v}");
+        assert_eq!(v["credentials"]["state"], "still_held", "{what}: {v}");
+        let hold = n
+            .store
+            .credential_hold("github.com/acme/hdr")
+            .unwrap()
+            .expect("still held");
+        // Still the first peer's preparation, still on what it lends.
+        assert_eq!(hold.offer_id, first.offer_id, "{what}");
+        assert_eq!(hold.lending_hash, first.lending_hash, "{what}");
+        let file = Config::try_load().unwrap();
+        assert_eq!(file.repo[0].prepare_credentials, ["nova"], "{what}");
+    }
+    assert_eq!(
+        Config::try_load().unwrap().repo[0].checks.as_deref(),
+        Some(&["just check".to_string()][..])
+    );
 }
 
 /// The table moving between the review and the accept refuses the accept
@@ -708,12 +771,18 @@ async fn an_accept_starts_the_build_unless_credentials_are_kept() {
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     assert!(v.to_string().contains("held: nova"), "{v}");
+    let hash = n
+        .store
+        .credential_hold(&path)
+        .unwrap()
+        .unwrap()
+        .lending_hash;
     let (s, v) = call(
         &n,
         "POST",
         "/api/repos/holds/start",
         LOCAL,
-        Some(json!({ "path": path })),
+        Some(json!({ "path": path, "lending_hash": hash })),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
@@ -860,27 +929,18 @@ async fn an_offer_is_declined_superseded_or_lapses() {
         .unwrap_err();
     assert!(lapsed.contains("lapsed"), "{lapsed}");
 
-    // One that lapses while it waits cannot be accepted.
+    // One that would lapse within the hour is not staged either: an
+    // operator is given time to read an offer. (A staged offer that lapses
+    // is refused at accept; the store's tests hold it to its time.)
     let short = n
         .state
         .execute(
             PEER,
-            offer(recipe(), "personal", tracon::store::now_ms() + 40),
+            offer(recipe(), "personal", tracon::store::now_ms() + 60_000),
         )
         .await
-        .unwrap();
-    let id = short["offer_id"].as_str().unwrap().to_string();
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    let (s, v) = call(
-        &n,
-        "POST",
-        &format!("/api/repos/offers/{id}/accept"),
-        LOCAL,
-        Some(json!({ "viewed_hash": "x" })),
-    )
-    .await;
-    assert_eq!(s, StatusCode::CONFLICT, "{v}");
-    assert!(v.to_string().contains("expired"), "{v}");
+        .unwrap_err();
+    assert!(short.contains("within the hour"), "{short}");
     assert_eq!(
         std::fs::read_to_string(Config::config_path()).unwrap(),
         NODE_TOML

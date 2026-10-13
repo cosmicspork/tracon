@@ -61,8 +61,8 @@ pub const MAX_OFFERS_PER_HOUR: i64 = 10;
 /// operator to look back on.
 pub const KEEP_DECIDED_MS: i64 = 30 * 24 * 3600 * 1000;
 
-/// How long a superseded offer is kept.
-pub const KEEP_SUPERSEDED_MS: i64 = 24 * 3600 * 1000;
+/// How long an offer that was not taken up is kept.
+pub const KEEP_UNTAKEN_MS: i64 = 24 * 3600 * 1000;
 
 /// How long an accept may hold an offer before it is taken to have died
 /// part way (a crash between the claim and the write) and is pending again.
@@ -100,11 +100,14 @@ fn sweep(conn: &rusqlite::Connection, now_ms: i64) -> rusqlite::Result<usize> {
          WHERE state NOT IN ('pending', 'accepting') AND received_ms < ?1",
         [now_ms - KEEP_DECIDED_MS],
     )?;
-    // A superseded offer is the same sender's older word on the same
-    // repository: kept a day, for an operator who saw it arrive.
+    // An offer that was not taken up (superseded by the same sender's newer
+    // word, declined, lapsed or withdrawn) is kept a day, for an operator
+    // who saw it arrive; an accepted one is kept as `KEEP_DECIDED_MS`.
     conn.execute(
-        "DELETE FROM repo_recipe_offer WHERE state = 'superseded' AND decided_ms < ?1",
-        [now_ms - KEEP_SUPERSEDED_MS],
+        "DELETE FROM repo_recipe_offer
+         WHERE state IN ('superseded', 'declined', 'expired', 'withdrawn')
+           AND COALESCE(decided_ms, expires_ms) < ?1",
+        [now_ms - KEEP_UNTAKEN_MS],
     )?;
     conn.execute(
         "UPDATE repo_recipe_offer SET state = 'expired'
@@ -278,6 +281,15 @@ impl Store {
             .optional()?)
     }
 
+    /// Release the hold on `path` only if it is still on `lending_hash`.
+    pub fn credential_hold_release_matching(&self, path: &str, lending_hash: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "DELETE FROM repo_credential_hold WHERE path = ?1 AND lending_hash = ?2",
+            [path, lending_hash],
+        )? == 1)
+    }
+
     /// Release a hold. True when there was one.
     pub fn credential_hold_release(&self, path: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
@@ -449,6 +461,42 @@ mod tests {
             .recipe_offers_expire(10 + KEEP_DECIDED_MS + 1)
             .unwrap();
         assert!(store.recipe_offer("1").unwrap().is_none());
+    }
+
+    /// An offer not taken up is forgotten after a day; a hold is released
+    /// only on what it was confirmed for.
+    #[test]
+    fn untaken_offers_go_after_a_day_and_holds_release_only_as_confirmed() {
+        let store = Store::open_in_memory().unwrap();
+        let mut row = offer("1", "n1", "github.com/o/a", 10);
+        row.expires_ms = 1_000_000_000;
+        store.recipe_offer_stage(&row, 8).unwrap();
+        store
+            .recipe_offer_decide("1", "declined", None, 20)
+            .unwrap();
+        store
+            .recipe_offers_expire(20 + KEEP_UNTAKEN_MS - 1)
+            .unwrap();
+        assert!(store.recipe_offer("1").unwrap().is_some());
+        store
+            .recipe_offers_expire(20 + KEEP_UNTAKEN_MS + 1)
+            .unwrap();
+        assert!(store.recipe_offer("1").unwrap().is_none());
+
+        let hold = CredentialHoldRow {
+            path: "p".into(),
+            offer_id: "o".into(),
+            sender_node: "n".into(),
+            repo: "github.com/o/a".into(),
+            credentials: vec!["nova".into()],
+            lending_hash: "h1".into(),
+            created_ms: 1,
+        };
+        store.credential_hold_put(&hold).unwrap();
+        assert!(!store.credential_hold_release_matching("p", "h2").unwrap());
+        assert!(store.credential_hold("p").unwrap().is_some());
+        assert!(store.credential_hold_release_matching("p", "h1").unwrap());
+        assert!(store.credential_hold("p").unwrap().is_none());
     }
 
     #[test]

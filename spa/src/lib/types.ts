@@ -1633,6 +1633,8 @@ export interface CredentialHold {
   sender_node: string
   repo: string
   credentials: string[]
+  /** What the hold is on; a start names it, and is refused for another. */
+  lending_hash: string
   created_ms: number
 }
 
@@ -1681,7 +1683,7 @@ export interface RecipeOfferView {
   /** The entry's own fields (never offered) it still has after the offer. */
   kept: string[]
   /** What becomes of credentials the entry lends its preparation. */
-  credentials: { state: 'none' | 'unaffected' | 'dropped' | 'kept'; names: string[] }
+  credentials: { state: 'none' | 'unaffected' | 'dropped' | 'kept' | 'still_held'; names: string[] }
   replace_image: boolean
   keep_credentials: boolean
   /** Names exactly this review; an accept must carry it. */
