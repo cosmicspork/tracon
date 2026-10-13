@@ -125,7 +125,7 @@ pub async fn build(
 
 /// The repository a caller named: a checkout by its path, or a clone the node
 /// manages by the end of its path (`owner/name`).
-fn repo_root(given: &str) -> Result<PathBuf, String> {
+pub(super) fn repo_root(given: &str) -> Result<PathBuf, String> {
     let path = crate::config::expand_home(Path::new(given.trim()));
     if path.as_os_str().is_empty() {
         return Err("name the repository to build".into());

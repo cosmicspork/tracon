@@ -29,6 +29,9 @@ import type {
   NodeConfig,
   RepoEntry,
   RepoEnvironments,
+  RecipeOffer,
+  RecipeOfferResult,
+  RecipeOfferView,
   NodeInfo,
   OperatorIssue,
   OperatorQuestion,
@@ -635,6 +638,24 @@ export const api = {
     call<{ changed: boolean; restart_required: boolean }>('PUT', '/api/repos/environments', { entries }),
   buildRepoEnvironment: (repo: string) =>
     call<{ repo: string; since_ms: number }>('POST', '/api/repos/environments/build', { repo }),
+  offerRecipe: (body: { path?: string; repo?: string; channel: string; to_nodes?: string[]; note?: string }) =>
+    call<{ repo: string; expires_ms: number; results: RecipeOfferResult[] }>('POST', '/api/repos/offer', body),
+  recipeOffers: () => call<{ offers: RecipeOffer[] }>('GET', '/api/repos/offers'),
+  recipeOffer: (id: string, path = '', replaceImage = false) => {
+    const query = new URLSearchParams()
+    if (path) query.set('path', path)
+    if (replaceImage) query.set('replace_image', 'true')
+    const suffix = query.size ? `?${query}` : ''
+    return call<RecipeOfferView>('GET', `/api/repos/offers/${encodeURIComponent(id)}${suffix}`)
+  },
+  acceptRecipeOffer: (id: string, body: { path?: string; replace_image?: boolean }) =>
+    call<{ accepted: boolean; path: string; changed: boolean; restart_required: boolean; building: boolean }>(
+      'POST',
+      `/api/repos/offers/${encodeURIComponent(id)}/accept`,
+      body,
+    ),
+  declineRecipeOffer: (id: string) =>
+    call<{ declined: boolean }>('POST', `/api/repos/offers/${encodeURIComponent(id)}/decline`),
   manifest: (channel: string) =>
     call<ManifestView>('GET', `/api/manifest?channel=${encodeURIComponent(channel)}`),
   importSkill: (channel: string, source: string) =>

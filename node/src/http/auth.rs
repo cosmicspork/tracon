@@ -475,6 +475,27 @@ impl axum::extract::FromRequestParts<super::api::AppState> for Administrator {
     }
 }
 
+/// The operator at the node, or an explicitly authenticated
+/// [`Administrator`] anywhere else: for a decision that changes neither what
+/// the node is nor what it lends, such as declining an offer it was sent.
+pub struct LocalOrAdministrator;
+
+impl axum::extract::FromRequestParts<super::api::AppState> for LocalOrAdministrator {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &super::api::AppState,
+    ) -> Result<Self, Self::Rejection> {
+        if parts_are_local(parts) {
+            return Ok(LocalOrAdministrator);
+        }
+        <Administrator as axum::extract::FromRequestParts<_>>::from_request_parts(parts, state)
+            .await
+            .map(|_| LocalOrAdministrator)
+    }
+}
+
 fn peer_ip(req: &Request) -> Option<IpAddr> {
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()

@@ -129,6 +129,14 @@ rather than running it after the sender gave up. It is additive and defaulted, s
 command without one runs whenever it lands, an older owner ignores the field, and the
 contract version is unmoved. A node that cannot parse a direct `command` payload acks
 its `cmd_id` with an error naming its older build instead of dropping it silently.
+A `recipe_offer` command `{ recipe, from_channel, note?, not_after_ms }` offers the
+receiver a repository recipe on a channel both are members of, which the receiver
+checks by its own record. `recipe` is `{ repo, dockerfile?, context?, checks?, prepare,
+egress, session_egress, timeout_secs? }`, `repo` a forge identity (`host/owner/name`);
+a receiver refuses any other field. It is staged for the receiver's operator, never
+applied on receipt, and acks `{ offer_id, state, expires_ms, superseded }`. The op is
+additive and the contract version is unmoved: a node that predates it answers that it
+runs an older build.
 Version 4 lets a review row and a queued card name no session: a harness the operator
 runs themselves calls with none. `session_id` on a `reviews` row and on a `queue` card
 may be `null`, a review row gains an optional `lane` (the caller's display label), and

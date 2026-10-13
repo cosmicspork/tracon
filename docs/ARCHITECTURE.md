@@ -633,7 +633,9 @@ it, like every other live session. An entry may name the repository's Dockerfile
 image: the node then builds it (`crate::repo_image`) from the **default branch**, read
 through Git's object store and never from a working tree, adds one layer of its own,
 and records the digest it built in its own state — the recipe is configuration, the
-digest is not, because a locally built image has a different one on every node. The
+digest is not, because a locally built image has a different one on every node. That
+is also why a recipe can be offered to another node (see Mesh frames) and its digest
+never is. The
 layer depends on who a run is (`repo_image::RunAs`). Under Podman it is root with no
 capabilities in `/work`, `HOME=/root`, no entrypoint. A pod is never root: there the
 layer makes `/work`, `/cache` and `harness_home` owned by `[runtime.kubernetes] uid`
@@ -1071,6 +1073,26 @@ Invariants on top of the wire:
   later from the outbox. A prompt queued on purpose for an unreachable owner carries
   no deadline and is reported as queued, naming the owner, not as sent. A command
   from a sender on an older build names no deadline and runs as before.
+- **A repository recipe is offered, never applied.** An operator may offer a
+  `[[repo]]` entry's recipe to the other members of a channel it shares with them
+  (`RecipeOffer`, sealed to each receiver like any command). The recipe names the
+  repository by its forge identity (`github.com/owner/name`) and carries only the
+  portable part of the entry: `dockerfile`, `context`, `checks`, `prepare`,
+  `egress`, `session_egress` and `timeout_secs`. It never carries the entry's
+  `image` (a digest names what one node built or chose), `prepare_credentials`,
+  its `path`, or its `commits` and `style`, and a command naming a home directory
+  is refused. Both ends check this: the sender before it sends, and the receiver,
+  which also refuses any field a recipe does not have and holds the sender to the
+  named channel by its own record, as it does every command. The receiver only
+  stages the offer (`repo_recipe_offer`, node-local, never replicated) and
+  announces it on the operator's devices; nothing reaches `node.toml` until the
+  operator, having seen what would change on the entry it lands on, accepts it,
+  which is an admin action (a passkey from off the node). Offering is one too.
+  Accepting goes through the one `[[repo]]` writer, so the entry keeps
+  its comments and every field the recipe does not carry, and the node then builds
+  and pins its own image from the recipe. A newer offer from the same sender for
+  the same repository supersedes an undecided one, a sender holds at most 32
+  undecided offers on a node, and an offer lapses after 14 days.
 - **The hello may carry state, not secrets.** A node's models and its provider
   summary (names, states, identities — and a pending login URL) ride the hello,
   sealed to the operator's own mesh. Credential values never do; those move only as
@@ -1572,7 +1594,8 @@ Three surfaces, three answers, and the differences are the point.
   lends: setting or removing the operator token, authority grants, credential
   import, share and forge tokens, provider keys, sign-ins and channels, channel
   bindings, boundary setup, mesh invitation, admission, removal and hub sharing,
-  reopening a channel to external harnesses, and passkeys themselves. So are
+  reopening a channel to external harnesses, offering a repository recipe to
+  peers and accepting one into `[[repo]]`, and passkeys themselves. So are
   the approval answers that change the node rather than let one call run:
   allowing a repository setup proposal (it writes the `[[repo]]` entry),
   allowing a Dockerfile trial (a networked build outside the boundary), and

@@ -1,9 +1,11 @@
 <script lang="ts">
   import Card from './Card.svelte'
+  import RecipeOffers from './RecipeOffers.svelte'
   import { api } from '../../lib/api'
   import { store } from '../../lib/store.svelte'
+  import { forgeIdentity, offerResultLine, offerTargets } from '../../lib/recipes'
   import { acceptsUploads, blankForm, buildLine, canonical, problems, toEntry, toForm, words, type RepoForm } from '../../lib/repos'
-  import type { RepoEnvironments, RepoImageBuild } from '../../lib/types'
+  import type { RecipeOfferResult, RepoEnvironments, RepoImageBuild } from '../../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
 
@@ -75,6 +77,51 @@
     }
   }
 
+  // Offering an entry's recipe to channel co-members. Only a saved entry is
+  // offered: the node reads it from its own table.
+  const targets = $derived(offerTargets(store.channels, store.nodes, store.node?.id ?? ''))
+  let offering = $state<string | null>(null)
+  let offerChannel = $state('')
+  let offerNodes = $state<string[]>([])
+  let offerRepo = $state('')
+  let offerNote = $state('')
+  let offerResults = $state<RecipeOfferResult[]>([])
+  const offerPeers = $derived(targets.find((target) => target.channel === offerChannel)?.peers ?? [])
+
+  function startOffer(path: string) {
+    offering = offering === path ? null : path
+    offerChannel = targets[0]?.channel ?? ''
+    offerNodes = (targets[0]?.peers ?? []).map((peer) => peer.id)
+    offerRepo = forgeIdentity(path) ?? ''
+    offerNote = ''
+    offerResults = []
+  }
+
+  function chooseChannel(channel: string) {
+    offerChannel = channel
+    offerNodes = (targets.find((target) => target.channel === channel)?.peers ?? []).map((peer) => peer.id)
+  }
+
+  async function sendOffer(path: string) {
+    if (busy || !offerChannel || !offerNodes.length) return
+    busy = `offer:${path}`
+    error = ''
+    try {
+      const sent = await api.offerRecipe({
+        path,
+        repo: offerRepo.trim() || undefined,
+        channel: offerChannel,
+        to_nodes: offerNodes,
+        note: offerNote.trim() || undefined,
+      })
+      offerResults = sent.results
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause)
+    } finally {
+      busy = ''
+    }
+  }
+
   function add() {
     forms = [...forms, blankForm()]
   }
@@ -91,6 +138,8 @@
   {#if !local}
     <p class="blocked">Repository environments are changed on the node itself.</p>
   {/if}
+
+  <RecipeOffers onaccepted={() => void load(true)} />
 
   {#if loaded}
     {#if forms.length === 0}
@@ -211,7 +260,59 @@
           </p>
         {/if}
 
+        {#if offering === form.path}
+          <div class="offer">
+            <span class="heading">Offer this recipe</span>
+            <small>
+              Its Dockerfile, preparation, checks and registries go to the nodes you pick, which each stage it for their
+              operator. Never its pinned image, credentials, path or publication settings.
+            </small>
+            <div class="grid">
+              <label>
+                <span>Channel</span>
+                <select value={offerChannel} onchange={(event) => chooseChannel(event.currentTarget.value)} disabled={busy !== ''}>
+                  {#each targets as target (target.channel)}
+                    <option value={target.channel}>{target.channel}</option>
+                  {/each}
+                </select>
+              </label>
+              <label>
+                <span>Repository</span>
+                <input bind:value={offerRepo} spellcheck="false" placeholder="from the checkout's origin" disabled={busy !== ''} />
+                <small>Its forge identity, like github.com/owner/name.</small>
+              </label>
+              <div class="wide sessions">
+                <span class="heading">To</span>
+                {#each offerPeers as peer (peer.id)}
+                  <label class="toggle"><input type="checkbox" bind:group={offerNodes} value={peer.id} disabled={busy !== ''} /> {peer.name}</label>
+                {/each}
+              </div>
+              <label class="wide">
+                <span>Note</span>
+                <input bind:value={offerNote} placeholder="optional, shown with the offer" disabled={busy !== ''} />
+              </label>
+            </div>
+            <div class="acts">
+              <button class="btn p" type="button" onclick={() => void sendOffer(form.path)} disabled={busy !== '' || !offerNodes.length}>
+                {busy === `offer:${form.path}` ? 'Offering…' : 'Offer'}
+              </button>
+            </div>
+            {#if offerResults.length}
+              <ul class="builds">
+                {#each offerResults as result (result.node)}
+                  <li class:failed={result.state === 'refused'}><span>{offerResultLine(result)}</span></li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        {/if}
+
         <div class="acts">
+          {#if targets.length && form.path && !dirty}
+            <button class="lnk" type="button" onclick={() => startOffer(form.path)} disabled={busy !== ''}>
+              {offering === form.path ? 'Do not offer' : 'Offer to…'}
+            </button>
+          {/if}
           <button class="lnk d" type="button" onclick={() => remove(index)} disabled={!local || busy !== ''}>Remove this entry</button>
         </div>
       </details>
@@ -265,6 +366,8 @@
   .builds details summary { cursor: pointer; color: var(--ink2); }
   .acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
   .entry .acts { margin-top: 12px; }
+  .offer { display: grid; gap: 8px; margin-top: 12px; background: var(--s1); border-radius: 4px; padding: 10px 12px; }
+  .offer input:not([type='checkbox']), .offer select { background: var(--s2); }
   .caution { margin: 0; color: var(--wait); font-size: 12.5px; }
   .bad, .error, .blocked { color: var(--crit); }
   .dim, .note, .error { margin: 0; font-size: 12.5px; }

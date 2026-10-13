@@ -1438,6 +1438,29 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX webauthn_challenge_expiry ON webauthn_challenge(expires_ms);
     "#,
+    // 63: `[[repo]]` recipes channel co-members offered this node, staged for
+    // its operator. `repo` is the forge identity the recipe names and
+    // `recipe_json` the recipe as received (never an image, a digest or a
+    // credential). `state` is `pending`, then `accepted`, `declined`,
+    // `superseded` (a newer offer from the same sender for the same
+    // repository arrived) or `expired`. Node-local: an offer is to this node.
+    r#"
+    CREATE TABLE repo_recipe_offer (
+        id           TEXT PRIMARY KEY,
+        sender_node  TEXT NOT NULL,
+        channel      TEXT NOT NULL,
+        repo         TEXT NOT NULL,
+        recipe_json  TEXT NOT NULL,
+        note         TEXT,
+        received_ms  INTEGER NOT NULL,
+        expires_ms   INTEGER NOT NULL,
+        state        TEXT NOT NULL DEFAULT 'pending',
+        decided_ms   INTEGER,
+        decided_path TEXT
+    );
+    CREATE INDEX repo_recipe_offer_sender ON repo_recipe_offer(sender_node, repo, state);
+    CREATE INDEX repo_recipe_offer_received ON repo_recipe_offer(received_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

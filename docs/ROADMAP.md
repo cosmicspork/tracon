@@ -226,6 +226,16 @@ wait until **Now** and **Next** have made a day's work unremarkable.
       session's scratchpad, in the same package as the harness state backup, so a
       compacted context summarises something that still exists.
 
+**Repository environments across the mesh.** A node offers a `[[repo]]` recipe to its
+channel co-members, each of which stages it, shows the operator what would change and
+builds and pins its own image once accepted (the recipe is shared, the digest never is).
+
+- [ ] Podman nodes pull a peer-built image by signed digest: a node that has built a
+      recipe's image publishes its digest signed with its node key, and a peer that
+      accepted the same recipe may pull that image from a shared registry instead of
+      building it, holding it to the signed digest. Kubernetes nodes already pull from a
+      registry; this extends the registry client to Podman and adds the signed statement.
+
 **Diff reading.** Borrow interaction patterns from
 [cosmicspork/review](https://github.com/cosmicspork/review), especially its
 [diff viewer](https://github.com/cosmicspork/review/blob/main/src/diff-part.ts); weigh
@@ -324,6 +334,8 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       another node, with `RUST_LOG=tracon::mesh::stream=debug` on both, confirming the
       relay's `GET /v0/streams` connection holds and `GET /v0/info` reports the same
       contract everywhere.
+- [ ] **A repository recipe offered over the real hub**: offered from the laptop, accepted
+      on the homelab node, which builds and pins its own image from it.
 - [ ] **Real project workflows on Kubernetes**: preparation, a coding task, checks, review.
       An OpenCode session started on the homelab cluster and ran gated tools on
       2026-09-29 (after #291, #294); the whole workflow has not.
@@ -419,12 +431,6 @@ Kept as intent, off the plan until the supported configuration has earned them.
   transfer with Git history fetched from the forge, lineage, fencing, chunked transfers
   past 2 MB, compatibility re-evaluated at the destination); the hub roll-ups. The
   homelab node keeps what exists running.
-- **Repository environments shared across the mesh.** A `[[repo]]` entry is one node's
-  configuration today, so every node that works on a repository repeats it. Share the
-  recipe through the channel — the Dockerfile reference, the checks, the preparation and
-  its egress presets — and never the image digest: a locally built image has a different
-  one on every node, so each node builds and pins its own. Waits on mesh-wide
-  configuration sync; a node already builds the image itself.
 - **Kubernetes parity.** A refuse-not-drop egress policy, and service sidecars as pods
   of their own. Per-client egress grants and the egress ask work there now. What earns it:
   work left running unattended belongs on an always-on node, which is the homelab

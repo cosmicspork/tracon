@@ -400,6 +400,20 @@ pub enum Command {
     ReviewDetail {
         request: Value,
     },
+    /// A `[[repo]]` recipe offered to a channel co-member, which stages it
+    /// for its operator to accept or decline; nothing is applied on receipt.
+    /// `recipe` carries the repository's forge identity and how to build,
+    /// prepare and check it, and never an image, a digest, a credential name
+    /// or a path on the sender's machine: the receiver refuses one that does.
+    /// `not_after_ms` is when the offer lapses. An older peer cannot read
+    /// this op and answers that it runs an older build.
+    RecipeOffer {
+        recipe: Value,
+        from_channel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        not_after_ms: i64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -891,6 +905,26 @@ mod tests {
             not_after_ms: Some(42),
         };
         assert_eq!(serde_json::to_value(&dated).unwrap()["not_after_ms"], 42);
+    }
+
+    /// A recipe offer names its op on the wire, so a build without it refuses
+    /// it by name, and a missing note is left out rather than sent as null.
+    #[test]
+    fn a_recipe_offer_round_trips() {
+        let offer = Payload::Command {
+            cmd_id: "c1".into(),
+            command: Command::RecipeOffer {
+                recipe: serde_json::json!({ "repo": "github.com/o/r" }),
+                from_channel: "personal".into(),
+                note: None,
+                not_after_ms: 7,
+            },
+            not_after_ms: Some(7),
+        };
+        let v = serde_json::to_value(&offer).unwrap();
+        assert_eq!(v["command"]["op"], "recipe_offer");
+        assert!(v["command"].get("note").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<Payload>(v).unwrap(), offer);
     }
 
     /// A payload this build cannot parse still opens to its JSON, so the

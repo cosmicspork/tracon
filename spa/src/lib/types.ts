@@ -1623,6 +1623,60 @@ export interface RepoEnvironments {
   entries: { entry: RepoEntry; builds: RepoImageBuild[] }[]
 }
 
+/**
+ * A repository recipe as it travels between nodes: the repository's forge
+ * identity and how to build, prepare and check it. Never an image, a digest,
+ * a credential name or a path on the sender's machine.
+ */
+export interface RepoRecipe {
+  repo: string
+  dockerfile?: string
+  context?: string
+  checks?: string[]
+  prepare: string[]
+  egress: string[]
+  session_egress: boolean
+  timeout_secs?: number
+}
+
+/** A recipe a channel co-member offered this node, held for its operator. */
+export interface RecipeOffer {
+  id: string
+  sender_node: string
+  sender_name: string
+  channel: string
+  repo: string
+  recipe: RepoRecipe
+  note: string | null
+  received_ms: number
+  expires_ms: number
+  state: 'pending' | 'accepted' | 'declined' | 'superseded' | 'expired'
+  decided_ms: number | null
+  /** The `[[repo]]` path an accepted offer was written to. */
+  decided_path: string | null
+}
+
+/** An offer against the entry it would change. */
+export interface RecipeOfferView {
+  offer: RecipeOffer
+  target: { path: string; exists: boolean }
+  before: RepoEntry | null
+  after: RepoEntry
+  changes: { field: string; before: unknown; after: unknown }[]
+  notes: string[]
+  /** The entry's fields an offer never changes. */
+  kept: string[]
+}
+
+/** What one node made of an offer this node sent it. */
+export interface RecipeOfferResult {
+  node: string
+  name: string
+  state: 'offered' | 'queued' | 'refused'
+  offer_id?: string
+  detail?: string
+}
+
 /** One thing an operator put in a channel's launch manifest. */
 export interface ManifestItem {
   channel: string

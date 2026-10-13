@@ -214,8 +214,9 @@ and you are in.
 
 The app then offers to add a passkey. Take it: from off the node, every admin
 action (the operator token, credentials, forge and provider keys, authority grants,
-channel bindings, mesh invitations and members, passkeys themselves) is confirmed
-with a passkey, one prompt per save, and the cookie alone cannot make them. A
+channel bindings, mesh invitations and members, repository recipe offers, passkeys
+themselves) is confirmed with a passkey, one prompt per save, and the cookie alone
+cannot make them. A
 freshly paired browser may add the node's first passkey without one for 15 minutes;
 after that, adding another is itself confirmed with an existing passkey, so a token
 that leaks later buys a sign-in but not admin. Passkeys are bound to
@@ -475,6 +476,20 @@ cache, and no check reads it. Two sessions on one repository share it, so a seco
 `cargo build` waits for the first's lock. The layer is root, like every run here, so a tool the Dockerfile installed under
 another user's home has to be readable and executable by others. OpenCode sessions, and
 sessions on Kubernetes, stay in the harness image.
+
+**Offer a repository's recipe to another node.** On a mesh, an entry's **Offer to…** in
+Settings → Repositories sends its recipe to the other members of a channel you pick:
+the Dockerfile and its context, the checks, the preparation, its registries and whether
+sessions reach them, and the time limit, with the repository named by its forge identity
+(`github.com/owner/name`). Never its pinned image or any digest, the credentials it lends
+to preparation, its path, or how its commits are published; a command naming a home
+directory is refused. Each receiving node only stages the offer and notifies its
+operator, who sees what would change on the entry it lands on (the entry already
+answering for the repository, or one they name) and accepts or declines it. Offering and
+accepting are admin actions, confirmed with a passkey from off the node. Accepting keeps
+the entry's comments and its own fields, and the node then builds and pins its own image. An undecided
+offer is replaced by a newer one from the same node for the same repository, and lapses
+after 14 days.
 
 A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy
