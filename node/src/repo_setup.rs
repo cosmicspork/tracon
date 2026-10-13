@@ -546,9 +546,13 @@ pub async fn draft(
 /// What the entry says about its sessions' egress, and which credentials it
 /// lends its default branch's preparation, is kept as it was: neither is an
 /// agent's to propose.
-pub fn save(cfg: &Config, repo: &Path, entry: Repo) -> Result<String, String> {
-    let _edit = Config::edit_lock();
-    let mut file = Config::try_load()?;
+pub fn save(
+    cfg: &Config,
+    store: &std::sync::Arc<crate::store::Store>,
+    repo: &Path,
+    entry: Repo,
+    actor: &str,
+) -> Result<String, String> {
     let mut entries: Vec<Repo> = cfg.repos().as_ref().clone();
     let path = match entries.iter_mut().find(|current| current.matches(repo)) {
         Some(current) => {
@@ -571,9 +575,13 @@ pub fn save(cfg: &Config, repo: &Path, entry: Repo) -> Result<String, String> {
         }
     };
     crate::config::validate_repos(&entries)?;
-    file.repo = entries.clone();
-    file.save().map_err(|error| error.to_string())?;
-    cfg.live_repo.set(entries);
+    // As Settings writes it: the table the node runs on, edited into the
+    // file entry by entry so what is unchanged keeps its comments.
+    let outcome = crate::config::update(store, actor, |file| {
+        crate::config::Op::replace_repos(&file.repo, &entries)
+    })
+    .map_err(|error| error.to_string())?;
+    cfg.live_repo.set(outcome.config.repo.clone());
     Ok(path)
 }
 

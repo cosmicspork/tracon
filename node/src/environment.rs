@@ -466,14 +466,12 @@ pub fn session_grant(
 /// was asked. Returns the entry's path, as written.
 pub fn save_session_host(
     cfg: &Config,
-    store: &Store,
+    store: &std::sync::Arc<Store>,
     session_id: &str,
     host: &str,
 ) -> Result<String, String> {
     let repo = origin_repo(store, Some(session_id))?
         .ok_or("this session has no repository whose egress could keep it")?;
-    let _edit = Config::edit_lock();
-    let mut file = Config::try_load()?;
     let mut entries: Vec<crate::config::Repo> = cfg.repos().as_ref().clone();
     let path = match entries.iter_mut().find(|entry| entry.matches(&repo)) {
         None => {
@@ -502,9 +500,14 @@ pub fn save_session_host(
         }
     };
     crate::config::validate_repos(&entries)?;
-    file.repo = entries.clone();
-    file.save().map_err(|error| error.to_string())?;
-    cfg.live_repo.set(entries);
+    // The table the node runs on is what this decided against, so it is what
+    // is written; the file is edited entry by entry towards it.
+    let actor = format!("an approved egress ask (session {session_id})");
+    let outcome = crate::config::update(store, &actor, |file| {
+        crate::config::Op::replace_repos(&file.repo, &entries)
+    })
+    .map_err(|error| error.to_string())?;
+    cfg.live_repo.set(outcome.config.repo.clone());
     Ok(path)
 }
 

@@ -7,6 +7,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+pub mod edit;
+pub use edit::{edit, snapshot, update, EditError, EditOutcome, KeyPath, Op, Snapshot};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -657,9 +660,9 @@ impl Default for ReviewLimits {
 }
 
 impl ReviewLimits {
-    /// The defaults before they were raised. `Config::save` writes every key,
-    /// so a node that never touched the cap has these in its `node.toml` and
-    /// would otherwise keep them forever.
+    /// The defaults before they were raised. Saves once wrote every key, so a
+    /// node that never touched the cap has these in its `node.toml` and would
+    /// otherwise keep them forever.
     const RETIRED_DEFAULTS: (i64, usize) = (800, 40);
 
     fn lift_retired_defaults(&mut self) {
@@ -2183,115 +2186,80 @@ impl Config {
                     }
                     None => text,
                 };
-                let mut config: Self = toml::from_str(&text)
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                // From the text, not the struct: a file with no
-                // `[providers]` at all deserializes to the defaults whole.
-                config.declared_providers = declared_providers(&text);
-                for (name, provider) in default_providers() {
-                    config.providers.entry(name).or_insert(provider);
-                }
-                config.review.lift_retired_defaults();
-                if let Some(section) = retired_qa_section(&text) {
-                    tracing::warn!(
-                        "{}: [qa] is ignored; candidate QA deploys, browser runs and prototype builds were removed ({section})",
-                        path.display()
-                    );
-                }
-                // A built-in provider the operator wrote without models is
-                // not one with none: the section is usually there to set a
-                // credential name or an upstream, and an empty catalogue
-                // behind it starts no session. `models = []` is preserved as
-                // written only where the operator's file says so.
-                for (name, provider) in config.providers.iter_mut() {
-                    if provider.models.is_empty() {
-                        provider.models = default_models(name);
-                    }
-                }
-                config
-                    .docs
-                    .preview_origin()
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                config
-                    .ui
-                    .opencode_origin()
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                config
-                    .auth
-                    .public_origin()
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                validate_repos(&config.repo)
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                validate_services(&config.service)
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                config
-                    .runtime
-                    .kubernetes
-                    .validate()
-                    .map_err(|error| format!("{}: {error}", path.display()))?;
-                if let Some(contact) = config.notify.contact.as_deref() {
-                    validate_contact(contact)
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
-                }
-                Ok(config)
+                Self::from_toml(&text, path)
             }
             Err(_) => Ok(Self::default()),
         }
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
-        self.save_to(&Self::config_path())
-    }
-
-    /// Held from `try_load` to `save` by every edit of `node.toml` this
-    /// process makes. `save_to` writes the difference between the file as it
-    /// is now and `self`, so an edit loaded before another one was saved
-    /// writes that other edit's keys back to what it loaded: two settings
-    /// saved together, or an enrolment finishing while the repository table
-    /// is saved, would otherwise lose one of them. A `std` guard, so a
-    /// handler cannot hold it across an `.await`.
-    pub fn edit_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Write what changed, and only that.
-    ///
-    /// The file keeps every key it already had, and gains or changes only the
-    /// values that differ from what loading it gives. Serializing the whole
-    /// struct wrote every default into the file, where it then stayed fixed:
-    /// a node whose settings were saved once kept that release's harness image
-    /// (`runtime.kubernetes.harness_image`) through every upgrade after it,
-    /// because a written value is never a default again.
-    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+    /// A `node.toml` text as the node loads it, with every check a load
+    /// makes; `path` is only for the message. What `config::edit` holds a
+    /// result to before it writes it.
+    pub fn from_toml(text: &str, path: &Path) -> Result<Self, String> {
+        let mut config: Self =
+            toml::from_str(text).map_err(|error| format!("{}: {error}", path.display()))?;
+        // From the text, not the struct: a file with no
+        // `[providers]` at all deserializes to the defaults whole.
+        config.declared_providers = declared_providers(text);
+        for (name, provider) in default_providers() {
+            config.providers.entry(name).or_insert(provider);
         }
-        let (mut doc, before) = match std::fs::read_to_string(path) {
-            // A file that does not parse has nothing to keep: it is replaced,
-            // as it always was. (`put_config` refuses before reaching here.)
-            Ok(text) => match (
-                toml::from_str::<toml::Table>(&text),
-                Self::try_load_from(path),
-            ) {
-                (Ok(doc), Ok(before)) => (doc, before),
-                _ => (toml::Table::new(), Self::default()),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                (toml::Table::new(), Self::default())
+        config.review.lift_retired_defaults();
+        if let Some(section) = retired_qa_section(text) {
+            tracing::warn!(
+                "{}: [qa] is ignored; candidate QA deploys, browser runs and prototype builds were removed ({section})",
+                path.display()
+            );
+        }
+        // A built-in provider the operator wrote without models is
+        // not one with none: the section is usually there to set a
+        // credential name or an upstream, and an empty catalogue
+        // behind it starts no session. `models = []` is preserved as
+        // written only where the operator's file says so.
+        for (name, provider) in config.providers.iter_mut() {
+            if provider.models.is_empty() {
+                provider.models = default_models(name);
             }
-            Err(e) => return Err(e),
-        };
-        let before = toml::Table::try_from(&before).map_err(std::io::Error::other)?;
-        let after = toml::Table::try_from(self).map_err(std::io::Error::other)?;
-        write_changes(&mut doc, &before, &after, &[]);
-        let text = toml::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-        write_replacing(path, text.as_bytes())
+        }
+        config
+            .docs
+            .preview_origin()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        config
+            .ui
+            .opencode_origin()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        config
+            .auth
+            .public_origin()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_repos(&config.repo).map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_services(&config.service)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        config
+            .runtime
+            .kubernetes
+            .validate()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if let Some(contact) = config.notify.contact.as_deref() {
+            validate_contact(contact).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+        Ok(config)
     }
 }
 
+/// The table `value` serializes as, less every key whose value is what
+/// `T::default()` has there: an entry written this way says what the operator
+/// chose, and loads back the same.
+pub fn without_defaults<T: Serialize + Default>(value: &T) -> Result<toml::Table, String> {
+    let mut table = toml::Table::try_from(value).map_err(|e| e.to_string())?;
+    let defaults = toml::Table::try_from(T::default()).map_err(|e| e.to_string())?;
+    table.retain(|key, value| defaults.get(key) != Some(value));
+    Ok(table)
+}
+
 /// Replace `path` by renaming a finished file over it, so a reader never sees
-/// it truncated or half-written: `try_load` does not hold `edit_lock`, and an
+/// it truncated or half-written: `try_load` does not hold the edit lock, and an
 /// empty file parses as the defaults. A symlinked `node.toml` keeps its link,
 /// and the file keeps its mode.
 fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -2309,139 +2277,8 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// Carry into `doc` every value that differs between `before` (what the file
-/// loads as) and `after` (what is being saved), leaving everything else as the
-/// file had it — present or absent.
-fn write_changes(doc: &mut toml::Table, before: &toml::Table, after: &toml::Table, at: &[&str]) {
-    for key in before.keys() {
-        if !after.contains_key(key) {
-            doc.remove(key);
-        }
-    }
-    for (key, now) in after {
-        let was = before.get(key);
-        if was == Some(now) {
-            continue;
-        }
-        // A provider the file does not name comes from the defaults on load,
-        // entry by entry: a partial entry written here would shadow the whole
-        // default one and lose its credential and upstream. Write it whole.
-        let whole_entry = at == ["providers"] && !doc.contains_key(key);
-        match (was, now) {
-            (Some(toml::Value::Table(was)), toml::Value::Table(now)) if !whole_entry => {
-                let entry = doc
-                    .entry(key.clone())
-                    .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-                if !entry.is_table() {
-                    *entry = toml::Value::Table(toml::Table::new());
-                }
-                if let toml::Value::Table(entry) = entry {
-                    let mut path = at.to_vec();
-                    path.push(key.as_str());
-                    write_changes(entry, was, now, &path);
-                }
-            }
-            _ => {
-                doc.insert(key.clone(), now.clone());
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-
-    /// Saving writes the change, not the release's defaults: a default that is
-    /// written stops being one, which is how a node's harness image stayed at
-    /// the release its settings were first saved under.
-    #[test]
-    fn a_save_writes_what_changed_and_no_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("node.toml");
-        let mut cfg = Config::default();
-        cfg.harness.id = "claude".into();
-        cfg.save_to(&path).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("claude"), "{text}");
-        assert!(
-            !text.contains("harness_image"),
-            "a default was written: {text}"
-        );
-        assert!(
-            !text.contains("[providers"),
-            "a default was written: {text}"
-        );
-        let back = Config::try_load_from(&path).unwrap();
-        assert_eq!(back.harness.id, "claude");
-        assert_eq!(
-            back.runtime.kubernetes.harness_image,
-            Config::default().runtime.kubernetes.harness_image
-        );
-    }
-
-    #[test]
-    fn a_save_keeps_what_the_file_already_says() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("node.toml");
-        std::fs::write(
-            &path,
-            "node_name = \"kept\"\n\n[session]\nbudget_tokens = 5\n",
-        )
-        .unwrap();
-        let mut cfg = Config::try_load_from(&path).unwrap();
-        cfg.harness.id = "claude".into();
-        cfg.save_to(&path).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("node_name = \"kept\""), "{text}");
-        assert!(text.contains("budget_tokens = 5"), "{text}");
-        assert!(!text.contains("harness_image"), "{text}");
-        assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "claude");
-    }
-
-    /// The save renames a new file into place, which must not turn a
-    /// symlinked `node.toml` into a copy or reset its mode.
-    #[cfg(unix)]
-    #[test]
-    fn a_save_keeps_the_files_link_and_mode() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real.toml");
-        let link = dir.path().join("node.toml");
-        std::fs::write(&real, "node_name = \"n\"\n").unwrap();
-        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        let mut cfg = Config::try_load_from(&link).unwrap();
-        cfg.harness.id = "claude".into();
-        cfg.save_to(&link).unwrap();
-        assert!(std::fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(std::fs::read_to_string(&real).unwrap().contains("claude"));
-        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o640);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
-    }
-
-    /// A provider the file never named is a default entry; editing it must not
-    /// leave a partial one that shadows its credential, or drop the others.
-    #[test]
-    fn a_provider_edit_on_a_file_without_providers_keeps_them_whole() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("node.toml");
-        std::fs::write(&path, "node_name = \"n\"\n").unwrap();
-        let mut cfg = Config::try_load_from(&path).unwrap();
-        let codex = cfg.providers.get_mut("openai-codex").unwrap();
-        codex.models.truncate(1);
-        let want = codex.models.clone();
-        cfg.save_to(&path).unwrap();
-        let back = Config::try_load_from(&path).unwrap();
-        let codex = &back.providers["openai-codex"];
-        assert_eq!(codex.models, want);
-        assert_eq!(codex.credential, "openai-codex");
-        assert!(!codex.upstream.is_empty());
-        assert!(back.providers.contains_key("anthropic"));
-    }
 
     /// The guard that stands between `cargo test` and the operator's sealed
     /// credential store, and the override integration tests use because they
@@ -2883,11 +2720,21 @@ checks = []
         assert_eq!(config.repo[0].prepare.len(), 1);
         assert_eq!(config.repo[1].checks.as_deref(), Some(&[][..]));
         assert!(config.repo[1].image.is_none());
-        config.save_to(&path).unwrap();
+        // Writing the table back as it loaded touches nothing.
+        assert!(Op::replace_repos(&config.repo, &config.repo)
+            .unwrap()
+            .is_empty());
+        let mut grown = config.repo.clone();
+        grown[1].timeout_secs = Some(60);
+        let ops = Op::replace_repos(&config.repo, &grown).unwrap();
+        let store = std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap());
+        edit::edit_at(&path, &store, &ops, None, "test").unwrap();
         let back = Config::try_load_from(&path).unwrap();
         assert_eq!(back.repo.len(), 2);
         assert_eq!(back.repo[1].checks.as_deref(), Some(&[][..]));
-        assert!(back.repo[1].image.is_none() && back.repo[1].timeout_secs.is_none());
+        assert!(back.repo[1].image.is_none());
+        assert_eq!(back.repo[1].timeout_secs, Some(60));
+        assert_eq!(back.repo[0].timeout_secs, Some(1800));
 
         std::fs::write(&path, "[[repo]]\npath = \"/srv/x\"\negress = [\"nope\"]\n").unwrap();
         assert!(Config::try_load_from(&path).is_err());
@@ -2905,9 +2752,10 @@ checks = []
         )
         .unwrap();
         assert!(Config::try_load_from(&path).is_err());
-        let mut c = Config::default();
-        c.mesh.hub_url = Some("https://hub.example".into());
-        c.save_to(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let store = std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap());
+        let hub = Op::set(KeyPath::keys(&["mesh", "hub_url"]), "https://hub.example");
+        edit::edit_at(&path, &store, &[hub], None, "test").unwrap();
         let back = Config::try_load_from(&path).unwrap();
         assert_eq!(back.mesh.hub_url.as_deref(), Some("https://hub.example"));
         assert_eq!(back.mesh.heartbeat_secs, 60);

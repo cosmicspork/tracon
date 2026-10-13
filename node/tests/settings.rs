@@ -715,6 +715,33 @@ async fn mesh_urls_are_validated_before_configuration_changes() {
     }
 }
 
+/// A save through Settings goes through the one audited edit path: the row
+/// names who and which keys, and saving the same values again writes nothing.
+#[tokio::test]
+async fn a_settings_save_is_audited_and_a_repeat_writes_nothing() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let current = Config::try_load().unwrap().review.max_files;
+    let next = if current == 41 { 42 } else { 41 };
+    let patch = json!({ "review": { "max_files": next } });
+    let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch.clone())).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["changed"], json!(["review.max_files"]));
+    assert_eq!(v["restart_required"], true);
+    let rows = n.store.config_audit_recent(10).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].actor, "Settings");
+    assert_eq!(rows[0].changes[0]["key"], "review.max_files");
+    assert_eq!(rows[0].changes[0]["after"], next);
+    assert_eq!(Config::try_load().unwrap().review.max_files, next);
+
+    let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["changed"], json!([]));
+    assert_eq!(v["restart_required"], false);
+    assert_eq!(n.store.config_audit_recent(10).unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn an_unknown_setting_is_refused_rather_than_dropped() {
     let n = node();

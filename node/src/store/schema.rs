@@ -1375,6 +1375,20 @@ const MIGRATIONS: &[&str] = &[
         announced_ms INTEGER NOT NULL
     );
     "#,
+    // 61: every write of node.toml, by whom, and what it changed. The hashes
+    // are of the file's bytes before and after; `changes_json` names each
+    // key with its old and new value, a secret's values redacted.
+    r#"
+    CREATE TABLE config_audit (
+        id           TEXT PRIMARY KEY,
+        at_ms        INTEGER NOT NULL,
+        actor        TEXT NOT NULL,
+        old_hash     TEXT NOT NULL,
+        new_hash     TEXT NOT NULL,
+        changes_json TEXT NOT NULL
+    );
+    CREATE INDEX config_audit_at ON config_audit(at_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

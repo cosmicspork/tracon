@@ -1,14 +1,14 @@
 //! The configuration the interface may read and write.
 //!
-//! An allowlist rather than the whole of `node.toml`, for two reasons. The
-//! file carries things that are not settings — the mesh's hub, the runtime
-//! kind — and writing it is a full re-serialise, so every key the interface
-//! does not understand would be a key it could silently drop. What is here is
-//! what an operator sets while standing a node up.
+//! An allowlist rather than the whole of `node.toml`: the file carries things
+//! that are not settings (the mesh's hub, the runtime kind), and what is here
+//! is what an operator sets while standing a node up. A patch becomes typed
+//! operations on the file (`config::edit`), which writes them in place and
+//! audits them.
 
 use serde_json::{json, Value};
 
-use crate::config::{Config, ModelDecl};
+use crate::config::{Config, KeyPath, ModelDecl, Op};
 
 /// Config as the interface sees it: the writable keys, plus a little context
 /// it needs to explain itself. No secrets — the broker owns those, and none
@@ -69,18 +69,38 @@ pub fn config_view(cfg: &Config) -> Value {
     })
 }
 
-/// Apply a patch of the allowlisted keys, returning what changed.
+/// What a patch asks for: the settings it changes, by the names the form
+/// uses, and the edit of `node.toml` that makes them so.
+#[derive(Debug, Default)]
+pub struct Patch {
+    pub changed: Vec<String>,
+    pub ops: Vec<Op>,
+}
+
+impl Patch {
+    fn set(&mut self, key: &str, value: impl Into<toml::Value>) -> Result<(), String> {
+        let path = KeyPath::parse(key)?;
+        self.ops.push(Op::set(path, value));
+        self.changed.push(key.to_string());
+        Ok(())
+    }
+}
+
+/// Map a patch of the allowlisted keys onto an edit of `node.toml`,
+/// against the configuration `cfg` the file loads as now. Only what differs
+/// from `cfg` becomes an operation, so the patch says honestly whether
+/// anything changed.
 ///
 /// Unknown keys are refused rather than ignored: a settings form that silently
 /// drops what it was given is worse than one that says it cannot.
-pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
+pub fn apply(cfg: &Config, patch: &Value) -> Result<Patch, String> {
     let Some(obj) = patch.as_object() else {
         return Err("expected an object".into());
     };
-    let mut changed = Vec::new();
+    let mut out = Patch::default();
     for (key, value) in obj {
         match key.as_str() {
-            "node_name" => set_string(&mut cfg.node_name, value, "node_name", &mut changed)?,
+            "node_name" => set_string(&cfg.node_name, value, "node_name", &mut out)?,
             "harness" => {
                 for (k, v) in object(value, "harness")? {
                     match k.as_str() {
@@ -98,21 +118,12 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                                     crate::adapter::KNOWN.join(", ")
                                 ));
                             }
-                            set_string(&mut cfg.harness.id, v, "harness.id", &mut changed)?
+                            set_string(&cfg.harness.id, v, "harness.id", &mut out)?
                         }
-                        "version" => set_string(
-                            &mut cfg.harness.version,
-                            v,
-                            "harness.version",
-                            &mut changed,
-                        )?,
-                        "tools" => {
-                            let list = string_list(v, "harness.tools")?;
-                            if cfg.harness.tools != list {
-                                cfg.harness.tools = list;
-                                changed.push("harness.tools".into());
-                            }
+                        "version" => {
+                            set_string(&cfg.harness.version, v, "harness.version", &mut out)?
                         }
+                        "tools" => set_list(&cfg.harness.tools, v, "harness.tools", &mut out)?,
                         other => return Err(unknown(&format!("harness.{other}"))),
                     }
                 }
@@ -120,29 +131,29 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             "session" => {
                 for (k, v) in object(value, "session")? {
                     match k.as_str() {
-                        "budget_tokens" => set_i64(
-                            &mut cfg.session.budget_tokens,
+                        "budget_tokens" => set_whole(
+                            cfg.session.budget_tokens,
                             v,
                             "session.budget_tokens",
-                            &mut changed,
+                            &mut out,
                         )?,
-                        "permission_timeout_secs" => set_u64(
-                            &mut cfg.session.permission_timeout_secs,
+                        "permission_timeout_secs" => set_whole(
+                            cfg.session.permission_timeout_secs,
                             v,
                             "session.permission_timeout_secs",
-                            &mut changed,
+                            &mut out,
                         )?,
-                        "approval_expiry_secs" => set_u64(
-                            &mut cfg.session.approval_expiry_secs,
+                        "approval_expiry_secs" => set_whole(
+                            cfg.session.approval_expiry_secs,
                             v,
                             "session.approval_expiry_secs",
-                            &mut changed,
+                            &mut out,
                         )?,
                         "default_channel" => set_string(
-                            &mut cfg.session.default_channel,
+                            &cfg.session.default_channel,
                             v,
                             "session.default_channel",
-                            &mut changed,
+                            &mut out,
                         )?,
                         other => return Err(unknown(&format!("session.{other}"))),
                     }
@@ -151,17 +162,17 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             "review" => {
                 for (k, v) in object(value, "review")? {
                     match k.as_str() {
-                        "max_diff_lines" => set_i64(
-                            &mut cfg.review.max_diff_lines,
+                        "max_diff_lines" => set_whole(
+                            cfg.review.max_diff_lines,
                             positive(v, "review.max_diff_lines")?,
                             "review.max_diff_lines",
-                            &mut changed,
+                            &mut out,
                         )?,
-                        "max_files" => set_usize(
-                            &mut cfg.review.max_files,
+                        "max_files" => set_whole(
+                            cfg.review.max_files,
                             positive(v, "review.max_files")?,
                             "review.max_files",
-                            &mut changed,
+                            &mut out,
                         )?,
                         other => return Err(unknown(&format!("review.{other}"))),
                     }
@@ -171,11 +182,7 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                 for (k, v) in object(value, "gateway")? {
                     match k.as_str() {
                         "allow_hosts" => {
-                            let list = string_list(v, "gateway.allow_hosts")?;
-                            if cfg.gateway.allow_hosts != list {
-                                cfg.gateway.allow_hosts = list;
-                                changed.push("gateway.allow_hosts".into());
-                            }
+                            set_list(&cfg.gateway.allow_hosts, v, "gateway.allow_hosts", &mut out)?
                         }
                         other => return Err(unknown(&format!("gateway.{other}"))),
                     }
@@ -184,11 +191,9 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             "publish" => {
                 for (k, v) in object(value, "publish")? {
                     match k.as_str() {
-                        "gh" => set_string(&mut cfg.publish.gh, v, "publish.gh", &mut changed)?,
-                        "glab" => {
-                            set_string(&mut cfg.publish.glab, v, "publish.glab", &mut changed)?
-                        }
-                        "git" => set_string(&mut cfg.publish.git, v, "publish.git", &mut changed)?,
+                        "gh" => set_string(&cfg.publish.gh, v, "publish.gh", &mut out)?,
+                        "glab" => set_string(&cfg.publish.glab, v, "publish.glab", &mut out)?,
+                        "git" => set_string(&cfg.publish.git, v, "publish.git", &mut out)?,
                         other => return Err(unknown(&format!("publish.{other}"))),
                     }
                 }
@@ -196,12 +201,9 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             "boundary" => {
                 for (k, v) in object(value, "boundary")? {
                     match k.as_str() {
-                        "podman" => set_string(
-                            &mut cfg.boundary.podman,
-                            v,
-                            "boundary.podman",
-                            &mut changed,
-                        )?,
+                        "podman" => {
+                            set_string(&cfg.boundary.podman, v, "boundary.podman", &mut out)?
+                        }
                         other => return Err(unknown(&format!("boundary.{other}"))),
                     }
                 }
@@ -210,30 +212,31 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                 for (k, v) in object(value, "supervision")? {
                     match k.as_str() {
                         "checks" => {
-                            let checks = string_list(v, "supervision.checks")?;
-                            if cfg.supervision.checks != checks {
-                                cfg.supervision.checks = checks;
-                                changed.push("supervision.checks".into());
-                            }
+                            set_list(&cfg.supervision.checks, v, "supervision.checks", &mut out)?
                         }
-                        "timeout_secs" => set_u64(
-                            &mut cfg.supervision.timeout_secs,
+                        "timeout_secs" => set_whole(
+                            cfg.supervision.timeout_secs,
                             v,
                             "supervision.timeout_secs",
-                            &mut changed,
+                            &mut out,
                         )?,
                         "dependency_inputs" => {
-                            let inputs = string_map(v, "supervision.dependency_inputs")?;
+                            let key = "supervision.dependency_inputs";
+                            let inputs = string_map(v, key)?;
                             if cfg.supervision.dependency_inputs != inputs {
-                                cfg.supervision.dependency_inputs = inputs;
-                                changed.push("supervision.dependency_inputs".into());
+                                out.set(
+                                    key,
+                                    toml::Value::Table(
+                                        inputs.into_iter().map(|(k, v)| (k, v.into())).collect(),
+                                    ),
+                                )?;
                             }
                         }
-                        "max_snapshot_bytes" => set_u64(
-                            &mut cfg.supervision.max_snapshot_bytes,
+                        "max_snapshot_bytes" => set_whole(
+                            cfg.supervision.max_snapshot_bytes,
                             v,
                             "supervision.max_snapshot_bytes",
-                            &mut changed,
+                            &mut out,
                         )?,
                         other => return Err(unknown(&format!("supervision.{other}"))),
                     }
@@ -242,12 +245,14 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             "external" => {
                 for (k, v) in object(value, "external")? {
                     match k.as_str() {
-                        "enabled" => set_bool(
-                            &mut cfg.external.enabled,
-                            v,
-                            "external.enabled",
-                            &mut changed,
-                        )?,
+                        "enabled" => {
+                            let next = v
+                                .as_bool()
+                                .ok_or("`external.enabled` expects true or false")?;
+                            if cfg.external.enabled != next {
+                                out.set("external.enabled", next)?;
+                            }
+                        }
                         // External harnesses no longer attach, so nothing
                         // times out; an older interface may still send it.
                         "idle_timeout_secs" => {}
@@ -258,20 +263,14 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             "launch" => {
                 for (k, v) in object(value, "launch")? {
                     match k.as_str() {
-                        "plugins" => {
-                            let plugins = string_list(v, "launch.plugins")?;
-                            if cfg.launch.plugins != plugins {
-                                cfg.launch.plugins = plugins;
-                                changed.push("launch.plugins".into());
-                            }
-                        }
+                        "plugins" => set_list(&cfg.launch.plugins, v, "launch.plugins", &mut out)?,
                         other => return Err(unknown(&format!("launch.{other}"))),
                     }
                 }
             }
             "providers" => {
                 for (name, entry) in object(value, "providers")? {
-                    let Some(provider) = cfg.providers.get_mut(name) else {
+                    let Some(provider) = cfg.providers.get(name) else {
                         return Err(format!(
                             "`providers.{name}` is not a provider on this node; add it to node.toml first"
                         ));
@@ -281,10 +280,31 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
                             "models" => {
                                 let key = format!("providers.{name}.models");
                                 let models = model_list(v, &key)?;
-                                if provider.models != models {
-                                    provider.models = models;
-                                    changed.push(key);
+                                if provider.models == models {
+                                    continue;
                                 }
+                                let at = KeyPath::keys(&["providers", name]);
+                                // A provider the file does not name comes
+                                // from the defaults on load, entry by entry:
+                                // a partial entry written here would shadow
+                                // the whole default one and lose its
+                                // credential and upstream. Write it whole.
+                                let listed = toml::Value::try_from(&models)
+                                    .map_err(|e| format!("`{key}`: {e}"))?;
+                                let op = match cfg.declared_providers.contains(name) {
+                                    true => Op::set(at.key("models"), listed),
+                                    false => {
+                                        let mut whole = toml::Table::try_from(provider)
+                                            .map_err(|e| format!("`{key}`: {e}"))?;
+                                        // Written even when empty: `models = []`
+                                        // is a declaration, and leaving it out
+                                        // would load the defaults back.
+                                        whole.insert("models".into(), listed);
+                                        Op::set(at, whole)
+                                    }
+                                };
+                                out.ops.push(op);
+                                out.changed.push(key);
                             }
                             other => return Err(unknown(&format!("providers.{name}.{other}"))),
                         }
@@ -294,23 +314,7 @@ pub fn apply(cfg: &mut Config, patch: &Value) -> Result<Vec<String>, String> {
             other => return Err(unknown(other)),
         }
     }
-    Ok(changed)
-}
-
-fn set_bool(
-    slot: &mut bool,
-    v: &Value,
-    key: &str,
-    changed: &mut Vec<String>,
-) -> Result<(), String> {
-    let next = v
-        .as_bool()
-        .ok_or_else(|| format!("`{key}` expects true or false"))?;
-    if *slot != next {
-        *slot = next;
-        changed.push(key.to_string());
-    }
-    Ok(())
+    Ok(out)
 }
 
 fn unknown(key: &str) -> String {
@@ -334,6 +338,14 @@ fn string_list(v: &Value, key: &str) -> Result<Vec<String>, String> {
                 .ok_or_else(|| format!("`{key}` expects a list of strings"))
         })
         .collect()
+}
+
+fn set_list(current: &[String], v: &Value, key: &str, out: &mut Patch) -> Result<(), String> {
+    let next = string_list(v, key)?;
+    if current != next.as_slice() {
+        out.set(key, next)?;
+    }
+    Ok(())
 }
 
 /// A catalogue as the form sends it: every entry needs an id, ids are unique,
@@ -376,27 +388,25 @@ fn string_map(v: &Value, key: &str) -> Result<std::collections::BTreeMap<String,
         .collect()
 }
 
-fn set_string(
-    slot: &mut String,
-    v: &Value,
-    key: &str,
-    changed: &mut Vec<String>,
-) -> Result<(), String> {
+fn set_string(current: &str, v: &Value, key: &str, out: &mut Patch) -> Result<(), String> {
     let next = v
         .as_str()
         .ok_or_else(|| format!("`{key}` expects a string"))?;
-    if slot != next {
-        *slot = next.to_string();
-        changed.push(key.to_string());
+    if current != next {
+        out.set(key, next)?;
     }
     Ok(())
 }
 
-fn set_u64(slot: &mut u64, v: &Value, key: &str, changed: &mut Vec<String>) -> Result<(), String> {
-    let next = whole(v, key)?;
-    if *slot != next {
-        *slot = next;
-        changed.push(key.to_string());
+/// A whole-number setting, whatever integer type the struct keeps it in.
+/// TOML integers are signed 64-bit, so that is the ceiling.
+fn set_whole<N>(current: N, v: &Value, key: &str, out: &mut Patch) -> Result<(), String>
+where
+    N: TryInto<i64>,
+{
+    let next = i64::try_from(whole(v, key)?).map_err(|_| format!("`{key}` is too large"))?;
+    if current.try_into().ok() != Some(next) {
+        out.set(key, next)?;
     }
     Ok(())
 }
@@ -414,32 +424,39 @@ fn positive<'a>(v: &'a Value, key: &str) -> Result<&'a Value, String> {
     Ok(v)
 }
 
-fn set_i64(slot: &mut i64, v: &Value, key: &str, changed: &mut Vec<String>) -> Result<(), String> {
-    let next = whole(v, key)? as i64;
-    if *slot != next {
-        *slot = next;
-        changed.push(key.to_string());
-    }
-    Ok(())
-}
-
-fn set_usize(
-    slot: &mut usize,
-    v: &Value,
-    key: &str,
-    changed: &mut Vec<String>,
-) -> Result<(), String> {
-    let next = whole(v, key)? as usize;
-    if *slot != next {
-        *slot = next;
-        changed.push(key.to_string());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node.toml as the patches land on it: each patch is mapped to
+    /// operations against what the file loads as, the operations are applied
+    /// to its text, and the text is loaded again.
+    struct File {
+        text: String,
+        cfg: Config,
+    }
+
+    impl File {
+        fn new() -> Self {
+            Self::from("")
+        }
+
+        fn from(text: &str) -> Self {
+            let cfg = Config::from_toml(text, std::path::Path::new("node.toml")).unwrap();
+            Self {
+                text: text.into(),
+                cfg,
+            }
+        }
+
+        fn apply(&mut self, patch: &Value) -> Result<Vec<String>, String> {
+            let patch = apply(&self.cfg, patch)?;
+            self.text = crate::config::edit::apply_to_text(&self.text, &patch.ops)
+                .map_err(|e| e.to_string())?;
+            self.cfg = Config::from_toml(&self.text, std::path::Path::new("node.toml"))?;
+            Ok(patch.changed)
+        }
+    }
 
     #[test]
     fn a_review_cap_of_zero_is_refused() {
@@ -491,9 +508,8 @@ mod tests {
     /// whole numbers, and the rest of the provider entry untouched.
     #[test]
     fn provider_models_are_written_and_the_rest_of_the_entry_is_not() {
-        let mut cfg = Config::default();
-        let changed = apply(
-            &mut cfg,
+        let mut file = File::new();
+        let changed = file.apply(
             &json!({ "providers": { "openai-codex": { "models": [
                 { "id": " gpt-6 ", "name": "GPT-6", "context": 1_000_000, "output": 200_000, "reasoning": true },
                 { "id": "gpt-6-mini" }
@@ -501,49 +517,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(changed, ["providers.openai-codex.models"]);
-        let models = &cfg.providers["openai-codex"].models;
+        let models = &file.cfg.providers["openai-codex"].models;
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "gpt-6");
         assert_eq!(models[0].context, 1_000_000);
         assert_eq!(models[1].label(), "gpt-6-mini");
         assert_eq!(
-            cfg.providers["openai-codex"].upstream,
+            file.cfg.providers["openai-codex"].upstream,
             "https://chatgpt.com/backend-api"
         );
 
         // Re-applying is a no-op; an empty list is a decision, not an error.
-        let again = apply(&mut cfg, &json!({ "providers": { "openai-codex": { "models": [
+        let again = file.apply(&json!({ "providers": { "openai-codex": { "models": [
             { "id": "gpt-6", "name": "GPT-6", "context": 1_000_000, "output": 200_000, "reasoning": true },
             { "id": "gpt-6-mini" }
         ] } } })).unwrap();
         assert!(again.is_empty());
-        let cleared = apply(
-            &mut cfg,
-            &json!({ "providers": { "anthropic": { "models": [] } } }),
-        )
-        .unwrap();
+        let cleared = file
+            .apply(&json!({ "providers": { "anthropic": { "models": [] } } }))
+            .unwrap();
         assert_eq!(cleared, ["providers.anthropic.models"]);
-        assert!(cfg.providers["anthropic"].models.is_empty());
+        assert!(file.text.contains("models = []"), "{}", file.text);
 
-        let dup = apply(
-            &mut cfg,
+        let dup = file.apply(
             &json!({ "providers": { "anthropic": { "models": [{ "id": "a" }, { "id": "a" }] } } }),
         );
         assert!(dup.unwrap_err().contains("twice"));
-        let blank = apply(
-            &mut cfg,
-            &json!({ "providers": { "anthropic": { "models": [{ "id": "  " }] } } }),
-        );
+        let blank =
+            file.apply(&json!({ "providers": { "anthropic": { "models": [{ "id": "  " }] } } }));
         assert!(blank.unwrap_err().contains("without an id"));
-        let nobody = apply(
-            &mut cfg,
-            &json!({ "providers": { "nobody": { "models": [] } } }),
-        );
+        let nobody = file.apply(&json!({ "providers": { "nobody": { "models": [] } } }));
         assert!(nobody.unwrap_err().contains("not a provider"));
-        let upstream = apply(
-            &mut cfg,
-            &json!({ "providers": { "anthropic": { "upstream": "http://x" } } }),
-        );
+        let upstream =
+            file.apply(&json!({ "providers": { "anthropic": { "upstream": "http://x" } } }));
         assert!(upstream
             .unwrap_err()
             .contains("providers.anthropic.upstream"));
@@ -551,67 +557,69 @@ mod tests {
 
     #[test]
     fn a_patch_applies_only_what_changed() {
-        let mut cfg = Config::default();
-        let before = cfg.harness.id.clone();
-        let changed = apply(
-            &mut cfg,
-            &json!({ "harness": { "id": "claude" }, "session": { "budget_tokens": 5_000_000 } }),
+        let mut file = File::new();
+        let before = file.cfg.harness.id.clone();
+        let changed = file.apply(&json!({ "harness": { "id": "claude" }, "session": { "budget_tokens": 5_000_000 } }),
         )
         .unwrap();
-        assert_eq!(cfg.harness.id, "claude");
-        assert_eq!(cfg.session.budget_tokens, 5_000_000);
+        assert_eq!(file.cfg.harness.id, "claude");
+        assert_eq!(file.cfg.session.budget_tokens, 5_000_000);
         assert!(changed.contains(&"harness.id".to_string()));
         assert!(changed.contains(&"session.budget_tokens".to_string()));
-        assert_ne!(before, cfg.harness.id);
+        assert_ne!(before, file.cfg.harness.id);
 
         // Re-applying the same values changes nothing, so the interface can
         // say honestly whether a restart is owed.
-        let again = apply(&mut cfg, &json!({ "harness": { "id": "claude" } })).unwrap();
+        let again = file
+            .apply(&json!({ "harness": { "id": "claude" } }))
+            .unwrap();
         assert!(again.is_empty());
     }
 
     #[test]
     fn a_harness_the_node_cannot_run_is_never_written() {
-        let mut cfg = Config::default();
-        let err = apply(&mut cfg, &json!({ "harness": { "id": "omp" } })).unwrap_err();
+        let mut file = File::new();
+        let err = file
+            .apply(&json!({ "harness": { "id": "omp" } }))
+            .unwrap_err();
         assert!(err.contains("was removed"), "{err}");
-        let err = apply(&mut cfg, &json!({ "harness": { "id": "aider" } })).unwrap_err();
+        let err = file
+            .apply(&json!({ "harness": { "id": "aider" } }))
+            .unwrap_err();
         assert!(err.contains("opencode"), "{err}");
-        assert_eq!(cfg.harness.id, Config::default().harness.id);
+        assert_eq!(file.cfg.harness.id, Config::default().harness.id);
     }
 
     #[test]
     fn the_default_channel_is_a_session_setting() {
-        let mut cfg = Config::default();
-        assert_eq!(config_view(&cfg)["session"]["default_channel"], "");
-        let changed = apply(
-            &mut cfg,
-            &json!({ "session": { "default_channel": "work" } }),
-        )
-        .unwrap();
+        let mut file = File::new();
+        assert_eq!(config_view(&file.cfg)["session"]["default_channel"], "");
+        let changed = file
+            .apply(&json!({ "session": { "default_channel": "work" } }))
+            .unwrap();
         assert_eq!(changed, vec!["session.default_channel"]);
-        assert_eq!(cfg.session.default_channel, "work");
-        assert_eq!(config_view(&cfg)["session"]["default_channel"], "work");
+        assert_eq!(file.cfg.session.default_channel, "work");
+        assert_eq!(config_view(&file.cfg)["session"]["default_channel"], "work");
         // Clearing it is a change too.
-        let changed = apply(&mut cfg, &json!({ "session": { "default_channel": "" } })).unwrap();
+        let changed = file
+            .apply(&json!({ "session": { "default_channel": "" } }))
+            .unwrap();
         assert_eq!(changed, vec!["session.default_channel"]);
     }
 
     #[test]
     fn operator_can_set_candidate_check_identities() {
-        let mut cfg = Config::default();
-        let changed = apply(
-            &mut cfg,
-            &json!({
+        let mut file = File::new();
+        let changed = file
+            .apply(&json!({
                 "supervision": {
                     "checks": ["cargo test --locked"],
                     "timeout_secs": 120,
                     "dependency_inputs": { "lockfile": "sha256:abc" },
                     "max_snapshot_bytes": 1048576,
                 }
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         assert_eq!(
             changed,
             vec![
@@ -622,30 +630,38 @@ mod tests {
             ]
         );
         assert_eq!(
-            cfg.supervision.checks,
+            file.cfg.supervision.checks,
             vec!["cargo test --locked".to_string()]
         );
         assert_eq!(
-            cfg.supervision.dependency_inputs.get("lockfile"),
+            file.cfg.supervision.dependency_inputs.get("lockfile"),
             Some(&"sha256:abc".to_string())
         );
     }
 
     #[test]
     fn an_unknown_key_is_refused_rather_than_dropped() {
-        let mut cfg = Config::default();
-        let err = apply(&mut cfg, &json!({ "mesh": { "hub_url": "https://x" } })).unwrap_err();
+        let mut file = File::new();
+        let err = file
+            .apply(&json!({ "mesh": { "hub_url": "https://x" } }))
+            .unwrap_err();
         assert!(err.contains("mesh"), "{err}");
-        let err = apply(&mut cfg, &json!({ "harness": { "nope": 1 } })).unwrap_err();
+        let err = file
+            .apply(&json!({ "harness": { "nope": 1 } }))
+            .unwrap_err();
         assert!(err.contains("harness.nope"), "{err}");
     }
 
     #[test]
     fn a_wrong_type_is_refused_with_the_key_named() {
-        let mut cfg = Config::default();
-        let err = apply(&mut cfg, &json!({ "session": { "budget_tokens": "lots" } })).unwrap_err();
+        let mut file = File::new();
+        let err = file
+            .apply(&json!({ "session": { "budget_tokens": "lots" } }))
+            .unwrap_err();
         assert!(err.contains("session.budget_tokens"), "{err}");
-        let err = apply(&mut cfg, &json!({ "gateway": { "allow_hosts": "a" } })).unwrap_err();
+        let err = file
+            .apply(&json!({ "gateway": { "allow_hosts": "a" } }))
+            .unwrap_err();
         assert!(err.contains("gateway.allow_hosts"), "{err}");
     }
 }

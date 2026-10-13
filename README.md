@@ -901,7 +901,12 @@ which reads a file and needs no node at all. `--help` on any of them says more.
 
 ### Configuration
 
-`node.toml` is optional; every key has a default. The full set, with defaults:
+`node.toml` is optional; every key has a default. When the node writes it (Settings,
+`tracon repo set`, `tracon mesh init`, an approved egress ask), it edits the file in place:
+your comments, key order and formatting stay, only the keys that changed are touched, and a
+result that would not load is refused before anything is written. Each write is recorded
+with who made it and which keys it changed, and pushed to your subscribed devices
+("node.toml changed: ... by ..."). The full set, with defaults:
 
 ```toml
 node_name = "<hostname>"            # how this node is named in the mesh

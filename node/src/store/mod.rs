@@ -21,6 +21,7 @@ use serde_json::Value;
 pub mod approvals;
 pub mod authority;
 pub use authority::*;
+pub mod config_audit;
 pub mod context;
 pub mod continuation;
 pub mod corpus;
