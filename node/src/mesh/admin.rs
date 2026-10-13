@@ -125,6 +125,11 @@ pub fn admit(
     if matches!(command, Command::ConfigRead) {
         return Ok(None);
     }
+    if let Command::ConfigPatch { not_after_ms, .. } = command {
+        if now > not_after_ms.saturating_add(DEADLINE_SKEW_MS) {
+            return Err("this edit expired before it arrived; it was not run".into());
+        }
+    }
     let Some(statement) = statement_of(command) else {
         return Err(
             "an admin command from a peer must carry the statement its operator confirmed with \

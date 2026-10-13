@@ -5663,7 +5663,7 @@ async fn admin_on_peer(
     line: &str,
     command: impl Fn(Option<proto::admin::AdminStatement>) -> proto::frame::Command,
     timeout: std::time::Duration,
-) -> Result<Json<serde_json::Value>, super::peer_admin::Refused> {
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
     let op_hash = crate::mesh::admin::op_hash(node_id, &command(None));
     let summary =
         super::peer_admin::summary_for(s, node_id, line).map_err(super::peer_admin::refused)?;
@@ -5680,7 +5680,7 @@ async fn admin_on_peer(
 fn admin_body<T: serde::de::DeserializeOwned + Default>(
     parts: &axum::http::request::Parts,
     body: &[u8],
-) -> Result<T, super::peer_admin::Refused> {
+) -> Result<T, super::config_api::Refused> {
     super::passkey::json_or_empty(&parts.headers, body).map_err(super::peer_admin::refused)?;
     if body.is_empty() {
         return Ok(T::default());
@@ -5702,7 +5702,7 @@ pub async fn node_connect_provider(
     Path((node_id, name)): Path<(String, String)>,
     parts: axum::http::request::Parts,
     bytes: axum::body::Bytes,
-) -> Result<Json<serde_json::Value>, super::peer_admin::Refused> {
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
     let body: ConnectBody = admin_body(&parts, &bytes)?;
     if node_id == s.node_id {
         super::passkey::authorize(&s, &parts, &bytes)
@@ -5739,7 +5739,7 @@ pub async fn node_provider_code(
     Path((node_id, name)): Path<(String, String)>,
     parts: axum::http::request::Parts,
     bytes: axum::body::Bytes,
-) -> Result<Json<serde_json::Value>, super::peer_admin::Refused> {
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
     let body: CodeBody = serde_json::from_slice(&bytes).map_err(|e| {
         ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -5774,7 +5774,7 @@ pub async fn node_disconnect_provider(
     Path((node_id, name)): Path<(String, String)>,
     parts: axum::http::request::Parts,
     bytes: axum::body::Bytes,
-) -> Result<Json<serde_json::Value>, super::peer_admin::Refused> {
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
     if node_id == s.node_id {
         super::passkey::json_or_empty(&parts.headers, &bytes)
             .map_err(super::peer_admin::refused)?;
@@ -6403,10 +6403,20 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     .map_err(provider_err),
                 Err(error) => Err(error),
             },
-            C::ConfigRead | C::ConfigPatch { .. } => Err(ApiError(
-                StatusCode::NOT_IMPLEMENTED,
-                "this node does not serve its configuration to peers yet".into(),
-            )),
+            // `authorise_forwarded` admitted the sender as an admin peer,
+            // and for an edit spent the statement it carries.
+            C::ConfigRead => Ok(super::config_api::peer_read(self).await),
+            C::ConfigPatch {
+                expected_hash, ops, ..
+            } => match &admitted {
+                Some(admitted) => {
+                    Ok(super::config_api::peer_patch(self, &expected_hash, &ops, admitted).await)
+                }
+                None => Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    "an edit from a peer must carry its operator's statement".into(),
+                )),
+            },
             C::OperatorNotify {
                 channel,
                 notification_id,

@@ -1643,6 +1643,16 @@ export interface ConfigKeySpec {
   /** False for a key only the host's own node.toml may change. */
   editable: boolean
   why_not?: string
+  /** False for a key no peer changes, even one the node lets administer it
+      (`[mesh] admin_peers`), with why. */
+  editable_by_peer?: boolean
+  why_not_by_peer?: string
+}
+
+/** A node's `node.toml` read through `GET /api/nodes/{id}/config`: what that
+    node's own `GET /api/config` shows, and which node it is. */
+export interface PeerNodeConfig extends NodeConfig {
+  node: { id: string; name: string; is_self: boolean }
 }
 
 /** One typed edit of node.toml (`PATCH /api/config`). Keys are dotted

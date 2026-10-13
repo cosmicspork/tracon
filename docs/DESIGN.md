@@ -193,6 +193,16 @@ machine, nothing is refused this way and the sheet never appears. A window that
 cannot make passkeys confirms in another browser instead (below); one that can is
 offered "Use another device" beside Confirm.
 
+**Administer a peer.** Settings → Mesh → "A peer's node.toml" (or a peer's
+repositories under Channels & repositories) → choose the node → its file, as its
+own Settings shows it, secrets and comments left out. A node that does not name this
+one in its `[mesh] admin_peers` shows nothing but why, and how to add it (at that
+node, or in its own Settings with its passkey). Otherwise: a key and a value → Set →
+the same confirmation sheet, its line starting with the peer's name ("On beta: Change
+node.toml: review.max_files") → passkey → the peer checks it again and writes it; its
+own phone is told. `admin_peers` itself is never offered for a peer's editing. A peer
+that is away refuses at once; nothing waits to run when it returns.
+
 **Sign in from another browser.** The desktop app against a remote node (or any
 browser with no token to hand) → the login screen's "Sign in from another
 browser" → the window shows a code (`BCDF-GHJK`), an "Open in browser" link and

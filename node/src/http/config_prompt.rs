@@ -417,6 +417,20 @@ pub fn summarize(
     effective: &toml::Table,
     changes: &[Change],
 ) -> Result<String, String> {
+    summarize_within(before, after, effective, changes, MAX_SUMMARY)
+}
+
+/// [`summarize`], in `budget` characters rather than a whole prompt's: what
+/// is left of one once a prefix (`On <peer>: `) has taken its share, so the
+/// two together are what the prompt shows and the peer's statement carries,
+/// never cut.
+pub fn summarize_within(
+    before: &toml::Table,
+    after: &toml::Table,
+    effective: &toml::Table,
+    changes: &[Change],
+    budget: usize,
+) -> Result<String, String> {
     let mut items = Vec::new();
     for change in changes {
         let segs = &change.key.0;
@@ -495,7 +509,7 @@ pub fn summarize(
         true => 0,
         false => "; ".len() + format!(" and {} more", quiet.len()).len(),
     };
-    if line.chars().count() + reserve > MAX_SUMMARY {
+    if line.chars().count() + reserve > budget {
         return Err(format!(
             "this edit changes more sensitive keys than one confirmation can show ({}); split it into smaller edits",
             loud.len()
@@ -515,7 +529,7 @@ pub fn summarize(
             String::new()
         };
         if line.chars().count() + sep.len() + item.text.chars().count() + tail.chars().count()
-            > MAX_SUMMARY
+            > budget
         {
             break;
         }
@@ -551,6 +565,27 @@ mod tests {
 
     fn set(key: &str, value: impl Into<toml::Value>) -> Op {
         Op::set(KeyPath::parse(key).unwrap(), value)
+    }
+
+    /// A peer's prompt starts `On <peer>: `, and the rest is fitted to what
+    /// is left: routine keys are counted rather than listed, and a sensitive
+    /// change that does not fit is refused rather than cut.
+    #[test]
+    fn a_line_is_fitted_to_the_budget_a_prefix_leaves() {
+        let mut ops: Vec<Op> = (0..30)
+            .map(|i| set(&format!("providers.\"p{i:02}\".models"), toml::Value::Array(vec![])))
+            .collect();
+        ops.push(set("publish.gh", "/opt/evil/gh"));
+        let seen = preview("", &ops).unwrap();
+        let after: toml::Table = toml::from_str(&seen.text).unwrap();
+        let before = toml::Table::new();
+        let effective = toml::Table::new();
+        let line = summarize_within(&before, &after, &effective, &seen.changes, 160).unwrap();
+        assert!(line.chars().count() <= 160, "{line}");
+        assert!(line.contains("publish.gh"), "{line}");
+        assert!(line.contains("/opt/evil/gh"), "{line}");
+        assert!(line.ends_with("more"), "{line}");
+        assert!(summarize_within(&before, &after, &effective, &seen.changes, 30).is_err());
     }
 
     #[test]

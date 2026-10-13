@@ -675,6 +675,12 @@ impl AdminRequest {
         expected(&self.parts.headers).map(|v| v.trim().trim_matches('"'))
     }
 
+    /// The request's head: what a confirmation for an operation the node
+    /// works out from the body itself (`peer_admin`) is decided on.
+    pub(crate) fn parts(&self) -> &Parts {
+        &self.parts
+    }
+
     /// Whether this is the operator at the node's own machine, who confirms
     /// nothing.
     pub fn is_local(&self) -> bool {

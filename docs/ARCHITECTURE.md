@@ -260,6 +260,25 @@ path, whether it exists) is not answered to a cookie alone; its refusals come ba
 `422` with each refused key and its reason. An edit that touches `[[repo]]` moves the
 live table with the file, as the repository editor does.
 
+**A peer's `node.toml`.** `GET` and `PATCH /api/nodes/{id}/config` are the same two
+routes for another node, over the mesh (`ConfigRead`, `ConfigPatch`). The peer answers
+only if its own `[mesh] admin_peers` names the asking node; otherwise the refusal says
+so (`not_admin_peer`) and the interface shows that node's configuration unread and
+read-only, with why. A read returns exactly what the peer's own `GET /api/config`
+would. An edit is decided first on the asking node against the file as the peer shows
+it: the version it names, keys a peer may change (everything a remote edit may, except
+`[mesh] admin_peers`, which only the node itself or its own passkey changes), and the
+prompt, worked out from that file by the same code and prefixed `On <peer>: ` within
+the same 600 characters. Then it is confirmed there (a passkey off that node's machine),
+and the asking node signs an admin statement for exactly that edit on exactly that
+peer (see [Mesh frames](#mesh-frames)). The peer checks the statement, then runs the
+edit as its own `PATCH` would, as an editor that may not change `admin_peers`: the
+version, the operations, the keys, the path guard against its own host, the audit row
+(actor `peer <id> for <operator session>`, or `for local`), the push, and the live keys
+applied at once. An edit is never queued: a peer that is away is refused at once, and
+one that arrives after its two minutes is refused there. A peer's answer (a conflict
+with its hash now, a refusal by key) is relayed as it gave it.
+
 The routes that wrote `node.toml` (or what a harness runs) at the machine only are admin
 actions now, confirmed the same way, each with a prompt the node words from its body.
 The Settings save (`PUT /api/config`) and the repository table each require the `hash`
@@ -1214,7 +1233,9 @@ before the policy is consulted for the same reason.
 their runner/owner and ordinary channel. Mesh handlers authenticate both channel
 memberships, verify the candidate's actual channel and owner, refuse third-node
 relays, and bound responses. Peer UI detail is read-only; it never turns a remote
-ID into a local action.
+ID into a local action. A peer's configuration and provider sign-ins are read-only
+unless the peer names you in its `[mesh] admin_peers`; then each change is confirmed
+on your node and checked again on the peer.
 
 **What is reviewed is the tree; the commits and the branch are prose.** The
 candidate is a tree hash recorded at capture, and every check, verdict and grant
@@ -2001,8 +2022,11 @@ Three surfaces, three answers, and the differences are the point.
   allowing a repository setup proposal (it writes the `[[repo]]` entry),
   allowing a Dockerfile trial (a networked build outside the boundary), and
   allowing an egress host for the repository. A peer cannot answer one of
-  those over the mesh; the gate is per node, and peer commands are still
-  authorised by channel membership. Each handler takes an `AdminAction` extractor, which
+  those over the mesh; the gate is per node. Most peer commands are authorised
+  by channel membership; the admin ones (a peer's provider sign-ins and its
+  `node.toml`) need the peer to name the sender in its `[mesh] admin_peers`
+  and a statement the sender's operator confirmed with the sender's passkey
+  (see [Mesh frames](#mesh-frames)). Each handler takes an `AdminAction` extractor, which
   reads the body once and hashes the request it is about to run:
   `op_hash = sha256("tracon-admin-op/1" | method | path and query | If-Match |
   sha256(body))`. Without a proof for exactly that hash the request is refused

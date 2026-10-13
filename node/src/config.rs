@@ -2405,7 +2405,10 @@ mod tests {
             format!("{id} "),
             "zz".repeat(32),
         ] {
-            assert!(validate_admin_peers(std::slice::from_ref(&bad)).is_err(), "{bad}");
+            assert!(
+                validate_admin_peers(std::slice::from_ref(&bad)).is_err(),
+                "{bad}"
+            );
         }
         let text = format!("[mesh]\nadmin_peers = [\"{}\"]\n", "AB".repeat(32));
         assert!(Config::from_toml(&text, Path::new("node.toml"))

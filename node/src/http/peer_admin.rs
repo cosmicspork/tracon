@@ -12,38 +12,19 @@
 
 use axum::{
     http::{request::Parts, StatusCode},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
 };
 use proto::admin::AdminStatement;
 
 use super::api::{ApiError, AppState};
-use super::passkey::{self, clean_text, Caller, Refusal};
+use super::passkey::{self, clean_text, Caller, Refusal, MAX_SUMMARY};
 use crate::store::now_ms;
 
-/// The longest line a confirmation prompt shows, which the peer's name and
-/// what is done there must fit together: the statement carries exactly the
-/// line the operator read, never a shortened one.
-const MAX_SUMMARY: usize = 160;
-
-/// A refusal already shaped as the response to send. Boxed: a response is
-/// large, and most calls succeed.
-pub struct Refused(Box<Response>);
-
-impl IntoResponse for Refused {
-    fn into_response(self) -> Response {
-        *self.0
-    }
-}
-
-impl From<Response> for Refused {
-    fn from(response: Response) -> Self {
-        Refused(Box::new(response))
-    }
-}
+pub(crate) use super::config_api::Refused;
 
 /// Any refusal, as the response it is.
 pub(crate) fn refused(refusal: impl IntoResponse) -> Refused {
-    Refused(Box::new(refusal.into_response()))
+    refusal.into_response().into()
 }
 
 /// The longest a peer's name is shown.
@@ -66,19 +47,23 @@ pub(crate) fn peer_label(s: &AppState, node_id: &str) -> String {
     }
 }
 
-/// The line a prompt shows for `line` done on `node_id`: `On <peer>: line`.
-/// Refused when it does not fit a prompt whole.
+/// What a prompt for an action on `node_id` starts with: `On <peer>: `.
+pub(crate) fn prefix(s: &AppState, node_id: &str) -> String {
+    format!("On {}: ", peer_label(s, node_id))
+}
+
+/// The line a prompt shows for `line` done on `node_id`: the [`prefix`],
+/// then `line`. Refused when the two do not fit one prompt whole: the
+/// statement carries exactly the line the operator read, never a shortened
+/// one.
 pub(crate) fn summary_for(s: &AppState, node_id: &str, line: &str) -> Result<String, Refusal> {
-    let summary = clean_text(
-        &format!("On {}: {line}", peer_label(s, node_id)),
-        usize::MAX,
-    );
+    let summary = clean_text(&format!("{}{line}", prefix(s, node_id)), usize::MAX);
     if summary.chars().count() > MAX_SUMMARY {
         return Err(Refusal::Api(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
-                "what this changes on the peer does not fit one confirmation \
-                 ({} characters, at most {MAX_SUMMARY}); split it into smaller edits",
+                "what this does on the peer does not fit one confirmation \
+                 ({} characters, at most {MAX_SUMMARY}); split it",
                 summary.chars().count()
             ),
         )));

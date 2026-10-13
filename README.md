@@ -894,11 +894,16 @@ cloud console's user-data and a fresh VM comes up enrolled.
 the selected channel keys and signed policy, not the private signing key. Logging
 a browser into an existing node does not enroll another machine or grant it keys.
 
-**A reachable node can be configured remotely.** Open its management link from
-Nodes, then use **Settings → Connections** to connect a provider or share a
-credential. Provider login stays on the selected node; credential listings show
-names and bindings, never secret values. Sessions can be started, prompted,
-reviewed, and stopped from another channel member.
+**A reachable node can be configured remotely, if it lets you.** On the node to be
+administered, list the administering node's id (`tracon mesh id` on it) in `[mesh]
+admin_peers`. Then, from the administering node, **Settings → Connections** signs
+that node's providers in and out, and **Settings → Mesh → A peer's node.toml** reads
+and edits its configuration. Each change is confirmed with your passkey on the node
+you are using, with a prompt naming the peer, and the peer checks it again before it
+runs it; `admin_peers` itself is changed only at the node or with its own passkey.
+Provider login stays on the selected node; credential listings show names and
+bindings, never secret values. Sessions can be started, prompted, reviewed, and
+stopped from another channel member.
 
 Mesh invitations, admission, removal, and explicit hub channel sharing require
 administrator authentication, including on loopback, and work from an authenticated
