@@ -554,6 +554,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // the file: an interrupted edit is settled against this version too.
     let config_before_load = crate::config::edit::file_hash(&Config::config_path()).ok();
     let cfg = Arc::new(Config::try_load().map_err(|e| anyhow::anyhow!(e))?);
+    // Before anything runs: every program the node spawns from here on is
+    // checked against this, and a key that breaks a rule is reported now.
+    crate::config::path_guard::install_for_serve(&cfg);
     let store = Arc::new(Store::open(&Config::db_path()).context("open store")?);
     // Only the serving node's own startup interrupts a stale `running` check;
     // see `Store::reconcile_interrupted_runs`. A CLI subcommand opening the

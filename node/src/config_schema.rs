@@ -23,6 +23,48 @@ pub enum Apply {
     Restart,
 }
 
+/// What a path-valued key names, which decides the rules
+/// `config::path_guard` holds it to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathKind {
+    /// A program the node runs on its host: an absolute path or a bare name
+    /// found on the node's `PATH`, called exactly what its key runs. Its file
+    /// and every directory above it (and above any link on the way) must be
+    /// out of an agent's reach and owned and writable by nobody but root
+    /// and, inside a package manager's prefix, the node's own user. Checked
+    /// again just before every spawn.
+    Executable,
+    /// Arguments to such a program that decide what it in turn runs
+    /// (`consulta.args`: `uv run --project <dir> consulta`). Held to a fixed
+    /// shape, its project to consulta's own.
+    ExecArgs,
+    /// A file whose content the node reads as a credential and sends on.
+    /// Only inside a directory set aside for the node's secrets
+    /// (`<config dir>/secrets`, `/etc/tracon`); never one of the node's own
+    /// secrets or an operator's credential store, and writable by nobody but
+    /// root and the node's own user.
+    SecretFile,
+    /// A directory of credential files the node reads; as `SecretFile`.
+    SecretDir,
+    /// A directory the node writes files into: only the node's own export
+    /// area, or a directory an operator marked for it on the host. Never a
+    /// system directory, the configuration or state directory, a worktree
+    /// root or a package manager's prefix.
+    WriteDir,
+    /// A directory the node replaces whole and serves files from: only
+    /// inside the state or data directory, or one that does not exist yet.
+    ManagedDir,
+    /// A directory under which worktrees are made or accepted. Never `/`, a
+    /// system directory or a package manager's prefix, and never the state
+    /// or configuration directory or a directory holding either.
+    Root,
+    /// Where the state volume is mounted. Never `/` or a system directory;
+    /// it holds the state and configuration directories by design, and
+    /// everything under it counts as a place an agent can write.
+    Mount,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct KeySpec {
     pub key: &'static str,
@@ -30,14 +72,18 @@ pub struct KeySpec {
     /// Writing it is an administrative act. Every key is, today: what the
     /// node runs, trusts and reaches is all decided here.
     pub admin: bool,
-    /// It names an executable the node runs on its host, so a writer that
-    /// could choose it could choose what the node executes.
+    /// It names an executable the node runs on its host, or arguments that
+    /// decide what that executable runs, so a writer that could choose it
+    /// could choose what the node executes.
     pub exec_path: bool,
     /// It names a file or directory on the host that the node reads or
     /// writes (a credential file, a certificate directory, an export
     /// target), so a writer that could choose it could choose what the node
     /// reads, sends on or overwrites. The value is a path, not a secret.
     pub fs_path: bool,
+    /// Which rules `config::path_guard` holds the value to, for a key that
+    /// is `exec_path` or `fs_path`.
+    pub path: Option<PathKind>,
     /// Its value is never shown: the audit log records that it changed, not
     /// what to.
     pub secret: bool,
@@ -50,6 +96,7 @@ const fn restart(key: &'static str) -> KeySpec {
         admin: true,
         exec_path: false,
         fs_path: false,
+        path: None,
         secret: false,
     }
 }
@@ -65,13 +112,24 @@ impl KeySpec {
     const fn exec(self) -> Self {
         KeySpec {
             exec_path: true,
+            path: Some(PathKind::Executable),
             ..self
         }
     }
 
-    const fn path(self) -> Self {
+    /// Arguments that decide what an executable runs.
+    const fn exec_args(self) -> Self {
+        KeySpec {
+            exec_path: true,
+            path: Some(PathKind::ExecArgs),
+            ..self
+        }
+    }
+
+    const fn path(self, kind: PathKind) -> Self {
         KeySpec {
             fs_path: true,
+            path: Some(kind),
             ..self
         }
     }
@@ -118,12 +176,12 @@ pub const KEYS: &[KeySpec] = &[
     restart("session.default_channel"),
     restart("session.claim_grace_secs"),
     restart("session.suspend_published_after_secs"),
-    restart("session.worktree_root").path(),
+    restart("session.worktree_root").path(PathKind::Root),
     restart("session.pty_buffer_frames"),
     restart("session.pty_capture_output"),
     // [consulta]
     restart("consulta.command").exec(),
-    restart("consulta.args"),
+    restart("consulta.args").exec_args(),
     restart("consulta.timeout_secs"),
     // [publish]
     restart("publish.gh").exec(),
@@ -156,7 +214,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image"),
     restart("runtime.kubernetes.state_claim"),
-    restart("runtime.kubernetes.state_mount"),
+    restart("runtime.kubernetes.state_mount").path(PathKind::Mount),
     restart("runtime.kubernetes.harness_home"),
     restart("runtime.kubernetes.uid"),
     restart("runtime.kubernetes.gateway_host"),
@@ -165,11 +223,11 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.internal_cidrs"),
     // [runtime.kubernetes.builder]
     restart("runtime.kubernetes.builder.addr"),
-    restart("runtime.kubernetes.builder.tls_dir").path(),
+    restart("runtime.kubernetes.builder.tls_dir").path(PathKind::SecretDir),
     restart("runtime.kubernetes.builder.registry"),
-    restart("runtime.kubernetes.builder.docker_config").path(),
+    restart("runtime.kubernetes.builder.docker_config").path(PathKind::SecretDir),
     restart("runtime.kubernetes.builder.timeout_secs"),
-    restart("runtime.kubernetes.builder.do_token_file").path(),
+    restart("runtime.kubernetes.builder.do_token_file").path(PathKind::SecretFile),
     restart("runtime.kubernetes.builder.buildctl").exec(),
     restart("runtime.kubernetes.shm_size"),
     restart("runtime.kubernetes.resources.session.cpu_request"),
@@ -235,7 +293,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("embed.base_url"),
     restart("embed.model"),
     restart("embed.dim"),
-    restart("embed.api_key_file").path(),
+    restart("embed.api_key_file").path(PathKind::SecretFile),
     restart("embed.provider"),
     restart("embed.batch"),
     restart("embed.timeout_secs"),
@@ -243,9 +301,9 @@ pub const KEYS: &[KeySpec] = &[
     // [external]
     restart("external.enabled"),
     restart("external.idle_timeout_secs"),
-    restart("external.repo_roots").path(),
+    restart("external.repo_roots").path(PathKind::Root),
     // [docs]
-    restart("docs.export_dir").path(),
+    restart("docs.export_dir").path(PathKind::WriteDir),
     restart("docs.export_channel"),
     restart("docs.export_every_secs"),
     restart("docs.preview_listen"),
@@ -255,7 +313,7 @@ pub const KEYS: &[KeySpec] = &[
     // [ui]
     restart("ui.opencode_listen"),
     restart("ui.opencode_url"),
-    restart("ui.opencode_bundle_dir").path(),
+    restart("ui.opencode_bundle_dir").path(PathKind::ManagedDir),
     // [auth]
     restart("auth.public_origin"),
     restart("auth.trusted_proxies"),
@@ -270,6 +328,7 @@ const UNKNOWN: KeySpec = KeySpec {
     admin: true,
     exec_path: false,
     fs_path: false,
+    path: None,
     secret: true,
 };
 
@@ -309,6 +368,7 @@ pub fn lookup(key: &[&str]) -> KeySpec {
         admin: under.iter().any(|spec| spec.admin),
         exec_path: under.iter().any(|spec| spec.exec_path),
         fs_path: under.iter().any(|spec| spec.fs_path),
+        path: None,
         secret: under.iter().any(|spec| spec.secret),
     }
 }
@@ -359,6 +419,8 @@ mod tests {
             assert!(spec.fs_path && !spec.secret && !spec.exec_path, "{key}");
         }
         assert!(lookup(&["embed", "api_key_file"]).fs_path);
+        let args = lookup(&["consulta", "args"]);
+        assert!(args.exec_path && args.path == Some(PathKind::ExecArgs));
         assert_eq!(
             lookup(&["providers", "openrouter", "models", "id"]).key,
             "providers.*.models.id"
@@ -374,6 +436,21 @@ mod tests {
         // A key nobody reads is kept out of the log.
         let unknown = lookup(&["qa", "browser"]);
         assert!(unknown.secret && unknown.admin);
+    }
+
+    /// A key the path guard checks says so in both ways, and one that names
+    /// a path says which rules hold it.
+    #[test]
+    fn every_path_key_says_which_rules_hold_it() {
+        for spec in KEYS {
+            match spec.path {
+                Some(PathKind::Executable | PathKind::ExecArgs) => {
+                    assert!(spec.exec_path && !spec.fs_path, "{}", spec.key)
+                }
+                Some(_) => assert!(spec.fs_path && !spec.exec_path, "{}", spec.key),
+                None => assert!(!spec.exec_path && !spec.fs_path, "{}", spec.key),
+            }
+        }
     }
 
     #[test]

@@ -206,13 +206,15 @@ async fn run_sidecar(
     argv: Vec<String>,
     caller: &str,
 ) -> Result<Value, String> {
-    let mut cmd = tokio::process::Command::new(&cfg.consulta.command);
+    let program = crate::config::path_guard::consulta(&cfg.consulta)
+        .map_err(|e| format!("could not run the query tool: {e}"))?;
+    let mut cmd = tokio::process::Command::new(program);
     cmd.args(&cfg.consulta.args)
         .args(&argv)
         // A clean environment: the sidecar gets the credential and nothing
         // inherited that might contain another one.
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .envs(env)
         .kill_on_drop(true);

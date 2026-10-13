@@ -668,8 +668,13 @@ pub async fn identity_on(
 /// or reachable: the operator's, as every Git outside the boundary already
 /// commits with — never a name for tracon. `None` when the host has none.
 pub async fn host_identity(git: &str) -> Option<Identity> {
+    let git = crate::config::path_guard::program("publish.git", git)
+        .inspect_err(|error| tracing::warn!(%error, "the host's git identity was not read"))
+        .ok()?;
+    let git = &git;
     let read = |key: &'static str| async move {
         let out = tokio::process::Command::new(git)
+            .env("PATH", crate::config::path_guard::child_path())
             .args(["config", "--global", "--get", key])
             .output()
             .await
@@ -770,7 +775,8 @@ pub async fn clone(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let url = format!("https://{host}/{owner}/{name}.git");
-    let mut cmd = crate::git_remote::git("git", FORGE_HOME, credential);
+    let mut cmd =
+        crate::git_remote::git("git", FORGE_HOME, credential).map_err(|e| e.to_string())?;
     cmd.args(["clone", "--no-local", "--no-hardlinks", &url])
         .arg(dest);
     let out = cmd.output().await.map_err(|e| e.to_string())?;
@@ -795,7 +801,8 @@ pub async fn fetch_managed(
     if !repo.starts_with(&root) {
         return Err("refusing to fetch a repository outside managed storage".into());
     }
-    let mut command = crate::git_remote::git_in("git", repo, FORGE_HOME, credential);
+    let mut command = crate::git_remote::git_in("git", repo, FORGE_HOME, credential)
+        .map_err(|e| e.to_string())?;
     command.args(["fetch", "--prune", "origin"]);
     let out = command.output().await.map_err(|e| e.to_string())?;
     if out.status.success() {

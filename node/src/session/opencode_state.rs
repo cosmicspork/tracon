@@ -358,7 +358,9 @@ pub fn at_least(have: &str, want: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 async fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new("git")
+    let git = crate::config::path_guard::program("publish.git", "git").ok()?;
+    let out = tokio::process::Command::new(git)
+        .env("PATH", crate::config::path_guard::child_path())
         .current_dir(dir)
         .args(args)
         // The same hardening the review capture uses: no external diff or

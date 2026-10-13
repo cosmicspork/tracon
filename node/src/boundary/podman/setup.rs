@@ -347,7 +347,8 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     let args = gateway_args(cfg, super::selinux_enabled().await)?;
     if let Some(unit) = gateway_unit_path().filter(|_| !cfg!(target_os = "macos")) {
         if user_manager_running().await {
-            let podman_bin = super::resolve_podman_env(cfg);
+            // Checked here: systemd, not the node, runs what the unit names.
+            let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
             let text = gateway_unit_text(&podman_bin, &args, &service_path());
             write_unit(&unit, &text)?;
             systemctl(&["daemon-reload"]).await?;
@@ -405,7 +406,8 @@ pub async fn recover_gateway(cfg: &Config) -> Result<Recovery, BoundaryError> {
             // it came to be stopped), and a newer binary may describe it
             // differently. Both converge on the same unit.
             let args = gateway_args(cfg, super::selinux_enabled().await)?;
-            let podman_bin = super::resolve_podman_env(cfg);
+            // Checked here: systemd, not the node, runs what the unit names.
+            let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
             let text = gateway_unit_text(&podman_bin, &args, &service_path());
             write_unit(&unit, &text)?;
             systemctl(&["daemon-reload"]).await?;
@@ -474,8 +476,15 @@ fn write_unit(path: &std::path::Path, text: &str) -> Result<(), BoundaryError> {
 
 /// The PATH the unit runs podman with: the node's own, which found podman and
 /// its helpers (conmon, netavark, pasta) already.
+/// The unit's PATH: the node's, less every entry the path guard refuses, as
+/// every program the guard checks is given. Podman finds conmon and its
+/// network helpers on it.
 fn service_path() -> String {
-    std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into())
+    let path = crate::config::path_guard::child_path();
+    match path.is_empty() {
+        true => "/usr/local/bin:/usr/bin:/bin".into(),
+        false => path.to_string_lossy().into_owned(),
+    }
 }
 
 /// The gateway's unit, as Podman's own Quadlet generator would write it for a

@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub mod edit;
+pub mod path_guard;
 pub use edit::{edit, snapshot, update, EditError, EditOutcome, KeyPath, Op, Snapshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

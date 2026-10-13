@@ -115,11 +115,159 @@ what the file holds now decides again when another edit lands first.
 
 `config_schema` describes every key: whether a change applies live or at restart (only
 `[[repo]]` is live today), whether writing it is an admin action (every key is), whether
-it names an executable the node runs, and whether its value is a secret the audit log
-redacts. A test walks the `Config` structs' own `Deserialize` and fails on a key without
-an entry, so a new setting cannot arrive without saying which it is. The one other writer
-is the load-time migration of a retired harness, which rewrites the file once and keeps
-the original beside it.
+it names an executable the node runs or a host path it reads or writes (and which rules of
+the path guard hold it), and whether its value is a secret the audit log redacts. A test
+walks the `Config` structs' own `Deserialize` and fails on a key without an entry, so a
+new setting cannot arrive without saying which it is. The one other writer is the
+load-time migration of a retired harness, which rewrites the file once and keeps the
+original beside it.
+
+#### The path guard
+
+Remote configuration makes every key writable by whoever holds an admin session, and
+agents write files: their workspaces, their scratch, the state volume a pod shares with
+the node. A program key pointed at one of those files would run an agent's bytes as the
+node; `embed.api_key_file` is read and sent to `embed.base_url` as a bearer token, so
+pointed at the identity seed or an SSH key it would hand either to a host the writer
+chose; a directory the node writes into or replaces could be one something else reads or
+runs. `config::path_guard` holds each such key to rules for what it names
+(`config_schema::PathKind`), and where a rule can be an allowlist, it is one:
+
+- **Programs** (`boundary.podman`, `publish.gh`, `publish.glab`, `publish.git`,
+  `consulta.command`, `runtime.kubernetes.builder.buildctl`): an absolute path without
+  `..`, or a bare name looked up on the node's `PATH`, whose file name is exactly one the
+  key runs (`podman` or `podman-remote`, `gh`, `glab`, `git`, `uv` or `consulta`,
+  `buildctl`), so a shell or interpreter installed somewhere trusted cannot stand in for
+  it. Every symbolic link on the way is followed, by hand, and the directory each link
+  lives in counts as much as the target. The target is a regular file with an execute
+  bit, and neither it, the path as written, nor any link's directory is inside a place an
+  agent can write. The file and every directory above it (and above each link) belong to
+  root or the node's user, and none is writable by every user or by a group other than
+  root's, macOS's `admin`, or the node's own, unless it is a sticky directory like
+  `/tmp`. Outside a package manager's prefix (`/opt/homebrew`, `/usr/local`,
+  `/home/linuxbrew/.linuxbrew`, `~/.local/bin`, `~/.cargo/bin`) none may be owned by the
+  node's user, or writable by its group, either: an owner can always make a file
+  writable, and this closes the chain where the node is made to write a file and then run
+  it. A program whose path as written is inside a prefix is held to the prefix's rules
+  even where a link there points outside it, as uv's tool links into `~/.local/share/uv`
+  do. (The node's group counts as the node: on Kubernetes it is the volume's `fsGroup`,
+  which makes the whole volume group-writable.) A bare name skips a `PATH` entry that
+  fails these rules and runs the next one that passes, and every guarded program is given
+  the node's `PATH` less every such entry, and less empty and relative ones, so a program
+  that runs another (git its helpers, uv its tools) does not find a planted one.
+- **`consulta.args`** decides what `uv` runs and what consulta is told, so with `uv` it
+  must read `run [--frozen|--locked|--no-sync|--offline|--no-dev|--quiet|--no-progress]
+  [--project <dir>] consulta`, with nothing after `consulta`: the node appends the
+  query's own arguments, and consulta's options include where it writes its output.
+  `--with`, `--python`, `--directory`, an index, a script or any other program are
+  refused. The project must be an absolute directory, not `/` or a system directory, out
+  of the places an agent can write, owned as a secret file is (the node's own user may
+  write it: the node image's `/opt/consulta` is the node's), and must hold a
+  `pyproject.toml` naming the project `consulta`. With `consulta` itself as the command,
+  `args` must be empty.
+- **Secret files and directories** (`embed.api_key_file`,
+  `runtime.kubernetes.builder.do_token_file`, `.tls_dir`, `.docker_config`): only inside
+  a directory set aside for the node's secrets, `<config dir>/secrets` (on macOS inside
+  the directory that is both configuration and state, which counts as the node's own
+  there) or `/etc/tracon` (where a pod mounts its Secrets); absolute; never inside a place an agent can write;
+  never one of the node's own secrets under the state directory (`node.db` and its
+  journal, `node-identity.seed`, `credentials.sealed`, `credentials.toml`, `policy-key`;
+  matched by path, through links, and by file identity, so a hard link is caught); never
+  under `/proc`, `/sys` or `/dev`; never in the operator's usual credential stores
+  (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.claude`,
+  `~/.config/gh`, ..., and a pod's service-account token); and owned and writable as a
+  program's directories are, except that the node's user may write them. A secret
+  directory may not hold the state directory.
+- **The export directory** (`docs.export_dir`): only the node's own export area
+  (`<data dir>/tracon/exports`), or an existing directory that holds a `.tracon-export`
+  file and is outside every place an agent can write. The marker says the operator set
+  the directory aside; it is not proof of that on its own, since an agent can write one
+  into its own volume, which is why the place rule applies too. Never `/`, a system
+  directory (`/etc`, `/usr`, `/var/lib`, `/System`, ...), the home directory itself,
+  inside the configuration or state directory or a worktree root, a directory holding
+  the configuration or state directory, or inside or holding a package manager's prefix.
+  The export itself is written through the directory it checked: the directory is
+  opened as itself (`O_NOFOLLOW`) and its descriptor compared by identity with what the
+  check's own walk found, and from then on everything goes through that descriptor
+  (`archive` opened from it the same way, documents read with `O_NOFOLLOW`, written to a
+  new file with `O_EXCL | O_NOFOLLOW` and renamed with `renameat`, stale ones removed
+  with `unlinkat` after an `lstat`). A link where a document goes is refused, and no
+  link repointed after the check can move the export somewhere else.
+- **The UI bundle directory** (`ui.opencode_bundle_dir`), which `setup` replaces whole:
+  as the export directory for what it may not be, outside every place an agent can
+  write unless it is in the node's own state or data directory, and only inside those,
+  a directory that does not exist yet, or one already holding a bundle (one the node
+  would serve, or one tracon installed, which it marks with a file beside it).
+  Separately, `setup` never moves aside or deletes a directory that holds anything but a
+  bundle, whichever key or variable named it, and makes its staging directory fresh and
+  writes the marker without following a link.
+- **Roots** (`session.worktree_root`, `external.repo_roots`): never `/`, a system
+  directory, inside the configuration directory, a directory holding the configuration or
+  state directory, or inside or holding a package manager's prefix.
+- **The state mount** (`runtime.kubernetes.state_mount`): never `/` or a system
+  directory, and never changed by an edit at all: it decides where agents can write, so
+  it is changed in `node.toml` on the host. It holds the state and configuration
+  directories by design, and everything under it counts as a place an agent can write,
+  except the configuration directory's `secrets` (a harness pod mounts only the claim's
+  top-level `tracon-*` volumes, never `config/`).
+
+The node's own areas (the export area, the state and data directories for the bundle,
+the configuration directory's `secrets`) are an exception to "never in a place an agent
+can write" only where they themselves sit in one (macOS keeps them all in the state
+directory; a pod keeps them on the claim), and the exception holds only for a path that
+resolves into the area and passes through no link kept in any place an agent can write.
+System and operator links on the way (`/var` to `/private/var` on macOS, `/home` to
+`/var/home`) are fine; a link an agent made is not, so a path spelled in an agent's own
+volume and linked into an own area is refused like any other path in the volume.
+
+A place an agent can write is the state directory, the state volume, the session
+worktree root, Podman's container storage (the data directory's `containers`, and
+`/var/lib/containers` on Linux, where named volumes and container layers live), and the
+node's runtime directory. In a pod the state volume is found from the running process
+(the filesystem the state directory is on, or its nearest existing ancestor on a first
+start, where `KUBERNETES_SERVICE_HOST` is set and the file says `runtime.kind =
+"kubernetes"`; never `/` or a home directory), not only from `state_mount`, and an edit is judged against the places the
+running node started with as well as those either file names, so two edits cannot move
+the volume and then use what was on it. Every place is matched as written, as it resolves, and by the
+identity of the directory on disk, so `/tmp` and `/private/tmp`, `/home` and
+`/var/home`, or another letter case on a case-insensitive volume, are one place. The
+home directory is `HOME` and, when it differs, the one the password database gives.
+
+The rules apply at three points. An edit (`config::edit`) is refused when it makes any
+guarded key break a rule it did not already break: what the old file broke is judged by
+its own places, what the new one breaks by the places either file names, so moving the
+worktree root away from a program in the same edit does not unmake it, and moving it
+onto a program's directory is refused. A value that names nothing yet, somewhere only
+root or the operator could put it, is allowed. A start (`serve`) does not refuse a file
+that breaks a rule, because a node that cannot start cannot be reconfigured remotely
+either; it warns about each key, and about each `PATH` entry the guard refuses. And at
+use: every spawn of a guarded program (each of Podman's multi-step volume transfers, as
+one) checks it again just before it runs and runs the path the check returned, so a
+binary swapped or a directory loosened after the edit is refused there; the embedding
+key file, the builder's token file and the registry's `config.json` are opened, then
+checked, then compared by identity with what the check's own walk found, and read from
+what was opened; the builder's certificate directory is checked with every `buildctl`
+spawn, which reads it itself; the export directory is checked and opened as described
+above before every export, and the bundle directory is checked before `setup` replaces
+it. At use a secret file outside the
+dedicated directories is still read, so a key file placed by hand before the guard
+existed keeps working (with the start's warning) until it is moved; every other rule
+holds there.
+
+What remains between a check and the `exec` or `open` after it is a window of
+microseconds that only someone able to write the program's directories can use: root,
+or, inside a package manager's prefix, the operator's own user. The guard does not
+cover programs the node spawns by a fixed name other than `git` (`systemctl`, `id`),
+which rely on the node's own `PATH`, which no key sets (the review capture's, the
+session checkpoint's and the skill reader's `git` go through the guard);
+configuration files a trusted program reads from the home the node gives it, which on
+Kubernetes is on the state volume (the publish path's `git` is told to ignore them);
+Podman storage moved elsewhere by `storage.conf`; the gateway's systemd unit, which
+names the podman checked when setup or recovery wrote it, with the guard's `PATH`, and
+which systemd runs later without asking the node; and image keys (`boundary.harness_image`, `[[repo]] image`,
+`[[service]] image`), which choose what runs inside the boundary, not on the host, and
+are held by digest pinning instead. The guard is a backstop behind the passkey every
+admin save needs, the audit row and the push.
 
 ## Harness control
 

@@ -194,7 +194,7 @@ async fn cloning_offers_the_brokered_credential_and_never_an_ambient_helper() {
     let offered: Offered = Default::default();
     let addr = challenging_host(offered.clone()).await;
 
-    let mut command = git_remote::git("git", forge::FORGE_HOME, &brokered());
+    let mut command = git_remote::git("git", forge::FORGE_HOME, &brokered()).unwrap();
     command
         .args(["clone", &format!("http://{addr}/owner/name.git")])
         .arg(dir.join("clone"));
@@ -242,7 +242,7 @@ async fn asking_what_a_ref_holds_offers_the_brokered_credential_only() {
     let repo = repo_with_remote(&dir, &url);
     plant_repo_helper(&repo, &marker);
 
-    let mut command = git_remote::git_in("git", &repo, "publish-home", &brokered());
+    let mut command = git_remote::git_in("git", &repo, "publish-home", &brokered()).unwrap();
     command.args(["ls-remote", "origin", "refs/heads/main"]);
     let out = command.output().await.unwrap();
     assert!(!out.status.success(), "the host refuses every credential");
@@ -263,7 +263,7 @@ async fn pushing_offers_the_brokered_credential_only() {
     let repo = repo_with_remote(&dir, &url);
     plant_repo_helper(&repo, &marker);
 
-    let mut command = git_remote::git_in("git", &repo, "publish-home", &brokered());
+    let mut command = git_remote::git_in("git", &repo, "publish-home", &brokered()).unwrap();
     command.args(["push", "origin", "HEAD:refs/heads/feat/x"]);
     let out = command.output().await.unwrap();
     assert!(!out.status.success(), "the host refuses every credential");
@@ -286,7 +286,8 @@ async fn an_anonymous_command_has_nothing_to_fall_back_on() {
     let repo = repo_with_remote(&dir, &url);
     plant_repo_helper(&repo, &marker);
 
-    let mut command = git_remote::git_in("git", &repo, "publish-home", &Credential::Anonymous);
+    let mut command =
+        git_remote::git_in("git", &repo, "publish-home", &Credential::Anonymous).unwrap();
     command.args(["ls-remote", "origin"]);
     let out = command.output().await.unwrap();
     assert!(!out.status.success());

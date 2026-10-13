@@ -1138,7 +1138,8 @@ async fn squash_commit(
     else {
         return Err(PublishError::IdentityChanged);
     };
-    let mut command = git_remote::git_bare(git, publisher, PUBLISH_HOME, &Credential::Anonymous);
+    let mut command = git_remote::git_bare(git, publisher, PUBLISH_HOME, &Credential::Anonymous)
+        .map_err(|source| spawn_error(git, source))?;
     command
         .env("GIT_AUTHOR_NAME", author)
         .env("GIT_AUTHOR_EMAIL", author_email)
@@ -1340,7 +1341,8 @@ async fn reword_commits(
                 source,
             })?;
             let mut command =
-                git_remote::git_bare(git, publisher, PUBLISH_HOME, &Credential::Anonymous);
+                git_remote::git_bare(git, publisher, PUBLISH_HOME, &Credential::Anonymous)
+                    .map_err(|source| spawn_error(git, source))?;
             let (author, committer) = (&original.author, &original.committer);
             command
                 .env("GIT_AUTHOR_NAME", &author.0)
@@ -1619,18 +1621,28 @@ fn remote_url(
     Ok(format!("https://{host}/{project}.git"))
 }
 
+/// A program that could not be started, the path guard's refusal included.
+fn spawn_error(cli: &str, source: std::io::Error) -> PublishError {
+    PublishError::Spawn {
+        cli: cli.to_string(),
+        source,
+    }
+}
+
 async fn source_git<'a>(
     git: &str,
     dir: &Path,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<String, PublishError> {
-    let mut command = git_remote::git_in(git, dir, PUBLISH_HOME, &Credential::Anonymous);
+    let mut command = git_remote::git_in(git, dir, PUBLISH_HOME, &Credential::Anonymous)
+        .map_err(|source| spawn_error(git, source))?;
     command.args(args);
     output(git, command).await
 }
 
 async fn init_publisher(git: &str, dir: &Path) -> Result<String, PublishError> {
-    let mut command = git_remote::git(git, PUBLISH_HOME, &Credential::Anonymous);
+    let mut command = git_remote::git(git, PUBLISH_HOME, &Credential::Anonymous)
+        .map_err(|source| spawn_error(git, source))?;
     command.args(["init", "--bare"]).arg(dir);
     output(git, command).await
 }
@@ -1649,7 +1661,8 @@ async fn publisher_raw<'a>(
     dir: &Path,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<u8>, PublishError> {
-    let mut command = git_remote::git_bare(git, dir, PUBLISH_HOME, &Credential::Anonymous);
+    let mut command = git_remote::git_bare(git, dir, PUBLISH_HOME, &Credential::Anonymous)
+        .map_err(|source| spawn_error(git, source))?;
     command.args(args);
     let out = command
         .output()
@@ -1674,7 +1687,8 @@ async fn publisher_git_with_credential<'a>(
     credential: &Credential<'_>,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<String, PublishError> {
-    let mut command = git_remote::git_bare(git, dir, PUBLISH_HOME, credential);
+    let mut command = git_remote::git_bare(git, dir, PUBLISH_HOME, credential)
+        .map_err(|source| spawn_error(git, source))?;
     command.args(args);
     output(git, command).await
 }
@@ -1690,12 +1704,18 @@ async fn run_cli(
     args: &[&str],
 ) -> Result<String, PublishError> {
     let cli = provider.command(cfg);
-    let mut command = Command::new(&cli);
+    let key = match provider {
+        Provider::Github => "publish.gh",
+        Provider::Gitlab => "publish.glab",
+    };
+    let program = crate::config::path_guard::program(key, &cli)
+        .map_err(|source| spawn_error(&cli, source))?;
+    let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(dir)
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", git_remote::home(PUBLISH_HOME))
         .envs(env)
         .kill_on_drop(true);

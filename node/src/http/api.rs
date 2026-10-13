@@ -3860,13 +3860,17 @@ pub async fn publish_operator_issue(
         serde_json::to_string_pretty(&attachments).unwrap_or_else(|_| "[]".into()),
         issue.id,
     );
+    // Checked before the draft is marked as publishing, so a refused `gh`
+    // leaves it a draft rather than an uncertain publication.
+    let gh = crate::config::path_guard::program("publish.gh", &s.cfg.publish.gh)
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
     if !s.store().begin_issue_publication(&id)? {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "this issue was already authorized or is no longer a draft".into(),
         ));
     }
-    let result = tokio::process::Command::new(&s.cfg.publish.gh)
+    let result = tokio::process::Command::new(gh)
         .args([
             "issue",
             "create",
@@ -3879,7 +3883,7 @@ pub async fn publish_operator_issue(
         ])
         .current_dir(Config::state_dir())
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .envs(env)
         .output()

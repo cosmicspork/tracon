@@ -52,14 +52,19 @@ pub async fn identify(channel: &str, repo: &Path, git: &str) -> (String, String,
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
-    let out = tokio::process::Command::new(git)
-        .arg("-C")
-        .arg(repo)
-        .args(["config", "--get", "remote.origin.url"])
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .output()
-        .await;
+    let out = match crate::config::path_guard::program("publish.git", git) {
+        Ok(git) => {
+            tokio::process::Command::new(git)
+                .arg("-C")
+                .arg(repo)
+                .args(["config", "--get", "remote.origin.url"])
+                .env_clear()
+                .env("PATH", crate::config::path_guard::child_path())
+                .output()
+                .await
+        }
+        Err(error) => Err(error),
+    };
     let remote = out
         .ok()
         .filter(|o| o.status.success())

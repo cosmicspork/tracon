@@ -109,6 +109,17 @@ pub fn absent_advice() -> String {
 /// `--rebuild` means for every other thing `setup` owns.
 pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Result<Outcome> {
     let dir = cfg.ui.opencode_bundle_path();
+    // An install moves whatever is at `dir` aside and deletes it, so it
+    // replaces only a bundle, never a directory that holds something else.
+    if let Some(configured) = &cfg.ui.opencode_bundle_dir {
+        crate::config::path_guard::path("ui.opencode_bundle_dir", configured)?;
+    }
+    if !replaceable(&dir) {
+        bail!(
+            "{} holds something other than an OpenCode UI bundle; tracon replaces only a bundle it installed, so it leaves this directory alone",
+            dir.display()
+        );
+    }
     if !force {
         if let Ok(bundle) = ui::Bundle::load(&dir) {
             return Ok(Outcome::Current {
@@ -148,6 +159,9 @@ pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Resul
             .unwrap_or_else(|| "opencode-ui".into())
     ));
     let _ = std::fs::remove_dir_all(&staging);
+    // Made fresh here, so a link left at its name is an error rather than
+    // somewhere the bundle is unpacked into.
+    std::fs::create_dir(&staging).with_context(|| format!("creating {}", staging.display()))?;
     let unpacked = unpack(&bytes, &staging).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&staging);
     })?;
@@ -185,8 +199,57 @@ pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Resul
         return Err(e).with_context(|| format!("installing the bundle at {}", dir.display()));
     }
     let _ = std::fs::remove_dir_all(&retired);
+    if let Some(marker) = marker(&dir) {
+        write_marker(&marker).with_context(|| format!("marking {} as tracon's", dir.display()))?;
+    }
 
     Ok(Outcome::Installed { dir, files, source })
+}
+
+/// The file beside a bundle directory that says tracon installed it there.
+/// Beside, not inside: the bundle's own tree is pinned by its digest.
+fn marker(dir: &Path) -> Option<PathBuf> {
+    let name = dir.file_name()?.to_string_lossy();
+    Some(dir.parent()?.join(format!(".{name}.tracon-bundle")))
+}
+
+/// The marker, written without following a link: one already at its name
+/// is refused rather than written through.
+fn write_marker(marker: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if std::fs::symlink_metadata(marker).is_ok_and(|m| !m.is_file()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not a regular file", marker.display()),
+        ));
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
+        .open(marker)
+        .map(drop)
+}
+
+/// Whether `dir` is a bundle: one the node would serve, one tracon put
+/// there, or an older install at the default place in the state directory.
+pub fn recognised(dir: &Path) -> bool {
+    ui::Bundle::load(dir).is_ok()
+        || marker(dir).is_some_and(|marker| {
+            std::fs::symlink_metadata(marker).is_ok_and(|m| m.file_type().is_file())
+        })
+        || (dir == Config::state_dir().join("opencode-ui") && dir.join("index.html").is_file())
+}
+
+/// What an install may move aside and delete: nothing, an empty
+/// directory, or a bundle.
+fn replaceable(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Err(_) => true,
+        Ok(mut entries) => entries.next().is_none() || recognised(dir),
+    }
 }
 
 async fn fetch(url: &str) -> Result<Vec<u8>> {
@@ -395,6 +458,51 @@ mod tests {
             install(&cfg, Some(&tarball), true).await.unwrap(),
             Outcome::Installed { .. }
         ));
+    }
+
+    /// A directory that holds anything but a bundle is never moved aside or
+    /// deleted, whatever `force` says: the bundle directory is a key, and a
+    /// key could name the operator's source tree.
+    #[tokio::test]
+    async fn a_directory_that_is_not_a_bundle_is_left_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        let dir = home.path().join("src");
+        std::fs::create_dir_all(dir.join("project")).unwrap();
+        std::fs::write(dir.join("project/main.rs"), "fn main() {}").unwrap();
+        cfg.ui.opencode_bundle_dir = Some(dir.clone());
+        let tarball = home.path().join("bundle.tar.gz");
+        std::fs::write(&tarball, b"not even a tarball").unwrap();
+        for force in [false, true] {
+            let err = install(&cfg, Some(&tarball), force).await.unwrap_err();
+            assert!(
+                err.to_string().contains("leaves this directory alone"),
+                "{err}"
+            );
+            assert!(dir.join("project/main.rs").is_file());
+        }
+        // An empty directory, or one tracon marked as its bundle, may be.
+        assert!(replaceable(&home.path().join("absent")));
+        let empty = home.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(replaceable(&empty));
+        std::fs::write(home.path().join(".src.tracon-bundle"), b"").unwrap();
+        assert!(replaceable(&dir));
+    }
+
+    /// A marker name holding a link is neither trusted nor written through.
+    #[test]
+    fn a_linked_marker_is_not_a_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("ui");
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        let target = home.path().join("elsewhere");
+        std::fs::write(&target, "keep").unwrap();
+        let marker = marker(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+        assert!(!recognised(&dir));
+        assert!(write_marker(&marker).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
     }
 
     /// An archive carrying a symlink is refused before the digest is reached —

@@ -993,7 +993,35 @@ which reads a file and needs no node at all. `--help` on any of them says more.
 your comments, key order and formatting stay, only the keys that changed are touched, and a
 result that would not load is refused before anything is written. Each write is recorded
 with who made it and which keys it changed, and pushed to your subscribed devices
-("node.toml changed: ... by ..."). The full set, with defaults:
+("node.toml changed: ... by ...").
+
+Keys that name a program the node runs (`podman`, `gh`, `glab`, `git`, `[consulta]`, the
+builder's `buildctl`) or a file or directory it reads, sends on or writes
+(`embed.api_key_file`, the builder's certificate, registry and token paths,
+`docs.export_dir`, `ui.opencode_bundle_dir`, `worktree_root`, `repo_roots`,
+`state_mount`) are held to a path guard, so neither an agent nor a stolen session can
+point one at something an agent wrote or at a secret. In short:
+
+- a program is an absolute path or a bare name on the node's `PATH`, is called exactly
+  what its key runs, and lives where no agent can write and only root can, or under a
+  package manager's prefix (Homebrew, `~/.local/bin`, `~/.cargo/bin`), where your own
+  user may;
+- `[consulta] args` reads `run --project <consulta's checkout> consulta` (a few plain
+  `uv` flags allowed), with nothing after `consulta`;
+- a secret file lives in `~/.config/tracon/secrets/` (on macOS, `secrets/` beside
+  `node.toml`) or `/etc/tracon/`;
+- documents export into the node's own export area (`~/.local/share/tracon/exports` on
+  Linux), or into a directory you marked by creating a `.tracon-export` file in it,
+  which must be outside anywhere an agent can write;
+- the UI bundle directory is the node's own, new, or already a bundle.
+
+An edit that breaks a rule is refused with the reason. A file that already breaks one
+still starts, with a warning naming the key; the node refuses to run such a program or
+write such a directory until it is fixed, and still reads a key file you placed outside
+the secrets directory, until you move it. The rules in full are in
+`docs/ARCHITECTURE.md` ("The path guard").
+
+The full set, with defaults:
 
 ```toml
 node_name = "<hostname>"            # how this node is named in the mesh
@@ -1202,7 +1230,9 @@ enabled = false
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 
 [docs]
-# export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/
+# export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/;
+                                    # the node's export area, or a directory holding a
+                                    # .tracon-export file you created (the path guard)
 export_channel = ""                 # empty: [session] default_channel
 export_every_secs = 1800            # at startup, then this often (at least 60)
 preview_listen = "127.0.0.1:7422"   # isolated HTML capability origin
@@ -1213,7 +1243,7 @@ enabled = false
 base_url = "http://127.0.0.1:8080"  # an OpenAI-shaped /v1/embeddings
 model = "bge-m3"
 dim = 1024                          # must match the model; changing it rebuilds the index
-# api_key_file = "<home>/.config/llama-server.key"
+# api_key_file = "<home>/.config/tracon/secrets/llama-server.key"  # only under secrets/ or /etc/tracon
 # provider = "anthropic"            # instead of base_url: through the gateway, so the channel ceiling applies
 batch = 16
 timeout_secs = 60

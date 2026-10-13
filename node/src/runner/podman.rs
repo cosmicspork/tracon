@@ -289,13 +289,24 @@ impl PodmanRunner {
         &self.spec
     }
 
+    /// `podman`, checked by the path guard just before it is spawned.
+    fn podman(&self) -> std::io::Result<Command> {
+        let mut command = Command::new(crate::config::path_guard::program(
+            "boundary.podman",
+            &self.spec.podman_bin,
+        )?);
+        command.env("PATH", crate::config::path_guard::child_path());
+        Ok(command)
+    }
+
     async fn ensure_volumes(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
         let mut seen = std::collections::BTreeSet::new();
         for mount in self.spec.extra_mounts.iter().chain(cmd.mounts.iter()) {
             if !seen.insert(&mount.volume) {
                 continue;
             }
-            let out = Command::new(&self.spec.podman_bin)
+            let out = self
+                .podman()?
                 .args(["volume", "create", "--ignore", &mount.volume])
                 .output()
                 .await?;
@@ -332,7 +343,8 @@ impl Runner for PodmanRunner {
             .spec
             .podman_args_publishing(&name, &cmd, false, host_port);
         tracing::debug!(container = %name, "podman run");
-        let child = Command::new(&self.spec.podman_bin)
+        let child = self
+            .podman()?
             .args(&args)
             .envs(secrets)
             .stdin(Stdio::piped())
@@ -348,7 +360,7 @@ impl Runner for PodmanRunner {
         let name = self.capture_name(&cmd.name);
         let secrets = secret_env_for(&cmd)?;
         let args = self.spec.podman_args(&name, &cmd, false);
-        Command::new(&self.spec.podman_bin)
+        self.podman()?
             .args(&args)
             .envs(secrets)
             .output()
@@ -364,11 +376,13 @@ impl Runner for PodmanRunner {
     /// can outlive this call whichever path it took.
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
         let timeout = self.spec.stop_timeout_secs.to_string();
-        let _ = Command::new(&self.spec.podman_bin)
+        let _ = self
+            .podman()?
             .args(["stop", "--time", &timeout, "--ignore", name])
             .output()
             .await;
-        let _ = Command::new(&self.spec.podman_bin)
+        let _ = self
+            .podman()?
             .args(["rm", "-f", "-i", name])
             .output()
             .await?;
@@ -376,7 +390,8 @@ impl Runner for PodmanRunner {
     }
 
     async fn start_sidecar(&self, sidecar: &super::Sidecar) -> Result<(), RunnerError> {
-        let out = Command::new(&self.spec.podman_bin)
+        let out = self
+            .podman()?
             .args(self.spec.sidecar_args(sidecar))
             .output()
             .await?;
@@ -396,7 +411,8 @@ impl Runner for PodmanRunner {
     }
 
     async fn probe_sidecar(&self, sidecar: &super::Sidecar) -> Result<bool, RunnerError> {
-        let out = Command::new(&self.spec.podman_bin)
+        let out = self
+            .podman()?
             .args(self.spec.probe_args(sidecar))
             .output()
             .await?;
@@ -424,7 +440,9 @@ impl Runner for PodmanRunner {
     /// recorded, podman unreachable): evidence must never invent a pin.
     async fn resolved_image(&self, image: Option<&str>) -> Option<String> {
         let image = image.unwrap_or(&self.spec.image);
-        let output = Command::new(&self.spec.podman_bin)
+        let output = self
+            .podman()
+            .ok()?
             .args(["inspect", "--format", "{{index .RepoDigests 0}}", image])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

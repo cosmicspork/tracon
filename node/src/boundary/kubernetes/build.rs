@@ -236,20 +236,36 @@ impl BuildKitBuilder {
         argv
     }
 
-    fn command(&self, args: &[OsString]) -> tokio::process::Command {
+    /// `buildctl`, checked by the path guard just before it is spawned.
+    fn command(&self, args: &[OsString]) -> std::io::Result<tokio::process::Command> {
+        let program = crate::config::path_guard::program(
+            "runtime.kubernetes.builder.buildctl",
+            &self.settings.buildctl,
+        )?;
+        // What buildctl reads its certificate and push credential from,
+        // checked again with it.
+        crate::config::path_guard::path(
+            "runtime.kubernetes.builder.tls_dir",
+            &self.settings.tls_dir,
+        )?;
+        crate::config::path_guard::path(
+            "runtime.kubernetes.builder.docker_config",
+            &self.settings.docker_config,
+        )?;
         // Made here, not once at startup: the claim is mounted by then, and
         // something may have removed the directory since.
         let _ = std::fs::create_dir_all(&self.scratch);
-        let mut command = tokio::process::Command::new(&self.settings.buildctl);
+        let mut command = tokio::process::Command::new(program);
         command
             .args(args)
+            .env("PATH", crate::config::path_guard::child_path())
             .env("DOCKER_CONFIG", &self.settings.docker_config)
             .env("TMPDIR", &self.scratch)
             .stdin(std::process::Stdio::null())
             // A build abandoned at its deadline must not keep running: the
             // daemon cancels it when this client's session goes.
             .kill_on_drop(true);
-        command
+        Ok(command)
     }
 
     /// Whether the daemon answers over mTLS and the registry lets the
@@ -269,7 +285,10 @@ impl BuildKitBuilder {
     async fn probe(&self) -> Result<String, String> {
         let mut args = self.connection();
         args.extend(["debug".into(), "workers".into()]);
-        let out = tokio::time::timeout(WORKERS_TIMEOUT, self.command(&args).output())
+        let mut command = self
+            .command(&args)
+            .map_err(|error| format!("{}: {error}", self.settings.buildctl))?;
+        let out = tokio::time::timeout(WORKERS_TIMEOUT, command.output())
             .await
             .map_err(|_| {
                 format!(
@@ -393,7 +412,11 @@ impl ImageBuilder for BuildKitBuilder {
             .timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(build.timeout);
-        let out = match tokio::time::timeout(timeout, self.command(&argv).output()).await {
+        let mut command = match self.command(&argv) {
+            Ok(command) => command,
+            Err(error) => return Err(failure(format!("{}: {error}", self.settings.buildctl), &[])),
+        };
+        let out = match tokio::time::timeout(timeout, command.output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(error)) => {
                 return Err(BuildFailure::transient(unusable(&format!(
