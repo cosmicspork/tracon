@@ -913,6 +913,10 @@ suspend_published_after_secs = 1800 # a published session idle this long is susp
 kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # [runtime.kubernetes]              # namespace, harness_image,
                                     # state_claim, state_mount, harness_home, uid, gateway_host
+# start_timeout_secs = 900          # (under [runtime.kubernetes]) how long a pod may take to be
+                                    # scheduled, pull its image and start before the run is given
+                                    # up with the reason it was waiting. Only the start: a started
+                                    # check or preparation runs until it ends or its own timeout
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
 # [[repo]]                          # one repository's environment (also Settings → Repositories and

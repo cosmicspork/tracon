@@ -9,6 +9,7 @@ pub mod fake;
 pub mod fake_opencode;
 pub mod harness;
 pub mod http;
+pub mod kube_api;
 pub mod mesh;
 pub mod oauth_fake;
 pub mod rows;

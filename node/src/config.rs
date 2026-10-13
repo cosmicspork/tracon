@@ -891,6 +891,11 @@ pub struct Kubernetes {
     pub uid: i64,
     /// The name the harness pod resolves to the node's pod IP.
     pub gateway_host: String,
+    /// How long a harness pod may take to start (scheduling, pulling its
+    /// image, mounting) before the run is given up with the reason it was
+    /// still waiting. Only the start is bounded here: a started command runs
+    /// until it ends or its caller stops it, as it does under Podman.
+    pub start_timeout_secs: u64,
 }
 
 impl Default for Kubernetes {
@@ -906,6 +911,8 @@ impl Default for Kubernetes {
             harness_home: "/home/harness".into(),
             uid: 65532,
             gateway_host: "tracon-gw".into(),
+            // A first pull of a repository image can be gigabytes.
+            start_timeout_secs: 15 * 60,
         }
     }
 }
