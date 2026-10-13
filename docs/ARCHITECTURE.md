@@ -113,14 +113,52 @@ takes its own comments with it. The operator's devices get a push through the or
 operator notification path, keyed by the audit row. A writer whose operations depend on
 what the file holds now decides again when another edit lands first.
 
-`config_schema` describes every key: whether a change applies live or at restart (only
-`[[repo]]` is live today), whether writing it is an admin action (every key is), whether
-it names an executable the node runs or a host path it reads or writes (and which rules of
-the path guard hold it), and whether its value is a secret the audit log redacts. A test
+`config_schema` describes every key: whether a change applies live or at restart,
+whether writing it is an admin action (every key is), whether it names an executable the
+node runs or a host path it reads or writes (and which rules of the path guard hold it), and whether its value is a secret the audit log redacts. A test
 walks the `Config` structs' own `Deserialize` and fails on a key without an entry, so a
 new setting cannot arrive without saying which it is. The one other writer is the
 load-time migration of a retired harness, which rewrites the file once and keeps the
 original beside it.
+
+**Live keys and the restart owed.** Every part of the node holds the `Arc<Config>` it was
+given at start; inside it a `ConfigHandle` carries the newest file the node has taken in.
+An edit through the node swaps it at once, and a file changed by another process (the
+CLI, an editor) is taken in at the next 15-second look. Code reads a live key through
+`Config::live()`, which is the configuration the node started with with only the
+schema's live keys laid over it from the newest file, so a reader that also touches a
+restart key still sees what is running. Live today: `[[repo]]`, the `[session]` defaults
+(budget, permission and approval timeouts, harness API timeout, default channel, claim
+grace, suspend-after), `[publish]`, `[github] dispatch`, `[supervision]`, `[review]`
+limits, `[notify] contact`, `[memory] promote_at`, provider prices,
+`[runtime] approved_images` and the `[docs]` export keys. Everything else (listeners,
+the boundary and runtime, the mesh, providers' credentials and upstreams, the harness,
+`[auth]`, `[ui]`) holds until a restart. The node remembers the file it started from and
+reports the restart-only keys that differ from it now (`GET /api/restart`, and a
+`restart` stream frame), which the interface shows as one banner on every screen.
+
+**Restart over HTTP.** `POST /api/admin/restart {mode, expected_hash}` restarts the node
+into the file the caller read; a file that changed since, or that would not load, is
+refused. `when_idle`, the default, refuses new sessions and turns, waits (30 minutes
+unless the request says otherwise) for running turns and required checks to finish, then
+restarts; if they have not finished it gives up, takes work again and pushes why. `now`
+answers with the live sessions it would end until the body confirms them. What restarts
+the node is its supervisor: the fixed user service where it runs under one, and in a
+Kubernetes pod the node drains, shuts down as SIGTERM would and exits 0 for the kubelet
+to start it again on the same volume and pod IP. Anywhere else the request is refused,
+because nothing would bring the node back. The route is an `AdminAction`: free at the
+node, and from anywhere else a passkey assertion bound to exactly this request, so the
+phone can ask while a bearer token never suffices off the node.
+
+**Last-known-good.** A node that has run five minutes copies the file it started from to
+`node.toml.last-good`, beside it with its permissions. Each start counts itself, before
+the configuration loads, in `boot-attempts.json` under the state directory, keyed by the
+file's hash; a clean stop or five healthy minutes clears the count. A start that finds
+three failed starts in a row of a file that differs from last-good keeps that file as
+`node.toml.failed-<ms>`, puts last-good in its place, and on the next successful start
+records a `config_audit` row (actor `last-known-good restore`) and pushes it. A file
+equal to last-good is never replaced, so the restore cannot loop. Undoing one is in
+[RECOVERY.md](RECOVERY.md).
 
 #### The path guard
 
@@ -659,7 +697,9 @@ node](#reaching-a-node)). Policy signing/install and host service actions additi
 require a local request (see [Reaching a node](#reaching-a-node)), which a proxy on
 the node's own host does not make. Service actions name only the supported fixed supervisor,
 refuse active work or ambiguous process identity, and report scheduling rather
-than pretending a restart has already succeeded.
+than pretending a restart has already succeeded. The restart route that applies a
+configuration change (see [Configuration](#configuration)) drains active work instead
+of refusing it, and also restarts a node in a Kubernetes pod.
 
 **A policy preview is a signed artifact with a fixed baseline.** Application
 compares the preview's expected installed hash while holding the same policy lock
@@ -760,8 +800,8 @@ files. Required checks run against an isolated copy of the candidate, never the
 worktree, in a throwaway container with no credentials, no egress, and only the tools of
 the image the operator validated for that repository. Which commands and which image is
 the repository's `[[repo]]` entry in the node's own configuration — never a file in the
-candidate, which could then choose its own gate, and the one table a running node
-replaces rather than waiting for a restart, so an entry saved from Settings or the CLI
+candidate, which could then choose its own gate, and a table a running node takes in
+live rather than waiting for a restart, so an entry saved from Settings or the CLI
 applies to the next session and check without ending the ones in progress — over the
 node-wide checks and the
 harness image where the entry names none; a command that image has no tool for is
@@ -1902,10 +1942,13 @@ Three surfaces, three answers, and the differences are the point.
   author in a year included, retrofits multi-user onto it.
 - **No business domain.** Clients, invoicing, and time billing live elsewhere.
 - **Bootstrap.** The node is developed by agents running inside it, so a documented
-  path to running a harness outside the system is maintained, and rebuilding or
-  restarting the node is a host-side recipe — the CLI's or the desktop app's, never
-  a tool and never the node's HTTP API — so no session inside the boundary performs
-  it. A harness outside the boundary runs as the operator and could; see
+  path to running a harness outside the system is maintained, and rebuilding the
+  node is a host-side recipe, the CLI's or the desktop app's. Restarting it is also
+  an administrator's call on the node's HTTP API (`POST /api/admin/restart`), so a
+  node in a pod or reached from a phone can apply its own configuration; it is never
+  a tool, and it needs an administrator (at the node, or confirmed with a passkey),
+  so no session inside the boundary performs it. A harness outside
+  the boundary runs as the operator and could; see
   `reference/external-harness-notes.md`.
 
 ## Data lifecycle

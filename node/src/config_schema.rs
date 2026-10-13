@@ -17,7 +17,8 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Apply {
-    /// The running node picks it up from the next session or check.
+    /// The running node picks it up where it next reads it: the next
+    /// session, turn, check, publication or push (`Config::live`).
     Live,
     /// The running node holds what it loaded; a restart applies it.
     Restart,
@@ -169,13 +170,13 @@ pub const KEYS: &[KeySpec] = &[
     restart("gateway.egress_port"),
     restart("gateway.harness_listen"),
     // [session]
-    restart("session.budget_tokens"),
-    restart("session.permission_timeout_secs"),
-    restart("session.approval_expiry_secs"),
-    restart("session.harness_api_timeout_secs"),
-    restart("session.default_channel"),
-    restart("session.claim_grace_secs"),
-    restart("session.suspend_published_after_secs"),
+    live("session.budget_tokens"),
+    live("session.permission_timeout_secs"),
+    live("session.approval_expiry_secs"),
+    live("session.harness_api_timeout_secs"),
+    live("session.default_channel"),
+    live("session.claim_grace_secs"),
+    live("session.suspend_published_after_secs"),
     restart("session.worktree_root").path(PathKind::Root),
     restart("session.pty_buffer_frames"),
     restart("session.pty_capture_output"),
@@ -184,19 +185,19 @@ pub const KEYS: &[KeySpec] = &[
     restart("consulta.args").exec_args(),
     restart("consulta.timeout_secs"),
     // [publish]
-    restart("publish.gh").exec(),
-    restart("publish.glab").exec(),
-    restart("publish.git").exec(),
-    restart("publish.forge_timeout_secs"),
-    restart("publish.commits"),
-    restart("publish.style.conventional"),
-    restart("publish.style.types"),
-    restart("publish.style.imperative"),
-    restart("publish.style.max_subject"),
-    restart("publish.style.kebab_branch"),
-    restart("publish.style.no_ticket_keys"),
+    live("publish.gh").exec(),
+    live("publish.glab").exec(),
+    live("publish.git").exec(),
+    live("publish.forge_timeout_secs"),
+    live("publish.commits"),
+    live("publish.style.conventional"),
+    live("publish.style.types"),
+    live("publish.style.imperative"),
+    live("publish.style.max_subject"),
+    live("publish.style.kebab_branch"),
+    live("publish.style.no_ticket_keys"),
     // [github]
-    restart("github.dispatch.*"),
+    live("github.dispatch.*"),
     // [mesh]
     restart("mesh.hub_url"),
     restart("mesh.heartbeat_secs"),
@@ -210,7 +211,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("mesh.renew_credentials"),
     // [runtime]
     restart("runtime.kind"),
-    restart("runtime.approved_images"),
+    live("runtime.approved_images"),
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image"),
     restart("runtime.kubernetes.state_claim"),
@@ -238,7 +239,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.resources.command.cpu_limit"),
     restart("runtime.kubernetes.resources.command.memory_request"),
     restart("runtime.kubernetes.resources.command.memory_limit"),
-    // [[repo]]: the one table a running node reads live (`Config::repos`).
+    // [[repo]]: replaced whole when saved (`Config::repos`).
     live("repo.path"),
     live("repo.image"),
     live("repo.dockerfile"),
@@ -268,8 +269,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("providers.*.upstream"),
     restart("providers.*.shape"),
     restart("providers.*.login"),
-    restart("providers.*.price.input_per_mtok"),
-    restart("providers.*.price.output_per_mtok"),
+    live("providers.*.price.input_per_mtok"),
+    live("providers.*.price.output_per_mtok"),
     restart("providers.*.models.id"),
     restart("providers.*.models.name"),
     restart("providers.*.models.context"),
@@ -277,17 +278,17 @@ pub const KEYS: &[KeySpec] = &[
     restart("providers.*.models.reasoning"),
     restart("providers.*.models.attachment"),
     // [memory]
-    restart("memory.promote_at"),
+    live("memory.promote_at"),
     // [supervision]
-    restart("supervision.checks"),
-    restart("supervision.timeout_secs"),
-    restart("supervision.dependency_inputs.*"),
-    restart("supervision.max_snapshot_bytes"),
+    live("supervision.checks"),
+    live("supervision.timeout_secs"),
+    live("supervision.dependency_inputs.*"),
+    live("supervision.max_snapshot_bytes"),
     // [review]
-    restart("review.max_diff_lines"),
-    restart("review.max_files"),
+    live("review.max_diff_lines"),
+    live("review.max_files"),
     // [notify]
-    restart("notify.contact"),
+    live("notify.contact"),
     // [embed]
     restart("embed.enabled"),
     restart("embed.base_url"),
@@ -303,9 +304,9 @@ pub const KEYS: &[KeySpec] = &[
     restart("external.idle_timeout_secs"),
     restart("external.repo_roots").path(PathKind::Root),
     // [docs]
-    restart("docs.export_dir").path(PathKind::WriteDir),
-    restart("docs.export_channel"),
-    restart("docs.export_every_secs"),
+    live("docs.export_dir").path(PathKind::WriteDir),
+    live("docs.export_channel"),
+    live("docs.export_every_secs"),
     restart("docs.preview_listen"),
     restart("docs.preview_url"),
     // [launch]

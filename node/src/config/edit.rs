@@ -699,6 +699,7 @@ pub fn update_repos_at<T, E: From<EditError>>(
         Op::replace_repos(&file.repo, &entries)
     })?;
     cfg.live_repo.set(outcome.config.repo.clone());
+    cfg.apply_edit(&outcome);
     Ok((value, outcome))
 }
 
@@ -751,7 +752,7 @@ fn announce(
     }))
 }
 
-fn audit_entry(change: &Change) -> serde_json::Value {
+pub(crate) fn audit_entry(change: &Change) -> serde_json::Value {
     let at: Vec<String> = change
         .key
         .schema_key()
@@ -800,7 +801,7 @@ fn redacted(at: &[String], value: &toml::Value) -> serde_json::Value {
 /// The keys whose values differ between two texts of the file, down to the
 /// values themselves: a table that appears or goes is each of its keys. An
 /// array of tables whose length changed is one change at the array.
-fn diff(before: &str, after: &str) -> Vec<Change> {
+pub(crate) fn diff(before: &str, after: &str) -> Vec<Change> {
     let parse = |text: &str| toml::from_str::<toml::Table>(text).unwrap_or_default();
     let (before, after) = (parse(before), parse(after));
     let mut out = Vec::new();

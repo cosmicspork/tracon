@@ -181,7 +181,8 @@ struct CheckDefinition {
 /// own in its place; `candidate_environment` is what a candidate actually
 /// answers to.
 pub fn required_definitions(cfg: &Config) -> Vec<String> {
-    cfg.supervision
+    cfg.live()
+        .supervision
         .checks
         .iter()
         .map(|command| command.trim())
@@ -1115,7 +1116,7 @@ fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde_json::Valu
             RuntimeKind::Kubernetes => "kubernetes",
         },
         "timeout_secs": environment.timeout_secs,
-        "dependency_inputs": cfg.supervision.dependency_inputs,
+        "dependency_inputs": cfg.live().supervision.dependency_inputs,
     });
     if !environment.prepare.is_empty() {
         inputs["prepare"] = json!(environment.prepare);

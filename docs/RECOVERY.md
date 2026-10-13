@@ -253,6 +253,42 @@ app with its host changed (`http://localhost:7420/#approve=<id>`), or approve
 it with the code the app shows:
 `curl -s -X POST -H 'content-type: application/json' -d '{"user_code":"BCDF-GHJK"}' http://127.0.0.1:7420/api/auth/device/approvals/<id>/approve`.
 
+## A node.toml that keeps the node from starting
+
+`node.toml` can be edited from elsewhere now (Settings on another device, the CLI),
+and a restart applies whatever it says. So the node keeps a way back:
+
+- Once a node has run for five minutes, the file it started from is copied to
+  `node.toml.last-good`, beside it and with its permissions.
+- Each start is counted in `boot-attempts.json` in the state directory, against
+  the file's hash, before the file is loaded. A clean stop, or five minutes of
+  running, clears the count.
+- A start that finds three failed starts in a row of a file that differs from
+  `node.toml.last-good` moves that file aside as `node.toml.failed-<ms>` (the time
+  of the restore, in milliseconds) and puts last-good in its place. The node starts
+  on it, records a `config_audit` row with the actor `last-known-good restore`, and
+  pushes "node.toml restored" to the operator's devices.
+
+It never loops and never discards the operator's file: a file equal to last-good is
+never replaced however often it fails, and the replaced file is always kept first.
+A start that fails for a reason that is not the file (a port another process holds)
+counts the same way, so a node that keeps failing on a file it once ran well on is
+not "fixed" by putting that same file back.
+
+**To undo a restore** once the cause is fixed, put the failed file back and restart:
+
+```sh
+cd ~/.config/tracon          # or the volume's config directory in a pod
+cp node.toml node.toml.restored
+mv node.toml.failed-<ms> node.toml
+```
+
+then restart the node (Settings, `tracon service restart`, or let the pod restart).
+If it fails three more times it is restored again, with a new `node.toml.failed-<ms>`.
+
+**To stop it from restoring at all**, delete `node.toml.last-good`; with no last-good
+file nothing is put back. Deleting `boot-attempts.json` starts the count again.
+
 ## Recovering the node itself
 
 Everything a node is lives in two directories. On Linux that is
@@ -262,6 +298,7 @@ on macOS both are `~/Library/Application Support/tracon/`.
 | | | |
 |---|---|---|
 | `node.toml` | the configuration | back it up; hand-writable |
+| `node.toml.last-good`, `node.toml.failed-<ms>` | the last file the node ran well on, and any it put aside (below) | kept beside `node.toml`; safe to delete |
 | `node-identity.seed` | the node's identity, 32 bytes of hex | **back it up first** |
 | `credentials.sealed` | the broker | sealed under a key derived from the seed — worthless without it |
 | `node.db` | sessions, corpus, ledger, channel keys, candidates and evidence | back it up |

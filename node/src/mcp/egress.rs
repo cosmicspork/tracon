@@ -193,7 +193,7 @@ pub fn ask(
         created_ms: now,
         decided_ms: None,
         finished_ms: None,
-        expires_ms: now + (manager.cfg().session.approval_expiry_secs.max(1) as i64) * 1000,
+        expires_ms: now + (manager.cfg().live().session.approval_expiry_secs.max(1) as i64) * 1000,
     };
     store.insert_approval(&row).map_err(|e| e.to_string())?;
     Ok(Asked::Pending(row, true))

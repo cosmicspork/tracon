@@ -197,7 +197,7 @@ pub fn session_authority(
         limits: json!({
             "budget_tokens": session.budget_tokens,
             "tokens_used": session.tokens_used,
-            "permission_timeout_secs": cfg.session.permission_timeout_secs,
+            "permission_timeout_secs": cfg.live().session.permission_timeout_secs,
             "ceiling": crate::metrics::ceiling(
                 store,
                 &channel_bindings(store, &session.channel),

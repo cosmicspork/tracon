@@ -171,7 +171,6 @@
   let cfg = $state<NodeConfig | null>(null)
   let form = $state<NodeConfig | null>(null)
   let changed = $state<string[]>([])
-  let restartOwed = $state(false)
 
   let configError = $state('')
   // A one-shot read at mount, not an effect: nothing reactive decides when
@@ -200,7 +199,7 @@
       const patch = changedSubset(cfg as never, form as never)
       const res = await api.putConfig(patch)
       changed = res.changed
-      restartOwed = restartOwed || res.restart_required
+      void store.refreshRestart()
       await loadConfig()
     })
   }
@@ -215,7 +214,7 @@
   // the canonical config afterward, the same way `saveConfig` does.
   async function saveProviderModels(name: string, models: NodeConfig['providers'][string]['models']) {
     const res = await api.putConfig({ providers: { [name]: { models } } })
-    restartOwed = restartOwed || res.restart_required
+    void store.refreshRestart()
     await loadConfig()
   }
 
@@ -254,7 +253,7 @@
   }
   function onCustomProviderCreated(name: string) {
     addProvider = 'closed'
-    restartOwed = true
+    void store.refreshRestart()
     addProviderNote = `${name} saved to node.toml. Restart the node for it to be available.`
     void loadConfig()
   }
@@ -443,7 +442,7 @@
       const res = await api.meshUnpair()
       unpairing = false
       unpaired = true
-      if (res.restart_required) restartOwed = true
+      if (res.restart_required) void store.refreshRestart()
     })
   }
   let hubUrl = $state('')
@@ -455,7 +454,7 @@
       meshInit = await api.meshInit(hubUrl.trim())
       admitCopied = false
       admitCopyError = ''
-      restartOwed = true
+      void store.refreshRestart()
     })
   }
   async function copyAdmit() {
@@ -484,7 +483,7 @@
       enrollPollError = ''
       if (next.done) {
         stopEnrollPoll()
-        if (next.restart_required) restartOwed = true
+        if (next.restart_required) void store.refreshRestart()
         await store.refetch()
       }
       return next.done
@@ -626,9 +625,6 @@
 <div class="h4">
   Settings
   <b>{store.node?.name ?? 'this node'}</b>
-  {#if restartOwed}
-    <span class="chip warn r" title="The running node read its configuration at startup. Quit and reopen the app, or restart the service.">restart owed</span>
-  {/if}
 </div>
 
 <nav class="section-nav" aria-label="Settings sections">
@@ -1143,7 +1139,7 @@
 {/if}
 
 {#if activeSection === 'system'}
-  <Card title="Node configuration" note="Host settings in the serving node's node.toml. Most take effect after a restart.">
+  <Card title="Node configuration" note="Host settings in the serving node's node.toml. Some apply at once; the banner at the top names any that wait for a restart.">
     {#if form && cfg}
       <div class="grid">
         <label><span>Node name</span><input bind:value={form.node_name} disabled={!local} spellcheck="false" /></label>
@@ -1599,10 +1595,6 @@
     border-radius: 4px;
     word-break: break-all;
   }
-  .chip.r {
-    margin-left: auto;
-  }
-
   /* Mesh */
   .hub {
     display: grid;

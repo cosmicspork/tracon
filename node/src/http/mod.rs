@@ -132,6 +132,11 @@ pub fn router(state: AppState) -> Router {
             post(admin::boundary_check),
         )
         .route("/api/admin/maintenance/restart", post(admin::restart))
+        .route("/api/restart", get(admin::restart_status))
+        .route(
+            "/api/admin/restart",
+            post(admin::restart_node).delete(admin::cancel_restart),
+        )
         .route("/api/maintenance/storage", post(admin::storage))
         .route("/api/maintenance/data", get(admin::data))
         .route("/api/admin/maintenance/install", post(admin::install))
@@ -552,8 +557,20 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // `[mesh]` must not quietly run this node unmeshed.
     // Before the load, which may migrate the retired harness and so rewrite
     // the file: an interrupted edit is settled against this version too.
+    // Counted before the load, so a file that keeps the node from starting
+    // is found out, and the last one it ran well on put back
+    // (`config::last_good`).
+    let boots = crate::config::last_good::Paths::node();
+    if let Err(error) = crate::config::last_good::on_boot(&boots, crate::store::now_ms()) {
+        tracing::warn!(%error, "could not count this start; node.toml.last-good will not be restored");
+    }
     let config_before_load = crate::config::edit::file_hash(&Config::config_path()).ok();
     let cfg = Arc::new(Config::try_load().map_err(|e| anyhow::anyhow!(e))?);
+    // The file as it loaded (after any migration the load wrote): what a
+    // restart would change is measured against it, and it is what becomes
+    // last-good once the node has run on it.
+    let boot_text = std::fs::read_to_string(Config::config_path()).unwrap_or_default();
+    cfg.set_boot_text(&boot_text);
     // Before anything runs: every program the node spawns from here on is
     // checked against this, and a key that breaks a rule is reported now.
     crate::config::path_guard::install_for_serve(&cfg);
@@ -927,11 +944,16 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         let store = store.clone();
         let manager = state.manager.clone();
         let node_id = state.node_id.clone();
-        let grace = std::time::Duration::from_secs(cfg.session.claim_grace_secs);
+        let cfg = cfg.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 tick.tick().await;
+                // node.toml changed by another process (the CLI, an editor):
+                // its live keys apply from here.
+                cfg.refresh_live_from(&Config::config_path());
+                crate::restart::publish(&manager);
+                let grace = std::time::Duration::from_secs(cfg.live().session.claim_grace_secs);
                 // A deadline is judged only after a suspend has moved it on.
                 awake.catch_up().await;
                 // An approval waits for the operator until it expires; the
@@ -988,14 +1010,21 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     // A session whose work is published and which has gone quiet is put
     // away rather than left holding its container and its way out.
-    if cfg.session.suspend_published_after_secs > 0 {
+    // Read at every tick, so turning it on, off or changing it applies
+    // without a restart.
+    {
         let manager = state.manager.clone();
-        let idle = std::time::Duration::from_secs(cfg.session.suspend_published_after_secs);
+        let cfg = cfg.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tick.tick().await;
-                manager.suspend_idle_published(idle).await;
+                let after = cfg.live().session.suspend_published_after_secs;
+                if after > 0 {
+                    manager
+                        .suspend_idle_published(std::time::Duration::from_secs(after))
+                        .await;
+                }
             }
         });
     }
@@ -1026,6 +1055,18 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     tokio::spawn(crate::corpus::export::run(store.clone(), cfg.clone()));
 
     tracing::info!(%listen, "serving");
+    // Started: a restore of last-good is recorded and told, and once the
+    // node has run a while on this file, it is the new last-good.
+    crate::config::last_good::settle(&boots, &store, &cfg);
+    {
+        let boots = boots.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::config::last_good::HEALTHY_AFTER).await;
+            if let Err(error) = crate::config::last_good::promote(&boots, &boot_text) {
+                tracing::warn!(%error, "could not keep node.toml as last-known-good");
+            }
+        });
+    }
     let manager = state.manager.clone();
     let bus = manager.bus().clone();
     let operator =
@@ -1048,6 +1089,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // The listener is closed; end every live session so no harness container
     // outlives the process that gates it.
     manager.shutdown_all().await;
+    // A stop, not a failed start.
+    crate::config::last_good::clean_stop(&boots);
     Ok(())
 }
 
@@ -1269,10 +1312,14 @@ async fn shutdown_signal() {
         tokio::select! {
             _ = ctrl_c => {},
             _ = term.recv() => {},
+            _ = crate::restart::exit_requested() => {},
         }
     }
     #[cfg(not(unix))]
-    ctrl_c.await.ok();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = crate::restart::exit_requested() => {},
+    }
     tracing::info!("shutting down");
 }
 

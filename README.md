@@ -461,8 +461,8 @@ The table is edited where you would look for it: **Settings → Repositories**, 
 --prepare "cargo fetch --locked" --egress crates` (and `show`, `rm`). Either writes
 `node.toml` and takes effect for the next session and the next check without a restart —
 a restart would end every session on the node to change one repository's environment. A
-session already running keeps the image and the egress it started with. Hand edits to
-`node.toml` are read at start, as before.
+session already running keeps the image and the egress it started with. A hand edit of
+`node.toml` is picked up within about 15 seconds, the same way.
 
 Or let a session draft it. `repo_setup_draft` reads the default branch (its devcontainer,
 lockfiles, a `just check` recipe or `package.json` scripts) and drafts the entry with where
@@ -900,7 +900,9 @@ Mesh invitations, admission, removal, and explicit hub channel sharing require
 administrator authentication, including on loopback, and work from an authenticated
 remote browser. **Maintenance** service changes additionally require local access,
 the fixed supported supervisor, and no active sessions. A scheduled restart is not
-a completed restart; unsupported or ambiguous service identities are refused.
+a completed restart; unsupported or ambiguous service identities are refused. The
+restart that applies a `node.toml` change (see [Configuration](#configuration)) drains
+active sessions instead of refusing them.
 
 **Permissions & policies** separates verified installed files from the running
 process policy. On a managing node, initialize a missing policy, or preview and
@@ -1021,7 +1023,23 @@ write such a directory until it is fixed, and still reads a key file you placed 
 the secrets directory, until you move it. The rules in full are in
 `docs/ARCHITECTURE.md` ("The path guard").
 
-The full set, with defaults:
+Some keys apply to the running node at once: `[[repo]]`, the `[session]` defaults (budget,
+timeouts, default channel, claim grace, suspend-after), `[publish]`, `[github] dispatch`,
+`[supervision]`, `[review]`, `[notify] contact`, `[memory] promote_at`, provider prices,
+`[runtime] approved_images` and the `[docs]` export keys, from the next session, turn,
+check or push. The rest wait for a restart, and every screen of the interface says which
+until then ("node.toml changed: restart to apply ..."). **Restart when idle** stops
+taking new sessions and turns, waits for running turns and checks to finish (30 minutes at
+most, then it gives up and says why), and restarts; **Restart now** lists the sessions it
+would end and asks first. The same is `POST /api/admin/restart` with
+`{"mode": "when_idle" | "now", "expected_hash": "<GET /api/restart's config.hash>"}`. It
+is an administrator's action, confirmed with a passkey from anywhere but the node itself,
+and works under the user service and in a Kubernetes pod, where the node exits for the
+kubelet to start it again.
+
+A node keeps the last file it ran well on as `node.toml.last-good`, and puts it back after
+three failed starts in a row of a different file, keeping the failed one as
+`node.toml.failed-<ms>`; see [RECOVERY.md](docs/RECOVERY.md). The full set, with defaults:
 
 ```toml
 node_name = "<hostname>"            # how this node is named in the mesh
@@ -1398,7 +1416,11 @@ kubectl -n <namespace> port-forward deploy/tracon-node 7420:7420
 
 The ConfigMap only seeds `node.toml`. An init container copies it onto the state
 volume once, and from then on the node reads and writes the copy there
-(`/state/config/tracon/node.toml`); delete that file to reseed. Every harness pod
+(`/state/config/tracon/node.toml`); delete that file to reseed. A change that waits
+for a restart is applied with **Restart when idle** in the interface (or
+`POST /api/admin/restart`): the node drains, exits 0, and the kubelet starts the
+container again on the same volume and pod IP, so a phone with a passkey restarts it
+without `kubectl`. Every harness pod
 names its own requests and memory limit (`[runtime.kubernetes.resources]`, sized by
 default for one shared 4 vCPU / 8 GB node), so a namespace's LimitRange never
 substitutes its defaults. Each pod also gets a memory-backed `/dev/shm` for browsers

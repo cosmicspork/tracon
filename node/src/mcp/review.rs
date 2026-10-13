@@ -453,7 +453,7 @@ async fn submit(
 
     // The cap, before anything else: complexity accretes because nothing says
     // no at submission time. A resubmission is capped the same way.
-    let limits = &manager.cfg().review;
+    let limits = manager.cfg().live().review.clone();
     let lines = capture.added + capture.removed;
     if lines > limits.max_diff_lines || capture.files.len() > limits.max_files {
         let reason = format!(
@@ -533,8 +533,12 @@ async fn submit(
             target.branch = named;
         }
     }
-    let (commit_mode, style) =
-        review::prose::rules(manager.cfg(), store, &ctx.channel, repo_path.as_deref());
+    let (commit_mode, style) = review::prose::rules(
+        &manager.cfg().live(),
+        store,
+        &ctx.channel,
+        repo_path.as_deref(),
+    );
     let squash = commit_mode == crate::config::Commits::Squash;
     let commits = review::commits(&worktree, &range_base)
         .await
@@ -611,7 +615,7 @@ async fn submit(
         }
     }
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
-    let max_snapshot_bytes = manager.cfg().supervision.max_snapshot_bytes;
+    let max_snapshot_bytes = manager.cfg().live().supervision.max_snapshot_bytes;
     // Capture the committed candidate before any check can execute. The
     // snapshot is a hardened Git tree import, not this mutable worktree. No
     // check runs here for an external harness, so its submission waits only
@@ -1302,7 +1306,8 @@ async fn forge_intent(
             .unwrap()
             .env_for(provider.credential(), &ctx.channel, &ctx.node_id);
     let dir = review::publish::inspection_dir().map_err(|e| e.to_string())?;
-    let cfg = manager.cfg();
+    let live = manager.cfg().live();
+    let cfg: &crate::config::Config = &live;
     let Some(change) = target.change.clone() else {
         // Opening a second change for a branch fails at publication, after
         // the operator approved it. Where the forge can be asked, say so now.

@@ -79,6 +79,9 @@ pub enum Frame {
     /// Whether this node is holding its machine awake, and the last suspend
     /// it noticed. This node's alone; never forwarded.
     Awake(Value),
+    /// What a restart of this node would change, and one asked for and
+    /// waiting (`GET /api/restart`). This node's alone; never forwarded.
+    Restart(Value),
 }
 
 impl Frame {
@@ -99,6 +102,7 @@ impl Frame {
             Frame::Promotions { .. } => "promotions",
             Frame::Questions { .. } => "questions",
             Frame::Awake(_) => "awake",
+            Frame::Restart(_) => "restart",
         }
     }
 

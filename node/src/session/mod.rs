@@ -422,6 +422,9 @@ pub struct Manager {
     checking: Arc<crate::mcp::checking::Checking>,
     /// What each session has been told of the decisions it waited on.
     told: Arc<waits::Told>,
+    /// A restart asked for and waiting: while it waits, new sessions and
+    /// new turns are refused.
+    restart: Arc<crate::restart::Restart>,
 }
 
 impl Manager {
@@ -468,6 +471,31 @@ impl Manager {
             egress: Arc::default(),
             checking: Arc::default(),
             told: Arc::default(),
+            restart: Arc::default(),
+        }
+    }
+
+    pub fn restart(&self) -> &Arc<crate::restart::Restart> {
+        &self.restart
+    }
+
+    /// Refuse new work on this node while a restart waits.
+    fn refuse_while_restarting(&self) -> Result<(), SessionError> {
+        match self.restart.refusal() {
+            Some(why) => Err(SessionError::NodeRefused(why)),
+            None => Ok(()),
+        }
+    }
+
+    /// `refuse_while_restarting`, for a turn of `id`: only one this node
+    /// runs. A session on a peer is the peer's to refuse.
+    fn refuse_turn_while_restarting(&self, id: &str) -> Result<(), SessionError> {
+        if !self.restart.draining() {
+            return Ok(());
+        }
+        match self.store.get_session(id)? {
+            Some(row) if row.node_id == self.node_id => self.refuse_while_restarting(),
+            _ => Ok(()),
         }
     }
 
@@ -524,7 +552,7 @@ impl Manager {
         .flatten();
         match forge {
             Some(identity) => Some(identity),
-            None => crate::forge::host_identity(&self.cfg.publish.git).await,
+            None => crate::forge::host_identity(&self.cfg.live().publish.git).await,
         }
     }
 
@@ -751,6 +779,10 @@ impl Manager {
     /// — the node stopped under it — once everything it waited on has been
     /// decided: a new session on its workspace, told each decision.
     pub async fn continue_held(&self) {
+        // Carried on by the node that comes back, not into a restart.
+        if self.restart.draining() {
+            return;
+        }
         let Ok(rows) = self
             .store
             .list_sessions(Some(SessionState::Suspended.as_str()))
@@ -1382,6 +1414,7 @@ impl Manager {
                 .publish_untapped(Frame::Session(Box::new(row.clone())));
             return Ok(row);
         }
+        self.refuse_while_restarting()?;
         self.validate_review_context(&spec)?;
         // A dangling ancestor is worse than none: it reads as history that
         // can be followed and cannot.
@@ -1411,7 +1444,7 @@ impl Manager {
         let budget = spec
             .budget_tokens
             .or_else(|| phase_bindings["budget_tokens"].as_i64())
-            .unwrap_or(self.cfg.session.budget_tokens);
+            .unwrap_or(self.cfg.live().session.budget_tokens);
         if budget < 0 {
             return Err(SessionError::BadBudget);
         }
@@ -1550,7 +1583,7 @@ impl Manager {
                 crate::corpus::project::identify(
                     &spec.channel,
                     std::path::Path::new(&spec.repo_path),
-                    &self.cfg.publish.git,
+                    &self.cfg.live().publish.git,
                 )
                 .await
             }
@@ -1837,7 +1870,7 @@ impl Manager {
                         .map_err(anyhow::Error::msg)?;
                 }
                 let workspace = crate::workspace::seed_from_checkout(
-                    &self.cfg.publish.git,
+                    &self.cfg.live().publish.git,
                     &repo,
                     &branch,
                     spec.base_sha.as_deref(),
@@ -2417,7 +2450,7 @@ impl Manager {
             self.bus.clone(),
             Arc::from(handle),
             started,
-            Duration::from_secs(self.cfg.session.permission_timeout_secs),
+            Duration::from_secs(self.cfg.live().session.permission_timeout_secs),
             cmd_tx_for_turns,
             runner,
             container.clone(),
@@ -2506,6 +2539,7 @@ impl Manager {
     /// Prompt a session, or hold the prompt for it while its turn runs.
     pub async fn prompt(&self, id: &str, text: String) -> Result<Prompted, SessionError> {
         self.ensure_active(id)?;
+        self.refuse_turn_while_restarting(id)?;
         let (ack, wait) = oneshot::channel();
         match self
             .send(
@@ -3115,6 +3149,7 @@ impl Manager {
         if let Some(row) = self.store.get_session(id)? {
             Self::refuse_legacy(&row)?;
         }
+        self.refuse_turn_while_restarting(id)?;
         let (ack, wait) = oneshot::channel();
         match self
             .send(
@@ -3233,6 +3268,9 @@ impl Manager {
     /// recorded safe boundary, and each settled exactly once. Run from the
     /// node's periodic tick.
     pub async fn wake_exhausted(&self) {
+        if self.restart.draining() {
+            return;
+        }
         let Ok(due) = self.store.exhaustion_due(now_ms()) else {
             return;
         };

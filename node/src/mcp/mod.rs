@@ -976,7 +976,7 @@ impl Tools {
     /// operator says: a workflow `[github] dispatch` does not list.
     fn refusal_before_asking(&self, name: &str, args: &Value) -> Option<String> {
         match name {
-            github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.github, args),
+            github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.live().github, args),
             _ => None,
         }
     }
@@ -1055,7 +1055,8 @@ impl Tools {
                     created_ms: now,
                     decided_ms: None,
                     finished_ms: None,
-                    expires_ms: now + (self.cfg.session.approval_expiry_secs.max(1) as i64) * 1000,
+                    expires_ms: now
+                        + (self.cfg.live().session.approval_expiry_secs.max(1) as i64) * 1000,
                 };
                 access
                     .store

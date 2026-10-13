@@ -132,9 +132,11 @@ pub fn environment_with(
     repo: Option<&Path>,
     entry: Option<&Repo>,
 ) -> RepoEnvironment {
+    // `[supervision]` as it applies now; the rest as the node started.
+    let live = cfg.live();
     let checks = match entry.and_then(|entry| entry.checks.as_ref()) {
         Some(checks) => checks,
-        None => &cfg.supervision.checks,
+        None => &live.supervision.checks,
     };
     let built = || {
         let repo = repo?.to_string_lossy();
@@ -172,7 +174,7 @@ pub fn environment_with(
             .collect(),
         timeout_secs: entry
             .and_then(|entry| entry.timeout_secs)
-            .unwrap_or(cfg.supervision.timeout_secs)
+            .unwrap_or(live.supervision.timeout_secs)
             .max(1),
         prepare: entry.map(|entry| entry.prepare.clone()).unwrap_or_default(),
         // Refused at load when it does not parse; a table built any other way
@@ -779,6 +781,7 @@ pub(crate) fn approved_image(
         Some(image)
             if image.contains("@sha256:")
                 || cfg
+                    .live()
                     .runtime
                     .approved_images
                     .iter()

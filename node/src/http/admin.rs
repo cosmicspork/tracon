@@ -5,7 +5,9 @@
 //! bounded invitation, admission, removal, and selected-key handoff flows work
 //! for an authenticated remote PWA, each confirmed there by a passkey
 //! ([`AdminAction`]). Host lifecycle and fixed boundary checks additionally
-//! require [`Loopback`].
+//! require [`Loopback`], except the restart that applies a configuration
+//! change (`restart_node`), which drains work first and is confirmed like
+//! any other admin action.
 
 use axum::{
     extract::{Path, State},
@@ -730,4 +732,63 @@ pub async fn restart(
     Json(body): Json<Confirmation>,
 ) -> ApiResult<Json<Value>> {
     schedule_lifecycle(&s, body.confirm, crate::service::LifecycleAction::Restart)
+}
+
+/// `GET /api/restart`: what a restart of this node would change, whether one
+/// can be done here, and the one waiting, if any. An ordinary operator read:
+/// it is what the interface's restart banner shows.
+pub async fn restart_status(State(s): State<AppState>) -> Json<Value> {
+    Json(crate::restart::status(&s.manager))
+}
+
+/// `POST /api/admin/restart`: restart this node into the `node.toml` the
+/// caller read (`expected_hash`), `when_idle` by default. `now` answers 409
+/// with the sessions it would end until the body confirms them.
+///
+/// An administrator's action: at the node, or from a signed-in browser off
+/// it with a passkey confirming exactly this request (`AdminAction`). A
+/// bearer token never suffices off the node.
+pub async fn restart_node(
+    _admin: Administrator,
+    State(s): State<AppState>,
+    AdminAction(Json(body)): AdminAction<Json<crate::restart::Request>>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    use crate::restart::Refused;
+    let refusal = |message: String, extra: Value| {
+        let mut v = json!({ "error": { "code": 409, "message": message } });
+        if let (Some(v), Value::Object(extra)) = (v.as_object_mut(), extra) {
+            v.extend(extra);
+        }
+        (StatusCode::CONFLICT, Json(v))
+    };
+    match crate::restart::request(&s.manager, body) {
+        Ok(status) => Ok((StatusCode::ACCEPTED, Json(status))),
+        Err(Refused::Conflict(why)) | Err(Refused::Unavailable(why)) => {
+            Err(refusal(why, Value::Null))
+        }
+        Err(Refused::ConfirmRequired(closing)) => Err(refusal(
+            format!(
+                "restarting now ends {} live session{}; confirm to go ahead",
+                closing.len(),
+                if closing.len() == 1 { "" } else { "s" }
+            ),
+            json!({ "confirm_required": true, "closing": closing }),
+        )),
+    }
+}
+
+/// `DELETE /api/admin/restart`: withdraw a restart that is still waiting for
+/// running work, so the node takes new sessions and turns again.
+pub async fn cancel_restart(
+    _admin: Administrator,
+    State(s): State<AppState>,
+    AdminAction(()): AdminAction,
+) -> ApiResult<Json<Value>> {
+    if !crate::restart::cancel(&s.manager) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "no restart is waiting to be withdrawn",
+        ));
+    }
+    Ok(Json(crate::restart::status(&s.manager)))
 }

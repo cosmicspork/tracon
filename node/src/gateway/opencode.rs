@@ -64,7 +64,7 @@ pub(super) const MOUNT: &str = "/api/opencode/";
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn forward_timeout(s: &AppState) -> Duration {
-    match s.cfg.session.harness_api_timeout_secs {
+    match s.cfg.live().session.harness_api_timeout_secs {
         0 => FORWARD_TIMEOUT,
         secs => Duration::from_secs(secs),
     }

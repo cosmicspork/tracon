@@ -206,10 +206,16 @@ pub mod chrono_free {
     }
 }
 
-/// The nightly loop.
+/// The nightly loop. `[memory] promote_at` is read again at least once a
+/// minute, so a time changed in `node.toml` is kept without a restart.
 pub async fn nightly(store: Arc<Store>, bus: Bus, site: String, cfg: Arc<Config>) {
+    const LOOK: u64 = 60;
     loop {
-        let wait = secs_until(&cfg.memory.promote_at, chrono_free::now());
+        let wait = secs_until(&cfg.live().memory.promote_at, chrono_free::now());
+        if wait > LOOK {
+            tokio::time::sleep(std::time::Duration::from_secs(LOOK)).await;
+            continue;
+        }
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         let made = batch_now(&store, &bus, &site, MIN_AGE_MS);
         if !made.is_empty() {
