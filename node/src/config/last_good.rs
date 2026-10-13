@@ -489,9 +489,14 @@ mod tests {
         // The fourth start of the same file finds three that failed.
         let restored = on_boot(&p, 5).unwrap().expect("restored");
         assert_eq!(read(&p.config), "node_name = \"good\"\n");
+        // The restore works on the resolved file, so compare resolved
+        // spellings: macOS's temp dir sits behind /var -> /private/var.
         assert_eq!(
             restored.backup,
-            p.config.with_file_name("node.toml.failed-5")
+            p.config
+                .canonicalize()
+                .unwrap()
+                .with_file_name("node.toml.failed-5")
         );
         assert_eq!(read(&restored.backup), "node_name = \"bad\"\n");
         assert_eq!(restored.attempts, 3);
@@ -710,6 +715,9 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(read(&link), "node_name = \"good\"\n");
-        assert_eq!(restored.backup, real.join("node.toml.failed-3"));
+        assert_eq!(
+            restored.backup,
+            real.canonicalize().unwrap().join("node.toml.failed-3")
+        );
     }
 }
