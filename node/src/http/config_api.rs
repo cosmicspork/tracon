@@ -26,9 +26,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api::{ApiError, AppState};
-use super::passkey::{config_summary, AdminRequest};
+use super::passkey::{AdminRequest, Refusal};
 use crate::config::{
-    edit::{self, Change, EditError, Preview, REDACTED},
+    edit::{self, Change, EditError, REDACTED},
     path_guard, Config, KeyPath, Op,
 };
 use crate::config_schema::{self, KEYS};
@@ -50,6 +50,12 @@ impl IntoResponse for Refused {
 impl From<Response> for Refused {
     fn from(response: Response) -> Self {
         Refused(Box::new(response))
+    }
+}
+
+impl From<Refusal> for Refused {
+    fn from(refusal: Refusal) -> Self {
+        refusal.into_response().into()
     }
 }
 
@@ -145,9 +151,10 @@ fn spec_json(spec: &config_schema::KeySpec) -> Value {
         "path": spec.path,
         "secret": spec.secret,
         "editable": !spec.host_only,
+        "editable_at_node": !spec.host_only || config_schema::editable_at_node(spec.key),
     });
     if spec.host_only {
-        v["why_not"] = json!(config_schema::HOST_ONLY_REASON);
+        v["why_not"] = json!(config_schema::host_only_reason(spec.key));
     }
     v
 }
@@ -311,10 +318,101 @@ fn ops_of(body: &[PatchOp]) -> Result<Vec<Op>, Vec<KeyError>> {
     }
 }
 
-/// What a change may not do before anything is confirmed: set a key the
-/// node does not read, send a secret's placeholder back as its value, or
-/// touch a key only the host may change. Each refused key once.
-fn check_changes(changes: &[Change]) -> Vec<KeyError> {
+/// Every key an operation names, with the value it writes there: each leaf
+/// of what a `set` or an `insert` writes (the key itself where that is an
+/// empty table or array), and the key a `remove` or `reorder` names.
+fn named(ops: &[Op]) -> Vec<(Vec<String>, Option<toml::Value>)> {
+    let path = |key: &KeyPath| -> Vec<String> {
+        key.schema_key().into_iter().map(str::to_string).collect()
+    };
+    let mut out = Vec::new();
+    for op in ops {
+        let (at, value) = match op {
+            Op::Set { key, value } => (path(key), Some(value.clone())),
+            Op::Insert { array, entry, .. } => {
+                (path(array), Some(toml::Value::Table(entry.clone())))
+            }
+            Op::Remove { key } => (path(key), None),
+            Op::Reorder { array, .. } => (path(array), None),
+        };
+        match value {
+            Some(value) => {
+                let mut leaves = Vec::new();
+                collect_leaves(&at, &value, &mut leaves);
+                if leaves.is_empty() {
+                    out.push((at, Some(value)));
+                } else {
+                    out.extend(leaves.into_iter().map(|(k, v)| (k, Some(v.clone()))));
+                }
+            }
+            None => out.push((at, None)),
+        }
+    }
+    out
+}
+
+/// Whether any operation writes a value at a secret key. Such a request is
+/// always confirmed, even when the file already holds that value: answering
+/// "nothing changed" before a confirmation would tell a cookie alone whether
+/// it guessed a secret.
+fn names_a_secret(ops: &[Op]) -> bool {
+    named(ops).iter().any(|(key, value)| {
+        let segs: Vec<&str> = key.iter().map(String::as_str).collect();
+        value.is_some() && config_schema::lookup(&segs).secret
+    })
+}
+
+/// Whether `key` (an exact schema key) may not be changed by this caller,
+/// and why.
+fn host_only(segs: &[&str], local: bool) -> Option<&'static str> {
+    let spec = config_schema::lookup(segs);
+    (spec.host_only && !spec.key.is_empty())
+        .then_some(spec.key)
+        .filter(|key| !local || !config_schema::editable_at_node(key))
+        .map(config_schema::host_only_reason)
+}
+
+/// What an operation may not name, decided from the request alone, before
+/// the file is read: a key the node does not read, a secret's placeholder
+/// sent back as its value, a key only the host may change. The answer is
+/// the same whatever the file holds, so it tells a caller nothing about it.
+fn check_named(ops: &[Op], local: bool) -> Vec<KeyError> {
+    let mut errors = Vec::new();
+    for (key, value) in named(ops) {
+        let segs: Vec<&str> = key.iter().map(String::as_str).collect();
+        let shown = segs.join(".");
+        if value.is_some() && !config_schema::known(&segs) {
+            errors.push(KeyError {
+                key: shown.clone(),
+                message: format!("{shown} is not a node.toml key this node reads"),
+            });
+            continue;
+        }
+        if value.as_ref().and_then(toml::Value::as_str) == Some(REDACTED)
+            && config_schema::lookup(&segs).secret
+        {
+            errors.push(KeyError {
+                key: shown.clone(),
+                message: format!(
+                    "{shown} is a secret, sent as {REDACTED:?} and never read back: set a new value, or leave the key out"
+                ),
+            });
+        }
+        if let Some(why) = host_only(&segs, local) {
+            errors.push(KeyError {
+                key: shown.clone(),
+                message: format!("{shown} {why}"),
+            });
+        }
+    }
+    dedup(errors)
+}
+
+/// What the changes an edit would make may not do: write a key the node
+/// does not read, or touch a host-only key, under a table the request set
+/// whole. Only what is new is looked at: an entry of an array of tables the
+/// edit leaves as it was is not the edit's doing.
+fn check_changes(changes: &[Change], local: bool) -> Vec<KeyError> {
     let mut errors = Vec::new();
     for change in changes {
         let at: Vec<String> = change
@@ -323,49 +421,101 @@ fn check_changes(changes: &[Change]) -> Vec<KeyError> {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let before = change.before.as_ref().map(|v| (at.clone(), v));
-        let after = change.after.as_ref().map(|v| (at.clone(), v));
         let mut leaves = Vec::new();
-        if let Some((at, value)) = &after {
-            collect_leaves(at, value, &mut leaves);
+        if let Some(after) = &change.after {
+            match (after, &change.before) {
+                (toml::Value::Array(now), Some(toml::Value::Array(was))) => {
+                    for entry in now.iter().filter(|e| !was.contains(e)) {
+                        collect_leaves(&at, entry, &mut leaves);
+                    }
+                }
+                _ => collect_leaves(&at, after, &mut leaves),
+            }
         }
-        for (key, value) in &leaves {
+        for (key, _) in &leaves {
             let segs: Vec<&str> = key.iter().map(String::as_str).collect();
             if !config_schema::known(&segs) {
                 errors.push(KeyError {
                     key: change.key.to_string(),
                     message: format!("{} is not a node.toml key this node reads", segs.join(".")),
                 });
-            } else if config_schema::lookup(&segs).secret && value.as_str() == Some(REDACTED) {
+            }
+        }
+        let mut touched: Vec<Vec<String>> = leaves.into_iter().map(|(k, _)| k).collect();
+        if let Some(before) = &change.before {
+            let mut was = Vec::new();
+            collect_leaves(&at, before, &mut was);
+            touched.extend(was.into_iter().map(|(k, _)| k));
+        }
+        touched.push(at);
+        for key in touched {
+            let segs: Vec<&str> = key.iter().map(String::as_str).collect();
+            if let Some(why) = host_only(&segs, local) {
                 errors.push(KeyError {
                     key: change.key.to_string(),
-                    message: format!(
-                        "{} is a secret, sent as {REDACTED:?} and never read back: set a new value, or leave the key out",
-                        segs.join(".")
-                    ),
+                    message: format!("{} {why}", segs.join(".")),
                 });
             }
         }
-        let mut touched = leaves.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
-        if let Some((at, value)) = &before {
-            let mut was = Vec::new();
-            collect_leaves(at, value, &mut was);
-            touched.extend(was.into_iter().map(|(k, _)| k));
-        }
-        touched.push(at.clone());
-        if let Some(key) = touched.iter().find(|key| {
-            let segs: Vec<&str> = key.iter().map(String::as_str).collect();
-            config_schema::lookup(&segs).host_only
-        }) {
-            errors.push(KeyError {
-                key: change.key.to_string(),
-                message: format!("{} {}", key.join("."), config_schema::HOST_ONLY_REASON),
-            });
-        }
     }
+    dedup(errors)
+}
+
+fn dedup(mut errors: Vec<KeyError>) -> Vec<KeyError> {
     let mut seen = std::collections::BTreeSet::new();
     errors.retain(|e| seen.insert((e.key.clone(), e.message.clone())));
     errors
+}
+
+fn refused_keys(errors: &[KeyError]) -> Refused {
+    let message = errors
+        .iter()
+        .map(|e| e.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    refusal(StatusCode::UNPROCESSABLE_ENTITY, "refused", message, errors)
+}
+
+/// The version a request was decided against: `given` (its body's
+/// `expected_hash`) or its `If-Match`, which must agree. Required.
+pub(crate) fn expected_version(given: Option<&str>, req: &AdminRequest) -> Result<String, Refused> {
+    match (given, req.if_match()) {
+        (Some(a), Some(b)) if a.trim() != b => Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "expected_hash and If-Match name different versions".into(),
+            &[],
+        )),
+        (Some(hash), _) | (None, Some(hash)) => Ok(hash.trim().to_string()),
+        (None, None) => Err(refusal(
+            StatusCode::PRECONDITION_REQUIRED,
+            "precondition_required",
+            "name the version this edit was decided against: expected_hash (or If-Match) is the hash the node gave with what was read".into(),
+            &[],
+        )),
+    }
+}
+
+/// The file's text and what it loads as, if it is still the version
+/// `expected` names; a conflict carrying the version now if not.
+pub(crate) fn read_expected(expected: &str) -> Result<(String, Config), Refused> {
+    let (text, hash) = edit::read_text(&Config::config_path()).map_err(edit_refusal)?;
+    if hash != expected {
+        return Err(conflict(&hash));
+    }
+    let config = edit::preview(&text, &[]).map_err(edit_refusal)?.config;
+    Ok((text, config))
+}
+
+/// What `ops` would change in `text`, and the line the passkey prompt shows
+/// for it (`config_prompt`). An edit whose sensitive keys do not all fit
+/// that line is refused, to be split.
+pub(crate) fn prompt(text: &str, ops: &[Op]) -> Result<(Vec<Change>, String), Refused> {
+    let seen = edit::preview(text, ops).map_err(edit_refusal)?;
+    let parse = |t: &str| toml::from_str::<toml::Table>(t).unwrap_or_default();
+    let summary = super::config_prompt::summarize(&parse(text), &parse(&seen.text), &seen.changes)
+        .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
+    Ok((seen.changes, summary))
 }
 
 /// Every value under `value` that is not itself a table (or an array of
@@ -417,26 +567,8 @@ pub async fn patch_config(
     State(s): State<AppState>,
     req: AdminRequest,
 ) -> Result<Json<Value>, Refused> {
-    let body: PatchBody = req.json().map_err(IntoResponse::into_response)?;
-    let expected = match (body.expected_hash.as_deref(), req.if_match()) {
-        (Some(a), Some(b)) if a != b => {
-            return Err(refusal(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid",
-                "expected_hash and If-Match name different versions".into(),
-                &[],
-            ))
-        }
-        (Some(hash), _) | (None, Some(hash)) => hash.trim().to_string(),
-        (None, None) => {
-            return Err(refusal(
-                StatusCode::PRECONDITION_REQUIRED,
-                "precondition_required",
-                "name the version this edit was decided against: expected_hash (or If-Match) is GET /api/config's hash".into(),
-                &[],
-            ))
-        }
-    };
+    let body: PatchBody = req.json()?;
+    let expected = expected_version(body.expected_hash.as_deref(), &req)?;
     if body.ops.is_empty() {
         return Err(refusal(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -461,39 +593,26 @@ pub async fn patch_config(
             &errors,
         )
     })?;
-
-    let path = Config::config_path();
-    let (text, hash) = edit::read_text(&path).map_err(edit_refusal)?;
-    if hash != expected {
-        return Err(conflict(&hash));
+    let local = req.is_local();
+    let errors = check_named(&ops, local);
+    if !errors.is_empty() {
+        return Err(refused_keys(&errors));
     }
-    let Preview { changes, .. } = edit::preview(&text, &ops).map_err(edit_refusal)?;
-    if changes.is_empty() {
+
+    let (text, _) = read_expected(&expected)?;
+    let (changes, summary) = prompt(&text, &ops)?;
+    let errors = check_changes(&changes, local);
+    if !errors.is_empty() {
+        return Err(refused_keys(&errors));
+    }
+    if changes.is_empty() && !names_a_secret(&ops) {
         return Ok(Json(json!({
             "changed": [],
-            "hash": hash,
+            "hash": expected,
             "restart_required": false,
         })));
     }
-    let errors = check_changes(&changes);
-    if !errors.is_empty() {
-        let message = errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(refusal(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "refused",
-            message,
-            &errors,
-        ));
-    }
-
-    let keys: Vec<String> = changes.iter().map(|c| c.key.to_string()).collect();
-    req.confirm(&s, &config_summary(&keys))
-        .await
-        .map_err(IntoResponse::into_response)?;
+    req.confirm(&s, &summary).await?;
 
     let outcome = edit::edit_live(&s.cfg, s.store(), &ops, Some(&expected), actor(&req))
         .map_err(edit_refusal)?;
@@ -504,14 +623,6 @@ pub async fn patch_config(
         "restart_required": outcome.restart_required,
         "audit_id": outcome.audit_id,
     })))
-}
-
-/// The keys `ops` would change in the file as it is now, for a route that
-/// writes `node.toml` through its own body and confirms with them.
-pub(crate) fn keys_changed(ops: &[Op]) -> Result<Vec<String>, Refused> {
-    let (text, _) = edit::read_text(&Config::config_path()).map_err(edit_refusal)?;
-    let preview = edit::preview(&text, ops).map_err(edit_refusal)?;
-    Ok(preview.changes.iter().map(|c| c.key.to_string()).collect())
 }
 
 #[cfg(test)]
@@ -568,30 +679,95 @@ mod tests {
         assert_eq!(errors[0].key, "ops[0]");
     }
 
+    fn op_set(key: &str, value: toml::Value) -> Op {
+        Op::set(KeyPath::parse(key).unwrap(), value)
+    }
+
     #[test]
-    fn unknown_keys_secrets_sent_back_and_host_only_keys_are_refused() {
-        let s = |v: &str| Some(toml::Value::String(v.into()));
-        assert!(check_changes(&[change("publish.gh", None, s("/usr/bin/gh"))]).is_empty());
-        let errors = check_changes(&[change("publish.ghh", None, s("x"))]);
+    fn what_an_operation_names_is_checked_before_the_file_is_read() {
+        let s = |v: &str| toml::Value::String(v.into());
+        assert!(check_named(&[op_set("publish.gh", s("/usr/bin/gh"))], false).is_empty());
+        let errors = check_named(&[op_set("publish.ghh", s("x"))], false);
         assert!(
             errors[0].message.contains("not a node.toml key"),
             "{}",
             errors[0].message
         );
-        // Inside a table set whole, too.
+        // Inside a table set whole, and an entry inserted, too.
         let table = toml::Value::Table(toml::from_str("gh = \"gh\"\ntypo = 1").unwrap());
-        let errors = check_changes(&[change("publish", None, Some(table))]);
+        let errors = check_named(&[op_set("publish", table)], false);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("publish.typo"));
+        assert_eq!(errors[0].key, "publish.typo");
+        let entry: toml::Table = toml::from_str("path = \"/x\"\nmystery = 1").unwrap();
+        let errors = check_named(&[Op::append(KeyPath::keys(&["repo"]), entry)], false);
+        assert_eq!(errors[0].key, "repo.mystery");
         // Removing a key nobody reads is how a typo is cleaned up.
-        assert!(check_changes(&[change("qa.browser", s("x"), None)]).is_empty());
-        for (before, after) in [(None, s("/elsewhere")), (s("/state"), None)] {
-            let errors = check_changes(&[change("runtime.kubernetes.state_mount", before, after)]);
+        assert!(
+            check_named(&[Op::remove(KeyPath::parse("qa.browser").unwrap())], false).is_empty()
+        );
+        // Host-only keys: refused from elsewhere; at the node, all but the
+        // state mount may change.
+        for key in [
+            "gateway.harness_listen",
+            "boundary.gateway_image",
+            "boundary.harness_image",
+            "runtime.kubernetes.harness_image",
+        ] {
+            assert_eq!(check_named(&[op_set(key, s("x"))], false).len(), 1, "{key}");
+            assert!(
+                check_named(&[op_set(key, s("x"))], true).is_empty(),
+                "{key}"
+            );
+        }
+        let mount = op_set("runtime.kubernetes.state_mount", s("/elsewhere"));
+        for local in [false, true] {
+            let errors = check_named(std::slice::from_ref(&mount), local);
             assert!(
                 errors[0].message.contains("on the host"),
                 "{}",
                 errors[0].message
             );
         }
+    }
+
+    #[test]
+    fn a_secret_named_is_always_confirmed() {
+        // No key is secret in the schema today; an unknown key is held to
+        // the rule, and is refused by name before anything else.
+        assert!(!names_a_secret(&[op_set(
+            "review.max_files",
+            toml::Value::Integer(1)
+        )]));
+        assert!(names_a_secret(&[op_set(
+            "qa.token",
+            toml::Value::String("guess".into())
+        )]));
+    }
+
+    #[test]
+    fn only_new_entries_of_a_whole_array_are_checked() {
+        let entry = |t: &str| toml::Value::Table(toml::from_str(t).unwrap());
+        let old = entry("path = \"/a\"\nmystery = 1");
+        let new = entry("path = \"/b\"");
+        let changed = change(
+            "repo",
+            Some(toml::Value::Array(vec![old.clone()])),
+            Some(toml::Value::Array(vec![old, new])),
+        );
+        assert!(check_changes(&[changed], false).is_empty());
+        let mount = |v: Option<&str>| v.map(|v| toml::Value::String(v.into()));
+        let errors = check_changes(
+            &[change(
+                "runtime.kubernetes.state_mount",
+                mount(Some("/state")),
+                None,
+            )],
+            true,
+        );
+        assert!(
+            errors[0].message.contains("on the host"),
+            "{}",
+            errors[0].message
+        );
     }
 }

@@ -59,6 +59,10 @@ use crate::{
 
 /// The header a retried admin request carries its step-up proof in.
 pub const STEP_UP_HEADER: &str = "x-tracon-step-up";
+/// The longest summary a confirmation prompt shows. A `node.toml` save's
+/// lists every sensitive key it changes with its new value
+/// (`config_prompt`), so it is longer than a route's one line.
+pub const MAX_SUMMARY: usize = 600;
 /// How long a challenge may be answered.
 pub const CHALLENGE_TTL_MS: i64 = 2 * 60 * 1000;
 /// How long a proof may be spent once its assertion verified.
@@ -345,7 +349,7 @@ fn open_assertion(
     delegable: bool,
 ) -> Result<Value, Refusal> {
     let action = action.map(|a| clean_text(a, 160));
-    let summary = summary.map(|a| clean_text(a, 160));
+    let summary = summary.map(|a| clean_text(a, MAX_SUMMARY));
     let (action, summary) = (action.as_deref(), summary.as_deref());
     let passkeys: Vec<Passkey> = enrolled(s)?.into_iter().map(|(_, p)| p).collect();
     if passkeys.is_empty() {
@@ -459,9 +463,6 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
         ("DELETE", ["api", "admin", "restart"]) => "Withdraw the node's restart".to_string(),
         ("POST", ["api", "passkeys", "register", "options"]) => "Add a passkey".to_string(),
         ("POST", ["api", "mesh", "unpair"]) => "Leave the mesh (forget the hub)".to_string(),
-        ("DELETE", ["api", "manifest", kind, name]) => {
-            format!("Remove the {kind} {name} from a launch manifest")
-        }
         ("DELETE", ["api", "passkeys", _]) => "Remove a passkey".to_string(),
         _ => return None,
     };
@@ -666,40 +667,6 @@ impl AdminRequest {
     pub async fn confirm(&self, s: &AppState, summary: &str) -> Result<(), Refusal> {
         authorize_as(s, &self.parts, &self.body, Some(summary.to_string())).await
     }
-}
-
-/// The line a prompt shows for a change to `node.toml`: the keys it
-/// changes, as many as fit, and how many more.
-pub fn config_summary(keys: &[String]) -> String {
-    const MAX: usize = 150;
-    let head = "Change node.toml: ";
-    let mut line = head.to_string();
-    let mut shown = 0;
-    for key in keys {
-        let key = clean_text(key, 80);
-        let sep = if shown == 0 { "" } else { ", " };
-        let rest = keys.len() - shown - 1;
-        let tail = if rest > 0 {
-            format!(" and {rest} more")
-        } else {
-            String::new()
-        };
-        if line.chars().count() + sep.len() + key.chars().count() + tail.chars().count() > MAX
-            && shown > 0
-        {
-            break;
-        }
-        line.push_str(sep);
-        line.push_str(&key);
-        shown += 1;
-    }
-    if shown < keys.len() {
-        line.push_str(&format!(" and {} more", keys.len() - shown));
-    }
-    if keys.is_empty() {
-        line.push_str("nothing");
-    }
-    clean_text(&line, 160)
 }
 
 /// Whether `session` may enroll the node's first passkey without one: none is
@@ -1140,34 +1107,6 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_config_summary_names_the_keys_that_fit_and_counts_the_rest() {
-        assert_eq!(
-            config_summary(&["publish.gh".into(), "repo[2].egress".into()]),
-            "Change node.toml: publish.gh, repo[2].egress"
-        );
-        let many: Vec<String> = (0..50)
-            .map(|i| format!("providers.provider-{i:02}.upstream"))
-            .collect();
-        let line = config_summary(&many);
-        assert!(line.chars().count() <= 160, "{line}");
-        assert!(line.starts_with("Change node.toml: providers.provider-00.upstream, "));
-        let shown = line.matches(".upstream").count();
-        assert!(
-            line.ends_with(&format!(" and {} more", 50 - shown)),
-            "{line}"
-        );
-        // A key is text from the file: kept to one printable line.
-        let odd = config_summary(&["a\u{202e}b\nc".into()]);
-        assert_eq!(odd, "Change node.toml: abc");
-        // One key longer than the line is cut, not dropped.
-        let long = config_summary(&["k".repeat(400)]);
-        assert!(
-            long.chars().count() <= 160 && long.contains("kkkk"),
-            "{long}"
-        );
-    }
 
     #[test]
     fn the_op_hash_binds_every_part_of_the_request() {

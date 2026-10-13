@@ -6639,37 +6639,56 @@ fn add_provider(s: &AppState, body: &CreateProviderBody, host: &str) -> ApiResul
 /// Write the settings the Settings pane names (`settings::apply`). An admin
 /// action, like every `node.toml` write: these keys decide which binaries
 /// the node executes, so off this machine a passkey confirms it, and the
-/// prompt lists the keys the patch changes. `PATCH /api/config` is the
-/// whole-file form of the same thing.
+/// prompt lists what the patch changes. Decided against the version the
+/// pane read (`expected_hash`, or `If-Match`), and written only over that
+/// version, so what is written is what was confirmed. `PATCH /api/config`
+/// is the whole-file form of the same thing.
 pub async fn put_config(
     State(s): State<AppState>,
     req: super::passkey::AdminRequest,
-) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
-    let patch: serde_json::Value = req.json()?;
-    let now = crate::config::snapshot()?;
-    let planned = super::settings::apply(&now.config, &patch)
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
+    let mut patch: serde_json::Value = req.json()?;
+    let given = match patch
+        .as_object_mut()
+        .and_then(|o| o.remove("expected_hash"))
+    {
+        None => None,
+        Some(serde_json::Value::String(hash)) => Some(hash),
+        Some(_) => {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "expected_hash is the hash GET /api/config gave".into(),
+            )
+            .into())
+        }
+    };
+    let expected = super::config_api::expected_version(given.as_deref(), &req)?;
+    let (text, now) = super::config_api::read_expected(&expected)?;
+    let planned = super::settings::apply(&now, &patch)
         .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    if planned.ops.is_empty() {
-        return Ok(Json(json!({ "changed": [], "restart_required": false })));
+    let (changes, summary) = super::config_api::prompt(&text, &planned.ops)?;
+    if changes.is_empty() {
+        return Ok(Json(json!({
+            "changed": [],
+            "restart_required": false,
+            "hash": expected,
+        })));
     }
-    req.confirm(&s, &super::passkey::config_summary(&planned.changed))
-        .await?;
-    let mut changed = Vec::new();
-    let outcome = crate::config::update(s.store(), "Settings", |cfg| {
-        let patch = super::settings::apply(cfg, &patch)
-            .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-        changed = patch.changed;
-        Ok::<_, ApiError>(patch.ops)
-    })?;
-    if !outcome.wrote() {
-        changed.clear();
-    }
-    // The live keys apply now; the others wait for a restart, which the
-    // node's restart status names (`GET /api/restart`).
-    s.cfg.apply_edit(&outcome);
+    req.confirm(&s, &summary).await?;
+    let outcome = crate::config::edit::edit_live(
+        &s.cfg,
+        s.store(),
+        &planned.ops,
+        Some(&expected),
+        "Settings",
+    )
+    .map_err(super::config_api::edit_refusal)?;
     Ok(Json(json!({
-        "changed": changed,
+        "changed": planned.changed,
+        // The live keys apply now; the others wait for a restart, which the
+        // node's restart status names (`GET /api/restart`).
         "restart_required": outcome.restart_required,
+        "hash": outcome.new_hash,
     })))
 }
 
@@ -6853,19 +6872,22 @@ pub async fn put_manifest_text(
 }
 
 /// Remove one item from a channel's manifest. An admin action, as adding
-/// one is.
+/// one is; the prompt names the channel.
 pub async fn delete_manifest_item(
     State(s): State<AppState>,
     Path((kind, name)): Path<(String, String)>,
     Query(q): Query<ChannelQuery>,
-    super::passkey::AdminAction(()): super::passkey::AdminAction,
-) -> ApiResult<Json<serde_json::Value>> {
+    req: super::passkey::AdminRequest,
+) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
     let channel = q.channel();
+    req.confirm(&s, &format!("Remove the {kind} {name} from {channel}"))
+        .await?;
     if !s.store().manifest_remove(&channel, &kind, &name)? {
         return Err(ApiError(
             StatusCode::NOT_FOUND,
             format!("`{name}` is not a {kind} on `{channel}`"),
-        ));
+        )
+        .into());
     }
     Ok(Json(json!({ "channel": channel, "removed": name })))
 }

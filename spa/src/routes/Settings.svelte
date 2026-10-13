@@ -195,9 +195,10 @@
 
   function saveConfig() {
     if (!cfg || !form) return
+    const read = cfg.hash
     return act('config', async () => {
       const patch = changedSubset(cfg as never, form as never)
-      const res = await api.putConfig(patch)
+      const res = await api.putConfig(patch, read)
       changed = res.changed
       void store.refreshRestart()
       await loadConfig()
@@ -213,7 +214,8 @@
   // `put_config` already validates (`providers.<name>.models`) and reloads
   // the canonical config afterward, the same way `saveConfig` does.
   async function saveProviderModels(name: string, models: NodeConfig['providers'][string]['models']) {
-    const res = await api.putConfig({ providers: { [name]: { models } } })
+    if (!cfg) return
+    await api.putConfig({ providers: { [name]: { models } } }, cfg.hash)
     void store.refreshRestart()
     await loadConfig()
   }

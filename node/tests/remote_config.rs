@@ -617,9 +617,33 @@ async fn a_remote_edit_is_confirmed_with_a_passkey_that_names_its_keys() {
     .await;
     assert_ne!(r.status, StatusCode::OK, "{}", r.body);
 
-    // A long edit's prompt is capped, and says how many more keys it holds.
+    // A long edit's prompt puts what could change what the node runs first,
+    // with its value, never cut; routine keys follow as many as fit.
     let h = hash(&n).await;
-    let many: Vec<Value> = (0..40)
+    let mut many: Vec<Value> = (0..40)
+        .map(|i| set(&format!("providers.\"p{i:02}\".models"), json!([])))
+        .collect();
+    many.push(set("publish.gh", json!("/usr/bin/gh")));
+    let r = remote(
+        &n,
+        &cookie,
+        "PATCH",
+        "/api/config",
+        Some(&patch(&h, many)),
+        None,
+    )
+    .await;
+    assert_eq!(r.kind(), "step_up_required", "{}", r.body);
+    let summary = r.body["step_up"]["summary"].as_str().unwrap();
+    assert!(summary.chars().count() <= 600, "{summary}");
+    assert!(
+        summary.starts_with("Change node.toml: publish.gh = /usr/bin/gh; providers."),
+        "{summary}"
+    );
+    assert!(summary.ends_with("more"), "{summary}");
+
+    // So many sensitive keys that they would not all show: split the edit.
+    let too_many: Vec<Value> = (0..40)
         .map(|i| {
             set(
                 &format!("github.dispatch.\"owner/repository-{i:02}\""),
@@ -632,18 +656,129 @@ async fn a_remote_edit_is_confirmed_with_a_passkey_that_names_its_keys() {
         &cookie,
         "PATCH",
         "/api/config",
-        Some(&patch(&h, many)),
+        Some(&patch(&h, too_many)),
         None,
     )
     .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+    assert_eq!(r.kind(), "too_large");
+    assert!(r.text.contains("split"), "{}", r.body);
+}
+
+/// A `[[repo]]` entry added from elsewhere is named in the prompt with
+/// what it would run and lend.
+#[tokio::test]
+async fn a_repository_entry_is_named_in_the_prompt_with_what_it_lends() {
+    let _lock = state::config_lock().await;
+    let (n, cookie, _key) = paired().await;
+    write_file(HAND_WRITTEN);
+    let body = patch(
+        &hash(&n).await,
+        vec![json!({
+            "op": "insert",
+            "array": "repo",
+            "entry": {
+                "path": "/src/app",
+                "dockerfile": ".devcontainer/Dockerfile",
+                "prepare": ["composer install"],
+                "prepare_credentials": ["NOVA_AUTH"],
+            },
+        })],
+    );
+    let r = remote(&n, &cookie, "PATCH", "/api/config", Some(&body), None).await;
     assert_eq!(r.kind(), "step_up_required", "{}", r.body);
     let summary = r.body["step_up"]["summary"].as_str().unwrap();
-    assert!(summary.chars().count() <= 160, "{summary}");
+    assert!(summary.contains("repo /src/app added:"), "{summary}");
     assert!(
-        summary.starts_with("Change node.toml: github.dispatch."),
+        summary.contains("prepare_credentials = [NOVA_AUTH]"),
         "{summary}"
     );
-    assert!(summary.ends_with("more"), "{summary}");
+    assert!(
+        summary.contains("prepare = [composer install]"),
+        "{summary}"
+    );
+}
+
+/// Whether a request changes anything is not told to a caller who has not
+/// confirmed it when the request names a key whose value is hidden: a
+/// guess at a hidden value gets the same answer, right or wrong.
+#[tokio::test]
+async fn a_guess_at_a_hidden_value_learns_nothing() {
+    let _lock = state::config_lock().await;
+    let (n, cookie, _key) = paired().await;
+    write_file(HAND_WRITTEN);
+    let h = hash(&n).await;
+    let mut answers = Vec::new();
+    for guess in ["sk-live-unknown-1234", "sk-wrong"] {
+        let body = patch(&h, vec![set("qa.browser_token", json!(guess))]);
+        let r = remote(&n, &cookie, "PATCH", "/api/config", Some(&body), None).await;
+        answers.push((
+            r.status,
+            r.kind().to_string(),
+            r.body["error"]["fields"].clone(),
+        ));
+    }
+    assert_eq!(answers[0], answers[1], "{answers:?}");
+    assert_eq!(answers[0].0, StatusCode::UNPROCESSABLE_ENTITY);
+    // At the node too: a key the node does not read is refused by name,
+    // never answered "nothing changed".
+    let body = patch(
+        &h,
+        vec![set("qa.browser_token", json!("sk-live-unknown-1234"))],
+    );
+    let r = local(&n, "PATCH", "/api/config", Some(&body)).await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+    assert_eq!(file(), HAND_WRITTEN);
+}
+
+/// The gateway's socket path and the images the node runs with its own
+/// sockets are changed at the node: refused from elsewhere, allowed there.
+#[tokio::test]
+async fn the_gateway_socket_and_images_are_changed_at_the_node_only() {
+    let _lock = state::config_lock().await;
+    let (n, cookie, _key) = paired().await;
+    write_file(HAND_WRITTEN);
+    for (key, value) in [
+        ("gateway.harness_listen", "/tmp/elsewhere/harness.sock"),
+        ("boundary.gateway_image", "ghcr.io/evil/gateway:latest"),
+        ("boundary.harness_image", "ghcr.io/evil/harness:latest"),
+        (
+            "runtime.kubernetes.harness_image",
+            "ghcr.io/evil/harness:latest",
+        ),
+    ] {
+        let body = patch(&hash(&n).await, vec![set(key, json!(value))]);
+        let r = remote(&n, &cookie, "PATCH", "/api/config", Some(&body), None).await;
+        assert_eq!(
+            r.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{key}: {}",
+            r.body
+        );
+        assert_eq!(r.body["error"]["fields"][0]["field"], key, "{}", r.body);
+        assert!(r.text.contains("at the node"), "{}", r.body);
+        assert_eq!(file(), HAND_WRITTEN);
+    }
+    let r = local(&n, "GET", "/api/config", None).await;
+    let spec = r.body["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["key"] == "boundary.gateway_image")
+        .unwrap()
+        .clone();
+    assert_eq!(spec["editable"], false);
+    assert_eq!(spec["editable_at_node"], true);
+    // At the node the same edit is the operator's.
+    let body = patch(
+        &hash(&n).await,
+        vec![set(
+            "boundary.gateway_image",
+            json!("localhost/tracon-gateway:dev"),
+        )],
+    );
+    let r = local(&n, "PATCH", "/api/config", Some(&body)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
 }
 
 /// The path guard runs when the edit is written, after it is confirmed:
@@ -769,7 +904,7 @@ async fn every_former_loopback_writer_goes_ahead_once_confirmed() {
         (
             "PUT",
             "/api/config",
-            Box::new(|_| Some(json!({ "review": { "max_files": 77 } }))),
+            Box::new(|h| Some(json!({ "review": { "max_files": 77 }, "expected_hash": h }))),
             StatusCode::OK,
             "Change node.toml: review.max_files",
         ),
@@ -808,7 +943,7 @@ async fn every_former_loopback_writer_goes_ahead_once_confirmed() {
             "/api/manifest/instruction/style",
             Box::new(|_| None),
             StatusCode::OK,
-            "Remove the instruction style from a launch manifest",
+            "Remove the instruction style from personal",
         ),
         (
             "PUT",
@@ -820,7 +955,7 @@ async fn every_former_loopback_writer_goes_ahead_once_confirmed() {
                 }))
             }),
             StatusCode::OK,
-            "Change node.toml: repo",
+            "Change node.toml: repo /src/app added: egress = [crates]",
         ),
         (
             "POST",

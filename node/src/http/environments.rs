@@ -4,13 +4,12 @@ use std::path::{Path, PathBuf};
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api::{ApiError, ApiResult, AppState};
-use super::passkey::{config_summary, AdminRequest};
+use super::passkey::AdminRequest;
 use crate::config::Config;
 use crate::repo_image;
 
@@ -69,40 +68,22 @@ pub async fn save(
     State(s): State<AppState>,
     req: AdminRequest,
 ) -> Result<Json<Value>, super::config_api::Refused> {
-    let body: SaveBody = req.json().map_err(IntoResponse::into_response)?;
-    let Some(expected) = body
-        .expected_hash
-        .as_deref()
-        .or(req.if_match())
-        .map(str::to_string)
-    else {
-        return Err(ApiError::new(
-            StatusCode::PRECONDITION_REQUIRED,
-            "name the version this table was read from: expected_hash is the list's hash",
-        )
-        .into());
-    };
+    let body: SaveBody = req.json()?;
+    let expected = super::config_api::expected_version(body.expected_hash.as_deref(), &req)?;
     crate::config::validate_repos(&body.entries)
-        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error).into_response())?;
-    let now = crate::config::snapshot().map_err(super::config_api::edit_refusal)?;
-    if now.hash != expected {
-        return Err(super::config_api::edit_refusal(
-            crate::config::EditError::Conflict { current: now.hash },
-        ));
-    }
-    let ops = crate::config::Op::replace_repos(&now.config.repo, &body.entries)
+        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error))?;
+    let (text, now) = super::config_api::read_expected(&expected)?;
+    let ops = crate::config::Op::replace_repos(&now.repo, &body.entries)
         .map_err(super::config_api::edit_refusal)?;
-    let keys = super::config_api::keys_changed(&ops)?;
-    if keys.is_empty() {
+    let (changes, summary) = super::config_api::prompt(&text, &ops)?;
+    if changes.is_empty() {
         return Ok(Json(json!({
             "changed": false,
             "restart_required": false,
-            "hash": now.hash,
+            "hash": expected,
         })));
     }
-    req.confirm(&s, &config_summary(&keys))
-        .await
-        .map_err(IntoResponse::into_response)?;
+    req.confirm(&s, &summary).await?;
     let outcome = crate::config::edit::replace_repos_expecting(
         &s.cfg,
         s.store(),

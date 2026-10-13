@@ -89,10 +89,12 @@ pub struct KeySpec {
     /// what to, and `GET /api/config` sends a placeholder in its place. It
     /// can be written, never read back.
     pub secret: bool,
-    /// Changed only in `node.toml` on the host, never by an edit: it decides
-    /// what the path guard counts as a place an agent can write, so an edit
-    /// that moved it could unmake the guard's own rules
-    /// (`config::path_guard::refuse_new`). Shown, not offered for editing.
+    /// Changed at the node only, never by an edit from elsewhere: the state
+    /// mount (which decides what the path guard counts as a place an agent
+    /// can write, so no edit changes it at all, `config::path_guard`), the
+    /// gateway's harness socket path and the images the node runs with its
+    /// own sockets, which the guard does not check (`host_only_reason`).
+    /// Shown, not offered for editing remotely.
     pub host_only: bool,
 }
 
@@ -171,8 +173,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("boundary.subnet"),
     restart("boundary.gateway_ip"),
     restart("boundary.gateway_container"),
-    restart("boundary.gateway_image"),
-    restart("boundary.harness_image"),
+    restart("boundary.gateway_image").host_only(),
+    restart("boundary.harness_image").host_only(),
     restart("boundary.selinux_label_disable"),
     restart("boundary.start_machine"),
     restart("boundary.stop_timeout_secs"),
@@ -182,7 +184,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("gateway.qa_proxy_port"),
     restart("gateway.forward_port"),
     restart("gateway.egress_port"),
-    restart("gateway.harness_listen"),
+    restart("gateway.harness_listen").host_only(),
     // [session]
     live("session.budget_tokens"),
     live("session.permission_timeout_secs"),
@@ -227,7 +229,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kind"),
     live("runtime.approved_images"),
     restart("runtime.kubernetes.namespace"),
-    restart("runtime.kubernetes.harness_image"),
+    restart("runtime.kubernetes.harness_image").host_only(),
     restart("runtime.kubernetes.state_claim"),
     restart("runtime.kubernetes.state_mount")
         .path(PathKind::Mount)
@@ -402,9 +404,30 @@ pub fn known(key: &[&str]) -> bool {
             .any(|spec| spec.key.split('.').count() >= key.len() && matches(spec.key, key))
 }
 
-/// Why a host-only key is not edited remotely, in words for the operator.
+/// Why the state mount is not changed by an edit at all, in words for the
+/// operator: the path guard refuses it everywhere.
 pub const HOST_ONLY_REASON: &str =
     "decides where agents can write, so it is changed in node.toml on the host, not by an edit";
+
+/// Why a host-only key is not edited from elsewhere, in words for the
+/// operator. `key` is the schema's spelling (`KeySpec::key`).
+pub fn host_only_reason(key: &str) -> &'static str {
+    match key {
+        "runtime.kubernetes.state_mount" => HOST_ONLY_REASON,
+        "gateway.harness_listen" => {
+            "is the harness socket's path, whose directory the node creates and mounts writable into the gateway container, so it is changed at the node, not from elsewhere"
+        }
+        _ => {
+            "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
+        }
+    }
+}
+
+/// Whether a host-only key may still be changed by an edit made at the
+/// node. The state mount may not: the path guard refuses any edit of it.
+pub fn editable_at_node(key: &str) -> bool {
+    key != "runtime.kubernetes.state_mount"
+}
 
 #[cfg(test)]
 mod tests {
@@ -487,13 +510,23 @@ mod tests {
     }
 
     #[test]
-    fn only_the_state_mount_is_left_to_the_host() {
-        let host_only: Vec<&str> = KEYS
+    fn the_state_mount_sockets_and_gateway_images_are_left_to_the_host() {
+        let mut host_only: Vec<&str> = KEYS
             .iter()
             .filter(|spec| spec.host_only)
             .map(|spec| spec.key)
             .collect();
-        assert_eq!(host_only, ["runtime.kubernetes.state_mount"]);
+        host_only.sort_unstable();
+        assert_eq!(
+            host_only,
+            [
+                "boundary.gateway_image",
+                "boundary.harness_image",
+                "gateway.harness_listen",
+                "runtime.kubernetes.harness_image",
+                "runtime.kubernetes.state_mount",
+            ]
+        );
         assert!(lookup(&["runtime", "kubernetes"]).host_only);
         assert!(!lookup(&["runtime", "kubernetes", "namespace"]).host_only);
     }

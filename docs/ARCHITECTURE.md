@@ -183,47 +183,87 @@ to last-good is never replaced, so the restore cannot loop. Undoing one is in
 
 #### Editing from elsewhere
 
-Every key is editable from wherever the operator is (`http::config_api`), except the one
-the path guard reserves for the host. `GET /api/config` returns the file as written
-(`document`), as it loads with every default filled in (`effective`), the redacted
-document as TOML text, the file's `hash`, and the schema of every key. A secret's value
-is never sent, and neither is the value of a key the node does not read (the schema holds
-an unknown key to the secret rule, since a retired section can hold a credential); the
-text is rendered from the redacted document rather than sent as written, because a
-comment can hold anything, a commented-out key among it. Reading needs only the cookie.
+Every key is editable from wherever the operator is (`http::config_api`), except a few
+the schema marks `host_only`. The state mount is changed in the file on the host and
+never by an edit, since it decides where agents can write. The gateway's harness socket
+path (`gateway.harness_listen`, whose directory the node creates and mounts writable
+into the gateway container) and the images the node runs with its own sockets and
+credentials (`boundary.gateway_image`, `boundary.harness_image`,
+`runtime.kubernetes.harness_image`) are outside the path guard's rules, so they are
+changed at the node, by hand or by an edit made there, and refused from elsewhere.
+
+`GET /api/config` returns the file as written (`document`), as it loads with every
+default filled in (`effective`), the redacted document as TOML text, the file's `hash`,
+and the schema of every key. A secret's value is never sent, and neither is the value
+of a key the node does not read (the schema holds an unknown key to the secret rule,
+since a retired section can hold a credential); the text is rendered from the redacted
+document rather than sent as written, because a comment can hold anything, a
+commented-out key among it. An error that quotes the file is said without the quoted
+lines. Reading needs only the cookie.
 
 `PATCH /api/config {expected_hash, ops}` takes typed operations (set a key or an array
 entry to a JSON value, remove a key or entry, insert an entry into an array of tables,
 reorder one), at most 256, and maps them onto `config::edit`. `expected_hash` (or
 `If-Match`, which the admin `op_hash` already binds) is required. Before anything is
-confirmed the node answers what it can from its own state: a stale version is `409`
-with the hash now; operations that do not apply or leave a file that would not load,
-a key the node does not read, a secret's placeholder sent back as its value, and a
-host-only key are `422`, field by field. A change that changes nothing writes nothing
-and confirms nothing. Then the request is an admin action: off the machine it is
-confirmed with a passkey bound to its exact bytes, and the prompt the node opens lists
-the keys it changes ("Change node.toml: publish.gh, runtime.kubernetes.resources.session.memory_request
-and 3 more"), worked out by the node from the file and that request, cleaned and capped
-at 160 characters, never taken from the client. Because the request names the version
-it was decided against, the keys the prompt shows are exactly the keys the write
-changes. The path guard runs when the edit is written, after the confirmation, so what
-it knows about the host's files (who owns a path, whether it exists) is not answered to
-a cookie alone; its refusals come back as `422` with each refused key and its reason.
-An edit that touches `[[repo]]` moves the live table with the file, as the repository
-editor does.
+confirmed the node answers only what it can from the request and its own state, in an
+order that tells a caller nothing about a hidden value:
+
+1. What the operations name, from the request alone: a key the node does not read, a
+   secret's placeholder sent back as its value, a host-only key (`422`, key by key).
+2. A stale version: `409` with the hash now.
+3. Operations that do not apply, a file that would not load (a builder table included),
+   and keys a whole-table set or a new array entry would add that the node does not
+   read (`422`).
+4. A change that changes nothing writes nothing and confirms nothing, unless the request
+   writes a secret's value: then it is confirmed like any change, so "nothing changed"
+   never confirms a guess.
+
+Then the request is an admin action: off the machine it is confirmed with a passkey
+bound to its exact bytes, and the node words the prompt (`http::config_prompt`). It is
+the one thing a phished confirmation would be judged by, so what could change what the
+node runs, trusts, reads, sends or reaches comes first, with its new value: programs and
+host paths, secrets (named, value not shown), host-only keys, keys the node does not
+read, `auth`, `mesh`, `runtime`, `boundary`, `consulta`, the gateway's allowlist, a
+provider's upstream, credential and sign-in, a repository's preparation, lent
+credentials, egress, image, Dockerfile and checks, a service's image and command,
+plugins, the embedding endpoint and key, and the GitHub dispatch list. Those are never
+cut short: an edit whose sensitive keys do not all fit 600 characters is refused, to be
+split. Routine keys follow, as many as fit, and how many more. An entry of an array of
+tables is named by its own `path`, `name` or `id` with the fields that change ("repo
+/src/app added: dockerfile = Dockerfile, prepare = [composer install],
+prepare_credentials = [NOVA]"), and a key inside one by its entry. A map entry's name
+is capped at 24 characters and every part is cleaned of control, format and bidi
+characters. Because the request names the version it was decided against, what the
+prompt shows is exactly what the write changes. The path guard runs when the edit is
+written, after the confirmation, so what it knows about the host's files (who owns a
+path, whether it exists) is not answered to a cookie alone; its refusals come back as
+`422` with each refused key and its reason. An edit that touches `[[repo]]` moves the
+live table with the file, as the repository editor does.
 
 The routes that wrote `node.toml` (or what a harness runs) at the machine only are admin
-actions now, confirmed the same way, each with a prompt the node words from its body:
-the Settings save (`PUT /api/config`, listing its keys), the repository table and its
-image builds, adding a provider (naming the credential and the host it is sent to), the
-launch manifest's instructions and agents, and starting, joining or leaving a mesh
-(naming the hub). The repository table is saved whole, so its `PUT` requires the
-`hash` its list returned, and a stale one is a conflict. What stays at the machine
-(`auth::Loopback`) is what acts on the host itself rather than on configuration:
-importing a skill package (it reads a host directory the caller names), the policy
-signing key and bundle installation, the service lifecycle (install, uninstall,
-restart), the storage sweep and the boundary re-check. The state mount is changed in the
-file on the host.
+actions now, confirmed the same way, each with a prompt the node words from its body.
+The Settings save (`PUT /api/config`) and the repository table each require the `hash`
+they were read with and write only over that version, so what is written is what was
+confirmed; their prompts are made as above. Building a repository's image names the
+repository; adding a provider names the credential and the host it is sent to; the
+launch manifest's instructions and agents name the item and the channel; starting,
+joining or leaving a mesh names the hub. What stays at the machine (`auth::Loopback`) is
+what acts on the host itself rather than on configuration: importing a skill package
+(it reads a host directory the caller names), the policy signing key and bundle
+installation, the service lifecycle (install, uninstall, restart), the storage sweep and
+the boundary re-check.
+
+Two keys deserve a word, since a confirmed edit can set them. `[auth] trusted_proxies`
+decides only whose `X-Forwarded-For` the node believes when it tells callers apart: set
+to `0.0.0.0/0`, every peer is believed, so a caller chooses the address its per-address
+login, ceremony and device-approval limits count against and the address an approval
+page shows (the global limits still hold). It never makes a request local, since any
+forwarding header makes it remote. `mesh.hub_url` points the node at a hub after a
+restart. A hub sees routing metadata and ciphertext, can drop or delay what it relays
+and serve stale policy, but cannot read a work channel's content, forge a peer's signed
+command or serve a policy bundle it did not get signed. A hub of an attacker's choosing
+therefore costs this node its mesh and shows the attacker which peers it talks to and
+when. Both changes are in the audit log and the push.
 
 #### The path guard
 

@@ -217,9 +217,9 @@ action (the operator token, credentials, forge and provider keys, authority gran
 channel bindings, mesh invitations and members, repository recipe offers, any change
 to `node.toml`, passkeys themselves) is confirmed with a passkey, one prompt per save, and the cookie alone
 cannot make them. A configuration save's prompt lists the keys it changes. Every
-`node.toml` key can be changed this way except `runtime.kubernetes.state_mount`,
-which is changed in the file on the host; a secret's value can be set but is never
-shown back. Importing a skill from a host directory, policy signing and the service
+`node.toml` key can be changed this way except a few changed at the node only: the
+state mount, the gateway's socket path, and the gateway and harness images. A
+secret's value can be set but is never shown back. Importing a skill from a host directory, policy signing and the service
 lifecycle stay at the node. A
 freshly paired browser may add the node's first passkey without one for 15 minutes;
 after that, adding another is itself confirmed with an existing passkey, so a token

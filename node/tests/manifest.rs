@@ -360,6 +360,13 @@ async fn a_plugin_outside_the_images_cache_makes_the_manifest_refuse_to_build() 
     assert_eq!(v["next"]["plugins"], json!(baked));
 }
 
+/// `node.toml`'s version as `GET /api/config` gives it, which a save names.
+async fn config_hash(n: &Node) -> String {
+    let (s, v) = call(n, "GET", "/api/config", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["hash"].as_str().unwrap().to_string()
+}
+
 /// `[launch]` is an allowlist like the rest of the settings surface: the one
 /// key it writes round-trips, and anything else is refused by name rather
 /// than dropped.
@@ -371,7 +378,10 @@ async fn the_launch_settings_are_an_allowlist() {
         "PUT",
         "/api/config",
         Some(LOCAL),
-        Some(json!({ "launch": { "plugins": ["@example/audit@1.0.0"] } })),
+        Some(json!({
+            "launch": { "plugins": ["@example/audit@1.0.0"] },
+            "expected_hash": config_hash(&n).await,
+        })),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
@@ -382,7 +392,10 @@ async fn the_launch_settings_are_an_allowlist() {
         "PUT",
         "/api/config",
         Some(LOCAL),
-        Some(json!({ "launch": { "formatters": { "prettier": [] } } })),
+        Some(json!({
+            "launch": { "formatters": { "prettier": [] } },
+            "expected_hash": config_hash(&n).await,
+        })),
     )
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");

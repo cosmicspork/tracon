@@ -249,6 +249,13 @@ push your devices got), so undo it at the node: through the port-forward above,
 `PATCH /api/config` with `{"expected_hash": ..., "ops": [...]}` from there needs
 no passkey; or edit `node.toml` by hand and restart.
 
+Some keys are only ever changed at the node, and an edit from elsewhere is refused
+with that reason: `runtime.kubernetes.state_mount` (not even by an edit there; change
+it in the file), and `gateway.harness_listen`, `boundary.gateway_image`,
+`boundary.harness_image` and `runtime.kubernetes.harness_image` (an edit through the
+port-forward, or by hand). A remote save that lists more sensitive keys than one
+prompt can show is refused with "split it into smaller edits".
+
 **A window was signed in that you did not approve** (a push says "Signed in from
 another window"). Someone approved a device request with a passkey, or talked
 you into it. At the node, `tracon auth sessions` lists the sessions; the one

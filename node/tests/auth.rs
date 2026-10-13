@@ -1058,7 +1058,7 @@ async fn a_request_relayed_by_a_same_host_proxy_is_not_local() {
         (
             "PUT",
             "/api/config",
-            Some(json!({ "review": { "max_files": 77 } })),
+            Some(json!({ "review": { "max_files": 77 }, "expected_hash": hash })),
         ),
         (
             "PATCH",

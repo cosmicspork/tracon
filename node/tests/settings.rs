@@ -117,6 +117,13 @@ async fn call(
     )
 }
 
+/// `node.toml`'s version as `GET /api/config` gives it, which a save names.
+async fn config_hash(n: &Node) -> String {
+    let (s, v) = call(n, "GET", "/api/config", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["hash"].as_str().unwrap().to_string()
+}
+
 /// `node.toml`'s version as the repository list gives it, which a save names.
 async fn repos_hash(n: &Node) -> String {
     let (s, v) = call(n, "GET", "/api/repos/environments", Some(LOCAL), None).await;
@@ -735,9 +742,21 @@ async fn a_settings_save_is_audited_and_a_repeat_writes_nothing() {
     let n = node();
     let current = Config::try_load().unwrap().review.max_files;
     let next = if current == 41 { 42 } else { 41 };
-    let patch = json!({ "review": { "max_files": next } });
+    // A save names the version it was decided against.
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/config",
+        Some(LOCAL),
+        Some(json!({ "review": { "max_files": next } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_REQUIRED, "{v}");
+    let read = config_hash(&n).await;
+    let patch = json!({ "review": { "max_files": next }, "expected_hash": read });
     let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch.clone())).await;
     assert_eq!(s, StatusCode::OK, "{v}");
+    assert_ne!(v["hash"], json!(read));
     assert_eq!(v["changed"], json!(["review.max_files"]));
     // A review limit applies to the running node at once.
     assert_eq!(v["restart_required"], false);
@@ -748,6 +767,11 @@ async fn a_settings_save_is_audited_and_a_repeat_writes_nothing() {
     assert_eq!(rows[0].changes[0]["after"], next);
     assert_eq!(Config::try_load().unwrap().review.max_files, next);
 
+    // The same save from the same read is now stale: it is not applied
+    // over a version it was not decided against.
+    let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch)).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let patch = json!({ "review": { "max_files": next }, "expected_hash": config_hash(&n).await });
     let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch)).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["changed"], json!([]));
@@ -763,7 +787,10 @@ async fn an_unknown_setting_is_refused_rather_than_dropped() {
         "PUT",
         "/api/config",
         Some(LOCAL),
-        Some(json!({ "mesh": { "hub_url": "https://elsewhere.example.com" } })),
+        Some(json!({
+            "mesh": { "hub_url": "https://elsewhere.example.com" },
+            "expected_hash": config_hash(&n).await,
+        })),
     )
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");

@@ -663,8 +663,14 @@ export const api = {
     call<{ name: string; created: boolean; note: string | null }>('POST', '/api/channels', { name }),
   runSetup: (rebuild = false) => call<BoundaryResult>('POST', '/api/boundary/setup', { rebuild }),
   config: () => call<NodeConfig>('GET', '/api/config'),
-  putConfig: (patch: unknown) =>
-    call<{ changed: string[]; restart_required: boolean }>('PUT', '/api/config', patch),
+  /** Save Settings fields, decided against the `hash` the config was read
+      with (a 409 carries the hash now). Off the node's machine a passkey
+      confirms it. */
+  putConfig: (patch: Record<string, unknown>, expectedHash: string) =>
+    call<{ changed: string[]; restart_required: boolean; hash: string }>('PUT', '/api/config', {
+      ...patch,
+      expected_hash: expectedHash,
+    }),
   /** Typed edits of node.toml, decided against `expectedHash` (a 409 carries
       the hash now). Off the node's machine a passkey confirms it. */
   patchConfig: (expectedHash: string, ops: ConfigOp[]) =>

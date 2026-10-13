@@ -543,17 +543,7 @@ pub fn edit_at(
     }
     .map_err(EditError::Invalid)?;
     let changes = diff(&text, &next);
-    // A builder the node cannot use is reported at start rather than fatal
-    // there, so a node keeps running with one; but an edit that writes the
-    // table is held to it.
-    let builder = KeyPath::keys(&["runtime", "kubernetes", "builder"]);
-    if changes.iter().any(|c| c.key.0.starts_with(&builder.0)) {
-        if let Some(settings) = &config.runtime.kubernetes.builder {
-            crate::boundary::kubernetes::build::validate_settings(settings).map_err(|why| {
-                EditError::Invalid(format!("[runtime.kubernetes.builder]: {why}"))
-            })?;
-        }
-    }
+    check_builder(&config, &changes)?;
     if changes.is_empty() {
         return Ok(EditOutcome {
             new_hash: old_hash.clone(),
@@ -626,6 +616,8 @@ pub fn edit_at(
 pub struct Preview {
     pub config: Config,
     pub changes: Vec<Change>,
+    /// The text the edit would write.
+    pub text: String,
 }
 
 /// Apply `ops` to `text` and load the result with every check a load makes,
@@ -637,9 +629,12 @@ pub fn preview(text: &str, ops: &[Op]) -> Result<Preview, EditError> {
         None => Config::from_toml(&next, &Config::config_path()),
     }
     .map_err(EditError::Invalid)?;
+    let changes = diff(text, &next);
+    check_builder(&config, &changes)?;
     Ok(Preview {
         config,
-        changes: diff(text, &next),
+        changes,
+        text: next,
     })
 }
 
@@ -777,6 +772,21 @@ pub fn redact(at: &[String], value: &toml::Value) -> toml::Value {
             }
         }
     }
+}
+
+/// A builder the node cannot use is reported at start rather than fatal
+/// there, so a node keeps running with one; but an edit that writes the
+/// table is held to it.
+fn check_builder(config: &Config, changes: &[Change]) -> Result<(), EditError> {
+    let builder = KeyPath::keys(&["runtime", "kubernetes", "builder"]);
+    if changes.iter().any(|c| c.key.0.starts_with(&builder.0)) {
+        if let Some(settings) = &config.runtime.kubernetes.builder {
+            crate::boundary::kubernetes::build::validate_settings(settings).map_err(|why| {
+                EditError::Invalid(format!("[runtime.kubernetes.builder]: {why}"))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// What `ops` make of `text`, without writing or checking it.

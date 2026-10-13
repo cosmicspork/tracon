@@ -2,6 +2,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod config_api;
+mod config_prompt;
 pub mod device;
 pub mod environments;
 pub mod evidence;
