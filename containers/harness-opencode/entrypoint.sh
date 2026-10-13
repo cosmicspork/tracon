@@ -38,6 +38,21 @@ if [ -n "${XDG_CACHE_HOME:-}" ] && [ -d "$seed/packages" ]; then
   fi
 fi
 
+# OpenCode runs the `rg` on PATH, or else the one in its cache's `bin`, or else
+# downloads one with no flag to stop it (config-state.md 8, row 11). On a
+# repository's image PATH is the repository's and may have none, and putting
+# /opt/tracon/bin on it would put this image's `node` in front of the agent's
+# shell too. So the cache gets a link to the baked one instead, which only
+# OpenCode looks at.
+if [ -n "${XDG_CACHE_HOME:-}" ] && [ -x /opt/tracon/bin/rg ]; then
+  target="$XDG_CACHE_HOME/opencode/bin"
+  if [ ! -e "$target/rg" ]; then
+    if ! (mkdir -p "$target" && ln -s /opt/tracon/bin/rg "$target/rg"); then
+      echo "tracon: could not link $target/rg; OpenCode will try to download one" >&2
+    fi
+  fi
+fi
+
 # `exec`, so the harness — not this script — is the process the init reaps and
 # the process a stop signal reaches.
 [ "$#" -gt 0 ] || set -- opencode --version

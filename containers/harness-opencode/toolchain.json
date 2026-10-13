@@ -1,5 +1,5 @@
 {
-  "revision": "1",
+  "revision": "2",
   "profile": "rust+typescript",
   "opencode_version": "1.18.30",
   "node_version": "24.21.0",
@@ -20,7 +20,7 @@
     {
       "id": "typescript",
       "version": "6.0.0",
-      "command": ["/opt/tracon/lsp/typescript-language-server", "--stdio"],
+      "command": ["/opt/tracon/bin/node", "/opt/tracon/lsp/typescript-language-server", "--stdio"],
       "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
       "initialization": { "tsserver": { "path": "/opt/tracon/lsp/tsserver.js" } },
       "note": "`initialization` is the builtin's, copied here because naming `command` discards it (config-state.md 6.4)."
@@ -36,7 +36,7 @@
     {
       "id": "prettier",
       "version": "3.9.6",
-      "command": ["/opt/tracon/fmt/prettier", "--write", "$FILE"],
+      "command": ["/opt/tracon/bin/node", "/opt/tracon/fmt/prettier", "--write", "$FILE"],
       "extensions": [
         ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
         ".html", ".htm", ".css", ".scss", ".less", ".vue",

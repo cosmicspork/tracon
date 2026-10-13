@@ -664,8 +664,22 @@ copied from the release's harness image in its registry, and the layer also copi
 image's static `tini` to `/usr/libexec/tracon/tini`, which the session's pod runs as
 `tini --` in front of the harness: a pod's first process is PID 1, which ignores
 signals it does not handle and inherits orphans, and Kubernetes has nothing like
-Podman's `--init`. The probe runs in a pod as the harness uid. Only a Claude Code
-session is layered; OpenCode stays in its own image. Checks stay on the repository's image, so a harness
+Podman's `--init`. The probe runs in a pod as the harness uid. Both harnesses are
+layered. Claude Code is one binary and the environment its image sets. OpenCode is its
+binary and the whole of `/opt/tracon`: the entrypoint that seeds its package caches (now
+the layered image's `ENTRYPOINT`, and named in front of the harness in a pod), the
+language servers and formatters its configuration names, a statically linked `rg` that
+the entrypoint links into OpenCode's cache so it never downloads one, and its own Node at
+`/opt/tracon/bin/node`. That Node is on no `PATH`: the toolchain profile names it in front
+of each JavaScript tool, so the agent's shell keeps the repository's `node` and the tools
+keep theirs, and a tool whose interpreter does not run on the image is reported
+`unavailable` in the session's launch status rather than failing the session. The layer
+also removes what a repository's image could use to configure OpenCode under the node:
+`/etc/opencode`, which OpenCode reads whatever its environment says, and anything already
+at `/opt/tracon`, whose seed the entrypoint copies into the configuration directory. An
+image whose environment sets an `OPENCODE_*` variable is refused, naming it, since the
+variable would reach the harness wherever the launch sets no value of its own. OpenCode is
+launched as `/usr/local/bin/opencode`, never by a `PATH` lookup. Checks stay on the repository's image, so a harness
 upgrade rebuilds only the layer and no evidence moves. The session's start event
 records the image it ran in, the repository image under it, and the reason when it ran
 in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`

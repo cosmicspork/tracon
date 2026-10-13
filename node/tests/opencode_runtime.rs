@@ -72,23 +72,26 @@ fn internal_network() -> Option<String> {
 /// An image that is an OpenCode harness: one that carries the toolchain
 /// manifest this row's Containerfile writes. Named in
 /// `TRACON_OPENCODE_IMAGE`, or found under the names `tracon setup` and this
-/// row's own build use.
+/// row's own build use. A found one has to be from this tree's toolchain
+/// revision: the image a released node built is older than the profile
+/// whenever a change moves it, and that says nothing about this tree. One
+/// that is named is taken as it is, so a stale image named on purpose fails.
 fn harness_image() -> Option<String> {
-    let mut candidates: Vec<String> = std::env::var("TRACON_OPENCODE_IMAGE")
+    if let Some(named) = std::env::var("TRACON_OPENCODE_IMAGE")
         .ok()
         .filter(|v| !v.is_empty())
-        .into_iter()
-        .collect();
-    candidates.extend(
-        [
-            "localhost/tracon-harness-opencode",
-            "localhost/tracon-harness-opencode-test",
-            Config::default().boundary.harness_image.as_str(),
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-    candidates.into_iter().find(|image| {
+    {
+        return Some(named);
+    }
+    let revision = format!("\"revision\": \"{}\"", toolchain::profile().revision);
+    [
+        "localhost/tracon-harness-opencode",
+        "localhost/tracon-harness-opencode-test",
+        Config::default().boundary.harness_image.as_str(),
+    ]
+    .into_iter()
+    .map(String::from)
+    .find(|image| {
         Command::new("podman")
             .args(["image", "exists", image])
             .status()
@@ -100,8 +103,9 @@ fn harness_image() -> Option<String> {
                     "--rm",
                     "--network=none",
                     image,
-                    "test",
-                    "-f",
+                    "grep",
+                    "-q",
+                    &revision,
                     toolchain::MANIFEST_PATH,
                 ])
                 .status()
@@ -130,8 +134,9 @@ fn runtime() -> Option<Runtime> {
     };
     let Some(image) = harness_image() else {
         eprintln!(
-            "skipped: no OpenCode harness image on this machine. Run `tracon setup` with the \
-             OpenCode harness selected, or build containers/harness-opencode and name it in \
+            "skipped: no OpenCode harness image from this tree's toolchain revision on this \
+             machine. Run `tracon setup` with the OpenCode harness selected, or build \
+             containers/harness-opencode (`just harness-opencode-image`) and name it in \
              TRACON_OPENCODE_IMAGE."
         );
         return None;

@@ -366,9 +366,7 @@ fn normalised(source: &str, run_as: &RunAs) -> String {
 
 /// How a harness goes onto a repository's image: what is copied out of the
 /// harness's own image, the environment that image sets, and the command that
-/// proves the result runs. Only a harness that is one binary is carried this
-/// way. OpenCode's image is an entrypoint and a toolchain profile the launch
-/// manifest records, and it stays in it.
+/// proves the result runs.
 struct HarnessLayer {
     lines: String,
     probe: String,
@@ -393,7 +391,53 @@ fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
                 },
             })
         }
+        crate::adapter::opencode::OpenCodeAdapter::ID => Some(opencode_layer(run_as)),
         _ => None,
+    }
+}
+
+/// OpenCode over a repository's image: the binary, and `/opt/tracon` whole,
+/// which holds the entrypoint that seeds its package caches, the language
+/// servers and formatters its configuration names, the `node` those run on
+/// and the `rg` its search tools use.
+///
+/// Nothing goes on the repository's `PATH` and nothing replaces what it
+/// installed: the baked `node` is `/opt/tracon/bin/node`, which the toolchain
+/// profile names in front of each JavaScript tool, so the agent's shell keeps
+/// the repository's own Node and the tools keep theirs.
+///
+/// The node's configuration is the only one OpenCode may read, and a
+/// repository's image could otherwise supply another: `/etc/opencode` is read
+/// whatever the environment says, so it is removed (as is anything already at
+/// `/opt/tracon`, whose seed the entrypoint copies into the configuration
+/// directory), and an `OPENCODE_*` variable in the image's environment would
+/// reach the harness wherever the launch does not set the same name, so an
+/// image with one is refused, naming it. A pod's layer does this as root and
+/// ends as the harness uid again.
+fn opencode_layer(run_as: &RunAs) -> HarnessLayer {
+    use crate::adapter::opencode::OpenCodeAdapter;
+    use crate::runner::toolchain::IMAGE_ENTRYPOINT;
+    let binary = OpenCodeAdapter::BINARY;
+    let guard = "RUN rm -rf /etc/opencode /opt/tracon && test ! -e /etc/opencode \
+                 && found=$(env | sed -n 's/^\\(OPENCODE_[A-Za-z0-9_]*\\)=.*/\\1/p' | tr '\\n' ' ') \
+                 && if [ -n \"$found\" ]; then echo \"tracon: the repository's image sets ${found% }, \
+                 which would override the node's OpenCode configuration\" >&2; exit 1; fi\n";
+    let guard = match run_as {
+        RunAs::Root => guard.to_string(),
+        RunAs::Pod { uid, .. } => format!("USER 0:0\n{guard}USER {uid}:{uid}\n"),
+    };
+    let probe = format!("{IMAGE_ENTRYPOINT} {binary} --version && git --version");
+    HarnessLayer {
+        lines: format!(
+            "{guard}\
+             COPY --from=harness {binary} {binary}\n\
+             COPY --from=harness /opt/tracon /opt/tracon\n\
+             ENTRYPOINT [\"{IMAGE_ENTRYPOINT}\"]\n"
+        ),
+        probe: match run_as {
+            RunAs::Root => probe,
+            RunAs::Pod { .. } => format!("{probe} && {POD_INIT} --version"),
+        },
     }
 }
 
@@ -2092,7 +2136,7 @@ mod tests {
     }
 
     /// Which sessions get a repository image at all: one whose repository has
-    /// an entry naming an image, on a harness that is a single binary, on a
+    /// an entry naming an image, on a harness the node can layer, on a
     /// runtime that can build.
     #[tokio::test]
     async fn a_session_keeps_the_harness_image_where_no_repository_image_applies() {
@@ -2122,11 +2166,16 @@ mod tests {
             }
         };
         assert_eq!(ask("/src/other", "claude").await, SessionImage::default());
-        let opencode = ask("/src/app", "opencode").await;
-        assert!(opencode.image.is_none());
-        assert!(opencode.note.unwrap().contains("runs in its own image"));
-        let unbuildable = ask("/src/app", "claude").await;
-        assert!(unbuildable.note.unwrap().contains("cannot build images"));
+        let other = ask("/src/app", "pi").await;
+        assert!(other.image.is_none());
+        assert!(other.note.unwrap().contains("runs in its own image"));
+        for harness in ["claude", "opencode"] {
+            let unbuildable = ask("/src/app", harness).await;
+            assert!(
+                unbuildable.note.unwrap().contains("cannot build images"),
+                "{harness}"
+            );
+        }
     }
 
     /// A runtime that pulls its harness images from a registry and builds
@@ -2251,7 +2300,154 @@ mod tests {
             exported, 3,
             "the harness image sets something the layer does not"
         );
-        assert!(harness_layer("opencode", &RunAs::Root).is_none());
+        assert!(harness_layer("pi", &RunAs::Root).is_none());
+    }
+
+    const OPENCODE_GUARD: &str = r#"RUN rm -rf /etc/opencode /opt/tracon && test ! -e /etc/opencode && found=$(env | sed -n 's/^\(OPENCODE_[A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ') && if [ -n "$found" ]; then echo "tracon: the repository's image sets ${found% }, which would override the node's OpenCode configuration" >&2; exit 1; fi
+"#;
+
+    const OPENCODE_COPY: &str = r#"COPY --from=harness /usr/local/bin/opencode /usr/local/bin/opencode
+COPY --from=harness /opt/tracon /opt/tracon
+ENTRYPOINT ["/opt/tracon/bin/harness-entrypoint"]
+"#;
+
+    /// OpenCode's layer, pinned per runtime: the binary and `/opt/tracon`
+    /// copied in, the configuration a repository's image could slip under
+    /// the node's removed or refused first, and the harness entrypoint as the
+    /// image's own. A pod's does the root part as root and ends as the
+    /// harness uid.
+    #[test]
+    fn the_opencode_layer_is_pinned_per_runtime() {
+        let root = harness_layer("opencode", &RunAs::Root).unwrap();
+        assert_eq!(root.lines, format!("{OPENCODE_GUARD}{OPENCODE_COPY}"));
+        assert_eq!(
+            root.probe,
+            "/opt/tracon/bin/harness-entrypoint /usr/local/bin/opencode --version && git --version"
+        );
+        assert_eq!(
+            layered(
+                "localhost/app@sha256:abc",
+                "localhost/h@sha256:def",
+                &root,
+                &RunAs::Root
+            ),
+            format!(
+                "FROM localhost/h@sha256:def AS harness\n{}{OPENCODE_GUARD}{OPENCODE_COPY}",
+                normalised("localhost/app@sha256:abc", &RunAs::Root)
+            )
+        );
+
+        let pod_layer = harness_layer("opencode", &pod()).unwrap();
+        assert_eq!(
+            pod_layer.lines,
+            format!("USER 0:0\n{OPENCODE_GUARD}USER 65532:65532\n{OPENCODE_COPY}")
+        );
+        assert_eq!(
+            pod_layer.probe,
+            "/opt/tracon/bin/harness-entrypoint /usr/local/bin/opencode --version && git --version \
+             && /usr/libexec/tracon/tini --version"
+        );
+        let text = layered(
+            "ghcr.io/app@sha256:abc",
+            "ghcr.io/h@sha256:def",
+            &pod_layer,
+            &pod(),
+        );
+        assert!(text.ends_with(&format!(
+            "{OPENCODE_COPY}COPY --from=harness /usr/bin/tini-static /usr/libexec/tracon/tini\n"
+        )));
+        // Nothing after the last `USER` makes the harness root again.
+        let last_user = text.rfind("\nUSER ").unwrap();
+        assert!(text[last_user..].starts_with("\nUSER 65532:65532\n"));
+        assert!(!text[last_user..].contains("RUN "), "{text}");
+        assert!(!text.contains("/root"), "{text}");
+
+        // The paths are the ones the launch and the pod name.
+        assert!(root
+            .lines
+            .contains(crate::adapter::opencode::OpenCodeAdapter::BINARY));
+        assert!(root
+            .lines
+            .contains(crate::runner::toolchain::IMAGE_ENTRYPOINT));
+    }
+
+    /// The layer writes `/usr/local/bin/opencode` and `/opt/tracon`, and
+    /// nothing a repository installs its own tools to: its `node`, `npm` and
+    /// `rg` stay what its Dockerfile made them. The baked node is
+    /// `/opt/tracon/bin/node`, where only the toolchain profile names it.
+    #[test]
+    fn the_opencode_layer_leaves_the_repositorys_own_tools_alone() {
+        for run_as in [RunAs::Root, pod()] {
+            let layer = harness_layer("opencode", &run_as).unwrap();
+            let written: Vec<&str> = layer
+                .lines
+                .lines()
+                .filter_map(|line| line.strip_prefix("COPY --from=harness "))
+                .filter_map(|copy| copy.split_whitespace().last())
+                .collect();
+            assert_eq!(written, ["/usr/local/bin/opencode", "/opt/tracon"]);
+            assert!(!layer.lines.contains("ENV "), "nothing changes PATH");
+            for theirs in ["/usr/local/bin/node", "/usr/local/bin/npm", "/usr/bin/node"] {
+                assert!(!layer.lines.contains(theirs), "{theirs}");
+            }
+        }
+        let image = include_str!("../../containers/harness-opencode/Containerfile");
+        assert!(image.contains("COPY --from=toolchain /usr/local/bin/node /opt/tracon/bin/node"));
+        assert!(image.contains("install -m 0755 /tmp/rg/rg /opt/tracon/bin/rg"));
+        assert!(image.contains("/usr/bin/tini-static --version"));
+        // Every tool that needs a node names the baked one.
+        let profile = crate::runner::toolchain::profile();
+        for tool in profile.lsp.iter().chain(profile.formatter.iter()) {
+            if let Some(interpreter) = tool.interpreter() {
+                assert_eq!(interpreter, "/opt/tracon/bin/node", "{}", tool.id);
+            }
+        }
+    }
+
+    /// An OpenCode layer that builds and runs is what the session gets, in
+    /// its own row and key, and its probe is held to the pinned release.
+    #[tokio::test]
+    async fn an_opencode_session_is_layered_and_probed_against_its_pin() {
+        let repo = Path::new("/src/app");
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let pinned = crate::adapter::opencode::OpenCodeAdapter::PINNED_VERSION;
+        let harness = |run_as: RunAs| SessionHarness {
+            id: "opencode",
+            version: pinned,
+            image: "localhost/tracon-harness-opencode".into(),
+            layer: harness_layer("opencode", &run_as).unwrap(),
+            run_as,
+        };
+        let says = Box::leak(format!("{pinned}\ngit version 2.50").into_boxed_str());
+        let runner = ProbeRunner::saying(says, 0);
+        let got = ensure_session_with(
+            &builder,
+            &runner,
+            &store,
+            repo,
+            BASE_IMAGE,
+            &harness(RunAs::Root),
+        )
+        .await;
+        let image = got.image.clone().expect("the layered image");
+        assert!(image.contains("-opencode@sha256:"), "{image}");
+        assert_eq!(got.toolchain_image.as_deref(), Some(BASE_IMAGE));
+        assert!(store
+            .ready_repo_image("/src/app", "session:opencode")
+            .unwrap()
+            .is_some());
+        assert!(builder.builds.lock().unwrap()[0]
+            .1
+            .contains("ENTRYPOINT [\"/opt/tracon/bin/harness-entrypoint\"]"));
+
+        // Another release in the image is not the pinned one.
+        let store = Store::open_in_memory().unwrap();
+        let runner = ProbeRunner::saying("1.0.0\ngit version 2.50", 0);
+        let got =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness(pod())).await;
+        assert_eq!(got.image, None);
+        assert!(got.note.unwrap().contains("does not run"));
     }
 
     #[test]

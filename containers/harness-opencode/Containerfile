@@ -64,6 +64,15 @@ ARG RUSTFMT_X64_SHA256=b29a1addcbf2aa8f5785075605700e63cbe131b08c8334b50c09cfca8
 ARG RUSTFMT_ARM64_SHA256=7d4c136278b61096d46ef23019c29acb7ee5a2a1412cbfee5050316110c6fd8c
 ARG RUSTC_X64_SHA256=e974f036b28565f37c0f3bd92ddefa809bee16c04f9dcf07b9ed96e05aaaf7c4
 ARG RUSTC_ARM64_SHA256=89fb83041993b48816514815606f53a5264729b8b449671a6b291e6f0ae74f40
+# ripgrep is baked rather than left to the harness: OpenCode downloads `rg` at
+# first use with no flag to stop it (finding 8b of the manifest), and an image
+# that ships it is the only thing that prevents that call. The release's
+# statically linked musl build rather than Debian's, which links libpcre2: the
+# same file is copied onto repository images (`repo_image::harness_layer`),
+# whose libraries are not this image's.
+ARG RIPGREP_VERSION=15.2.0
+ARG RIPGREP_X64_SHA256=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ARG RIPGREP_ARM64_SHA256=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
 RUN apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
@@ -79,6 +88,19 @@ RUN set -eu; case "${TARGETARCH}" in \
       --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md; \
     rm -f /tmp/node.tar.xz; \
     node --version
+RUN set -eu; case "${TARGETARCH}" in \
+      amd64) rg_target=x86_64-unknown-linux-musl;  rg_digest="${RIPGREP_X64_SHA256}" ;; \
+      arm64) rg_target=aarch64-unknown-linux-musl; rg_digest="${RIPGREP_ARM64_SHA256}" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/rg.tar.gz \
+      "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-${rg_target}.tar.gz"; \
+    echo "${rg_digest}  /tmp/rg.tar.gz" | sha256sum -c -; \
+    mkdir -p /tmp/rg /opt/tracon/bin; \
+    tar -xzf /tmp/rg.tar.gz -C /tmp/rg --strip-components=1; \
+    install -m 0755 /tmp/rg/rg /opt/tracon/bin/rg; \
+    rm -rf /tmp/rg /tmp/rg.tar.gz; \
+    /opt/tracon/bin/rg --version
 # The Rust dist tarballs are component archives: one `bin/` under a
 # `<component>-preview` directory, checked before anything is unpacked. Both
 # binaries carry `RUNPATH=$ORIGIN/../lib`, so bin/ and lib/ have to stay
@@ -157,13 +179,15 @@ ARG TARGETARCH
 # The revision of the baked language-toolchain profile. It is an ARG so a
 # rebuild of the same definitions carries the same number, and it is written
 # into /opt/tracon/toolchain.json, which is the file the node's manifest reads.
-ARG TRACON_TOOLCHAIN_REVISION=1
-# ripgrep is installed rather than left to the harness: OpenCode downloads `rg`
-# at first use with no flag to stop it (finding 8b of the manifest), and an
-# image that ships it is the only thing that prevents that call.
+ARG TRACON_TOOLCHAIN_REVISION=2
+# `tini` is not run in this image. Its statically linked build,
+# /usr/bin/tini-static, is the init a session image layered for a Kubernetes
+# pod copies in (`repo_image::layered`): static, because a repository's base
+# may not share this image's libc.
 RUN apt-get -o Acquire::Check-Valid-Until=false update \
-    && apt-get install -y --no-install-recommends git curl ripgrep \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends git curl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/tini-static --version
 # The official release archive is checked before its binary is extracted; the
 # mutable convenience installer is never part of this image build.
 RUN set -eu; case "${TARGETARCH}" in \
@@ -178,9 +202,16 @@ RUN set -eu; case "${TARGETARCH}" in \
     rm -f /tmp/opencode.tar.gz /tmp/opencode; \
     /usr/local/bin/opencode --version
 # Node, and only node: the package manager that built the tree below stays in
-# the builder stage, so nothing in this image can install anything.
-COPY --from=toolchain /usr/local/bin/node /usr/local/bin/node
+# the builder stage, so nothing in this image can install anything. It lives
+# under /opt/tracon/bin, which is on no PATH, and the profile names it in front
+# of every JavaScript tool, so a tool never runs on whichever `node` a PATH
+# finds first. That is what lets the same tree go onto a repository's image
+# beside the repository's own Node. Here, where there is no other, it is also
+# on PATH for the agent's shell, and so is `rg`.
+COPY --from=toolchain /usr/local/bin/node /opt/tracon/bin/node
 COPY --from=toolchain /opt/tracon /opt/tracon
+RUN ln -s /opt/tracon/bin/node /usr/local/bin/node \
+    && ln -s /opt/tracon/bin/rg /usr/local/bin/rg
 COPY toolchain.json /opt/tracon/toolchain.json
 COPY manifest.js /opt/tracon/manifest.js
 COPY entrypoint.sh /opt/tracon/bin/harness-entrypoint
@@ -191,7 +222,9 @@ COPY entrypoint.sh /opt/tracon/bin/harness-entrypoint
 # this image actually holds.
 RUN set -eu; \
     chmod 0755 /opt/tracon/bin/harness-entrypoint; \
-    for tool in /opt/tracon/lsp/rust-analyzer \
+    for tool in /opt/tracon/bin/node \
+                /opt/tracon/bin/rg \
+                /opt/tracon/lsp/rust-analyzer \
                 /opt/tracon/lsp/typescript-language-server \
                 /opt/tracon/fmt/rustfmt \
                 /opt/tracon/fmt/prettier; do \
@@ -202,10 +235,11 @@ RUN set -eu; \
     test -d "/opt/tracon/seed/packages/@opencode-ai/plugin@${OPENCODE_VERSION}/node_modules/@opencode-ai/plugin"; \
     /opt/tracon/lsp/rust-analyzer --version; \
     /opt/tracon/fmt/rustfmt --version; \
-    /opt/tracon/fmt/prettier --version; \
-    /opt/tracon/lsp/typescript-language-server --version; \
-    node -e "const m=require('/opt/tracon/toolchain.json'); const want='${TRACON_TOOLCHAIN_REVISION}'; if (m.revision !== want) { console.error('toolchain.json revision ' + m.revision + ' is not the build argument ' + want); process.exit(1) }"; \
-    node /opt/tracon/manifest.js; \
+    /opt/tracon/bin/rg --version; \
+    /opt/tracon/bin/node /opt/tracon/fmt/prettier --version; \
+    /opt/tracon/bin/node /opt/tracon/lsp/typescript-language-server --version; \
+    /opt/tracon/bin/node -e "const m=require('/opt/tracon/toolchain.json'); const want='${TRACON_TOOLCHAIN_REVISION}'; if (m.revision !== want) { console.error('toolchain.json revision ' + m.revision + ' is not the build argument ' + want); process.exit(1) }"; \
+    /opt/tracon/bin/node /opt/tracon/manifest.js; \
     rm -f /opt/tracon/manifest.js
 # `/etc/opencode` is the one configuration source with no environment control
 # (manifest finding 12), so the claim "no ambient discovery" holds only for an

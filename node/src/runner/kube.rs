@@ -99,7 +99,7 @@ pub struct KubeSpec {
     /// See `RunSpec::state_env`: the harness names its own state directory.
     pub state_env: &'static str,
     pub state_dir: &'static str,
-    /// The harness image's entrypoint, when it has one. Podman prefixes a
+    /// The entrypoint `image` has, when it has one. Podman prefixes a
     /// container's command with the image's `ENTRYPOINT`; a pod's `command`
     /// *replaces* it. So an image whose entrypoint does real work (the
     /// OpenCode harness seeds its package caches there) has to have it named
@@ -345,7 +345,8 @@ impl KubeSpec {
         labels.insert(SESSION_LABEL.to_string(), name.to_string());
         let workdir = cmd.workdir.clone().unwrap_or_else(|| self.workdir.clone());
         let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
-        // Only the harness image has the harness's entrypoint. Forcing it onto
+        // Only the spec's own image (the harness's, or a session image with
+        // the harness layered on) has the harness's entrypoint. Forcing it onto
         // a repository image would run a path that image does not have, and
         // every check and preparation in it would fail before it started.
         let own = image == self.image;

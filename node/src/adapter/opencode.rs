@@ -85,6 +85,11 @@ impl OpenCodeAdapter {
     /// keeps the two from drifting apart.
     pub const PINNED_VERSION: &'static str = "1.18.30";
 
+    /// Where the harness image installs the binary, and where the layer over
+    /// a repository's image copies it. Launched by this path: a repository's
+    /// image may put an `opencode` of its own earlier on `PATH`.
+    pub const BINARY: &'static str = "/usr/local/bin/opencode";
+
     /// OpenCode's server API carries no protocol version of its own, so the
     /// pinned release's major.minor API *is* the protocol identity and 1 is
     /// the name given to that revision here. What the server reports at
@@ -225,7 +230,7 @@ impl OpenCodeAdapter {
         secret_env.extend(password);
         RunnerCommand {
             argv: vec![
-                "opencode".into(),
+                Self::BINARY.into(),
                 "serve".into(),
                 "--pure".into(),
                 // Every interface of the runner, not its loopback: the node
@@ -831,7 +836,7 @@ impl HarnessAdapter for OpenCodeAdapter {
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
         let out = runner
             .run_capture(RunnerCommand {
-                argv: vec!["opencode".into(), "--version".into()],
+                argv: vec![Self::BINARY.into(), "--version".into()],
                 name: "opencode-version".into(),
                 ..Default::default()
             })
@@ -2181,7 +2186,7 @@ mod tests {
         assert_eq!(
             cmd.argv,
             [
-                "opencode",
+                "/usr/local/bin/opencode",
                 "serve",
                 "--pure",
                 "--hostname",

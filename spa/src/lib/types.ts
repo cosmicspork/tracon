@@ -1234,6 +1234,10 @@ export interface ToolStatus {
   kind: 'lsp' | 'formatter'
   version: string
   path: string
+  /** What runs `path` when it is a script; a tool whose interpreter does not
+   *  run on the image is unavailable. Absent for a native tool, and from older
+   *  nodes. */
+  interpreter?: string
   state: 'configured' | 'unavailable' | 'disabled'
 }
 
