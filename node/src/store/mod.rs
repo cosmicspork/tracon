@@ -36,6 +36,7 @@ pub mod opencode;
 pub mod opencode_state;
 pub mod operator;
 pub mod outcome;
+pub mod passkeys;
 pub mod pipeline_follow;
 pub mod policy_rollouts;
 pub mod publication;
@@ -55,6 +56,7 @@ pub use manifest::*;
 pub use opencode::*;
 pub use opencode_state::*;
 pub use operator::*;
+pub use passkeys::*;
 pub use policy_rollouts::*;
 pub use publication::*;
 pub use records::*;
@@ -1821,6 +1823,10 @@ mod records {
         pub last_seen_ms: i64,
         pub expires_ms: i64,
         pub user_agent: Option<String>,
+        /// When this client exchanged the operator token for its cookie: the
+        /// start of its window to enroll the node's first passkey. `None` for
+        /// a session from before passkeys.
+        pub paired_ms: Option<i64>,
     }
 
     /// A phone (or any browser) this node pushes to. Keys are kept as the
@@ -1870,6 +1876,7 @@ mod records {
                 last_seen_ms: r.get("last_seen_ms")?,
                 expires_ms: r.get("expires_ms")?,
                 user_agent: r.get("user_agent")?,
+                paired_ms: r.get("paired_ms")?,
             })
         }
     }
@@ -2678,6 +2685,11 @@ impl Store {
             }
         }
         tx.execute("DELETE FROM auth_session", [])?;
+        // Ceremonies in flight were bound to those sessions. The enrolled
+        // passkeys stay: they belong to the operator, not to the token, and
+        // rotating a leaked token must not also hand its holder a fresh
+        // enrollment window.
+        tx.execute("DELETE FROM webauthn_challenge", [])?;
         // The devices those clients registered go with them; a browser on
         // this machine has no session and stays.
         tx.execute(
@@ -2691,14 +2703,15 @@ impl Store {
     pub fn auth_session_insert(&self, r: &AuthSessionRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO auth_session (token_hash, created_ms, last_seen_ms, expires_ms, user_agent)
-             VALUES (?1,?2,?3,?4,?5)",
+            "INSERT INTO auth_session (token_hash, created_ms, last_seen_ms, expires_ms, user_agent, paired_ms)
+             VALUES (?1,?2,?3,?4,?5,?6)",
             rusqlite::params![
                 r.token_hash,
                 r.created_ms,
                 r.last_seen_ms,
                 r.expires_ms,
-                r.user_agent
+                r.user_agent,
+                r.paired_ms
             ],
         )?;
         Ok(())

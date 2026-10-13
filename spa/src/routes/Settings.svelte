@@ -18,6 +18,7 @@
   import { connectableProviders } from '../lib/providers'
   import HubRollups from '../components/HubRollups.svelte'
   import AdminAccess from '../components/settings/AdminAccess.svelte'
+  import Passkeys from '../components/settings/Passkeys.svelte'
   import Maintenance from '../components/settings/Maintenance.svelte'
   import DataHeld from '../components/settings/DataHeld.svelte'
   import Repositories from '../components/settings/Repositories.svelte'
@@ -937,6 +938,8 @@
       <div class="issued"><p>{issued.applied ? 'Token created. Save it before leaving this page.' : 'Replacement prepared; activation is not confirmed. Keep this token until access is verified.'}</p><div class="qr">{@html issued.svg}</div><code>{issued.token}</code></div>
     {/if}
   </Card>
+
+  <Passkeys />
 
   <Notifications />
 

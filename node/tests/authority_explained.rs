@@ -9,7 +9,7 @@
 #[path = "support/mod.rs"]
 mod support;
 use support::harness::{harness, Harness};
-use support::http::call;
+use support::http::{call, call_local};
 use support::state;
 
 use serde_json::{json, Value};
@@ -180,7 +180,7 @@ async fn consequential_actions_are_listed_with_the_grants_that_bear_on_them() {
         "capability"
     );
 
-    let (status, _) = call(
+    let (status, _) = call_local(
         &h.operator,
         "POST",
         "/api/authority/grants",
@@ -218,7 +218,7 @@ async fn a_revoked_grant_stops_being_explained_as_live() {
     state::isolate();
     let h = harness().await;
     h.store.insert_session(&session_row("s1")).unwrap();
-    let (_, created) = call(
+    let (_, created) = call_local(
         &h.operator,
         "POST",
         "/api/authority/grants",
@@ -237,7 +237,7 @@ async fn a_revoked_grant_stops_being_explained_as_live() {
         1
     );
 
-    let (status, _) = call(
+    let (status, _) = call_local(
         &h.operator,
         "DELETE",
         &format!("/api/authority/grants/{id}"),

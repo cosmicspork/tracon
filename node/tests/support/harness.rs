@@ -24,6 +24,9 @@ pub struct Harness {
     /// What the interface would be watching: tests that care about a live
     /// client, rather than a fresh page load, assert on these.
     pub bus: Bus,
+    /// The state behind the routers, for a test that drives what the mesh
+    /// would (`CommandExecutor`).
+    pub state: AppState,
 }
 
 pub async fn harness() -> Harness {
@@ -77,7 +80,8 @@ pub async fn harness_on(cfg: Config, backend: Arc<dyn tracon::boundary::Backend>
     };
     Harness {
         harness: tracon::http::harness_router(state.clone()),
-        operator: tracon::http::router(state),
+        operator: tracon::http::router(state.clone()),
+        state,
         store,
         manager,
         tools,

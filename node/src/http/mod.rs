@@ -4,6 +4,7 @@ pub mod auth;
 pub mod environments;
 pub mod evidence;
 mod mcp;
+pub mod passkey;
 mod policy_admin;
 pub mod preview;
 pub mod push;
@@ -439,6 +440,23 @@ pub fn router(state: AppState) -> Router {
             post(auth::put_token).delete(auth::delete_token),
         )
         .route("/api/auth/sessions", get(auth::list_sessions))
+        // Passkeys: enrolled at pairing, then what confirms an admin action
+        // from off this machine (`passkey::AdminAction`).
+        .route("/api/passkeys", get(passkey::list))
+        .route("/api/passkeys/{id}", delete(passkey::delete))
+        .route(
+            "/api/passkeys/register/options",
+            post(passkey::register_options),
+        )
+        .route(
+            "/api/passkeys/register/finish",
+            post(passkey::register_finish),
+        )
+        .route(
+            "/api/passkeys/assert/options",
+            post(passkey::assert_options),
+        )
+        .route("/api/passkeys/assert/finish", post(passkey::assert_finish))
         .route("/api/push/key", get(push::key))
         .route(
             "/api/push/subscriptions",

@@ -16,7 +16,7 @@ use proto::keyring::Keyring;
 use proto::keys::Identity;
 use serde_json::json;
 use support::fake::FakeAdapter;
-use support::http::call;
+use support::http::{call, call_local};
 use support::mesh::{identity, wait_for};
 use tokio::sync::Mutex;
 use tracon::adapter::HarnessEvent;
@@ -332,7 +332,7 @@ async fn a_peers_providers_are_driven_from_here() {
 
     // A remote node signs in to Anthropic by paste: the redirect is
     // Anthropic's own page, not this browser's localhost.
-    let (st, v) = call(
+    let (st, v) = call_local(
         &a.app,
         "POST",
         &format!("/api/nodes/{bi}/providers/anthropic/connect"),
@@ -345,10 +345,11 @@ async fn a_peers_providers_are_driven_from_here() {
         .as_str()
         .unwrap()
         .contains("platform.claude.com%2Foauth%2Fcode%2Fcallback"));
-    // The node-addressed route is treated as remote even when the target id
-    // is this node; only the direct provider route claims a local callback.
+    // Addressed to this node by its id, the sign-in runs here, and a browser
+    // at the node itself is offered the local callback as on the direct
+    // route. (A browser elsewhere gets the paste flow: `tests/auth.rs`.)
     let ai = a.id.node_id();
-    let (st, v) = call(
+    let (st, v) = call_local(
         &a.app,
         "POST",
         &format!("/api/nodes/{ai}/providers/anthropic/connect"),
@@ -356,11 +357,11 @@ async fn a_peers_providers_are_driven_from_here() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["completion"], "paste", "{v}");
+    assert_eq!(v["completion"], "local_callback", "{v}");
 
     // An unreachable owner is refused up front, not timed out.
     a.store.set_reachable(&bi, false).unwrap();
-    let (st, v) = call(
+    let (st, v) = call_local(
         &a.app,
         "POST",
         &format!("/api/nodes/{bi}/providers/anthropic/disconnect"),
@@ -398,7 +399,7 @@ async fn a_credential_is_shared_to_a_peer_and_nothing_leaks_on_the_way() {
 
     // Sharing from the interface widens the pin explicitly — this node stays
     // allowed — and hands the credential to B, sealed to B alone.
-    let (st, v) = call(
+    let (st, v) = call_local(
         &a.app,
         "POST",
         "/api/credentials/jira/share",
@@ -418,7 +419,7 @@ async fn a_credential_is_shared_to_a_peer_and_nothing_leaks_on_the_way() {
     }
 
     // Sharing something that does not exist says so.
-    let (st, _) = call(
+    let (st, _) = call_local(
         &a.app,
         "POST",
         "/api/credentials/nope/share",

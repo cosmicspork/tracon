@@ -246,6 +246,7 @@ impl Rig {
                 last_seen_ms: now,
                 expires_ms: now + 86_400_000,
                 user_agent: None,
+                paired_ms: None,
             })
             .unwrap();
         secret.to_string()

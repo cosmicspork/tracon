@@ -7,7 +7,7 @@
 #[path = "support/mod.rs"]
 mod support;
 use support::harness::{harness_with, Harness};
-use support::http::call;
+use support::http::{call, call_local};
 use support::state;
 
 use std::sync::Arc;
@@ -1281,7 +1281,7 @@ async fn a_legacy_channel_pause_fences_like_a_stop_until_start() {
         "{view}"
     );
 
-    let (status, _) = call(&h.operator, "POST", "/api/external/work/start", None).await;
+    let (status, _) = call_local(&h.operator, "POST", "/api/external/work/start", None).await;
     assert!(status.is_success(), "{status}");
     assert!(h.manager.bindings("work")["external_paused"].is_null());
     let (status, _) = mcp(&h.operator, "work", ping()).await;
@@ -1304,7 +1304,7 @@ async fn a_channel_stop_refuses_every_call_until_start() {
     let (status, _) = mcp(&h.operator, "personal", ping()).await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, _) = call(&h.operator, "POST", "/api/external/work/start", None).await;
+    let (status, _) = call_local(&h.operator, "POST", "/api/external/work/start", None).await;
     assert!(status.is_success(), "{status}");
     assert!(h.manager.bindings("work")["external_stopped"].is_null());
     let (status, _) = mcp(&h.operator, "work", ping()).await;
@@ -1314,7 +1314,7 @@ async fn a_channel_stop_refuses_every_call_until_start() {
 
     // The older route still starts it.
     call(&h.operator, "POST", "/api/external/work/stop", None).await;
-    let (status, _) = call(&h.operator, "DELETE", "/api/external/work/stop", None).await;
+    let (status, _) = call_local(&h.operator, "DELETE", "/api/external/work/stop", None).await;
     assert!(status.is_success(), "{status}");
     let (status, _) = mcp(&h.operator, "work", ping()).await;
     assert!(status.is_success(), "{status}");

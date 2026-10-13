@@ -1120,6 +1120,12 @@ impl Tools {
         if approval.state != PENDING {
             return Err(no_longer_waiting());
         }
+        // Expired is over even before the sweep marks it so. Checked here,
+        // ahead of every answer, because some answers write before they
+        // decide (saving an egress host to the repository).
+        if approval.expires_ms <= crate::store::now_ms() {
+            return Err(rejected("this approval has expired"));
+        }
         let said = |text: &Option<String>| {
             text.as_deref()
                 .map(str::trim)
@@ -1281,7 +1287,8 @@ impl Tools {
                 None,
                 Some(match &saved {
                     Some(repo) => format!(
-                        "the session holds no grant any more, so nothing was opened now;                          {host} was saved to {repo}'s egress for its next session"
+                        "the session holds no grant any more, so nothing was opened now; \
+                         {host} was saved to {repo}'s egress for its next session"
                     ),
                     None => "the session holds no grant any more; nothing was opened".into(),
                 }),

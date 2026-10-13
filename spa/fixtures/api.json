@@ -1106,5 +1106,29 @@
     "channels": [],
     "lanes": [],
     "stopped": []
+  },
+  "/api/passkeys": {
+    "passkeys": [
+      {
+        "id": "q0VbYF9rZ2x2b2JkUXlqTjE",
+        "label": "iPhone",
+        "sign_count": 0,
+        "backup_eligible": true,
+        "backup_state": true,
+        "transports": "[\"internal\",\"hybrid\"]",
+        "created_ms": -1209600000,
+        "last_used_ms": -7200000
+      }
+    ],
+    "local": true,
+    "relying_party": {
+      "id": "tracon-node.example.org",
+      "origin": "https://tracon-node.example.org"
+    },
+    "unavailable": null,
+    "enrollment": {
+      "open": false,
+      "closes_ms": null
+    }
   }
 }

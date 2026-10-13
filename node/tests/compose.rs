@@ -97,13 +97,19 @@ impl Harness {
 
     async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
         let req = Request::builder().method(method).uri(uri);
-        let req = match body {
+        let mut req = match body {
             Some(b) => req
                 .header("content-type", "application/json")
                 .body(Body::from(b.to_string()))
                 .unwrap(),
             None => req.body(Body::empty()).unwrap(),
         };
+        // From the node's own machine, as the interface there calls it.
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                5000,
+            ))));
         let res = self.app.clone().oneshot(req).await.unwrap();
         let status = res.status();
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)

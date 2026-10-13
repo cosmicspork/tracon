@@ -85,6 +85,9 @@ class Store {
   connected = $state(false)
   /** The node wants a login: show the gate rather than an empty interface. */
   authRequired = $state(false)
+  /** This browser just spent the operator token: offer it a passkey while
+      the node still lets it enroll the first one without one. */
+  justPaired = $state(false)
   lastSeq = 0
 
   private source: EventSource | null = null
@@ -232,6 +235,7 @@ class Store {
   /** Exchange the operator token for a cookie, then start over. */
   async signIn(token: string) {
     await api.login(token)
+    this.justPaired = true
     this.authRequired = false
     this.source?.close()
     this.source = null

@@ -33,6 +33,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::hostname;
+pub use super::passkey::AdminAction;
 use crate::store::{now_ms, AuthSessionRow, Store, OPERATOR_TOKEN_KEY};
 
 use super::api::{ApiError, AppState};
@@ -50,34 +51,63 @@ const RENEW_AFTER_MS: i64 = SESSION_TTL_MS / 3;
 const LOGIN_WINDOW_MS: i64 = 5 * 60 * 1000;
 const LOGIN_PER_IP: u32 = 10;
 const LOGIN_GLOBAL: u32 = 50;
+/// Passkey ceremonies opened or finished per window, per cookie session and
+/// in total. Each admin action off this machine costs two (the challenge and
+/// its answer), so a session gets a few dozen confirmations in five minutes:
+/// far more than an operator makes, and a bound on what a stolen cookie can
+/// make the node verify and store. Keyed by session rather than address:
+/// behind an ingress every caller shares one address, and one cookie must
+/// not be able to spend the operator's budget. The total is generous for the
+/// same reason, and still bounds what many cookies together can do.
+const CEREMONY_PER_SESSION: u32 = 60;
+const CEREMONY_GLOBAL: u32 = 600;
 
 pub fn hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-/// A fixed window of failed logins. Cleared wholesale when the window turns, so
+/// A fixed window of attempts. Cleared wholesale when the window turns, so
 /// it cannot grow without bound.
-#[derive(Default)]
-struct Limiter {
+/// Keyed by whatever separates one caller from another: the peer address
+/// for login, the cookie session for passkey ceremonies.
+struct Limiter<K = IpAddr> {
     window_start_ms: i64,
     global: u32,
-    per_ip: HashMap<IpAddr, u32>,
+    per_ip: HashMap<K, u32>,
+    per_ip_cap: u32,
+    global_cap: u32,
 }
 
-impl Limiter {
+impl Default for Limiter {
+    fn default() -> Self {
+        Self::new(LOGIN_PER_IP, LOGIN_GLOBAL)
+    }
+}
+
+impl<K: std::hash::Hash + Eq> Limiter<K> {
+    fn new(per_ip_cap: u32, global_cap: u32) -> Self {
+        Self {
+            window_start_ms: 0,
+            global: 0,
+            per_ip: HashMap::new(),
+            per_ip_cap,
+            global_cap,
+        }
+    }
+
     /// Whether another attempt is allowed, counting it if so.
-    fn allow(&mut self, ip: Option<IpAddr>, now: i64) -> bool {
+    fn allow(&mut self, ip: Option<K>, now: i64) -> bool {
         if now - self.window_start_ms >= LOGIN_WINDOW_MS {
             self.window_start_ms = now;
             self.global = 0;
             self.per_ip.clear();
         }
-        if self.global >= LOGIN_GLOBAL {
+        if self.global >= self.global_cap {
             return false;
         }
         if let Some(ip) = ip {
             let n = self.per_ip.entry(ip).or_insert(0);
-            if *n >= LOGIN_PER_IP {
+            if *n >= self.per_ip_cap {
                 return false;
             }
             *n += 1;
@@ -93,6 +123,7 @@ impl Limiter {
 pub struct AuthState {
     token_hash: Mutex<Option<String>>,
     limiter: Mutex<Limiter>,
+    ceremonies: Mutex<Limiter<String>>,
 }
 
 impl AuthState {
@@ -110,6 +141,7 @@ impl AuthState {
         Self {
             token_hash: Mutex::new(token_hash),
             limiter: Mutex::new(Limiter::default()),
+            ceremonies: Mutex::new(Limiter::new(CEREMONY_PER_SESSION, CEREMONY_GLOBAL)),
         }
     }
 
@@ -129,6 +161,15 @@ impl AuthState {
 
     fn set_configured(&self, hash: Option<String>) {
         *self.token_hash.lock().unwrap() = hash;
+    }
+
+    /// Whether `session` may open or finish another passkey ceremony now,
+    /// counting it if so.
+    pub(crate) fn allow_ceremony(&self, session: &str, now: i64) -> bool {
+        self.ceremonies
+            .lock()
+            .unwrap()
+            .allow(Some(session.to_string()), now)
     }
 }
 
@@ -332,14 +373,15 @@ fn request_is_local(req: &Request) -> bool {
 
 /// [`is_local`] of the parts an extractor or a handler sees.
 pub(crate) fn parts_are_local(parts: &axum::http::request::Parts) -> bool {
-    is_local(
-        parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ci| ci.0.ip()),
-        &parts.uri,
-        &parts.headers,
-    )
+    is_local(parts_peer(parts), &parts.uri, &parts.headers)
+}
+
+/// The TCP peer of a request, as an extractor sees it.
+pub(crate) fn parts_peer(parts: &axum::http::request::Parts) -> Option<IpAddr> {
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
 }
 
 /// Whether the request is [local](is_local), for a handler that also takes a
@@ -622,6 +664,9 @@ pub async fn login(
                 .get(header::USER_AGENT)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.chars().take(200).collect()),
+            // Spending the token is the pairing: this client may enroll the
+            // node's first passkey for a short while (`http::passkey`).
+            paired_ms: Some(now),
         })
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -654,10 +699,12 @@ pub struct TokenBody {
     pub token_hash: String,
 }
 
-/// Set (or replace) the operator token. Every existing cookie dies with it.
+/// Set (or replace) the operator token. Every existing cookie dies with it;
+/// enrolled passkeys stay. An admin action: off this machine it needs a
+/// passkey to confirm it ([`AdminAction`]).
 pub async fn put_token(
     State(state): State<AppState>,
-    Json(body): Json<TokenBody>,
+    AdminAction(Json(body)): AdminAction<Json<TokenBody>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let h = body.token_hash.trim().to_lowercase();
     if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -674,9 +721,11 @@ pub async fn put_token(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Remove the operator token: the node answers loopback only again.
+/// Remove the operator token: the node answers loopback only again. An admin
+/// action, like setting one.
 pub async fn delete_token(
     State(state): State<AppState>,
+    AdminAction(()): AdminAction,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state
         .store()
@@ -1056,6 +1105,17 @@ mod tests {
         assert!(l.allow(Some("10.0.0.2".parse().unwrap()), 1_000));
         // The window turning clears both.
         assert!(l.allow(Some(ip), 1_000 + LOGIN_WINDOW_MS));
+    }
+
+    #[test]
+    fn ceremonies_are_limited_per_session_not_per_address() {
+        let auth = AuthState::new("127.0.0.1".into(), None);
+        for _ in 0..CEREMONY_PER_SESSION {
+            assert!(auth.allow_ceremony("attacker", 0));
+        }
+        assert!(!auth.allow_ceremony("attacker", 0));
+        // Another cookie behind the same ingress still has its own budget.
+        assert!(auth.allow_ceremony("operator", 0));
     }
 
     #[test]

@@ -506,7 +506,8 @@ serve stale policy but not new policy.
 
 **Administration is an explicit operator capability, not a loopback exemption.**
 Mesh admission, removal, and hub-key sharing accept authenticated administrators
-from the remote UI. Policy signing/install and host service actions additionally
+from the remote UI, each confirmed there with a passkey (see [Reaching a
+node](#reaching-a-node)). Policy signing/install and host service actions additionally
 require a local request (see [Reaching a node](#reaching-a-node)), which a proxy on
 the node's own host does not make. Service actions name only the supported fixed supervisor,
 refuse active work or ambiguous process identity, and report scheduling rather
@@ -1553,8 +1554,10 @@ Three surfaces, three answers, and the differences are the point.
   normalised at load. An IP address is refused, loopback included, because a
   passkey's relying-party ID must be a domain and browsers refuse WebAuthn on
   an IP-literal origin. It is not a credential and does not widen what is local. The push
-  subject falls back to it when `[notify] contact` is unset, and it is what a
-  passkey's origin and relying-party ID will be pinned to.
+  subject falls back to it when `[notify] contact` is unset, and it pins the
+  passkeys' origin and relying-party ID. Unset, every passkey route and every
+  remote admin action refuses (`step_up_unavailable`, `no_public_origin`): the
+  node will not guess which origin its passkeys belong to.
 - **The operator from anywhere else** needs the token, exchanged for an HttpOnly,
   Secure, SameSite=Lax cookie — a cookie because `EventSource` cannot set headers,
   Lax because a push notification's deep link is a top-level cross-site navigation.
@@ -1564,6 +1567,46 @@ Three surfaces, three answers, and the differences are the point.
   so rather than looping. A login link may carry the token in the URL fragment —
   never the query string — because fragments are not sent in requests and the app
   strips them before anything renders.
+- **An admin action from anywhere else also needs a passkey** (`http::passkey`).
+  The cookie is enough to use the node, not to change who may use it or what it
+  lends: setting or removing the operator token, authority grants, credential
+  import, share and forge tokens, provider keys, sign-ins and channels, channel
+  bindings, boundary setup, mesh invitation, admission, removal and hub sharing,
+  reopening a channel to external harnesses, and passkeys themselves. So are
+  the approval answers that change the node rather than let one call run:
+  allowing a repository setup proposal (it writes the `[[repo]]` entry),
+  allowing a Dockerfile trial (a networked build outside the boundary), and
+  allowing an egress host for the repository. A peer cannot answer one of
+  those over the mesh; the gate is per node, and peer commands are still
+  authorised by channel membership. Each handler takes an `AdminAction` extractor, which
+  reads the body once and hashes the request it is about to run:
+  `op_hash = sha256("tracon-admin-op/1" | method | path and query | If-Match |
+  sha256(body))`. Without a proof for exactly that hash the request is refused
+  with a typed `step_up_required` carrying an assertion challenge bound to it;
+  the interface asks for the passkey, posts the assertion, gets back a proof, and
+  sends the identical bytes again with the proof in `X-Tracon-Step-Up`. Challenge
+  and proof each live two minutes, are spent once by a conditional `UPDATE`, and
+  belong to the cookie session that asked: a proof is useless with another
+  cookie, on another request, or a second time. The proof is stored as a hash.
+  A bearer token never confirms anything off the machine, because a
+  confirmation belongs to a cookie session and a bearer request has none; the
+  remote CLI's admin commands are refused with that reason. A local request
+  passes without a passkey: the node's own machine, including `kubectl
+  port-forward`, is the recovery root. The verifier is `webauthn-rs` (OpenSSL
+  built from source, so the static musl build stays static): attestation
+  `none`, user verification required, a discoverable credential preferred and
+  no attachment pinned, so a synced phone passkey, a hybrid phone across the
+  room and a security key all work. Loopback-only routes stay loopback-only.
+- **Pairing enrolls the first passkey.** Spending the token stamps the session's
+  `paired_ms`; for fifteen minutes after, and only while no passkey is
+  enrolled, that session may enroll one without confirming. The insert itself
+  is conditional on the table being empty, so of two freshly paired clients one
+  wins. After that, adding a passkey is an admin action, so a token that leaks
+  later (a photographed QR) buys a cookie but not admin. Rotating the token
+  ends every session and every ceremony in flight and keeps the passkeys, so it
+  never reopens the window. Removing a passkey cancels every outstanding
+  ceremony and proof. Losing every passkey is recovered at the node: remove
+  them there and pair again (see `docs/RECOVERY.md`).
 
 ## Constraints
 

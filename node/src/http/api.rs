@@ -199,7 +199,7 @@ pub async fn list_authority_grants(
 
 pub async fn create_authority_grant(
     State(s): State<AppState>,
-    Json(b): Json<AuthorityGrantBody>,
+    super::auth::AdminAction(Json(b)): super::auth::AdminAction<Json<AuthorityGrantBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let action = b.action.trim();
     if !crate::authority::valid_action(action) {
@@ -283,6 +283,7 @@ pub async fn create_authority_grant(
 pub async fn revoke_authority_grant(
     State(s): State<AppState>,
     Path(id): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     if !s.store().authority_grant_revoke(&id)? {
         return Err(ApiError::new(
@@ -369,7 +370,7 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
 pub async fn put_channel_bindings(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(patch): Json<serde_json::Value>,
+    super::auth::AdminAction(Json(patch)): super::auth::AdminAction<Json<serde_json::Value>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let row = s.store().channel_get(&name)?.ok_or(ApiError(
         StatusCode::NOT_FOUND,
@@ -2058,13 +2059,121 @@ pub struct AnswerBody {
     notes: Option<String>,
 }
 
+/// Whether answering approval `id` with `option_id` changes the node rather
+/// than letting one call run, and if so, what it changes. Allowing a
+/// repository setup proposal writes its `[[repo]]` entry (checks, preparation,
+/// egress, image) into `node.toml`; allowing a Dockerfile trial builds that
+/// Dockerfile with the network, outside the boundary; allowing an egress ask
+/// for the repository saves the host to the repository's egress for every
+/// session after this one. Each is a config write or networked work outside
+/// the boundary, so each is an admin action. Refusing, or asking for
+/// changes, never is.
+pub(crate) fn admin_answer(
+    s: &AppState,
+    id: &str,
+    option_id: &str,
+) -> ApiResult<Option<AdminAnswer>> {
+    let Some(approval) = s.store().get_approval(id)? else {
+        return Ok(None);
+    };
+    let allow = option_id == crate::adapter::types::OPTION_ALLOW_ONCE;
+    // The summary is the stored approval's, never the answer's: it says what
+    // the operator is confirming in the node's words.
+    let args: serde_json::Value = serde_json::from_str(&approval.arguments).unwrap_or_default();
+    let field = |key: &str| args[key].as_str().unwrap_or("").trim().to_string();
+    let repo = field("repo");
+    let repo = if repo.is_empty() {
+        "this repository".to_string()
+    } else {
+        repo
+    };
+    Ok(match approval.tool.as_str() {
+        crate::mcp::setup::PROPOSE if allow => Some(AdminAnswer {
+            what: "allowing a repository setup proposal writes node.toml",
+            summary: format!("Allow repository setup for {repo}"),
+        }),
+        crate::mcp::setup::TRY if allow => Some(AdminAnswer {
+            what: "allowing a Dockerfile trial builds it with the network, outside the boundary",
+            summary: {
+                let dockerfile = field("dockerfile");
+                let dockerfile = if dockerfile.is_empty() {
+                    "its Dockerfile".to_string()
+                } else {
+                    dockerfile
+                };
+                format!("Build {dockerfile} for {repo} with the network")
+            },
+        }),
+        crate::mcp::egress::REQUEST if option_id == crate::store::approvals::OPTION_ALLOW_REPO => {
+            Some(AdminAnswer {
+                what: "allowing a host for the repository saves it to the repository's egress",
+                summary: format!("Save {} to the repository's egress", field("host")),
+            })
+        }
+        _ => None,
+    })
+}
+
+/// An approval answer that is an admin action: why, and what the operator
+/// is confirming, in a line.
+pub(crate) struct AdminAnswer {
+    pub what: &'static str,
+    pub summary: String,
+}
+
 /// An answer the node cannot act on as sent is a 422 that names each field,
 /// so the operator can fix their edit and answer again; nothing was decided.
 pub async fn answer_permission(
     State(s): State<AppState>,
     Path(id): Path<String>,
-    Json(b): Json<AnswerBody>,
+    parts: axum::http::request::Parts,
+    body: axum::body::Bytes,
 ) -> Response {
+    if let Err(e) = super::passkey::json_or_empty(&parts.headers, &body) {
+        return e.into_response();
+    }
+    let b: AnswerBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("bad answer: {e}"))
+                .into_response()
+        }
+    };
+    // An answer that writes config or runs networked work outside the
+    // boundary is an admin action: away from the node it needs a passkey,
+    // bound to this answer (option and any edited arguments included).
+    match admin_answer(&s, &id, &b.option_id) {
+        Ok(Some(AdminAnswer { what, summary })) => {
+            let held_elsewhere = s
+                .store()
+                .get_approval(&id)
+                .ok()
+                .flatten()
+                .is_some_and(|a| a.node_id != s.node_id);
+            if held_elsewhere {
+                return ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{what}, so it is answered on the node that holds it: a peer cannot \
+                         confirm an admin action for another node yet"
+                    ),
+                )
+                .into_response();
+            }
+            let summary = if b.arguments.is_some() {
+                format!("{summary}, as edited")
+            } else {
+                summary
+            };
+            if let Err(refusal) =
+                super::passkey::authorize_as(&s, &parts, &body, Some(summary)).await
+            {
+                return refusal.into_response();
+            }
+        }
+        Ok(None) => {}
+        Err(e) => return e.into_response(),
+    }
     let answer = crate::session::OperatorAnswer {
         option_id: b.option_id,
         arguments: b.arguments,
@@ -3428,10 +3537,13 @@ pub async fn external_stop(
 }
 
 /// `POST /api/external/{channel}/start` (and, as before, `DELETE .../stop`):
-/// allow external harnesses on the channel again.
+/// allow external harnesses on the channel again. Stopping is ordinary;
+/// reopening hands the node's tools back to a harness outside the boundary,
+/// so it is an admin action.
 pub async fn external_start(
     State(s): State<AppState>,
     Path(channel): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     s.manager.set_external_stopped(&channel, false).await?;
     Ok(Json(json!({ "channel": channel, "stopped": false })))
@@ -5163,7 +5275,7 @@ pub struct ForgeCredentialBody {
 pub async fn put_forge_credential(
     State(s): State<AppState>,
     Path(forge): Path<String>,
-    Json(body): Json<ForgeCredentialBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ForgeCredentialBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let forge = forge_credential(&forge)?;
     let token = body.token.trim();
@@ -5215,6 +5327,7 @@ pub async fn put_forge_credential(
 pub async fn delete_forge_credential(
     State(s): State<AppState>,
     Path(forge): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     let forge = forge_credential(&forge)?;
     let key = crate::mesh::identity::load_or_generate()
@@ -5249,7 +5362,7 @@ pub struct ShareBody {
 pub async fn share_credential(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(body): Json<ShareBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ShareBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let to = body.to;
     if to == s.node_id {
@@ -5342,7 +5455,7 @@ pub async fn connect_provider(
     State(s): State<AppState>,
     super::auth::Local(local): super::auth::Local,
     Path(name): Path<String>,
-    body: Option<Json<ConnectBody>>,
+    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<ConnectBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let local_callback = callback_allowed(&s, local, body.local_callback);
@@ -5404,7 +5517,7 @@ pub struct ProviderKeyBody {
 pub async fn put_provider_key(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(body): Json<ProviderKeyBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ProviderKeyBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let key = body.key.trim();
     if key.is_empty() {
@@ -5423,7 +5536,7 @@ pub async fn put_provider_key(
 pub async fn set_provider_channels(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(body): Json<ChannelsBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ChannelsBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let channels = chosen_channels(s.store(), body.channels, false)?;
     providers_of(&s)?
@@ -5456,6 +5569,7 @@ async fn code_local(s: &AppState, name: &str, code: &str) -> ApiResult<serde_jso
 pub async fn disconnect_provider(
     State(s): State<AppState>,
     Path(name): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     disconnect_local(&s, &name).await.map(Json)
 }
@@ -5506,7 +5620,7 @@ pub async fn node_connect_provider(
     State(s): State<AppState>,
     super::auth::Local(local): super::auth::Local,
     Path((node_id, name)): Path<(String, String)>,
-    body: Option<Json<ConnectBody>>,
+    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<ConnectBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     if node_id == s.node_id {
@@ -5554,6 +5668,7 @@ pub async fn node_provider_code(
 pub async fn node_disconnect_provider(
     State(s): State<AppState>,
     Path((node_id, name)): Path<(String, String)>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     if node_id == s.node_id {
         return disconnect_local(&s, &name).await.map(Json);
@@ -5774,7 +5889,23 @@ fn authorise_forwarded(
         | C::Kill { session_id }
         | C::Pause { session_id, .. }
         | C::Resume { session_id, .. } => forwarded_session(s, sender, session_id),
-        C::Answer { permission_id, .. } => {
+        C::Answer {
+            permission_id,
+            option_id,
+            ..
+        } => {
+            // A passkey confirms an admin action on the node it is enrolled
+            // with; a peer's answer carries none, so these are refused until
+            // the mesh has a signed admin path of its own.
+            if let Some(AdminAnswer { what, .. }) = admin_answer(s, permission_id, option_id)? {
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{what}, an admin action this node confirms only with its own \
+                         passkey or at the node; a peer's answer cannot confirm it yet"
+                    ),
+                ));
+            }
             if let Some(approval) = s.store().get_approval(permission_id)? {
                 owned_here(s, &approval.node_id, "approval")?;
                 return sender_in_channel(s, sender, &approval.channel, "approval");
@@ -6223,7 +6354,7 @@ pub struct SetupBody {
 /// nothing useful to show mid-flight that the verdict does not say better.
 pub async fn run_setup(
     State(s): State<AppState>,
-    body: Option<Json<SetupBody>>,
+    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<SetupBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rebuild = body.map(|b| b.rebuild).unwrap_or(false);
     let backend = s.manager.backend().clone();
@@ -6278,7 +6409,7 @@ pub struct ImportBody {
 /// file would have held, and it is never written to disk in the clear.
 pub async fn import_credentials(
     State(s): State<AppState>,
-    Json(body): Json<ImportBody>,
+    super::auth::AdminAction(Json(body)): super::auth::AdminAction<Json<ImportBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let parsed = crate::broker::Broker::parse_text(&body.toml)
         .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;

@@ -3,7 +3,7 @@
 
 #[path = "support/mod.rs"]
 mod support;
-use support::state;
+use support::{soft_passkey::SoftPasskey, state};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,7 +38,10 @@ struct Node {
 fn node() -> Node {
     let store = Arc::new(Store::open_in_memory().unwrap());
     store.ensure_peer_node("n1").unwrap();
-    let cfg = Arc::new(Config::default());
+    let mut cfg = Config::default();
+    // Where passkeys are anchored, so a remote admin action can be confirmed.
+    cfg.auth.public_origin = Some(PUBLIC_ORIGIN.into());
+    let cfg = Arc::new(cfg);
     let tools = Arc::new(Tools {
         broker: Broker::default().shared(),
         cfg: cfg.clone(),
@@ -128,6 +131,7 @@ async fn call(
 
 const LOCAL: &str = "127.0.0.1:5000";
 const REMOTE: &str = "203.0.113.7:5000";
+const PUBLIC_ORIGIN: &str = "https://tracon.example";
 
 /// Set the operator token the way `tracon auth issue` does: over loopback,
 /// through the API, hash only.
@@ -1324,9 +1328,65 @@ async fn only_a_local_browser_is_offered_the_local_sign_in_callback() {
     .await;
     assert_eq!(s, StatusCode::OK);
     let cookie = cookie_of(&cookies);
+    // Starting a sign-in from off the machine is an admin action: the paired
+    // browser enrolls a passkey and confirms each one with it.
+    let mut key = SoftPasskey::new(1, PUBLIC_ORIGIN);
+    let (s, _, opts) = call(
+        &n,
+        "POST",
+        "/api/passkeys/register/options",
+        REMOTE,
+        "tracon.example",
+        &[("cookie", &cookie)],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{opts}");
+    let credential = key.create(&opts["options"]);
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/passkeys/register/finish",
+        REMOTE,
+        "tracon.example",
+        &[("cookie", &cookie)],
+        Some(json!({ "challenge_id": opts["challenge_id"], "credential": credential })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
     for (host, forwarded) in PROXIES {
         let mut headers = forwarded.to_vec();
         headers.push(("cookie", &cookie));
+        let (s, _, refused) = call(
+            &n,
+            "POST",
+            "/api/providers/anthropic/connect",
+            LOCAL,
+            host,
+            &headers,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{host}: {refused}");
+        assert_eq!(
+            refused["error"]["kind"], "step_up_required",
+            "{host}: {refused}"
+        );
+        let step_up = &refused["step_up"];
+        let credential = key.get(&step_up["options"]);
+        let (s, _, finished) = call(
+            &n,
+            "POST",
+            "/api/passkeys/assert/finish",
+            LOCAL,
+            host,
+            &headers,
+            Some(json!({ "challenge_id": step_up["challenge_id"], "credential": credential })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{host}: {finished}");
+        let proof = finished["proof"].as_str().unwrap().to_string();
+        headers.push((tracon::http::passkey::STEP_UP_HEADER, &proof));
         let (s, _, v) = call(
             &n,
             "POST",

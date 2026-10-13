@@ -86,6 +86,11 @@ url = "2"
 socket2 = "0.6"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
+# Passkeys: the WebAuthn verifier for admin step-up. It verifies with OpenSSL,
+# which is built from source here (`vendored`) so the static musl build stays
+# static and no host's libssl is linked.
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 tracon-hub = { path = "../hub" }
