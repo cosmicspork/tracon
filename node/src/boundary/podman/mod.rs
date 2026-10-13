@@ -555,6 +555,7 @@ impl super::ImageBuilder for PodmanBackend {
         let failure = |error: String, log: &[u8]| super::BuildFailure {
             error,
             log_tail: log_tail(log),
+            ..Default::default()
         };
         let out = match tokio::time::timeout(build.timeout, command.output()).await {
             Ok(Ok(out)) => out,

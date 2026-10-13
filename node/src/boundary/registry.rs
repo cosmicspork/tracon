@@ -151,31 +151,89 @@ struct AuthEntry {
 
 /// The user and password a Docker `config.json` in `dir` holds for `host`.
 /// Credential helpers are not consulted: a node in a pod has none.
-pub fn credentials(dir: &Path, host: &str) -> Option<(String, String)> {
-    let text = std::fs::read_to_string(dir.join("config.json")).ok()?;
-    let config: DockerConfig = serde_json::from_str(&text).ok()?;
+///
+/// A key spelled exactly as the host wins. Otherwise the keys that name the
+/// host some other way (`https://host`, `host/v1/`, Docker Hub's aliases)
+/// must be one: two would make which credential is presented depend on map
+/// order, so that is refused.
+pub fn credentials(dir: &Path, host: &str) -> Result<Option<(String, String)>, RegistryError> {
+    let path = dir.join("config.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(RegistryError(format!("{}: {error}", path.display()))),
+    };
+    let config: DockerConfig = serde_json::from_str(&text)
+        .map_err(|error| RegistryError(format!("{}: {error}", path.display())))?;
     let hub = ["registry-1.docker.io", "index.docker.io", "docker.io"];
-    let wanted = |key: &str| {
+    let names_host = |key: &str| {
         let key = key
             .trim_start_matches("https://")
             .trim_start_matches("http://");
         let key = key.split('/').next().unwrap_or(key);
         key == host || (hub.contains(&host) && hub.contains(&key))
     };
-    let entry = config
-        .auths
-        .iter()
-        .find(|(key, _)| wanted(key))
-        .map(|(_, entry)| entry)?;
+    let entry = match config.auths.get(host) {
+        Some(entry) => entry,
+        None => {
+            let mut matching: Vec<_> = config
+                .auths
+                .iter()
+                .filter(|(key, _)| names_host(key))
+                .collect();
+            matching.sort_by(|a, b| a.0.cmp(b.0));
+            match matching.as_slice() {
+                [] => return Ok(None),
+                [(_, entry)] => *entry,
+                many => {
+                    let keys: Vec<&str> = many.iter().map(|(key, _)| key.as_str()).collect();
+                    return Err(RegistryError(format!(
+                        "{} holds more than one credential for {host} ({}); keep one",
+                        path.display(),
+                        keys.join(", ")
+                    )));
+                }
+            }
+        }
+    };
     if let (Some(user), Some(password)) = (&entry.username, &entry.password) {
-        return Some((user.clone(), password.clone()));
+        return Ok(Some((user.clone(), password.clone())));
     }
+    let malformed = || {
+        RegistryError(format!(
+            "the credential for {host} in {} is not a base64 user:password",
+            path.display()
+        ))
+    };
     let decoded = base64::engine::general_purpose::STANDARD
-        .decode(entry.auth.as_deref()?.trim())
+        .decode(entry.auth.as_deref().ok_or_else(malformed)?.trim())
+        .map_err(|_| malformed())?;
+    let decoded = String::from_utf8(decoded).map_err(|_| malformed())?;
+    let (user, password) = decoded.split_once(':').ok_or_else(malformed)?;
+    Ok(Some((user.to_string(), password.to_string())))
+}
+
+/// The actions a registry token grants on `repository`, when the token is a
+/// JWT that says (`access`, as Docker's token specification has it). `None`
+/// for an opaque token, which cannot be read.
+fn granted_actions(token: &str, repository: &str) -> Option<Vec<String>> {
+    let parts: Vec<&str> = token.split('.').collect();
+    let [_, payload, _] = parts.as_slice() else {
+        return None;
+    };
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
         .ok()?;
-    let decoded = String::from_utf8(decoded).ok()?;
-    let (user, password) = decoded.split_once(':')?;
-    Some((user.to_string(), password.to_string()))
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    let access = claims.get("access")?.as_array()?;
+    Some(
+        access
+            .iter()
+            .filter(|entry| entry["type"] == "repository" && entry["name"] == repository)
+            .flat_map(|entry| entry["actions"].as_array().cloned().unwrap_or_default())
+            .filter_map(|action| action.as_str().map(str::to_string))
+            .collect(),
+    )
 }
 
 /// What a 401 asked for.
@@ -280,8 +338,11 @@ impl Registry {
         self
     }
 
-    fn credentials(&self, host: &str) -> Option<(String, String)> {
-        credentials(self.docker_config.as_deref()?, host)
+    fn credentials(&self, host: &str) -> Result<Option<(String, String)>, RegistryError> {
+        match self.docker_config.as_deref() {
+            Some(dir) => credentials(dir, host),
+            None => Ok(None),
+        }
     }
 
     /// One request, answering the registry's challenge if it makes one.
@@ -321,7 +382,7 @@ impl Registry {
                     "{host} refused the request and named no way to authenticate"
                 ))
             })?;
-        let credential = self.credentials(host);
+        let credential = self.credentials(host)?;
         let auth = match challenge {
             Challenge::Basic => {
                 let (user, password) = credential.ok_or_else(|| {
@@ -446,7 +507,24 @@ impl Registry {
     }
 
     pub async fn exists(&self, image: &str) -> bool {
-        matches!(self.digest(image).await, Ok(Some(_)))
+        self.presence(image).await == crate::boundary::Presence::Present
+    }
+
+    /// Whether the registry holds `image`, or `Unknown` when it could not be
+    /// asked: a registry that is down is not a registry that pruned it.
+    pub async fn presence(&self, image: &str) -> crate::boundary::Presence {
+        use crate::boundary::Presence;
+        if Reference::parse(image).is_err() {
+            return Presence::Absent;
+        }
+        match self.digest(image).await {
+            Ok(Some(_)) => Presence::Present,
+            Ok(None) => Presence::Absent,
+            Err(error) => {
+                tracing::warn!(%image, %error, "could not ask the registry for an image");
+                Presence::Unknown
+            }
+        }
     }
 
     /// `name@sha256:…` for what `image` names now.
@@ -520,7 +598,7 @@ impl Registry {
                 .map(|token| token.trim().to_string())
                 .map_err(|error| RegistryError(format!("{}: {error}", file.display())))?,
             None => {
-                self.credentials(&reference.host)
+                self.credentials(&reference.host)?
                     .ok_or_else(|| RegistryError("no API token and no registry credential".into()))?
                     .1
             }
@@ -537,25 +615,82 @@ impl Registry {
         }
     }
 
-    /// Whether `host` accepts the Docker config's credential: `/v2/` with the
-    /// challenge answered. A registry that lets anyone in proves nothing about
-    /// the credential, so one is required.
-    pub async fn ping(&self, host: &str) -> Result<(), RegistryError> {
-        if self.credentials(host).is_none() {
-            return Err(RegistryError(format!(
+    /// Whether the Docker config's credential may push under `prefix`
+    /// (`host/namespace`). The registry's token service is asked for push on
+    /// a repository there, the token is presented to `/v2/`, and a token that
+    /// says what it grants must grant push: a read-only credential would
+    /// otherwise pass every check and fail every build. `Ok(false)` where
+    /// the credential is accepted but the grant cannot be read (an opaque
+    /// token, or a registry asking for Basic).
+    pub async fn check_push(&self, prefix: &str) -> Result<bool, RegistryError> {
+        let host = prefix.split('/').next().unwrap_or(prefix);
+        let credential = self.credentials(host)?.ok_or_else(|| {
+            RegistryError(format!(
                 "the Docker config{} holds no credential for {host}",
                 self.docker_config
                     .as_ref()
                     .map(|dir| format!(" in {}", dir.display()))
                     .unwrap_or_default()
-            )));
+            ))
+        })?;
+        let url = format!("{}://{host}/v2/", self.scheme);
+        let first = self.http.get(&url).send().await?;
+        match first.status() {
+            StatusCode::UNAUTHORIZED => {}
+            status if status.is_success() => return Ok(false),
+            status => return Err(RegistryError(format!("{host} answered {status}"))),
         }
-        let response = self.send(Method::GET, host, "", None).await?;
-        match response.status() {
-            status if status.is_success() => Ok(()),
-            status => Err(RegistryError(format!(
-                "{host} answered {status} with the credential"
-            ))),
+        let challenge = first
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_challenge)
+            .ok_or_else(|| RegistryError(format!("{host} named no way to authenticate")))?;
+        let refused = |status: StatusCode| {
+            RegistryError(format!("{host} answered {status} with the credential"))
+        };
+        match challenge {
+            Challenge::Basic => {
+                let (user, password) = credential;
+                let response = self
+                    .http
+                    .get(&url)
+                    .basic_auth(user, Some(password))
+                    .send()
+                    .await?;
+                match response.status() {
+                    status if status.is_success() => Ok(false),
+                    status => Err(refused(status)),
+                }
+            }
+            Challenge::Bearer { realm, service, .. } => {
+                let namespace = prefix.split_once('/').map(|(_, rest)| rest).unwrap_or("");
+                let repository = match namespace.is_empty() {
+                    true => "tracon-repo-probe".to_string(),
+                    false => format!("{namespace}/tracon-repo-probe"),
+                };
+                let scope = format!("repository:{repository}:push,pull");
+                let token = self
+                    .token(&realm, service.as_deref(), Some(&scope), Some(credential))
+                    .await?;
+                let response = self.http.get(&url).bearer_auth(&token).send().await?;
+                if !response.status().is_success() {
+                    return Err(refused(response.status()));
+                }
+                match granted_actions(&token, &repository) {
+                    Some(actions) if !actions.iter().any(|action| action == "push") => {
+                        Err(RegistryError(format!(
+                            "the credential may not push to {prefix} (the token grants {})",
+                            match actions.is_empty() {
+                                true => "nothing there".to_string(),
+                                false => actions.join(", "),
+                            }
+                        )))
+                    }
+                    Some(_) => Ok(true),
+                    None => Ok(false),
+                }
+            }
         }
     }
 }
@@ -584,6 +719,13 @@ pub(crate) mod tests {
         pub refuse_delete: Mutex<bool>,
         /// Leave `Docker-Content-Digest` off a HEAD.
         pub no_digest_header: Mutex<bool>,
+        /// Ask for Basic credentials instead of a token.
+        pub basic: Mutex<bool>,
+        /// Answer every registry request 503.
+        pub down: Mutex<bool>,
+        /// Issue JWTs granting these actions on the scope's repository,
+        /// instead of opaque tokens.
+        pub jwt_actions: Mutex<Option<Vec<String>>>,
         pub base: Mutex<String>,
     }
 
@@ -616,6 +758,16 @@ pub(crate) mod tests {
                 .unwrap_or_default(),
         );
         fake.scopes.lock().unwrap().push(scope.clone());
+        if let Some(actions) = fake.jwt_actions.lock().unwrap().clone() {
+            let repository = scope.split(':').nth(1).unwrap_or_default();
+            let claims = serde_json::json!({ "access": [
+                { "type": "repository", "name": repository, "actions": actions }
+            ]});
+            let payload =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
+            return axum::Json(serde_json::json!({ "token": format!("granted.{payload}.sig") }))
+                .into_response();
+        }
         axum::Json(serde_json::json!({ "token": format!("granted {scope}") })).into_response()
     }
 
@@ -647,6 +799,9 @@ pub(crate) mod tests {
         let method = request.method().clone();
         let path = request.uri().path().to_string();
         fake.seen.lock().unwrap().push(format!("{method} {path}"));
+        if *fake.down.lock().unwrap() {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         let rest = path.strip_prefix("/v2/").unwrap_or_default();
         let (repository, reference) = match rest.rsplit_once("/manifests/") {
             Some((repository, reference)) => (repository.to_string(), reference.to_string()),
@@ -666,10 +821,25 @@ pub(crate) mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let authorised = match repository.is_empty() {
-            true => auth.starts_with("Bearer granted"),
-            false => auth == format!("Bearer {wanted}"),
+        let basic = *fake.basic.lock().unwrap();
+        let authorised = match (basic, repository.is_empty()) {
+            (true, _) => {
+                auth == format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("pusher:secret")
+                )
+            }
+            (false, true) => auth.starts_with("Bearer granted"),
+            (false, false) => auth == format!("Bearer {wanted}"),
         };
+        if !authorised && basic {
+            let mut response = StatusCode::UNAUTHORIZED.into_response();
+            response.headers_mut().insert(
+                WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"fake\""),
+            );
+            return response;
+        }
         if !authorised {
             let base = fake.base.lock().unwrap().clone();
             let mut challenge = format!("Bearer realm=\"{base}/token\",service=\"fake\"");
@@ -853,13 +1023,123 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(
             credentials(dir.path(), "registry.digitalocean.com"),
-            Some(("tok".into(), "tok-secret".into()))
+            Ok(Some(("tok".into(), "tok-secret".into())))
         );
         assert_eq!(
             credentials(dir.path(), "registry-1.docker.io"),
-            Some(("me".into(), "pw".into()))
+            Ok(Some(("me".into(), "pw".into())))
         );
-        assert_eq!(credentials(dir.path(), "ghcr.io"), None);
+        assert_eq!(credentials(dir.path(), "ghcr.io"), Ok(None));
+    }
+
+    /// Two keys that name one host are refused rather than chosen between by
+    /// map order, unless one of them is the host spelled exactly.
+    #[test]
+    fn two_credentials_for_one_host_are_refused_unless_one_is_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let encode = |pair: &str| base64::engine::general_purpose::STANDARD.encode(pair);
+        let write = |auths: serde_json::Value| {
+            std::fs::write(
+                dir.path().join("config.json"),
+                serde_json::json!({ "auths": auths }).to_string(),
+            )
+            .unwrap()
+        };
+        write(serde_json::json!({
+            "https://reg.example.com": { "auth": encode("a:1") },
+            "reg.example.com/v1/": { "auth": encode("b:2") },
+        }));
+        let error = credentials(dir.path(), "reg.example.com").unwrap_err();
+        assert!(error.0.contains("more than one credential"), "{error}");
+        write(serde_json::json!({
+            "https://reg.example.com": { "auth": encode("a:1") },
+            "reg.example.com": { "auth": encode("b:2") },
+        }));
+        assert_eq!(
+            credentials(dir.path(), "reg.example.com"),
+            Ok(Some(("b".into(), "2".into())))
+        );
+        write(serde_json::json!({ "reg.example.com": { "auth": "not base64!" } }));
+        assert!(credentials(dir.path(), "reg.example.com").is_err());
+    }
+
+    /// A registry that asks for Basic is given the credential directly, for
+    /// lookups, removal and the push check alike.
+    #[tokio::test]
+    async fn a_basic_challenge_is_answered_with_the_credential() {
+        let (fake, host) = serve().await;
+        *fake.basic.lock().unwrap() = true;
+        fake.put("ns/app", "t1", DIGEST);
+        let config = docker_config(&host);
+        let registry =
+            Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
+        assert_eq!(
+            registry.identity(&format!("{host}/ns/app:t1")).await,
+            Some(format!("{host}/ns/app@{DIGEST}"))
+        );
+        assert_eq!(registry.check_push(&format!("{host}/ns")).await, Ok(false));
+        registry.remove(&format!("{host}/ns/app:t1")).await.unwrap();
+        assert!(!registry.exists(&format!("{host}/ns/app@{DIGEST}")).await);
+        assert!(fake.scopes.lock().unwrap().is_empty());
+
+        let anonymous = Registry::new(None).for_test("unused", "unused");
+        let error = anonymous
+            .digest(&format!("{host}/ns/app:t1"))
+            .await
+            .unwrap_err();
+        assert!(error.0.contains("holds none"), "{error}");
+    }
+
+    /// A registry that does not answer leaves an image's presence unknown,
+    /// never absent: what is standing is not rebuilt on its account.
+    #[tokio::test]
+    async fn a_registry_that_is_down_is_unknown_not_absent() {
+        let (fake, host) = serve().await;
+        fake.put("ns/app", "t1", DIGEST);
+        let config = docker_config(&host);
+        let registry =
+            Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
+        let image = format!("{host}/ns/app@{DIGEST}");
+        assert_eq!(
+            registry.presence(&image).await,
+            crate::boundary::Presence::Present
+        );
+        *fake.down.lock().unwrap() = true;
+        assert_eq!(
+            registry.presence(&image).await,
+            crate::boundary::Presence::Unknown
+        );
+        *fake.down.lock().unwrap() = false;
+        assert_eq!(
+            registry.presence(&format!("{host}/ns/app:gone")).await,
+            crate::boundary::Presence::Absent
+        );
+    }
+
+    /// The push check asks for push and refuses a token that does not grant
+    /// it; one that cannot be read is accepted without the claim.
+    #[tokio::test]
+    async fn a_read_only_credential_fails_the_push_check() {
+        let (fake, host) = serve().await;
+        let config = docker_config(&host);
+        let registry =
+            Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
+        let prefix = format!("{host}/cs");
+
+        assert_eq!(registry.check_push(&prefix).await, Ok(false));
+        *fake.jwt_actions.lock().unwrap() = Some(vec!["pull".into()]);
+        let error = registry.check_push(&prefix).await.unwrap_err();
+        assert!(
+            error.0.contains("may not push") && error.0.contains("pull"),
+            "{error}"
+        );
+        *fake.jwt_actions.lock().unwrap() = Some(vec!["pull".into(), "push".into()]);
+        assert_eq!(registry.check_push(&prefix).await, Ok(true));
+        assert!(fake
+            .scopes
+            .lock()
+            .unwrap()
+            .contains(&"repository:cs/tracon-repo-probe:push,pull".to_string()));
     }
 
     /// The client answers the token challenge with the configured credential,
@@ -883,7 +1163,7 @@ pub(crate) mod tests {
             registry.digest(&format!("{host}/ns/other:t1")).await,
             Ok(None)
         );
-        assert!(registry.ping(&host).await.is_ok());
+        assert!(registry.check_push(&format!("{host}/ns")).await.is_ok());
 
         registry.remove(&format!("{host}/ns/app:t1")).await.unwrap();
         assert!(!registry.exists(&format!("{host}/ns/app@{DIGEST}")).await);
@@ -917,7 +1197,7 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(error.0.contains("holds no credential"), "{error}");
         assert!(registry
-            .ping(&host)
+            .check_push(&format!("{host}/ns"))
             .await
             .unwrap_err()
             .0

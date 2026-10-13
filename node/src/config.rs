@@ -1193,9 +1193,10 @@ impl Default for Kubernetes {
 
 /// A BuildKit daemon the node drives with `buildctl` over mutual TLS, and the
 /// registry it pushes what it builds to
-/// (`boundary::kubernetes::build::BuildKitBuilder`). The push credential stays
-/// with the node: `buildctl` answers the daemon's requests for registry
-/// tokens itself, so the daemon never holds one.
+/// (`boundary::kubernetes::build::BuildKitBuilder`). The push credential is
+/// mounted in the node's pod, not the daemon's, but BuildKit's session auth
+/// hands it to the daemon on request during a build, so it should be scoped
+/// to the registry alone.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KubeBuilder {

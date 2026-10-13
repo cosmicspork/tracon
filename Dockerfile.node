@@ -90,9 +90,17 @@ RUN cargo build -p tracon --release --bin tracon
 # DOCKER_CONFIG. The client only; the daemon is the deployment's. The release
 # tarball is held to its published sha256 before anything is unpacked. The node
 # image is built for linux/amd64 alone, so the tarball is that platform's.
-FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS buildctl
+FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051 AS buildctl
 ARG BUILDKIT_VERSION=v0.34.0
 ARG BUILDKIT_SHA256=14813b1fb2a40082114e6d386c6fc5e7dd5298176ce7ee1a18bc33e73e109ac3
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
     curl -fsSL -o /tmp/buildkit.tar.gz \
       "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"; \

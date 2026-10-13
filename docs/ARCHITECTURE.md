@@ -598,9 +598,13 @@ which is why the operator names each one. The build goes through the runtime's
 `ImageBuilder`: Podman builds into its local store; on Kubernetes the node runs
 `buildctl` against a BuildKit daemon over mutual TLS, sends the materialised context
 itself, pushes to the configured registry, and takes the digest from the build's
-metadata. The registry credential stays in the node's pod, because `buildctl` answers
-the daemon's token requests, and `exists`, `identity` and `remove` are answered by a
-runtime-neutral OCI distribution client (`boundary::registry`). A session runs in the same image with the
+metadata. The registry credential is mounted only in the node's pod, but BuildKit's
+session auth hands it to the daemon on request during a build, so it is scoped to the
+registry alone. `exists`, `identity` and `remove` are answered by a runtime-neutral
+OCI distribution client (`boundary::registry`); a registry that cannot be asked keeps
+the standing image in use, a builder that cannot build is never held against the
+recipe, and a registry's superseded image is kept one generation longer for pods
+still about to pull it. A session runs in the same image with the
 harness layered on: a second image, `FROM` the repository's by digest with the harness
 binary copied out of the harness image, keyed on both digests and probed before any
 session is told to launch in it. Checks stay on the repository's image, so a harness

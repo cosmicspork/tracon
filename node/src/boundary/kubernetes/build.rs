@@ -6,10 +6,15 @@
 //! The context and the Dockerfile are sent from the node (`--local`), where
 //! `repo_image` materialised them from the default branch, so the daemon
 //! reads nothing of the node's but what it is given. The registry credential
-//! stays in the node too: `buildctl` answers the daemon's requests for
-//! registry tokens from `DOCKER_CONFIG`, for the `FROM` pulls and the push
-//! alike. The image is reported by the digest the daemon pushed
-//! (`--metadata-file`), never by a tag a later push could move.
+//! is read from `DOCKER_CONFIG` in the node's pod and is not mounted in the
+//! daemon, but it is not kept from it: BuildKit's session auth answers the
+//! daemon's credential requests during a build with that username and
+//! secret, for the `FROM` pulls and the push alike. A daemon that runs a
+//! hostile Dockerfile can therefore obtain the push credential, which is why
+//! it should be scoped to the registry and nothing else (a DigitalOcean
+//! `doctl registry docker-config --read-write` credential is). The image is
+//! reported by the digest the daemon pushed (`--metadata-file`), never by a
+//! tag a later push could move.
 //!
 //! Images are named as Podman names them, `localhost/tracon-repo-…`, and that
 //! prefix is the configured registry here: a build under one pushes to the
@@ -43,7 +48,23 @@ pub fn unusable(why: &str) -> String {
 }
 
 /// How long `buildctl debug workers` may take to answer the check.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+const WORKERS_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the whole check may take: it runs in every boundary check and
+/// before every build.
+const CHECK_BOUND: Duration = Duration::from_secs(15);
+
+/// What this node pushes, by name under the registry: only these are ever
+/// removed from it.
+const OWN: &str = "tracon-repo-";
+
+/// `90 seconds`, `45 minutes`: a deadline as the operator set it.
+fn duration_words(duration: Duration) -> String {
+    match duration.as_secs() {
+        1 => "1 second".into(),
+        secs if secs < 60 || secs % 60 != 0 => format!("{secs} seconds"),
+        secs => format!("{} minutes", secs / 60),
+    }
+}
 
 pub struct BuildKitBuilder {
     settings: KubeBuilder,
@@ -62,10 +83,12 @@ pub struct Unusable(pub String);
 #[async_trait]
 impl ImageBuilder for Unusable {
     async fn build(&self, _build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
-        Err(BuildFailure {
-            error: unusable(&self.0),
-            log_tail: String::new(),
-        })
+        Err(BuildFailure::transient(unusable(&self.0)))
+    }
+    /// Said before anything is staged, so a repository's tree is never
+    /// materialised for a build that cannot happen.
+    async fn unavailable(&self) -> Option<String> {
+        Some(unusable(&self.0))
     }
     async fn exists(&self, _image: &str) -> bool {
         false
@@ -93,6 +116,9 @@ impl BuildKitBuilder {
             return Err("docker_config must name a directory holding config.json".into());
         }
         let prefix = settings.registry.trim().trim_end_matches('/').to_string();
+        let namespaced = prefix
+            .split_once('/')
+            .is_some_and(|(_, namespace)| !namespace.is_empty());
         let probe = Reference::parse(&format!("{prefix}/probe:t")).ok();
         let qualified = probe.as_ref().is_some_and(|probe| {
             prefix.starts_with(&format!("{}/", probe.host)) || prefix == probe.host
@@ -101,6 +127,7 @@ impl BuildKitBuilder {
             || prefix.contains("://")
             || prefix.starts_with(LOCAL)
             || !qualified
+            || !namespaced
             || !prefix
                 .split('/')
                 .next()
@@ -216,18 +243,30 @@ impl BuildKitBuilder {
         command
     }
 
-    /// Whether the daemon answers over mTLS and the registry takes the push
-    /// credential, in a sentence for the boundary report.
+    /// Whether the daemon answers over mTLS and the registry lets the
+    /// credential push, in a sentence for the boundary report. Bounded as a
+    /// whole: it runs in every boundary check and before every build.
     pub async fn check(&self) -> Result<String, String> {
+        tokio::time::timeout(CHECK_BOUND, self.probe())
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "the builder check did not finish in {}s",
+                    CHECK_BOUND.as_secs()
+                ))
+            })
+    }
+
+    async fn probe(&self) -> Result<String, String> {
         let mut args = self.connection();
         args.extend(["debug".into(), "workers".into()]);
-        let out = tokio::time::timeout(CHECK_TIMEOUT, self.command(&args).output())
+        let out = tokio::time::timeout(WORKERS_TIMEOUT, self.command(&args).output())
             .await
             .map_err(|_| {
                 format!(
                     "buildkitd at {} did not answer in {}s",
                     self.settings.addr,
-                    CHECK_TIMEOUT.as_secs()
+                    WORKERS_TIMEOUT.as_secs()
                 )
             })?
             .map_err(|error| format!("{}: {error}", self.settings.buildctl))?;
@@ -250,14 +289,19 @@ impl BuildKitBuilder {
                 self.settings.addr
             ));
         }
-        let host = self.prefix.split('/').next().unwrap_or_default();
-        self.registry
-            .ping(host)
+        let confirmed = self
+            .registry
+            .check_push(&self.prefix)
             .await
             .map_err(|error| format!("registry {}: {error}", self.prefix))?;
         Ok(format!(
-            "buildkitd at {} answers with {workers} worker(s) and {} takes the push credential",
-            self.settings.addr, self.prefix
+            "buildkitd at {} answers with {workers} worker(s) and {} {}",
+            self.settings.addr,
+            self.prefix,
+            match confirmed {
+                true => "grants the credential push",
+                false => "accepts the credential (whether it may push cannot be read)",
+            }
         ))
     }
 }
@@ -288,11 +332,14 @@ impl ImageBuilder for BuildKitBuilder {
         let failure = |error: String, log: &[u8]| BuildFailure {
             error,
             log_tail: crate::boundary::podman::log_tail(log),
+            ..Default::default()
         };
         let target = self.pushed_name(build.tag);
         let stage = std::fs::create_dir_all(&self.scratch)
             .and_then(|()| tempfile::tempdir_in(&self.scratch))
-            .map_err(|error| failure(format!("{}: {error}", self.scratch.display()), &[]))?;
+            .map_err(|error| {
+                BuildFailure::transient(unusable(&format!("{}: {error}", self.scratch.display())))
+            })?;
         let metadata = stage.path().join("metadata.json");
         let argv = self.argv(&build, &target, &metadata);
         let timeout = self
@@ -303,17 +350,14 @@ impl ImageBuilder for BuildKitBuilder {
         let out = match tokio::time::timeout(timeout, self.command(&argv).output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(error)) => {
-                return Err(failure(
-                    unusable(&format!("{}: {error}", self.settings.buildctl)),
-                    &[],
-                ))
+                return Err(BuildFailure::transient(unusable(&format!(
+                    "{}: {error}",
+                    self.settings.buildctl
+                ))))
             }
             Err(_) => {
                 return Err(failure(
-                    format!(
-                        "the build did not finish in {} minutes",
-                        timeout.as_secs() / 60
-                    ),
+                    format!("the build did not finish in {}", duration_words(timeout)),
                     &[],
                 ))
             }
@@ -322,11 +366,16 @@ impl ImageBuilder for BuildKitBuilder {
         if !out.status.success() {
             // The daemon or the registry, rather than the Dockerfile, is
             // reported as the check reports it: one reason in both places.
-            let error = match self.check().await {
-                Err(why) => unusable(&why),
-                Ok(_) => format!("buildctl build exited {}", out.status.code().unwrap_or(-1)),
-            };
-            return Err(failure(error, &log));
+            return Err(match self.check().await {
+                Err(why) => BuildFailure {
+                    transient: true,
+                    ..failure(unusable(&why), &log)
+                },
+                Ok(_) => failure(
+                    format!("buildctl build exited {}", out.status.code().unwrap_or(-1)),
+                    &log,
+                ),
+            });
         }
         let digest = std::fs::read_to_string(&metadata)
             .map_err(|error| format!("build metadata: {error}"))
@@ -350,12 +399,26 @@ impl ImageBuilder for BuildKitBuilder {
         Some(self.scratch.clone())
     }
 
-    /// Only what this node pushed: an image in another registry, such as a
-    /// harness image or one an entry pinned by hand, is the cluster's to
-    /// drop from its cache, never this node's to delete.
+    async fn presence(&self, image: &str) -> crate::boundary::Presence {
+        self.registry.presence(&self.resolve(image)).await
+    }
+
+    async fn unavailable(&self) -> Option<String> {
+        self.check().await.err().map(|why| unusable(&why))
+    }
+
+    /// A pod already scheduled on the image a rebuild replaces may not have
+    /// pulled it yet.
+    fn retains_previous(&self) -> bool {
+        true
+    }
+
+    /// Only what this node pushed, `<registry>/tracon-repo-…`: a harness
+    /// image, or one an entry pinned by hand in this registry or another, is
+    /// never this node's to delete.
     async fn remove(&self, image: &str) {
         let image = self.resolve(image);
-        if !image.starts_with(&format!("{}/", self.prefix)) {
+        if !image.starts_with(&format!("{}/{OWN}", self.prefix)) {
             return;
         }
         if let Err(error) = self.registry.remove(&image).await {
@@ -419,6 +482,8 @@ mod tests {
         for (registry, addr) in [
             ("", "tcp://b:1234"),
             ("cosmicspork", "tcp://b:1234"),
+            ("registry.digitalocean.com", "tcp://b:1234"),
+            ("registry.digitalocean.com/", "tcp://b:1234"),
             ("https://registry.digitalocean.com/x", "tcp://b:1234"),
             ("localhost/x", "tcp://b:1234"),
             (
@@ -505,6 +570,8 @@ mod tests {
             builder.pushed_name("tracon-repo-a:1"),
             "registry.digitalocean.com/cs/tracon-repo-a:1"
         );
+        assert_eq!(duration_words(Duration::from_secs(90)), "90 seconds");
+        assert_eq!(duration_words(Duration::from_secs(45 * 60)), "45 minutes");
         assert_eq!(untagged("host:5000/a/b:t"), "host:5000/a/b");
         assert_eq!(untagged("host:5000/a/b"), "host:5000/a/b");
     }
@@ -609,6 +676,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(failed.error, "buildctl build exited 1");
         assert!(failed.log_tail.contains("no such package"));
+        // The recipe's own failure: remembered against it.
+        assert!(!failed.transient);
 
         config.buildctl = stub(tmp.path(), "echo 'error: connection refused' >&2; exit 1");
         let failed = BuildKitBuilder::new_for_test(&config)
@@ -627,6 +696,40 @@ mod tests {
             "buildkitd at tcp://buildkitd.tracon-build.svc:1234 refused `buildctl debug workers`: \
              error: connection refused, so a repository's image cannot be built"
         );
+        // The builder's failure: not remembered against the recipe.
+        assert!(failed.transient);
+
+        // A client that cannot start is the builder's failure too.
+        let mut missing = config.clone();
+        missing.buildctl = tmp
+            .path()
+            .join("no-buildctl")
+            .to_string_lossy()
+            .into_owned();
+        let failed = BuildKitBuilder::new_for_test(&missing)
+            .unwrap()
+            .build(ImageBuild {
+                tag: "localhost/tracon-repo-a:t",
+                containerfile: &containerfile,
+                context: tmp.path(),
+                labels: &[],
+                timeout: Duration::from_secs(30),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            failed.transient && failed.error.contains("no-buildctl"),
+            "{}",
+            failed.error
+        );
+
+        // An unusable table is said before anything is staged.
+        let unusable_builder = Unusable("[runtime.kubernetes.builder] is not usable (x)".into());
+        assert_eq!(
+            unusable_builder.unavailable().await.as_deref(),
+            Some("[runtime.kubernetes.builder] is not usable (x), so a repository's image cannot be built")
+        );
+        assert_eq!(unusable_builder.scratch_dir(), None);
 
         // Exited 0 but pushed nothing it would name.
         config.buildctl = stub(tmp.path(), "exit 0");
@@ -670,7 +773,8 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(failed.error.contains("did not finish"), "{}", failed.error);
+        assert_eq!(failed.error, "the build did not finish in 1 second");
+        assert!(!failed.transient);
         assert!(started.elapsed() < Duration::from_secs(10));
         let pid = std::fs::read_to_string(tmp.path().join("pid")).unwrap();
         let mut gone = false;
@@ -693,6 +797,7 @@ mod tests {
         let (fake, host) = serve().await;
         fake.put("cs/tracon-repo-a", "t", DIGEST);
         fake.put("other/harness", "1", DIGEST);
+        fake.put("cs/toolchain", "1", DIGEST);
         let config = docker_config(&host);
         let mut settings = settings(&format!("{host}/cs"));
         settings.docker_config = config.path().to_path_buf();
@@ -719,6 +824,9 @@ mod tests {
 
         builder.remove(&format!("{host}/other/harness:1")).await;
         assert!(builder.exists(&format!("{host}/other/harness:1")).await);
+        // An operator's own image in the same namespace is not this node's.
+        builder.remove(&format!("{host}/cs/toolchain:1")).await;
+        assert!(builder.exists(&format!("{host}/cs/toolchain:1")).await);
         builder.remove("localhost/tracon-repo-a:t").await;
         assert!(!builder.exists("localhost/tracon-repo-a:t").await);
     }
@@ -860,7 +968,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            said.contains("1 worker(s)") && said.contains("takes the push credential"),
+            said.contains("1 worker(s)") && said.contains("accepts the credential"),
             "{said}"
         );
 

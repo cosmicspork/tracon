@@ -114,10 +114,37 @@ pub struct BuiltImage {
 }
 
 /// A build that produced none.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BuildFailure {
     pub error: String,
     pub log_tail: String,
+    /// The builder could not build at all (a daemon that does not answer, a
+    /// registry that refuses the credential, a builder configured wrong),
+    /// rather than the recipe failing. Such a failure says nothing about the
+    /// recipe, so it is not remembered against it: the next start tries
+    /// again.
+    pub transient: bool,
+}
+
+impl BuildFailure {
+    /// A failure of the builder rather than of the recipe.
+    pub fn transient(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            transient: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// Whether a builder holds an image, as far as it can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Present,
+    Absent,
+    /// It could not be asked: a registry that did not answer. What is
+    /// standing keeps being used, and nothing is rebuilt on its account.
+    Unknown,
 }
 
 /// A runtime that can build an image where the node's runs will find it. A
@@ -140,6 +167,25 @@ pub trait ImageBuilder: Send + Sync {
     /// ephemeral storage (a pod's container filesystem) names one with room.
     fn scratch_dir(&self) -> Option<std::path::PathBuf> {
         None
+    }
+    /// `exists`, with a third answer for a builder that may be unable to ask.
+    async fn presence(&self, image: &str) -> Presence {
+        match self.exists(image).await {
+            true => Presence::Present,
+            false => Presence::Absent,
+        }
+    }
+    /// Why no build could succeed right now, asked before anything is staged
+    /// or recorded. `None` for a builder that is always there.
+    async fn unavailable(&self) -> Option<String> {
+        None
+    }
+    /// Whether a superseded image is kept for one more generation before it
+    /// is removed. A registry's is, because a pod already scheduled on it may
+    /// not have pulled it yet; a local store's need not be, because the
+    /// runtime refuses to remove an image a container uses.
+    fn retains_previous(&self) -> bool {
+        false
     }
 }
 

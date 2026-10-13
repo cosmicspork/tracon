@@ -1283,10 +1283,15 @@ What the node pod needs:
 - **The push credential.** A Docker `config.json` with a credential that may push to
   `registry`, mounted in the directory `docker_config` names (a
   `kubernetes.io/dockerconfigjson` Secret with its `.dockerconfigjson` key mounted as
-  `config.json`). `buildctl` reads it as `DOCKER_CONFIG` and answers the daemon's
-  requests for registry tokens itself, so the daemon never holds the credential. The
-  node reads the same file to look images up and remove superseded ones. Credential
-  helpers are not consulted.
+  `config.json`). `buildctl` reads it as `DOCKER_CONFIG`, and the node reads the same
+  file to look images up and remove superseded ones. Credential helpers are not
+  consulted. The credential is mounted only in the node's pod, but it is not kept from
+  the daemon: during a build, BuildKit's session auth answers the daemon's credential
+  requests with this username and secret, so a daemon running a hostile Dockerfile
+  can obtain it. Give it a credential scoped to the registry and nothing else.
+  DigitalOcean's `doctl registry docker-config --read-write` is one: its token is
+  refused by the rest of the DigitalOcean API (account, Droplets, Kubernetes all
+  answer 403) and accepted only for the registry.
 - **Egress.** TCP to the daemon's port, and HTTPS to every registry a build pulls from
   or pushes to *and to their token services*, because the client fetches the tokens:
   `auth.docker.io` and `registry-1.docker.io` for a `FROM` on Docker Hub, `ghcr.io` for
@@ -1300,17 +1305,27 @@ What the node pod needs:
   namespace's pull secrets; DigitalOcean's cluster integration adds them to the
   `default` service account.
 
-The `runtime` check runs `buildctl debug workers` over mutual TLS and asks the
-registry's `/v2/` with the credential, and appends what it found to its detail. A
-table that cannot be a builder, or a builder that fails either probe, is a warning
-there and never refuses the node: sessions and checks still run. A build attempted
-anyway fails with the same reason the check gave, recorded against the repository's
-image. A superseded image is deleted from the
-registry by digest through the distribution API. DigitalOcean's registry routes that
-delete but may refuse it, so on that host the node falls back to the DigitalOcean API
-(`DELETE /v2/registries/<registry>/repositories/<repo>/digests/<digest>`) with
-`do_token_file`, or the credential's password. Deleting a manifest frees no space
-until the registry's garbage collection runs; schedule it.
+The `runtime` check runs `buildctl debug workers` over mutual TLS, then asks the
+registry's token service for push on `<registry>/tracon-repo-probe` and presents the
+token to `/v2/`, and appends what it found to its detail; a token that says it grants
+only pull fails it. The whole check is bounded at 15 seconds. A table that cannot be a
+builder, or a builder that fails either probe, is a warning there and never refuses
+the node: sessions and checks still run. A build attempted anyway fails with the same
+reason the check gave, and that failure is not held against the repository's recipe:
+the next session or check tries again without `tracon repo build`. A registry that
+cannot be asked whether an image is still there leaves the standing image in use and
+triggers no rebuild.
+
+The node removes only what it pushed, `<registry>/tracon-repo-…`, never an image an
+entry pinned. A superseded image is kept for one more generation, because a pod
+already scheduled on it may not have pulled it yet: the build two back is removed when
+a new one finishes. Removal is by digest through the distribution API. DigitalOcean's
+registry routes that delete but may refuse it, so on that host the node falls back to
+the DigitalOcean API (`DELETE /v2/registries/<registry>/repositories/<repo>/digests/<digest>`)
+with `do_token_file`, or the credential's password. Deleting a manifest frees no space
+until the registry's garbage collection runs; schedule it with
+`doctl registry garbage-collection start --include-untagged-manifests`, so the
+untagged manifests a rebuild under the same tag leaves behind go too.
 
 ### From source
 
