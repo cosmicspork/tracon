@@ -469,8 +469,10 @@ fn vanished(error: &std::io::Error) -> bool {
 /// through a link, and every link it passes through after that is held to the
 /// same rule. A `..` after a link (`node_modules/x/..`) would climb out of
 /// wherever that link leads, which no reading of the text can bound. An npm
-/// `.bin` entry (`../acorn/bin/acorn`) or a pnpm store link passes.
-fn link_stays_inside(target: &Path, depth: usize) -> bool {
+/// `.bin` entry (`../acorn/bin/acorn`) or a pnpm store link passes. Review
+/// holds a candidate's links to the same rule, so a candidate it accepts is
+/// one every copy accepts.
+pub(crate) fn link_stays_inside(target: &Path, depth: usize) -> bool {
     if target.as_os_str().is_empty() {
         return false;
     }
