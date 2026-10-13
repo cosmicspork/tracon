@@ -264,6 +264,19 @@ pub trait Backend: Send + Sync {
             self.kind()
         )))
     }
+    /// What the per-client egress proxy will not dial, whatever a grant
+    /// names (`gateway::proxy::Refusal`). This machine and its link unless a
+    /// runtime says more.
+    fn egress_refusal(&self) -> crate::gateway::proxy::Refusal {
+        crate::gateway::proxy::Refusal::this_machine()
+    }
+    /// Why this runtime cannot, right now, start a harness whose secret
+    /// environment (its gateway token, its egress grant) stays out of what
+    /// others may read; `None` when it can. A session is refused with this
+    /// rather than started with the values somewhere readable.
+    fn secret_env_refusal(&self) -> Option<String> {
+        None
+    }
     /// Remove harnesses left over from a previous run, by name.
     async fn reconcile(&self, names: &[String]);
     /// The runtime volumes this backend holds whose names begin with

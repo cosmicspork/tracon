@@ -80,6 +80,10 @@ impl ClaudeAdapter {
     /// 2.1.296: the `system/init` frame lists them as `tracon:<name>`.
     const PLUGIN_DIR: &'static str = "plugin";
 
+    /// The node's MCP server as `--mcp-config` reads it, relative to the
+    /// state directory and mounted read-only.
+    const MCP_CONFIG_FILE: &'static str = "tracon-mcp.json";
+
     /// The argv for a headless session.
     ///
     /// `--permission-mode default` is load-bearing and must never become
@@ -118,9 +122,16 @@ impl ClaudeAdapter {
             "--model".into(),
             spec.model.clone(),
         ];
+        // The servers carry this session's token as a header, so they are
+        // read from a file staged beside the plugin (`scratch_files`) rather
+        // than given on the argv, which a pod spec and `ps` both show.
         if !spec.mcp_servers.is_empty() {
             argv.push("--mcp-config".into());
-            argv.push(mcp_config(&spec.mcp_servers).to_string());
+            argv.push(format!(
+                "{}/{}",
+                crate::session::materialize::state_target(&spec.harness_home, Self::layout()),
+                Self::MCP_CONFIG_FILE
+            ));
         }
         argv.push("--plugin-dir".into());
         argv.push(format!(
@@ -774,7 +785,8 @@ impl HarnessAdapter for ClaudeAdapter {
 
     /// The plugin `--plugin-dir` names: a manifest and the channel's skills.
     /// Staged even when there are no skills, so the directory the argv names
-    /// always exists.
+    /// always exists. And the MCP configuration `--mcp-config` names, when
+    /// the session is offered the node's tools.
     fn scratch_files(&self, wiring: &crate::gateway::model::Wiring) -> Vec<(String, String)> {
         let manifest = json!({
             "name": "tracon",
@@ -792,6 +804,12 @@ impl HarnessAdapter for ClaudeAdapter {
                 .into_iter()
                 .map(|(rel, text)| (format!("{}/{rel}", Self::PLUGIN_DIR), text)),
         );
+        if !wiring.mcp_servers.is_empty() {
+            files.push((
+                Self::MCP_CONFIG_FILE.to_string(),
+                mcp_config(&wiring.mcp_servers).to_string(),
+            ));
+        }
         files
     }
 
@@ -1030,6 +1048,31 @@ mod tests {
         // still return within MAX_WAIT_SECS.
         assert_eq!(server["timeout"], MCP_CALL_TIMEOUT_MS);
         const { assert!(MCP_CALL_TIMEOUT_MS > 300_000) };
+    }
+
+    /// The server's header carries the session's token, which an argv shows
+    /// to `ps` and a pod spec to anyone who may read pods: the argv names a
+    /// staged file instead, and the file holds the configuration.
+    #[test]
+    fn the_mcp_token_is_staged_in_a_file_and_never_on_the_argv() {
+        let cmd = ClaudeAdapter::cmd("c", &spec(), "sid");
+        let argv = cmd.argv.join(" ");
+        assert!(!argv.contains("tok"), "{argv}");
+        assert!(
+            argv.contains("--mcp-config /root/.claude/tracon-mcp.json"),
+            "{argv}"
+        );
+        let wiring = crate::gateway::model::Wiring {
+            mcp_servers: spec().mcp_servers,
+            ..Default::default()
+        };
+        let files = ClaudeAdapter::new(ClaudeAdapter::PINNED_VERSION).scratch_files(&wiring);
+        let (_, staged) = files
+            .iter()
+            .find(|(path, _)| path == "tracon-mcp.json")
+            .expect("the MCP configuration is staged");
+        let staged: Value = serde_json::from_str(staged).unwrap();
+        assert_eq!(staged, mcp_config(&spec().mcp_servers));
     }
 
     /// The ledger keeps what a tool returned, whichever shape Claude Code sent

@@ -959,6 +959,14 @@ pub struct Kubernetes {
     /// runtime gives by default crashes a browser test. It counts against
     /// the pod's memory limit, so it must fit within both limits.
     pub shm_size: String,
+    /// Address blocks the per-client egress proxy refuses besides the
+    /// private ones (RFC 1918, 100.64.0.0/10, fc00::/7), which it always
+    /// refuses here: a cluster whose pod or service range, or whose nodes'
+    /// network, is publicly routable names it, so a grant cannot reach it.
+    /// So does one whose network translates IPv6 to IPv4 (NAT64,
+    /// `64:ff9b::/96`; 6to4, `2002::/16`): an IPv4 address carried inside
+    /// such an IPv6 one is not decoded, so the block itself must be named.
+    pub internal_cidrs: Vec<String>,
 }
 
 /// What a harness pod asks the scheduler for. Two kinds: a session (the
@@ -1181,6 +1189,7 @@ impl Default for Kubernetes {
             resources: KubeResources::default(),
             image_pull_secrets: Vec::new(),
             shm_size: "1Gi".into(),
+            internal_cidrs: Vec::new(),
         }
     }
 }

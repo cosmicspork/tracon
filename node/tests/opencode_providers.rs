@@ -450,6 +450,8 @@ impl Runner for EnvRunner {
         if let Some((_, password)) = cmd
             .env
             .iter()
+            // The adapter hands it over as secret environment.
+            .chain(cmd.secret_env.iter())
             .find(|(name, _)| name == "OPENCODE_SERVER_PASSWORD")
         {
             *self.password.lock().unwrap() = password.clone();
@@ -937,6 +939,8 @@ impl Runner for LiveRunner {
         let password = cmd
             .env
             .iter()
+            // The adapter hands it over as secret environment.
+            .chain(cmd.secret_env.iter())
             .find(|(name, _)| name == "OPENCODE_SERVER_PASSWORD")
             .map(|(_, value)| value.clone())
             .unwrap_or_default();

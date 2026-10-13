@@ -324,7 +324,14 @@ route, the node serving the allowlist proxy itself). Both answer the same checks
 behind the same seam. The harness reaches exactly two things: allowlisted provider
 hosts through the proxy, and the node through the forward. On Podman a second forward
 carries the node's per-client egress proxy, which opens nothing to a caller that
-presents no grant.
+presents no grant; on Kubernetes a harness pod reaches the same proxy at the node's pod,
+on `[gateway] egress_port`, which both policies must open before the node issues a
+grant. The proxy never dials this machine or its link for a grant. In a cluster it sits
+beside the API server and every service, so there it also refuses private and
+carrier-grade NAT addresses, `[runtime.kubernetes] internal_cidrs`, and cluster names
+(`.svc`, `.cluster.local`, `.internal`, or no dot), before any lookup. It looks a name up
+once, as absolute so no search domain completes it, and dials only the addresses it
+checked, so a name that answers differently a second time is never asked again.
 
 Three things collapse the boundary and must be verified per environment:
 
@@ -626,7 +633,11 @@ pod that never restarts never reads it again. A run that ends before it starts (
 failure, a kill, a dropped caller) deletes it on the way out, and the boundary check and
 `reconcile` sweep any a dead node left. The Secrets rights are optional in the `runtime`
 check. A node without them refuses a run carrying secret environment and never
-downgrades it to a plaintext value. A private package therefore reaches candidates and
+downgrades it to a plaintext value. A session is such a run everywhere: its token at the
+gateway and the MCP server, OpenCode's per-launch server password and its egress grant
+are secret environment, and Claude Code reads its MCP server, whose header carries the
+token, from a staged file rather than its argv. A Kubernetes node without the rights
+refuses every session up front, and issues no egress grant. A private package therefore reaches candidates and
 sessions as cached bytes, never as a token, and a candidate that needs one the cache
 does not hold fails its preparation rather than being lent the credential.
 A preparation that fails runs no check: it is reported once, with the failing command,
