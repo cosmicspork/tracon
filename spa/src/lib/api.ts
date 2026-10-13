@@ -74,6 +74,7 @@ import type {
 } from './types'
 
 import type { HtmlBundleSelection } from './html-bundle'
+import type { CreationOptionsJSON, RequestOptionsJSON } from './passkey'
 import type { AnswerProblem, ApprovalDetails } from './approval'
 
 /** A document edit that lost to another: the current state comes back. */
@@ -102,31 +103,106 @@ export class ApiError extends Error {
     public workItemId?: string,
     /** A 422 that names what to fix, field by field. */
     public fields?: AnswerProblem[],
+    /** What kind of refusal this is, where the node says: `step_up_required`
+        or `step_up_unavailable` for an admin action. */
+    public kind?: string,
+    /** Why a step-up cannot happen here (`no_session`, `no_public_origin`,
+        `no_passkey`, `enrollment_closed`). */
+    public reason?: string,
   ) {
     super(message)
   }
 }
 
+/** An admin action the node wants confirmed with a passkey: the challenge
+    for exactly the refused request, and the operation it is bound to. */
+export interface StepUp {
+  op_hash: string
+  challenge_id: string
+  options: RequestOptionsJSON
+  expires_ms: number
+  /** `METHOD /path`, to say what is being confirmed. */
+  action?: string
+}
+
+/** The header a retried admin request carries its proof in. */
+export const STEP_UP_HEADER = 'x-tracon-step-up'
+
+/** Confirms an admin action with a passkey and returns the proof; installed
+    by the step-up prompt. With none installed a refusal is just an error. */
+type StepUpHandler = (stepUp: StepUp, message: string) => Promise<string>
+let stepUpHandler: StepUpHandler | null = null
+export function setStepUpHandler(handler: StepUpHandler | null): void {
+  stepUpHandler = handler
+}
+
+interface ErrorBody {
+  error?: { message?: string; fields?: AnswerProblem[]; kind?: string; reason?: string }
+  work_item_id?: string
+  step_up?: StepUp
+}
+
+/** One enrolled passkey, as the node lists it. */
+export interface PasskeyInfo {
+  id: string
+  label: string
+  sign_count: number
+  backup_eligible: boolean
+  backup_state: boolean
+  /** A JSON array of transport hints, as the browser reported them. */
+  transports: string | null
+  created_ms: number
+  last_used_ms: number | null
+}
+
+export interface PasskeyList {
+  passkeys: PasskeyInfo[]
+  local: boolean
+  relying_party: { id: string; origin: string } | null
+  /** Why passkeys cannot be used on this node, when they cannot. */
+  unavailable: string | null
+  enrollment: { open: boolean; closes_ms: number | null }
+}
+
 export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
-  const text = await res.text()
-  // Not every failure body is JSON: axum's extractors reject with plain text.
-  let json: { error?: { message?: string; fields?: AnswerProblem[] }; work_item_id?: string } | null = null
-  try {
-    json = text ? JSON.parse(text) : null
-  } catch {
-    json = null
-  }
-  if (!res.ok) {
+  // Serialized once: a retry after a passkey confirmation must send the very
+  // bytes the confirmation was bound to.
+  const payload = body !== undefined ? JSON.stringify(body) : undefined
+  let proof: string | undefined
+  for (let attempt = 0; ; attempt++) {
+    const headers: Record<string, string> = {}
+    if (payload !== undefined) headers['content-type'] = 'application/json'
+    if (proof) headers[STEP_UP_HEADER] = proof
+    const res = await fetch(path, {
+      method,
+      headers: Object.keys(headers).length ? headers : undefined,
+      body: payload,
+    })
+    const text = await res.text()
+    // Not every failure body is JSON: axum's extractors reject with plain text.
+    let json: ErrorBody | null = null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
+    if (res.ok) return json as T
     const message = json?.error?.message ?? (text || `${res.status} ${res.statusText}`)
+    // An admin action off the node's machine: confirm it, then send the same
+    // request once more. A second refusal is reported, not prompted again.
+    if (
+      res.status === 403 &&
+      json?.error?.kind === 'step_up_required' &&
+      json.step_up &&
+      attempt === 0 &&
+      stepUpHandler
+    ) {
+      proof = await stepUpHandler(json.step_up, message)
+      continue
+    }
     const fields = Array.isArray(json?.error?.fields) ? json.error.fields : undefined
-    throw new ApiError(res.status, message, json?.work_item_id, fields)
+    throw new ApiError(res.status, message, json?.work_item_id, fields, json?.error?.kind, json?.error?.reason)
   }
-  return json as T
 }
 
 async function upload<T>(path: string, body: FormData): Promise<T> {
@@ -581,6 +657,30 @@ export const api = {
   qr: (text: string) => call<{ svg: string }>('POST', '/api/auth/qr', { text }),
   setToken: (tokenHash: string) =>
     call<{ ok: boolean }>('POST', '/api/auth/token', { token_hash: tokenHash }),
+  passkeys: () => call<PasskeyList>('GET', '/api/passkeys'),
+  /** Begin enrolling a passkey. In a freshly paired session's window this
+      needs none; after that it is an admin action. */
+  passkeyRegisterOptions: (label: string) =>
+    call<{ challenge_id: string; options: CreationOptionsJSON; expires_ms: number }>(
+      'POST',
+      '/api/passkeys/register/options',
+      { label },
+    ),
+  passkeyRegisterFinish: (challengeId: string, credential: unknown) =>
+    call<{ id: string; label: string }>('POST', '/api/passkeys/register/finish', {
+      challenge_id: challengeId,
+      credential,
+    }),
+  /** A fresh challenge for an operation whose first one expired. */
+  passkeyAssertOptions: (opHash: string) =>
+    call<StepUp>('POST', '/api/passkeys/assert/options', { op_hash: opHash }),
+  passkeyAssertFinish: (challengeId: string, credential: unknown) =>
+    call<{ proof: string; op_hash: string; expires_ms: number }>('POST', '/api/passkeys/assert/finish', {
+      challenge_id: challengeId,
+      credential,
+    }),
+  deletePasskey: (id: string) =>
+    call<{ removed: string }>('DELETE', `/api/passkeys/${encodeURIComponent(id)}`),
   meshInit: (hubUrl: string) =>
     call<{ hub_url: string; node_id: string; admit_with: string }>('POST', '/api/mesh/init', {
       hub_url: hubUrl,

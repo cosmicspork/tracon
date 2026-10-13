@@ -18,6 +18,8 @@
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
   import Evidence from './routes/Evidence.svelte'
+  import PasskeyOffer from './components/PasskeyOffer.svelte'
+  import StepUpPrompt from './components/StepUpPrompt.svelte'
   import { attention } from './lib/attention'
   import { stashToken, tokenFromHash } from './lib/auth'
   import { shellSessionId } from './lib/opencode'
@@ -303,6 +305,10 @@
   </nav>
 </div>
 {/if}
+<!-- Above every screen: the passkey a remote admin action waits on, and the
+     offer to add one right after pairing. -->
+<StepUpPrompt />
+<PasskeyOffer />
 
 <style>
   .shell { display: grid; grid-template-columns: 172px minmax(0, 1fr); min-height: 100vh; }
