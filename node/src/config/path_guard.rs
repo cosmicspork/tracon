@@ -1733,7 +1733,7 @@ pub fn path(key: &str, value: &Path) -> std::io::Result<()> {
 pub fn read_secret(key: &str, value: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(value)?;
     let opened = file_id(&file.metadata()?);
-    if let Some(guard) = current() {
+    if let Some(guard) = current().filter(|guard| !guard.off) {
         let (_, checked) = guard.checked(key, &value.to_string_lossy(), Stage::Use)?;
         same(key, value, opened, checked)?;
     }
@@ -1755,19 +1755,17 @@ pub fn read_secret_in(key: &str, dir: &Path, name: &str) -> std::io::Result<Opti
         Err(e) => return Err(e),
     };
     let opened = file_id(&file.metadata()?);
-    if let Some(guard) = current() {
+    if let Some(guard) = current().filter(|guard| !guard.off) {
         guard.checked(key, &dir.to_string_lossy(), Stage::Use)?;
-        if !guard.off {
-            let walked = guard
-                .secret(&path, PathKind::SecretFile, Stage::Use)
-                .map_err(|problem| Refusal {
-                    key: key.to_string(),
-                    value: path.to_string_lossy().into_owned(),
-                    reason: problem.reason,
-                    missing: problem.missing,
-                })?;
-            same(key, &path, opened, walked.id)?;
-        }
+        let walked = guard
+            .secret(&path, PathKind::SecretFile, Stage::Use)
+            .map_err(|problem| Refusal {
+                key: key.to_string(),
+                value: path.to_string_lossy().into_owned(),
+                reason: problem.reason,
+                missing: problem.missing,
+            })?;
+        same(key, &path, opened, walked.id)?;
     }
     let mut text = String::new();
     file.read_to_string(&mut text)?;
