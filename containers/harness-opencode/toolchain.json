@@ -1,5 +1,5 @@
 {
-  "revision": "1",
+  "revision": "2",
   "profile": "rust+typescript",
   "opencode_version": "1.18.30",
   "node_version": "24.21.0",
@@ -20,6 +20,7 @@
     {
       "id": "typescript",
       "version": "6.0.0",
+      "interpreter": "/opt/tracon/bin/node",
       "command": ["/opt/tracon/lsp/typescript-language-server", "--stdio"],
       "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
       "initialization": { "tsserver": { "path": "/opt/tracon/lsp/tsserver.js" } },
@@ -36,14 +37,14 @@
     {
       "id": "prettier",
       "version": "3.9.6",
+      "interpreter": "/opt/tracon/bin/node",
       "command": ["/opt/tracon/fmt/prettier", "--write", "$FILE"],
       "extensions": [
         ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
         ".html", ".htm", ".css", ".scss", ".less", ".vue",
         ".json", ".jsonc", ".yaml", ".yml", ".md", ".mdx", ".graphql", ".gql"
       ],
-      "environment": { "BUN_BE_BUN": "1" },
-      "note": "Deliberately narrower than the builtin's extension list, which also claims .sass, .toml, .xml and .svelte — parsers prettier core does not have."
+      "note": "Run on the baked node, so the builtin's `BUN_BE_BUN=1`, which is for running a package on OpenCode's own binary, is not carried. Deliberately narrower than the builtin's extension list, which also claims .sass, .toml, .xml and .svelte — parsers prettier core does not have."
     }
   ],
   "disabled_formatter": ["oxfmt", "biome"],

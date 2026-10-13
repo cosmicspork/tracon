@@ -36,12 +36,15 @@ pub const MANIFEST_PATH: &str = "/opt/tracon/toolchain.json";
 /// per-session package caches from the image and `exec`s, so the harness is
 /// what the container's init supervises. Podman uses the image's own
 /// `ENTRYPOINT`; a Kubernetes `command` *replaces* an image entrypoint rather
-/// than prefixing it, so the pod has to name this explicitly.
+/// than prefixing it, so the pod has to name this explicitly. The layer that
+/// puts OpenCode onto a repository's image copies it to the same path and
+/// makes it that image's `ENTRYPOINT` too (`repo_image::harness_layer`).
 pub const IMAGE_ENTRYPOINT: &str = "/opt/tracon/bin/harness-entrypoint";
 
-/// The entrypoint a harness image runs before the harness, when it has one.
-/// Only the OpenCode image does; the others put their CLI straight in the
-/// container's command and have nothing to seed.
+/// The entrypoint a harness's image runs before the harness, when it has one:
+/// its own image, or a repository's with the harness layered on. Only
+/// OpenCode has one; the others put their CLI straight in the container's
+/// command and have nothing to seed.
 pub fn image_entrypoint(harness_id: &str) -> Option<String> {
     (harness_id == crate::adapter::opencode::OpenCodeAdapter::ID)
         .then(|| IMAGE_ENTRYPOINT.to_string())
@@ -61,6 +64,13 @@ pub struct Tool {
     /// Absolute, in the image. `$FILE` in a formatter's arguments is
     /// OpenCode's substitution, not this node's.
     pub command: Vec<String>,
+    /// What runs `command`, when it is a script: the baked node, named in
+    /// front of it in the configuration the node renders. Named rather than
+    /// left to the script's `#!/usr/bin/env node`, because on a repository's
+    /// image the `node` a PATH finds is the repository's, at whatever version
+    /// it chose, or none.
+    #[serde(default)]
+    pub interpreter: Option<String>,
     #[serde(default)]
     pub extensions: Vec<String>,
     #[serde(default)]
@@ -70,10 +80,24 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// The path the runtime spawns, which is the path whose existence decides
-    /// whether this tool is `configured` or `unavailable`.
+    /// The tool itself: what `command` starts with. For a native binary that
+    /// is what the runtime spawns; for a script, what its interpreter runs.
     pub fn binary(&self) -> &str {
         self.command.first().map(String::as_str).unwrap_or_default()
+    }
+
+    pub fn interpreter(&self) -> Option<&str> {
+        self.interpreter.as_deref()
+    }
+
+    /// What OpenCode is configured to spawn: the interpreter, where there is
+    /// one, then the command.
+    pub fn argv(&self) -> Vec<String> {
+        self.interpreter
+            .iter()
+            .chain(self.command.iter())
+            .cloned()
+            .collect()
     }
 }
 
@@ -124,7 +148,7 @@ pub fn lsp_formatter_config() -> (Value, Value) {
     }
     for tool in &profile.lsp {
         let mut entry = serde_json::Map::new();
-        entry.insert("command".into(), json!(tool.command));
+        entry.insert("command".into(), json!(tool.argv()));
         if !tool.extensions.is_empty() {
             entry.insert("extensions".into(), json!(tool.extensions));
         }
@@ -146,7 +170,7 @@ pub fn lsp_formatter_config() -> (Value, Value) {
     }
     for tool in &profile.formatter {
         let mut entry = serde_json::Map::new();
-        entry.insert("command".into(), json!(tool.command));
+        entry.insert("command".into(), json!(tool.argv()));
         if !tool.extensions.is_empty() {
             entry.insert("extensions".into(), json!(tool.extensions));
         }
@@ -203,6 +227,10 @@ pub struct ToolStatus {
     pub kind: &'static str,
     pub version: String,
     pub path: String,
+    /// What runs `path`, when it is a script: a tool whose interpreter is
+    /// missing, or does not run on the image, is `unavailable` too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interpreter: Option<String>,
     pub state: ToolState,
 }
 
@@ -231,16 +259,32 @@ impl ToolchainStatus {
 /// The shell the probe runs in the image: one line per named binary, plus the
 /// image's own profile revision. `sed` rather than a JSON parser because the
 /// harness image has no general-purpose one and this needs exactly one field.
-fn probe_script(paths: &[String]) -> String {
-    let quoted = paths
-        .iter()
-        .map(|p| format!("'{}'", p.replace('\'', "'\\''")))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
+///
+/// An interpreter has to run, not just be there: the baked node is linked
+/// against the harness image's C++ runtime, which a repository's image may
+/// not have, and a node that cannot start leaves its tools as absent as a
+/// missing file would.
+fn probe_script(paths: &[String], interpreters: &[String]) -> String {
+    let quote = |paths: &[String]| {
+        paths
+            .iter()
+            .map(|p| format!("'{}'", p.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut script = format!(
         "sed -n 's/.*\"revision\": *\"\\([^\"]*\\)\".*/rev \\1/p' {MANIFEST_PATH} 2>/dev/null | head -n 1; \
-         for p in {quoted}; do if [ -x \"$p\" ]; then echo \"ok $p\"; else echo \"missing $p\"; fi; done"
-    )
+         for p in {}; do if [ -x \"$p\" ]; then echo \"ok $p\"; else echo \"missing $p\"; fi; done",
+        quote(paths)
+    );
+    if !interpreters.is_empty() {
+        script.push_str(&format!(
+            "; for p in {}; do if \"$p\" --version >/dev/null 2>&1; then echo \"runs $p\"; \
+             else echo \"broken $p\"; fi; done",
+            quote(interpreters)
+        ));
+    }
+    script
 }
 
 /// Turn the probe's output into a status. A path the probe said nothing about
@@ -249,28 +293,36 @@ fn probe_script(paths: &[String]) -> String {
 fn read_probe(out: &str) -> ToolchainStatus {
     let profile = profile();
     let mut present = std::collections::BTreeSet::new();
+    let mut runs = std::collections::BTreeSet::new();
     let mut image_revision = None;
     for line in out.lines() {
         if let Some(rev) = line.strip_prefix("rev ") {
             image_revision = Some(rev.trim().to_string());
         } else if let Some(path) = line.strip_prefix("ok ") {
             present.insert(path.trim().to_string());
+        } else if let Some(path) = line.strip_prefix("runs ") {
+            runs.insert(path.trim().to_string());
         }
     }
     let mut tools = Vec::new();
     for (kind, list) in [("lsp", &profile.lsp), ("formatter", &profile.formatter)] {
         for tool in list {
             let path = tool.binary().to_string();
+            let interpreter = tool.interpreter().map(str::to_string);
+            let usable = present.contains(&path)
+                && interpreter
+                    .as_ref()
+                    .is_none_or(|interpreter| runs.contains(interpreter));
             tools.push(ToolStatus {
                 id: tool.id.clone(),
                 kind,
                 version: tool.version.clone(),
-                state: if present.contains(&path) {
-                    ToolState::Configured
-                } else {
-                    ToolState::Unavailable
+                state: match usable {
+                    true => ToolState::Configured,
+                    false => ToolState::Unavailable,
                 },
                 path,
+                interpreter,
             });
         }
     }
@@ -283,6 +335,7 @@ fn read_probe(out: &str) -> ToolchainStatus {
             kind: "lsp",
             version: String::new(),
             path: String::new(),
+            interpreter: None,
             state: ToolState::Disabled,
         });
     }
@@ -292,6 +345,7 @@ fn read_probe(out: &str) -> ToolchainStatus {
             kind: "formatter",
             version: String::new(),
             path: String::new(),
+            interpreter: None,
             state: ToolState::Disabled,
         });
     }
@@ -307,15 +361,20 @@ fn read_probe(out: &str) -> ToolchainStatus {
 /// callers cache it.
 pub async fn probe(runner: &dyn Runner) -> ToolchainStatus {
     let profile = profile();
-    let paths: Vec<String> = profile
-        .lsp
-        .iter()
-        .chain(profile.formatter.iter())
-        .map(|tool| tool.binary().to_string())
+    let tools = || profile.lsp.iter().chain(profile.formatter.iter());
+    let paths: Vec<String> = tools().map(|tool| tool.binary().to_string()).collect();
+    let mut interpreters: Vec<String> = tools()
+        .filter_map(|tool| tool.interpreter().map(str::to_string))
         .collect();
+    interpreters.sort();
+    interpreters.dedup();
     let out = runner
         .run_capture(RunnerCommand {
-            argv: vec!["sh".into(), "-c".into(), probe_script(&paths)],
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                probe_script(&paths, &interpreters),
+            ],
             name: "opencode-toolchain".into(),
             ..Default::default()
         })
@@ -335,6 +394,8 @@ pub async fn probe(runner: &dyn Runner) -> ToolchainStatus {
 mod tests {
     use super::*;
 
+    const NODE: &str = "/opt/tracon/bin/node";
+
     #[test]
     fn the_committed_profile_parses_and_names_absolute_paths() {
         let profile = profile();
@@ -345,6 +406,30 @@ mod tests {
                 tool.binary().starts_with("/opt/tracon/"),
                 "{} is not an image-baked absolute path",
                 tool.binary()
+            );
+        }
+        // A JavaScript tool names the baked node in front of itself, so it
+        // never runs on a `node` a repository's PATH puts first; a native one
+        // names nothing in front.
+        for tool in profile.lsp.iter().chain(profile.formatter.iter()) {
+            let javascript = matches!(tool.id.as_str(), "typescript" | "prettier");
+            assert_eq!(
+                tool.interpreter(),
+                javascript.then_some(NODE),
+                "{} names the wrong interpreter",
+                tool.id
+            );
+            // And the configuration spawns it in front of the tool.
+            let (lsp, formatter) = lsp_formatter_config();
+            let rendered = lsp
+                .get(&tool.id)
+                .or_else(|| formatter.get(&tool.id))
+                .unwrap()["command"]
+                .clone();
+            assert_eq!(rendered, json!(tool.argv()), "{}", tool.id);
+            assert_eq!(
+                rendered[0].as_str().unwrap(),
+                tool.interpreter().unwrap_or(tool.binary())
             );
         }
         // The two languages this repository's own workflows use.
@@ -361,12 +446,18 @@ mod tests {
     fn the_image_definition_asserts_every_path_the_profile_names() {
         let containerfile = include_str!("../../../containers/harness-opencode/Containerfile");
         for tool in profile().lsp.iter().chain(profile().formatter.iter()) {
-            assert!(
-                containerfile.contains(tool.binary()),
-                "the Containerfile never mentions {}",
-                tool.binary()
-            );
+            for path in tool.interpreter().into_iter().chain([tool.binary()]) {
+                assert!(
+                    containerfile.contains(path),
+                    "the Containerfile never mentions {path}"
+                );
+            }
         }
+        // And the build checks the profile's revision against its own.
+        assert!(containerfile.contains(&format!(
+            "ARG TRACON_TOOLCHAIN_REVISION={}\n",
+            profile().revision
+        )));
         assert!(containerfile.contains(IMAGE_ENTRYPOINT));
         assert!(containerfile.contains(&profile().opencode_version));
     }
@@ -435,6 +526,63 @@ mod tests {
         assert!(!status.complete());
     }
 
+    /// A JavaScript tool needs its script and the node in front of it, and a
+    /// node that is there but cannot start (a repository's image without the
+    /// C++ runtime it links) is as missing as one that is not.
+    #[test]
+    fn a_tool_whose_interpreter_does_not_run_is_unavailable() {
+        let script = |id: &str| {
+            profile()
+                .lsp
+                .iter()
+                .chain(profile().formatter.iter())
+                .find(|t| t.id == id)
+                .unwrap()
+                .binary()
+                .to_string()
+        };
+        let all = format!(
+            "rev 2\nok {}\nok {}\nok {}\nok {}\n",
+            script("rust"),
+            script("typescript"),
+            script("rustfmt"),
+            script("prettier")
+        );
+        let state = |status: &ToolchainStatus, id: &str| {
+            status.tools.iter().find(|t| t.id == id).unwrap().state
+        };
+
+        let broken = read_probe(&format!("{all}broken {NODE}\n"));
+        assert_eq!(state(&broken, "rust"), ToolState::Configured);
+        assert_eq!(state(&broken, "rustfmt"), ToolState::Configured);
+        assert_eq!(state(&broken, "typescript"), ToolState::Unavailable);
+        assert_eq!(state(&broken, "prettier"), ToolState::Unavailable);
+        assert!(!broken.complete());
+        let typescript = broken.tools.iter().find(|t| t.id == "typescript").unwrap();
+        assert_eq!(typescript.interpreter.as_deref(), Some(NODE));
+        assert_eq!(
+            typescript.path,
+            "/opt/tracon/lsp/typescript-language-server"
+        );
+
+        // Not a word about it is no better.
+        let unasked = read_probe(&all);
+        assert_eq!(state(&unasked, "typescript"), ToolState::Unavailable);
+
+        let running = read_probe(&format!("{all}runs {NODE}\n"));
+        assert!(running.complete(), "{:?}", running.tools);
+
+        // A native tool says nothing about an interpreter.
+        let json = serde_json::to_value(&running.tools).unwrap();
+        let rust = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == "rust")
+            .unwrap();
+        assert!(rust.get("interpreter").is_none());
+    }
+
     #[test]
     fn a_probe_that_never_ran_claims_nothing() {
         let status = read_probe("");
@@ -449,9 +597,15 @@ mod tests {
 
     #[test]
     fn the_probe_script_quotes_every_path_it_tests() {
-        let script = probe_script(&["/opt/tracon/lsp/rust-analyzer".into(), "a'b".into()]);
+        let script = probe_script(
+            &["/opt/tracon/lsp/rust-analyzer".into(), "a'b".into()],
+            &[NODE.into()],
+        );
         assert!(script.contains("'/opt/tracon/lsp/rust-analyzer'"));
         assert!(script.contains("'a'\\''b'"));
         assert!(script.contains(MANIFEST_PATH));
+        // The interpreter is run, not just looked at.
+        assert!(script.contains(&format!("for p in '{NODE}'; do if \"$p\" --version")));
+        assert!(!probe_script(&[], &[]).contains("--version"));
     }
 }

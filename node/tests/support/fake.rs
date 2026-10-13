@@ -118,6 +118,15 @@ impl HarnessAdapter for FakeAdapter {
 pub struct NamedFake {
     pub id: &'static str,
     pub inner: FakeAdapter,
+    /// What each launch was given: its plain and its secret environment.
+    pub launched: Arc<std::sync::Mutex<Vec<Launched>>>,
+}
+
+/// One launch of a `NamedFake`, as the node specified it.
+#[derive(Debug, Clone)]
+pub struct Launched {
+    pub env: Vec<(String, String)>,
+    pub secret: Vec<(String, String)>,
 }
 
 impl NamedFake {
@@ -128,6 +137,7 @@ impl NamedFake {
                 tx: Arc::new(Mutex::new(None)),
                 tokens: Arc::new(Mutex::new(100)),
             },
+            launched: Default::default(),
         }
     }
 }
@@ -158,6 +168,10 @@ impl HarnessAdapter for NamedFake {
         r: &dyn Runner,
         spec: LaunchSpec,
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
+        self.launched.lock().unwrap().push(Launched {
+            env: spec.env.clone(),
+            secret: spec.secret_env.iter().cloned().collect(),
+        });
         self.inner.launch(r, spec).await
     }
 }

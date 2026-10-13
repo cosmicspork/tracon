@@ -460,9 +460,9 @@ writes the entry only when you allow it, and a proposal never opens the reposito
 egress to its sessions. Hosts you opened to the session while it tried are suggested in
 `egress`.
 
-A Claude Code session runs in that image too. The node copies the harness onto the
-repository's image as one more layer, proves it runs there, and launches the session in
-the result, so the agent has the compiler, the test runner and the formatter its checks
+A session runs in that image too, with Claude Code or OpenCode. The node copies the
+harness onto the repository's image as one more layer, proves it runs there, and launches
+the session in the result, so the agent has the compiler, the test runner and the formatter its checks
 will be run with instead of the bare harness image. The session's start line says which
 image it got, and why when it is not the repository's: a base the harness binary does not
 run on (a musl image, one with no Git) leaves the session in the harness image rather
@@ -473,8 +473,28 @@ outlives each session: what a session fetched and, through `CARGO_TARGET_DIR=/ca
 what it compiled are there for the next one. It starts as a copy of the repository's base
 cache, and no check reads it. Two sessions on one repository share it, so a second
 `cargo build` waits for the first's lock. The layer is root, like every run here, so a tool the Dockerfile installed under
-another user's home has to be readable and executable by others. OpenCode sessions, and
-sessions on Kubernetes, stay in the harness image.
+another user's home has to be readable and executable by others.
+
+OpenCode brings more than its binary: the layer copies `/opt/tracon` too, with the language
+servers and formatters the node configures, the `rg` OpenCode searches with, and a Node of
+its own at `/opt/tracon/bin/node` for the JavaScript ones. That Node is on no `PATH`, so
+`node`, `npm` and `npx` in the agent's shell are still the repository's. A language server
+the image cannot run (the baked Node needs glibc and `libstdc++`) shows as `unavailable` in
+the session header and the session runs without it.
+
+OpenCode reads its configuration from the node and nowhere else, so the layer deletes
+`/etc/opencode` and refuses an image that would configure OpenCode, or change what it
+loads, underneath the node: one whose environment sets any `OPENCODE_*` or `BUN_*`
+variable, `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH`, one with a non-empty
+`/etc/ld.so.preload`, or one where `/opt`, `/usr`, `/usr/local`, `/usr/local/bin` or
+`/usr/libexec` is a symbolic link. The session's note names what was found, and the session
+runs in the harness image. This is by design even where the value is harmless (a
+devcontainer that sets `OPENCODE_THEME` for its own user, or `LD_LIBRARY_PATH` for a
+toolkit): unset it in the image, or move it into the tool's own wrapper. These checks catch
+an image that would change OpenCode by accident. They are not a boundary against a hostile
+Dockerfile. The image you name for a repository is trusted as you trust its Dockerfile,
+which already builds with the network and supplies every command the agent runs; what
+keeps a session in bounds is the runtime around it, not what the image contains.
 
 A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy
@@ -482,8 +502,10 @@ credentials that are the session's own, so "add this dependency and run the test
 ordinary task: `cargo add`, `bun add`, `composer require` work, and a host the entry does
 not name is refused. It is opt-in because a session is long-lived and runs what a model
 decides: a host that accepts uploads accepts them from it, and the `github` and
-`packagist` presets both carry `api.github.com`. OpenCode sessions keep the harness proxy
-and reach no registry either way.
+`packagist` presets both carry `api.github.com`. This holds for Claude Code and OpenCode
+sessions alike: the grant replaces the harness proxy for the harness and everything its
+shell runs, while the model and the node's tools stay on the gateway, which no proxy
+sits in front of.
 
 A private registry (Laravel Nova, a private npm scope, Private Packagist, GitHub
 Packages) is reached with a credential the node lends to one preparation only: the one
@@ -1355,12 +1377,11 @@ TLS. Each build sends the default branch's tree and the Dockerfile from the node
 The node names images as Podman does, `localhost/tracon-repo-…`, and that prefix becomes
 the configured `registry` here: `localhost/tracon-repo-app-1a2b3c4d5e:0123` is pushed as
 `<registry>/tracon-repo-app-1a2b3c4d5e:0123`. The image serves checks and preparation,
-and a Claude Code session runs in it with the harness layered on, as under Podman: the
-layer copies `claude` and a static `tini` out of the release's harness image, the
-session's pod runs under that `tini`, and the session gets its cache at `/cache` and its
-workspace prepared before the agent arrives. An OpenCode session still runs in its own
-harness image. Without a builder every session runs in its harness's own image and is
-told so.
+and a session of either harness runs in it with the harness layered on, as under Podman:
+the layer copies the harness and a static `tini` out of the release's harness image, the
+session's pod runs under that `tini` (and, for OpenCode, its harness entrypoint), and the
+session gets its cache at `/cache` and its workspace prepared before the agent arrives.
+Without a builder every session runs in its harness's own image and is told so.
 
 A harness pod is never root. It runs as `[runtime.kubernetes] uid` (65532) with
 `runAsNonRoot`, `HOME` at `harness_home` (`/home/harness`), and no capabilities, so the

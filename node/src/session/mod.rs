@@ -1981,25 +1981,27 @@ impl Manager {
         // Recorded, not just built: the revision this returns is the one this
         // session ran, and the next edit mints a different one that leaves
         // this session alone.
-        // The session's own way out, where the runtime issues one and the
-        // harness is a single process whose fetches are the agent's. OpenCode
-        // installs plugins on its own, and what its image baked is the rule
-        // for those, so it keeps the harness proxy and reaches no registry.
+        // The session's own way out, where the runtime issues one, for
+        // either harness. It replaces the harness proxy and carries the hosts
+        // that proxy allows (`[gateway] allow_hosts`), so nothing the harness
+        // reached before is lost; the model and the node's MCP server are on
+        // the gateway host, which `NO_PROXY` keeps off any proxy. OpenCode's
+        // shell and terminals inherit its environment, so the agent's
+        // installs go through the grant as Claude Code's do. What OpenCode
+        // fetches on its own stays closed by its launch flags and its image's
+        // seeds (plugins, `rg`, no LSP downloads), not by the proxy.
         let environment = crate::environment::session_environment(&self.cfg, &self.store, id);
-        let egress = (adapter.id() == crate::adapter::claude::ClaudeAdapter::ID)
-            .then(|| {
-                self.backend
-                    .egress_grant(crate::environment::session_grant(
-                        &self.cfg,
-                        &environment,
-                        id,
-                    ))
-                    .map_err(|error| {
-                        tracing::info!(session = %id, %error, "the session keeps the harness proxy");
-                    })
-                    .ok()
+        let egress = self
+            .backend
+            .egress_grant(crate::environment::session_grant(
+                &self.cfg,
+                &environment,
+                id,
+            ))
+            .map_err(|error| {
+                tracing::info!(session = %id, %error, "the session keeps the harness proxy");
             })
-            .flatten();
+            .ok();
 
         // The repository's session cache: what its sessions fetched and
         // compiled, kept for the next one and read by no check. It starts as
