@@ -253,7 +253,7 @@ pub async fn access(State(s): State<AppState>, parts: Parts) -> Json<Value> {
     Json(json!({
         "authenticated": auth::administrator_authenticated(&s.auth, s.store(), &parts.headers),
         "token_configured": s.auth.token_configured(),
-        "local": auth::extensions_are_loopback(&parts.extensions),
+        "local": auth::parts_are_local(&parts),
     }))
 }
 
@@ -264,10 +264,7 @@ pub async fn mesh(
     State(s): State<AppState>,
     parts: Parts,
 ) -> ApiResult<Json<Value>> {
-    Ok(Json(overview(
-        &s,
-        auth::extensions_are_loopback(&parts.extensions),
-    )?))
+    Ok(Json(overview(&s, auth::parts_are_local(&parts))?))
 }
 
 #[derive(Deserialize)]
@@ -596,7 +593,7 @@ pub async fn maintenance(
         }
     }
     Ok(Json(json!({
-        "local": auth::extensions_are_loopback(&parts.extensions),
+        "local": auth::parts_are_local(&parts),
         "service": service,
         "active_sessions": active_sessions,
         "boundary": api::node_json(&s)?,

@@ -465,7 +465,8 @@ serve stale policy but not new policy.
 **Administration is an explicit operator capability, not a loopback exemption.**
 Mesh admission, removal, and hub-key sharing accept authenticated administrators
 from the remote UI. Policy signing/install and host service actions additionally
-require loopback. Service actions name only the supported fixed supervisor,
+require a local request (see [Reaching a node](#reaching-a-node)), which a proxy on
+the node's own host does not make. Service actions name only the supported fixed supervisor,
 refuse active work or ambiguous process identity, and report scheduling rather
 than pretending a restart has already succeeded.
 
@@ -1451,9 +1452,29 @@ Three surfaces, three answers, and the differences are the point.
 
 - **The harness** gets a separate listener with a per-session bearer token and no
   operator API: a harness that finds the forward cannot drive sessions.
-- **The operator on the node's own machine** is the operator by definition:
-  loopback is answered with no credential, guarded only against DNS rebinding
-  (Origin and Host must be local).
+- **The operator on the node's own machine** is the operator by definition: a
+  local request is answered with no credential. Local is one test
+  (`http::auth::is_local`) behind the guard, the `Loopback` gate and every
+  `local` flag the interface reads, and it asks more than the peer address. A
+  reverse proxy on the same host (`tailscale serve`, cloudflared, a pod's
+  sidecar) connects from `127.0.0.1` too, and a peer-only test made every caller
+  behind it the operator, cookie or not, on the routes that rewrite `node.toml`.
+  So a request is local only when the TCP peer is loopback, it carries no
+  forwarding header (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, and the
+  CDN client-IP headers), its `Host` and any absolute target name `localhost`,
+  `127.0.0.0/8` or `::1`, and its `Origin`, if any, is an HTTP(S) loopback
+  origin. The Host and Origin checks are also the DNS-rebinding defence. The
+  port is not compared, so `kubectl port-forward` to another local port and the
+  Vite dev server stay local; a proxy that rewrites `Host` presents the bound
+  port anyway. There is no list of trusted proxies. What the test cannot see is
+  a same-host relay that strips forwarding headers and rewrites `Host` to its
+  upstream, which is by construction a request from the machine; proxies in
+  front of a node must send `X-Forwarded-For`.
+- **`[auth] public_origin`** is the name the node answers to from elsewhere:
+  an `https:` origin (plain `http:` only for a loopback host), normalised at
+  load. It is not a credential and does not widen what is local. The push
+  subject falls back to it when `[notify] contact` is unset, and it is what a
+  passkey's origin and relying-party ID will be pinned to.
 - **The operator from anywhere else** needs the token, exchanged for an HttpOnly,
   Secure, SameSite=Lax cookie — a cookie because `EventSource` cannot set headers,
   Lax because a push notification's deep link is a top-level cross-site navigation.
