@@ -75,6 +75,12 @@ pub fn decide(method: &Method, authority: Option<&str>, allow: &Allowlist) -> De
 }
 
 pub async fn serve(port: u16, allow: Allowlist) {
+    serve_refusing(port, allow, Refusal::nothing()).await
+}
+
+/// `serve`, never dialling what `refusal` refuses: how a pod-hosted node
+/// serves its harnesses' allowlist proxy, beside the cluster's own services.
+pub async fn serve_refusing(port: u16, allow: Allowlist, refusal: Refusal) {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -83,18 +89,33 @@ pub async fn serve(port: u16, allow: Allowlist) {
             return;
         }
     };
-    run(listener, allow).await
+    run_refusing(listener, allow, refusal, system_resolver()).await
 }
 
 pub async fn run(listener: TcpListener, allow: Allowlist) {
+    run_refusing(listener, allow, Refusal::nothing(), system_resolver()).await
+}
+
+/// `run` with what it may never dial and how it looks names up.
+pub async fn run_refusing(
+    listener: TcpListener,
+    allow: Allowlist,
+    refusal: Refusal,
+    resolve: Resolve,
+) {
+    let proxied = Proxied {
+        allow,
+        refusal,
+        resolve,
+    };
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
-        let allow = allow.clone();
+        let proxied = proxied.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
-            let svc = service_fn(move |req| handle(req, peer, allow.clone()));
+            let svc = service_fn(move |req| handle(req, peer, proxied.clone()));
             if let Err(e) = http1::Builder::new()
                 .serve_connection(io, svc)
                 .with_upgrades()
@@ -106,28 +127,44 @@ pub async fn run(listener: TcpListener, allow: Allowlist) {
     }
 }
 
+/// The allowlist proxy's state: what it admits, what it never dials, and
+/// how it looks names up.
+#[derive(Clone)]
+struct Proxied {
+    allow: Allowlist,
+    refusal: Refusal,
+    resolve: Resolve,
+}
+
 type Body = http_body_util::Either<Empty<Bytes>, Full<Bytes>>;
 
 async fn handle(
     req: Request<Incoming>,
     peer: SocketAddr,
-    allow: Allowlist,
+    proxied: Proxied,
 ) -> Result<Response<Body>, hyper::Error> {
+    let refused = |why: &str| {
+        Ok(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(http_body_util::Either::Right(Full::from(why.to_string())))
+            .expect("static response"))
+    };
     let authority = req.uri().authority().map(|a| a.as_str().to_string());
-    let host = match decide(req.method(), authority.as_deref(), &allow) {
+    let host = match decide(req.method(), authority.as_deref(), &proxied.allow) {
         Decision::Connect(h) => h,
         Decision::Refused(why) => {
             tracing::info!(%peer, target = authority.as_deref().unwrap_or("-"), why, "proxy refused");
-            return Ok(Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .body(http_body_util::Either::Right(Full::from(why)))
-                .expect("static response"));
+            return refused(why);
         }
     };
-    let upstream = match TcpStream::connect((host.as_str(), 443)).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(%peer, %host, error = %e, "proxy could not reach host");
+    let upstream = match dial(&proxied.refusal, &proxied.resolve, &host, 443).await {
+        Dialled::Stream(stream) => stream,
+        Dialled::Refused(why) => {
+            tracing::warn!(%peer, %host, why, "proxy refused an internal host");
+            return refused(why);
+        }
+        Dialled::Unreachable => {
+            tracing::warn!(%peer, %host, "proxy could not reach host");
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(http_body_util::Either::Right(Full::from(
@@ -151,6 +188,49 @@ async fn handle(
         .status(StatusCode::OK)
         .body(http_body_util::Either::Left(Empty::new()))
         .expect("static response"))
+}
+
+/// What came of dialling a host a proxy admitted.
+enum Dialled {
+    Stream(TcpStream),
+    /// Refused by `Refusal`, by name or by every address it resolved to.
+    Refused(&'static str),
+    /// Nothing resolved, or nothing that passed answered.
+    Unreachable,
+}
+
+/// Dial `host` as both proxies do: refused by name before any lookup, looked
+/// up once (as absolute in a cluster), and dialled only at the addresses
+/// that pass, so the addresses checked are the addresses dialled and a name
+/// that answers differently the second time (DNS rebinding) is never asked a
+/// second time.
+async fn dial(refusal: &Refusal, resolve: &Resolve, host: &str, port: u16) -> Dialled {
+    if let Some(why) = refusal.name(host) {
+        return Dialled::Refused(why);
+    }
+    let resolved: Vec<SocketAddr> = resolve(refusal.lookup_name(host), port)
+        .await
+        .unwrap_or_default();
+    let mut refused = None;
+    let addresses: Vec<&SocketAddr> = resolved
+        .iter()
+        .filter(|addr| match refusal.address(&addr.ip()) {
+            Some(why) => {
+                refused = Some(why);
+                false
+            }
+            None => true,
+        })
+        .collect();
+    if let (true, Some(why)) = (addresses.is_empty(), refused) {
+        return Dialled::Refused(why);
+    }
+    for address in addresses {
+        if let Ok(stream) = TcpStream::connect(address).await {
+            return Dialled::Stream(stream);
+        }
+    }
+    Dialled::Unreachable
 }
 
 /// What one client may reach, and what it is told when it asks for more.
@@ -684,36 +764,16 @@ async fn handle_granted(
             said.as_deref().unwrap_or(&grant.refusal),
         ));
     }
-    // Resolved once, here, and dialled by address: the addresses checked are
-    // the addresses dialled, so a name that answers differently the second
-    // time (DNS rebinding) is never asked a second time.
-    let lookup = granted.refusal.lookup_name(&host);
-    let resolved: Vec<SocketAddr> = (granted.resolve)(lookup, port).await.unwrap_or_default();
-    let mut refused = None;
-    let addresses: Vec<&SocketAddr> = resolved
-        .iter()
-        .filter(|addr| match granted.refusal.address(&addr.ip()) {
-            Some(why) => {
-                refused = Some(why);
-                false
-            }
-            None => true,
-        })
-        .collect();
-    if let (true, Some(why)) = (addresses.is_empty(), refused) {
-        tracing::warn!(client = %grant.client, %host, why, "granted host resolves inside");
-        return Ok(answer(StatusCode::FORBIDDEN, why));
-    }
-    let mut upstream = None;
-    for address in &addresses {
-        if let Ok(stream) = TcpStream::connect(address).await {
-            upstream = Some(stream);
-            break;
+    let upstream = match dial(&granted.refusal, &granted.resolve, &host, port).await {
+        Dialled::Stream(stream) => stream,
+        Dialled::Refused(why) => {
+            tracing::warn!(client = %grant.client, %host, why, "granted host resolves inside");
+            return Ok(answer(StatusCode::FORBIDDEN, why));
         }
-    }
-    let Some(upstream) = upstream else {
-        tracing::warn!(client = %grant.client, %host, "granted proxy could not reach host");
-        return Ok(answer(StatusCode::BAD_GATEWAY, "upstream unreachable"));
+        Dialled::Unreachable => {
+            tracing::warn!(client = %grant.client, %host, "granted proxy could not reach host");
+            return Ok(answer(StatusCode::BAD_GATEWAY, "upstream unreachable"));
+        }
     };
     tracing::info!(client = %grant.client, %host, port, "granted proxy connect");
     if tunnel {

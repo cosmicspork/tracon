@@ -327,11 +327,12 @@ carries the node's per-client egress proxy, which opens nothing to a caller that
 presents no grant; on Kubernetes a harness pod reaches the same proxy at the node's pod,
 on `[gateway] egress_port`, which both policies must open before the node issues a
 grant. The proxy never dials this machine or its link for a grant. In a cluster it sits
-beside the API server and every service, so there it also refuses private and
-carrier-grade NAT addresses, `[runtime.kubernetes] internal_cidrs`, and cluster names
-(`.svc`, `.cluster.local`, `.internal`, or no dot), before any lookup. It looks a name up
-once, as absolute so no search domain completes it, and dials only the addresses it
-checked, so a name that answers differently a second time is never asked again.
+beside the API server and every service, so there it, and the allowlist proxy the node
+serves there, also refuse private and carrier-grade NAT addresses,
+`[runtime.kubernetes] internal_cidrs`, and cluster names (`.svc`, `.cluster.local`,
+`.internal`, or no dot), before any lookup. Each looks a name up once, as absolute so no
+search domain completes it, and dials only the addresses it checked, so a name that
+answers differently a second time is never asked again.
 
 Three things collapse the boundary and must be verified per environment:
 

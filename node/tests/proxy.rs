@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use tracon::gateway::proxy::{
-    run, serve_granted, Allowlist, GrantSpec, Granted, Grants, Refusal, Resolve,
+    run, run_refusing, serve_granted, Allowlist, GrantSpec, Granted, Grants, Refusal, Resolve,
 };
 
 async fn proxy(allow: &[String]) -> std::net::SocketAddr {
@@ -525,4 +525,87 @@ async fn a_name_is_resolved_once_and_only_what_was_checked_is_dialled() {
     // Loopback is this machine, so it is refused; what matters is the name.
     assert!(line.starts_with("HTTP/1.1 403"), "{line}");
     assert_eq!(*names.lock().unwrap(), ["registry.example.test."]);
+}
+
+/// The allowlist proxy a pod-hosted node serves on its proxy port refuses
+/// what the cluster holds exactly as the granted one does: a cluster name
+/// before any lookup, an allowlisted name that resolves inside, once and as
+/// absolute, and it dials only the addresses it checked. Without a refusal
+/// (how Podman's tests run it; Podman's own proxy is the gateway's) it dials
+/// as it always did.
+#[tokio::test]
+async fn the_allowlist_proxy_in_a_cluster_refuses_what_the_cluster_holds() {
+    state::isolate();
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let allowed = upstream.local_addr().unwrap();
+    let accepted = Arc::new(Mutex::new(0usize));
+    let counted = accepted.clone();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = upstream.accept().await.unwrap();
+            *counted.lock().unwrap() += 1;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                drop(s);
+            });
+        }
+    });
+    let private: std::net::SocketAddr = "10.245.0.1:443".parse().unwrap();
+    let (resolve, names) = scripted(vec![vec![private]]);
+    let allow = Allowlist::new(&[
+        r"^kubernetes\.default\.svc$".into(),
+        r"^10\.0\.0\.1$".into(),
+        r"^api\.example\.test$".into(),
+    ])
+    .unwrap();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(run_refusing(
+        l,
+        allow.clone(),
+        Refusal::cluster(&[]).unwrap(),
+        resolve,
+    ));
+    let plain = |host: &str| format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n");
+
+    let svc = exchange(addr, &plain("kubernetes.default.svc")).await;
+    assert!(svc.starts_with("HTTP/1.1 403"), "{svc}");
+    assert!(svc.contains("names a host inside the cluster"), "{svc}");
+    let literal = exchange(addr, &plain("10.0.0.1")).await;
+    assert!(literal.contains("private or cluster address"), "{literal}");
+    assert!(names.lock().unwrap().is_empty(), "nothing was looked up");
+
+    let inside = exchange(addr, &plain("api.example.test")).await;
+    assert!(inside.starts_with("HTTP/1.1 403"), "{inside}");
+    assert!(inside.contains("private or cluster address"), "{inside}");
+    assert_eq!(
+        *names.lock().unwrap(),
+        ["api.example.test."],
+        "once, as absolute"
+    );
+
+    // A mixed answer: only the address that passes is dialled. Loopback is
+    // this machine to a cluster, so this half refuses the private block alone.
+    let (resolve, names) = scripted(vec![vec![private, allowed]]);
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mixed_addr = l.local_addr().unwrap();
+    tokio::spawn(run_refusing(
+        l,
+        allow,
+        Refusal::only(&["10.0.0.0/8"]),
+        resolve,
+    ));
+    let mixed = exchange(mixed_addr, &plain("api.example.test")).await;
+    assert!(mixed.starts_with("HTTP/1.1 200"), "{mixed}");
+    assert_eq!(*accepted.lock().unwrap(), 1);
+    assert_eq!(names.lock().unwrap().len(), 1, "looked up once");
+
+    // Unrefused, a listed private literal is dialled as before.
+    let podman = proxy(&[r"^127\.0\.0\.1$".into()]).await;
+    let line = status_of(
+        podman,
+        "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n",
+    )
+    .await;
+    assert!(line.contains("502"), "{line}");
 }

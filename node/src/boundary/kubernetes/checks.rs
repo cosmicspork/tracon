@@ -144,12 +144,18 @@ pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryRep
     let runtime = check_runtime(b, cfg).await;
     let runtime_ok = runtime.ok;
     checks.push(runtime);
-    // Closed until this check reaches the network check and finds it open,
-    // so a re-check that stops early never leaves an earlier verdict open.
-    b.egress_port().set(Err(
-        "the boundary check has not confirmed the egress port".into()
-    ));
+    // The egress port's verdict is replaced, never cleared ahead of time: a
+    // re-check runs while sessions start and preparations open grants, and
+    // an open port must not read as shut for the length of a check. Each
+    // way this check can stop before the network check closes it (below);
+    // the network check sets it otherwise.
+    let stopped = |why: &str| {
+        b.egress_port().set(Err(format!(
+            "the boundary check stopped before it could confirm the egress port ({why})"
+        )));
+    };
     if !runtime_ok {
+        stopped("runtime unavailable");
         for id in [
             CheckId::HarnessUnprivileged,
             CheckId::NoRuntimeSocket,
@@ -171,6 +177,7 @@ pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryRep
     {
         Ok(r) => r,
         Err(e) => {
+            stopped("no runner");
             for id in [
                 CheckId::HarnessUnprivileged,
                 CheckId::NoRuntimeSocket,
@@ -199,6 +206,7 @@ pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryRep
                 .await;
         }
         Err(e) => {
+            stopped("the probe pod failed");
             for id in [
                 CheckId::HarnessUnprivileged,
                 CheckId::NoRuntimeSocket,
@@ -437,19 +445,41 @@ fn admits_harness(rule: &NetworkPolicyIngressRule) -> bool {
     })
 }
 
-/// The TCP ports a rule names, or `None` for a rule that names none (every
-/// port). A named port (`name: forward`) is not resolved here and counts as
-/// no port.
+/// One entry of a rule's `ports`, as far as the checks read it.
+#[derive(Debug, PartialEq, Eq)]
+enum PolicyPort {
+    /// TCP (stated, or left to the default) on `first..=last`: one port when
+    /// there is no `endPort`.
+    Tcp { first: i32, last: i32 },
+    /// Anything else: another protocol, a named port (not resolved here), or
+    /// an entry naming no port, said as the refusal says it.
+    Other(String),
+}
+
+/// The entries a rule names, or `None` for a rule that names none (every
+/// port, every protocol).
 fn rule_ports(
     ports: Option<&[k8s_openapi::api::networking::v1::NetworkPolicyPort]>,
-) -> Option<Vec<i32>> {
+) -> Option<Vec<PolicyPort>> {
     let ports = ports.filter(|ports| !ports.is_empty())?;
     Some(
         ports
             .iter()
-            .filter_map(|p| match p.port.as_ref() {
-                Some(IntOrString::Int(port)) => Some(*port),
-                _ => None,
+            .map(|p| {
+                let protocol = p.protocol.as_deref().unwrap_or("TCP");
+                match (protocol, p.port.as_ref()) {
+                    ("TCP", Some(IntOrString::Int(port))) => PolicyPort::Tcp {
+                        first: *port,
+                        last: p.end_port.unwrap_or(*port),
+                    },
+                    (_, Some(IntOrString::String(name))) => {
+                        PolicyPort::Other(format!("the named port {name:?}"))
+                    }
+                    (_, None) => PolicyPort::Other(format!("every {protocol} port")),
+                    (_, Some(IntOrString::Int(port))) => {
+                        PolicyPort::Other(format!("{protocol} port {port}"))
+                    }
+                }
             })
             .collect(),
     )
@@ -461,7 +491,11 @@ fn rule_ports(
 fn node_admits(rules: &[NetworkPolicyIngressRule], port: i32) -> bool {
     rules.iter().any(|rule| {
         admits_harness(rule)
-            && rule_ports(rule.ports.as_deref()).is_none_or(|ports| ports.contains(&port))
+            && rule_ports(rule.ports.as_deref()).is_none_or(|ports| {
+                ports.iter().any(|entry| {
+                    matches!(entry, PolicyPort::Tcp { first, last } if (*first..=*last).contains(&port))
+                })
+            })
     })
 }
 
@@ -501,9 +535,27 @@ fn harness_egress(
                 return Err("an egress peer is not the node pod".into());
             }
         }
-        let ports = rule_ports(rule.ports.as_deref()).unwrap_or_default();
-        if ports.is_empty() {
+        let entries = rule_ports(rule.ports.as_deref()).unwrap_or_default();
+        if entries.is_empty() {
             return Err("an egress rule allows every port".into());
+        }
+        let mut ports = Vec::new();
+        for entry in entries {
+            match entry {
+                PolicyPort::Tcp { first, last } if first == last => ports.push(first),
+                PolicyPort::Tcp { first, last } => {
+                    return Err(format!(
+                        "egress allows the port range {first}-{last}; only the forward, the \
+                         proxy and the egress port are expected"
+                    ))
+                }
+                PolicyPort::Other(what) => {
+                    return Err(format!(
+                        "egress allows {what}; only TCP to the forward, the proxy and the \
+                         egress port is expected"
+                    ))
+                }
+            }
         }
         if let Some(p) = ports
             .iter()
@@ -877,6 +929,26 @@ mod tests {
             ..Default::default()
         }]);
         assert!(harness_egress(&[anywhere], 7421, 8888, 7424).is_err());
+
+        // TCP, stated or by default, one port per entry: a range, another
+        // protocol or an unresolved name is more than the check can vouch for.
+        let mut unstated = egress_to_node(&[7421, 8888, 7424]);
+        for entry in unstated.ports.iter_mut().flatten() {
+            entry.protocol = None;
+        }
+        assert_eq!(harness_egress(&[unstated], 7421, 8888, 7424), Ok(true));
+        let mut udp = egress_to_node(&[7421, 8888]);
+        udp.ports.as_mut().unwrap()[1].protocol = Some("UDP".into());
+        let why = harness_egress(&[udp], 7421, 8888, 7424).unwrap_err();
+        assert!(why.contains("UDP port 8888"), "{why}");
+        let mut range = egress_to_node(&[7421, 8888]);
+        range.ports.as_mut().unwrap()[0].end_port = Some(7430);
+        let why = harness_egress(&[range], 7421, 8888, 7424).unwrap_err();
+        assert!(why.contains("range 7421-7430"), "{why}");
+        let mut named = egress_to_node(&[7421, 8888]);
+        named.ports.as_mut().unwrap()[0].port = Some(IntOrString::String("forward".into()));
+        let why = harness_egress(&[named], 7421, 8888, 7424).unwrap_err();
+        assert!(why.contains("named port"), "{why}");
     }
 
     /// The node's ingress admits harness pods on the egress port only when a
@@ -906,6 +978,13 @@ mod tests {
         assert!(node_admits(&[from_harness(None)], 7424));
         assert!(!node_admits(&[ingress(Some(vec![pods("other")]))], 7424));
         assert!(node_admits(&[ingress(None)], 7424));
+        // A TCP range that holds the port admits it; UDP on it does not.
+        let mut range = from_harness(Some(&[7420]));
+        range.ports.as_mut().unwrap()[0].end_port = Some(7430);
+        assert!(node_admits(&[range], 7424));
+        let mut udp = from_harness(Some(&[7424]));
+        udp.ports.as_mut().unwrap()[0].protocol = Some("UDP".into());
+        assert!(!node_admits(&[udp], 7424));
     }
 
     /// The deep probe asks the per-client port with no credentials: a

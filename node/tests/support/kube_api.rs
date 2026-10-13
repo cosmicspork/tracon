@@ -3,7 +3,8 @@
 //! by a kubelet. Enough of `secrets` for a run's own Secret: create, list,
 //! patch (a merge of metadata; data stays immutable) and delete, every call
 //! recorded. And `selfsubjectaccessreviews`, allowing everything a test has
-//! not denied.
+//! not denied. And `networkpolicies` get, from what a test put in place, with
+//! a gate a test can hold reads at and names it can make unreadable.
 //!
 //! A kubelet's one rule about Secrets is kept: a pod whose `secretKeyRef`
 //! names a Secret or key that does not exist when it is created never starts
@@ -31,6 +32,7 @@ use k8s_openapi::api::core::v1::{
     ContainerState, ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting,
     ContainerStatus, Pod, PodStatus, Secret,
 };
+use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use serde_json::{json, Value};
 use tokio::time::Instant;
@@ -135,6 +137,13 @@ struct Inner {
     /// A Secret request answers 403, as the API does for a Role without
     /// the rule, whatever the access reviews say.
     secrets_forbidden: bool,
+    policies: HashMap<String, NetworkPolicy>,
+    /// Policy names a read of answers 403.
+    policies_forbidden: Vec<String>,
+    /// Held reads wait for a permit here, one per read.
+    policy_gate: Option<Arc<tokio::sync::Semaphore>>,
+    /// How many policy reads have arrived, held or not.
+    policy_reads: usize,
 }
 
 #[derive(Clone)]
@@ -183,8 +192,40 @@ impl KubeApi {
         self
     }
 
+    /// Put a NetworkPolicy in place under its name.
+    pub fn insert_policy(&self, policy: NetworkPolicy) {
+        let name = policy.metadata.name.clone().unwrap_or_default();
+        self.inner.lock().unwrap().policies.insert(name, policy);
+    }
+
+    /// Reads of this policy answer 403.
+    pub fn forbid_policy(self, name: &str) -> Self {
+        self.inner
+            .lock()
+            .unwrap()
+            .policies_forbidden
+            .push(name.into());
+        self
+    }
+
+    /// Hold every policy read until a permit is added to the returned gate.
+    pub fn hold_policy_reads(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        self.inner.lock().unwrap().policy_gate = Some(gate.clone());
+        gate
+    }
+
+    /// How many policy reads have arrived.
+    pub fn policy_reads(&self) -> usize {
+        self.inner.lock().unwrap().policy_reads
+    }
+
     pub fn router(&self) -> Router {
         Router::new()
+            .route(
+                "/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{name}",
+                get(read_policy),
+            )
             .route("/api/v1/namespaces/{ns}/pods", get(list).post(create))
             .route(
                 "/api/v1/namespaces/{ns}/pods/{name}",
@@ -680,4 +721,34 @@ async fn review(
         ..Default::default()
     });
     (StatusCode::CREATED, Json(review)).into_response()
+}
+
+async fn read_policy(
+    State(api): State<KubeApi>,
+    Path((_ns, name)): Path<(String, String)>,
+) -> Response {
+    let gate = {
+        let mut inner = api.inner.lock().unwrap();
+        inner.policy_reads += 1;
+        inner.policy_gate.clone()
+    };
+    if let Some(gate) = gate {
+        gate.acquire().await.expect("gate open").forget();
+    }
+    let inner = api.inner.lock().unwrap();
+    if inner.policies_forbidden.contains(&name) {
+        return status_error(
+            StatusCode::FORBIDDEN,
+            "Forbidden",
+            format!("networkpolicies.networking.k8s.io \"{name}\" is forbidden"),
+        );
+    }
+    match inner.policies.get(&name) {
+        Some(policy) => Json(policy.clone()).into_response(),
+        None => status_error(
+            StatusCode::NOT_FOUND,
+            "NotFound",
+            format!("networkpolicies.networking.k8s.io \"{name}\" not found"),
+        ),
+    }
 }

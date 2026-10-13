@@ -264,9 +264,10 @@ pub trait Backend: Send + Sync {
             self.kind()
         )))
     }
-    /// What the per-client egress proxy will not dial, whatever a grant
-    /// names (`gateway::proxy::Refusal`). This machine and its link unless a
-    /// runtime says more.
+    /// What the node's own proxies will not dial, whatever a grant or the
+    /// allowlist names (`gateway::proxy::Refusal`): the per-client egress
+    /// proxy, and the allowlist proxy where the node serves it
+    /// (`proxy_port`). This machine and its link unless a runtime says more.
     fn egress_refusal(&self) -> crate::gateway::proxy::Refusal {
         crate::gateway::proxy::Refusal::this_machine()
     }

@@ -953,7 +953,8 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # internal_cidrs = []               # (under [runtime.kubernetes]) address blocks the per-client
                                     # egress proxy refuses besides the private ones (RFC 1918,
                                     # 100.64.0.0/10, fc00::/7), which it always refuses in a
-                                    # cluster: name a pod, service or node range that is public,
+                                    # cluster: name a pod, service or node range that is public
+                                    # (on a cloud, the nodes' and load balancers' public IPs),
                                     # and any NAT64 (64:ff9b::/96) or 6to4 (2002::/16) range the
                                     # cluster uses, since an IPv4 address inside one is not decoded
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
@@ -1272,11 +1273,17 @@ which a harness pod reaches at the node's pod address. The shipped policies open
 issued no grants until the `network` check finds both policies open the port and the
 `runtime` check finds the Secrets rule, and it says which is missing; it runs either way,
 so a release and the policy change that opens the port can roll out in either order.
-`--deep` asks the port with no credentials from a harness pod and expects a 407. In a
-cluster the proxy refuses to dial a private address (RFC 1918, `100.64.0.0/10`,
+`--deep` asks the port with no credentials from a harness pod and expects a 407.
+
+In a cluster both of the node's proxies, the allowlist proxy on `proxy_port` and the
+per-client one, refuse to dial a private address (RFC 1918, `100.64.0.0/10`,
 `fc00::/7`), this machine, the link, any block in `[runtime.kubernetes] internal_cidrs`,
 and names ending `.svc`, `.cluster.local` or `.internal` or with no dot, whatever a grant
-names. It looks a name up once, as absolute, and dials only the addresses it checked.
+or `allow_hosts` names. Each looks a name up once, as absolute, and dials only the
+addresses it checked. On a cloud, list the nodes' and load balancers' public addresses
+in `internal_cidrs` too: they reach the cluster from outside it, and nothing private
+about them says so. An entry that is not an address block is refused when `node.toml`
+loads.
 
 ### From source
 

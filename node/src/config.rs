@@ -1167,6 +1167,14 @@ impl Kubernetes {
                 "runtime.kubernetes.image_pull_secrets: {name:?} is not a Secret name"
             ));
         }
+        // What the egress proxy refuses is part of the boundary, so a block
+        // that does not parse is refused here, at load, rather than found at
+        // the next boundary check with per-client egress already off.
+        for block in &self.internal_cidrs {
+            block
+                .parse::<crate::gateway::proxy::Cidr>()
+                .map_err(|error| format!("runtime.kubernetes.internal_cidrs: {error}"))?;
+        }
         Ok(())
     }
 }
@@ -3060,6 +3068,30 @@ models = [{ id = "gpt-6" }]
     /// namespace's LimitRange never fills in a default the node did not
     /// choose; a check gets more than a session because a test suite with a
     /// browser needs it.
+    #[test]
+    fn an_internal_block_that_does_not_parse_is_refused_at_load() {
+        let mut k = Config::default().runtime.kubernetes;
+        k.internal_cidrs = vec!["203.0.113.0/24".into(), "64:ff9b::/96".into()];
+        k.validate().unwrap();
+        k.internal_cidrs.push("10.0.0.0/33".into());
+        let why = k.validate().unwrap_err();
+        assert!(
+            why.starts_with("runtime.kubernetes.internal_cidrs:"),
+            "{why}"
+        );
+        assert!(why.contains("10.0.0.0/33"), "{why}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(
+            &path,
+            "[runtime.kubernetes]\ninternal_cidrs = [\"public-pods\"]\n",
+        )
+        .unwrap();
+        let why = Config::try_load_from(&path).unwrap_err();
+        assert!(why.contains("internal_cidrs"), "{why}");
+    }
+
     #[test]
     fn kubernetes_pods_are_sized_by_default() {
         let k = Config::default().runtime.kubernetes;

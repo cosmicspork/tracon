@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use k8s_openapi::api::networking::v1::NetworkPolicy;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -28,7 +29,7 @@ use tower::ServiceExt;
 use tracon::adapter::HarnessAdapter;
 use tracon::boundary::kubernetes::{EgressPort, KubeBackend};
 use tracon::boundary::{Backend, EgressGrant};
-use tracon::config::{Config, RuntimeKind};
+use tracon::config::{Config, HarnessListen, RuntimeKind};
 use tracon::gateway::proxy::{serve_granted, GrantSpec, Granted};
 use tracon::runner::kube::PodEnv;
 use tracon::runner::RunnerCommand;
@@ -550,4 +551,170 @@ async fn a_session_is_refused_without_the_secret_rights() {
     );
     assert!(error.contains("role.yaml"), "{error}");
     assert!(api.created().is_empty(), "no pod was made");
+}
+
+/// The shipped harness policy's shape, egress to the node on `ports`.
+fn harness_policy(ports: &[i32]) -> NetworkPolicy {
+    serde_json::from_value(json!({
+        "metadata": { "name": "tracon-harness", "namespace": NAMESPACE },
+        "spec": {
+            "podSelector": { "matchLabels": { "tracon.dev/role": "harness" } },
+            "policyTypes": ["Ingress", "Egress"],
+            "ingress": [{ "from": [{ "podSelector": { "matchLabels": { "tracon.dev/role": "node" } } }] }],
+            "egress": [{
+                "to": [{ "podSelector": { "matchLabels": { "tracon.dev/role": "node" } } }],
+                "ports": ports.iter().map(|port| json!({ "protocol": "TCP", "port": port })).collect::<Vec<_>>(),
+            }],
+        },
+    }))
+    .unwrap()
+}
+
+/// The shipped node policy's shape, admitting harness pods on `ports`.
+fn node_policy(ports: &[i32]) -> NetworkPolicy {
+    serde_json::from_value(json!({
+        "metadata": { "name": "tracon-node", "namespace": NAMESPACE },
+        "spec": {
+            "podSelector": { "matchLabels": { "tracon.dev/role": "node" } },
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{ "podSelector": { "matchLabels": { "tracon.dev/role": "harness" } } }],
+                "ports": ports.iter().map(|port| json!({ "protocol": "TCP", "port": port })).collect::<Vec<_>>(),
+            }],
+        },
+    }))
+    .unwrap()
+}
+
+/// A pod-hosted node's configuration: the harness listener on the pod
+/// network, as the shipped ConfigMap has it.
+fn pod_config(state: &std::path::Path) -> Config {
+    let mut cfg = config(state);
+    cfg.gateway.harness_listen = HarnessListen::Tcp("0.0.0.0:7421".parse().unwrap());
+    cfg
+}
+
+/// What the node policy looks like in one case.
+enum NodePolicy {
+    Absent,
+    Admits(&'static [i32]),
+    Unreadable,
+}
+
+/// The network check decides whether grants are on, and never fails the
+/// node over it: a harness policy with or without the egress port, against
+/// a node policy that is absent (unrestricted), narrow, open, or unreadable.
+#[tokio::test]
+async fn the_network_check_turns_grants_on_only_when_both_policies_open_the_port() {
+    support::state::isolate();
+    for (harness, node, open, said) in [
+        (
+            &[7421, 8888][..],
+            NodePolicy::Absent,
+            false,
+            "tracon-harness does not allow",
+        ),
+        (&[7421, 8888, 7424][..], NodePolicy::Absent, true, ""),
+        (
+            &[7421, 8888, 7424][..],
+            NodePolicy::Admits(&[7421, 8888]),
+            false,
+            "tracon-node does not admit",
+        ),
+        (
+            &[7421, 8888, 7424][..],
+            NodePolicy::Admits(&[7421, 8888, 7424]),
+            true,
+            "",
+        ),
+        (
+            &[7421, 8888, 7424][..],
+            NodePolicy::Unreadable,
+            false,
+            "could not read tracon-node",
+        ),
+        (
+            &[7421, 8888][..],
+            NodePolicy::Admits(&[7421, 8888, 7424]),
+            false,
+            "tracon-harness does not allow",
+        ),
+    ] {
+        let api = match node {
+            NodePolicy::Unreadable => KubeApi::new(NAMESPACE).forbid_policy("tracon-node"),
+            _ => KubeApi::new(NAMESPACE),
+        };
+        api.insert_policy(harness_policy(harness));
+        if let NodePolicy::Admits(ports) = node {
+            api.insert_policy(node_policy(ports));
+        }
+        let state = tempfile::tempdir().unwrap();
+        let cfg = pod_config(state.path());
+        let backend = backend(&api, &cfg);
+        let report = backend.check_all(&cfg, false).await;
+        let case = format!("{harness:?}, open {open}");
+        assert!(report.passed(), "{case}: {:?}", report.first_failure());
+        let network = report
+            .checks
+            .iter()
+            .find(|check| check.id == tracon::boundary::CheckId::NetworkIsolated)
+            .unwrap();
+        assert_eq!(
+            backend.egress_port().is_open(),
+            open,
+            "{case}: {}",
+            network.detail
+        );
+        match backend.egress_port().verdict().unwrap() {
+            Ok(()) => assert!(network.detail.contains("egress port 7424"), "{case}"),
+            Err(why) => {
+                assert!(why.contains(said), "{case}: {why}");
+                assert!(network.detail.contains(said), "{case}: {}", network.detail);
+            }
+        }
+        assert_eq!(
+            backend.egress_grant(GrantSpec::default()).is_ok(),
+            open,
+            "{case}"
+        );
+    }
+}
+
+/// A re-check runs while sessions start and preparations open grants: an
+/// open port stays open while it runs, and is replaced only by what it
+/// finds. A check that stops before the network check closes it.
+#[tokio::test]
+async fn a_recheck_never_closes_an_open_port_while_it_runs() {
+    support::state::isolate();
+    let api = KubeApi::new(NAMESPACE);
+    api.insert_policy(harness_policy(&[7421, 8888, 7424]));
+    let state = tempfile::tempdir().unwrap();
+    let cfg = pod_config(state.path());
+    let backend = Arc::new(backend(&api, &cfg));
+    assert!(backend.check_all(&cfg, false).await.passed());
+    assert!(backend.egress_port().is_open());
+
+    let gate = api.hold_policy_reads();
+    let reads = api.policy_reads();
+    let checking = {
+        let (backend, cfg) = (backend.clone(), cfg.clone());
+        tokio::spawn(async move { backend.check_all(&cfg, false).await })
+    };
+    while api.policy_reads() == reads {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Mid-check, held at the policy read: still open, and grants still issue.
+    assert!(backend.egress_port().is_open());
+    assert!(backend.egress_grant(GrantSpec::default()).is_ok());
+    gate.add_permits(16);
+    assert!(checking.await.unwrap().passed());
+    assert!(backend.egress_port().is_open());
+
+    // A re-check that cannot even reach the runtime closes it.
+    let mut loopback = cfg.clone();
+    loopback.gateway.harness_listen = HarnessListen::Tcp("127.0.0.1:7421".parse().unwrap());
+    let stopped = backend.check_all(&loopback, false).await;
+    assert!(!stopped.passed());
+    let why = backend.egress_port().verdict().unwrap().unwrap_err();
+    assert!(why.contains("stopped before"), "{why}");
 }
