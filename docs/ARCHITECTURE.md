@@ -1692,6 +1692,60 @@ Three surfaces, three answers, and the differences are the point.
   never reopens the window. Removing a passkey cancels every outstanding
   ceremony and proof. Losing every passkey is recovered at the node: remove
   them there and pair again (see `docs/RECOVERY.md`).
+- **A window without passkeys borrows a browser's** (`http::device`, shaped like
+  RFC 8628 device authorization). The desktop app against a remote node is the
+  case: its webview has no WebAuthn on Linux (webkit2gtk) or in an unsigned
+  macOS build. To sign in, the window posts `/api/auth/device` (public; ten
+  asks per address per five minutes, four waiting per address and sixteen in
+  all) and gets a secret `device_code`, an eight-consonant `user_code`, and
+  `approve_url = <public_origin>/#approve=<id>`, which it opens in the system
+  browser or shows as a QR. The ID rides in the fragment; the secret is in no
+  URL and is stored as a hash. A browser signed in to the node opens the
+  address and shows what the asker claims to be, its address and when it
+  asked (for a step-up, also the asking session's short ID and what approved
+  that session), but not the code: the operator types the code the asking
+  window shows, compared in constant time, and the third wrong one denies the
+  request. That is what ties an approval to the window in front of the
+  operator rather than to a link someone sent them (RFC 8628 §5.4). Approving
+  is itself an admin action, bound to that request alone: `sha256(
+  "tracon-device-approval/1" | id | user_code | kind | op_hash)`, so off the
+  machine it takes a passkey assertion for it, and no cookie (including the
+  asking window's own) approves anything by itself; at the node it needs none.
+  The window polls `/api/auth/device/token` and is answered
+  `authorization_pending`, `slow_down` (its interval raised five seconds),
+  `access_denied`, `expired_token` (ten minutes) or `invalid_grant`, until it
+  collects, once, a new session cookie scoped like a login's. The code is
+  looked up before any limit applies, and only polls whose code answers to
+  nothing meet the per-address and global poll limits, so junk cannot block a
+  window that holds a real one. That session
+  records `delegated_from` (the approving session's short ID, or `local`),
+  lives 30 days rather than 90, never has `paired_ms`, so it cannot enroll the
+  first passkey, and its sign-in is pushed to the operator's devices. For an
+  admin action, a window refused with `step_up_required` posts its challenge
+  to `/api/auth/device/stepup` instead of asserting. Only a challenge the node
+  opened when it refused a request carries that request's description
+  (`webauthn_challenge.action`, `.summary`), and only such a challenge becomes
+  an approval: one asked for by operation hash alone, with no refused request
+  on record, is refused, and the window sends the request again for a fresh
+  refusal. Nor can approving a device request be delegated in turn: its
+  challenge (and any fresh one for the same operation) is marked
+  not-delegable, so the approving browser's own passkey answers it. Every
+  agent- or client-supplied word that reaches a prompt or the approval page
+  (a host, repository, Dockerfile, user agent) is stripped of control, format
+  (bidirectional, zero-width) and separator characters and bounded, and an
+  answer that edits an approval's arguments names the edited keys first in
+  its summary ("Edited host: Save …"). The approval takes the operation, request and summary the node
+  recorded, is bound to the asking session (three waiting at most), and the
+  poll (accepted only from that session) collects a proof for the original
+  `op_hash`, with the same single-use, two-minute and session rules as one
+  from an assertion. A bearer token neither approves nor asks for a step-up.
+  Rotating the token or removing a passkey revokes every approval not yet
+  collected; rows stay a day after they settle as the record of who approved
+  what, and the log keeps each decision. The address an approval shows and
+  the limits key on is the TCP peer, or, when that peer is loopback or in
+  `[auth] trusted_proxies` (an ingress controller's pod network, say), the
+  rightmost `X-Forwarded-For` entry that is not itself a trusted proxy. It
+  only tells callers apart; it never makes a request local.
 
 ## Constraints
 

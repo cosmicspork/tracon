@@ -86,6 +86,7 @@ async fn rig() -> (Harness, SoftPasskey) {
             expires_ms: now + 600_000,
             user_agent: None,
             paired_ms: Some(now),
+            delegated_from: None,
         })
         .unwrap();
     let mut key = SoftPasskey::new(1, ORIGIN);
@@ -213,13 +214,13 @@ async fn an_admin_answer_from_afar_needs_a_passkey_bound_to_it() {
         let proof = finished["proof"].as_str().unwrap().to_string();
 
         // A proof for this answer does not allow it with other arguments,
-        // and the prompt for those says they were edited.
+        // and the prompt for those says which were edited.
         let edited = json!({ "option_id": option, "arguments": { "checks": ["curl evil"] } });
         let (s, v) = send(&h, "POST", &uri, REMOTE, &edited, Some(&proof)).await;
         assert_eq!(v["error"]["kind"], "step_up_required", "{id}: {s} {v}");
         assert_eq!(
             v["step_up"]["summary"].as_str().unwrap_or_default(),
-            format!("{expected}, as edited")
+            format!("Edited checks: {expected}")
         );
 
         // The answer it was made for goes past the gate.
@@ -230,6 +231,51 @@ async fn an_admin_answer_from_afar_needs_a_passkey_bound_to_it() {
     // The two the node runs itself were decided: no longer waiting.
     assert_ne!(state_of(&h, "propose"), "pending");
     assert_ne!(state_of(&h, "trial"), "pending");
+}
+
+/// What an agent wrote is shown cleaned: no bidirectional overrides,
+/// zero-width or separator characters to disguise a host, and bounded.
+#[tokio::test]
+async fn an_agents_words_in_the_prompt_are_cleaned_and_bounded() {
+    let (h, _key) = rig().await;
+    let host = format!(
+        "evil\u{202E}gro.elpmaxe\u{200B}\u{2028}.test{}",
+        "x".repeat(400)
+    );
+    approval(
+        &h,
+        "sneaky",
+        "request_egress",
+        "n1",
+        json!({ "host": host }),
+    );
+    let (s, refused) = send(
+        &h,
+        "POST",
+        "/api/permissions/sneaky/answer",
+        REMOTE,
+        &json!({ "option_id": "allow_repo", "arguments": { "host": "a", "zz": 1, "\u{202E}k": 2 } }),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{refused}");
+    let summary = refused["step_up"]["summary"].as_str().unwrap();
+    // Which arguments were edited, by name, first, so no cap cuts it off.
+    assert!(
+        summary.starts_with("Edited host, k, zz: Save evilgro.elpmaxe.testxxx"),
+        "{summary}"
+    );
+    assert!(
+        !summary
+            .chars()
+            .any(|c| matches!(c as u32, 0x200B | 0x2028 | 0x202E)),
+        "{summary:?}"
+    );
+    assert!(
+        summary.chars().count() <= 160,
+        "{}",
+        summary.chars().count()
+    );
 }
 
 #[tokio::test]

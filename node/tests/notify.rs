@@ -474,6 +474,7 @@ async fn each_device_gets_its_own_copy_and_a_revoked_session_takes_its_devices()
             expires_ms: now_ms() + 60_000,
             user_agent: None,
             paired_ms: None,
+            delegated_from: None,
         })
         .unwrap();
     svc.subscribe(&store, &base, "laptop", None);

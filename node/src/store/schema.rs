@@ -1438,7 +1438,56 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX webauthn_challenge_expiry ON webauthn_challenge(expires_ms);
     "#,
-    // 63: `[[repo]]` recipes channel co-members offered this node, staged for
+    // 63: device approval (`http::device`), for a window that cannot make a
+    // passkey (the desktop app against a remote node): it asks, a signed-in
+    // browser approves with one, and the window polls for the outcome.
+    // Node-local, like the passkeys it leans on.
+    //
+    // `auth_session.delegated_from` names what approved a session made this
+    // way (`local`, or the approving session's short ID); such a session has
+    // no `paired_ms`, so no window to enroll a first passkey.
+    //
+    // `webauthn_challenge.action` and `.summary` keep what an assertion was
+    // opened for, in the node's words, so a device approval made from the
+    // challenge shows the operator the same line the prompt would have.
+    //
+    // `device_approval` is one request: the hash of the secret the window
+    // polls with (never the secret), the short code both screens show, who
+    // asked, and for a step-up the operation and the session it is bound
+    // to. `code_misses` counts wrong codes typed by an approving browser;
+    // the third denies the request. Rows stay a day after they are decided
+    // or expire, as the record of what was approved by whom.
+    r#"
+    ALTER TABLE auth_session ADD COLUMN delegated_from TEXT;
+    ALTER TABLE webauthn_challenge ADD COLUMN action TEXT;
+    ALTER TABLE webauthn_challenge ADD COLUMN summary TEXT;
+    CREATE TABLE device_approval (
+        id                TEXT PRIMARY KEY,
+        kind              TEXT NOT NULL CHECK (kind IN ('sign-in', 'step-up')),
+        device_code_hash  TEXT NOT NULL UNIQUE,
+        user_code         TEXT NOT NULL,
+        requester_session TEXT,
+        requester_agent   TEXT,
+        requester_addr    TEXT,
+        op_hash           TEXT,
+        action            TEXT,
+        summary           TEXT,
+        status            TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending', 'approved', 'denied', 'consumed', 'revoked')),
+        approver          TEXT,
+        issued            TEXT,
+        code_misses       INTEGER NOT NULL DEFAULT 0,
+        created_ms        INTEGER NOT NULL,
+        expires_ms        INTEGER NOT NULL,
+        interval_ms       INTEGER NOT NULL,
+        last_poll_ms      INTEGER,
+        decided_ms        INTEGER,
+        consumed_ms       INTEGER,
+        CHECK (kind = 'sign-in' OR (requester_session IS NOT NULL AND op_hash IS NOT NULL))
+    );
+    CREATE INDEX device_approval_created ON device_approval(created_ms);
+    "#,
+    // 64: `[[repo]]` recipes channel co-members offered this node, staged for
     // its operator. `repo` is the forge identity the recipe names and
     // `recipe_json` the recipe as received (never an image, a digest or a
     // credential). `state` is `pending`, then `accepted`, `declined`,

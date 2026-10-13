@@ -3,9 +3,23 @@
 // asks the operator to confirm (a tap is what lets iOS show the passkey
 // sheet at all), runs the assertion, and hands the proof back for the retry.
 // At the node itself nothing is ever refused this way, so the desktop app
-// never sees it.
+// never sees it there. Against a remote node the desktop app's webview has no
+// passkeys to offer, so the prompt hands the challenge to a device approval
+// instead: another browser, signed in with a passkey, confirms it, and this
+// window collects the proof (`device.ts`).
 
-import { api, setStepUpHandler, type StepUp } from './api'
+import { isTauri } from '@tauri-apps/api/core'
+
+import { api, setStepUpHandler, StaleChallenge, type StepUp } from './api'
+import {
+  confirmsElsewhere,
+  DeviceCancelled,
+  deviceProblem,
+  handOver,
+  pollForApproval,
+  type DeviceProof,
+  type DeviceStart,
+} from './device'
 import {
   assertionJSON,
   ceremonyProblem,
@@ -37,11 +51,32 @@ interface Pending {
   reject: (err: Error) => void
 }
 
+/** Hand the pending action's challenge to a device approval. Either way the
+    challenge is spent: the next try needs a fresh one. */
+async function askElsewhere(pending: Pending): Promise<DeviceStart> {
+  try {
+    return await handOver(pending.stepUp, {
+      deviceStepUp: (challengeId) => api.deviceStepUp(challengeId),
+    })
+  } finally {
+    pending.stepUp = { ...pending.stepUp, expires_ms: 0 }
+  }
+}
+
 class StepUpPrompt {
   pending = $state<Pending | null>(null)
   busy = $state(false)
   problem = $state('')
   readonly supported = passkeysSupported()
+  /** This window confirms in another browser rather than with its own
+      passkey: the desktop app, or a browser without WebAuthn. */
+  readonly elsewhere = confirmsElsewhere({
+    tauri: typeof window !== 'undefined' && isTauri(),
+    passkeys: this.supported,
+  })
+  /** The device approval this prompt is waiting on, once asked for. */
+  device = $state<DeviceStart | null>(null)
+  private abort: AbortController | null = null
   /** Prompts wait their turn: one sheet at a time. */
   private queue: Promise<unknown> = Promise.resolve()
 
@@ -50,11 +85,53 @@ class StepUpPrompt {
       () =>
         new Promise<string>((resolve, reject) => {
           this.problem = ''
+          this.device = null
           this.pending = { stepUp, message, resolve, reject }
+          // Nothing to tap for here: ask straight away, so the button that
+          // opens the browser is a plain link the tap follows.
+          if (this.elsewhere) void this.confirmElsewhere()
         }),
     )
     this.queue = turn.catch(() => undefined)
     return turn
+  }
+
+  /** Have another browser confirm the pending action, and wait for it. */
+  async confirmElsewhere(): Promise<void> {
+    const pending = this.pending
+    if (!pending || this.busy || this.abort) return
+    this.problem = ''
+    this.device = null
+    const abort = new AbortController()
+    this.abort = abort
+    try {
+      const started = await askElsewhere(pending)
+      if (abort.signal.aborted) {
+        void api.deviceDeny(started.approval_id).catch(() => undefined)
+        return
+      }
+      this.device = started
+      const collected = await pollForApproval(started, (code) => api.deviceToken<DeviceProof>(code), {
+        signal: abort.signal,
+      })
+      if (this.pending !== pending) return
+      this.pending = null
+      this.device = null
+      pending.resolve(collected.proof)
+    } catch (err) {
+      if (err instanceof DeviceCancelled || this.pending !== pending) return
+      this.device = null
+      if (err instanceof StaleChallenge) {
+        // The request is sent again for a challenge the node describes; the
+        // refusal it gets opens this prompt anew.
+        this.pending = null
+        pending.reject(err)
+        return
+      }
+      this.problem = deviceProblem(err)
+    } finally {
+      if (this.abort === abort) this.abort = null
+    }
   }
 
   /** Run the assertion for the pending action. Called from the prompt's
@@ -94,6 +171,13 @@ class StepUpPrompt {
   cancel(): void {
     const pending = this.pending
     if (!pending) return
+    // A device approval still waiting is refused, so the other browser does
+    // not go on offering it.
+    const device = this.device
+    this.abort?.abort()
+    this.abort = null
+    if (device) void api.deviceDeny(device.approval_id).catch(() => undefined)
+    this.device = null
     this.pending = null
     this.problem = ''
     pending.reject(new StepUpCancelled())

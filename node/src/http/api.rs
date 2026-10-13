@@ -2072,6 +2072,7 @@ pub(crate) fn admin_answer(
     s: &AppState,
     id: &str,
     option_id: &str,
+    edited: Option<&serde_json::Value>,
 ) -> ApiResult<Option<AdminAnswer>> {
     let Some(approval) = s.store().get_approval(id)? else {
         return Ok(None);
@@ -2080,14 +2081,16 @@ pub(crate) fn admin_answer(
     // The summary is the stored approval's, never the answer's: it says what
     // the operator is confirming in the node's words.
     let args: serde_json::Value = serde_json::from_str(&approval.arguments).unwrap_or_default();
-    let field = |key: &str| args[key].as_str().unwrap_or("").trim().to_string();
+    // An agent wrote these: cleaned and bounded before they are put in front
+    // of the operator, here and in another browser's approval page.
+    let field = |key: &str| super::passkey::clean_text(args[key].as_str().unwrap_or(""), 100);
     let repo = field("repo");
     let repo = if repo.is_empty() {
         "this repository".to_string()
     } else {
         repo
     };
-    Ok(match approval.tool.as_str() {
+    let answer = match approval.tool.as_str() {
         crate::mcp::setup::PROPOSE if allow => Some(AdminAnswer {
             what: "allowing a repository setup proposal writes node.toml",
             summary: format!("Allow repository setup for {repo}"),
@@ -2111,7 +2114,37 @@ pub(crate) fn admin_answer(
             })
         }
         _ => None,
-    })
+    };
+    // An answer that edits the arguments says which, by name and first, so
+    // no length cuts it off: the line is the stored request's, so without
+    // this an approver could not tell that what runs differs from it.
+    Ok(answer.map(|mut a| {
+        if let Some(edited) = edited {
+            a.summary = format!("{}: {}", edited_line(&args, edited), a.summary);
+        }
+        a
+    }))
+}
+
+/// "Edited host, repo": the argument names an answer changes from the
+/// stored request, cleaned, at most six named.
+fn edited_line(stored: &serde_json::Value, edited: &serde_json::Value) -> String {
+    let mut keys: Vec<String> = match edited.as_object() {
+        Some(map) => map
+            .iter()
+            .filter(|(k, v)| stored.get(k.as_str()) != Some(*v))
+            .map(|(k, _)| super::passkey::clean_text(k, 40))
+            .collect(),
+        None => vec!["the arguments".into()],
+    };
+    keys.sort();
+    let more = keys.len().saturating_sub(6);
+    keys.truncate(6);
+    match (keys.is_empty(), more) {
+        (true, _) => "Edited nothing".into(),
+        (false, 0) => format!("Edited {}", keys.join(", ")),
+        (false, n) => format!("Edited {} and {n} more", keys.join(", ")),
+    }
 }
 
 /// An approval answer that is an admin action: why, and what the operator
@@ -2142,7 +2175,7 @@ pub async fn answer_permission(
     // An answer that writes config or runs networked work outside the
     // boundary is an admin action: away from the node it needs a passkey,
     // bound to this answer (option and any edited arguments included).
-    match admin_answer(&s, &id, &b.option_id) {
+    match admin_answer(&s, &id, &b.option_id, b.arguments.as_ref()) {
         Ok(Some(AdminAnswer { what, summary })) => {
             let held_elsewhere = s
                 .store()
@@ -2160,11 +2193,6 @@ pub async fn answer_permission(
                 )
                 .into_response();
             }
-            let summary = if b.arguments.is_some() {
-                format!("{summary}, as edited")
-            } else {
-                summary
-            };
             if let Err(refusal) =
                 super::passkey::authorize_as(&s, &parts, &body, Some(summary)).await
             {
@@ -5897,7 +5925,8 @@ fn authorise_forwarded(
             // A passkey confirms an admin action on the node it is enrolled
             // with; a peer's answer carries none, so these are refused until
             // the mesh has a signed admin path of its own.
-            if let Some(AdminAnswer { what, .. }) = admin_answer(s, permission_id, option_id)? {
+            if let Some(AdminAnswer { what, .. }) = admin_answer(s, permission_id, option_id, None)?
+            {
                 return Err(ApiError(
                     StatusCode::FORBIDDEN,
                     format!(

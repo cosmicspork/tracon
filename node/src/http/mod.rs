@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
+pub mod device;
 pub mod environments;
 pub mod evidence;
 mod mcp;
@@ -464,6 +465,18 @@ pub fn router(state: AppState) -> Router {
             post(passkey::assert_options),
         )
         .route("/api/passkeys/assert/finish", post(passkey::assert_finish))
+        // Device approval: a window without passkeys (the desktop app against
+        // a remote node) signs in, or confirms an admin action, by having a
+        // signed-in browser approve it with one.
+        .route("/api/auth/device", post(device::start))
+        .route("/api/auth/device/token", post(device::token))
+        .route("/api/auth/device/stepup", post(device::step_up))
+        .route("/api/auth/device/approvals/{id}", get(device::view))
+        .route(
+            "/api/auth/device/approvals/{id}/approve",
+            post(device::approve),
+        )
+        .route("/api/auth/device/approvals/{id}/deny", post(device::deny))
         .route("/api/push/key", get(push::key))
         .route(
             "/api/push/subscriptions",
