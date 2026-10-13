@@ -1371,13 +1371,17 @@ What the node pod needs:
 
 The `runtime` check runs `buildctl debug workers` over mutual TLS, then asks the
 registry's token service for push on `<registry>/tracon-repo-probe` and presents the
-token to `/v2/`, and appends what it found to its detail; a token that says it grants
-only pull fails it. The whole check is bounded at 15 seconds. A table that cannot be a
+token to `/v2/`, and appends what it found to its detail. Only an explicit refusal
+fails it: a token service that refuses the credential, or a token that names that
+repository without push. A token that does not say is accepted, and the detail reads
+"push not confirmed". The whole check is bounded at 15 seconds. A table that cannot be a
 builder, or a builder that fails either probe, is a warning there and never refuses
 the node: sessions and checks still run. A build attempted anyway fails with the same
-reason the check gave, and that failure is not held against the repository's recipe:
-the next check or preparation tries again without `tracon repo build` (on
-Kubernetes a session never builds: it runs in its harness's own image). A registry that
+reason the check gave, and that failure is not held against the repository's recipe.
+The recipe is left alone for two minutes, so the check runs queued behind an outage
+do not each try again, and the next check or preparation after that tries again
+without `tracon repo build`, which retries at once (on Kubernetes a session never
+builds: it runs in its harness's own image). A registry that
 cannot be asked whether an image is still there leaves the standing image in use and
 triggers no rebuild.
 

@@ -300,7 +300,7 @@ impl BuildKitBuilder {
             self.prefix,
             match confirmed {
                 true => "grants the credential push",
-                false => "accepts the credential (whether it may push cannot be read)",
+                false => "accepts the credential (push not confirmed: the token does not say)",
             }
         ))
     }

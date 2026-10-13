@@ -214,8 +214,10 @@ pub fn credentials(dir: &Path, host: &str) -> Result<Option<(String, String)>, R
 }
 
 /// The actions a registry token grants on `repository`, when the token is a
-/// JWT that says (`access`, as Docker's token specification has it). `None`
-/// for an opaque token, which cannot be read.
+/// JWT that names it in its `access` claim, as Docker's token specification
+/// has it. `None` whenever the token does not say: an opaque token, a JWT
+/// without the claim, or one whose claim names the repository some other way.
+/// Only a token that names the repository and leaves push out is a refusal.
 fn granted_actions(token: &str, repository: &str) -> Option<Vec<String>> {
     let parts: Vec<&str> = token.split('.').collect();
     let [_, payload, _] = parts.as_slice() else {
@@ -226,10 +228,16 @@ fn granted_actions(token: &str, repository: &str) -> Option<Vec<String>> {
         .ok()?;
     let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     let access = claims.get("access")?.as_array()?;
+    let named: Vec<&serde_json::Value> = access
+        .iter()
+        .filter(|entry| entry["type"] == "repository" && entry["name"] == repository)
+        .collect();
+    if named.is_empty() {
+        return None;
+    }
     Some(
-        access
-            .iter()
-            .filter(|entry| entry["type"] == "repository" && entry["name"] == repository)
+        named
+            .into_iter()
             .flat_map(|entry| entry["actions"].as_array().cloned().unwrap_or_default())
             .filter_map(|action| action.as_str().map(str::to_string))
             .collect(),
@@ -618,10 +626,13 @@ impl Registry {
     /// Whether the Docker config's credential may push under `prefix`
     /// (`host/namespace`). The registry's token service is asked for push on
     /// a repository there, the token is presented to `/v2/`, and a token that
-    /// says what it grants must grant push: a read-only credential would
-    /// otherwise pass every check and fail every build. `Ok(false)` where
-    /// the credential is accepted but the grant cannot be read (an opaque
-    /// token, or a registry asking for Basic).
+    /// names the probe repository must grant push on it: a read-only
+    /// credential would otherwise pass every check and fail every build. Only
+    /// an explicit refusal fails, because the check gates every build: a
+    /// token service that refuses the credential, or a token that names the
+    /// repository without push. `Ok(false)` where the credential is accepted
+    /// but the token does not say (an opaque token, a JWT without an `access`
+    /// claim or naming the repository otherwise, or a Basic registry).
     pub async fn check_push(&self, prefix: &str) -> Result<bool, RegistryError> {
         let host = prefix.split('/').next().unwrap_or(prefix);
         let credential = self.credentials(host)?.ok_or_else(|| {
@@ -682,7 +693,7 @@ impl Registry {
                         Err(RegistryError(format!(
                             "the credential may not push to {prefix} (the token grants {})",
                             match actions.is_empty() {
-                                true => "nothing there".to_string(),
+                                true => "nothing on it".to_string(),
                                 false => actions.join(", "),
                             }
                         )))
@@ -726,6 +737,9 @@ pub(crate) mod tests {
         /// Issue JWTs granting these actions on the scope's repository,
         /// instead of opaque tokens.
         pub jwt_actions: Mutex<Option<Vec<String>>>,
+        /// Name this repository in the JWT's claim instead of the scope's;
+        /// an empty name leaves the `access` claim out.
+        pub jwt_name: Mutex<Option<String>>,
         pub base: Mutex<String>,
     }
 
@@ -759,10 +773,16 @@ pub(crate) mod tests {
         );
         fake.scopes.lock().unwrap().push(scope.clone());
         if let Some(actions) = fake.jwt_actions.lock().unwrap().clone() {
-            let repository = scope.split(':').nth(1).unwrap_or_default();
-            let claims = serde_json::json!({ "access": [
-                { "type": "repository", "name": repository, "actions": actions }
-            ]});
+            let named = fake.jwt_name.lock().unwrap().clone();
+            let repository = named
+                .clone()
+                .unwrap_or_else(|| scope.split(':').nth(1).unwrap_or_default().to_string());
+            let claims = match named.as_deref() {
+                Some("") => serde_json::json!({ "sub": "pusher" }),
+                _ => serde_json::json!({ "access": [
+                    { "type": "repository", "name": repository, "actions": actions }
+                ]}),
+            };
             let payload =
                 base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
             return axum::Json(serde_json::json!({ "token": format!("granted.{payload}.sig") }))
@@ -1133,8 +1153,29 @@ pub(crate) mod tests {
             error.0.contains("may not push") && error.0.contains("pull"),
             "{error}"
         );
+        // A token that does not say, or says it of another name, is not a
+        // refusal: push is not confirmed, and builds are not blocked on it.
+        *fake.jwt_name.lock().unwrap() = Some("cs/something-else".into());
+        assert_eq!(registry.check_push(&prefix).await, Ok(false));
+        *fake.jwt_name.lock().unwrap() = Some(String::new());
+        assert_eq!(registry.check_push(&prefix).await, Ok(false));
+        *fake.jwt_name.lock().unwrap() = None;
         *fake.jwt_actions.lock().unwrap() = Some(vec!["pull".into(), "push".into()]);
         assert_eq!(registry.check_push(&prefix).await, Ok(true));
+        // A token service that refuses the credential is a refusal.
+        let wrong = tempfile::tempdir().unwrap();
+        let auth = base64::engine::general_purpose::STANDARD.encode("pusher:wrong");
+        std::fs::write(
+            wrong.path().join("config.json"),
+            serde_json::json!({ "auths": { host.clone(): { "auth": auth } } }).to_string(),
+        )
+        .unwrap();
+        let refused = Registry::new(Some(wrong.path().to_path_buf()))
+            .for_test("unused", "unused")
+            .check_push(&prefix)
+            .await
+            .unwrap_err();
+        assert!(refused.0.contains("answered 401"), "{refused}");
         assert!(fake
             .scopes
             .lock()

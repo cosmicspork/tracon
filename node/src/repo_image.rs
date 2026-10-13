@@ -97,6 +97,64 @@ fn build_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
         .clone()
 }
 
+/// How long a builder that could not build is left alone for one recipe.
+/// Every check run and preparation queued behind an outage would otherwise
+/// each stage a tree and run the builder's check again, minutes of work to
+/// learn the same thing.
+const COOLDOWN: Duration = Duration::from_secs(120);
+
+type Cooldowns = HashMap<(PathBuf, String), (std::time::Instant, String)>;
+
+/// Builder outages still cooling down, by repository and recipe: until when,
+/// and what the builder said.
+fn cooldowns() -> &'static StdMutex<Cooldowns> {
+    static COOLDOWNS: std::sync::LazyLock<StdMutex<Cooldowns>> =
+        std::sync::LazyLock::new(Default::default);
+    &COOLDOWNS
+}
+
+fn retry_note(error: &str, until: std::time::Instant) -> String {
+    let left = until
+        .saturating_duration_since(std::time::Instant::now())
+        .as_secs()
+        .max(1);
+    format!("{error}; tried again in {left}s, or at once by `tracon repo build`")
+}
+
+/// What a builder outage left for this recipe, while it cools down.
+fn cooling(repo: &Path, key: &str) -> Option<String> {
+    let mut cooldowns = cooldowns().lock().unwrap();
+    let at = (repo.to_path_buf(), key.to_string());
+    match cooldowns.get(&at) {
+        Some((until, error)) if *until > std::time::Instant::now() => {
+            Some(retry_note(error, *until))
+        }
+        Some(_) => {
+            cooldowns.remove(&at);
+            None
+        }
+        None => None,
+    }
+}
+
+/// Leave this recipe alone for a while after the builder could not build
+/// it; the error, saying when it is tried again.
+fn cool(repo: &Path, key: &str, error: &str) -> String {
+    let until = std::time::Instant::now() + COOLDOWN;
+    cooldowns().lock().unwrap().insert(
+        (repo.to_path_buf(), key.to_string()),
+        (until, error.to_string()),
+    );
+    retry_note(error, until)
+}
+
+fn warm(repo: &Path, key: &str) {
+    cooldowns()
+        .lock()
+        .unwrap()
+        .remove(&(repo.to_path_buf(), key.to_string()));
+}
+
 /// The `[[repo]]` entry for `repo`, if it names a Dockerfile to build.
 pub fn building_entry(cfg: &Config, repo: &Path) -> Option<Repo> {
     cfg.repos()
@@ -426,8 +484,11 @@ async fn ensure_session_with(
     if let Some(failed) = latest.filter(|row| row.status == "failed" && row.recipe_hash == key) {
         return unlayered(failed.error);
     }
-    if let Some(why) = builder.unavailable().await {
+    if let Some(why) = cooling(repo, &key) {
         return unlayered(why);
+    }
+    if let Some(why) = builder.unavailable().await {
+        return unlayered(cool(repo, &key, &why));
     }
     let started = RepoImageStart {
         repo_path: &repo_path,
@@ -445,6 +506,7 @@ async fn ensure_session_with(
     match built {
         Ok(built) => {
             let _ = store.finish_repo_image(&id, Ok(&built.image), &built.log_tail, &[]);
+            warm(repo, &key);
             supersede(builder, store, repo, &kind).await;
             SessionImage {
                 image: Some(built.image),
@@ -455,7 +517,10 @@ async fn ensure_session_with(
         Err(failure) => {
             tracing::warn!(repo = %repo.display(), error = %failure.error, "session image build failed");
             settle_failure(store, &id, &failure);
-            unlayered(failure.error)
+            match failure.transient {
+                true => unlayered(cool(repo, &key, &failure.error)),
+                false => unlayered(failure.error),
+            }
         }
     }
 }
@@ -717,9 +782,16 @@ async fn ensure_with(
     }
     // A builder that cannot build says so before a tree is staged or a build
     // is recorded against the recipe.
+    // One that could not a moment ago is left alone for a while, unless
+    // the operator asks.
     if tried.is_none() {
+        if !force {
+            if let Some(why) = cooling(repo, &recipe.hash) {
+                return fallback(why);
+            }
+        }
         if let Some(why) = builder.unavailable().await {
-            return fallback(why);
+            return fallback(cool(repo, &recipe.hash, &why));
         }
     }
     let started = RepoImageStart {
@@ -738,7 +810,7 @@ async fn ensure_with(
         Some(tried) => Ok(tried),
         None => {
             tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image");
-            build(builder, cfg, repo, &recipe).await
+            build(builder, cfg, store, repo, &recipe).await
         }
     };
     match built {
@@ -751,13 +823,17 @@ async fn ensure_with(
                 &warnings,
             );
             let _ = store.set_repo_image_parent(&id, &built.source);
+            warm(repo, &recipe.hash);
             supersede(builder, store, repo, BASE).await;
             Ensured::Rebuilt(built.image.image)
         }
         Err(failure) => {
             tracing::warn!(repo = %repo.display(), error = %failure.error, "repository image build failed");
             settle_failure(store, &id, &failure);
-            fallback(failure.error)
+            match failure.transient {
+                true => fallback(cool(repo, &recipe.hash, &failure.error)),
+                false => fallback(failure.error),
+            }
         }
     }
 }
@@ -934,7 +1010,7 @@ pub async fn build_for_trial(
         .start_repo_image(&started)
         .map_err(|error| failed(error.to_string()))?;
     tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image for a trial");
-    match build(builder, cfg, repo, recipe).await {
+    match build(builder, cfg, store, repo, recipe).await {
         Ok(built) => {
             let _ =
                 store.finish_repo_image(&id, Ok(&built.image.image), &built.image.log_tail, &[]);
@@ -984,6 +1060,7 @@ struct Built {
 async fn build(
     builder: &dyn ImageBuilder,
     cfg: &Config,
+    store: &Store,
     repo: &Path,
     recipe: &Recipe,
 ) -> Result<Built, BuildFailure> {
@@ -1038,8 +1115,15 @@ async fn build(
     {
         Ok(built) => built,
         Err(failure) => {
-            // Nothing will ever stand on it.
-            builder.remove(&source.image).await;
+            // Nothing will stand on it, unless a build that stands already
+            // does: a cached rebuild can produce the very same source image.
+            let stands = store
+                .ready_repo_images(&repo.to_string_lossy())
+                .map(|rows| rows.iter().any(|row| row.parent_image == source.image))
+                .unwrap_or(true);
+            if !stands {
+                builder.remove(&source.image).await;
+            }
             return Err(failure);
         }
     };
@@ -1124,6 +1208,10 @@ mod tests {
         unknown: StdMutex<bool>,
         /// Keep a previous generation, as a registry does.
         retains: bool,
+        /// Give the same build the same digest every time, as a cache does.
+        same_digest: bool,
+        /// Fail every build from this many builds on.
+        fail_from: StdMutex<Option<usize>>,
     }
 
     #[async_trait]
@@ -1131,6 +1219,14 @@ mod tests {
         async fn build(&self, build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
             if *self.broken.lock().unwrap() {
                 return Err(BuildFailure::transient("buildkitd did not answer"));
+            }
+            let failing = (*self.fail_from.lock().unwrap())
+                .is_some_and(|from| self.builds.lock().unwrap().len() >= from);
+            if failing {
+                return Err(BuildFailure {
+                    error: "the layer did not build".into(),
+                    ..Default::default()
+                });
             }
             if *self.fail.lock().unwrap() {
                 return Err(BuildFailure {
@@ -1147,7 +1243,10 @@ mod tests {
             files.sort();
             let name = build.tag.rsplit_once(':').unwrap().0.to_string();
             // Every build its own digest, as a real one with a timestamp is.
-            let count = self.builds.lock().unwrap().len();
+            let count = match self.same_digest {
+                true => 0,
+                false => self.builds.lock().unwrap().len(),
+            };
             let digest = hex::encode(Sha256::digest(format!("{}{text}{count}", build.tag)));
             self.builds
                 .lock()
@@ -1323,7 +1422,9 @@ mod tests {
 
     /// A builder that cannot build at all, said before anything is staged or
     /// found during the build, is not a verdict on the recipe: nothing is
-    /// recorded against it, and the next ask builds without being told to.
+    /// recorded against it, and after a short cooldown (in which the queue
+    /// behind it does not each try again) the next ask builds without being
+    /// told to.
     #[tokio::test]
     async fn a_builder_that_cannot_build_is_not_held_against_the_recipe() {
         let tmp = checkout();
@@ -1331,31 +1432,82 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let builder = FakeBuilder::default();
         let path = repo.to_string_lossy();
+        let hash = recipe(repo, &entry(repo)).await.unwrap().hash;
 
         *builder.down.lock().unwrap() = Some("buildkitd did not answer, so no".into());
-        assert_eq!(
-            ensure(&builder, &store, repo, false).await,
-            Ensured::Unavailable {
-                reason: "buildkitd did not answer, so no".into()
-            }
+        let ensured = ensure(&builder, &store, repo, false).await;
+        let Ensured::Unavailable { reason } = &ensured else {
+            panic!("{ensured:?}");
+        };
+        assert!(
+            reason.starts_with("buildkitd did not answer, so no; tried again in 1")
+                && reason.ends_with("or at once by `tracon repo build`"),
+            "{reason}"
         );
         assert!(builder.builds.lock().unwrap().is_empty());
         assert_eq!(store.latest_repo_image(&path, BASE).unwrap(), None);
 
+        // Cooling down: the builder is not asked again, even once it is back.
         *builder.down.lock().unwrap() = None;
+        let ensured = ensure(&builder, &store, repo, false).await;
+        assert!(
+            matches!(&ensured, Ensured::Unavailable { reason } if reason.contains("tried again in")),
+            "{ensured:?}"
+        );
+        assert!(builder.builds.lock().unwrap().is_empty());
+
+        // A build the builder breaks mid-way is not recorded either.
+        warm(repo, &hash);
         *builder.broken.lock().unwrap() = true;
         let ensured = ensure(&builder, &store, repo, false).await;
         assert!(
-            matches!(&ensured, Ensured::Unavailable { reason } if reason == "buildkitd did not answer"),
+            matches!(&ensured, Ensured::Unavailable { reason }
+                if reason.starts_with("buildkitd did not answer; tried again in")),
             "{ensured:?}"
         );
         assert_eq!(store.latest_repo_image(&path, BASE).unwrap(), None);
 
+        // The operator asking goes past the cooldown; once it builds, the
+        // cooldown is gone.
         *builder.broken.lock().unwrap() = false;
+        assert!(matches!(
+            ensure(&builder, &store, repo, true).await,
+            Ensured::Rebuilt(_)
+        ));
+        assert_eq!(cooling(repo, &hash), None);
+    }
+
+    /// A layer that fails to build takes the source image built for it away,
+    /// unless a build that stands already stands on that very image, as a
+    /// cached rebuild of the same recipe can produce.
+    #[tokio::test]
+    async fn a_failed_layer_leaves_a_source_image_a_standing_build_uses() {
+        let tmp = checkout();
+        let repo = tmp.path();
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder {
+            same_digest: true,
+            ..Default::default()
+        };
         assert!(matches!(
             ensure(&builder, &store, repo, false).await,
             Ensured::Rebuilt(_)
         ));
+        let source = base_row(&store, repo).parent_image;
+        *builder.fail_from.lock().unwrap() = Some(3);
+        let ensured = ensure(&builder, &store, repo, true).await;
+        assert!(matches!(ensured, Ensured::Stale { .. }), "{ensured:?}");
+        assert!(!builder.removed.lock().unwrap().contains(&source));
+
+        // With nothing standing on it, it goes.
+        let other = checkout();
+        let fresh = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        *builder.fail_from.lock().unwrap() = Some(1);
+        ensure(&builder, &fresh, other.path(), false).await;
+        let removed = builder.removed.lock().unwrap().clone();
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].contains("-src@sha256:"), "{removed:?}");
     }
 
     /// A builder that cannot say whether the image is still there keeps it in
