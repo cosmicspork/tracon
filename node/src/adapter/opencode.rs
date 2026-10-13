@@ -201,7 +201,7 @@ impl OpenCodeAdapter {
             // (finding 4). The username is stated rather than defaulted so the
             // credential this node sends is the credential it set.
             ("OPENCODE_SERVER_USERNAME", SERVER_USERNAME.into()),
-            ("OPENCODE_SERVER_PASSWORD", password.to_string()),
+            (SERVER_PASSWORD_ENV, password.to_string()),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
@@ -215,6 +215,14 @@ impl OpenCodeAdapter {
     fn serve_cmd(spec: &LaunchSpec, port: u16, password: &str) -> RunnerCommand {
         let mut env = spec.env.clone();
         env.extend(Self::launch_env(&spec.harness_home, password));
+        // The password is what keeps anything else on the runner's network
+        // from driving this server, so it is never in a pod spec or on an
+        // argv: it travels with the session's other secrets.
+        let (password, env): (Vec<_>, Vec<_>) = env
+            .into_iter()
+            .partition(|(name, _)| name == SERVER_PASSWORD_ENV);
+        let mut secret_env = spec.secret_env.clone();
+        secret_env.extend(password);
         RunnerCommand {
             argv: vec![
                 "opencode".into(),
@@ -236,7 +244,7 @@ impl OpenCodeAdapter {
                 "INFO".into(),
             ],
             env,
-            secret_env: spec.secret_env.clone(),
+            secret_env,
             workdir: Some(spec.cwd_in_runner.clone()),
             name: spec.container_name.clone(),
             expose: Some(port),
@@ -247,6 +255,9 @@ impl OpenCodeAdapter {
 
 /// The username OpenCode's Basic auth defaults to and this node sets.
 const SERVER_USERNAME: &str = "opencode";
+
+/// Where `opencode serve` reads its per-launch password.
+pub const SERVER_PASSWORD_ENV: &str = "OPENCODE_SERVER_PASSWORD";
 
 /// An auth store with nothing in it. Asserted rather than assumed: an `oauth`
 /// record would arm a subscription plugin inside the runner and a `wellknown`
@@ -2184,8 +2195,20 @@ mod tests {
         );
         assert_eq!(cmd.expose, Some(41234));
         assert!(!cmd.argv.iter().any(|a| a == "--mdns"));
-        let env: std::collections::HashMap<_, _> = cmd.env.into_iter().collect();
-        assert_eq!(env["OPENCODE_SERVER_PASSWORD"], "pw");
+        // Hidden, as every secret a session carries is: never in a pod spec
+        // or on an argv.
+        assert!(cmd.secret_env.contains("OPENCODE_SERVER_PASSWORD", "pw"));
+        assert!(!cmd
+            .env
+            .iter()
+            .any(|(name, _)| name == "OPENCODE_SERVER_PASSWORD"));
+        assert_eq!(
+            cmd.env
+                .iter()
+                .find(|(name, _)| name == "OPENCODE_SERVER_USERNAME")
+                .map(|(_, value)| value.as_str()),
+            Some("opencode")
+        );
     }
 
     #[test]

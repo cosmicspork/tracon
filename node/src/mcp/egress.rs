@@ -13,7 +13,9 @@
 //! operator's one queue and `approval_status` reads it. Allowing it opens the
 //! host to the session's own grant — for a few minutes, for the rest of the
 //! session, or for the rest of the session and every later one through the
-//! repository's `egress` — and runs nothing. Podman only, as grants are.
+//! repository's `egress` — and runs nothing. Wherever the runtime issues
+//! grants: a Claude Code session on Podman, or on Kubernetes once the policies
+//! open the egress port and the node may keep the grant in a Secret.
 
 use std::time::{Duration, Instant};
 
@@ -227,12 +229,18 @@ pub async fn call(
         );
     };
     let host = normalize_host(args.get("host").and_then(Value::as_str).unwrap_or(""))?;
+    // A host no grant could ever reach here is not put to the operator.
+    if let Some(why) = manager.backend().egress_refusal().name(&host) {
+        return Err(format!("{host} {why}"));
+    }
     let grants = manager
         .egress_grants()
         .filter(|grants| grants.holds_session(session_id))
         .ok_or(
-            "this session holds no egress grant of its own to open: only a Claude Code session \
-             on the Podman runtime reaches the network through one",
+            "this session holds no egress grant of its own to open: a Claude Code session \
+             holds one where the runtime issues them (Podman, or Kubernetes once its policies \
+             open the egress port and the node may manage Secrets), and an OpenCode session \
+             keeps the harness proxy",
         )?;
     if grants.session_allows(session_id, &host) {
         return Ok(json!({ "host": host, "state": "reachable" }));

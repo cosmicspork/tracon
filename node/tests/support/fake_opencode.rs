@@ -1181,6 +1181,8 @@ impl Runner for FakeRunner {
         if let Some((_, password)) = cmd
             .env
             .iter()
+            // The adapter hands it over as secret environment.
+            .chain(cmd.secret_env.iter())
             .find(|(name, _)| name == "OPENCODE_SERVER_PASSWORD")
         {
             *self.password.lock().unwrap() = password.clone();

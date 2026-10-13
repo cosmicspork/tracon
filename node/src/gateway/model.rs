@@ -212,6 +212,34 @@ pub struct Wiring {
     pub mcp_servers: Vec<serde_json::Value>,
 }
 
+impl Wiring {
+    /// Whether this entry of `env` carries the session's token.
+    fn carries_token(&self, value: &str) -> bool {
+        !self.token.is_empty() && value == self.token
+    }
+
+    /// The wiring's environment that is safe to show: the base URLs.
+    pub fn plain_env(&self) -> Vec<(String, String)> {
+        self.env
+            .iter()
+            .filter(|(_, value)| !self.carries_token(value))
+            .cloned()
+            .collect()
+    }
+
+    /// The wiring's environment that carries the session's token, which
+    /// reaches the gateway and the node's MCP server as that session. It
+    /// travels as `secret_env`, so it is never in a pod spec or on an argv.
+    pub fn secret_env(&self) -> crate::runner::SecretEnv {
+        self.env
+            .iter()
+            .filter(|(_, value)| self.carries_token(value))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+}
+
 /// The base URL for one provider as the harness sees it.
 pub fn base_url(host: &str, port: u16, provider: &str) -> String {
     format!("http://{host}:{port}/model/{provider}")
@@ -1526,6 +1554,20 @@ mod tests {
             .expect("openai-codex is wired");
         assert_eq!(codex.base_url, "http://tracon-gw:7421/model/openai-codex");
         assert_eq!(w.token, "tok");
+
+        // The token is the session's credential: it travels hidden, and only
+        // the base URL may be shown.
+        assert_eq!(
+            w.plain_env(),
+            [(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://tracon-gw:7421/model/anthropic".to_string()
+            )]
+        );
+        let secret = w.secret_env();
+        assert!(secret.contains("ANTHROPIC_API_KEY", "tok"));
+        assert!(secret.contains("TRACON_PROVIDER_KEY_OPENAI_CODEX", "tok"));
+        assert!(!secret.contains_name("ANTHROPIC_BASE_URL"));
     }
 
     #[test]

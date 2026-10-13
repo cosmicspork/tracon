@@ -762,14 +762,23 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     if let Some(port) = backend.proxy_port() {
         let allow = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
             .map_err(|e| anyhow::anyhow!("allowlist: {e}"))?;
-        tokio::spawn(crate::gateway::proxy::serve(port, allow));
+        // Only a pod-hosted node serves it, beside the cluster's services:
+        // what it will never dial is the backend's.
+        tokio::spawn(crate::gateway::proxy::serve_refusing(
+            port,
+            allow,
+            backend.egress_refusal(),
+        ));
         tracing::info!(port, "connect proxy listening");
     }
     // Where a gateway container does carry the harness proxy, the node still
     // serves the per-client one behind the gateway's second forward: who may
-    // reach what is decided here, by the grant each client presents.
+    // reach what is decided here, by the grant each client presents. A pod
+    // reaches it directly, on the pod network, and what it may never dial
+    // there is wider (`Backend::egress_refusal`).
     if let Some(grants) = backend.egress_grants() {
-        let granted = crate::gateway::proxy::Granted::new(grants.clone());
+        let granted =
+            crate::gateway::proxy::Granted::refusing(grants.clone(), backend.egress_refusal());
         let listen = cfg.egress_listen();
         tracing::info!(%listen, "egress listener");
         match listen {

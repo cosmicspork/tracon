@@ -1743,7 +1743,7 @@ impl Manager {
         id: &str,
         slug: &str,
         workspace: &crate::workspace::Workspace,
-        cache: Option<&str>,
+        cache: Result<&str, String>,
         environment: &crate::environment::RepoEnvironment,
         started: Instant,
     ) -> Option<crate::environment::WorkspacePreparation> {
@@ -1793,6 +1793,13 @@ impl Manager {
     ) -> anyhow::Result<()> {
         if !self.startable(id)? {
             return Ok(());
+        }
+        // Every session carries secrets (its gateway token, and an egress
+        // grant's password where it holds one), and a runtime that cannot
+        // keep them out of what others read refuses here, before anything is
+        // staged, with what to change.
+        if let Some(why) = self.backend.secret_env_refusal() {
+            anyhow::bail!(why);
         }
         // Registered before the harness starts: it connects to the node's MCP
         // server during `session/new`, so a token published afterwards is
@@ -1987,6 +1994,9 @@ impl Manager {
                         &environment,
                         id,
                     ))
+                    .map_err(|error| {
+                        tracing::info!(session = %id, %error, "the session keeps the harness proxy");
+                    })
                     .ok()
             })
             .flatten();
@@ -2024,7 +2034,19 @@ impl Manager {
                 id,
                 &slug,
                 &workspace,
-                session_cache.as_deref(),
+                session_cache.as_deref().ok_or_else(|| {
+                    // Said precisely: on a runtime that cannot build images (a
+                    // Kubernetes node, today) this is every session, and the
+                    // reason is the runtime's, not the repository's.
+                    let why = image
+                        .note
+                        .as_deref()
+                        .map(|note| format!(": {note}"))
+                        .unwrap_or_default();
+                    format!(
+                        "the session runs in the harness's own image, not its repository's{why}"
+                    )
+                }),
                 &environment,
                 started,
             )
@@ -2254,17 +2276,9 @@ impl Manager {
             },
         )?;
 
-        let mut harness_env = wiring.env.clone();
-        harness_env.extend([
-            (
-                "GIT_CONFIG_GLOBAL".into(),
-                format!("{}/.gitconfig", self.backend.harness_home()),
-            ),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
-        ]);
+        let (mut harness_env, harness_secret_env) =
+            harness_environment(&wiring, egress.as_ref(), &self.backend.harness_home());
         harness_env.extend(cache_env);
-        let harness_secret_env = egress.as_ref().map(|e| e.env()).unwrap_or_default();
 
         // The supervisor's channel exists before the harness does, because the
         // ingestion layer needs it: a permission reconciliation re-raises goes
@@ -3829,19 +3843,44 @@ fn write_external_stop(
     Ok(())
 }
 
+/// What a session's harness is given as its environment: the wiring's base
+/// URLs and Git's settings in the open, and its secrets as secret
+/// environment, which never reaches a pod spec or an argv. Those are the
+/// wiring's token, which is the session's credential at the gateway and the
+/// MCP server, and the egress grant's proxy URL, which carries its password.
+pub fn harness_environment(
+    wiring: &crate::gateway::model::Wiring,
+    egress: Option<&crate::boundary::EgressGrant>,
+    home: &str,
+) -> (Vec<(String, String)>, crate::runner::SecretEnv) {
+    let mut env = wiring.plain_env();
+    env.extend([
+        ("GIT_CONFIG_GLOBAL".into(), format!("{home}/.gitconfig")),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+    ]);
+    let mut secret = wiring.secret_env();
+    if let Some(egress) = egress {
+        secret.extend(egress.env().iter().cloned());
+    }
+    (env, secret)
+}
+
 /// Run the repository's `prepare` on a session's workspace volume before its
 /// harness starts, in the repository's image with the session's `cache`
 /// writable and the entry's own egress for exactly as long as it runs: the
 /// steps a candidate is prepared with before its checks. `None` when the
-/// entry prepares nothing; `NotRun` when the session has no cache to prepare
-/// against because it is not in its repository's image. A failure is the
+/// entry prepares nothing; `NotRun`, with `cache`'s reason, when the session
+/// has no cache to prepare against because it is not in its repository's
+/// image. Egress the runtime cannot open (`Backend::egress_grant`) fails the
+/// preparation with the runtime's reason, as it fails a check's. A failure is the
 /// outcome, not an error: the session starts anyway, since it is the one that
 /// can fix what broke. The entry's own time limit bounds it, as it bounds a
 /// check's preparation, and `cancel` stops it sooner.
 pub(crate) async fn prepare_session_workspace(
     backend: &dyn crate::boundary::Backend,
     environment: &crate::environment::RepoEnvironment,
-    (workspace, cache): (&str, Option<&str>),
+    (workspace, cache): (&str, Result<&str, String>),
     runner_name: &str,
     cancel: &dyn crate::review::checks::Cancel,
 ) -> Option<crate::environment::WorkspacePreparation> {
@@ -3852,10 +3891,8 @@ pub(crate) async fn prepare_session_workspace(
     }
     let begun = Instant::now();
     let outcome = match cache {
-        None => PrepareOutcome::NotRun(
-            "the session runs in the harness's own image, not its repository's".into(),
-        ),
-        Some(cache) => {
+        Err(why) => PrepareOutcome::NotRun(why),
+        Ok(cache) => {
             let runner = backend.runner(Vec::new());
             let prepared = crate::review::checks::run_preparation(
                 backend,
@@ -3983,7 +4020,7 @@ mod tests {
 
     async fn prepare(
         environment: &crate::environment::RepoEnvironment,
-        (work, cache): (&str, Option<&str>),
+        (work, cache): (&str, Result<&str, String>),
         cancel: &dyn crate::review::checks::Cancel,
     ) -> Option<crate::environment::WorkspacePreparation> {
         prepare_session_workspace(
@@ -4003,7 +4040,7 @@ mod tests {
         let environment = preparing(&["touch prepared", "echo second > second"], 60);
         let done = prepare(
             &environment,
-            (&work, Some(&cache)),
+            (&work, Ok(&cache)),
             &crate::review::checks::RunToCompletion,
         )
         .await
@@ -4026,7 +4063,7 @@ mod tests {
         let environment = preparing(&["echo boom >&2; exit 3", "touch never"], 60);
         let done = prepare(
             &environment,
-            (&work, Some(&cache)),
+            (&work, Ok(&cache)),
             &crate::review::checks::RunToCompletion,
         )
         .await
@@ -4054,7 +4091,7 @@ mod tests {
         let begun = Instant::now();
         let done = prepare(
             &environment,
-            (&work, Some(&cache)),
+            (&work, Ok(&cache)),
             &crate::review::checks::RunToCompletion,
         )
         .await
@@ -4074,7 +4111,7 @@ mod tests {
         let (work, cache) = volumes();
         let environment = preparing(&["sleep 30"], 600);
         let begun = Instant::now();
-        let done = prepare(&environment, (&work, Some(&cache)), &Stopped)
+        let done = prepare(&environment, (&work, Ok(&cache)), &Stopped)
             .await
             .unwrap();
         assert_eq!(
@@ -4094,14 +4131,21 @@ mod tests {
         let (work, _) = volumes();
         let none = prepare(
             &preparing(&[], 60),
-            (&work, None),
+            (&work, Err("no image".into())),
             &crate::review::checks::RunToCompletion,
         )
         .await;
         assert_eq!(none, None);
         let done = prepare(
             &preparing(&["touch prepared"], 60),
-            (&work, None),
+            (
+                &work,
+                Err(
+                    "the session runs in the harness's own image, not its repository's: \
+                     the kubernetes runtime cannot build images"
+                        .into(),
+                ),
+            ),
             &crate::review::checks::RunToCompletion,
         )
         .await
@@ -4114,9 +4158,10 @@ mod tests {
             .join("prepared")
             .exists());
         assert_eq!(done.payload()["outcome"], "not_run");
+        // The reason is the caller's, word for word: what is still missing.
         assert!(done.payload()["reason"]
             .as_str()
             .unwrap()
-            .contains("harness"));
+            .ends_with("the kubernetes runtime cannot build images"));
     }
 }

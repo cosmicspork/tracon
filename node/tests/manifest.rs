@@ -797,6 +797,8 @@ impl Runner for LiveRunner {
         let password = cmd
             .env
             .iter()
+            // The adapter hands it over as secret environment.
+            .chain(cmd.secret_env.iter())
             .find(|(name, _)| name == "OPENCODE_SERVER_PASSWORD")
             .map(|(_, value)| value.clone())
             .unwrap_or_default();

@@ -6,9 +6,13 @@ mod support;
 use support::state;
 use support::{harness::harness, rows::session_row};
 
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracon::gateway::proxy::{run, serve_granted, Allowlist, GrantSpec, Granted, Grants};
+
+use tracon::gateway::proxy::{
+    run, run_refusing, serve_granted, Allowlist, GrantSpec, Granted, Grants, Refusal, Resolve,
+};
 
 async fn proxy(allow: &[String]) -> std::net::SocketAddr {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -351,4 +355,257 @@ async fn a_sessions_refusals_are_recorded_on_it_once_per_host() {
         .map(|event| event.payload["host"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(refused, ["registry.npmjs.org", "crates.io"]);
+}
+
+/// A proxy for a pod-hosted node: what a cluster holds is refused for any
+/// grant, by address after one lookup and by name before any.
+async fn granted_refusing(
+    grants: &Grants,
+    refusal: Refusal,
+    resolve: Option<Resolve>,
+) -> std::net::SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let mut granted = Granted::refusing(grants.clone(), refusal);
+    if let Some(resolve) = resolve {
+        granted = granted.resolving_with(resolve);
+    }
+    tokio::spawn(serve_granted(l, granted));
+    addr
+}
+
+/// A resolver that answers from a script, call by call, and records each
+/// name it was asked.
+fn scripted(answers: Vec<Vec<std::net::SocketAddr>>) -> (Resolve, Arc<Mutex<Vec<String>>>) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let heard = asked.clone();
+    let answers = Arc::new(Mutex::new(std::collections::VecDeque::from(answers)));
+    let resolve: Resolve = Arc::new(move |host, _port| {
+        heard.lock().unwrap().push(host);
+        let answer = answers.lock().unwrap().pop_front().unwrap_or_default();
+        Box::pin(async move { Ok(answer) })
+    });
+    (resolve, asked)
+}
+
+/// In a cluster the proxy sits beside the API server, the cluster's services
+/// and every other pod. A grant that names one, by address or by a name that
+/// resolves there, opens nothing: the node's own address, the private
+/// ranges, carrier-grade NAT, a configured block, and cluster names, which
+/// are refused before any lookup and raise no ask.
+#[tokio::test]
+async fn a_cluster_proxy_refuses_what_the_cluster_holds() {
+    state::isolate();
+    let grants = Grants::default();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    grants.on_refusal(Arc::new(move |_, host| {
+        seen.lock().unwrap().push(host.to_string());
+        None
+    }));
+    let token = grants
+        .issue(GrantSpec {
+            client: "session".into(),
+            session_id: Some("s1".into()),
+            hosts: [
+                "10.245.0.1",
+                "172.20.3.4",
+                "192.168.1.20",
+                "100.64.0.10",
+                "fd00::1",
+                "127.0.0.1",
+                "203.0.113.9",
+                "kubernetes.default.svc",
+                "buildkitd.tracon-build.svc.cluster.local",
+                "metadata.google.internal",
+                "buildkitd",
+            ]
+            .map(String::from)
+            .to_vec(),
+            ..Default::default()
+        })
+        .unwrap();
+    let refusal = Refusal::cluster(&["203.0.113.0/24".into()]).unwrap();
+    let addr = granted_refusing(&grants, refusal, None).await;
+    for (host, said) in [
+        ("10.245.0.1", "resolves to a private or cluster address"),
+        ("172.20.3.4", "resolves to a private or cluster address"),
+        ("192.168.1.20", "resolves to a private or cluster address"),
+        ("100.64.0.10", "resolves to a private or cluster address"),
+        ("[fd00::1]", "resolves to a private or cluster address"),
+        ("203.0.113.9", "resolves to a private or cluster address"),
+        ("127.0.0.1", "resolves to an address on this machine"),
+        ("kubernetes.default.svc", "names a host inside the cluster"),
+        (
+            "buildkitd.tracon-build.svc.cluster.local",
+            "names a host inside the cluster",
+        ),
+        (
+            "metadata.google.internal",
+            "names a host inside the cluster",
+        ),
+        ("buildkitd", "names a host inside the cluster"),
+        // Not granted either: refused for what it is, and nobody is asked.
+        ("vault.vault.svc", "names a host inside the cluster"),
+        ("10.9.9.9", "resolves to a private or cluster address"),
+    ] {
+        let line = exchange(addr, &connect(host, &basic("session", &token))).await;
+        assert!(
+            line.starts_with(&format!("HTTP/1.1 403 {said}")),
+            "{host}: {line}"
+        );
+    }
+    assert!(asked.lock().unwrap().is_empty(), "{:?}", asked.lock());
+}
+
+/// A name is looked up once, and what it resolved to is what is dialled:
+/// a resolver that answers with an allowed address and then, asked again,
+/// with a private one (DNS rebinding) is never asked again for the same
+/// connection. A name whose answer mixes the two is dialled only at the
+/// allowed one. In a cluster the name is looked up as absolute, so no search
+/// domain completes it into a service's.
+#[tokio::test]
+async fn a_name_is_resolved_once_and_only_what_was_checked_is_dialled() {
+    state::isolate();
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let allowed = upstream.local_addr().unwrap();
+    let accepted = Arc::new(Mutex::new(0usize));
+    let counted = accepted.clone();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = upstream.accept().await.unwrap();
+            *counted.lock().unwrap() += 1;
+            // Held open so the tunnel stays up for the test's read.
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                drop(s);
+            });
+        }
+    });
+    let private: std::net::SocketAddr = "10.0.0.7:443".parse().unwrap();
+    let (resolve, names) = scripted(vec![vec![allowed], vec![private], vec![private, allowed]]);
+    let grants = Grants::default();
+    let token = grants
+        .issue(GrantSpec {
+            client: "prepare".into(),
+            hosts: vec!["registry.example.test".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    let addr = granted_refusing(&grants, Refusal::only(&["10.0.0.0/8"]), Some(resolve)).await;
+    let request = connect("registry.example.test", &basic("prepare", &token));
+
+    let first = exchange(addr, &request).await;
+    assert!(first.starts_with("HTTP/1.1 200"), "{first}");
+    assert_eq!(names.lock().unwrap().len(), 1, "asked once");
+    assert_eq!(*accepted.lock().unwrap(), 1);
+
+    // Rebound: the next connection is checked against its own answer.
+    let second = exchange(addr, &request).await;
+    assert!(
+        second.starts_with("HTTP/1.1 403 resolves to a private or cluster address"),
+        "{second}"
+    );
+    assert_eq!(
+        *accepted.lock().unwrap(),
+        1,
+        "the private answer was not dialled"
+    );
+
+    let mixed = exchange(addr, &request).await;
+    assert!(mixed.starts_with("HTTP/1.1 200"), "{mixed}");
+    assert_eq!(*accepted.lock().unwrap(), 2);
+    assert_eq!(names.lock().unwrap().len(), 3, "one lookup per connection");
+
+    // The cluster's refusal looks the name up as absolute.
+    let (resolve, names) = scripted(vec![vec![allowed]]);
+    let cluster = Refusal::cluster(&[]).unwrap();
+    let addr = granted_refusing(&grants, cluster, Some(resolve)).await;
+    let line = exchange(addr, &request).await;
+    // Loopback is this machine, so it is refused; what matters is the name.
+    assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+    assert_eq!(*names.lock().unwrap(), ["registry.example.test."]);
+}
+
+/// The allowlist proxy a pod-hosted node serves on its proxy port refuses
+/// what the cluster holds exactly as the granted one does: a cluster name
+/// before any lookup, an allowlisted name that resolves inside, once and as
+/// absolute, and it dials only the addresses it checked. Without a refusal
+/// (how Podman's tests run it; Podman's own proxy is the gateway's) it dials
+/// as it always did.
+#[tokio::test]
+async fn the_allowlist_proxy_in_a_cluster_refuses_what_the_cluster_holds() {
+    state::isolate();
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let allowed = upstream.local_addr().unwrap();
+    let accepted = Arc::new(Mutex::new(0usize));
+    let counted = accepted.clone();
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = upstream.accept().await.unwrap();
+            *counted.lock().unwrap() += 1;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                drop(s);
+            });
+        }
+    });
+    let private: std::net::SocketAddr = "10.245.0.1:443".parse().unwrap();
+    let (resolve, names) = scripted(vec![vec![private]]);
+    let allow = Allowlist::new(&[
+        r"^kubernetes\.default\.svc$".into(),
+        r"^10\.0\.0\.1$".into(),
+        r"^api\.example\.test$".into(),
+    ])
+    .unwrap();
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(run_refusing(
+        l,
+        allow.clone(),
+        Refusal::cluster(&[]).unwrap(),
+        resolve,
+    ));
+    let plain = |host: &str| format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n");
+
+    let svc = exchange(addr, &plain("kubernetes.default.svc")).await;
+    assert!(svc.starts_with("HTTP/1.1 403"), "{svc}");
+    assert!(svc.contains("names a host inside the cluster"), "{svc}");
+    let literal = exchange(addr, &plain("10.0.0.1")).await;
+    assert!(literal.contains("private or cluster address"), "{literal}");
+    assert!(names.lock().unwrap().is_empty(), "nothing was looked up");
+
+    let inside = exchange(addr, &plain("api.example.test")).await;
+    assert!(inside.starts_with("HTTP/1.1 403"), "{inside}");
+    assert!(inside.contains("private or cluster address"), "{inside}");
+    assert_eq!(
+        *names.lock().unwrap(),
+        ["api.example.test."],
+        "once, as absolute"
+    );
+
+    // A mixed answer: only the address that passes is dialled. Loopback is
+    // this machine to a cluster, so this half refuses the private block alone.
+    let (resolve, names) = scripted(vec![vec![private, allowed]]);
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mixed_addr = l.local_addr().unwrap();
+    tokio::spawn(run_refusing(
+        l,
+        allow,
+        Refusal::only(&["10.0.0.0/8"]),
+        resolve,
+    ));
+    let mixed = exchange(mixed_addr, &plain("api.example.test")).await;
+    assert!(mixed.starts_with("HTTP/1.1 200"), "{mixed}");
+    assert_eq!(*accepted.lock().unwrap(), 1);
+    assert_eq!(names.lock().unwrap().len(), 1, "looked up once");
+
+    // Unrefused, a listed private literal is dialled as before.
+    let podman = proxy(&[r"^127\.0\.0\.1$".into()]).await;
+    let line = status_of(
+        podman,
+        "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n",
+    )
+    .await;
+    assert!(line.contains("502"), "{line}");
 }

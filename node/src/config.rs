@@ -1027,6 +1027,14 @@ pub struct Kubernetes {
     /// runtime gives by default crashes a browser test. It counts against
     /// the pod's memory limit, so it must fit within both limits.
     pub shm_size: String,
+    /// Address blocks the per-client egress proxy refuses besides the
+    /// private ones (RFC 1918, 100.64.0.0/10, fc00::/7), which it always
+    /// refuses here: a cluster whose pod or service range, or whose nodes'
+    /// network, is publicly routable names it, so a grant cannot reach it.
+    /// So does one whose network translates IPv6 to IPv4 (NAT64,
+    /// `64:ff9b::/96`; 6to4, `2002::/16`): an IPv4 address carried inside
+    /// such an IPv6 one is not decoded, so the block itself must be named.
+    pub internal_cidrs: Vec<String>,
 }
 
 /// What a harness pod asks the scheduler for. Two kinds: a session (the
@@ -1227,6 +1235,14 @@ impl Kubernetes {
                 "runtime.kubernetes.image_pull_secrets: {name:?} is not a Secret name"
             ));
         }
+        // What the egress proxy refuses is part of the boundary, so a block
+        // that does not parse is refused here, at load, rather than found at
+        // the next boundary check with per-client egress already off.
+        for block in &self.internal_cidrs {
+            block
+                .parse::<crate::gateway::proxy::Cidr>()
+                .map_err(|error| format!("runtime.kubernetes.internal_cidrs: {error}"))?;
+        }
         Ok(())
     }
 }
@@ -1249,6 +1265,7 @@ impl Default for Kubernetes {
             resources: KubeResources::default(),
             image_pull_secrets: Vec::new(),
             shm_size: "1Gi".into(),
+            internal_cidrs: Vec::new(),
         }
     }
 }
@@ -3125,6 +3142,30 @@ models = [{ id = "gpt-6" }]
     /// namespace's LimitRange never fills in a default the node did not
     /// choose; a check gets more than a session because a test suite with a
     /// browser needs it.
+    #[test]
+    fn an_internal_block_that_does_not_parse_is_refused_at_load() {
+        let mut k = Config::default().runtime.kubernetes;
+        k.internal_cidrs = vec!["203.0.113.0/24".into(), "64:ff9b::/96".into()];
+        k.validate().unwrap();
+        k.internal_cidrs.push("10.0.0.0/33".into());
+        let why = k.validate().unwrap_err();
+        assert!(
+            why.starts_with("runtime.kubernetes.internal_cidrs:"),
+            "{why}"
+        );
+        assert!(why.contains("10.0.0.0/33"), "{why}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(
+            &path,
+            "[runtime.kubernetes]\ninternal_cidrs = [\"public-pods\"]\n",
+        )
+        .unwrap();
+        let why = Config::try_load_from(&path).unwrap_err();
+        assert!(why.contains("internal_cidrs"), "{why}");
+    }
+
     #[test]
     fn kubernetes_pods_are_sized_by_default() {
         let k = Config::default().runtime.kubernetes;

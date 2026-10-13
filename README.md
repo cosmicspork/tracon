@@ -521,7 +521,8 @@ session's own grant and no other. An agent that knows what it needs asks first w
 **`request_egress`**, which waits up to 45 seconds for your answer; once you decline, a
 retried connection is told so and does not ask again. The session's log shows each
 refusal, and the orientation it starts with says all of this before its first command.
-Podman only, as the grants are.
+It works wherever grants are issued: on Podman, and on Kubernetes once the egress port
+is open and the node may manage Secrets (see [As a Kubernetes pod](#as-a-kubernetes-pod)).
 
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
@@ -549,7 +550,8 @@ same egress grant, so `node_modules` and the like are there when the agent arriv
 bounded by the entry's `timeout_secs` and stopped with the session; a failure is recorded
 in the session's log and told to the agent in its orientation, and the session starts
 anyway. A session in the harness's own image has no cache to prepare against and is told
-the commands were not run.
+the commands were not run, and why: on Kubernetes, which cannot build images yet, that is
+every session.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -943,7 +945,8 @@ forward_port = 7421
                                     # proxy: preparation and sessions. Each presents its own
                                     # credentials; the name is from the retired QA browser
 # egress_port = 7424                # where the node serves that proxy when harness_listen is a
-                                    # TCP address; with a socket path it is a socket beside it
+                                    # TCP address; with a socket path it is a socket beside it.
+                                    # A pod-hosted node's harnesses reach it here directly
 
 [session]
 budget_tokens = 2000000             # per session
@@ -971,6 +974,13 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # memory_request = "1Gi"            # renders its requests and memory limit, so a LimitRange
 # memory_limit = "4Gi"              # never fills them in; no CPU limit unless one is set
 # cpu_limit = "2"                   # (cpu_limit). A limit below its request is refused at load
+# internal_cidrs = []               # (under [runtime.kubernetes]) address blocks the per-client
+                                    # egress proxy refuses besides the private ones (RFC 1918,
+                                    # 100.64.0.0/10, fc00::/7), which it always refuses in a
+                                    # cluster: name a pod, service or node range that is public
+                                    # (on a cloud, the nodes' and load balancers' public IPs),
+                                    # and any NAT64 (64:ff9b::/96) or 6to4 (2002::/16) range the
+                                    # cluster uses, since an IPv4 address inside one is not decoded
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
 # [[repo]]                          # one repository's environment (also Settings → Repositories and
@@ -1277,6 +1287,30 @@ every run carrying a credential is refused with the rule to add. No value is eve
 written into a pod spec instead. The rights make the node able to read every Secret in
 its namespace, so keep nothing else there that a harness should not reach through a
 compromised node.
+
+A session carries secrets too: its token at the node's gateway and MCP server, OpenCode's
+per-launch server password, and its egress grant. They travel the same way, so a session
+on a node without the Secrets rule is refused with the rule to add rather than started
+with them in its pod spec.
+
+Per-client egress, the proxy credentials a preparation and a session present to reach the
+hosts their repository names, is served by the node on `[gateway] egress_port` (7424),
+which a harness pod reaches at the node's pod address. The shipped policies open it:
+`tracon-harness` lets harness pods out to it and `tracon-node` lets them in. A node is
+issued no grants until the `network` check finds both policies open the port and the
+`runtime` check finds the Secrets rule, and it says which is missing; it runs either way,
+so a release and the policy change that opens the port can roll out in either order.
+`--deep` asks the port with no credentials from a harness pod and expects a 407.
+
+In a cluster both of the node's proxies, the allowlist proxy on `proxy_port` and the
+per-client one, refuse to dial a private address (RFC 1918, `100.64.0.0/10`,
+`fc00::/7`), this machine, the link, any block in `[runtime.kubernetes] internal_cidrs`,
+and names ending `.svc`, `.cluster.local` or `.internal` or with no dot, whatever a grant
+or `allow_hosts` names. Each looks a name up once, as absolute, and dials only the
+addresses it checked. On a cloud, list the nodes' and load balancers' public addresses
+in `internal_cidrs` too: they reach the cluster from outside it, and nothing private
+about them says so. An entry that is not an address block is refused when `node.toml`
+loads.
 
 ### From source
 

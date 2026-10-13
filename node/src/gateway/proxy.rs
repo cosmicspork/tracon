@@ -75,6 +75,12 @@ pub fn decide(method: &Method, authority: Option<&str>, allow: &Allowlist) -> De
 }
 
 pub async fn serve(port: u16, allow: Allowlist) {
+    serve_refusing(port, allow, Refusal::nothing()).await
+}
+
+/// `serve`, never dialling what `refusal` refuses: how a pod-hosted node
+/// serves its harnesses' allowlist proxy, beside the cluster's own services.
+pub async fn serve_refusing(port: u16, allow: Allowlist, refusal: Refusal) {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -83,18 +89,33 @@ pub async fn serve(port: u16, allow: Allowlist) {
             return;
         }
     };
-    run(listener, allow).await
+    run_refusing(listener, allow, refusal, system_resolver()).await
 }
 
 pub async fn run(listener: TcpListener, allow: Allowlist) {
+    run_refusing(listener, allow, Refusal::nothing(), system_resolver()).await
+}
+
+/// `run` with what it may never dial and how it looks names up.
+pub async fn run_refusing(
+    listener: TcpListener,
+    allow: Allowlist,
+    refusal: Refusal,
+    resolve: Resolve,
+) {
+    let proxied = Proxied {
+        allow,
+        refusal,
+        resolve,
+    };
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
-        let allow = allow.clone();
+        let proxied = proxied.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
-            let svc = service_fn(move |req| handle(req, peer, allow.clone()));
+            let svc = service_fn(move |req| handle(req, peer, proxied.clone()));
             if let Err(e) = http1::Builder::new()
                 .serve_connection(io, svc)
                 .with_upgrades()
@@ -106,28 +127,44 @@ pub async fn run(listener: TcpListener, allow: Allowlist) {
     }
 }
 
+/// The allowlist proxy's state: what it admits, what it never dials, and
+/// how it looks names up.
+#[derive(Clone)]
+struct Proxied {
+    allow: Allowlist,
+    refusal: Refusal,
+    resolve: Resolve,
+}
+
 type Body = http_body_util::Either<Empty<Bytes>, Full<Bytes>>;
 
 async fn handle(
     req: Request<Incoming>,
     peer: SocketAddr,
-    allow: Allowlist,
+    proxied: Proxied,
 ) -> Result<Response<Body>, hyper::Error> {
+    let refused = |why: &str| {
+        Ok(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(http_body_util::Either::Right(Full::from(why.to_string())))
+            .expect("static response"))
+    };
     let authority = req.uri().authority().map(|a| a.as_str().to_string());
-    let host = match decide(req.method(), authority.as_deref(), &allow) {
+    let host = match decide(req.method(), authority.as_deref(), &proxied.allow) {
         Decision::Connect(h) => h,
         Decision::Refused(why) => {
             tracing::info!(%peer, target = authority.as_deref().unwrap_or("-"), why, "proxy refused");
-            return Ok(Response::builder()
-                .status(StatusCode::FORBIDDEN)
-                .body(http_body_util::Either::Right(Full::from(why)))
-                .expect("static response"));
+            return refused(why);
         }
     };
-    let upstream = match TcpStream::connect((host.as_str(), 443)).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(%peer, %host, error = %e, "proxy could not reach host");
+    let upstream = match dial(&proxied.refusal, &proxied.resolve, &host, 443).await {
+        Dialled::Stream(stream) => stream,
+        Dialled::Refused(why) => {
+            tracing::warn!(%peer, %host, why, "proxy refused an internal host");
+            return refused(why);
+        }
+        Dialled::Unreachable => {
+            tracing::warn!(%peer, %host, "proxy could not reach host");
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(http_body_util::Either::Right(Full::from(
@@ -151,6 +188,49 @@ async fn handle(
         .status(StatusCode::OK)
         .body(http_body_util::Either::Left(Empty::new()))
         .expect("static response"))
+}
+
+/// What came of dialling a host a proxy admitted.
+enum Dialled {
+    Stream(TcpStream),
+    /// Refused by `Refusal`, by name or by every address it resolved to.
+    Refused(&'static str),
+    /// Nothing resolved, or nothing that passed answered.
+    Unreachable,
+}
+
+/// Dial `host` as both proxies do: refused by name before any lookup, looked
+/// up once (as absolute in a cluster), and dialled only at the addresses
+/// that pass, so the addresses checked are the addresses dialled and a name
+/// that answers differently the second time (DNS rebinding) is never asked a
+/// second time.
+async fn dial(refusal: &Refusal, resolve: &Resolve, host: &str, port: u16) -> Dialled {
+    if let Some(why) = refusal.name(host) {
+        return Dialled::Refused(why);
+    }
+    let resolved: Vec<SocketAddr> = resolve(refusal.lookup_name(host), port)
+        .await
+        .unwrap_or_default();
+    let mut refused = None;
+    let addresses: Vec<&SocketAddr> = resolved
+        .iter()
+        .filter(|addr| match refusal.address(&addr.ip()) {
+            Some(why) => {
+                refused = Some(why);
+                false
+            }
+            None => true,
+        })
+        .collect();
+    if let (true, Some(why)) = (addresses.is_empty(), refused) {
+        return Dialled::Refused(why);
+    }
+    for address in addresses {
+        if let Ok(stream) = TcpStream::connect(address).await {
+            return Dialled::Stream(stream);
+        }
+    }
+    Dialled::Unreachable
 }
 
 /// What one client may reach, and what it is told when it asks for more.
@@ -327,19 +407,222 @@ pub fn internal_address(ip: &IpAddr) -> bool {
     }
 }
 
-/// The granted proxy: the registry it honours and the addresses it will not
-/// dial.
+/// An address block, `10.0.0.0/8` or `fc00::/7`. A bare address is a block
+/// of one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl std::str::FromStr for Cidr {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let text = text.trim();
+        let (address, prefix) = match text.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (text, None),
+        };
+        let network: IpAddr = address
+            .parse()
+            .map_err(|_| format!("{text:?} is not an address block such as 10.0.0.0/8"))?;
+        let most = if network.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            None => most,
+            Some(prefix) => prefix
+                .parse::<u8>()
+                .ok()
+                .filter(|prefix| *prefix <= most)
+                .ok_or_else(|| format!("{text:?} has no usable prefix length"))?,
+        };
+        Ok(Self { network, prefix })
+    }
+}
+
+impl Cidr {
+    pub fn contains(&self, ip: &IpAddr) -> bool {
+        // An IPv4 address written as IPv6 is the same host.
+        let ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(*ip, IpAddr::V4),
+            IpAddr::V4(_) => *ip,
+        };
+        let masked = |bits: u128, width: u32| match self.prefix {
+            0 => 0,
+            prefix => bits >> (width - u32::from(prefix)),
+        };
+        match (self.network, ip) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                masked(u32::from(network).into(), 32) == masked(u32::from(ip).into(), 32)
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                masked(u128::from(network), 128) == masked(u128::from(ip), 128)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The private and shared address blocks a pod-hosted node refuses to dial
+/// for a grant: RFC 1918, carrier-grade NAT (where some clusters put their
+/// services and pods), and IPv6 unique-local. A cluster's pods, services and
+/// API server, and the network the cluster sits on, are in these.
+pub const PRIVATE_BLOCKS: &[&str] = &[
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "fc00::/7",
+];
+
+/// Name suffixes that only resolve inside a cluster or a cloud's own network,
+/// refused before any lookup.
+pub const CLUSTER_SUFFIXES: &[&str] = &[".svc", ".cluster.local", ".internal"];
+
+/// What the granted proxy will not dial, whatever a grant names. Decided per
+/// runtime: under Podman the node's proxy sits on the operator's machine,
+/// where a host on their own network is a legitimate thing to name, so only
+/// this machine and its link are refused. In a pod the same proxy sits on
+/// the cluster network, beside the API server, the cluster's services and
+/// every other pod, none of which a grant was ever meant to reach.
+#[derive(Clone, Debug)]
+pub struct Refusal {
+    /// Loopback, link-local, unspecified and broadcast (`internal_address`).
+    this_machine: bool,
+    blocks: Vec<Cidr>,
+    /// Refuse names that resolve inside the cluster: the suffixes above, and
+    /// a name with no dot, which a cluster resolver's search list would
+    /// complete into one.
+    cluster_names: bool,
+}
+
+impl Refusal {
+    /// This machine and its link: the Podman node's refusal.
+    pub fn this_machine() -> Self {
+        Self {
+            this_machine: true,
+            blocks: Vec::new(),
+            cluster_names: false,
+        }
+    }
+
+    /// This machine, the private ranges, `extra` (`[runtime.kubernetes]
+    /// internal_cidrs`, for a cluster whose pod or service range is not
+    /// private), and cluster names: the pod-hosted node's refusal.
+    pub fn cluster(extra: &[String]) -> Result<Self, String> {
+        let blocks = PRIVATE_BLOCKS
+            .iter()
+            .map(|block| block.parse())
+            .chain(extra.iter().map(|block| block.parse()))
+            .collect::<Result<Vec<Cidr>, String>>()?;
+        Ok(Self {
+            this_machine: true,
+            blocks,
+            cluster_names: true,
+        })
+    }
+
+    /// Nothing refused. For tests, whose upstreams can only be on loopback.
+    #[doc(hidden)]
+    pub fn nothing() -> Self {
+        Self {
+            this_machine: false,
+            blocks: Vec::new(),
+            cluster_names: false,
+        }
+    }
+
+    /// Only these blocks refused. For tests, which need loopback dialled and
+    /// something else not.
+    #[doc(hidden)]
+    pub fn only(blocks: &[&str]) -> Self {
+        Self {
+            this_machine: false,
+            blocks: blocks.iter().map(|block| block.parse().unwrap()).collect(),
+            cluster_names: false,
+        }
+    }
+
+    /// Why `host` is refused before it is looked up, if it is: in a cluster,
+    /// a cluster name, or an address literal that is refused anyway.
+    pub fn name(&self, host: &str) -> Option<&'static str> {
+        if !self.cluster_names {
+            return None;
+        }
+        let host = host.trim_end_matches('.');
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return self.address(&ip);
+        }
+        let inside = CLUSTER_SUFFIXES
+            .iter()
+            .any(|suffix| host.ends_with(suffix) || host == &suffix[1..]);
+        (inside || !host.contains('.')).then_some("names a host inside the cluster; not proxied")
+    }
+
+    /// Why an address `host` resolved to is not dialled, if it is not.
+    pub fn address(&self, ip: &IpAddr) -> Option<&'static str> {
+        if self.this_machine && internal_address(ip) {
+            return Some("resolves to an address on this machine; not proxied");
+        }
+        self.blocks
+            .iter()
+            .any(|block| block.contains(ip))
+            .then_some("resolves to a private or cluster address; not proxied")
+    }
+
+    /// The name to look up. A cluster's resolver completes a relative name
+    /// through its search list (`<name>.<namespace>.svc.cluster.local` first,
+    /// with `ndots:5`), so in a cluster the name is looked up as absolute:
+    /// what the grant names is the only name asked about.
+    fn lookup_name(&self, host: &str) -> String {
+        match self.cluster_names && host.parse::<IpAddr>().is_err() && !host.ends_with('.') {
+            true => format!("{host}."),
+            false => host.to_string(),
+        }
+    }
+}
+
+/// How the granted proxy turns a name into addresses: the system resolver,
+/// or a test's.
+pub type Resolve = Arc<
+    dyn Fn(
+            String,
+            u16,
+        ) -> futures_util::future::BoxFuture<'static, std::io::Result<Vec<SocketAddr>>>
+        + Send
+        + Sync,
+>;
+
+fn system_resolver() -> Resolve {
+    Arc::new(|host, port| {
+        Box::pin(async move {
+            Ok(tokio::net::lookup_host((host.as_str(), port))
+                .await?
+                .collect())
+        })
+    })
+}
+
+/// The granted proxy: the registry it honours, the addresses it will not
+/// dial, and how it looks names up.
 #[derive(Clone)]
 pub struct Granted {
     grants: Grants,
-    refuse: fn(&IpAddr) -> bool,
+    refusal: Refusal,
+    resolve: Resolve,
 }
 
 impl Granted {
+    /// The Podman node's proxy: this machine and its link refused.
     pub fn new(grants: Grants) -> Self {
+        Self::refusing(grants, Refusal::this_machine())
+    }
+
+    pub fn refusing(grants: Grants, refusal: Refusal) -> Self {
         Self {
             grants,
-            refuse: internal_address,
+            refusal,
+            resolve: system_resolver(),
         }
     }
 
@@ -347,10 +630,14 @@ impl Granted {
     /// on loopback.
     #[doc(hidden)]
     pub fn dialling_any_address(grants: Grants) -> Self {
-        Self {
-            grants,
-            refuse: |_| false,
-        }
+        Self::refusing(grants, Refusal::nothing())
+    }
+
+    /// Look names up with `resolve` rather than the system's. For tests.
+    #[doc(hidden)]
+    pub fn resolving_with(mut self, resolve: Resolve) -> Self {
+        self.resolve = resolve;
+        self
     }
 }
 
@@ -463,6 +750,12 @@ async fn handle_granted(
     let host = host
         .trim_matches(|c| c == '[' || c == ']')
         .to_ascii_lowercase();
+    // Before the grant: a cluster name or address is refused whatever the grant says,
+    // so it never raises an ask that no answer could satisfy.
+    if let Some(why) = granted.refusal.name(&host) {
+        tracing::warn!(client = %grant.client, %host, "granted proxy refused a cluster name");
+        return Ok(answer(StatusCode::FORBIDDEN, why));
+    }
     if !grant.allows(&host) {
         tracing::info!(client = %grant.client, %host, "granted proxy refused");
         let said = granted.grants.refused(&grant, &host);
@@ -471,33 +764,16 @@ async fn handle_granted(
             said.as_deref().unwrap_or(&grant.refusal),
         ));
     }
-    // Resolved here and dialled by address: the name is checked once, and
-    // what it resolved to is what gets the connection.
-    let resolved: Vec<SocketAddr> = match tokio::net::lookup_host((host.as_str(), port)).await {
-        Ok(found) => found.collect(),
-        Err(_) => Vec::new(),
-    };
-    let addresses: Vec<&SocketAddr> = resolved
-        .iter()
-        .filter(|addr| !(granted.refuse)(&addr.ip()))
-        .collect();
-    if addresses.is_empty() && !resolved.is_empty() {
-        tracing::warn!(client = %grant.client, %host, "granted host resolves to this machine");
-        return Ok(answer(
-            StatusCode::FORBIDDEN,
-            "resolves to an address on this machine; not proxied",
-        ));
-    }
-    let mut upstream = None;
-    for address in &addresses {
-        if let Ok(stream) = TcpStream::connect(address).await {
-            upstream = Some(stream);
-            break;
+    let upstream = match dial(&granted.refusal, &granted.resolve, &host, port).await {
+        Dialled::Stream(stream) => stream,
+        Dialled::Refused(why) => {
+            tracing::warn!(client = %grant.client, %host, why, "granted host resolves inside");
+            return Ok(answer(StatusCode::FORBIDDEN, why));
         }
-    }
-    let Some(upstream) = upstream else {
-        tracing::warn!(client = %grant.client, %host, "granted proxy could not reach host");
-        return Ok(answer(StatusCode::BAD_GATEWAY, "upstream unreachable"));
+        Dialled::Unreachable => {
+            tracing::warn!(client = %grant.client, %host, "granted proxy could not reach host");
+            return Ok(answer(StatusCode::BAD_GATEWAY, "upstream unreachable"));
+        }
     };
     tracing::info!(client = %grant.client, %host, port, "granted proxy connect");
     if tunnel {
@@ -595,5 +871,97 @@ mod tests {
         for external in ["192.168.1.20", "10.0.0.5", "1.1.1.1", "2606:4700::1111"] {
             assert!(!internal_address(&external.parse().unwrap()), "{external}");
         }
+        // And the Podman refusal is exactly that, by address and by name.
+        let podman = Refusal::this_machine();
+        assert!(podman
+            .address(&"169.254.169.254".parse().unwrap())
+            .is_some());
+        assert!(podman.address(&"10.0.0.5".parse().unwrap()).is_none());
+        assert!(podman.name("nas.internal").is_none());
+        assert!(podman.name("intranet").is_none());
+        assert_eq!(podman.lookup_name("pypi.org"), "pypi.org");
+    }
+
+    #[test]
+    fn an_address_block_holds_what_its_prefix_says() {
+        let block: Cidr = "100.64.0.0/10".parse().unwrap();
+        assert!(block.contains(&"100.64.0.1".parse().unwrap()));
+        assert!(block.contains(&"100.127.255.255".parse().unwrap()));
+        assert!(!block.contains(&"100.128.0.0".parse().unwrap()));
+        // Written as IPv6, an IPv4 address is still in its block.
+        assert!(block.contains(&"::ffff:100.64.3.4".parse().unwrap()));
+        let ula: Cidr = "fc00::/7".parse().unwrap();
+        assert!(ula.contains(&"fd12:3456::1".parse().unwrap()));
+        assert!(!ula.contains(&"2606:4700::1111".parse().unwrap()));
+        let one: Cidr = "203.0.113.7".parse().unwrap();
+        assert!(one.contains(&"203.0.113.7".parse().unwrap()));
+        assert!(!one.contains(&"203.0.113.8".parse().unwrap()));
+        let all: Cidr = "0.0.0.0/0".parse().unwrap();
+        assert!(all.contains(&"8.8.8.8".parse().unwrap()));
+        for bad in [
+            "10.0.0.0/33",
+            "10.0.0/8",
+            "fc00::/129",
+            "pods",
+            "10.0.0.0/x",
+        ] {
+            assert!(bad.parse::<Cidr>().is_err(), "{bad}");
+        }
+    }
+
+    /// In a cluster the proxy sits beside the API server and every service:
+    /// none of it is dialled for a grant, by address or by name, and a
+    /// public host still is.
+    #[test]
+    fn a_cluster_refuses_private_ranges_and_cluster_names() {
+        let cluster = Refusal::cluster(&["203.0.113.0/24".into()]).unwrap();
+        for inside in [
+            "10.245.0.1",
+            "172.20.1.1",
+            "192.168.1.20",
+            "100.64.0.10",
+            "fd00::1",
+            "::ffff:10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "203.0.113.9",
+        ] {
+            assert!(
+                cluster.address(&inside.parse().unwrap()).is_some(),
+                "{inside}"
+            );
+        }
+        for outside in ["104.16.0.1", "2606:4700::1111", "172.32.0.1", "100.128.0.1"] {
+            assert!(
+                cluster.address(&outside.parse().unwrap()).is_none(),
+                "{outside}"
+            );
+        }
+        for name in [
+            "kubernetes.default.svc",
+            "kubernetes.default.svc.cluster.local",
+            "kubernetes.default.svc.cluster.local.",
+            "metadata.google.internal",
+            "buildkitd",
+            "localhost",
+            "svc",
+        ] {
+            assert!(cluster.name(name).is_some(), "{name}");
+        }
+        for name in [
+            "registry.npmjs.org",
+            "pypi.org",
+            "internal.example.com",
+            "1.2.3.4",
+        ] {
+            assert!(cluster.name(name).is_none(), "{name}");
+        }
+        // A refused address literal is refused before anything, too.
+        assert!(cluster.name("10.0.0.5").is_some());
+        assert!(cluster.name("fd00::1").is_some());
+        // Looked up as absolute, so no search domain completes it.
+        assert_eq!(cluster.lookup_name("pypi.org"), "pypi.org.");
+        assert_eq!(cluster.lookup_name("1.2.3.4"), "1.2.3.4");
+        assert!(Refusal::cluster(&["pods".into()]).is_err());
     }
 }
