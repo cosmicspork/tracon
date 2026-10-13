@@ -676,10 +676,19 @@ keep theirs, and a tool whose interpreter does not run on the image is reported
 `unavailable` in the session's launch status rather than failing the session. The layer
 also removes what a repository's image could use to configure OpenCode under the node:
 `/etc/opencode`, which OpenCode reads whatever its environment says, and anything already
-at `/opt/tracon`, whose seed the entrypoint copies into the configuration directory. An
-image whose environment sets an `OPENCODE_*` variable is refused, naming it, since the
-variable would reach the harness wherever the launch sets no value of its own. OpenCode is
-launched as `/usr/local/bin/opencode`, never by a `PATH` lookup. Checks stay on the repository's image, so a harness
+at `/opt/tracon`, whose seed the entrypoint copies into the configuration directory. It
+refuses, naming what it found, an image whose environment sets an `OPENCODE_*` or `BUN_*`
+variable, `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH` (each would reach the harness
+wherever the launch sets no value of its own), one with a non-empty `/etc/ld.so.preload`,
+and one where `/opt`, `/usr`, `/usr/local`, `/usr/local/bin` or `/usr/libexec` is a
+symbolic link that would send the copied files somewhere the image chose, such as the
+workspace. The probe then checks that the entrypoint, the binary and the baked node each
+resolve to themselves. The launch sets `BUN_BE_BUN=0`, because the binary is Bun and that
+variable would make it run a `serve` script from the worktree with the server password in
+its environment. The trust model is that the operator's image is trusted as its Dockerfile
+is: it builds with the network and supplies every command the agent runs. So these checks
+catch accidental configuration, not a hostile image; the boundary is the runtime around the
+session. OpenCode is launched as `/usr/local/bin/opencode`, never by a `PATH` lookup. Checks stay on the repository's image, so a harness
 upgrade rebuilds only the layer and no evidence moves. The session's start event
 records the image it ran in, the repository image under it, and the reason when it ran
 in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`

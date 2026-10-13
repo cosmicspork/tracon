@@ -64,6 +64,13 @@ pub struct Tool {
     /// Absolute, in the image. `$FILE` in a formatter's arguments is
     /// OpenCode's substitution, not this node's.
     pub command: Vec<String>,
+    /// What runs `command`, when it is a script: the baked node, named in
+    /// front of it in the configuration the node renders. Named rather than
+    /// left to the script's `#!/usr/bin/env node`, because on a repository's
+    /// image the `node` a PATH finds is the repository's, at whatever version
+    /// it chose, or none.
+    #[serde(default)]
+    pub interpreter: Option<String>,
     #[serde(default)]
     pub extensions: Vec<String>,
     #[serde(default)]
@@ -73,29 +80,23 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// The tool itself: the last absolute path its command names. For a
-    /// native binary that is what the runtime spawns; for a JavaScript tool it
-    /// is the script the interpreter in front of it runs.
+    /// The tool itself: what `command` starts with. For a native binary that
+    /// is what the runtime spawns; for a script, what its interpreter runs.
     pub fn binary(&self) -> &str {
-        self.paths().last().copied().unwrap_or_default()
+        self.command.first().map(String::as_str).unwrap_or_default()
     }
 
-    /// What runs the tool, when that is not the tool: the baked node in front
-    /// of a JavaScript tool. Named rather than left to the script's
-    /// `#!/usr/bin/env node`, because on a repository's image the `node` a
-    /// PATH finds is the repository's, at whatever version it chose, or none.
     pub fn interpreter(&self) -> Option<&str> {
-        let paths = self.paths();
-        (paths.len() > 1).then(|| paths[0])
+        self.interpreter.as_deref()
     }
 
-    /// Every absolute path the command names, in order. `$FILE` and flags are
-    /// not paths.
-    fn paths(&self) -> Vec<&str> {
-        self.command
+    /// What OpenCode is configured to spawn: the interpreter, where there is
+    /// one, then the command.
+    pub fn argv(&self) -> Vec<String> {
+        self.interpreter
             .iter()
-            .map(String::as_str)
-            .filter(|part| part.starts_with('/'))
+            .chain(self.command.iter())
+            .cloned()
             .collect()
     }
 }
@@ -147,7 +148,7 @@ pub fn lsp_formatter_config() -> (Value, Value) {
     }
     for tool in &profile.lsp {
         let mut entry = serde_json::Map::new();
-        entry.insert("command".into(), json!(tool.command));
+        entry.insert("command".into(), json!(tool.argv()));
         if !tool.extensions.is_empty() {
             entry.insert("extensions".into(), json!(tool.extensions));
         }
@@ -169,7 +170,7 @@ pub fn lsp_formatter_config() -> (Value, Value) {
     }
     for tool in &profile.formatter {
         let mut entry = serde_json::Map::new();
-        entry.insert("command".into(), json!(tool.command));
+        entry.insert("command".into(), json!(tool.argv()));
         if !tool.extensions.is_empty() {
             entry.insert("extensions".into(), json!(tool.extensions));
         }
@@ -418,6 +419,18 @@ mod tests {
                 "{} names the wrong interpreter",
                 tool.id
             );
+            // And the configuration spawns it in front of the tool.
+            let (lsp, formatter) = lsp_formatter_config();
+            let rendered = lsp
+                .get(&tool.id)
+                .or_else(|| formatter.get(&tool.id))
+                .unwrap()["command"]
+                .clone();
+            assert_eq!(rendered, json!(tool.argv()), "{}", tool.id);
+            assert_eq!(
+                rendered[0].as_str().unwrap(),
+                tool.interpreter().unwrap_or(tool.binary())
+            );
         }
         // The two languages this repository's own workflows use.
         assert!(profile.lsp.iter().any(|t| t.id == "rust"));
@@ -433,7 +446,7 @@ mod tests {
     fn the_image_definition_asserts_every_path_the_profile_names() {
         let containerfile = include_str!("../../../containers/harness-opencode/Containerfile");
         for tool in profile().lsp.iter().chain(profile().formatter.iter()) {
-            for path in tool.paths() {
+            for path in tool.interpreter().into_iter().chain([tool.binary()]) {
                 assert!(
                     containerfile.contains(path),
                     "the Containerfile never mentions {path}"

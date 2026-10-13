@@ -283,7 +283,7 @@ fn assert_session_image(image: &str, user: &str) {
         .lsp
         .iter()
         .chain(toolchain::profile().formatter.iter())
-        .map(|tool| tool.command.join(" ").replace("$FILE", "/dev/null"))
+        .map(|tool| tool.argv().join(" ").replace("$FILE", "/dev/null"))
         .filter(|command| command.contains("/opt/tracon/bin/node"))
         .map(|command| {
             format!(
@@ -345,38 +345,57 @@ async fn opencode_runs_on_a_pod_profile_image_as_the_harness_uid() {
     assert!(out.contains("tini version"), "{out}");
 }
 
-/// An image that sets an `OPENCODE_*` variable could override the node's
-/// configuration wherever the launch does not set the same name. It is
-/// refused, by name, and the session stays in the harness's own image.
+/// An image that would configure OpenCode, or change what it loads, under
+/// the node is refused, and the session's note says which and why: an
+/// `OPENCODE_*` or `BUN_*` variable, a loader variable, a preload file, or a
+/// symbolic link that would send the layer's files into the workspace. The
+/// session stays in the harness's own image.
 #[tokio::test]
-async fn an_image_that_configures_opencode_is_refused() {
+async fn an_image_that_would_change_opencode_is_refused_by_name() {
     let Some(rig) = rig() else { return };
-    let mut images = Images(Vec::new());
-    let base = base(
-        &mut images,
-        "configured",
-        "ENV OPENCODE_PERMISSION='{\"*\":\"allow\"}'\n",
-    );
-    let (got, store, repo) = layer(&mut images, &rig, &base, RuntimeKind::Podman).await;
-    assert_eq!(got.image, None);
-    assert_eq!(
-        got.note.as_deref(),
-        Some(
-            "the repository's image sets OPENCODE_PERMISSION, which would override the node's \
-             OpenCode configuration"
+    let sets = |name: &str| {
+        format!(
+            "the repository's image sets {name}, which would reach the harness and change how \
+             it is configured or what it loads"
         )
-    );
-    let row = store
-        .latest_repo_image(&repo, "session:opencode")
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.status, "failed");
-    assert!(
-        row.log_tail.contains(
-            "the repository's image sets OPENCODE_PERMISSION, which would override the node's \
-             OpenCode configuration"
+    };
+    for (name, extra, note) in [
+        (
+            "configured",
+            "ENV OPENCODE_PERMISSION='{\"*\":\"allow\"}'\n".to_string(),
+            sets("OPENCODE_PERMISSION"),
         ),
-        "{}",
-        row.log_tail
-    );
+        ("bun", "ENV BUN_BE_BUN=1\n".to_string(), sets("BUN_BE_BUN")),
+        (
+            "loader",
+            "ENV LD_LIBRARY_PATH=/usr/local/lib\n".to_string(),
+            sets("LD_LIBRARY_PATH"),
+        ),
+        (
+            "preload",
+            "RUN echo /usr/lib/nothing-here.so > /etc/ld.so.preload\n".to_string(),
+            "the repository's image preloads libraries through /etc/ld.so.preload, which would \
+             load them into the harness"
+                .to_string(),
+        ),
+        (
+            "linked",
+            "RUN mkdir -p /work/o && cp -a /opt/. /work/o/ && rm -rf /opt && ln -s /work/o /opt\n"
+                .to_string(),
+            "the repository's image makes /opt a symbolic link, which would let it choose what \
+             the harness runs"
+                .to_string(),
+        ),
+    ] {
+        let mut images = Images(Vec::new());
+        let base = base(&mut images, name, &extra);
+        let (got, store, repo) = layer(&mut images, &rig, &base, RuntimeKind::Podman).await;
+        assert_eq!(got.image, None, "{name}");
+        assert_eq!(got.note.as_deref(), Some(note.as_str()), "{name}");
+        let row = store
+            .latest_repo_image(&repo, "session:opencode")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "failed", "{name}");
+    }
 }

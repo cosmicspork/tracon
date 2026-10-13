@@ -199,6 +199,12 @@ impl OpenCodeAdapter {
             ("OPENCODE_DISABLE_LSP_DOWNLOAD", "true".into()),
             ("OPENCODE_DISABLE_AUTOUPDATE", "true".into()),
             ("OPENCODE_DISABLE_SHARE", "true".into()),
+            // The binary is Bun, and `BUN_BE_BUN=1` makes it Bun again: one
+            // inherited from anywhere turns `opencode serve` into running a
+            // `serve` script from the worktree's package.json, with this
+            // launch's password in its environment. Stated off, so no other
+            // value reaches it.
+            ("BUN_BE_BUN", "0".into()),
             // The store is supplied inline and holds nothing; the file next to
             // it says the same thing for the paths that read a file instead.
             ("OPENCODE_AUTH_CONTENT", empty_auth_store()),
@@ -2084,6 +2090,7 @@ mod tests {
             assert_eq!(env[flag], "true", "{flag} is not set");
         }
         assert_eq!(env["OPENCODE_PURE"], "1");
+        assert_eq!(env["BUN_BE_BUN"], "0", "the binary must stay OpenCode");
         assert_eq!(env["OPENCODE_SERVER_PASSWORD"], "secret-password");
         assert_eq!(env["OPENCODE_SERVER_USERNAME"], "opencode");
         // Per-session state is never the volume every session shares.

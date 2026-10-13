@@ -456,7 +456,7 @@ async fn the_image_has_every_binary_the_rendered_configuration_names() {
     for tool in &profile.lsp {
         assert_eq!(
             served["lsp"][&tool.id]["command"],
-            serde_json::json!(tool.command),
+            serde_json::json!(tool.argv()),
             "the binary did not read back the command for {}",
             tool.id
         );
@@ -474,7 +474,7 @@ async fn the_image_has_every_binary_the_rendered_configuration_names() {
     for tool in &profile.formatter {
         assert_eq!(
             served["formatter"][&tool.id]["command"],
-            serde_json::json!(tool.command),
+            serde_json::json!(tool.argv()),
             "the binary did not read back the command for {}",
             tool.id
         );

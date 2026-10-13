@@ -134,7 +134,7 @@ pub fn toolchain_lsp(harness_id: &str) -> Vec<ToolEntry> {
         .iter()
         .map(|tool| ToolEntry {
             name: tool.id.clone(),
-            command: tool.command.clone(),
+            command: tool.argv(),
         })
         .collect()
 }
@@ -149,7 +149,7 @@ pub fn toolchain_formatters(harness_id: &str) -> Vec<ToolEntry> {
         .iter()
         .map(|tool| ToolEntry {
             name: tool.id.clone(),
-            command: tool.command.clone(),
+            command: tool.argv(),
         })
         .collect()
 }

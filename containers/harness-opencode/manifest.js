@@ -28,13 +28,11 @@ function digest(file) {
 
 const binaries = []
 for (const tool of [...manifest.lsp, ...manifest.formatter]) {
-  // Every absolute path the command names: a JavaScript tool is the baked
-  // node followed by its script, and both are what runs.
-  const files = tool.command.filter((part) => part.startsWith("/"))
-  files.forEach((file, index) => {
-    const id = index < files.length - 1 ? `${tool.id}:interpreter` : tool.id
-    binaries.push({ id, version: tool.version, ...digest(file) })
-  })
+  binaries.push({ id: tool.id, version: tool.version, ...digest(tool.command[0]) })
+  // A JavaScript tool names the baked node that runs it; that is what runs too.
+  if (tool.interpreter) {
+    binaries.push({ id: `${tool.id}:interpreter`, version: tool.version, ...digest(tool.interpreter) })
+  }
 }
 // The tsserver bundle is not spawned, but it is named in `initialization` and
 // a missing one makes the TypeScript server useless, so it is recorded too.

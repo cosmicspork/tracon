@@ -480,10 +480,21 @@ servers and formatters the node configures, the `rg` OpenCode searches with, and
 its own at `/opt/tracon/bin/node` for the JavaScript ones. That Node is on no `PATH`, so
 `node`, `npm` and `npx` in the agent's shell are still the repository's. A language server
 the image cannot run (the baked Node needs glibc and `libstdc++`) shows as `unavailable` in
-the session header and the session runs without it. OpenCode reads its configuration from
-the node and nowhere else, so the layer deletes `/etc/opencode`, and a repository image
-whose environment sets any `OPENCODE_*` variable is refused, and the session's note names
-the variable; the session then runs in the harness image.
+the session header and the session runs without it.
+
+OpenCode reads its configuration from the node and nowhere else, so the layer deletes
+`/etc/opencode` and refuses an image that would configure OpenCode, or change what it
+loads, underneath the node: one whose environment sets any `OPENCODE_*` or `BUN_*`
+variable, `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH`, one with a non-empty
+`/etc/ld.so.preload`, or one where `/opt`, `/usr`, `/usr/local`, `/usr/local/bin` or
+`/usr/libexec` is a symbolic link. The session's note names what was found, and the session
+runs in the harness image. This is by design even where the value is harmless (a
+devcontainer that sets `OPENCODE_THEME` for its own user, or `LD_LIBRARY_PATH` for a
+toolkit): unset it in the image, or move it into the tool's own wrapper. These checks catch
+an image that would change OpenCode by accident. They are not a boundary against a hostile
+Dockerfile. The image you name for a repository is trusted as you trust its Dockerfile,
+which already builds with the network and supplies every command the agent runs; what
+keeps a session in bounds is the runtime around it, not what the image contains.
 
 A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy
