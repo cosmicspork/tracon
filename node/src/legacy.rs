@@ -476,10 +476,10 @@ state_claim = "tracon-state"
         assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "opencode");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), PRE_CUTOVER);
 
-        // An unknown id is still refused where the node starts.
+        // An unknown id is refused when the file loads.
         std::fs::write(&path, "[harness]\nid = \"aider\"\n").unwrap();
-        let cfg = Config::try_load_from(&path).unwrap();
-        assert!(crate::adapter::adapter_for(&cfg).is_err());
+        let err = Config::try_load_from(&path).unwrap_err();
+        assert!(err.contains("aider"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

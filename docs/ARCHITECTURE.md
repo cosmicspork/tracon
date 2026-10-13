@@ -102,9 +102,14 @@ Under one lock, an edit reads the file and checks the version the caller decided
 (the SHA-256 of its bytes; a mismatch is a conflict carrying the current hash), applies
 the operations, and loads the result with every check a start makes. A result that would
 not load is refused with the file untouched, so a write can never leave a node that will
-not start. It then records a `config_audit` row (who, when, the hashes before and after,
-each changed key with its values) and only then renames the new file into place; a
-failed write withdraws its row. The operator's devices get a push through the ordinary
+not start. It then records a pending `config_audit` row (who, when, the hashes before
+and after, each changed key with its values), renames the synced new file into place and
+marks the row landed; a failed write withdraws its row, and a start settles a row an
+interrupted edit left pending by the file's hash. The lock is a process mutex plus a
+lock file beside `node.toml`, so the CLI and the serving node serialise too. The
+`[[repo]]` table changes under one more lock, held from reading the live table to
+setting it again, and its entries are matched by `path`, so a removed or moved entry
+takes its own comments with it. The operator's devices get a push through the ordinary
 operator notification path, keyed by the audit row. A writer whose operations depend on
 what the file holds now decides again when another edit lands first.
 

@@ -166,11 +166,18 @@ pub enum Op {
     /// Set the value at `key`, creating the tables above it. A table is
     /// merged key by key over the one there (keys it does not name are
     /// removed), so what it keeps keeps its comments. A key ending in an
-    /// index replaces that entry of an array.
+    /// index replaces that entry of an array. An array of plain values is
+    /// replaced whole when it differs: a comment between its elements goes
+    /// with it, while the comments around the key stay.
     Set { key: KeyPath, value: toml::Value },
     /// Remove the key, or with an index the array entry. A key that is not
-    /// there is already removed.
+    /// there is already removed. A removed table takes the comment directly
+    /// above its header with it; a comment block set apart by a blank line
+    /// (a file's header, a note on a section) moves to what follows.
     Remove { key: KeyPath },
+    /// Put the entries of an array of tables in a new order: entry `k` is
+    /// the one that was at `order[k]`. Each entry keeps its comments.
+    Reorder { array: KeyPath, order: Vec<usize> },
     /// Add an entry to an array of tables (`[[repo]]`, `[[service]]`, a
     /// provider's models): at `index`, or after the last.
     Insert {
@@ -228,13 +235,15 @@ impl Op {
 
 impl Op {
     /// The ops that make the `[[repo]]` table read `after`, given `before` as
-    /// the file loads it: entry by entry and key by key, so whatever an entry
-    /// keeps keeps its comments.
+    /// the file loads it. Entries are matched by `path` (in order, where two
+    /// share one), so a removed or moved entry takes its own comments with
+    /// it; a matched entry is edited key by key, keeping the comments on what
+    /// it keeps.
     pub fn replace_repos(
         before: &[super::Repo],
         after: &[super::Repo],
     ) -> Result<Vec<Op>, EditError> {
-        replace_entries(&KeyPath::keys(&["repo"]), before, after)
+        replace_entries(&KeyPath::keys(&["repo"]), before, after, |r| &r.path)
     }
 
     /// Make entry `index` of `[[repo]]` read `entry`, or add it after the
@@ -255,24 +264,60 @@ impl Op {
     }
 }
 
-fn replace_entries<T: serde::Serialize + Default>(
+/// The ops that make an array of tables read `after`, entries matched by
+/// `key`: unmatched old entries are removed, the survivors put in `after`'s
+/// order, new entries inserted where `after` has them, and every matched
+/// entry edited key by key.
+fn replace_entries<T: serde::Serialize + Default, K: PartialEq>(
     array: &KeyPath,
     before: &[T],
     after: &[T],
+    key: impl Fn(&T) -> &K,
 ) -> Result<Vec<Op>, EditError> {
+    // For each entry of `after`, the old entry it continues, if any.
+    let mut used = vec![false; before.len()];
+    let matched: Vec<Option<usize>> = after
+        .iter()
+        .map(|now| {
+            let found = (0..before.len()).find(|&i| !used[i] && key(&before[i]) == key(now));
+            if let Some(i) = found {
+                used[i] = true;
+            }
+            found
+        })
+        .collect();
+
     let mut ops = Vec::new();
-    for (i, (was, now)) in before.iter().zip(after).enumerate() {
-        ops.extend(Op::changes(&array.clone().index(i), was, now)?);
-    }
-    for now in after.iter().skip(before.len()) {
-        ops.push(Op::append(
-            array.clone(),
-            super::without_defaults(now).map_err(EditError::Op)?,
-        ));
-    }
     // From the end, so each index still names the entry it did.
-    for i in (after.len()..before.len()).rev() {
+    for i in (0..before.len()).rev().filter(|&i| !used[i]) {
         ops.push(Op::remove(array.clone().index(i)));
+    }
+    // Where each survivor sits once the others are gone, in `after`'s order.
+    let survivors: Vec<usize> = (0..before.len()).filter(|&i| used[i]).collect();
+    let order: Vec<usize> = matched
+        .iter()
+        .flatten()
+        .map(|i| survivors.iter().position(|s| s == i).expect("a survivor"))
+        .collect();
+    if order.windows(2).any(|w| w[0] > w[1]) {
+        ops.push(Op::Reorder {
+            array: array.clone(),
+            order,
+        });
+    }
+    for (j, now) in after.iter().enumerate() {
+        if matched[j].is_none() {
+            ops.push(Op::Insert {
+                array: array.clone(),
+                index: Some(j),
+                entry: super::without_defaults(now).map_err(EditError::Op)?,
+            });
+        }
+    }
+    for (j, now) in after.iter().enumerate() {
+        if let Some(i) = matched[j] {
+            ops.extend(Op::changes(&array.clone().index(j), &before[i], now)?);
+        }
     }
     Ok(ops)
 }
@@ -391,6 +436,20 @@ pub fn snapshot_at(path: &Path) -> Result<Snapshot, EditError> {
     })
 }
 
+/// Settle the audit rows an interrupted edit left pending: landed if the
+/// file is now the version the row wrote, lost if not. The serving node runs
+/// this at start.
+pub fn reconcile_audit(store: &Store) -> Result<usize, EditError> {
+    reconcile_audit_at(&Config::config_path(), store)
+}
+
+pub fn reconcile_audit_at(path: &Path, store: &Store) -> Result<usize, EditError> {
+    let current = hash(&read(path)?);
+    store
+        .config_audit_settle(&current)
+        .map_err(|e| EditError::Audit(e.to_string()))
+}
+
 /// Edit `node.toml` at its usual place. `expected_hash` is the version the
 /// caller decided against (`Snapshot::hash`); `None` applies the operations
 /// to whatever the file is now. `actor` is who, in words for the log and the
@@ -440,7 +499,7 @@ pub fn edit_at(
     expected_hash: Option<&str>,
     actor: &str,
 ) -> Result<EditOutcome, EditError> {
-    let held = lock();
+    let held = lock(path)?;
     let bytes = read(path)?;
     let old_hash = hash(&bytes);
     if expected_hash.is_some_and(|expected| expected != old_hash) {
@@ -451,7 +510,13 @@ pub fn edit_at(
         EditError::Unparseable(e) => unparseable(path, &e),
         other => other,
     })?;
-    let config = Config::from_toml(&next, path).map_err(EditError::Invalid)?;
+    // Checked as a load would see it, so a file still naming the retired
+    // harness (migrated at every load) can be edited.
+    let config = match crate::legacy::migrate_config(&next) {
+        Some(migration) => Config::from_toml(&migration.text, path),
+        None => Config::from_toml(&next, path),
+    }
+    .map_err(EditError::Invalid)?;
     let changes = diff(&text, &next);
     if changes.is_empty() {
         return Ok(EditOutcome {
@@ -473,18 +538,19 @@ pub fn edit_at(
         old_hash: old_hash.clone(),
         new_hash: new_hash.clone(),
         changes: serde_json::Value::Array(changes.iter().map(audit_entry).collect()),
+        state: "pending".into(),
     };
+    // Pending until the file is in place: a crash between the two leaves a
+    // row `reconcile_audit` settles at the next start, by the file's hash.
     store
         .config_audit_insert(&row)
         .map_err(|e| EditError::Audit(e.to_string()))?;
-    let written = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| super::write_replacing(path, next.as_bytes()));
-    if let Err(error) = written {
+    if let Err(error) = super::write_replacing(path, next.as_bytes()) {
         let _ = store.config_audit_delete(&row.id);
         return Err(error.into());
+    }
+    if let Err(error) = store.config_audit_landed(&row.id) {
+        tracing::warn!(%error, id = %row.id, "node.toml was written; its audit row stays pending until the next start");
     }
     drop(held);
 
@@ -516,11 +582,71 @@ pub fn apply_to_text(text: &str, ops: &[Op]) -> Result<String, EditError> {
     Ok(doc.to_string())
 }
 
-/// Held for the span of one edit's read, write and audit. A `std` guard, so
-/// nothing can hold it across an `.await`.
-fn lock() -> std::sync::MutexGuard<'static, ()> {
+/// Held for the span of one edit's read, write and audit: a `std` guard
+/// for this process (so nothing can hold it across an `.await`), and an
+/// exclusive lock on `node.toml.lock` beside the file for every other one,
+/// so `tracon mesh init` and a serving node cannot lose each other's edits.
+struct Held {
+    _process: std::sync::MutexGuard<'static, ()>,
+    _file: std::fs::File,
+}
+
+fn lock(path: &Path) -> Result<Held, EditError> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let process = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(dir) = target.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(target.with_extension("toml.lock"))?;
+    file.lock()?;
+    Ok(Held {
+        _process: process,
+        _file: file,
+    })
+}
+
+/// The table every `[[repo]]` writer reads, changes and writes under, from
+/// `Config::repos()` through `LiveRepos::set`. Taken before the edit lock.
+fn repo_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Change the `[[repo]]` table the node runs on and write it to the file,
+/// as one step: `change` is given the live table (`Config::repos`), the file
+/// is edited entry by entry towards what it leaves, and the live table is set
+/// to what the file then holds, all under one lock, so two writers cannot
+/// both start from the same table and the live table never runs ahead of or
+/// behind the file.
+pub fn update_repos<T, E: From<EditError>>(
+    cfg: &Config,
+    store: &Arc<Store>,
+    actor: &str,
+    change: impl FnOnce(&mut Vec<super::Repo>) -> Result<T, E>,
+) -> Result<(T, EditOutcome), E> {
+    update_repos_at(&Config::config_path(), cfg, store, actor, change)
+}
+
+pub fn update_repos_at<T, E: From<EditError>>(
+    path: &Path,
+    cfg: &Config,
+    store: &Arc<Store>,
+    actor: &str,
+    change: impl FnOnce(&mut Vec<super::Repo>) -> Result<T, E>,
+) -> Result<(T, EditOutcome), E> {
+    let _repos = repo_lock();
+    let mut entries = cfg.repos().as_ref().clone();
+    let value = change(&mut entries)?;
+    let outcome = update_at(path, store, actor, |file| {
+        Op::replace_repos(&file.repo, &entries)
+    })?;
+    cfg.live_repo.set(outcome.config.repo.clone());
+    Ok((value, outcome))
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, EditError> {
@@ -573,17 +699,49 @@ fn announce(
 }
 
 fn audit_entry(change: &Change) -> serde_json::Value {
-    let secret = config_schema::lookup(&change.key.schema_key()).secret;
+    let at: Vec<String> = change
+        .key
+        .schema_key()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let shown = |value: &Option<toml::Value>| match value {
         None => serde_json::Value::Null,
-        Some(_) if secret => serde_json::Value::String(REDACTED.into()),
-        Some(value) => serde_json::to_value(value).unwrap_or_default(),
+        Some(value) => redacted(&at, value),
     };
     serde_json::json!({
         "key": change.key.to_string(),
         "before": shown(&change.before),
         "after": shown(&change.after),
     })
+}
+
+/// `value` as the log may show it: down to each value, a secret key's
+/// replaced. A whole table or array of tables is checked key by key, so a
+/// secret inside an entry stays hidden when the entry appears whole.
+fn redacted(at: &[String], value: &toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::Table(table) => serde_json::Value::Object(
+            table
+                .iter()
+                .map(|(key, value)| {
+                    let mut below = at.to_vec();
+                    below.push(key.clone());
+                    (key.clone(), redacted(&below, value))
+                })
+                .collect(),
+        ),
+        toml::Value::Array(values) if tables_of(values).is_some() => {
+            serde_json::Value::Array(values.iter().map(|v| redacted(at, v)).collect())
+        }
+        _ => {
+            let key: Vec<&str> = at.iter().map(String::as_str).collect();
+            match config_schema::lookup(&key).secret {
+                true => serde_json::Value::String(REDACTED.into()),
+                false => serde_json::to_value(value).unwrap_or_default(),
+            }
+        }
+    }
 }
 
 /// The keys whose values differ between two texts of the file, down to the
@@ -614,6 +772,17 @@ fn diff_values(
 ) {
     match (before, after) {
         (Some(was), Some(now)) if was == now => {}
+        // A table made or removed empty is a change of its own: `[x]` is
+        // what was written.
+        (None, Some(toml::Value::Table(t))) | (Some(toml::Value::Table(t)), None)
+            if t.is_empty() =>
+        {
+            out.push(Change {
+                key: at.clone(),
+                before: before.cloned(),
+                after: after.cloned(),
+            })
+        }
         (Some(toml::Value::Table(was)), Some(toml::Value::Table(now))) => {
             diff_tables(at, was, now, out)
         }
@@ -773,22 +942,19 @@ fn apply(doc: &mut DocumentMut, op: &Op) -> Result<(), EditError> {
             let Some(cursor) = walk(doc, parent, false)? else {
                 return Ok(());
             };
-            match last {
-                Seg::Key(name) => {
-                    if let Some(table) = cursor.table() {
-                        table.remove(name);
-                    }
-                }
+            let removed = match last {
+                Seg::Key(name) => cursor.table().and_then(|table| table.remove(name)),
                 Seg::Index(index) => {
                     let Cursor::Item(item) = cursor else {
                         return Err(not_array(&here));
                     };
                     match item {
                         Item::ArrayOfTables(array) if *index < array.len() => {
-                            array.remove(*index);
+                            Some(Item::Table(array.remove(*index)))
                         }
                         Item::Value(toml_edit::Value::Array(array)) if *index < array.len() => {
                             array.remove(*index);
+                            None
                         }
                         Item::ArrayOfTables(_) | Item::Value(toml_edit::Value::Array(_)) => {
                             return Err(no_entry(&here, *index))
@@ -796,6 +962,60 @@ fn apply(doc: &mut DocumentMut, op: &Op) -> Result<(), EditError> {
                         _ => return Err(not_array(&here)),
                     }
                 }
+            };
+            let first = match &removed {
+                Some(Item::Table(table)) => Some(table),
+                Some(Item::ArrayOfTables(tables)) => tables.get(0),
+                _ => None,
+            };
+            if let Some((position, kept)) = first.and_then(|t| Some((t.position()?, detached(t)?)))
+            {
+                rehome(doc, position, &kept);
+            }
+        }
+        Op::Reorder { array, order } => {
+            let mut seen = vec![false; order.len()];
+            let Some(Cursor::Item(item)) = walk(doc, &array.0, false)? else {
+                return Err(not_array(array));
+            };
+            let len = match &*item {
+                Item::ArrayOfTables(tables) => tables.len(),
+                Item::Value(toml_edit::Value::Array(values)) => values.len(),
+                _ => return Err(not_array(array)),
+            };
+            if order.len() != len
+                || order
+                    .iter()
+                    .any(|&i| i >= len || std::mem::replace(&mut seen[i], true))
+            {
+                return Err(EditError::Op(format!(
+                    "{order:?} is not an order of `{array}`'s {len} entries"
+                )));
+            }
+            match item {
+                Item::ArrayOfTables(tables) => {
+                    let old: Vec<Table> = tables.iter().cloned().collect();
+                    let mut rebuilt = ArrayOfTables::new();
+                    // The entries move; the places they render at do not.
+                    // What sits under a moved entry renders after it.
+                    for (slot, &from) in order.iter().enumerate() {
+                        let mut table = old[from].clone();
+                        if let Some(position) = old[slot].position() {
+                            table.set_position(position);
+                            place_children(&mut table, position);
+                        }
+                        rebuilt.push(table);
+                    }
+                    *tables = rebuilt;
+                }
+                Item::Value(toml_edit::Value::Array(values)) => {
+                    let old: Vec<toml_edit::Value> = values.iter().cloned().collect();
+                    values.clear();
+                    for &from in order {
+                        values.push_formatted(old[from].clone());
+                    }
+                }
+                _ => unreachable!("checked above"),
             }
         }
         Op::Insert {
@@ -816,7 +1036,15 @@ fn apply(doc: &mut DocumentMut, op: &Op) -> Result<(), EditError> {
             }
             match table.get_mut(name).expect("present") {
                 Item::ArrayOfTables(tables) => {
-                    let new = to_table(entry);
+                    let mut new = to_table(entry);
+                    // Rendered where the entry it goes before is.
+                    if let Some(position) = index
+                        .and_then(|at| tables.get(at))
+                        .and_then(Table::position)
+                    {
+                        new.set_position(position);
+                        place_children(&mut new, position);
+                    }
                     match index {
                         None => tables.push(new),
                         Some(at) if *at <= tables.len() => {
@@ -844,6 +1072,78 @@ fn apply(doc: &mut DocumentMut, op: &Op) -> Result<(), EditError> {
         }
     }
     Ok(())
+}
+
+/// The part of the comment above a table's header that is set apart from
+/// it by a blank line: not the table's own note, so it outlives the table.
+fn detached(table: &Table) -> Option<String> {
+    let prefix = table.decor().prefix()?.as_str()?;
+    let lines: Vec<&str> = prefix.split_inclusive('\n').collect();
+    let blank = lines.iter().rposition(|line| line.trim().is_empty())?;
+    let kept: String = lines[..=blank].concat();
+    kept.contains('#').then_some(kept)
+}
+
+/// Put `text` above the first table rendered after `position`, or at the end
+/// of the file when none is.
+fn rehome(doc: &mut DocumentMut, position: isize, text: &str) {
+    let mut next: Option<isize> = None;
+    visit_tables(doc.as_table_mut(), &mut |table| {
+        if let Some(p) = table.position().filter(|p| *p > position) {
+            next = Some(next.map_or(p, |n| n.min(p)));
+        }
+        false
+    });
+    let placed = next.is_some_and(|target| {
+        visit_tables(doc.as_table_mut(), &mut |table| {
+            if table.position() != Some(target) {
+                return false;
+            }
+            let below = table
+                .decor()
+                .prefix()
+                .and_then(|p| p.as_str())
+                .unwrap_or("\n")
+                .to_string();
+            table.decor_mut().set_prefix(format!("{text}{below}"));
+            true
+        })
+    });
+    if !placed {
+        let trailing = doc.trailing().as_str().unwrap_or("").to_string();
+        doc.set_trailing(format!("{trailing}\n{text}"));
+    }
+}
+
+/// Every table under `table`, depth first, until `f` says to stop.
+fn visit_tables(table: &mut Table, f: &mut dyn FnMut(&mut Table) -> bool) -> bool {
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => {
+                if f(child) || visit_tables(child, f) {
+                    return true;
+                }
+            }
+            Item::ArrayOfTables(children) => {
+                for child in children.iter_mut() {
+                    if f(child) || visit_tables(child, f) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Render the tables under `table` right after it, at its `position`: a
+/// tie keeps the order they are visited in, which is parent first.
+fn place_children(table: &mut Table, position: isize) {
+    visit_tables(table, &mut |child| {
+        child.set_position(position);
+        false
+    });
 }
 
 /// Write `value` into `item`, keeping what can be kept: a table merges key
@@ -1508,7 +1808,13 @@ checks = []
         assert!(read(&real).contains("claude"));
         let mode = std::fs::metadata(&real).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o640);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        // The file, its link, and the lock beside the file; no temporary left.
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["node.toml", "real.toml", "real.toml.lock"]);
     }
 
     #[test]
@@ -1570,6 +1876,267 @@ checks = []
                 "{next}"
             );
         }
+    }
+
+    /// Two `[[repo]]` writers at once each start from the table the other
+    /// left, so neither undoes the other, and the live table ends as the file.
+    #[test]
+    fn repo_writers_at_once_lose_nothing() {
+        let (_dir, path) = file("[[repo]]\npath = \"/r\"\n");
+        let store = store();
+        let cfg = Arc::new(snapshot_at(&path).unwrap().config);
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let (path, cfg, store) = (path.clone(), cfg.clone(), store.clone());
+                std::thread::spawn(move || {
+                    update_repos_at(&path, &cfg, &store, "test", |entries| {
+                        entries[0].egress.push(format!("h{i}.example"));
+                        Ok::<_, EditError>(())
+                    })
+                    .unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let file = Config::try_load_from(&path).unwrap();
+        assert_eq!(file.repo[0].egress.len(), 8, "{:?}", file.repo[0].egress);
+        assert_eq!(cfg.repos()[0].egress, file.repo[0].egress);
+
+        // An operator's removal is not undone by a later ask.
+        update_repos_at(&path, &cfg, &store, "Settings", |entries| {
+            entries[0].egress.retain(|h| h != "h0.example");
+            Ok::<_, EditError>(())
+        })
+        .unwrap();
+        update_repos_at(&path, &cfg, &store, "ask", |entries| {
+            entries[0].egress.push("late.example".into());
+            Ok::<_, EditError>(())
+        })
+        .unwrap();
+        let egress = Config::try_load_from(&path).unwrap().repo[0].egress.clone();
+        assert!(!egress.contains(&"h0.example".to_string()), "{egress:?}");
+        assert!(egress.contains(&"late.example".to_string()), "{egress:?}");
+    }
+
+    const THREE: &str = r#"# The operator's file.
+
+[[repo]]
+# Never open session egress here.
+path = "/srv/blog"
+
+[repo.style]
+conventional = true
+
+[[repo]]
+# Mine.
+path = "/srv/mine"
+
+[[repo]]
+# Notes.
+path = "/srv/notes"
+"#;
+
+    /// Entries are matched by path: removing the first takes its own
+    /// comment and leaves the others' where they are.
+    #[test]
+    fn removing_an_entry_takes_its_comments_with_it() {
+        let (_dir, path) = file(THREE);
+        let before = snapshot_at(&path).unwrap().config.repo;
+        let after = vec![before[1].clone(), before[2].clone()];
+        let ops = Op::replace_repos(&before, &after).unwrap();
+        edit_at(&path, &store(), &ops, None, "test").unwrap();
+        let text = read(&path);
+        assert!(!text.contains("Never open"), "{text}");
+        assert!(!text.contains("[repo.style]"), "{text}");
+        assert!(text.starts_with("# The operator's file."), "{text}");
+        let mine = text.find("# Mine.").unwrap();
+        assert!(mine < text.find("/srv/mine").unwrap(), "{text}");
+        assert!(
+            text.find("/srv/mine").unwrap() < text.find("# Notes.").unwrap(),
+            "{text}"
+        );
+        let back = Config::try_load_from(&path).unwrap();
+        let paths: Vec<_> = back.repo.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [PathBuf::from("/srv/mine"), PathBuf::from("/srv/notes")]
+        );
+    }
+
+    /// A moved entry carries its comments and its sub-tables.
+    #[test]
+    fn reordering_entries_moves_their_comments_with_them() {
+        let (_dir, path) = file(THREE);
+        let before = snapshot_at(&path).unwrap().config.repo;
+        let after = vec![before[2].clone(), before[0].clone(), before[1].clone()];
+        let ops = Op::replace_repos(&before, &after).unwrap();
+        assert!(
+            ops.iter().any(|op| matches!(op, Op::Reorder { .. })),
+            "{ops:?}"
+        );
+        edit_at(&path, &store(), &ops, None, "test").unwrap();
+        let text = read(&path);
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {text}"))
+        };
+        assert!(at("# Notes.") < at("/srv/notes"), "{text}");
+        assert!(at("/srv/notes") < at("# Never open"), "{text}");
+        assert!(at("# Never open") < at("/srv/blog"), "{text}");
+        assert!(at("/srv/blog") < at("[repo.style]"), "{text}");
+        assert!(at("[repo.style]") < at("# Mine."), "{text}");
+        let back = Config::try_load_from(&path).unwrap();
+        let paths: Vec<_> = back.repo.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/srv/notes"),
+                PathBuf::from("/srv/blog"),
+                PathBuf::from("/srv/mine")
+            ]
+        );
+        // The style stayed with its entry.
+        assert!(back.repo[1].style.as_ref().is_some_and(|s| s.conventional));
+        assert!(back.repo[0].style.is_none() && back.repo[2].style.is_none());
+
+        // A new entry lands where the table puts it, between the others.
+        let before = back.repo.clone();
+        let mut after = before.clone();
+        after.insert(
+            1,
+            Repo {
+                path: "/srv/new".into(),
+                ..Default::default()
+            },
+        );
+        edit_at(
+            &path,
+            &store(),
+            &Op::replace_repos(&before, &after).unwrap(),
+            None,
+            "test",
+        )
+        .unwrap();
+        let paths: Vec<_> = Config::try_load_from(&path)
+            .unwrap()
+            .repo
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        assert_eq!(paths[1], PathBuf::from("/srv/new"), "{}", read(&path));
+        assert!(Config::try_load_from(&path).unwrap().repo[2]
+            .style
+            .is_some());
+    }
+
+    /// The header of a file that starts with a table outlives that table.
+    #[test]
+    fn removing_the_first_table_keeps_the_files_header() {
+        let text = "# Header, written once.\n# Second line.\n\n# About the blog.\n[[repo]]\npath = \"/srv/blog\"\n\n[memory]\npromote_at = \"03:00\"\n";
+        let next = apply_to_text(text, &[Op::remove(KeyPath::parse("repo[0]").unwrap())]).unwrap();
+        assert!(
+            next.contains("# Header, written once.\n# Second line."),
+            "{next}"
+        );
+        assert!(!next.contains("About the blog"), "{next}");
+        assert!(
+            next.find("# Header").unwrap() < next.find("[memory]").unwrap(),
+            "{next}"
+        );
+        // With nothing after it, the header stays in the file anyway.
+        let lone = "# Header.\n\n[mesh]\nhub_url = \"https://hub\"\n";
+        let next = apply_to_text(lone, &[Op::remove(KeyPath::keys(&["mesh"]))]).unwrap();
+        assert!(next.contains("# Header."), "{next:?}");
+    }
+
+    /// An entry that appears whole is redacted key by key.
+    #[test]
+    fn a_secret_inside_a_new_entry_is_redacted() {
+        let (_dir, path) = file(COMMENTED);
+        let store = store();
+        let mut entry = toml::Table::new();
+        entry.insert("name".into(), "browser".into());
+        entry.insert(
+            "image".into(),
+            format!("img@sha256:{}", "a".repeat(64)).into(),
+        );
+        entry.insert("port".into(), 9222_i64.into());
+        entry.insert("token".into(), "hunter2".into());
+        edit_at(
+            &path,
+            &store,
+            &[Op::append(KeyPath::keys(&["service"]), entry)],
+            None,
+            "test",
+        )
+        .unwrap();
+        let row = &store.config_audit_recent(1).unwrap()[0];
+        let shown = row.changes.to_string();
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert_eq!(row.changes[0]["key"], "service");
+        assert_eq!(row.changes[0]["after"][0]["name"], "browser");
+        assert_eq!(row.changes[0]["after"][0]["token"], REDACTED);
+    }
+
+    #[test]
+    fn an_empty_table_made_on_purpose_is_written() {
+        let (_dir, path) = file(COMMENTED);
+        let outcome = edit_at(
+            &path,
+            &store(),
+            &[Op::set(
+                KeyPath::keys(&["github", "dispatch"]),
+                toml::Table::new(),
+            )],
+            None,
+            "test",
+        )
+        .unwrap();
+        assert!(outcome.wrote());
+        assert_eq!(outcome.changed(), ["github.dispatch"]);
+        assert!(read(&path).contains("[github.dispatch]"), "{}", read(&path));
+    }
+
+    #[test]
+    fn a_harness_the_node_cannot_run_is_refused() {
+        let (_dir, path) = file(COMMENTED);
+        let err = edit_at(&path, &store(), &[set("harness.id", "aider")], None, "test")
+            .err()
+            .unwrap();
+        assert!(matches!(err, EditError::Invalid(_)), "{err}");
+        assert_eq!(read(&path), COMMENTED);
+    }
+
+    /// A row is pending until its file is in place; one an interrupted edit
+    /// left behind is settled at the next start by the file's hash.
+    #[test]
+    fn an_interrupted_write_is_settled_by_the_files_hash() {
+        let (_dir, path) = file(COMMENTED);
+        let store = store();
+        let outcome = edit_at(&path, &store, &[set("node_name", "n2")], None, "test").unwrap();
+        assert_eq!(store.config_audit_recent(1).unwrap()[0].state, "landed");
+        let pending = |id: &str, new_hash: &str| ConfigAuditRow {
+            id: id.into(),
+            at_ms: crate::store::now_ms(),
+            actor: "test".into(),
+            old_hash: outcome.new_hash.clone(),
+            new_hash: new_hash.into(),
+            changes: serde_json::json!([]),
+            state: "pending".into(),
+        };
+        store
+            .config_audit_insert(&pending("landed-before-crash", &outcome.new_hash))
+            .unwrap();
+        store
+            .config_audit_insert(&pending("never-renamed", &hash(b"other")))
+            .unwrap();
+        assert_eq!(reconcile_audit_at(&path, &store).unwrap(), 2);
+        let rows = store.config_audit_recent(10).unwrap();
+        let state = |id: &str| rows.iter().find(|r| r.id == id).unwrap().state.clone();
+        assert_eq!(state("landed-before-crash"), "landed");
+        assert_eq!(state("never-renamed"), "lost");
     }
 
     #[test]

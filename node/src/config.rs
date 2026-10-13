@@ -2244,6 +2244,10 @@ impl Config {
         if let Some(contact) = config.notify.contact.as_deref() {
             validate_contact(contact).map_err(|error| format!("{}: {error}", path.display()))?;
         }
+        // What `serve` refuses to start with, refused here too, so no edit
+        // writes a harness the node has no adapter for.
+        crate::adapter::adapter_for(&config)
+            .map_err(|error| format!("{}: [harness] id: {error}", path.display()))?;
         Ok(config)
     }
 }
@@ -2265,12 +2269,24 @@ pub fn without_defaults<T: Serialize + Default>(value: &T) -> Result<toml::Table
 fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let tmp = target.with_extension(format!("toml.{}.tmp", uuid::Uuid::now_v7()));
-    let written = std::fs::write(&tmp, bytes).and_then(|()| {
+    let written = (|| {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
         if let Ok(meta) = std::fs::metadata(&target) {
-            std::fs::set_permissions(&tmp, meta.permissions())?;
+            file.set_permissions(meta.permissions())?;
         }
-        std::fs::rename(&tmp, &target)
-    });
+        // On disk before it is named, so a crash leaves the old file or the
+        // whole new one, never an empty one.
+        file.sync_all()?;
+        std::fs::rename(&tmp, &target)?;
+        // And the rename itself, so the new name survives a crash too.
+        #[cfg(unix)]
+        if let Some(dir) = target.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::File::open(dir)?.sync_all()?;
+        }
+        Ok(())
+    })();
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

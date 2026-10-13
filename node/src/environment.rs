@@ -472,42 +472,37 @@ pub fn save_session_host(
 ) -> Result<String, String> {
     let repo = origin_repo(store, Some(session_id))?
         .ok_or("this session has no repository whose egress could keep it")?;
-    let mut entries: Vec<crate::config::Repo> = cfg.repos().as_ref().clone();
-    let path = match entries.iter_mut().find(|entry| entry.matches(&repo)) {
-        None => {
-            entries.push(crate::config::Repo {
-                path: repo.clone(),
-                egress: vec![host.to_string()],
-                session_egress: true,
-                ..Default::default()
-            });
-            repo.display().to_string()
-        }
-        Some(entry) => {
-            let hosts = entry.egress_hosts()?;
-            if !entry.session_egress && !hosts.is_empty() {
-                return Err(format!(
-                    "{}'s egress is open to its preparation only; opening it to sessions would                      also open {}. Allow {host} for this session, or change the entry in                      Settings → Repositories",
-                    entry.path.display(),
-                    hosts.join(", ")
-                ));
-            }
-            if !hosts.iter().any(|named| named == host) {
-                entry.egress.push(host.to_string());
-            }
-            entry.session_egress = true;
-            entry.path.display().to_string()
-        }
-    };
-    crate::config::validate_repos(&entries)?;
-    // The table the node runs on is what this decided against, so it is what
-    // is written; the file is edited entry by entry towards it.
     let actor = format!("an approved egress ask (session {session_id})");
-    let outcome = crate::config::update(store, &actor, |file| {
-        crate::config::Op::replace_repos(&file.repo, &entries)
-    })
-    .map_err(|error| error.to_string())?;
-    cfg.live_repo.set(outcome.config.repo.clone());
+    let (path, _) = crate::config::edit::update_repos(cfg, store, &actor, |entries| {
+        let path = match entries.iter_mut().find(|entry| entry.matches(&repo)) {
+            None => {
+                entries.push(crate::config::Repo {
+                    path: repo.clone(),
+                    egress: vec![host.to_string()],
+                    session_egress: true,
+                    ..Default::default()
+                });
+                repo.display().to_string()
+            }
+            Some(entry) => {
+                let hosts = entry.egress_hosts()?;
+                if !entry.session_egress && !hosts.is_empty() {
+                    return Err(format!(
+                        "{}'s egress is open to its preparation only; opening it to sessions would                      also open {}. Allow {host} for this session, or change the entry in                      Settings → Repositories",
+                        entry.path.display(),
+                        hosts.join(", ")
+                    ));
+                }
+                if !hosts.iter().any(|named| named == host) {
+                    entry.egress.push(host.to_string());
+                }
+                entry.session_egress = true;
+                entry.path.display().to_string()
+            }
+        };
+        crate::config::validate_repos(entries)?;
+        Ok(path)
+    })?;
     Ok(path)
 }
 

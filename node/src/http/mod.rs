@@ -520,6 +520,15 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     store
         .reconcile_interrupted_runs()
         .context("reconcile interrupted checks")?;
+    // An edit of node.toml interrupted between its audit row and its rename.
+    match crate::config::edit::reconcile_audit(&store) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            rows = n,
+            "settled node.toml audit rows an interrupted edit left pending"
+        ),
+        Err(error) => tracing::warn!(%error, "could not settle pending node.toml audit rows"),
+    }
     match store.repair_search_index() {
         Ok(true) => {
             tracing::warn!("the full-text search index had drifted from its tables; rebuilt it")

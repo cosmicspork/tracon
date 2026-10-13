@@ -1377,7 +1377,9 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // 61: every write of node.toml, by whom, and what it changed. The hashes
     // are of the file's bytes before and after; `changes_json` names each
-    // key with its old and new value, a secret's values redacted.
+    // key with its old and new value, a secret's values redacted. `state` is
+    // `pending` from just before the file is replaced until just after, then
+    // `landed`; a start settles a pending row as `landed` or `lost`.
     r#"
     CREATE TABLE config_audit (
         id           TEXT PRIMARY KEY,
@@ -1385,7 +1387,8 @@ const MIGRATIONS: &[&str] = &[
         actor        TEXT NOT NULL,
         old_hash     TEXT NOT NULL,
         new_hash     TEXT NOT NULL,
-        changes_json TEXT NOT NULL
+        changes_json TEXT NOT NULL,
+        state        TEXT NOT NULL DEFAULT 'pending'
     );
     CREATE INDEX config_audit_at ON config_audit(at_ms);
     "#,

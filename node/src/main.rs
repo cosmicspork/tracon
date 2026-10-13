@@ -856,15 +856,12 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
                 std::sync::Arc::new(tracon::store::Store::open(&config::Config::db_path())?);
             tracon::mesh::channels::create(&store, &id, proto::frame::MESH_CHANNEL)?;
             let hub = hub.trim_end_matches('/').to_string();
-            config::edit(
-                &store,
-                &[config::Op::set(
+            config::update(&store, "tracon mesh init", |_| {
+                Ok::<_, config::EditError>(vec![config::Op::set(
                     config::KeyPath::keys(&["mesh", "hub_url"]),
                     hub.as_str(),
-                )],
-                None,
-                "tracon mesh init",
-            )?
+                )])
+            })?
             .settle()
             .await;
             println!("hub:         {hub}");
@@ -985,15 +982,12 @@ async fn enroll_command(
         &Stderr,
     )
     .await?;
-    config::edit(
-        &audit_store,
-        &[config::Op::set(
+    config::update(&audit_store, "tracon enroll", |_| {
+        Ok::<_, config::EditError>(vec![config::Op::set(
             config::KeyPath::keys(&["mesh", "hub_url"]),
             hub.trim_end_matches('/'),
-        )],
-        None,
-        "tracon enroll",
-    )?
+        )])
+    })?
     .settle()
     .await;
     println!("enrolled as {name}; channels: {}", channels.join(", "));
