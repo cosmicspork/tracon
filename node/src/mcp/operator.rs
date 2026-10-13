@@ -194,6 +194,15 @@ async fn ask(
             {
                 return Err("request_id is already bound to a different question".into());
             }
+            if stored.id == row.id {
+                // Untapped: questions are node-local, so there is nothing for
+                // the mesh to carry. The notifier diffs and debounces it.
+                if let Ok(waiting) = store.open_operator_questions() {
+                    manager
+                        .bus()
+                        .publish_untapped(crate::stream::Frame::Questions { waiting });
+                }
+            }
             stored
         }
     };

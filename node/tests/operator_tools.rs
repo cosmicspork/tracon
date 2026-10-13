@@ -31,6 +31,8 @@ struct Rig {
     store: Arc<Store>,
     tools: Arc<Tools>,
     ctx: CallContext,
+    /// The node's frame bus, where the notifier hears of a question.
+    bus: Bus,
     /// The operator's API, where a draft is published or discarded.
     operator: axum::Router,
 }
@@ -47,6 +49,7 @@ fn rig_with(cfg: Config, broker: tracon::broker::SharedBroker) -> Rig {
         .insert_session(&support::rows::session_row("s1", "n1", "personal"))
         .unwrap();
     let cfg = Arc::new(cfg);
+    let bus = Bus::new();
     let tools = Arc::new(Tools {
         broker,
         cfg: cfg.clone(),
@@ -56,7 +59,7 @@ fn rig_with(cfg: Config, broker: tracon::broker::SharedBroker) -> Rig {
     });
     let manager = Manager::new(
         store.clone(),
-        Bus::new(),
+        bus.clone(),
         cfg.clone(),
         "n1".into(),
         tools.clone(),
@@ -84,6 +87,7 @@ fn rig_with(cfg: Config, broker: tracon::broker::SharedBroker) -> Rig {
         store,
         tools,
         ctx: CallContext::session("s1", "personal", "n1"),
+        bus,
         operator,
     }
 }
@@ -158,6 +162,8 @@ impl Rig {
                 created_ms: now_ms(),
                 last_ok_ms: None,
                 fail_count: 0,
+                last_error: None,
+                last_error_ms: None,
             })
             .unwrap();
     }
@@ -283,6 +289,38 @@ async fn asking_still_creates_a_question_that_waits_for_an_answer() {
         .unwrap();
     assert_eq!(answered["answer"], "origin");
     assert!(rig.store.open_operator_questions().unwrap().is_empty());
+}
+
+/// A question is something waiting on a person, so asking one tells the
+/// notifier, which pushes it like an approval. Asking again with the same
+/// request_id is the same question and is not news.
+#[tokio::test]
+async fn asking_tells_the_notifier_once() {
+    state::isolate();
+    let rig = rig();
+    let mut frames = rig.bus.subscribe();
+    let args = json!({ "request_id": "q-push", "question": "ship it?", "wait_secs": 0 });
+    rig.call("ask_operator", args.clone()).await.unwrap();
+    let waiting = loop {
+        match tokio::time::timeout(Duration::from_secs(2), frames.recv()).await {
+            Ok(Ok(tracon::stream::Frame::Questions { waiting })) => break waiting,
+            Ok(Ok(_)) => continue,
+            other => panic!("no questions frame: {other:?}"),
+        }
+    };
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].prompt, "ship it?");
+
+    rig.call("ask_operator", args).await.unwrap();
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), frames.recv()).await {
+            Ok(Ok(tracon::stream::Frame::Questions { .. })) => {
+                panic!("a recovered question was announced again")
+            }
+            Ok(Ok(_)) => continue,
+            _ => break,
+        }
+    }
 }
 
 /// The agent that drafted an issue learns it was published, and as which

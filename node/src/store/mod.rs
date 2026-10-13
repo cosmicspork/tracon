@@ -1837,6 +1837,10 @@ mod records {
         pub created_ms: i64,
         pub last_ok_ms: Option<i64>,
         pub fail_count: i64,
+        /// What the push service said the last time it did not take a push,
+        /// truncated; cleared by the next one it takes.
+        pub last_error: Option<String>,
+        pub last_error_ms: Option<i64>,
     }
 
     impl PushSubscriptionRow {
@@ -1851,6 +1855,8 @@ mod records {
                 created_ms: r.get("created_ms")?,
                 last_ok_ms: r.get("last_ok_ms")?,
                 fail_count: r.get("fail_count")?,
+                last_error: r.get("last_error")?,
+                last_error_ms: r.get("last_error_ms")?,
             })
         }
     }
@@ -2816,18 +2822,23 @@ impl Store {
     pub fn push_subscription_ok(&self, id: &str, now: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE push_subscription SET last_ok_ms=?2, fail_count=0 WHERE id=?1",
+            "UPDATE push_subscription
+                SET last_ok_ms=?2, fail_count=0, last_error=NULL, last_error_ms=NULL
+              WHERE id=?1",
             rusqlite::params![id, now],
         )?;
         Ok(())
     }
 
-    /// A delivery did not land; returns the run of failures so far.
-    pub fn push_subscription_failed(&self, id: &str) -> Result<i64> {
+    /// A delivery did not land, for the reason given; returns the run of
+    /// failures so far.
+    pub fn push_subscription_failed(&self, id: &str, reason: &str, now: i64) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE push_subscription SET fail_count=fail_count+1 WHERE id=?1",
-            [id],
+            "UPDATE push_subscription
+                SET fail_count=fail_count+1, last_error=?2, last_error_ms=?3
+              WHERE id=?1",
+            rusqlite::params![id, reason, now],
         )?;
         conn.query_row(
             "SELECT fail_count FROM push_subscription WHERE id=?1",
@@ -2835,6 +2846,46 @@ impl Store {
             |r| r.get(0),
         )
         .map_err(Into::into)
+    }
+
+    /// A push service took a push about these items.
+    pub fn push_announced_mark(&self, tags: &[String], now: i64) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for tag in tags {
+            tx.execute(
+                "INSERT OR IGNORE INTO push_announced (tag, announced_ms) VALUES (?1, ?2)",
+                rusqlite::params![tag, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Of the items waiting now, the ones some push service already took a
+    /// push about; everything else is forgotten, since it no longer waits.
+    pub fn push_announced_keep(
+        &self,
+        waiting: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let known: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT tag FROM push_announced")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let waiting: std::collections::HashSet<&String> = waiting.iter().collect();
+        let mut kept = std::collections::HashSet::new();
+        for tag in known {
+            if waiting.contains(&tag) {
+                kept.insert(tag);
+            } else {
+                tx.execute("DELETE FROM push_announced WHERE tag=?1", [&tag])?;
+            }
+        }
+        tx.commit()?;
+        Ok(kept)
     }
 
     // ---- review ----

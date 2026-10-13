@@ -484,9 +484,60 @@ pub struct Notify {
     pub contact: Option<String>,
 }
 
+/// Why this node will not push, in words for Settings and the log.
+pub const NO_PUSH_CONTACT: &str = "no push contact: set [notify] contact in node.toml to a mailto: address or https: URL; Apple refuses pushes without a real one";
+
 impl Notify {
-    pub fn subject(&self) -> &str {
-        self.contact.as_deref().unwrap_or("mailto:tracon@localhost")
+    /// The VAPID subject this node signs with: `contact` when it is set, else
+    /// the node's public HTTPS origin when one is known. Never an address made
+    /// up on the spot: Apple answers `mailto:…@localhost` with a 403, so a
+    /// node with neither sends nothing and says why.
+    pub fn subject(&self, public_origin: Option<&str>) -> Result<String, &'static str> {
+        if let Some(contact) = self.contact.as_deref() {
+            return Ok(contact.to_string());
+        }
+        public_origin
+            .filter(|origin| validate_contact(origin).is_ok())
+            .map(|origin| origin.trim_end_matches('/').to_string())
+            .ok_or(NO_PUSH_CONTACT)
+    }
+}
+
+/// A VAPID subject a push service will take: `mailto:` an address on a real
+/// domain, or an `https:` URL on a host other than this machine. Shape only;
+/// nothing is sent to check that anyone answers.
+pub fn validate_contact(contact: &str) -> Result<(), String> {
+    let local = |host: &str| {
+        let host = host
+            .trim_matches(|c| c == '[' || c == ']')
+            .to_ascii_lowercase();
+        host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
+    };
+    if let Some(address) = contact.strip_prefix("mailto:") {
+        let (user, domain) = address
+            .split_once('@')
+            .ok_or_else(|| format!("notify.contact {contact:?} has no address after mailto:"))?;
+        let plain = |s: &str| !s.is_empty() && !s.contains(['@', ' ', '?', '/', ':']);
+        if !plain(user) || !plain(domain) || !domain.contains('.') || local(domain) {
+            return Err(format!(
+                "notify.contact {contact:?} is not an address a push service can write to"
+            ));
+        }
+        return Ok(());
+    }
+    let url = url::Url::parse(contact).map_err(|_| {
+        format!("notify.contact {contact:?} must be a mailto: address or an https: URL")
+    })?;
+    match url.host_str() {
+        Some(host) if url.scheme() == "https" && !local(host) => Ok(()),
+        _ => Err(format!(
+            "notify.contact {contact:?} must be a mailto: address or an https: URL on a public host"
+        )),
     }
 }
 
@@ -1728,6 +1779,13 @@ impl Config {
         Self::state_dir().join("harness-state")
     }
 
+    /// The HTTPS origin clients reach this node at, when the node knows it.
+    /// Nothing records one yet; it is the seam a configured public origin
+    /// plugs into, and the push subject falls back to it.
+    pub fn public_origin(&self) -> Option<String> {
+        None
+    }
+
     pub fn load() -> Self {
         Self::load_from(&Self::config_path())
     }
@@ -1797,6 +1855,10 @@ impl Config {
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 validate_services(&config.service)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
+                if let Some(contact) = config.notify.contact.as_deref() {
+                    validate_contact(contact)
+                        .map_err(|error| format!("{}: {error}", path.display()))?;
+                }
                 Ok(config)
             }
             Err(_) => Ok(Self::default()),
@@ -2655,6 +2717,72 @@ models = [{ id = "gpt-6" }]
             docs.preview_url = Some(invalid.into());
             assert!(docs.preview_origin().is_err(), "{invalid}");
         }
+    }
+
+    /// The subject a push is signed with is the contact, then a public origin,
+    /// and otherwise nothing: the old `mailto:tracon@localhost` default is
+    /// what Apple answered with 403.
+    #[test]
+    fn the_push_subject_is_never_made_up() {
+        let mut notify = Notify::default();
+        assert_eq!(notify.subject(None), Err(NO_PUSH_CONTACT));
+        assert_eq!(
+            notify.subject(Some("https://tracon.example.org/")).unwrap(),
+            "https://tracon.example.org"
+        );
+        for unusable in ["http://tracon.example.org", "https://localhost:7420"] {
+            assert_eq!(
+                notify.subject(Some(unusable)),
+                Err(NO_PUSH_CONTACT),
+                "{unusable}"
+            );
+        }
+        notify.contact = Some("mailto:ops@example.org".into());
+        assert_eq!(
+            notify.subject(Some("https://tracon.example.org")).unwrap(),
+            "mailto:ops@example.org",
+            "a configured contact wins"
+        );
+    }
+
+    #[test]
+    fn a_push_contact_is_checked_when_the_config_is_loaded() {
+        for good in [
+            "mailto:ops@example.org",
+            "https://tracon.example.org",
+            "https://example.org/contact",
+        ] {
+            assert!(validate_contact(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "mailto:tracon@localhost",
+            "mailto:ops@box.local",
+            "mailto:example.org",
+            "mailto:@example.org",
+            "mailto:ops@nodot",
+            "ops@example.org",
+            "http://example.org",
+            "https://127.0.0.1",
+            "https://[::1]:7420",
+            "",
+        ] {
+            assert!(validate_contact(bad).is_err(), "{bad:?}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(&path, "[notify]\ncontact = \"mailto:tracon@localhost\"\n").unwrap();
+        let error = Config::try_load_from(&path).unwrap_err();
+        assert!(error.contains("notify.contact"), "{error}");
+        std::fs::write(&path, "[notify]\ncontact = \"mailto:ops@example.org\"\n").unwrap();
+        assert_eq!(
+            Config::try_load_from(&path)
+                .unwrap()
+                .notify
+                .contact
+                .as_deref(),
+            Some("mailto:ops@example.org")
+        );
     }
 
     #[test]

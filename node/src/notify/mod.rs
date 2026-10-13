@@ -38,7 +38,8 @@ const SUMMARY_ABOVE: usize = 3;
 /// Per device now, so a burst to three phones is nine sends, not three.
 const MAX_IN_FLIGHT: usize = 32;
 /// A device that has failed this many times in a row without ever saying
-/// "gone" is treated as gone anyway.
+/// "gone" is treated as gone anyway, once the latest failure is one where
+/// nothing answered. Refusals count towards it but never forget a device.
 const MAX_FAILURES: i64 = 20;
 /// How long a push service holds an undelivered push for a phone that is off.
 const TTL_ITEM_SECS: u32 = 60 * 60;
@@ -67,6 +68,8 @@ pub enum Kind {
     Report,
     Promotion,
     Operator,
+    /// An `ask_operator` question waiting for an answer.
+    Question,
     /// A push that belongs in OpenCode's own view rather than tracon's session
     /// screen. Its own kind, not a flag on another, because it lands somewhere
     /// else and a burst of them collapses on its own terms.
@@ -84,6 +87,7 @@ impl Kind {
             Kind::Report => "report",
             Kind::Promotion => "promo",
             Kind::Operator => "operator",
+            Kind::Question => "question",
             Kind::Opencode => "opencode",
             Kind::Forge => "forge",
         }
@@ -102,6 +106,8 @@ impl Kind {
             (Kind::Promotion, _) => "memory batches",
             (Kind::Operator, 1) => "operator notification",
             (Kind::Operator, _) => "operator notifications",
+            (Kind::Question, 1) => "question",
+            (Kind::Question, _) => "questions",
             (Kind::Opencode, 1) => "OpenCode session",
             (Kind::Opencode, _) => "OpenCode sessions",
             (Kind::Forge, 1) => "published change moved",
@@ -154,7 +160,9 @@ impl Notification {
     fn ttl_secs(&self) -> u32 {
         match self.kind {
             Kind::Permission | Kind::Operator | Kind::Opencode => TTL_ITEM_SECS,
-            Kind::Review | Kind::Report | Kind::Promotion | Kind::Forge => TTL_REVIEW_SECS,
+            Kind::Review | Kind::Report | Kind::Promotion | Kind::Question | Kind::Forge => {
+                TTL_REVIEW_SECS
+            }
         }
     }
 
@@ -222,8 +230,13 @@ pub fn delivery_evidence(outcome: webpush::Outcome) -> (String, bool) {
     match outcome {
         webpush::Outcome::Sent => ("accepted_by_push_service".into(), true),
         webpush::Outcome::Gone => ("subscription_gone".into(), false),
-        webpush::Outcome::Refused(status) => (format!("push_service_refused:{status}"), false),
-        webpush::Outcome::Unreachable => ("push_service_unreachable".into(), false),
+        webpush::Outcome::Refused { status, reason } => {
+            (format!("push_service_refused:{status} ({reason})"), false)
+        }
+        webpush::Outcome::Unreachable { reason } => {
+            (format!("push_service_unreachable ({reason})"), false)
+        }
+        webpush::Outcome::NotSent(why) => (format!("not_sent ({why})"), false),
     }
 }
 
@@ -239,6 +252,7 @@ struct Seen {
     permissions: HashSet<String>,
     reviews: HashMap<String, String>,
     promotions: HashSet<String>,
+    questions: HashSet<String>,
 }
 
 /// Which channels push at all. Resolved per item from the channel's bindings.
@@ -343,23 +357,26 @@ impl Notifier {
         }
     }
 
-    /// Record what is already waiting without pushing any of it.
+    /// Announce what is already waiting, once.
     ///
-    /// A node restarts for reasons that have nothing to do with the operator —
-    /// a redeploy, a laptop waking — and re-announcing the standing queue every
-    /// time teaches them to swipe pushes away, which costs more than the
-    /// backlog is worth. Anything a peer raised while this node was down is
-    /// still announced: it was not in the store to be primed, so it arrives as
-    /// new when the mirror lands it.
+    /// A node restarts for reasons that have nothing to do with the operator:
+    /// a redeploy, a pod rescheduled, a laptop waking. What a push service
+    /// already took a push about stays quiet, since buzzing for the standing
+    /// queue on every restart teaches the operator to swipe pushes away. What
+    /// never got through (the node died inside the debounce, or every push
+    /// was refused until the contact was fixed) is announced now, collapsed
+    /// like any burst. Anything a peer raised while this node was down
+    /// arrives as new when the mirror lands it.
     fn prime(&mut self) {
-        if let Ok(rows) = self.store.open_permissions() {
-            self.seen.permissions = rows.into_iter().map(|p| p.id).collect();
-        }
-        if let Ok(rows) = self.store.open_reviews() {
-            self.seen.reviews = rows.into_iter().map(|r| (r.id, r.state)).collect();
-        }
-        if let Ok(rows) = self.store.open_promotions() {
-            self.seen.promotions = rows.into_iter().map(|p| p.id).collect();
+        self.resync();
+        let waiting: Vec<String> = self.pending.iter().map(|n| n.tag.clone()).collect();
+        match self.store.push_announced_keep(&waiting) {
+            Ok(announced) => self.pending.retain(|n| !announced.contains(&n.tag)),
+            // Without the record, quiet is the safer mistake.
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read what was announced; not re-announcing");
+                self.pending.clear();
+            }
         }
     }
 
@@ -374,6 +391,9 @@ impl Notifier {
         }
         if let Ok(rows) = self.store.open_promotions() {
             self.diff_promotions(&rows);
+        }
+        if let Ok(rows) = self.store.open_operator_questions() {
+            self.diff_questions(&rows);
         }
     }
 
@@ -489,9 +509,58 @@ impl Notifier {
         self.seen.promotions = present;
     }
 
+    /// A question an agent asked with `ask_operator`. It lands where it can be
+    /// answered: its session, or the home queue for a harness the operator
+    /// runs.
+    fn diff_questions(&mut self, waiting: &[crate::store::OperatorQuestionRow]) {
+        let mut present = HashSet::with_capacity(waiting.len());
+        for q in waiting.iter().filter(|q| q.state == "unanswered") {
+            present.insert(q.id.clone());
+            if self.seen.questions.contains(&q.id) || !self.gate.pushes(&q.channel) {
+                continue;
+            }
+            let (title, path) = match q.session_id.as_deref() {
+                Some(session_id) => {
+                    let branch = self
+                        .store
+                        .get_session(session_id)
+                        .ok()
+                        .flatten()
+                        .map(|s| s.branch);
+                    (
+                        match branch {
+                            Some(branch) => format!("Question: {branch}"),
+                            None => format!("Question on {}", q.channel),
+                        },
+                        format!("/sessions/{session_id}"),
+                    )
+                }
+                None => (format!("Question: external on {}", q.channel), "/".into()),
+            };
+            self.pending.push(Notification {
+                kind: Kind::Question,
+                title,
+                body: q.prompt.chars().take(200).collect(),
+                path,
+                tag: format!("tracon-question-{}", q.id),
+            });
+        }
+        self.seen.questions = present;
+    }
+
     /// Collapse a burst: past a handful of one kind, a count says more than
     /// the items would, and one banner beats five.
+    #[cfg(test)]
     fn collapse(pending: Vec<Notification>) -> Vec<Notification> {
+        Self::collapse_covering(pending)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect()
+    }
+
+    /// [`Self::collapse`], with the items each push stands for, so a push the
+    /// service takes can mark every one of them announced.
+    fn collapse_covering(pending: Vec<Notification>) -> Vec<(Notification, Vec<String>)> {
         let mut by_kind: HashMap<Kind, Vec<Notification>> = HashMap::new();
         for n in pending {
             by_kind.entry(n.kind).or_default().push(n);
@@ -502,16 +571,23 @@ impl Notifier {
         kinds.sort_by_key(|(k, _)| k.tag());
         for (kind, group) in kinds {
             if group.len() > SUMMARY_ABOVE {
-                out.push(Notification {
-                    kind,
-                    title: "tracon".into(),
-                    body: kind.plural(group.len()),
-                    path: "/".into(),
-                    // One summary replaces the last, unlike the items.
-                    tag: format!("tracon-queue-{}", kind.tag()),
-                });
+                let covers = group.iter().map(|n| n.tag.clone()).collect();
+                out.push((
+                    Notification {
+                        kind,
+                        title: "tracon".into(),
+                        body: kind.plural(group.len()),
+                        path: "/".into(),
+                        // One summary replaces the last, unlike the items.
+                        tag: format!("tracon-queue-{}", kind.tag()),
+                    },
+                    covers,
+                ));
             } else {
-                out.extend(group);
+                out.extend(group.into_iter().map(|n| {
+                    let covers = vec![n.tag.clone()];
+                    (n, covers)
+                }));
             }
         }
         out
@@ -535,12 +611,14 @@ impl Notifier {
         if devices.is_empty() {
             return;
         }
-        for n in Self::collapse(pending) {
+        for (n, covers) in Self::collapse_covering(pending) {
+            let covers = Arc::new(covers);
             for device in &devices {
                 let store = self.store.clone();
                 let cfg = self.cfg.clone();
                 let device = device.clone();
                 let n = n.clone();
+                let covers = covers.clone();
                 let permits = self.permits.clone();
                 let retry_after = self.opts.retry_after_ms;
                 tokio::spawn(async move {
@@ -550,16 +628,16 @@ impl Notifier {
                         tracing::warn!(tag = %n.tag, "notification dropped; push is backed up");
                         return;
                     };
-                    if deliver(&store, &cfg, &device, &n, now).await
-                        != webpush::Outcome::Unreachable
-                    {
-                        return;
+                    let mut outcome = deliver(&store, &cfg, &device, &n, now).await;
+                    if matches!(outcome, webpush::Outcome::Unreachable { .. }) {
+                        tokio::time::sleep(std::time::Duration::from_millis(retry_after)).await;
+                        outcome = deliver(&store, &cfg, &device, &n, now).await;
+                        if matches!(outcome, webpush::Outcome::Unreachable { .. }) {
+                            tracing::warn!(tag = %n.tag, device = %device.id, "notification not delivered");
+                        }
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_after)).await;
-                    if deliver(&store, &cfg, &device, &n, now).await
-                        == webpush::Outcome::Unreachable
-                    {
-                        tracing::warn!(tag = %n.tag, device = %device.id, "notification not delivered");
+                    if outcome == webpush::Outcome::Sent {
+                        let _ = store.push_announced_mark(&covers, now_ms());
                     }
                 });
             }
@@ -568,8 +646,13 @@ impl Notifier {
 }
 
 /// One push to one device, with the bookkeeping the outcome earns: a "gone"
-/// forgets the device, a run of failures eventually does too, and a success
-/// resets the run.
+/// forgets the device, a refusal or an unanswered push is recorded on it with
+/// what the service said, a long run of unanswered ones forgets it too, and a
+/// success clears the record.
+///
+/// A node with no contact to sign with sends nothing: a push Apple will
+/// refuse is not worth sending, and the refusal is the node's, not the
+/// device's, so nothing is recorded against the device.
 pub async fn deliver(
     store: &Arc<Store>,
     cfg: &Config,
@@ -577,12 +660,25 @@ pub async fn deliver(
     n: &Notification,
     now: i64,
 ) -> webpush::Outcome {
+    let subject = match cfg.notify.subject(cfg.public_origin().as_deref()) {
+        Ok(subject) => subject,
+        Err(why) => {
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!("pushes are not sent: {why}");
+            }
+            return webpush::Outcome::NotSent(why);
+        }
+    };
     let (p256dh, auth) = match webpush::decode_keys(&device.p256dh, &device.auth) {
         Ok(k) => k,
         Err(e) => {
             tracing::warn!(device = %device.id, error = %e, "push subscription unusable; forgetting it");
             let _ = store.push_subscription_delete(&device.id);
-            return webpush::Outcome::Refused(0);
+            return webpush::Outcome::Refused {
+                status: 0,
+                reason: e.to_string(),
+            };
         }
     };
     let sub = webpush::Subscriber {
@@ -594,22 +690,16 @@ pub async fn deliver(
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(device = %device.id, error = %e, "push could not be sealed");
-            return webpush::Outcome::Refused(0);
+            return webpush::Outcome::Refused {
+                status: 0,
+                reason: e.to_string(),
+            };
         }
     };
     let vapid = webpush::Vapid::load_or_generate(store);
     let http = http_client();
-    let outcome = webpush::send(
-        &http,
-        &vapid,
-        cfg.notify.subject(),
-        &sub,
-        body,
-        n.ttl_secs(),
-        &n.tag,
-    )
-    .await;
-    match outcome {
+    let outcome = webpush::send(&http, &vapid, &subject, &sub, body, n.ttl_secs(), &n.tag).await;
+    match &outcome {
         webpush::Outcome::Sent => {
             let _ = store.push_subscription_ok(&device.id, now_ms());
         }
@@ -617,19 +707,29 @@ pub async fn deliver(
             tracing::info!(device = %device.id, "push service says the device is gone; forgetting it");
             let _ = store.push_subscription_delete(&device.id);
         }
-        webpush::Outcome::Refused(status) => {
-            tracing::warn!(device = %device.id, status, "push service refused the push");
+        // Kept, however many times: a 403 is usually this node's signature
+        // (its contact, its key), and forgetting a working phone over it
+        // would hide the cause behind a missing device.
+        webpush::Outcome::Refused { status, reason } => {
+            tracing::warn!(device = %device.id, status, %reason, "push service refused the push");
+            let _ = store.push_subscription_failed(&device.id, reason, now_ms());
         }
-        webpush::Outcome::Unreachable => {
-            if let Ok(n) = store.push_subscription_failed(&device.id) {
+        webpush::Outcome::Unreachable { reason } => {
+            if let Ok(n) = store.push_subscription_failed(&device.id, reason, now_ms()) {
                 if n >= MAX_FAILURES {
-                    tracing::warn!(device = %device.id, failures = n, "device never answers; forgetting it");
+                    tracing::warn!(device = %device.id, failures = n, %reason, "device never answers; forgetting it");
                     let _ = store.push_subscription_delete(&device.id);
                 }
             }
         }
+        webpush::Outcome::NotSent(_) => {}
     }
     outcome
+}
+
+/// Why this node sends no pushes at all, when it sends none.
+pub fn not_sending(cfg: &Config) -> Option<&'static str> {
+    cfg.notify.subject(cfg.public_origin().as_deref()).err()
 }
 
 /// Send a push that opens OpenCode's own view for one session.
@@ -727,7 +827,8 @@ pub async fn run_with(
 
     let debounce = tokio::time::sleep(std::time::Duration::from_millis(debounce_ms));
     tokio::pin!(debounce);
-    let mut armed = false;
+    // What `prime` found unannounced goes out on the first window.
+    let mut armed = !n.pending.is_empty();
 
     loop {
         tokio::select! {
@@ -740,6 +841,7 @@ pub async fn run_with(
                 Ok(Frame::Queue { waiting }) => n.diff_permissions(&waiting),
                 Ok(Frame::Reviews { waiting }) => n.diff_reviews(&waiting),
                 Ok(Frame::Promotions { waiting }) => n.diff_promotions(&waiting),
+                Ok(Frame::Questions { waiting }) => n.diff_questions(&waiting),
                 Ok(_) => {}
                 // The queue moved faster than this task read it. The store has
                 // the answer; ask it rather than guessing what was missed.

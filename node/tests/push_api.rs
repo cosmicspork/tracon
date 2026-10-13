@@ -353,4 +353,10 @@ async fn a_bearer_or_bad_subscription_is_refused_and_loopback_belongs_to_the_mac
     .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["sent"].as_array().unwrap().len(), 0);
+    // This node has no `[notify] contact`, and says so wherever the devices
+    // are listed rather than letting the push service answer 403.
+    let reason = v["not_sending"].as_str().unwrap();
+    assert!(reason.contains("[notify] contact"), "{reason}");
+    let (_, _, list) = call(&n, "GET", "/api/push/subscriptions", LOCAL, &[], None).await;
+    assert_eq!(list["not_sending"], v["not_sending"]);
 }

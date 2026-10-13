@@ -13,6 +13,7 @@
 
 
   let devices = $state<PushDevice[]>([])
+  let notSending = $state<string | null>(null)
   let on = $state(false)
   let busy = $state(false)
   let note = $state('')
@@ -28,6 +29,7 @@
       const [sub, list] = await Promise.all([push.current(), api.pushDevices()])
       on = !!sub
       devices = list.devices
+      notSending = list.not_sending ?? null
     } catch {
       devices = []
     }
@@ -59,7 +61,9 @@
   }
   const test = () =>
     act(async () => {
-      const attempts = (await api.testPush()).sent
+      const result = await api.testPush()
+      if (result.not_sending) throw new Error(`Nothing was sent: ${result.not_sending}`)
+      const attempts = result.sent
       const accepted = attempts.filter((attempt) => attempt.service_accepted)
       if (!accepted.length) {
         throw new Error(`The push service did not accept a request: ${attempts.map((attempt) => attempt.outcome).join(', ') || 'no registered devices'}`)
@@ -90,6 +94,7 @@
       {/if}
     {/if}
   </div>
+  {#if notSending}<span class="note crit">{servingNode} sends no pushes: {notSending}</span>{/if}
   {#if note}<span class="note" class:crit={failed}>{note}</span>{/if}
 </Card>
 
@@ -103,6 +108,9 @@
             {#if d.last_ok_ms}service accepted {formatAge(d.last_ok_ms, clock.now)} ago{:else}no accepted push yet{/if}{#if d.fail_count}{' · '}{d.fail_count} failing{/if}
           </span>
           <button class="lnk d" onclick={() => forget(d)} disabled={busy}>Forget</button>
+          {#if d.last_error}
+            <span class="err">last failed{#if d.last_error_ms}{' '}{formatAge(d.last_error_ms, clock.now)} ago{/if}: {d.last_error}</span>
+          {/if}
         </div>
       {/each}
     </div>
@@ -146,6 +154,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .err {
+    grid-column: 1 / -1;
+    color: var(--crit);
+    overflow-wrap: anywhere;
   }
   .dev.mine .ua {
     color: var(--ink);

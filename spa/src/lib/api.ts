@@ -187,12 +187,18 @@ export const api = {
     body: { confirm: true; model?: string; budget_tokens?: number; branch?: string },
   ) => call<TransferImport>('POST', `/api/transfers/${encodeURIComponent(id)}/import`, body),
   pushKey: () => call<{ key: string }>('GET', '/api/push/key'),
-  pushDevices: () => call<{ devices: PushDevice[] }>('GET', '/api/push/subscriptions'),
+  /** `not_sending` is why the node sends no pushes at all, when it sends none. */
+  pushDevices: () => call<{ devices: PushDevice[]; not_sending: string | null }>('GET', '/api/push/subscriptions'),
   putPushSubscription: (sub: unknown) => call<{ id: string }>('POST', '/api/push/subscriptions', sub),
   deletePushSubscription: (id: string) => call<void>('DELETE', `/api/push/subscriptions/${id}`),
   deletePushSubscriptionByEndpoint: (endpoint: string) =>
     call<void>('DELETE', '/api/push/subscriptions', { endpoint }),
-  testPush: () => call<{ sent: { id: string; outcome: string; service_accepted: boolean }[] }>('POST', '/api/push/test', {}),
+  testPush: () =>
+    call<{ sent: { id: string; outcome: string; service_accepted: boolean }[]; not_sending: string | null }>(
+      'POST',
+      '/api/push/test',
+      {},
+    ),
   queue: () => call<Queue>('GET', '/api/queue'),
   recentRepos: () =>
     call<{ repos: RecentRepo[]; managed: ManagedRepo[] }>('GET', '/api/repos/recent'),

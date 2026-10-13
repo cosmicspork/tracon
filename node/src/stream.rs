@@ -70,6 +70,12 @@ pub enum Frame {
     Promotions {
         waiting: Vec<crate::store::PromotionRow>,
     },
+    /// Unanswered `ask_operator` questions, published when one is asked so the
+    /// notifier hears of it. The interface polls for these instead; this
+    /// node's alone, never forwarded.
+    Questions {
+        waiting: Vec<crate::store::OperatorQuestionRow>,
+    },
     /// Whether this node is holding its machine awake, and the last suspend
     /// it noticed. This node's alone; never forwarded.
     Awake(Value),
@@ -91,6 +97,7 @@ impl Frame {
             Frame::Providers { .. } => "providers",
             Frame::Changes { .. } => "changes",
             Frame::Promotions { .. } => "promotions",
+            Frame::Questions { .. } => "questions",
             Frame::Awake(_) => "awake",
         }
     }

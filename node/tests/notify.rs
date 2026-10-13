@@ -68,6 +68,8 @@ struct Service {
     devices: Arc<Mutex<std::collections::HashMap<String, Device>>>,
     /// What to answer; the node's handling of each answer is the subject.
     status: StatusCode,
+    /// The body that goes with it, as Apple names its reasons.
+    body: &'static str,
 }
 
 async fn receive(
@@ -75,7 +77,7 @@ async fn receive(
     Path(device): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> (StatusCode, &'static str) {
     let dev = s.devices.lock().unwrap().get(&device).cloned().unwrap();
     let plain =
         webpush::decrypt(&dev.secret, &dev.auth, &body).expect("the node sealed to this device");
@@ -95,16 +97,21 @@ async fn receive(
         authorization: h("authorization"),
     });
     s.wake.notify_waiters();
-    s.status
+    (s.status, s.body)
 }
 
 /// A push service on a real port answering `status`, and its base URL.
 async fn push_service(status: StatusCode) -> (Service, String) {
+    push_service_saying(status, "").await
+}
+
+async fn push_service_saying(status: StatusCode, body: &'static str) -> (Service, String) {
     let s = Service {
         got: Default::default(),
         wake: Default::default(),
         devices: Default::default(),
         status,
+        body,
     };
     let app = Router::new()
         .route("/push/{device}", post(receive))
@@ -144,6 +151,8 @@ impl Service {
                 created_ms: now_ms(),
                 last_ok_ms: None,
                 fail_count: 0,
+                last_error: None,
+                last_error_ms: None,
             })
             .unwrap();
         dev
@@ -252,6 +261,10 @@ fn review(id: &str, state: &str) -> ReviewRow {
 async fn notifier(store: Arc<Store>) -> Bus {
     let mut cfg = Config::default();
     cfg.notify.contact = Some("mailto:ops@tracon.example".into());
+    notifier_with(store, cfg).await
+}
+
+async fn notifier_with(store: Arc<Store>, cfg: Config) -> Bus {
     let bus = Bus::new();
     tokio::spawn(tracon::notify::run_with(
         store,
@@ -497,9 +510,11 @@ async fn each_device_gets_its_own_copy_and_a_revoked_session_takes_its_devices()
     assert_eq!(left, ["dev-laptop"]);
 }
 
-/// A restart is not news. What was already waiting stays waiting silently.
+/// A restart announces what no push service has taken a push about yet, once,
+/// and stays quiet about what one has: the queue a redeploy finds is not news,
+/// but an approval whose pushes were all refused still is.
 #[tokio::test]
-async fn the_standing_queue_is_not_announced_on_startup() {
+async fn a_restart_announces_only_what_never_got_through() {
     state::isolate();
     let (svc, base) = push_service(StatusCode::CREATED).await;
     let store = store_with_channel("{}");
@@ -508,24 +523,178 @@ async fn the_standing_queue_is_not_announced_on_startup() {
     let existing = permission("p1");
     store.insert_permission(&existing).unwrap();
 
-    // The notifier starts with the item already in the store.
-    let bus = notifier(store.clone()).await;
-    bus.publish(Frame::Queue {
+    // The notifier starts with an item nobody was told about.
+    let first = notifier(store.clone()).await;
+    let sent = svc.wait(1, 2_000).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].payload["tag"], "tracon-perm-p1");
+    first.publish(Frame::Queue {
+        waiting: vec![existing.clone()],
+    });
+    quiet().await;
+    assert_eq!(
+        svc.sent().len(),
+        1,
+        "announced once, not again on the next frame"
+    );
+
+    // Restarted, with the same item still waiting: the phone already has it.
+    let second = notifier(store.clone()).await;
+    second.publish(Frame::Queue {
         waiting: vec![existing],
     });
     quiet().await;
-    assert!(
-        svc.sent().is_empty(),
-        "a restart should not re-announce the backlog"
+    assert_eq!(
+        svc.sent().len(),
+        1,
+        "a restart should not re-announce what got through"
     );
 
     // Something genuinely new still gets through.
     let fresh = permission("p2");
     store.insert_permission(&fresh).unwrap();
-    bus.publish(Frame::Queue {
+    second.publish(Frame::Queue {
         waiting: vec![permission("p1"), fresh],
     });
+    assert_eq!(svc.wait(2, 2_000).await.len(), 2);
+}
+
+/// What a push service refused is not marked announced, so the next start
+/// tries it again; the refusal is recorded on the device, which is kept.
+#[tokio::test]
+async fn a_refused_push_is_recorded_and_tried_again_after_a_restart() {
+    state::isolate();
+    let (svc, base) =
+        push_service_saying(StatusCode::FORBIDDEN, r#"{"reason":"BadJwtToken"}"#).await;
+    let store = store_with_channel("{}");
+    session(&store, "s1");
+    svc.subscribe(&store, &base, "phone", None);
+    let p = permission("p1");
+    store.insert_permission(&p).unwrap();
+
+    let _first = notifier(store.clone()).await;
     assert_eq!(svc.wait(1, 2_000).await.len(), 1);
+    let row = settle(&store, |r| r.fail_count >= 1).await;
+    assert_eq!(row.fail_count, 1, "a refusal counts against the device");
+    assert_eq!(
+        row.last_error.as_deref(),
+        Some(r#"HTTP 403: {"reason":"BadJwtToken"}"#),
+        "and says what the service said"
+    );
+    assert!(row.last_error_ms.is_some());
+    quiet().await;
+    assert_eq!(svc.sent().len(), 1, "a 403 is not retried like an outage");
+
+    // The refusal was the node's to fix; once fixed, the restart tries again.
+    let _second = notifier(store.clone()).await;
+    assert_eq!(
+        svc.wait(2, 2_000).await.len(),
+        2,
+        "never announced, so announced now"
+    );
+    let row = settle(&store, |r| r.fail_count >= 2).await;
+    assert_eq!(row.fail_count, 2);
+    assert_eq!(
+        store.push_subscriptions().unwrap().len(),
+        1,
+        "a refusal never forgets the device"
+    );
+}
+
+/// The one device row, once `ready` says its bookkeeping has landed: the
+/// service records a request before the node has read the answer.
+async fn settle(
+    store: &Store,
+    ready: impl Fn(&PushSubscriptionRow) -> bool,
+) -> PushSubscriptionRow {
+    for _ in 0..100 {
+        if let Some(row) = store.push_subscriptions().unwrap().into_iter().next() {
+            if ready(&row) {
+                return row;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    store.push_subscriptions().unwrap().remove(0)
+}
+
+/// A node with no contact signs nothing: Apple answers the old
+/// `mailto:tracon@localhost` subject with a 403, so nothing leaves at all and
+/// the device is not blamed for it.
+#[tokio::test]
+async fn without_a_contact_nothing_is_sent_and_the_device_is_not_blamed() {
+    state::isolate();
+    let (svc, base) = push_service(StatusCode::CREATED).await;
+    let store = store_with_channel("{}");
+    session(&store, "s1");
+    svc.subscribe(&store, &base, "phone", None);
+    let bus = notifier_with(store.clone(), Config::default()).await;
+    let p = permission("p1");
+    store.insert_permission(&p).unwrap();
+    bus.publish(Frame::Queue { waiting: vec![p] });
+    quiet().await;
+    assert!(svc.sent().is_empty(), "{:?}", svc.sent());
+    let row = &store.push_subscriptions().unwrap()[0];
+    assert_eq!(row.fail_count, 0);
+    assert!(row.last_error.is_none());
+
+    let cfg = Config::default();
+    assert_eq!(
+        tracon::notify::not_sending(&cfg),
+        Some(tracon::config::NO_PUSH_CONTACT)
+    );
+    let outcome = tracon::notify::deliver(
+        &store,
+        &cfg,
+        row,
+        &tracon::notify::Notification::test(),
+        now_ms(),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        webpush::Outcome::NotSent(tracon::config::NO_PUSH_CONTACT)
+    );
+    let (evidence, accepted) = tracon::notify::delivery_evidence(outcome);
+    assert!(!accepted);
+    assert!(evidence.contains("[notify] contact"), "{evidence}");
+}
+
+/// An `ask_operator` question reaches the phone like an approval, landing on
+/// the session that asked.
+#[tokio::test]
+async fn a_question_reaches_the_phone() {
+    state::isolate();
+    let (svc, store, bus) = rig("{}", StatusCode::CREATED).await;
+    let question = tracon::store::OperatorQuestionRow {
+        id: "q1".into(),
+        session_id: Some("s1".into()),
+        channel: "personal".into(),
+        node_id: "n1".into(),
+        request_key: Some("k".into()),
+        prompt: "which remote?".into(),
+        choices_json: "[]".into(),
+        state: "unanswered".into(),
+        answer_json: None,
+        created_ms: now_ms(),
+        answered_ms: None,
+    };
+    store.insert_operator_question(&question).unwrap();
+    bus.publish(Frame::Questions {
+        waiting: store.open_operator_questions().unwrap(),
+    });
+    let sent = svc.wait(1, 2_000).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].payload["title"], "Question: feat/thing");
+    assert_eq!(sent[0].payload["body"], "which remote?");
+    assert_eq!(sent[0].payload["path"], "/sessions/s1");
+    assert_eq!(sent[0].payload["kind"], "question");
+
+    bus.publish(Frame::Questions {
+        waiting: store.open_operator_questions().unwrap(),
+    });
+    quiet().await;
+    assert_eq!(svc.sent().len(), 1, "the same question is not news twice");
 }
 
 /// Five approvals at once is one buzz, not five.
@@ -558,16 +727,18 @@ async fn a_burst_arrives_as_a_count() {
 #[tokio::test]
 async fn a_gone_endpoint_is_forgotten() {
     state::isolate();
-    let (svc, store, bus) = rig("{}", StatusCode::GONE).await;
-    let p = permission("p1");
-    store.insert_permission(&p).unwrap();
-    bus.publish(Frame::Queue { waiting: vec![p] });
-    svc.wait(1, 2_000).await;
-    quiet().await;
-    assert!(
-        store.push_subscriptions().unwrap().is_empty(),
-        "a 410 should remove the device"
-    );
+    for status in [StatusCode::GONE, StatusCode::NOT_FOUND] {
+        let (svc, store, bus) = rig("{}", status).await;
+        let p = permission("p1");
+        store.insert_permission(&p).unwrap();
+        bus.publish(Frame::Queue { waiting: vec![p] });
+        svc.wait(1, 2_000).await;
+        quiet().await;
+        assert!(
+            store.push_subscriptions().unwrap().is_empty(),
+            "a {status} should remove the device"
+        );
+    }
 }
 
 /// The push service being down is not the node's problem to escalate: one

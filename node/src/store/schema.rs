@@ -1362,6 +1362,19 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX queued_prompt_pending ON queued_prompt(session_id, delivered_ms);
     "#,
+    // 60: why a device's last push did not land, as the push service said it,
+    // so Settings can show a refusal instead of a bare count. And the items a
+    // push service has accepted a push about, so a restart announces what
+    // never got through and stays quiet about what did. Node-local, like the
+    // devices themselves.
+    r#"
+    ALTER TABLE push_subscription ADD COLUMN last_error TEXT;
+    ALTER TABLE push_subscription ADD COLUMN last_error_ms INTEGER;
+    CREATE TABLE push_announced (
+        tag          TEXT PRIMARY KEY,
+        announced_ms INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered
