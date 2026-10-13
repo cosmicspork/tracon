@@ -358,6 +358,22 @@ namespace down is what actually collects the language servers and formatters. A 
 gets the same number as its termination grace period and needs no shared process
 namespace, because the container carries its own init.
 
+**A command run to completion in a pod reports what it did.** A check, a preparation or
+a probe on Kubernetes is a pod of its own. Its exit code is its container's
+`terminated.exitCode`, so a failing check (2) and a missing tool (127) stay apart; a pod
+that ends without one (an eviction) is an error, never a made-up 1. Its output is the
+pod log, where the cluster has already merged stdout and stderr, so it all arrives as
+stdout and an empty stderr says nothing. Only the start is bounded by the runner
+(`[runtime.kubernetes] start_timeout_secs`, 15 minutes by default, enough for a first
+pull of a large image), and a start that runs out says what the pod was waiting for.
+The run itself has no runner limit, as under Podman: the caller's own timeout stops it
+by removing the pod, and a caller that stops waiting removes it too. The harness
+image's entrypoint is named only when the pod runs the harness image; a repository
+image runs the command as given. The identity a check's evidence is keyed on is the
+image reference itself when it is pinned by digest, because the kubelet runs nothing
+else under it, so an approval asked of a runner that has run nothing still finds it. A
+tag is confirmed only by the `imageID` a run of that same tag reported.
+
 **The checks verify what runs.** They render the same run specification a session
 uses onto a probe that is created but never started, so a mutating admission webhook
 that adds privilege fails the check rather than passing the rendering, and a second

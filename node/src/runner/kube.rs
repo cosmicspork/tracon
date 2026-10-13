@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EnvVar, HostAlias, PersistentVolumeClaimVolumeSource,
-    Pod, PodDNSConfig, PodSchedulingGate, PodSecurityContext, PodSpec, SeccompProfile,
-    SecurityContext, Volume, VolumeMount,
+    Capabilities, Container, ContainerPort, ContainerStatus, EnvVar, HostAlias,
+    PersistentVolumeClaimVolumeSource, Pod, PodDNSConfig, PodSchedulingGate, PodSecurityContext,
+    PodSpec, PodStatus, SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{AttachParams, DeleteParams, LogParams, PostParams};
@@ -83,15 +83,20 @@ pub struct KubeSpec {
     /// See `RunSpec::state_env`: the harness names its own state directory.
     pub state_env: &'static str,
     pub state_dir: &'static str,
-    /// The image's entrypoint, when it has one. Podman prefixes a container's
-    /// command with the image's `ENTRYPOINT`; a pod's `command` *replaces* it.
-    /// So an image whose entrypoint does real work — the OpenCode harness
-    /// seeds its package caches there — has to have it named here, or a pod
-    /// silently skips it.
+    /// The harness image's entrypoint, when it has one. Podman prefixes a
+    /// container's command with the image's `ENTRYPOINT`; a pod's `command`
+    /// *replaces* it. So an image whose entrypoint does real work (the
+    /// OpenCode harness seeds its package caches there) has to have it named
+    /// here, or a pod silently skips it. It belongs to `image` alone: a
+    /// command run in another image (a repository's, for its checks or its
+    /// preparation) does not have this file.
     pub entrypoint: Option<String>,
     /// Seconds between the SIGTERM the kubelet sends and the SIGKILL that
     /// follows. See `Boundary::stop_timeout_secs`.
     pub stop_timeout_secs: u16,
+    /// How long a pod may stay unstarted (unscheduled, pulling, mounting)
+    /// before the run is given up. `[runtime.kubernetes] start_timeout_secs`.
+    pub start_timeout: Duration,
 }
 
 impl KubeSpec {
@@ -118,6 +123,7 @@ impl KubeSpec {
             state_dir: layout.dir,
             entrypoint: image_entrypoint(harness_id),
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
+            start_timeout: Duration::from_secs(k.start_timeout_secs),
         }
     }
 
@@ -215,6 +221,11 @@ impl KubeSpec {
         labels.insert(ROLE_LABEL.to_string(), "harness".to_string());
         labels.insert(SESSION_LABEL.to_string(), name.to_string());
         let workdir = cmd.workdir.clone().unwrap_or_else(|| self.workdir.clone());
+        let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
+        // Only the harness image has the harness's entrypoint. Forcing it onto
+        // a repository image would run a path that image does not have, and
+        // every check and preparation in it would fail before it started.
+        let entrypoint = self.entrypoint.as_ref().filter(|_| image == self.image);
         Ok(Pod {
             metadata: ObjectMeta {
                 name: Some(name.into()),
@@ -285,18 +296,18 @@ impl KubeSpec {
                     ..Default::default()
                 }]),
                 containers: vec![Container {
-                    name: "harness".into(),
-                    image: Some(cmd.image.clone().unwrap_or_else(|| self.image.clone())),
+                    name: HARNESS_CONTAINER.into(),
+                    image: Some(image),
                     image_pull_policy: Some("IfNotPresent".into()),
                     // An image entrypoint is named rather than replaced: a pod
                     // `command` overrides `ENTRYPOINT`, so an image that does
                     // work before `exec`ing the harness would have that work
                     // skipped here and nowhere else.
-                    command: Some(match &self.entrypoint {
+                    command: Some(match entrypoint {
                         Some(entrypoint) => vec![entrypoint.clone()],
                         None => cmd.argv.clone(),
                     }),
-                    args: self.entrypoint.as_ref().map(|_| cmd.argv.clone()),
+                    args: entrypoint.map(|_| cmd.argv.clone()),
                     working_dir: Some(workdir),
                     stdin: Some(true),
                     stdin_once: Some(true),
@@ -338,10 +349,45 @@ impl KubeSpec {
 pub struct KubeRunner {
     client: Client,
     spec: KubeSpec,
-    /// The resolved image identity the kubelet reported for the most recent
-    /// `run_capture`, captured before the pod is removed. `resolved_image`
-    /// reads this rather than re-deriving anything from configuration.
-    last_image: tokio::sync::Mutex<Option<String>>,
+    /// The image a `run_capture` asked for and the identity the kubelet
+    /// reported for it, read before the pod is removed. `resolved_image`
+    /// answers from this only for the same reference: an `imageID` is
+    /// evidence about the image that ran, never about another.
+    last_image: tokio::sync::Mutex<Option<(String, String)>>,
+}
+
+/// How often a started pod is asked whether it has finished. A check runs for
+/// minutes, so a second's lag on its end costs nothing and halves the reads.
+const FINISH_POLL: Duration = Duration::from_secs(1);
+const START_POLL: Duration = Duration::from_millis(500);
+/// Reads in a row that may fail before a run is given up. A long run outlives
+/// the odd API blip; a pod that is gone (404) ends it at once.
+const READ_FAILURES: u32 = 10;
+
+/// Removes a capture's pod when its `run_capture` is dropped before it got to
+/// remove the pod itself: a caller that stops waiting (its own deadline, a
+/// cancellation) must not leave the command running in the cluster.
+struct PodRemoval {
+    pods: Api<Pod>,
+    name: String,
+    armed: bool,
+}
+
+impl Drop for PodRemoval {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let pods = self.pods.clone();
+            let name = std::mem::take(&mut self.name);
+            runtime.spawn(async move {
+                let _ = pods
+                    .delete(&name, &DeleteParams::default().grace_period(0))
+                    .await;
+            });
+        }
+    }
 }
 
 impl KubeRunner {
@@ -369,15 +415,14 @@ impl KubeRunner {
         }
     }
 
-    /// Wait for a phase the caller can act on. Pulling the image is the slow
-    /// part on a fresh node, so this is generous.
-    async fn wait_for(
-        &self,
-        name: &str,
-        want: &[&str],
-        timeout: Duration,
-    ) -> Result<String, RunnerError> {
+    /// Wait until the pod has started: scheduled, its image pulled, its
+    /// container created. That is the only part bounded here, by
+    /// `KubeSpec::start_timeout`, because it is the part a cluster can stall
+    /// on for reasons the command never sees. A pod that ran and ended before
+    /// it was looked at has started too.
+    async fn wait_started(&self, name: &str) -> Result<(), RunnerError> {
         let pods = self.pods();
+        let timeout = self.spec.start_timeout;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let pod = pods
@@ -385,25 +430,19 @@ impl KubeRunner {
                 .await
                 .map_err(|e| RunnerError::Other(format!("get pod {name}: {e}")))?;
             let status = pod.status.unwrap_or_default();
-            let phase = status.phase.clone().unwrap_or_default();
-            if want.contains(&phase.as_str()) {
-                return Ok(phase);
-            }
-            if phase == "Failed" || phase == "Succeeded" {
-                return Ok(phase);
+            let phase = status.phase.as_deref().unwrap_or_default();
+            if matches!(phase, "Running" | "Succeeded" | "Failed") {
+                return Ok(());
             }
             // A pod that cannot start says why in its container state; surface
             // that rather than a bare timeout.
-            if let Some(reason) = status
-                .container_statuses
-                .as_deref()
-                .and_then(|cs| cs.first())
+            if let Some(reason) = harness_status(&status)
                 .and_then(|c| c.state.as_ref())
                 .and_then(|s| s.waiting.as_ref())
-                .and_then(|w| w.reason.clone())
+                .and_then(|w| w.reason.as_deref())
             {
                 if matches!(
-                    reason.as_str(),
+                    reason,
                     "ErrImagePull"
                         | "ImagePullBackOff"
                         | "CreateContainerConfigError"
@@ -414,12 +453,49 @@ impl KubeRunner {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(RunnerError::Other(format!(
-                    "pod {name} did not reach {} in {}s (phase {phase})",
-                    want.join("/"),
-                    timeout.as_secs()
+                    "pod {name} did not start in {}s: {}; \
+                     [runtime.kubernetes] start_timeout_secs sets how long a start may take",
+                    timeout.as_secs(),
+                    pending_reason(&status)
                 )));
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(START_POLL).await;
+        }
+    }
+
+    /// Wait, without a limit, for a started pod's container to end, and
+    /// return the pod as it was then. The caller owns the deadline: it stops
+    /// a run by `kill`, which removes the pod, and that ends this wait too.
+    async fn wait_finished(&self, name: &str) -> Result<Pod, RunnerError> {
+        let pods = self.pods();
+        let mut failures = 0;
+        loop {
+            match pods.get(name).await {
+                Ok(pod) => {
+                    failures = 0;
+                    let status = pod.status.as_ref();
+                    let terminated = status
+                        .and_then(harness_status)
+                        .and_then(|c| c.state.as_ref())
+                        .is_some_and(|s| s.terminated.is_some());
+                    let phase = status.and_then(|s| s.phase.as_deref());
+                    if terminated || matches!(phase, Some("Succeeded" | "Failed")) {
+                        return Ok(pod);
+                    }
+                }
+                Err(kube::Error::Api(status)) if status.is_not_found() => {
+                    return Err(RunnerError::Other(format!(
+                        "pod {name} was removed before it finished"
+                    )));
+                }
+                Err(e) => {
+                    failures += 1;
+                    if failures >= READ_FAILURES {
+                        return Err(RunnerError::Other(format!("get pod {name}: {e}")));
+                    }
+                }
+            }
+            tokio::time::sleep(FINISH_POLL).await;
         }
     }
 
@@ -461,6 +537,131 @@ impl KubeRunner {
     async fn ensure_mount_roots(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
         self.spec.ensure_mount_roots(cmd).await
     }
+
+    /// What a finished capture pod reports: the container's own exit code,
+    /// its combined output, and the image the kubelet actually ran.
+    async fn captured(&self, name: &str, pod: Pod) -> Result<CaptureEnd, RunnerError> {
+        let status = pod.status.unwrap_or_default();
+        let container = harness_status(&status);
+        let code = match container
+            .and_then(|c| c.state.as_ref())
+            .and_then(|s| s.terminated.as_ref())
+        {
+            Some(terminated) => terminated.exit_code,
+            // A pod can end without its container ever reporting an exit (an
+            // eviction, a node lost): there is no code to give, so there is
+            // no result, rather than a 0 or 1 made up from the phase.
+            None => {
+                return Err(RunnerError::Other(format!(
+                    "pod {name} ended ({}) without an exit code: {}",
+                    status.phase.as_deref().unwrap_or("unknown phase"),
+                    [status.reason.as_deref(), status.message.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(": ")
+                )))
+            }
+        };
+        // Read what the kubelet actually pulled: the container's `imageID`,
+        // not the reference this runner asked for.
+        let image_id = container.and_then(|c| normalize_image_id(&c.image_id));
+        // The log endpoint interleaves stdout and stderr into one stream and
+        // has no stable way to ask for either alone, so both arrive as
+        // stdout. An empty `stderr` here says nothing about what the command
+        // wrote there; a log that could not be read says so in it instead.
+        let (stdout, stderr) = match self
+            .pods()
+            .logs(
+                name,
+                &LogParams {
+                    container: Some(HARNESS_CONTAINER.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(logs) => (logs.into_bytes(), Vec::new()),
+            Err(e) => (
+                Vec::new(),
+                format!("tracon: the output of pod {name} could not be read: {e}\n").into_bytes(),
+            ),
+        };
+        Ok(CaptureEnd {
+            code,
+            image_id,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+struct CaptureEnd {
+    code: i32,
+    image_id: Option<String>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+const HARNESS_CONTAINER: &str = "harness";
+
+/// The status of the one container a harness pod runs, by name.
+fn harness_status(status: &PodStatus) -> Option<&ContainerStatus> {
+    let statuses = status.container_statuses.as_deref()?;
+    statuses
+        .iter()
+        .find(|c| c.name == HARNESS_CONTAINER)
+        .or_else(|| statuses.first())
+}
+
+/// Why a pod has not started, in the words an operator can act on. The pod
+/// status has no "pulling" state: a pull shows as `ContainerCreating`, and the
+/// pod's events (which a runner holds no right to read) say the rest.
+fn pending_reason(status: &PodStatus) -> String {
+    if let Some(waiting) = harness_status(status)
+        .and_then(|c| c.state.as_ref())
+        .and_then(|s| s.waiting.as_ref())
+    {
+        let reason = waiting.reason.as_deref().unwrap_or("waiting");
+        let detail = waiting.message.as_deref().unwrap_or_default();
+        return match (reason, detail) {
+            ("ContainerCreating", "") => {
+                "ContainerCreating (the image is still pulling, or a volume is still mounting)"
+                    .into()
+            }
+            (reason, "") => reason.to_string(),
+            (reason, detail) => format!("{reason}: {detail}"),
+        };
+    }
+    if let Some(condition) = status.conditions.as_deref().and_then(|cs| {
+        cs.iter()
+            .find(|c| c.type_ == "PodScheduled" && c.status == "False")
+    }) {
+        return format!(
+            "not scheduled: {}",
+            [condition.reason.as_deref(), condition.message.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(": ")
+        );
+    }
+    format!(
+        "phase {}",
+        status
+            .phase
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .unwrap_or("Pending")
+    )
+}
+
+/// An `ExitStatus` that reports `code` as the exit code. Kubernetes reports a
+/// signalled container as 128 + the signal, which is already a code.
+fn exit_status(code: i32) -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    let code = if (0..=255).contains(&code) { code } else { 255 };
+    std::process::ExitStatus::from_raw(code << 8)
 }
 
 #[async_trait]
@@ -474,10 +675,7 @@ impl Runner for KubeRunner {
         pods.create(&PostParams::default(), &pod)
             .await
             .map_err(|e| RunnerError::Other(format!("create pod {name}: {e}")))?;
-        if let Err(e) = self
-            .wait_for(&name, &["Running"], Duration::from_secs(180))
-            .await
-        {
+        if let Err(e) = self.wait_started(&name).await {
             self.remove(&name).await;
             return Err(e);
         }
@@ -544,10 +742,19 @@ impl Runner for KubeRunner {
         })
     }
 
+    /// Run a command in a pod of its own and wait for it to end. Only the
+    /// start is bounded (`KubeSpec::start_timeout`); the run itself is not,
+    /// as `podman run` is not, so a check gets the budget its caller gave it
+    /// and not a runner's guess. A caller stops a run with `kill` on
+    /// `capture_name`, and dropping this future removes the pod as well.
+    ///
+    /// The result carries the container's own exit code. Its output is the
+    /// pod log, in which the cluster has already merged stdout and stderr, so
+    /// it is all in `stdout`; see `captured`.
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
-        use std::os::unix::process::ExitStatusExt;
         self.ensure_mount_roots(&cmd).await?;
         let name = self.capture_name(&Self::name_for(&cmd, "tracon-x"));
+        let asked = cmd.image.clone().unwrap_or_else(|| self.spec.image.clone());
         let mut pod = self.spec.pod(&name, &cmd, false)?;
         if let Some(c) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) {
             c.stdin = None;
@@ -558,38 +765,27 @@ impl Runner for KubeRunner {
         pods.create(&PostParams::default(), &pod)
             .await
             .map_err(|e| RunnerError::Other(format!("create pod {name}: {e}")))?;
-        let phase = self
-            .wait_for(&name, &["Succeeded", "Failed"], Duration::from_secs(180))
-            .await;
-        let result = match phase {
-            Ok(phase) => {
-                let logs = pods
-                    .logs(&name, &LogParams::default())
-                    .await
-                    .unwrap_or_default();
-                let code = if phase == "Succeeded" { 0 } else { 1 };
-                // Read what the kubelet actually pulled before the pod is
-                // gone: the container's `imageID`, not the reference this
-                // runner asked for.
-                let image_id = pods
-                    .get(&name)
-                    .await
-                    .ok()
-                    .and_then(|pod| pod.status)
-                    .and_then(|status| status.container_statuses)
-                    .and_then(|statuses| statuses.into_iter().next())
-                    .and_then(|status| normalize_image_id(&status.image_id));
-                *self.last_image.lock().await = image_id;
-                Ok(std::process::Output {
-                    status: std::process::ExitStatus::from_raw(code << 8),
-                    stdout: logs.into_bytes(),
-                    stderr: Vec::new(),
-                })
-            }
+        let mut removal = PodRemoval {
+            pods: pods.clone(),
+            name: name.clone(),
+            armed: true,
+        };
+        let result = match self.wait_started(&name).await {
+            Ok(()) => match self.wait_finished(&name).await {
+                Ok(finished) => self.captured(&name, finished).await,
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
         self.remove(&name).await;
-        result
+        removal.armed = false;
+        let end = result?;
+        *self.last_image.lock().await = end.image_id.map(|id| (asked, id));
+        Ok(std::process::Output {
+            status: exit_status(end.code),
+            stdout: end.stdout,
+            stderr: end.stderr,
+        })
     }
 
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
@@ -607,14 +803,39 @@ impl Runner for KubeRunner {
         )
     }
 
-    /// The kubelet's `imageID` for the most recent `run_capture`, when one
-    /// was confirmed against content addressing. That is already the image the
-    /// command actually ran in — `KubeSpec::pod` honours `cmd.image` — so the
-    /// override is not consulted here. `None` before any run, on failure, or
-    /// when the runtime reported no digest: evidence must never invent a pin.
-    async fn resolved_image(&self, _image: Option<&str>) -> Option<String> {
-        self.last_image.lock().await.clone()
+    /// The identity of the image a command runs in (`image`, else this
+    /// runner's own).
+    ///
+    /// A reference pinned by digest is its own answer: the kubelet pulls by
+    /// that digest and runs nothing else under it, so there is nothing a run
+    /// could confirm that the reference does not already say. That is what
+    /// lets a runner made fresh for an approval (every caller makes one)
+    /// answer without having run anything.
+    ///
+    /// A tag is only answered with the `imageID` the kubelet reported for that
+    /// same reference in this runner's last `run_capture`. `None` before
+    /// that, on failure, or when the runtime reported no digest: evidence
+    /// must never invent a pin.
+    async fn resolved_image(&self, image: Option<&str>) -> Option<String> {
+        let image = image.unwrap_or(&self.spec.image);
+        if digest_pinned(image) {
+            return Some(image.to_string());
+        }
+        self.last_image
+            .lock()
+            .await
+            .as_ref()
+            .filter(|(asked, _)| asked == image)
+            .map(|(_, id)| id.clone())
     }
+}
+
+/// Whether a reference names its content: `repo[:tag]@sha256:` and 64 hex
+/// digits, the shape `review::checks` keys evidence on.
+fn digest_pinned(image: &str) -> bool {
+    image.split_once("@sha256:").is_some_and(|(repo, digest)| {
+        !repo.is_empty() && digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+    })
 }
 
 /// Strip a container-runtime scheme prefix (`docker-pullable://`,
@@ -816,6 +1037,108 @@ mod tests {
         let c = &pod.spec.unwrap().containers[0];
         assert_eq!(c.command, Some(vec!["opencode".into(), "serve".into()]));
         assert!(c.args.is_none());
+    }
+
+    /// The entrypoint is the harness image's file. A check or a preparation
+    /// run in a repository's image gets its argv as the command, and naming
+    /// the harness image explicitly is the same as naming none.
+    #[test]
+    fn only_the_harness_image_gets_the_harness_entrypoint() {
+        let spec = spec();
+        assert!(spec.entrypoint.is_some(), "the default harness is OpenCode");
+        let mut repo = cmd();
+        repo.image = Some("registry.example/app@sha256:".to_string() + &"a".repeat(64));
+        let pod = spec.pod("tracon-c-1", &repo, false).unwrap();
+        let c = &pod.spec.unwrap().containers[0];
+        assert_eq!(c.image.as_deref(), repo.image.as_deref());
+        assert_eq!(c.command, Some(vec!["opencode".into(), "serve".into()]));
+        assert!(c.args.is_none());
+
+        let mut harness = cmd();
+        harness.image = Some(spec.image.clone());
+        let pod = spec.pod("tracon-c-2", &harness, false).unwrap();
+        let c = &pod.spec.unwrap().containers[0];
+        assert_eq!(
+            c.command,
+            Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
+        );
+        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
+    }
+
+    #[test]
+    fn the_start_deadline_comes_from_configuration() {
+        assert_eq!(spec().start_timeout, Duration::from_secs(15 * 60));
+        let mut cfg = Config::default();
+        cfg.runtime.kubernetes.start_timeout_secs = 42;
+        let spec = KubeSpec::from_config(&cfg, spec().env);
+        assert_eq!(spec.start_timeout, Duration::from_secs(42));
+    }
+
+    #[test]
+    fn only_a_full_digest_counts_as_pinned() {
+        let hex = "0123456789abcdef".repeat(4);
+        assert!(digest_pinned(&format!("ghcr.io/o/i@sha256:{hex}")));
+        assert!(digest_pinned(&format!("ghcr.io/o/i:1.2@sha256:{hex}")));
+        assert!(!digest_pinned("ghcr.io/o/i:1.2"));
+        assert!(!digest_pinned(&format!("@sha256:{hex}")));
+        assert!(!digest_pinned("ghcr.io/o/i@sha256:abc"));
+        assert!(!digest_pinned(&format!(
+            "ghcr.io/o/i@sha256:{}",
+            "z".repeat(64)
+        )));
+    }
+
+    #[test]
+    fn exit_codes_are_reported_as_they_are() {
+        assert_eq!(exit_status(0).code(), Some(0));
+        assert!(exit_status(0).success());
+        assert_eq!(exit_status(2).code(), Some(2));
+        assert_eq!(exit_status(127).code(), Some(127));
+        assert_eq!(exit_status(137).code(), Some(137));
+        // Out of range is a failure, never a wrapped-around success.
+        assert_eq!(exit_status(256).code(), Some(255));
+        assert_eq!(exit_status(-1).code(), Some(255));
+    }
+
+    #[test]
+    fn a_pod_that_has_not_started_says_why() {
+        use k8s_openapi::api::core::v1::{ContainerState, ContainerStateWaiting, PodCondition};
+        let waiting = |reason: &str, message: Option<&str>| PodStatus {
+            phase: Some("Pending".into()),
+            container_statuses: Some(vec![ContainerStatus {
+                name: HARNESS_CONTAINER.into(),
+                state: Some(ContainerState {
+                    waiting: Some(ContainerStateWaiting {
+                        reason: Some(reason.into()),
+                        message: message.map(str::to_string),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert!(pending_reason(&waiting("ContainerCreating", None)).contains("pulling"));
+        assert_eq!(
+            pending_reason(&waiting("CreateContainerError", Some("no such file"))),
+            "CreateContainerError: no such file"
+        );
+        let unscheduled = PodStatus {
+            phase: Some("Pending".into()),
+            conditions: Some(vec![PodCondition {
+                type_: "PodScheduled".into(),
+                status: "False".into(),
+                reason: Some("Unschedulable".into()),
+                message: Some("0/1 nodes are available".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            pending_reason(&unscheduled),
+            "not scheduled: Unschedulable: 0/1 nodes are available"
+        );
+        assert_eq!(pending_reason(&PodStatus::default()), "phase Pending");
     }
 
     #[test]
