@@ -866,11 +866,15 @@ alternates, and `config.worktree` before anything node-side or harness-side read
 it. The harness sees `/work` and no host path. A workspace outlives its session:
 resume it, export a checked snapshot, or download it. An export stages the tree
 as Git sees it — the repository, and the tracked and untracked files its ignore
-rules leave in — inside a container with no network and no capabilities, so the
-dependency trees and build output a session leaves behind are neither the
-candidate nor a reason to refuse the snapshot. It is reclaimed only by an
-explicit sweep (`crate::gc`), once no unarchived session uses it; a check run's
-volume is the one removed as soon as its run is over. Harness config is
+rules leave in — inside a container with no network and no capabilities (on
+Kubernetes the node stages it from the claim itself, reading the index and the
+ignore rules as files and running no Git), so the dependency trees and build
+output a session leaves behind are neither the candidate nor a reason to refuse
+the snapshot. Every copy keeps what Git records of a file: its bytes, whether it
+is executable, and a symbolic link that resolves inside the tree, as a link. An
+absolute link, or one that climbs out of the tree, refuses the copy. A workspace is
+reclaimed only by an explicit sweep (`crate::gc`), once no unarchived session uses
+it; a check run's volume is the one removed as soon as its run is over. Harness config is
 materialized into scratch and passed explicitly, so instruction-file discovery by
 directory walk stops mattering.
 

@@ -68,6 +68,41 @@ impl KubeBackend {
         Ok(KubeRunner::new(self.client().await?, spec))
     }
 
+    /// Copy a volume on the claim to a node-owned path through a staging
+    /// directory beside it, so a refused or failed copy never leaves a partial
+    /// tree where a snapshot is expected.
+    fn export_with(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+        copy: impl FnOnce(
+            &std::path::Path,
+            &std::path::Path,
+        ) -> Result<(), crate::workspace::WorkspaceError>,
+    ) -> Result<(), BoundaryError> {
+        let source = self.cfg.runtime.kubernetes.state_mount.join(volume);
+        if !source.is_dir() {
+            return Err(BoundaryError::Other(format!(
+                "runtime volume {volume} does not exist"
+            )));
+        }
+        let staged = destination.with_extension(format!("staging-{}", uuid::Uuid::now_v7()));
+        let _ = std::fs::remove_dir_all(&staged);
+        if let Err(error) = copy(&source, &staged) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(BoundaryError::Other(error.to_string()));
+        }
+        if destination.exists() {
+            std::fs::remove_dir_all(destination)?;
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(staged, destination)?;
+        crate::workspace::validate_tree(destination)
+            .map_err(|e| BoundaryError::Other(e.to_string()))
+    }
+
     pub fn manifests() -> String {
         let mut out = String::new();
         let mut names: Vec<_> = Manifests::iter().collect();
@@ -189,33 +224,31 @@ impl Backend for KubeBackend {
         volume: &str,
         destination: &std::path::Path,
     ) -> Result<(), BoundaryError> {
-        let source = self.cfg.runtime.kubernetes.state_mount.join(volume);
-        if !source.is_dir() {
-            return Err(BoundaryError::Other(format!(
-                "runtime volume {volume} does not exist"
-            )));
-        }
-        let staged = destination.with_extension(format!("staging-{}", uuid::Uuid::now_v7()));
-        let _ = std::fs::remove_dir_all(&staged);
-        crate::workspace::copy_tree(&source, &staged, false)
-            .map_err(|e| BoundaryError::Other(e.to_string()))?;
-        if destination.exists() {
-            std::fs::remove_dir_all(destination)?;
-        }
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(staged, destination)?;
-        crate::workspace::validate_tree(destination)
-            .map_err(|e| BoundaryError::Other(e.to_string()))
+        self.export_with(volume, destination, |source, staged| {
+            crate::workspace::copy_tree(source, staged, false)
+        })
+    }
+
+    /// The node reads the claim directly, so it stages what Podman's export
+    /// stages in a container (`STAGE_WORKSPACE`), with the index and the
+    /// ignore rules read as files: no Git runs on configuration the agent
+    /// wrote.
+    async fn export_workspace(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        self.export_with(volume, destination, crate::workspace::copy_checkout)
     }
 
     async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
-        super::clone_directory_volume(
+        super::clone_directory_volume_with(
+            "cp",
             &self.cfg.runtime.kubernetes.state_mount,
             source,
             destination,
         )
+        .await
     }
 
     fn harness_host(&self) -> String {
@@ -248,5 +281,112 @@ impl Backend for KubeBackend {
 
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
         crate::boundary::remove_directory_volume(&self.cfg.runtime.kubernetes.state_mount, volume)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(dir: &std::path::Path, script: &str) {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn backend(state: &std::path::Path) -> KubeBackend {
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg.runtime.kubernetes.state_mount = state.to_path_buf();
+        KubeBackend::new(&cfg)
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A workspace moves on and off the claim as Git would see it: scripts
+    /// stay executable through an import and a clone, and an export after an
+    /// install leaves `node_modules` (and its links) and `target` behind
+    /// rather than refusing them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workspace_keeps_modes_and_leaves_build_output_on_the_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let backend = backend(&state);
+
+        let snapshot = tmp.path().join("snapshot");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        sh(
+            &snapshot,
+            "git init -q -b main . && git config user.email t@e && git config user.name t \
+             && printf 'node_modules/\\ntarget/\\n' > .gitignore \
+             && printf '#!/bin/sh\\n' > run.sh && chmod 555 run.sh && echo a > a.txt \
+             && git add -A && git commit -qm one && chmod 444 a.txt",
+        );
+        backend
+            .import_volume("tracon-workspace-a", &snapshot)
+            .await
+            .unwrap();
+        let volume = state.join("tracon-workspace-a");
+        assert_eq!(mode(&volume.join("run.sh")), 0o755);
+        // Writable on the claim, though read-only in the snapshot.
+        assert_eq!(mode(&volume.join("a.txt")), 0o644);
+
+        backend
+            .clone_volume("tracon-workspace-a", "tracon-check-b")
+            .await
+            .unwrap();
+        assert_eq!(mode(&state.join("tracon-check-b/run.sh")), 0o755);
+
+        // What a session's install and build leave behind, including a link
+        // that leaves the tree.
+        sh(
+            &volume,
+            "mkdir -p node_modules/.bin node_modules/acorn/bin target \
+             && echo x > node_modules/acorn/bin/acorn \
+             && ln -s ../acorn/bin/acorn node_modules/.bin/acorn \
+             && ln -s /usr/bin/python3 target/python && echo new > b.txt",
+        );
+        assert!(backend
+            .export_volume("tracon-workspace-a", &tmp.path().join("whole"))
+            .await
+            .is_err());
+        assert!(
+            !tmp.path().join("whole").exists(),
+            "a refused export leaves nothing behind"
+        );
+
+        let exported = tmp.path().join("exported");
+        backend
+            .export_workspace("tracon-workspace-a", &exported)
+            .await
+            .unwrap();
+        assert_eq!(mode(&exported.join("run.sh")), 0o755);
+        assert_eq!(
+            std::fs::read_to_string(exported.join("b.txt")).unwrap(),
+            "new\n"
+        );
+        assert!(exported.join(".git/HEAD").is_file());
+        assert!(!exported.join("node_modules").exists());
+        assert!(!exported.join("target").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("staging-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }
