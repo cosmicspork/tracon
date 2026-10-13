@@ -1935,10 +1935,17 @@ async fn auth_command(cmd: AuthCommand) -> Result<()> {
                 println!("no clients logged in");
             }
             for c in clients {
+                // A session another browser approved (device approval) says
+                // which one did.
+                let delegated = c["delegated_from"]
+                    .as_str()
+                    .map(|by| format!("  approved by {by}"))
+                    .unwrap_or_default();
                 println!(
-                    "{}  last seen {}  {}",
+                    "{}  last seen {}{}  {}",
                     c["id"].as_str().unwrap_or(""),
                     c["last_seen_ms"].as_i64().unwrap_or(0),
+                    delegated,
                     c["user_agent"].as_str().unwrap_or("-"),
                 );
             }

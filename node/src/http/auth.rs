@@ -41,10 +41,19 @@ use super::api::{ApiError, AppState};
 /// Cookie name for a logged-in client.
 pub const COOKIE: &str = "tracon_session";
 /// How long a cookie lives without being used.
-const SESSION_TTL_MS: i64 = 90 * 24 * 60 * 60 * 1000;
-/// Renew when more than a third of the life has been consumed, so an active
-/// client is extended about monthly rather than on every request.
-const RENEW_AFTER_MS: i64 = SESSION_TTL_MS / 3;
+pub(crate) const SESSION_TTL_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+/// How long a session another browser approved (`http::device`) lives
+/// without being used: shorter, since no token was spent for it.
+pub(crate) const DELEGATED_SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// How long `row` lives without being used.
+pub(crate) fn session_ttl(row: &AuthSessionRow) -> i64 {
+    if row.delegated_from.is_some() {
+        DELEGATED_SESSION_TTL_MS
+    } else {
+        SESSION_TTL_MS
+    }
+}
 /// Failed logins tolerated per window, per address and in total. Behind an
 /// ingress every caller shares one address, so the global cap is the real
 /// limit; a 256-bit token is not reachable at this rate either way.
@@ -61,6 +70,15 @@ const LOGIN_GLOBAL: u32 = 50;
 /// same reason, and still bounds what many cookies together can do.
 const CEREMONY_PER_SESSION: u32 = 60;
 const CEREMONY_GLOBAL: u32 = 600;
+/// Device approvals a stranger may open per window (`http::device`), per
+/// address and in total. Each is a row and a prompt shown to the operator,
+/// so the bound is tight; behind an ingress the total is what holds.
+const DEVICE_START_PER_IP: u32 = 10;
+const DEVICE_START_GLOBAL: u32 = 30;
+/// Polls per window, per address and in total: a window polls every five
+/// seconds, sixty times in five minutes, and several may share an address.
+const DEVICE_POLL_PER_IP: u32 = 600;
+const DEVICE_POLL_GLOBAL: u32 = 3_000;
 
 pub fn hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -95,13 +113,24 @@ impl<K: std::hash::Hash + Eq> Limiter<K> {
         }
     }
 
-    /// Whether another attempt is allowed, counting it if so.
-    fn allow(&mut self, ip: Option<K>, now: i64) -> bool {
+    fn turn(&mut self, now: i64) {
         if now - self.window_start_ms >= LOGIN_WINDOW_MS {
             self.window_start_ms = now;
             self.global = 0;
             self.per_ip.clear();
         }
+    }
+
+    /// Whether the budget is spent, without counting anything.
+    fn exhausted(&mut self, ip: Option<K>, now: i64) -> bool {
+        self.turn(now);
+        self.global >= self.global_cap
+            || ip.is_some_and(|ip| self.per_ip.get(&ip).is_some_and(|n| *n >= self.per_ip_cap))
+    }
+
+    /// Whether another attempt is allowed, counting it if so.
+    fn allow(&mut self, ip: Option<K>, now: i64) -> bool {
+        self.turn(now);
         if self.global >= self.global_cap {
             return false;
         }
@@ -124,6 +153,8 @@ pub struct AuthState {
     token_hash: Mutex<Option<String>>,
     limiter: Mutex<Limiter>,
     ceremonies: Mutex<Limiter<String>>,
+    device_starts: Mutex<Limiter>,
+    device_polls: Mutex<Limiter>,
 }
 
 impl AuthState {
@@ -142,6 +173,8 @@ impl AuthState {
             token_hash: Mutex::new(token_hash),
             limiter: Mutex::new(Limiter::default()),
             ceremonies: Mutex::new(Limiter::new(CEREMONY_PER_SESSION, CEREMONY_GLOBAL)),
+            device_starts: Mutex::new(Limiter::new(DEVICE_START_PER_IP, DEVICE_START_GLOBAL)),
+            device_polls: Mutex::new(Limiter::new(DEVICE_POLL_PER_IP, DEVICE_POLL_GLOBAL)),
         }
     }
 
@@ -171,6 +204,25 @@ impl AuthState {
             .unwrap()
             .allow(Some(session.to_string()), now)
     }
+
+    /// Whether a caller at `ip` may open another device approval now.
+    pub(crate) fn allow_device_start(&self, ip: Option<IpAddr>, now: i64) -> bool {
+        self.device_starts.lock().unwrap().allow(ip, now)
+    }
+
+    /// Whether a poll from `ip` whose code answered to nothing is refused
+    /// now. Only such polls meet this limiter, after the lookup
+    /// (`http::device::token`): a poll with a real code never does, so junk
+    /// cannot spend the budget of a window that holds one, which `slow_down`
+    /// bounds per code.
+    pub(crate) fn device_poll_blocked(&self, ip: Option<IpAddr>, now: i64) -> bool {
+        self.device_polls.lock().unwrap().exhausted(ip, now)
+    }
+
+    /// Count a poll whose code answered to nothing.
+    pub(crate) fn device_poll_missed(&self, ip: Option<IpAddr>, now: i64) {
+        self.device_polls.lock().unwrap().allow(ip, now);
+    }
 }
 
 /// The value of one cookie in a `Cookie:` header.
@@ -197,13 +249,19 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// A path the guard lets through unauthenticated when a token is configured:
-/// login, the non-sensitive administrator access-status probe, and the SPA
-/// shell/assets. The shell is open-source code and the status probe contains
-/// no secret; serving them is what lets a remote login screen render. Every
-/// other `/api` path stays gated.
+/// login, asking for and collecting a device approval (`http::device`, which
+/// bounds and checks them itself), the non-sensitive administrator
+/// access-status probe, and the SPA shell/assets. The shell is open-source
+/// code and the status probe contains no secret; serving them is what lets a
+/// remote login screen render. Every other `/api` path stays gated.
 fn is_public(req: &Request) -> bool {
     let path = req.uri().path();
     if path == "/api/login" {
+        return true;
+    }
+    if req.method() == axum::http::Method::POST
+        && matches!(path, "/api/auth/device" | "/api/auth/device/token")
+    {
         return true;
     }
     if req.method() == axum::http::Method::GET && path == "/api/admin/access" {
@@ -374,6 +432,46 @@ fn request_is_local(req: &Request) -> bool {
 /// [`is_local`] of the parts an extractor or a handler sees.
 pub(crate) fn parts_are_local(parts: &axum::http::request::Parts) -> bool {
     is_local(parts_peer(parts), &parts.uri, &parts.headers)
+}
+
+/// Who a request is from, for telling callers apart (rate limits, and what a
+/// device-approval page shows), never for trusting one: the TCP peer, unless
+/// that is a proxy the node believes (loopback, or `[auth] trusted_proxies`),
+/// in which case the rightmost `X-Forwarded-For` entry that is not itself
+/// such a proxy. Entries further left are the client's own say and are not
+/// read. A malformed entry stops the walk at the last address believed.
+pub(crate) fn client_addr(
+    parts: &axum::http::request::Parts,
+    trusted: &[crate::gateway::proxy::Cidr],
+) -> Option<IpAddr> {
+    let peer = parts_peer(parts)?.to_canonical();
+    let believed = |ip: &IpAddr| ip.is_loopback() || trusted.iter().any(|c| c.contains(ip));
+    if !believed(&peer) {
+        return Some(peer);
+    }
+    let chain: Vec<String> = parts
+        .headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|v| v.trim().to_string())
+        .collect();
+    let mut client = peer;
+    for entry in chain.iter().rev() {
+        let Ok(ip) = entry
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+        else {
+            break;
+        };
+        client = ip.to_canonical();
+        if !believed(&client) {
+            break;
+        }
+    }
+    Some(client)
 }
 
 /// The TCP peer of a request, as an extractor sees it.
@@ -547,14 +645,18 @@ pub async fn guard(
     // 3. A cookie, or the token itself for non-browser clients.
     let now = now_ms();
     let store = state.store().clone();
-    let mut renew: Option<String> = None;
+    let mut renew: Option<(String, i64)> = None;
     let authenticated = if let Some(secret) = cookie_value(&headers, COOKIE) {
         let h = hash(secret);
         match store.auth_session_live(&h, now) {
             Ok(Some(row)) => {
-                if now - (row.expires_ms - SESSION_TTL_MS) > RENEW_AFTER_MS {
-                    let _ = store.auth_session_touch(&h, now, now + SESSION_TTL_MS);
-                    renew = Some(secret.to_string());
+                // Renew when more than a third of the life has been
+                // consumed, so an active client is extended about monthly
+                // (or every ten days, delegated) rather than on every request.
+                let ttl = session_ttl(&row);
+                if now - (row.expires_ms - ttl) > ttl / 3 {
+                    let _ = store.auth_session_touch(&h, now, now + ttl);
+                    renew = Some((secret.to_string(), ttl));
                 }
                 true
             }
@@ -590,8 +692,8 @@ pub async fn guard(
     }
 
     let mut response = next.run(req).await;
-    if let Some(secret) = renew {
-        set_cookie(&mut response, &secret, !local, SESSION_TTL_MS / 1000);
+    if let Some((secret, ttl)) = renew {
+        set_cookie(&mut response, &secret, !local, ttl / 1000);
     }
     Ok(response)
 }
@@ -605,7 +707,7 @@ pub async fn guard(
 /// origin" exception would. A local caller never needed the cookie for
 /// authentication anyway (`guard`'s step 1) — this only fixes the client's
 /// own `authenticated` readback.
-fn set_cookie(response: &mut Response, secret: &str, secure: bool, max_age_secs: i64) {
+pub(crate) fn set_cookie(response: &mut Response, secret: &str, secure: bool, max_age_secs: i64) {
     // SameSite=Lax rather than Strict: opening a review from a push
     // notification is a top-level cross-site navigation, and Strict would drop
     // the cookie on exactly that. Lax still withholds it from cross-site
@@ -667,6 +769,7 @@ pub async fn login(
             // Spending the token is the pairing: this client may enroll the
             // node's first passkey for a short while (`http::passkey`).
             paired_ms: Some(now),
+            delegated_from: None,
         })
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -756,6 +859,7 @@ pub async fn list_sessions(
                 "last_seen_ms": r.last_seen_ms,
                 "expires_ms": r.expires_ms,
                 "user_agent": r.user_agent,
+                "delegated_from": r.delegated_from,
             })
         })
         .collect();
@@ -817,6 +921,35 @@ mod tests {
             axum::http::Method::GET,
             "/api/admin/mesh",
         )));
+    }
+
+    #[test]
+    fn asking_for_and_collecting_a_device_approval_are_public_and_nothing_else_of_it() {
+        for path in ["/api/auth/device", "/api/auth/device/token"] {
+            assert!(
+                is_public(&request(axum::http::Method::POST, path)),
+                "{path}"
+            );
+            assert!(
+                !is_public(&request(axum::http::Method::GET, path)),
+                "{path}"
+            );
+        }
+        for path in [
+            "/api/auth/device/stepup",
+            "/api/auth/device/approvals/x",
+            "/api/auth/device/approvals/x/approve",
+            "/api/auth/device/approvals/x/deny",
+        ] {
+            assert!(
+                !is_public(&request(axum::http::Method::POST, path)),
+                "{path}"
+            );
+            assert!(
+                !is_public(&request(axum::http::Method::GET, path)),
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -1105,6 +1238,65 @@ mod tests {
         assert!(l.allow(Some("10.0.0.2".parse().unwrap()), 1_000));
         // The window turning clears both.
         assert!(l.allow(Some(ip), 1_000 + LOGIN_WINDOW_MS));
+    }
+
+    #[test]
+    fn a_forwarded_address_is_believed_only_from_a_trusted_proxy() {
+        use crate::gateway::proxy::Cidr;
+        let parts = |peer: &str, xff: &[&str]| {
+            let mut b = Request::builder().uri("/api/auth/device");
+            for v in xff {
+                b = b.header("x-forwarded-for", *v);
+            }
+            let (mut parts, _) = b.body(()).unwrap().into_parts();
+            parts
+                .extensions
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            parts
+        };
+        let ingress: Vec<Cidr> = vec!["10.244.0.0/16".parse().unwrap()];
+        let addr =
+            |p: &axum::http::request::Parts, t: &[Cidr]| client_addr(p, t).unwrap().to_string();
+        // A stranger's own header is not read.
+        assert_eq!(
+            addr(&parts("203.0.113.7:1", &["1.2.3.4"]), &ingress),
+            "203.0.113.7"
+        );
+        // Through the trusted ingress: the rightmost entry it did not add.
+        assert_eq!(
+            addr(&parts("10.244.1.5:1", &["1.2.3.4, 198.51.100.9"]), &ingress),
+            "198.51.100.9"
+        );
+        // A chain of trusted hops is walked; the forged left end is not.
+        assert_eq!(
+            addr(
+                &parts("127.0.0.1:1", &["6.6.6.6", "198.51.100.9, 10.244.2.2"]),
+                &ingress
+            ),
+            "198.51.100.9"
+        );
+        // Untrusted ingress: its own address, whatever it forwards.
+        assert_eq!(
+            addr(&parts("10.244.1.5:1", &["198.51.100.9"]), &[]),
+            "10.244.1.5"
+        );
+        // Malformed: the last address believed.
+        assert_eq!(addr(&parts("127.0.0.1:1", &["junk"]), &[]), "127.0.0.1");
+        // No header: the peer.
+        assert_eq!(addr(&parts("127.0.0.1:1", &[]), &[]), "127.0.0.1");
+    }
+
+    #[test]
+    fn a_limiter_can_be_read_without_counting() {
+        let mut l = Limiter::new(2, 10);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(!l.exhausted(Some(ip), 0));
+        assert!(l.allow(Some(ip), 0));
+        assert!(!l.exhausted(Some(ip), 0));
+        assert!(l.allow(Some(ip), 0));
+        assert!(l.exhausted(Some(ip), 0));
+        assert!(!l.exhausted(Some("10.0.0.2".parse().unwrap()), 0));
+        assert!(!l.exhausted(Some(ip), LOGIN_WINDOW_MS));
     }
 
     #[test]

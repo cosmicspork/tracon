@@ -186,9 +186,32 @@ and goes through. One sheet per save, however much the save changes. The button 
 not decoration: iOS shows the passkey sheet only from a tap. A sheet the system
 closed (cancel, timeout, an iOS PWA hang cut off at 60 seconds) says what the
 browser reported and offers Try again on the same challenge; Cancel abandons the
-save and nothing changes. At the node itself, and in the desktop app, nothing is
-refused this way and the sheet never appears. A browser that cannot make passkeys
-is told to make the change from one that can, or at the node.
+save and nothing changes. At the node itself, and in the desktop app on the node's
+machine, nothing is refused this way and the sheet never appears. A window that
+cannot make passkeys confirms in another browser instead (below); one that can is
+offered "Use another device" beside Confirm.
+
+**Sign in from another browser.** The desktop app against a remote node (or any
+browser with no token to hand) → the login screen's "Sign in from another
+browser" → the window shows a code (`BCDF-GHJK`), an "Open in browser" link and
+the same address as a QR, and waits → a browser already signed in to the node
+(the system browser, or the phone by scanning) opens it → "Sign in another
+window?" with what the asker claims to be, its address and how long ago it
+asked, a warning to deny if no window of theirs is asking, and a field for the
+code: the operator types the code the window shows (three wrong ones deny it) →
+Approve opens the passkey sheet (nothing at the node) → "Approved. Return to the
+window that asked." → the window signs in on its own within a few seconds. Deny
+ends it on both screens. The phone is told of every sign-in made this way.
+
+**Confirm an admin action from another browser.** The desktop app saves → the
+node refuses it with `step_up_required` → the same sheet, which for a window
+without passkeys asks the node at once and shows the code, link and QR instead of
+Confirm → the approving browser shows "Confirm for another window: Remove a
+passkey" with the request beneath and which session asked → type the window's
+code, Approve, passkey → the window's sheet closes and the save goes through.
+Cancel refuses the request, so the other browser stops offering it. A request
+left waiting so long its confirmation expired is sent again for a fresh one,
+without a sheet in between.
 
 **Degraded.** Hub gone: banner everywhere, local sessions continue, auto-allowed
 actions continue, approvals queue and deliver on return, recall falls back to the
@@ -273,4 +296,7 @@ operator's information, not the model's.
     shown a passkey sheet to read their queue. What a passkey guards is what a
     stolen cookie could use to keep its access or reach further: tokens,
     credentials, grants, providers, mesh membership, and the passkeys. Losing every passkey is recovered at the node
-    (`docs/RECOVERY.md`), never by a weaker path from afar.
+    (`docs/RECOVERY.md`), never by a weaker path from afar. A window that cannot
+    make one borrows a browser's (device approval) rather than getting a path
+    around it: that browser asserts for the exact request, and a session it
+    signs in can never enroll the first passkey.

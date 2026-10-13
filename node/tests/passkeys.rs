@@ -369,6 +369,7 @@ async fn the_window_closes_fifteen_minutes_after_pairing() {
                 expires_ms: now + 60_000,
                 user_agent: None,
                 paired_ms,
+                delegated_from: None,
             })
             .unwrap();
     }

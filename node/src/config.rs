@@ -556,6 +556,12 @@ pub struct Auth {
     /// `[notify] contact` is unset, and it is what a passkey is bound to.
     /// Unset, the node knows no public name for itself.
     pub public_origin: Option<String>,
+    /// The proxies in front of the node whose `X-Forwarded-For` it believes,
+    /// as addresses or CIDR blocks (an ingress controller's pod network, say).
+    /// A loopback peer is always one. The node uses what they report only to
+    /// tell callers apart (rate limits, and the address a device-approval
+    /// page shows); it never makes a request local or trusted.
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Auth {
@@ -568,6 +574,19 @@ impl Auth {
     /// domain name, never an IP address, because a passkey's relying-party ID
     /// must be one. An origin and nothing else: no credentials, path, query or
     /// fragment.
+    /// `trusted_proxies`, parsed, or the first entry that is not an address
+    /// or a block.
+    pub fn trusted_proxies(&self) -> Result<Vec<crate::gateway::proxy::Cidr>, String> {
+        self.trusted_proxies
+            .iter()
+            .map(|block| {
+                block
+                    .parse::<crate::gateway::proxy::Cidr>()
+                    .map_err(|error| format!("auth.trusted_proxies: {error}"))
+            })
+            .collect()
+    }
+
     pub fn public_origin(&self) -> Result<Option<String>, String> {
         let Some(configured) = self.public_origin.as_deref() else {
             return Ok(None);
@@ -2261,6 +2280,10 @@ impl Config {
         config
             .auth
             .public_origin()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        config
+            .auth
+            .trusted_proxies()
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_repos(&config.repo).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)

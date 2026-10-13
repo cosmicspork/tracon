@@ -236,6 +236,13 @@ class Store {
   async signIn(token: string) {
     await api.login(token)
     this.justPaired = true
+    this.signedIn()
+  }
+
+  /** The cookie is here (from the token, or a device approval another
+      browser granted): start over. A device approval is not a pairing, so
+      it offers no passkey. */
+  signedIn() {
     this.authRequired = false
     this.source?.close()
     this.source = null

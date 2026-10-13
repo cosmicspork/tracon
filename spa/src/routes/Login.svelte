@@ -1,6 +1,16 @@
 <script lang="ts">
-  import { ApiError } from '../lib/api'
+  import { isTauri } from '@tauri-apps/api/core'
+
+  import DeviceCode from '../components/DeviceCode.svelte'
+  import { api, ApiError } from '../lib/api'
   import { insecureContext, takeToken } from '../lib/auth'
+  import {
+    DeviceCancelled,
+    deviceProblem,
+    pollForApproval,
+    stashedApproval,
+    type DeviceStart,
+  } from '../lib/device'
   import { store } from '../lib/store.svelte'
 
   let token = $state('')
@@ -34,6 +44,44 @@
     if (t && !insecure) void signIn(t)
   })
 
+  // Signing in by approval: a browser already signed in to this node (with a
+  // passkey) approves this one. The desktop app's way in to a remote node,
+  // and any browser's that has no token to hand.
+  const desktop = typeof window !== 'undefined' && isTauri()
+  const approving = stashedApproval() !== null
+  let device = $state<DeviceStart | null>(null)
+  let deviceError = $state<string | null>(null)
+  let asking = $state(false)
+  let abort: AbortController | null = null
+
+  async function signInElsewhere() {
+    if (asking || device) return
+    asking = true
+    deviceError = null
+    abort = new AbortController()
+    const signal = abort.signal
+    try {
+      const started = await api.deviceSignIn()
+      device = started
+      await pollForApproval(started, (code) => api.deviceToken(code), { signal })
+      device = null
+      store.signedIn()
+    } catch (err) {
+      device = null
+      if (!(err instanceof DeviceCancelled)) deviceError = deviceProblem(err)
+    } finally {
+      asking = false
+      abort = null
+    }
+  }
+
+  function stopAsking() {
+    abort?.abort()
+  }
+
+  // Signed in some other way, or gone: stop polling.
+  $effect(() => () => abort?.abort())
+
   async function submit(e: SubmitEvent) {
     e.preventDefault()
     if (!token.trim() || busy) return
@@ -44,6 +92,9 @@
 <main>
   <form onsubmit={submit}>
     <h1>tracon</h1>
+    {#if approving}
+      <p class="note">Sign in to see the request you were sent here to approve.</p>
+    {/if}
     <p>
       This node is reached from off its own machine, so it wants the operator token. Run
       <code>tracon auth issue</code> on the node to mint one.
@@ -69,6 +120,24 @@
     {#if error}<p class="err">{error}</p>{/if}
     <button type="submit" disabled={busy || !token.trim()}>{busy ? 'Checking…' : 'Log in'}</button>
     <small>The token is exchanged for a cookie this browser holds. It is not stored here.</small>
+    {#if !approving}
+      <div class="or">
+        {#if device}
+          <DeviceCode start={device} {desktop} />
+          <button class="lnk" type="button" onclick={stopAsking}>Cancel</button>
+        {:else}
+          <p>
+            {desktop
+              ? 'Or approve this window from a browser already signed in to the node, with its passkey.'
+              : 'Or approve this browser from another one already signed in to the node, with its passkey.'}
+          </p>
+          <button class="alt" type="button" onclick={() => void signInElsewhere()} disabled={asking} data-testid="device-sign-in">
+            {asking ? 'Asking…' : 'Sign in from another browser'}
+          </button>
+        {/if}
+        {#if deviceError}<p class="err" data-testid="device-sign-in-problem">{deviceError}</p>{/if}
+      </div>
+    {/if}
   </form>
 </main>
 
@@ -130,6 +199,26 @@
   .err {
     color: var(--crit);
     font: 12.5px var(--mono);
+  }
+  .note {
+    color: var(--ink);
+  }
+  .or {
+    display: grid;
+    gap: 10px;
+    border-top: 1px solid var(--s2);
+    padding-top: 14px;
+  }
+  button.lnk {
+    justify-self: start;
+    background: none;
+    color: var(--ink2);
+    padding: 0;
+    font: 13px var(--sans);
+  }
+  button.alt {
+    background: var(--s2);
+    color: var(--ink);
   }
   small {
     color: var(--dim);
