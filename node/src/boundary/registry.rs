@@ -163,7 +163,16 @@ pub fn credentials(dir: &Path, host: &str) -> Result<Option<(String, String)>, R
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(RegistryError(format!("{}: {error}", path.display()))),
     };
-    let config: DockerConfig = serde_json::from_str(&text)
+    credentials_in(&text, &path, host)
+}
+
+/// `credentials`, from a `config.json` already read.
+fn credentials_in(
+    text: &str,
+    path: &Path,
+    host: &str,
+) -> Result<Option<(String, String)>, RegistryError> {
+    let config: DockerConfig = serde_json::from_str(text)
         .map_err(|error| RegistryError(format!("{}: {error}", path.display())))?;
     let hub = ["registry-1.docker.io", "index.docker.io", "docker.io"];
     let names_host = |key: &str| {
@@ -348,11 +357,18 @@ impl Registry {
 
     fn credentials(&self, host: &str) -> Result<Option<(String, String)>, RegistryError> {
         match self.docker_config.as_deref() {
-            Some(dir) => {
-                crate::config::path_guard::path("runtime.kubernetes.builder.docker_config", dir)
-                    .map_err(|error| RegistryError(error.to_string()))?;
-                credentials(dir, host)
-            }
+            // Read through the path guard: the directory checked, and the
+            // file compared with what the check found once it is open.
+            Some(dir) => match crate::config::path_guard::read_secret_in(
+                "runtime.kubernetes.builder.docker_config",
+                dir,
+                "config.json",
+            )
+            .map_err(|error| RegistryError(error.to_string()))?
+            {
+                Some(text) => credentials_in(&text, &dir.join("config.json"), host),
+                None => Ok(None),
+            },
             None => Ok(None),
         }
     }

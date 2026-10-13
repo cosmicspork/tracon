@@ -5,7 +5,11 @@
 //! never touched, so a README or anything else kept alongside survives.
 
 use std::collections::HashSet;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
+
+use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
+use rustix::io::Errno;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,124 +34,169 @@ pub struct Report {
 
 /// Make `dir` hold exactly these documents.
 ///
-/// Nothing here follows a symbolic link: the directory, its `archive`, and
-/// every file written are checked with `lstat`, and a document is written
-/// to a fresh temporary file (`O_EXCL`, `O_NOFOLLOW`) in the directory and
-/// renamed over its name, which replaces a link rather than writing through
-/// it. A link where a document goes is refused, not replaced: whoever put it
-/// there was not the node.
+/// The directory is opened once, as itself (`O_NOFOLLOW`), and everything
+/// after happens through that descriptor: `archive` is opened from it the
+/// same way, a document is read with `O_NOFOLLOW`, written to a new file
+/// (`O_EXCL`, `O_NOFOLLOW`) and renamed over its name with `renameat`, and a
+/// stale one removed with `unlinkat` after an `lstat`. So nothing here
+/// follows a link, and nothing is written outside the directory that was
+/// opened however its path changes meanwhile. A link where a document goes
+/// is refused, not replaced: whoever put it there was not the node.
 pub fn sync_dir(dir: &Path, docs: &[ExportDoc]) -> std::io::Result<Report> {
     std::fs::create_dir_all(dir)?;
-    real_dir(dir)?;
-    let archive = dir.join("archive");
+    let fd = crate::config::path_guard::open_dir_nofollow(dir)
+        .map_err(|e| refused_with(dir, "could not be opened as a directory", e))?;
+    sync_fd(fd.as_fd(), docs)
+}
+
+/// `sync_dir` into a directory already open, as the path guard's
+/// `open_dir` hands one over.
+pub fn sync_fd(dir: BorrowedFd<'_>, docs: &[ExportDoc]) -> std::io::Result<Report> {
     let mut report = Report::default();
     let mut live = HashSet::new();
     let mut archived = HashSet::new();
+    let mut archive: Option<OwnedFd> = None;
     for d in docs {
         let into = if d.archived {
-            match std::fs::create_dir(&archive) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
+            if archive.is_none() {
+                archive = Some(subdir(dir, ARCHIVE, true)?.expect("made"));
             }
-            real_dir(&archive)?;
             archived.insert(d.slug.as_str());
-            &archive
+            archive.as_ref().expect("opened").as_fd()
         } else {
             live.insert(d.slug.as_str());
             dir
         };
-        let path = into.join(format!("{}.md", d.slug));
-        if current(&path)?.as_deref() == Some(d.body.as_str()) {
+        let name = format!("{}.md", d.slug);
+        if current(into, &name)?.as_deref() == Some(d.body.as_str()) {
             report.unchanged += 1;
             continue;
         }
-        replace(into, &path, d.body.as_bytes())?;
+        replace(into, &name, d.body.as_bytes())?;
         report.written += 1;
     }
     report.removed += prune(dir, &live)?;
-    if std::fs::symlink_metadata(&archive).is_ok_and(|m| m.is_dir()) {
-        report.removed += prune(&archive, &archived)?;
+    if archive.is_none() {
+        archive = subdir(dir, ARCHIVE, false)?;
+    }
+    if let Some(archive) = &archive {
+        report.removed += prune(archive.as_fd(), &archived)?;
     }
     Ok(report)
 }
 
-fn refused(path: &Path, what: &str) -> std::io::Error {
+const ARCHIVE: &str = "archive";
+
+fn refused(what: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::PermissionDenied,
-        format!("{} {what}; nothing is exported there", path.display()),
+        format!("{what}; nothing is exported there"),
     )
 }
 
-/// `path` is a directory itself, not a link to one.
-fn real_dir(path: &Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(path)?;
-    match meta.is_dir() {
-        true => Ok(()),
-        false => Err(refused(path, "is not a directory (a symbolic link?)")),
+fn refused_with(path: &Path, what: &str, error: std::io::Error) -> std::io::Error {
+    refused(&format!("{} {what} ({error})", path.display()))
+}
+
+/// `name` in `dir`, opened as a directory and not through a link; made
+/// first when `make`. `None` when it is not there and not to be made.
+fn subdir(dir: BorrowedFd<'_>, name: &str, make: bool) -> std::io::Result<Option<OwnedFd>> {
+    if make {
+        match rfs::mkdirat(dir, name, Mode::from_raw_mode(0o755)) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    match rfs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => Ok(Some(fd)),
+        Err(Errno::NOENT) if !make => Ok(None),
+        Err(Errno::LOOP | Errno::NOTDIR) => Err(refused(&format!(
+            "{name} is not a directory (a symbolic link?)"
+        ))),
+        Err(e) => Err(e.into()),
     }
 }
 
 /// What a document's file holds now, read without following a link; `None`
 /// when there is none. Anything but a regular file is refused.
-fn current(path: &Path) -> std::io::Result<Option<String>> {
+fn current(dir: BorrowedFd<'_>, name: &str) -> std::io::Result<Option<String>> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Err(refused(path, "is not a regular file (a symbolic link?)")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+    let fd = match rfs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(Errno::LOOP) => {
+            return Err(refused(&format!("{name} is a symbolic link")));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !rfs::FileType::from_raw_mode(rfs::fstat(&fd)?.st_mode).is_file() {
+        return Err(refused(&format!("{name} is not a regular file")));
     }
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
     let mut text = String::new();
-    Ok(file.read_to_string(&mut text).ok().map(|_| text))
+    Ok(std::fs::File::from(fd)
+        .read_to_string(&mut text)
+        .ok()
+        .map(|_| text))
 }
 
-/// Write `body` to `path` in `dir` by way of a new file renamed over it.
-fn replace(dir: &Path, path: &Path, body: &[u8]) -> std::io::Result<()> {
+/// Write `body` as `name` in `dir` by way of a new file renamed over it.
+fn replace(dir: BorrowedFd<'_>, name: &str, body: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::now_v7().simple()));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(0o644)
-        .open(&temp)?;
+    let temp = format!(".{name}.{}.tmp", uuid::Uuid::now_v7().simple());
+    let fd = rfs::openat(
+        dir,
+        temp.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o644),
+    )?;
+    let mut file = std::fs::File::from(fd);
     let written = file.write_all(body).and_then(|()| file.sync_all());
     drop(file);
-    match written.and_then(|()| std::fs::rename(&temp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(e)
-        }
+    let renamed = written.and_then(|()| Ok(rfs::renameat(dir, temp.as_str(), dir, name)?));
+    if renamed.is_err() {
+        let _ = rfs::unlinkat(dir, temp.as_str(), AtFlags::empty());
     }
+    renamed
 }
 
 /// Remove the `<kind>-….md` files in `dir` that are no longer a document there.
-fn prune(dir: &Path, keep: &HashSet<&str>) -> std::io::Result<usize> {
+fn prune(dir: BorrowedFd<'_>, keep: &HashSet<&str>) -> std::io::Result<usize> {
     let mut removed = 0;
-    for entry in std::fs::read_dir(dir)? {
+    let mut entries = rfs::Dir::read_from(dir)?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.read() {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Ok(name) = entry.file_name().to_str() {
+            names.push(name.to_string());
+        }
+    }
+    for name in names {
         let Some(slug) = name.strip_suffix(".md") else {
             continue;
         };
-        // The entry's own type, not what a link points at.
-        if !entry.file_type()?.is_file()
-            || !valid_slug(slug)
-            || kind_of(slug) == "other"
-            || keep.contains(slug)
-        {
+        if !valid_slug(slug) || kind_of(slug) == "other" || keep.contains(slug) {
             continue;
         }
-        std::fs::remove_file(entry.path())?;
+        // The entry's own type, not what a link points at.
+        let stat = match rfs::statat(dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(Errno::NOENT) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if !rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
+            continue;
+        }
+        rfs::unlinkat(dir, name.as_str(), AtFlags::empty())?;
         removed += 1;
     }
     Ok(removed)
@@ -199,15 +248,15 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let (store, into, from) = (store.clone(), dir.clone(), channel.clone());
+        let (store, from) = (store.clone(), channel.clone());
         let configured = cfg.docs.export_dir.clone().unwrap_or_default();
         let done = tokio::task::spawn_blocking(move || {
-            // Before every export, not only when the key was written: what
-            // the directory is can change after.
-            crate::config::path_guard::path("docs.export_dir", &configured)
+            // Checked before every export, not only when the key was written,
+            // and written only through the descriptor the check vouched for.
+            let into = crate::config::path_guard::open_dir("docs.export_dir", &configured, true)
                 .map_err(|e| e.to_string())?;
             let (docs, skipped_html) = from_store(&store, &from).map_err(|e| e.to_string())?;
-            let mut report = sync_dir(&into, &docs).map_err(|e| e.to_string())?;
+            let mut report = sync_fd(into.as_fd(), &docs).map_err(|e| e.to_string())?;
             report.skipped_html = skipped_html;
             Ok::<_, String>(report)
         })

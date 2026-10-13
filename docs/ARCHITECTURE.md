@@ -186,9 +186,13 @@ runs. `config::path_guard` holds each such key to rules for what it names
   directory (`/etc`, `/usr`, `/var/lib`, `/System`, ...), the home directory itself,
   inside the configuration or state directory or a worktree root, a directory holding
   the configuration or state directory, or inside or holding a package manager's prefix.
-  The export itself follows no link: the directory, its `archive` and every document's
-  name are checked with `lstat`, a link where a document goes is refused, and each
-  document is written to a new file (`O_EXCL`, `O_NOFOLLOW`) and renamed into place.
+  The export itself is written through the directory it checked: the directory is
+  opened as itself (`O_NOFOLLOW`) and its descriptor compared by identity with what the
+  check's own walk found, and from then on everything goes through that descriptor
+  (`archive` opened from it the same way, documents read with `O_NOFOLLOW`, written to a
+  new file with `O_EXCL | O_NOFOLLOW` and renamed with `renameat`, stale ones removed
+  with `unlinkat` after an `lstat`). A link where a document goes is refused, and no
+  link repointed after the check can move the export somewhere else.
 - **The UI bundle directory** (`ui.opencode_bundle_dir`), which `setup` replaces whole:
   as the export directory for what it may not be, outside every place an agent can
   write unless it is in the node's own state or data directory, and only inside those,
@@ -207,12 +211,22 @@ runs. `config::path_guard` holds each such key to rules for what it names
   except the configuration directory's `secrets` (a harness pod mounts only the claim's
   top-level `tracon-*` volumes, never `config/`).
 
+The node's own areas (the export area, the state and data directories for the bundle,
+the configuration directory's `secrets`) are an exception to "never in a place an agent
+can write" only where they themselves sit in one (macOS keeps them all in the state
+directory; a pod keeps them on the claim), and the exception is decided by spelling
+alone: a path is in an own area only if it is, as written and as resolved, under that
+area's own spelling, and it passes through no link kept in any place an agent can write.
+A path an agent made, lexically in its own volume and linked into an own area, is
+refused like any other path in the volume.
+
 A place an agent can write is the state directory, the state volume, the session
 worktree root, Podman's container storage (the data directory's `containers`, and
 `/var/lib/containers` on Linux, where named volumes and container layers live), and the
 node's runtime directory. In a pod the state volume is found from the running process
-(the filesystem the state directory is on, where `KUBERNETES_SERVICE_HOST` says this is
-a pod), not only from `state_mount`, and an edit is judged against the places the
+(the filesystem the state directory is on, or its nearest existing ancestor on a first
+start, where `KUBERNETES_SERVICE_HOST` is set and the file says `runtime.kind =
+"kubernetes"`; never `/` or a home directory), not only from `state_mount`, and an edit is judged against the places the
 running node started with as well as those either file names, so two edits cannot move
 the volume and then use what was on it. Every place is matched as written, as it resolves, and by the
 identity of the directory on disk, so `/tmp` and `/private/tmp`, `/home` and
@@ -230,11 +244,12 @@ either; it warns about each key, and about each `PATH` entry the guard refuses. 
 use: every spawn of a guarded program (each of Podman's multi-step volume transfers, as
 one) checks it again just before it runs and runs the path the check returned, so a
 binary swapped or a directory loosened after the edit is refused there; the embedding
-key file and the builder's token file are opened, then checked, then compared by
-identity with what their path names, and read from what was opened; the builder's
-certificate and registry directories are checked with every `buildctl` and registry
-call; the export directory is checked before every export, and the bundle directory
-before `setup` replaces it. At use a secret file outside the
+key file, the builder's token file and the registry's `config.json` are opened, then
+checked, then compared by identity with what the check's own walk found, and read from
+what was opened; the builder's certificate directory is checked with every `buildctl`
+spawn, which reads it itself; the export directory is checked and opened as described
+above before every export, and the bundle directory is checked before `setup` replaces
+it. At use a secret file outside the
 dedicated directories is still read, so a key file placed by hand before the guard
 existed keeps working (with the start's warning) until it is moved; every other rule
 holds there.
