@@ -1558,7 +1558,13 @@ Three surfaces, three answers, and the differences are the point.
   lends: setting or removing the operator token, authority grants, credential
   import, share and forge tokens, provider keys, sign-ins and channels, channel
   bindings, boundary setup, mesh invitation, admission, removal and hub sharing,
-  and passkeys themselves. Each handler takes an `AdminAction` extractor, which
+  reopening a channel to external harnesses, and passkeys themselves. So are
+  the approval answers that change the node rather than let one call run:
+  allowing a repository setup proposal (it writes the `[[repo]]` entry),
+  allowing a Dockerfile trial (a networked build outside the boundary), and
+  allowing an egress host for the repository. A peer cannot answer one of
+  those over the mesh; the gate is per node, and peer commands are still
+  authorised by channel membership. Each handler takes an `AdminAction` extractor, which
   reads the body once and hashes the request it is about to run:
   `op_hash = sha256("tracon-admin-op/1" | method | path and query | If-Match |
   sha256(body))`. Without a proof for exactly that hash the request is refused
