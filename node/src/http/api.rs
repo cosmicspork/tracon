@@ -1340,7 +1340,8 @@ fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
             let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+            let link = metadata.file_type().is_symlink();
+            if !link && !metadata.is_file() && !metadata.is_dir() {
                 return Err(format!("refusing unsafe workspace path {}", path.display()));
             }
             let name = path
@@ -1348,9 +1349,24 @@ fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .replace('\\', "/");
-            if metadata.is_dir() {
+            if link {
+                // `validate_tree` admitted it, so it resolves inside the tree;
+                // it is archived as the link it is, never followed.
+                let target = std::fs::read_link(&path).map_err(|e| e.to_string())?;
+                archive
+                    .add_symlink(name, target.to_string_lossy(), options)
+                    .map_err(|e| e.to_string())?;
+            } else if metadata.is_dir() {
                 add(root, &path, archive, options)?;
             } else {
+                #[cfg(unix)]
+                let options = {
+                    use std::os::unix::fs::PermissionsExt;
+                    match metadata.permissions().mode() & 0o111 {
+                        0 => options,
+                        _ => options.unix_permissions(0o755),
+                    }
+                };
                 archive
                     .start_file(name, options)
                     .map_err(|e| e.to_string())?;
@@ -6923,5 +6939,39 @@ mod hub_url_tests {
         ] {
             assert!(validate_hub_base(input).is_err(), "accepted {input}");
         }
+    }
+}
+
+#[cfg(test)]
+mod zip_tests {
+    /// A snapshot may now hold links that stay inside it; a download archives
+    /// them as links and keeps scripts executable.
+    #[cfg(unix)]
+    #[test]
+    fn a_download_archives_links_as_links_and_keeps_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("snapshot");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/run"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(root.join("bin/run"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::os::unix::fs::symlink("bin/run", root.join("run")).unwrap();
+
+        let bytes = super::zip_workspace(&root).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mode = |archive: &mut zip::ZipArchive<_>, name: &str| {
+            archive.by_name(name).unwrap().unix_mode().unwrap()
+        };
+        assert_eq!(mode(&mut archive, "bin/run") & 0o777, 0o755);
+        let link = mode(&mut archive, "run");
+        assert_eq!(link & 0o170000, 0o120000, "{link:o}");
+        let mut target = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("run").unwrap(), &mut target).unwrap();
+        assert_eq!(target, "bin/run");
+
+        std::os::unix::fs::symlink("/etc/passwd", root.join("escape")).unwrap();
+        assert!(super::zip_workspace(&root).is_err());
     }
 }

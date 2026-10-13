@@ -800,26 +800,14 @@ fn safe_candidate_path(path: &str) -> Result<(), ReviewError> {
 }
 
 fn safe_symlink_target(path: &str, target: &str) -> Result<(), ReviewError> {
-    if target.is_empty() || Path::new(target).is_absolute() {
-        return Err(ReviewError::Rejected(format!(
-            "candidate symlink {path} escapes its snapshot"
-        )));
-    }
-    let mut depth = Path::new(path)
+    let depth = Path::new(path)
         .parent()
         .map(|parent| parent.components().count())
         .unwrap_or_default();
-    for component in Path::new(target).components() {
-        match component {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir if depth > 0 => depth -= 1,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(ReviewError::Rejected(format!(
-                    "candidate symlink {path} escapes its snapshot"
-                )))
-            }
-        }
+    if !crate::workspace::link_stays_inside(Path::new(target), depth) {
+        return Err(ReviewError::Rejected(format!(
+            "candidate symlink {path} escapes its snapshot"
+        )));
     }
     Ok(())
 }
@@ -1247,6 +1235,58 @@ mod tests {
             std::fs::read(snapshot.root.join("nl.bin")).unwrap(),
             b"x\n\ny"
         );
+    }
+
+    /// A candidate's links are held to the rule every workspace copy applies,
+    /// so a candidate review accepts is one a check's import accepts too.
+    #[cfg(unix)]
+    #[test]
+    fn candidate_links_follow_the_workspace_copy_rule() {
+        let link = |path: &str, target: &str| crate::store::CandidateFile {
+            path: path.into(),
+            mode: 0o120000,
+            content: target.as_bytes().to_vec(),
+        };
+        let file = crate::store::CandidateFile {
+            path: "b.txt".into(),
+            mode: 0o100644,
+            content: b"b".to_vec(),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("candidate");
+        let files = vec![
+            file.clone(),
+            link("link", "b.txt"),
+            link("d/up", "../b.txt"),
+            link("node_modules/.bin/acorn", "../acorn/bin/acorn"),
+        ];
+        materialize_candidate_files(&root, &files).unwrap();
+        assert_eq!(
+            std::fs::read_link(root.join("d/up")).unwrap(),
+            Path::new("../b.txt")
+        );
+        crate::workspace::validate_tree(&root).unwrap();
+        let copy = tmp.path().join("copy");
+        crate::workspace::copy_tree(&root, &copy, false).unwrap();
+        assert_eq!(std::fs::read_to_string(copy.join("d/up")).unwrap(), "b");
+        make_tree_writable(&root);
+
+        for (path, target) in [
+            ("link", "a/../b"),
+            ("d/link", "x/../../b.txt"),
+            ("link", "../b.txt"),
+            ("d/link", "../../b.txt"),
+            ("link", "/etc/passwd"),
+            ("link", ""),
+        ] {
+            let root = tmp.path().join(format!("refused-{}", uuid::Uuid::now_v7()));
+            let refused = materialize_candidate_files(&root, &[file.clone(), link(path, target)]);
+            assert!(
+                matches!(refused, Err(ReviewError::Rejected(_))),
+                "{path} -> {target} was accepted"
+            );
+            make_tree_writable(&root);
+        }
     }
 
     #[tokio::test]

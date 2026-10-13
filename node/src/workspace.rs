@@ -19,7 +19,9 @@ pub const MAX_IMPORT_FILES: usize = 20_000;
 pub enum WorkspaceError {
     #[error("workspace source {0} does not exist")]
     Missing(PathBuf),
-    #[error("workspace source contains a symbolic link or unsupported file: {0}")]
+    #[error(
+        "workspace source contains a symbolic link leaving the tree or an unsupported file: {0}"
+    )]
     Unsafe(PathBuf),
     #[error("workspace import exceeds the {MAX_IMPORT_BYTES}-byte limit")]
     TooLarge,
@@ -116,6 +118,9 @@ fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 /// Copy selected bytes without following symlinks.  `skip_git` is used only
 /// when overlaying an operator checkout onto the separately cloned seed: host
 /// Git configuration and executable metadata never cross that boundary.
+///
+/// What crosses is what Git itself records of a file: its bytes, whether it
+/// is executable, and a symbolic link as a link (see `link_stays_inside`).
 pub fn copy_tree(source: &Path, destination: &Path, skip_git: bool) -> Result<(), WorkspaceError> {
     let metadata =
         std::fs::symlink_metadata(source).map_err(|_| WorkspaceError::Missing(source.into()))?;
@@ -124,7 +129,7 @@ pub fn copy_tree(source: &Path, destination: &Path, skip_git: bool) -> Result<()
         return Err(WorkspaceError::Unsafe(source.into()));
     }
     let mut budget = CopyBudget::default();
-    copy_dir(source, destination, skip_git, None, &mut budget)?;
+    copy_dir(source, destination, skip_git, None, 0, &mut budget)?;
     // A directory that vanished under the walk is copied as empty, which is
     // the right answer for something inside the tree and the wrong one for the
     // tree itself: no destination at all means the source went away, not that
@@ -135,12 +140,14 @@ pub fn copy_tree(source: &Path, destination: &Path, skip_git: bool) -> Result<()
     Ok(())
 }
 
-/// Overlay an operator checkout the way `git status` sees it: tracked and
-/// untracked files, never what its ignore rules exclude. Dependency trees and
-/// build output are ignored, so they neither break the import (their
-/// symlinks) nor exhaust its budget, and an ignored `.env` never reaches the
-/// harness. The rules are read as files; no Git runs in the operator's
-/// checkout, where its configuration could execute commands.
+/// Overlay a checkout the way `git ls-files -co --exclude-standard` sees it,
+/// which is what Podman's export stages (`STAGE_WORKSPACE`): every file the
+/// index tracks, even one an ignore rule matches, and the untracked files the
+/// rules leave in. Dependency trees and build output are ignored, so they
+/// neither break the copy (their symlinks) nor exhaust its budget, and an
+/// ignored `.env` never reaches the harness. The rules and the index are read
+/// as files; no Git runs in the checkout, where its configuration could
+/// execute commands.
 fn overlay_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
     let metadata =
         std::fs::symlink_metadata(source).map_err(|_| WorkspaceError::Missing(source.into()))?;
@@ -168,12 +175,171 @@ fn overlay_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceEr
             keep.insert(relative.to_path_buf());
         }
     }
+    // A linked worktree's `.git` is a file naming an index elsewhere; its
+    // walk alone decides, as before.
+    let repository = source.join(".git");
+    if std::fs::symlink_metadata(&repository).is_ok_and(|metadata| metadata.is_dir()) {
+        for tracked in tracked_paths(&repository)? {
+            let mut path = tracked.as_path();
+            while !path.as_os_str().is_empty() && keep.insert(path.to_path_buf()) {
+                path = path.parent().unwrap_or(Path::new(""));
+            }
+        }
+    }
     let keep = Keep {
         root: source.to_path_buf(),
         paths: keep,
     };
     let mut budget = CopyBudget::default();
-    copy_dir(source, destination, true, Some(&keep), &mut budget)
+    copy_dir(source, destination, true, Some(&keep), 0, &mut budget)
+}
+
+/// Large enough for the index of a tree far past `MAX_IMPORT_FILES`.
+const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read one file of a Git directory without following a link at its leaf.
+/// `None` when it does not exist.
+fn read_git_file(path: &Path) -> Result<Option<Vec<u8>>, WorkspaceError> {
+    use std::io::Read;
+    let file = match open_no_follow(path) {
+        Ok(file) => file,
+        Err(error) if vanished(&error) => return Ok(None),
+        Err(_) => return Err(WorkspaceError::Unsafe(path.into())),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES {
+        return Err(WorkspaceError::Unsafe(path.into()));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_INDEX_BYTES).read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// The paths a repository's index tracks, parsed from `index` (and the
+/// shared index a split index names) as data. A missing index tracks
+/// nothing; one that cannot be parsed refuses the copy, as `git ls-files`
+/// would fail on it.
+fn tracked_paths(git_dir: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
+    let refused = |name: &str| WorkspaceError::Git {
+        op: "read index",
+        message: format!("{name} is not an index this node can read"),
+    };
+    let Some(index) = read_git_file(&git_dir.join("index"))? else {
+        return Ok(Vec::new());
+    };
+    // Only the object id's width is read from the configuration; one that
+    // cannot be read is the default, SHA-1, and a wrong guess fails the parse.
+    let config = read_git_file(&git_dir.join("config")).ok().flatten();
+    let sha256 = config.is_some_and(|config| {
+        let config: Vec<u8> = config
+            .iter()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .map(u8::to_ascii_lowercase)
+            .collect();
+        config
+            .windows(b"objectformat=sha256".len())
+            .any(|window| window == b"objectformat=sha256")
+    });
+    let hash_len = if sha256 { 32 } else { 20 };
+    let mut paths = Vec::new();
+    let shared = parse_index(&index, hash_len, &mut paths).ok_or_else(|| refused("index"))?;
+    if let Some(shared) = shared {
+        let name = format!("sharedindex.{shared}");
+        let bytes = read_git_file(&git_dir.join(&name))?.ok_or_else(|| refused(&name))?;
+        parse_index(&bytes, hash_len, &mut paths).ok_or_else(|| refused(&name))?;
+    }
+    Ok(paths)
+}
+
+/// Git's index format, versions 2 to 4, for the entry names alone. Returns
+/// the hex name of the shared index a split index points at, if any.
+fn parse_index(bytes: &[u8], hash_len: usize, out: &mut Vec<PathBuf>) -> Option<Option<String>> {
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    };
+    if bytes.get(..4)? != b"DIRC" {
+        return None;
+    }
+    let version = word(4)?;
+    if !(2..=4).contains(&version) {
+        return None;
+    }
+    let count = word(8)? as usize;
+    let mut at = 12;
+    let mut previous = Vec::new();
+    for _ in 0..count {
+        let start = at;
+        // ctime, mtime, dev, ino, mode, uid, gid and size, then the object id.
+        let flags_at = start + 40 + hash_len;
+        let flags = u16::from_be_bytes(bytes.get(flags_at..flags_at + 2)?.try_into().ok()?);
+        let mut name_at = flags_at + 2;
+        if flags & 0x4000 != 0 {
+            if version < 3 {
+                return None;
+            }
+            name_at += 2;
+        }
+        let name = if version == 4 {
+            // The name drops a varint count of bytes from the end of the
+            // previous one and appends a NUL-terminated suffix; no padding.
+            let mut strip = 0usize;
+            loop {
+                let byte = *bytes.get(name_at)?;
+                name_at += 1;
+                strip = strip
+                    .checked_mul(128)?
+                    .checked_add(usize::from(byte & 0x7f))?;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                strip = strip.checked_add(1)?;
+            }
+            let end = name_at + bytes.get(name_at..)?.iter().position(|b| *b == 0)?;
+            let mut name: Vec<u8> = previous.get(..previous.len().checked_sub(strip)?)?.to_vec();
+            name.extend_from_slice(&bytes[name_at..end]);
+            at = end + 1;
+            name
+        } else {
+            let end = name_at + bytes.get(name_at..)?.iter().position(|b| *b == 0)?;
+            // NUL padding to a multiple of eight, at least one byte.
+            at = start + ((end - start + 8) & !7);
+            bytes[name_at..end].to_vec()
+        };
+        // A split index stores an entry that replaces a shared one without
+        // its name; the shared index names it.
+        if !name.is_empty() {
+            out.push(index_path(&name));
+        }
+        previous = name;
+    }
+    let mut shared = None;
+    let body = bytes.len().checked_sub(hash_len)?;
+    while at + 8 <= body {
+        let size = word(at + 4)? as usize;
+        let data = bytes.get(at + 8..(at + 8).checked_add(size)?)?;
+        if &bytes[at..at + 4] == b"link" {
+            let oid = data.get(..hash_len)?;
+            if oid.iter().any(|byte| *byte != 0) {
+                shared = Some(oid.iter().map(|byte| format!("{byte:02x}")).collect());
+            }
+        }
+        at += 8 + size;
+    }
+    Some(shared)
+}
+
+fn index_path(name: &[u8]) -> PathBuf {
+    // A sparse index names a directory it does not expand with a trailing `/`.
+    let name = name.strip_suffix(b"/").unwrap_or(name);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(name))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(name).into_owned())
+    }
 }
 
 /// Copy a workspace the way its own repository sees it: the repository, and
@@ -295,11 +461,50 @@ fn vanished(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound
 }
 
+/// Whether a symbolic link `depth` directories below the root of the tree
+/// being copied resolves inside it. The target must be relative, may climb
+/// only at its start, and never above the root. Climbing only at the start is
+/// what makes this hold for the filesystem and not just the text: the
+/// directories it climbs out of are real ones, since the walk never descends
+/// through a link, and every link it passes through after that is held to the
+/// same rule. A `..` after a link (`node_modules/x/..`) would climb out of
+/// wherever that link leads, which no reading of the text can bound. An npm
+/// `.bin` entry (`../acorn/bin/acorn`) or a pnpm store link passes. Review
+/// holds a candidate's links to the same rule, so a candidate it accepts is
+/// one every copy accepts.
+pub(crate) fn link_stays_inside(target: &Path, depth: usize) -> bool {
+    if target.as_os_str().is_empty() {
+        return false;
+    }
+    let mut climbed = 0usize;
+    let mut descended = false;
+    for component in target.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if !descended && climbed < depth => climbed += 1,
+            Component::Normal(_) => descended = true,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Clear the way for a copied file or link. An overlay lands on a checkout
+/// that may already hold a link at the same path, and creating a file there
+/// would write wherever that link points.
+fn replace_leaf(path: &Path) -> Result<(), WorkspaceError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => Ok(std::fs::remove_file(path)?),
+        _ => Ok(()),
+    }
+}
+
 fn copy_dir(
     source: &Path,
     destination: &Path,
     skip_git: bool,
     keep: Option<&Keep>,
+    depth: usize,
     budget: &mut CopyBudget,
 ) -> Result<(), WorkspaceError> {
     // Listed before the destination is created: a directory that vanished
@@ -331,10 +536,36 @@ fn copy_dir(
             Err(error) => return Err(error.into()),
         };
         if metadata.file_type().is_symlink() {
+            // The link is copied as the text that was checked; nothing here
+            // follows it, so a target swapped in later is never read.
+            let target = match std::fs::read_link(&source_path) {
+                Ok(target) => target,
+                Err(error) if vanished(&error) => continue,
+                Err(_) => return Err(WorkspaceError::Unsafe(source_path)),
+            };
+            if !link_stays_inside(&target, depth) {
+                return Err(WorkspaceError::Unsafe(source_path));
+            }
+            budget.files += 1;
+            if budget.files > MAX_IMPORT_FILES {
+                return Err(WorkspaceError::TooManyFiles);
+            }
+            replace_leaf(&destination_path)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &destination_path)?;
+            #[cfg(not(unix))]
             return Err(WorkspaceError::Unsafe(source_path));
+            continue;
         }
         if metadata.is_dir() {
-            copy_dir(&source_path, &destination_path, skip_git, keep, budget)?;
+            copy_dir(
+                &source_path,
+                &destination_path,
+                skip_git,
+                keep,
+                depth + 1,
+                budget,
+            )?;
             continue;
         }
         if !metadata.is_file() {
@@ -368,8 +599,21 @@ fn copy_dir(
         if let Some(parent) = destination_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        replace_leaf(&destination_path)?;
         let mut dst = std::fs::File::create(&destination_path)?;
         std::io::copy(&mut src, &mut dst)?;
+        // Git's two file modes, and never the source's write bits: a
+        // read-only snapshot imported into a volume stays writable there.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if opened.permissions().mode() & 0o111 == 0 {
+                0o644
+            } else {
+                0o755
+            };
+            dst.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
     }
     Ok(())
 }
@@ -1007,19 +1251,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_export_leaves_what_the_repository_ignores_behind() {
+        use std::os::unix::fs::PermissionsExt;
+
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("volume");
         std::fs::create_dir_all(&source).unwrap();
         sh(
             &source,
             "git init -q -b main . && git config user.email t@e && git config user.name t \
-             && printf 'node_modules/\\ntarget/\\n' > .gitignore && echo one > a.txt \
+             && printf 'node_modules/\\ntarget/\\n*.log\\n' > .gitignore && echo one > a.txt \
+             && printf '#!/bin/sh\\n' > run.sh && chmod +x run.sh && ln -s a.txt link.txt \
+             && mkdir fixtures && echo kept > fixtures/run.log && git add -f fixtures/run.log \
              && echo gone > gone.txt && git add -A && git commit -qm one \
-             && rm gone.txt && echo new > b.txt \
+             && rm gone.txt && echo new > b.txt && echo noise > fixtures/new.log \
              && mkdir -p node_modules/.bin target/debug \
-             && ln -s ../acorn node_modules/.bin/acorn && echo built > target/debug/app",
+             && ln -s ../acorn node_modules/.bin/acorn && echo built > target/debug/app \
+             && ln -s /usr/bin/python3 target/python",
         );
-        // The whole volume is refused, as it always was.
+        // The whole volume is refused: a link in its build output leaves it.
         assert!(matches!(
             validate_tree(&source),
             Err(WorkspaceError::Unsafe(_))
@@ -1035,7 +1284,27 @@ mod tests {
             "new\n"
         );
         assert!(exported.join(".git/HEAD").is_file());
-        for absent in ["node_modules", "target", "gone.txt", "stale.txt"] {
+        // Tracked, though an ignore rule matches it, as `git ls-files` says.
+        assert_eq!(
+            std::fs::read_to_string(exported.join("fixtures/run.log")).unwrap(),
+            "kept\n"
+        );
+        assert_eq!(
+            std::fs::read_link(exported.join("link.txt")).unwrap(),
+            Path::new("a.txt")
+        );
+        let mode = std::fs::metadata(exported.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+        for absent in [
+            "node_modules",
+            "target",
+            "gone.txt",
+            "stale.txt",
+            "fixtures/new.log",
+        ] {
             assert!(!exported.join(absent).exists(), "{absent} was exported");
         }
 
@@ -1046,6 +1315,142 @@ mod tests {
         let copied = tmp.path().join("plain-copy");
         copy_checkout(&plain, &copied).unwrap();
         assert!(copied.join("target/out").is_file());
+    }
+
+    /// The index is read as a file, in every shape Git writes it: the
+    /// extended flags an intent-to-add entry sets (version 3), prefix-compressed
+    /// names (version 4), and a split index whose entries live in a shared
+    /// file beside it.
+    #[test]
+    fn every_index_version_names_its_tracked_files() {
+        for setup in [
+            "",
+            "git add -N -f intent.txt",
+            "git update-index --index-version 4",
+            "git update-index --split-index && echo more > dir/more.txt && git add -f dir/more.txt",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = tmp.path();
+            sh(
+                source,
+                "git init -q -b main . && git config user.email t@e && git config user.name t \
+                 && printf 'dir/\\n*.txt\\n' > .gitignore && mkdir -p dir/deeper \
+                 && echo a > dir/a.txt && echo b > dir/deeper/b.txt && echo i > intent.txt \
+                 && git add -f dir && git add .gitignore && git commit -qm one",
+            );
+            if !setup.is_empty() {
+                sh(source, setup);
+            }
+            if setup.contains("split") {
+                assert!(std::fs::read_dir(source.join(".git"))
+                    .unwrap()
+                    .flatten()
+                    .any(|entry| entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("sharedindex.")));
+            }
+            let mut tracked = tracked_paths(&source.join(".git")).unwrap();
+            tracked.sort();
+            let mut expected = vec![
+                PathBuf::from(".gitignore"),
+                PathBuf::from("dir/a.txt"),
+                PathBuf::from("dir/deeper/b.txt"),
+            ];
+            if setup.contains("intent") {
+                expected.push(PathBuf::from("intent.txt"));
+            }
+            if setup.contains("more") {
+                expected.push(PathBuf::from("dir/more.txt"));
+            }
+            expected.sort();
+            tracked.dedup();
+            assert_eq!(tracked, expected, "after `{setup}`");
+        }
+        assert!(parse_index(b"DIRC\0\0\0\x02\0\0\0\x05", 20, &mut Vec::new()).is_none());
+        assert!(parse_index(b"not an index", 20, &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn a_link_may_climb_only_at_its_start_and_never_out_of_the_tree() {
+        for (target, depth) in [
+            ("../acorn/bin/acorn", 2),
+            ("../../.pnpm/x@1/node_modules/x", 2),
+            ("a.txt", 0),
+            ("./a.txt", 0),
+            ("..", 1),
+        ] {
+            assert!(
+                link_stays_inside(Path::new(target), depth),
+                "{target} at depth {depth}"
+            );
+        }
+        for (target, depth) in [
+            ("/etc/passwd", 3),
+            ("..", 0),
+            ("../../x", 1),
+            ("x/../../y", 2),
+            ("link/..", 3),
+            ("sub/../", 0),
+            ("", 0),
+        ] {
+            assert!(
+                !link_stays_inside(Path::new(target), depth),
+                "{target} at depth {depth}"
+            );
+        }
+    }
+
+    /// What Git records of a file survives a copy: whether it is executable,
+    /// and a link that stays inside the tree, as the link it is. Write bits do
+    /// not: a read-only snapshot is copied into something a run can write.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_keeps_executable_bits_and_links_inside_the_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("workspace");
+        let bin = source.join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(source.join("node_modules/acorn/bin")).unwrap();
+        std::fs::write(source.join("node_modules/acorn/bin/acorn"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            source.join("node_modules/acorn/bin/acorn"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::fs::write(source.join("README"), "read only").unwrap();
+        std::fs::set_permissions(
+            source.join("README"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../acorn/bin/acorn", bin.join("acorn")).unwrap();
+
+        let copy = tmp.path().join("copy");
+        copy_tree(&source, &copy, false).unwrap();
+        let mode = |path: &str| {
+            std::fs::metadata(copy.join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("node_modules/acorn/bin/acorn"), 0o755);
+        assert_eq!(mode("README"), 0o644);
+        assert_eq!(
+            std::fs::read_link(copy.join("node_modules/.bin/acorn")).unwrap(),
+            Path::new("../acorn/bin/acorn")
+        );
+        validate_tree(&source).unwrap();
+
+        // A link that climbs out of the tree is refused wherever it sits.
+        std::os::unix::fs::symlink("../../../../outside", bin.join("escape")).unwrap();
+        assert!(matches!(
+            copy_tree(&source, &tmp.path().join("copy-2"), false),
+            Err(WorkspaceError::Unsafe(_))
+        ));
     }
 
     /// Uploads and continuity transfers name their own relative paths, and a

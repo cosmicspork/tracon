@@ -201,7 +201,8 @@ pub trait Backend: Send + Sync {
     /// carries those modes into the volume, where a run that is root with no
     /// capabilities cannot override them: it could not create `target/` or
     /// `node_modules/`, or let a formatter fix a file. A backend whose import
-    /// does not carry modes has nothing to do.
+    /// carries no write bits (`workspace::copy_tree` keeps only whether a file
+    /// is executable) has nothing to do.
     async fn import_writable(
         &self,
         volume: &str,
@@ -341,6 +342,15 @@ pub fn remove_directory_volume(root: &std::path::Path, volume: &str) -> Result<(
     }
 }
 
+fn check_volume_names(names: &[&str]) -> Result<(), BoundaryError> {
+    for volume in names {
+        if volume.is_empty() || volume.contains('/') || volume.contains("..") {
+            return Err(BoundaryError::Other(format!("not a volume name: {volume}")));
+        }
+    }
+    Ok(())
+}
+
 /// Copy one directory-backed volume to another, as the runtime's own copy
 /// would: everything, symlinks as symlinks. Nothing here is validated, because
 /// nothing here is read — the node interprets a volume only through an export.
@@ -349,11 +359,7 @@ pub fn clone_directory_volume(
     source: &str,
     destination: &str,
 ) -> Result<(), BoundaryError> {
-    for volume in [source, destination] {
-        if volume.is_empty() || volume.contains('/') || volume.contains("..") {
-            return Err(BoundaryError::Other(format!("not a volume name: {volume}")));
-        }
-    }
+    check_volume_names(&[source, destination])?;
     fn copy(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(to)?;
         for entry in std::fs::read_dir(from)? {
@@ -379,6 +385,52 @@ pub fn clone_directory_volume(
         true => Ok(copy(&from, &to)?),
         false => Ok(std::fs::create_dir_all(&to)?),
     }
+}
+
+/// `clone_directory_volume` through the system `cp`, which keeps modes,
+/// links and times in one pass and shares extents where the filesystem can
+/// (`--reflink=auto`): a run's dependency cache and each check's tree are
+/// clones, of tens of thousands of files. The flags are the ones Podman's
+/// clone uses (`CLONE_TREE`), `-a` without extended attributes and security
+/// labels, which GNU coreutils and busybox both take. A `cp` that is missing
+/// or refuses them leaves the copy to the node itself.
+pub async fn clone_directory_volume_with(
+    cp: &str,
+    root: &std::path::Path,
+    source: &str,
+    destination: &str,
+) -> Result<(), BoundaryError> {
+    check_volume_names(&[source, destination])?;
+    let (from, to) = (root.join(source), root.join(destination));
+    if !from.is_dir() {
+        return clone_directory_volume(root, source, destination);
+    }
+    if to.exists() {
+        std::fs::remove_dir_all(&to)?;
+    }
+    std::fs::create_dir_all(&to)?;
+    let copied = tokio::process::Command::new(cp)
+        .args(["-dRp", "--reflink=auto", "--"])
+        .arg(from.join("."))
+        .arg(&to)
+        .output()
+        .await;
+    match copied {
+        Ok(out) if out.status.success() => return Ok(()),
+        Ok(out) => tracing::warn!(
+            source,
+            destination,
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "cp could not clone the volume; copying it in process"
+        ),
+        Err(error) => tracing::warn!(
+            source,
+            destination,
+            %error,
+            "cp is unavailable; copying the volume in process"
+        ),
+    }
+    clone_directory_volume(root, source, destination)
 }
 
 /// The backend `[runtime] kind` selects. Detection that needs the host (the
@@ -422,5 +474,62 @@ mod tests {
             .unwrap();
         assert!(root.path().join("tracon-prep-cache-c").is_dir());
         assert!(clone_directory_volume(root.path(), "../etc", "tracon-x").is_err());
+    }
+
+    /// The system `cp` and the in-process copy it falls back to make the same
+    /// clone: executable bits and links kept, a stale destination replaced.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clone_keeps_modes_and_links_with_or_without_cp() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for cp in ["cp", "/nonexistent/tracon-cp"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("tracon-prep-a");
+            std::fs::create_dir_all(source.join("node_modules/.bin")).unwrap();
+            std::fs::write(source.join("run.sh"), "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(
+                source.join("run.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(
+                "../acorn/bin/acorn",
+                source.join("node_modules/.bin/acorn"),
+            )
+            .unwrap();
+            std::fs::create_dir_all(root.path().join("tracon-check-b")).unwrap();
+            std::fs::write(root.path().join("tracon-check-b/stale"), "x").unwrap();
+
+            clone_directory_volume_with(cp, root.path(), "tracon-prep-a", "tracon-check-b")
+                .await
+                .unwrap();
+            let copy = root.path().join("tracon-check-b");
+            let mode = std::fs::metadata(copy.join("run.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "{cp}");
+            assert_eq!(
+                std::fs::read_link(copy.join("node_modules/.bin/acorn")).unwrap(),
+                std::path::Path::new("../acorn/bin/acorn"),
+                "{cp}"
+            );
+            assert!(!copy.join("stale").exists(), "{cp}");
+            assert!(
+                !copy.join("tracon-prep-a").exists(),
+                "{cp} nested the source"
+            );
+
+            clone_directory_volume_with(cp, root.path(), "tracon-none", "tracon-empty")
+                .await
+                .unwrap();
+            assert!(root.path().join("tracon-empty").is_dir());
+            assert!(
+                clone_directory_volume_with(cp, root.path(), "../etc", "tracon-x")
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

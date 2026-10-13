@@ -322,8 +322,8 @@ GH_TOKEN = "…"
 
 **Nothing on this machine is bind-mounted into the boundary.** A session works in
 a runtime-owned volume: a forge clone the node made, or files you pick in the
-browser, which are copied in once (bounded in size and count, symlinks and Git
-metadata refused) and never written back. The harness sees `/work` and no host
+browser, which are copied in once (bounded in size and count, Git metadata and any
+symlink leading out of the tree refused) and never written back. The harness sees `/work` and no host
 path; your Git configuration, hooks, and credentials stay outside. A workspace
 outlives its session — start another on it, export a checked snapshot, or download
 it as a zip — and publication happens from that snapshot through a separate,
