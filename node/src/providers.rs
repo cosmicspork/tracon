@@ -1067,6 +1067,28 @@ impl Providers {
         }
     }
 
+    /// The channels the credential a sign-in for `name` would replace
+    /// serves, or `None` when this node holds none: what a peer must share
+    /// before it may sign in over it.
+    pub fn credential_channels(&self, name: &str) -> Result<Option<Vec<String>>, ProviderError> {
+        let credential_name = self.credential_name(name)?;
+        Ok(self
+            .broker
+            .read()
+            .unwrap()
+            .get(&credential_name)
+            .map(|credential| credential.channels.clone()))
+    }
+
+    /// The channels a sign-in in progress for `name` will bind its
+    /// credential to, or `None` when there is none.
+    pub fn login_channels(&self, name: &str) -> Option<Vec<String>> {
+        self.inflight
+            .lock()
+            .get(name)
+            .map(|slot| slot.channels.clone())
+    }
+
     fn credential_name(&self, name: &str) -> Result<String, ProviderError> {
         self.cfg
             .providers

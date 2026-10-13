@@ -139,13 +139,33 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
 }
 
 async fn pair() -> (Node, Node) {
+    pair_with(&[], None).await
+}
+
+/// As `pair`, with channels only B is admitted to, and optionally a third
+/// member the hub admits to `@mesh` that never runs: a node that never answers.
+async fn pair_with(b_only: &[&str], silent: Option<&Identity>) -> (Node, Node) {
     let a_id = identity(1);
     let b_id = identity(2);
-    let hub = support::mesh::start_hub_personal(&[&a_id, &b_id]).await;
+    let both: &[&str] = &[MESH_CHANNEL, "personal"];
+    let b_channels: Vec<&str> = both.iter().chain(b_only).copied().collect();
+    let mut admitted: Vec<(&Identity, &[&str])> =
+        vec![(&a_id, both), (&b_id, b_channels.as_slice())];
+    if let Some(silent) = silent {
+        admitted.push((silent, &[MESH_CHANNEL]));
+    }
+    let hub = support::mesh::start_hub(&admitted).await;
     let mesh = Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
     let personal = Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
     let b_mesh = mesh.wrap_for(&a_id, &b_id.x25519_public()).unwrap();
     let b_personal = personal.wrap_for(&a_id, &b_id.x25519_public()).unwrap();
+    let mut b_rings = vec![(MESH_CHANNEL, b_mesh), ("personal", b_personal)];
+    for channel in b_only {
+        b_rings.push((
+            channel,
+            Keyring::genesis(&b_id.x25519_public(), &DataKey::generate()),
+        ));
+    }
     let a = node(
         1,
         "alpha",
@@ -153,13 +173,7 @@ async fn pair() -> (Node, Node) {
         &[(MESH_CHANNEL, mesh), ("personal", personal)],
     )
     .await;
-    let b = node(
-        2,
-        "beta",
-        &hub,
-        &[(MESH_CHANNEL, b_mesh), ("personal", b_personal)],
-    )
-    .await;
+    let b = node(2, "beta", &hub, &b_rings).await;
     // Both say hello so each knows the other's sealing key.
     a.client.hello().await.unwrap();
     b.client.hello().await.unwrap();
@@ -181,6 +195,32 @@ async fn pair() -> (Node, Node) {
     })
     .await;
     (a, b)
+}
+
+/// A permission waiting on `session_id`, held by `node`.
+fn permission(id: &str, node: &str, session_id: &str) -> tracon::store::PermissionRow {
+    let now = tracon::store::now_ms();
+    tracon::store::PermissionRow {
+        id: id.into(),
+        session_id: Some(session_id.into()),
+        node_id: node.into(),
+        rpc_id: 0,
+        tool_call_id: None,
+        title: "run just test".into(),
+        kind: Some("execute".into()),
+        raw_input: None,
+        options: "[]".into(),
+        state: "new".into(),
+        answer_option_id: None,
+        created_ms: now,
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        expires_ms: now + 60_000,
+    }
+}
+
+fn refused_with(result: &Result<serde_json::Value, CommandError>, words: &str) -> bool {
+    matches!(result, Err(CommandError::Refused(message)) if message.contains(words))
 }
 
 #[tokio::test]
@@ -670,4 +710,265 @@ async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["owner_detail"]["state"], "unreachable", "{v}");
     assert!(v["evidence"].is_null());
+}
+
+/// Being on the mesh is not being in a channel. A sealed command proves which
+/// node sent it; the owner still holds the sender to the channel of what it
+/// would drive, records the refusal, and lets a member through.
+#[tokio::test]
+async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
+    state::isolate();
+    let (a, b) = pair_with(&["private"], None).await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    wait_for("B to learn who is in which channel", || {
+        b.store
+            .nodes_in_channel("private")
+            .is_ok_and(|m| m == [bi.clone()])
+            && b.store
+                .nodes_in_channel("personal")
+                .is_ok_and(|m| m.contains(&ai) && m.contains(&bi))
+    })
+    .await;
+    b.store
+        .insert_session(&support::rows::session_row("private-1", &bi, "private"))
+        .unwrap();
+    b.store
+        .insert_permission(&permission("perm-1", &bi, "private-1"))
+        .unwrap();
+    let t = Duration::from_secs(5);
+    let commands = [
+        Command::Prompt {
+            session_id: "private-1".into(),
+            text: "do it".into(),
+        },
+        Command::Kill {
+            session_id: "private-1".into(),
+        },
+        Command::Pause {
+            session_id: "private-1".into(),
+            reason: "x".into(),
+        },
+        Command::Resume {
+            session_id: "private-1".into(),
+            reason: "x".into(),
+        },
+        Command::Answer {
+            permission_id: "perm-1".into(),
+            option_id: "allow".into(),
+            arguments: None,
+            reason: None,
+            notes: None,
+        },
+        Command::ProviderConnect {
+            name: "anthropic".into(),
+            channels: vec!["private".into()],
+            share: true,
+        },
+    ];
+    for command in commands {
+        let result = a.client.command(&bi, command.clone(), t).await;
+        assert!(
+            refused_with(&result, "not a member"),
+            "{command:?}: {result:?}"
+        );
+    }
+    let row = b.store.get_session("private-1").unwrap().unwrap();
+    assert_eq!(row.state, "running");
+    assert_eq!(
+        b.store.get_permission("perm-1").unwrap().unwrap().state,
+        "new"
+    );
+    let seen = b.client.snapshot().last_refusal.unwrap_or_default();
+    assert!(
+        seen.contains(&ai) && seen.contains("not a member"),
+        "{seen}"
+    );
+
+    // Nor may a member sign in over a credential that serves only channels
+    // it is not in.
+    let credential = Config::default().providers["anthropic"].credential.clone();
+    b.broker.write().unwrap().put(
+        &credential,
+        tracon::broker::Credential {
+            channels: vec!["private".into()],
+            ..Default::default()
+        },
+    );
+    let result = a
+        .client
+        .command(
+            &bi,
+            Command::ProviderConnect {
+                name: "anthropic".into(),
+                channels: vec!["personal".into()],
+                share: true,
+            },
+            t,
+        )
+        .await;
+    assert!(refused_with(&result, "would replace"), "{result:?}");
+
+    // A member drives a session in a channel it shares.
+    b.store
+        .insert_session(&support::rows::session_row("shared-1", &bi, "personal"))
+        .unwrap();
+    let stopped = a
+        .client
+        .command(
+            &bi,
+            Command::Kill {
+                session_id: "shared-1".into(),
+            },
+            t,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped["stopped"], true);
+    assert_eq!(
+        b.store.get_session("shared-1").unwrap().unwrap().state,
+        "closed"
+    );
+    // Its prompt reaches the session itself, which has no live harness here.
+    b.store
+        .insert_session(&support::rows::session_row("shared-2", &bi, "personal"))
+        .unwrap();
+    let result = a
+        .client
+        .command(
+            &bi,
+            Command::Prompt {
+                session_id: "shared-2".into(),
+                text: "go on".into(),
+            },
+            t,
+        )
+        .await;
+    assert!(refused_with(&result, "not running"), "{result:?}");
+
+    // B is not a relay: a command for a session another node owns is refused,
+    // not forwarded on under B's identity.
+    b.store
+        .insert_session(&support::rows::session_row("a-owned", &ai, "personal"))
+        .unwrap();
+    let result = a
+        .client
+        .command(
+            &bi,
+            Command::Kill {
+                session_id: "a-owned".into(),
+            },
+            t,
+        )
+        .await;
+    assert!(
+        refused_with(&result, "belongs to another node"),
+        "{result:?}"
+    );
+}
+
+/// A command whose sender stopped waiting is not run late from the outbox.
+/// One from a sender on an older build names no deadline and still runs.
+#[tokio::test]
+async fn a_command_past_its_deadline_is_refused_and_an_undated_one_still_runs() {
+    use tracon::mesh::forward::DEADLINE_SKEW_MS;
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    b.store
+        .insert_session(&support::rows::session_row("late-1", &bi, "personal"))
+        .unwrap();
+    let kill = Command::Kill {
+        session_id: "late-1".into(),
+    };
+    let t = Duration::from_secs(5);
+    let stale = tracon::store::now_ms() - DEADLINE_SKEW_MS - 60_000;
+    let result = a
+        .client
+        .command_until(&bi, kill.clone(), t, Some(stale))
+        .await;
+    assert!(refused_with(&result, "expired"), "{result:?}");
+    assert_eq!(
+        b.store.get_session("late-1").unwrap().unwrap().state,
+        "running"
+    );
+    let seen = b.client.snapshot().last_refusal.unwrap_or_default();
+    assert!(seen.contains("expired"), "{seen}");
+
+    let stopped = a.client.command_until(&bi, kill, t, None).await.unwrap();
+    assert_eq!(stopped["stopped"], true);
+    assert_eq!(
+        b.store.get_session("late-1").unwrap().unwrap().state,
+        "closed"
+    );
+}
+
+/// A build that cannot read a command answers it, so a newer sender is told
+/// why instead of timing out.
+#[tokio::test]
+async fn a_command_this_build_cannot_read_is_answered_not_dropped() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let result = a
+        .client
+        .command_json(
+            &bi,
+            json!({ "op": "from_a_newer_build", "session_id": "s" }),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(refused_with(&result, "older build"), "{result:?}");
+    assert!(refused_with(&result, "from_a_newer_build"), "{result:?}");
+}
+
+/// A peer on an older build drops a command it cannot read without a word;
+/// when it last said it runs an older build, the silence is named for what
+/// it probably is. And a prompt for an owner that is away is queued here and
+/// reported as queued, not as sent.
+#[tokio::test]
+async fn an_absent_owner_queues_a_prompt_and_an_older_one_is_named() {
+    state::isolate();
+    let ghost = identity(3);
+    let gi = ghost.node_id();
+    let (a, _b) = pair_with(&[], Some(&ghost)).await;
+    wait_for("A to learn the silent member's key", || {
+        a.client.peer_key(&gi).is_some() && a.store.get_node(&gi).ok().flatten().is_some()
+    })
+    .await;
+    let kill = || Command::Kill {
+        session_id: "s".into(),
+    };
+    let mut row = a.store.get_node(&gi).unwrap().unwrap();
+    row.app_version = Some("0.0.1".into());
+    a.store.put_node(&row).unwrap();
+    let result = a
+        .client
+        .command(&gi, kill(), Duration::from_millis(300))
+        .await;
+    assert!(
+        matches!(&result, Err(CommandError::OlderPeer { peer, .. }) if peer == "0.0.1"),
+        "{result:?}"
+    );
+    row.app_version = Some(env!("CARGO_PKG_VERSION").into());
+    a.store.put_node(&row).unwrap();
+    let result = a
+        .client
+        .command(&gi, kill(), Duration::from_millis(300))
+        .await;
+    assert!(matches!(result, Err(CommandError::Timeout)), "{result:?}");
+
+    // A live session on the absent node, as A mirrors it.
+    a.store
+        .insert_session(&support::rows::session_row("away-1", &gi, "personal"))
+        .unwrap();
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        "/api/sessions/away-1/prompt",
+        Some(json!({ "text": "when you are back" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(v["queued"], true, "{v}");
+    assert_eq!(v["owner"], gi.as_str(), "{v}");
 }

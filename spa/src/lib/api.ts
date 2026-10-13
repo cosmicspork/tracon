@@ -323,9 +323,10 @@ export const api = {
   unarchiveChannel: (name: string) => api.putChannelBindings(name, { archived: null }),
   /** Forget an archived channel on this node; its sessions and work stay in history. */
   deleteChannel: (name: string) => call<{ deleted: string }>('DELETE', `/api/channels/${encodeURIComponent(name)}`),
-  /** Sent now, or held for the agent while its turn runs (`queued`). */
+  /** Sent now, or held (`queued`): for the agent while its turn runs (`message_id`), or on
+   *  this node until an unreachable owner returns (`owner`). */
   prompt: (id: string, text: string) =>
-    call<{ queued: boolean; message_id?: string }>('POST', `/api/sessions/${id}/prompt`, { text }),
+    call<{ queued: boolean; message_id?: string; owner?: string }>('POST', `/api/sessions/${id}/prompt`, { text }),
   pause: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/pause`, { reason }),
   resume: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/resume`, { reason }),
   stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),

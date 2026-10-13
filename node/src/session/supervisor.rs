@@ -55,6 +55,9 @@ pub enum Prompted {
     /// A turn was running, so it is held until it reaches the agent: in the
     /// next node tool result the session receives, or as the next prompt.
     Queued { message_id: String },
+    /// The owner was unreachable, so it waits in this node's outbox and is
+    /// delivered when the owner returns. Nothing has reached the session.
+    QueuedForOwner { node_id: String },
 }
 
 /// Commands the HTTP layer sends to a running session.
