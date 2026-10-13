@@ -572,12 +572,25 @@ pub async fn ensure_base(
 /// every session can start from a copy of it without inheriting anything
 /// another candidate installed. A warm-up that fails leaves a cache that is
 /// merely colder.
+///
+/// It is also the one preparation lent the entry's `prepare_credentials`: it
+/// runs source the operator merged, not a candidate's, and what it fetches
+/// from a private registry is what the others then install from the cache
+/// without the credential. A credential the broker will not lend stops the
+/// warm-up before anything runs, rather than letting the registry refuse it.
 async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, repo: &Path) {
     let environment = crate::environment::environment_for(cfg, store, Some(repo));
     if environment.prepare.is_empty() {
         return;
     }
+    let lent = building_entry(cfg, repo)
+        .map(|entry| entry.prepare_credentials)
+        .unwrap_or_default();
     let warmed = async {
+        let secrets = crate::environment::PrepareSecrets::new(
+            crate::broker::preparation_env_for(repo, &lent)
+                .map_err(|error| format!("prepare_credentials: {error}"))?,
+        );
         let (_, commit) = default_commit(repo).await?;
         let tree = crate::review::snapshot_candidate(
             &repo.to_string_lossy(),
@@ -593,7 +606,7 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
             .await
             .map_err(|error| error.to_string())?;
         let runner = backend.runner(Vec::new());
-        let prepared = crate::review::checks::run_preparation(
+        let prepared = crate::review::checks::run_preparation_with(
             backend,
             runner.as_ref(),
             &environment,
@@ -602,6 +615,7 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
             tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
             &crate::review::checks::RunToCompletion,
             "the base cache stays as it was",
+            &secrets,
         )
         .await;
         let _ = backend.remove_volume(&work).await;

@@ -576,6 +576,12 @@ read-only. That cache is the run's own, copied from the repository's base cache 
 removed with the run. The base is written by one thing only — a preparation of the
 default branch, made when the repository's image is built — so a candidate's install,
 which may run the candidate's own scripts, can reach its own evidence and nobody else's.
+That warm-up is also the only preparation lent a registry credential: the entry's
+`prepare_credentials` name `env` credentials in the broker, each of which must name the
+repository in its own `repos`, and their environment goes into the warm-up's commands
+and is taken out of what they print. A private package therefore reaches candidates and
+sessions as cached bytes, never as a token, and a candidate that needs one the cache
+does not hold fails its preparation rather than being lent the credential.
 A preparation that fails runs no check: it is reported once, with the failing command,
 its exit status and its output, each check it kept from running is recorded `not_run`
 (never a pass, never reusable), and the refusal names preparation rather than a check.

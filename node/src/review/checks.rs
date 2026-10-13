@@ -24,7 +24,9 @@ use super::output;
 use crate::{
     boundary::Backend,
     config::{Config, RuntimeKind},
-    environment::{cache_env, environment_for, origin_repo, scoped_egress, RepoEnvironment},
+    environment::{
+        cache_env, environment_for, origin_repo, scoped_egress, PrepareSecrets, RepoEnvironment,
+    },
     runner::{Mount, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
 };
@@ -820,11 +822,80 @@ pub(crate) async fn run_preparation(
     backend: &dyn Backend,
     runner: &dyn Runner,
     environment: &RepoEnvironment,
+    volumes: (&str, &str),
+    runner_name: &str,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+    unprepared: &str,
+) -> Result<(), Stopped> {
+    run_preparation_with(
+        backend,
+        runner,
+        environment,
+        volumes,
+        runner_name,
+        deadline,
+        cancel,
+        unprepared,
+        &PrepareSecrets::default(),
+    )
+    .await
+}
+
+/// `run_preparation` with `secrets` in every command's environment and
+/// taken out of what a failure says. Only the default branch's preparation,
+/// which warms the base cache, is lent any: a candidate's or a session's runs
+/// code an agent can change.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_preparation_with(
+    backend: &dyn Backend,
+    runner: &dyn Runner,
+    environment: &RepoEnvironment,
+    volumes: (&str, &str),
+    runner_name: &str,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+    unprepared: &str,
+    secrets: &PrepareSecrets,
+) -> Result<(), Stopped> {
+    let prepared = prepare_steps(
+        backend,
+        runner,
+        environment,
+        volumes,
+        runner_name,
+        deadline,
+        cancel,
+        unprepared,
+        secrets,
+    )
+    .await;
+    match prepared {
+        // Every part of the report is read by someone: its message and
+        // output reach the node's log, a review's reason and an agent's tail.
+        Err(Stopped::Unprepared(failure)) if !secrets.is_empty() => {
+            Err(Stopped::Unprepared(PrepareFailure {
+                command: failure.command.map(|command| secrets.redact(&command)),
+                exit: failure.exit,
+                message: secrets.redact(&failure.message),
+                output: secrets.redact(&failure.output),
+            }))
+        }
+        prepared => prepared,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_steps(
+    backend: &dyn Backend,
+    runner: &dyn Runner,
+    environment: &RepoEnvironment,
     (work, cache): (&str, &str),
     runner_name: &str,
     deadline: tokio::time::Instant,
     cancel: &dyn Cancel,
     unprepared: &str,
+    secrets: &PrepareSecrets,
 ) -> Result<(), Stopped> {
     let stopped = |stop: Option<String>, killed: &str| match stop {
         Some(reason) => Stopped::Cancelled {
@@ -842,6 +913,7 @@ pub(crate) async fn run_preparation(
         let running = runner.capture_name(&name);
         let mut env = cache_env();
         env.extend(egress.env.iter().cloned());
+        env.extend(secrets.env().iter().cloned());
         let cmd = RunnerCommand {
             argv: output::merged_shell(command),
             env,
@@ -1549,6 +1621,8 @@ mod tests {
         commands: std::sync::Mutex<Vec<RunnerCommand>>,
         /// Exit status handed to a preparation command.
         prepare_exit: i32,
+        /// What a failing preparation says, in place of a registry's 403.
+        prepare_output: String,
         /// Exit status and output handed to a check.
         check_exit: i32,
         check_output: String,
@@ -1601,7 +1675,9 @@ mod tests {
                 } else {
                     self.0.check_output.as_bytes().to_vec()
                 },
-                stderr: if preparing && exit != 0 {
+                stderr: if preparing && exit != 0 && !self.0.prepare_output.is_empty() {
+                    self.0.prepare_output.as_bytes().to_vec()
+                } else if preparing && exit != 0 {
                     b"error: 403 Forbidden".to_vec()
                 } else {
                     Vec::new()
@@ -1925,6 +2001,91 @@ mod tests {
                 "close",
             ]
         );
+    }
+
+    /// Lent credentials are in every command of the preparation they are lent
+    /// to, and out of what its failure says. A candidate's preparation of the
+    /// same entry, which runs code an agent can change, is lent nothing: the
+    /// entry naming them does not reach it.
+    #[tokio::test]
+    async fn lent_credentials_reach_only_the_preparation_they_are_lent_to() {
+        let (store, mut cfg, candidate) = prepared_repo("prep-lent");
+        cfg.repo[0].prepare_credentials = vec!["npm-private".into()];
+        let recorded = std::sync::Arc::new(Recorded {
+            prepare_exit: 1,
+            prepare_output:
+                "npm ERR! 401 Unauthorized with //npm.pkg.github.com/:_authToken=npm_0123456789"
+                    .into(),
+            ..Default::default()
+        });
+        let backend = RecordingBackend(recorded.clone());
+        let mut environment = environment_for(&cfg, &store, Some(Path::new("/src/app")));
+        // A command that names the value itself, so the failure's command and
+        // message carry it as well as its output.
+        environment.prepare =
+            vec!["npm ci --//npm.pkg.github.com/:_authToken=npm_0123456789".into()];
+        let secrets = PrepareSecrets::new(vec![("NPM_TOKEN".into(), "npm_0123456789".into())]);
+        let runner = backend.runner(Vec::new());
+        let stopped = run_preparation_with(
+            &backend,
+            runner.as_ref(),
+            &environment,
+            ("tracon-warm-x", &environment.cache_volume),
+            "tracon-w-x",
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            &RunToCompletion,
+            "the base cache stays as it was",
+            &secrets,
+        )
+        .await
+        .unwrap_err();
+        let said = stopped.to_string();
+        assert!(said.contains("401 Unauthorized"), "{said}");
+        assert!(
+            said.contains("[redacted]") && !said.contains("npm_0123456789"),
+            "{said}"
+        );
+        // Each part of the failure report, not only what it prints as.
+        let Stopped::Unprepared(failure) = stopped else {
+            panic!("preparation failed, so it is reported as unprepared");
+        };
+        assert_eq!(failure.exit, Some(1));
+        for (part, text) in [
+            ("command", failure.command.clone().unwrap_or_default()),
+            ("message", failure.message.clone()),
+            ("output", failure.output.clone()),
+            ("reason", failure.reason()),
+        ] {
+            assert!(
+                text.contains("[redacted]") && !text.contains("npm_0123456789"),
+                "{part}: {text}"
+            );
+        }
+        {
+            let commands = recorded.commands.lock().unwrap();
+            assert_eq!(commands.len(), 1);
+            assert!(commands[0]
+                .env
+                .contains(&("NPM_TOKEN".to_string(), "npm_0123456789".to_string())));
+        }
+
+        let report = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &std::env::temp_dir(),
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(!report.all_required_passed);
+        let commands = recorded.commands.lock().unwrap();
+        assert_eq!(commands.len(), 2, "the candidate was prepared once");
+        assert!(!commands[1].env.iter().any(|(name, _)| name == "NPM_TOKEN"));
+        // Nothing was lent, so there was nothing to take out.
+        assert!(!report.results[0].tail.contains("[redacted]"));
     }
 
     /// A failed check says what failed even when the end of its output does

@@ -33,8 +33,8 @@ const BUILD_SOURCE: &str = "build_source";
 const BUILD_RECIPE: &str = "build_recipe";
 
 /// The fields of an entry an agent may draft. Not `path`, which the node
-/// takes from the session, and not `session_egress`, which is the
-/// operator's alone.
+/// takes from the session, and not `session_egress` or
+/// `prepare_credentials`, which are the operator's alone.
 const ENTRY_FIELDS: &[&str] = &[
     "image",
     "dockerfile",

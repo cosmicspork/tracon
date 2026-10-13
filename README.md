@@ -427,6 +427,42 @@ decides: a host that accepts uploads accepts them from it, and the `github` and
 `packagist` presets both carry `api.github.com`. OpenCode sessions keep the harness proxy
 and reach no registry either way.
 
+A private registry (Laravel Nova, a private npm scope, Private Packagist, GitHub
+Packages) is reached with a credential the node lends to one preparation only: the one
+that warms the repository's base cache from its **default branch** after the node builds
+its image. Every candidate, session and check then installs from that cache and never
+holds the credential, because each of them runs code an agent can change. Put the
+credential in the broker as environment, naming the repositories that may use it, and
+name it from the entry:
+
+```toml
+# a plaintext file for `tracon credential import`, chmod 600
+[credentials.nova]
+repos = ["github.com/acme/shop"]    # written as a [[repo]] path is; empty lends it nowhere
+[credentials.nova.env]
+COMPOSER_AUTH = '{"http-basic":{"nova.laravel.com":{"username":"…","password":"…"}}}'
+
+# node.toml
+[[repo]]
+path = "github.com/acme/shop"
+dockerfile = ".devcontainer/Dockerfile"
+prepare = ["composer install --no-interaction --no-scripts"]
+egress = ["packagist", "nova.laravel.com"]
+prepare_credentials = ["nova"]
+```
+
+Both sides must agree: an entry naming a credential that does not name the repository
+is refused at the warm-up, and the warm-up does not run. Read the secret from the
+environment (`COMPOSER_AUTH`, or an `.npmrc` line like
+`//npm.pkg.github.com/:_authToken=${NPM_TOKEN}`) and never write it to a file: the cache
+the warm-up fills is copied into every session on the repository. What preparation
+prints is shown with the lent values taken out. Two limits follow from lending it so
+narrowly. A candidate that adds or upgrades a private package cannot fetch it, so that
+change is checked after it merges and `tracon repo build <repo>` warms the cache again.
+And the warm-up runs whatever the default branch's install runs, so a Composer plugin or
+an npm lifecycle script there could read the credential and send it to any host in
+`egress`; install with scripts off where the project allows it.
+
 A refused host is put to you rather than left to fail quietly. The refusal raises a card
 naming the session and the host, once however often a package manager retries, and its
 reason line — the line `pip` or `npm` prints — tells the agent the operator has been
@@ -907,6 +943,10 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # session_egress = true             # open `egress` to this repository's sessions too, so an agent can
                                     # add a dependency. Off by default: a session that can reach a host
                                     # that accepts uploads can upload to it
+# prepare_credentials = ["nova"]    # broker credentials (kind `env`) whose environment is lent to the
+                                    # default branch's preparation when the image is built, and to
+                                    # nothing else. Needs `dockerfile`; each credential must also list
+                                    # this repository in its own `repos`
 
 # [[service]]                       # something a session may start beside itself by name
                                     # (`service_start`), never by image or command. It joins the
