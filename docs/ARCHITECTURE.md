@@ -1083,8 +1083,9 @@ Invariants on top of the wire:
   its `path`, or its `commits` and `style`. Both ends check it: the sender before
   it sends, and the receiver, which also refuses any field a recipe does not have
   and holds the sender to the named channel by its own record, as it does every
-  command. Either refuses a command naming a home directory, an egress entry that
-  is an IP address, and any command, egress entry, path or note carrying a
+  command. Either refuses a command naming a home directory, an egress entry
+  anything `inet_aton` would read as an address, a recipe over 64 KiB, and any
+  command, egress entry, path or note carrying a
   control, format (bidirectional overrides, zero-width characters) or separator
   character, so what the operator reads is what runs. The receiver only stages
   the offer (`repo_recipe_offer`, node-local, never replicated) and announces it,
@@ -1100,14 +1101,19 @@ Invariants on top of the wire:
   not chosen for the operator. Credentials the entry lends its preparation are
   dropped when the offer changes that preparation's commands, egress, Dockerfile
   or context, because a peer would otherwise choose what runs with them and where
-  it may send them; the operator may keep them explicitly, and then the node
-  starts no build on its own. Accepting goes through the one `[[repo]]` writer,
+  it may send them. The operator may keep them explicitly; the entry is then held
+  (`repo_credential_hold`, on exactly what the credentials would be lent to):
+  `ensure_base`, and so every check, preparation, session and default-branch
+  change, builds and warms nothing for it, using the image it last built, until
+  the operator starts that build, itself an admin action whose prompt names what
+  is lent. The accept prompt leads with what becomes of lent credentials, and a
+  peer's name is shown without control or format characters and bounded. Accepting goes through the one `[[repo]]` writer,
   so the entry keeps its comments and every field the recipe does not carry, and
   the node then builds and pins its own image from the recipe. A newer offer from
   the same sender for the same repository supersedes an undecided one; a sender
   holds at most 32 undecided offers on a node and makes at most 10 an hour; an
   offer lapses after 14 days, is withdrawn once its sender no longer shares its
-  channel, and decided offers are forgotten after 30 days.
+  channel, superseded offers are forgotten after a day and decided ones after 30.
 - **The hello may carry state, not secrets.** A node's models and its provider
   summary (names, states, identities — and a pending login URL) ride the hello,
   sealed to the operator's own mesh. Credential values never do; those move only as

@@ -1460,6 +1460,20 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX repo_recipe_offer_sender ON repo_recipe_offer(sender_node, repo, state);
     CREATE INDEX repo_recipe_offer_received ON repo_recipe_offer(received_ms);
+    -- A `[[repo]]` entry that keeps lending its credentials to a preparation
+    -- a peer's accepted recipe changed: the node builds and warms nothing
+    -- for it until the operator starts that build. `lending_hash` is of what
+    -- the credentials would be lent to; an entry the operator has edited
+    -- since no longer matches it and is not held.
+    CREATE TABLE repo_credential_hold (
+        path         TEXT PRIMARY KEY,
+        offer_id     TEXT NOT NULL,
+        sender_node  TEXT NOT NULL,
+        repo         TEXT NOT NULL,
+        credentials  TEXT NOT NULL,
+        lending_hash TEXT NOT NULL,
+        created_ms   INTEGER NOT NULL
+    );
     "#,
 ];
 

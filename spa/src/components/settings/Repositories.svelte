@@ -46,6 +46,25 @@
     return loaded?.entries.find((item) => item.entry.path === path)?.builds ?? []
   }
 
+  function holdOf(path: string) {
+    return loaded?.entries.find((item) => item.entry.path === path)?.hold ?? null
+  }
+
+  async function startHeld(path: string) {
+    if (busy) return
+    busy = `start:${path}`
+    note = ''
+    try {
+      const started = await api.startHeldBuild(path)
+      note = started.building ? 'Building with the offered preparation now.' : 'Released: the next session or check builds it.'
+      await load(false)
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause)
+    } finally {
+      busy = ''
+    }
+  }
+
   async function save() {
     if (busy || invalid.length) return
     busy = 'save'
@@ -147,6 +166,7 @@
     {/if}
     {#each forms as form, index (index)}
       {@const built = builds(form.path)}
+      {@const hold = holdOf(form.path)}
       {@const uploads = acceptsUploads(words(form.egress), presets)}
       <details class="entry" open={!form.path || forms.length <= 2}>
         <summary>
@@ -228,6 +248,17 @@
           </div>
         </div>
 
+        {#if hold}
+          <div class="held" role="status">
+            <p>
+              Held: this entry keeps lending {hold.credentials.join(', ')} to a preparation a peer's recipe changed, so
+              nothing is built or warmed for it until you start it. Checks and sessions use the image it last built.
+            </p>
+            <button class="btn p" type="button" onclick={() => void startHeld(form.path)} disabled={busy !== '' || dirty}>
+              {busy === `start:${form.path}` ? 'Starting…' : `Start the build, lending ${hold.credentials.join(', ')}`}
+            </button>
+          </div>
+        {/if}
         {#if built.length}
           <ul class="builds">
             {#each built as item (item.id)}
@@ -368,6 +399,8 @@
   .entry .acts { margin-top: 12px; }
   .offer { display: grid; gap: 8px; margin-top: 12px; background: var(--s1); border-radius: 4px; padding: 10px 12px; }
   .offer input:not([type='checkbox']), .offer select { background: var(--s2); }
+  .held { display: grid; gap: 8px; justify-items: start; margin-top: 12px; background: var(--s1); border-left: 3px solid var(--wait); padding: 8px 10px; }
+  .held p { margin: 0; font-size: 12.5px; }
   .caution { margin: 0; color: var(--wait); font-size: 12.5px; }
   .bad, .error, .blocked { color: var(--crit); }
   .dim, .note, .error { margin: 0; font-size: 12.5px; }

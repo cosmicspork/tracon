@@ -172,7 +172,7 @@
                 />
                 Keep lending {view.credentials.names.join(', ')} to the preparation this offer changes
               </label>
-              <small>The offer changes what that preparation runs or reaches. Kept, nothing builds until you start it.</small>
+              <small>The offer changes what that preparation runs or reaches. Kept, this repository is held: nothing is built or warmed for it until you start its build here, and it says what it lends when you do.</small>
             {/if}
             <div class="acts">
               <button class="lnk" type="button" onclick={() => void compare(offer)} disabled={busy !== '' || !stale}>Compare</button>

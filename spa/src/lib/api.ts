@@ -658,6 +658,8 @@ export const api = {
       `/api/repos/offers/${encodeURIComponent(id)}/accept`,
       body,
     ),
+  startHeldBuild: (path: string) =>
+    call<{ released: boolean; building: boolean }>('POST', '/api/repos/holds/start', { path }),
   declineRecipeOffer: (id: string) =>
     call<{ declined: boolean }>('POST', `/api/repos/offers/${encodeURIComponent(id)}/decline`),
   manifest: (channel: string) =>

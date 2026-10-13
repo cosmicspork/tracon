@@ -431,6 +431,62 @@ async fn credentials_are_kept_only_when_asked_and_then_nothing_builds() {
     let file = Config::try_load().unwrap();
     assert_eq!(file.repo[0].prepare_credentials, ["nova"]);
     assert_eq!(file.repo[0].prepare, ["composer install", "npm ci"]);
+
+    // The entry is held: Settings says so, an ordinary build is refused, and
+    // only the start, an admin action, releases it.
+    let (_, v) = call(&n, "GET", "/api/repos/environments", LOCAL, None).await;
+    assert_eq!(
+        v["entries"][0]["hold"]["credentials"],
+        json!(["nova"]),
+        "{v}"
+    );
+    assert_eq!(v["entries"][1]["hold"], Value::Null);
+    assert!(n
+        .store
+        .credential_hold("github.com/acme/hdr")
+        .unwrap()
+        .is_some());
+    let start = json!({ "path": "github.com/acme/hdr" });
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/repos/holds/start",
+        REMOTE,
+        Some(start.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/repos/holds/start",
+        REMOTE_BROWSER,
+        Some(start.clone()),
+    )
+    .await;
+    assert_ne!(s, StatusCode::OK, "{v}");
+    assert!(n
+        .store
+        .credential_hold("github.com/acme/hdr")
+        .unwrap()
+        .is_some());
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/repos/holds/start",
+        LOCAL,
+        Some(start.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["released"], true);
+    assert!(n
+        .store
+        .credential_hold("github.com/acme/hdr")
+        .unwrap()
+        .is_none());
+    let (s, _) = call(&n, "POST", "/api/repos/holds/start", LOCAL, Some(start)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
 /// The table moving between the review and the accept refuses the accept
@@ -639,6 +695,29 @@ async fn an_accept_starts_the_build_unless_credentials_are_kept() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["credentials"]["state"], "kept", "{v}");
     assert_eq!(v["building"], false, "{v}");
+
+    // Held, the repository's own build is refused and says why; started,
+    // it builds.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/repos/environments/build",
+        LOCAL,
+        Some(json!({ "repo": path })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(v.to_string().contains("held: nova"), "{v}");
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/repos/holds/start",
+        LOCAL,
+        Some(json!({ "path": path })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["building"], true, "{v}");
 }
 
 /// A note or a command that hides what it says is refused on receipt.

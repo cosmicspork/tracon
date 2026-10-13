@@ -297,6 +297,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/repos/environments/build", post(environments::build))
         .route("/api/repos/offer", post(recipes::offer))
+        .route("/api/repos/holds/start", post(recipes::start_held))
         .route("/api/repos/offers", get(recipes::list))
         .route("/api/repos/offers/{id}", get(recipes::view))
         .route("/api/repos/offers/{id}/accept", post(recipes::accept))

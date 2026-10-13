@@ -741,6 +741,25 @@ pub async fn ensure_base(
     let Some(entry) = building_entry(cfg, repo) else {
         return Ensured::Unconfigured;
     };
+    // An entry that keeps lending credentials to a preparation a peer's
+    // recipe changed builds nothing, forced or not, until the operator
+    // starts that build: a build is followed by the one warm-up the
+    // credentials are lent to. What last built keeps the repository usable.
+    if let Some(hold) = crate::mesh::recipe::held(store, &entry) {
+        let reason = crate::mesh::recipe::held_reason(&hold);
+        tracing::info!(repo = %repo.display(), "repository image held: {reason}");
+        return match store
+            .ready_repo_image(&repo.to_string_lossy(), BASE)
+            .ok()
+            .flatten()
+        {
+            Some(row) => Ensured::Stale {
+                using: row.image,
+                error: reason,
+            },
+            None => Ensured::Unavailable { reason },
+        };
+    }
     let Some(builder) = backend.image_builder() else {
         return Ensured::Unavailable {
             reason: format!("the {} runtime cannot build images", backend.kind()),
@@ -788,9 +807,16 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
     if environment.prepare.is_empty() {
         return;
     }
-    let lent = building_entry(cfg, repo)
-        .map(|entry| entry.prepare_credentials)
-        .unwrap_or_default();
+    let Some(entry) = building_entry(cfg, repo) else {
+        return;
+    };
+    // `ensure_base` builds nothing for a held entry, so it never gets here;
+    // this is the one place credentials are lent, so it checks again.
+    if crate::mesh::recipe::held(store, &entry).is_some() {
+        tracing::warn!(repo = %repo.display(), "base cache not warmed: the entry is held");
+        return;
+    }
+    let lent = entry.prepare_credentials;
     let warmed = async {
         let secrets = crate::environment::PrepareSecrets::new(
             crate::broker::preparation_env_for(repo, &lent)
@@ -2577,5 +2603,83 @@ ENTRYPOINT []
             ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
         assert!(retried.image.is_some(), "{retried:?}");
         assert_eq!(builder.builds.lock().unwrap().len(), builds + 1);
+    }
+
+    /// An entry that keeps lending credentials to a preparation a peer's
+    /// recipe changed is built and warmed by nothing (a forced build, a
+    /// check's or a preparation's environment, a session, a default-branch
+    /// change) until its hold is released; what last built stays in use.
+    #[tokio::test]
+    async fn a_held_entry_builds_and_warms_nothing_until_it_is_started() {
+        use crate::store::recipe_offers::CredentialHoldRow;
+        let tmp = checkout();
+        let repo = tmp.path();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let pulling = Arc::new(Pulling {
+            builder: FakeBuilder::default(),
+        });
+        let backend: Arc<dyn Backend> = pulling.clone();
+        let held_entry = Repo {
+            prepare: vec!["npm ci".into()],
+            egress: vec!["npm".into()],
+            prepare_credentials: vec!["nova".into()],
+            ..entry(repo)
+        };
+        let cfg = Arc::new(Config {
+            repo: vec![held_entry.clone()],
+            ..Default::default()
+        });
+        let hold = CredentialHoldRow {
+            path: repo.to_string_lossy().into(),
+            offer_id: "o".into(),
+            sender_node: "n".into(),
+            repo: "github.com/acme/app".into(),
+            credentials: vec!["nova".into()],
+            lending_hash: crate::mesh::recipe::lending_hash(&held_entry),
+            created_ms: 1,
+        };
+        store.credential_hold_put(&hold).unwrap();
+        let builds = || pulling.builder.builds.lock().unwrap().len();
+
+        let forced = ensure_base(backend.as_ref(), &cfg, &store, repo, true).await;
+        assert!(
+            matches!(&forced, Ensured::Unavailable { reason } if reason.starts_with("held: nova")),
+            "{forced:?}"
+        );
+        let checks = environment(backend.as_ref(), &cfg, &store, Some(repo)).await;
+        assert!(
+            checks.image_source.contains("held"),
+            "{}",
+            checks.image_source
+        );
+        let session = session_image(&backend, &cfg, &store, repo, ("claude", "1"), &|| {}).await;
+        assert!(session.image.is_none());
+        assert!(session.note.unwrap().contains("held"));
+        assert_eq!(builds(), 0);
+
+        // Started: it builds.
+        assert!(store.credential_hold_release(&hold.path).unwrap());
+        let built = ensure_base(backend.as_ref(), &cfg, &store, repo, false).await;
+        let Ensured::Rebuilt(image) = built else {
+            panic!("a released entry builds: {built:?}");
+        };
+        let after_start = builds();
+        assert!(after_start > 0);
+
+        // Held again, a default-branch change rebuilds nothing, forced or
+        // not, and the image that stands is the one used.
+        store.credential_hold_put(&hold).unwrap();
+        commit_conf(repo, "changed");
+        for force in [false, true] {
+            let held = ensure_base(backend.as_ref(), &cfg, &store, repo, force).await;
+            assert_eq!(
+                held,
+                Ensured::Stale {
+                    using: image.clone(),
+                    error: crate::mesh::recipe::held_reason(&hold),
+                }
+            );
+        }
+        assert_eq!(builds(), after_start);
     }
 }

@@ -27,6 +27,20 @@ pub struct RecipeOfferRow {
     pub decided_path: Option<String>,
 }
 
+/// An entry held from building because it keeps lending credentials to a
+/// preparation a peer's recipe changed (`crate::mesh::recipe::Credentials`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CredentialHoldRow {
+    /// The `[[repo]]` entry's `path`, as the table writes it.
+    pub path: String,
+    pub offer_id: String,
+    pub sender_node: String,
+    pub repo: String,
+    pub credentials: Vec<String>,
+    pub lending_hash: String,
+    pub created_ms: i64,
+}
+
 /// What staging an offer did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Staged {
@@ -46,6 +60,9 @@ pub const MAX_OFFERS_PER_HOUR: i64 = 10;
 /// How long a decided, superseded, lapsed or withdrawn offer is kept for the
 /// operator to look back on.
 pub const KEEP_DECIDED_MS: i64 = 30 * 24 * 3600 * 1000;
+
+/// How long a superseded offer is kept.
+pub const KEEP_SUPERSEDED_MS: i64 = 24 * 3600 * 1000;
 
 /// How long an accept may hold an offer before it is taken to have died
 /// part way (a crash between the claim and the write) and is pending again.
@@ -82,6 +99,12 @@ fn sweep(conn: &rusqlite::Connection, now_ms: i64) -> rusqlite::Result<usize> {
         "DELETE FROM repo_recipe_offer
          WHERE state NOT IN ('pending', 'accepting') AND received_ms < ?1",
         [now_ms - KEEP_DECIDED_MS],
+    )?;
+    // A superseded offer is the same sender's older word on the same
+    // repository: kept a day, for an operator who saw it arrive.
+    conn.execute(
+        "DELETE FROM repo_recipe_offer WHERE state = 'superseded' AND decided_ms < ?1",
+        [now_ms - KEEP_SUPERSEDED_MS],
     )?;
     conn.execute(
         "UPDATE repo_recipe_offer SET state = 'expired'
@@ -208,6 +231,57 @@ impl Store {
              WHERE id = ?1 AND state = 'accepting'",
             params![id, now_ms, path],
         )? == 1)
+    }
+
+    /// Hold `row.path` from building until the operator starts it.
+    pub fn credential_hold_put(&self, row: &CredentialHoldRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO repo_credential_hold
+               (path, offer_id, sender_node, repo, credentials, lending_hash, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(path) DO UPDATE SET offer_id = ?2, sender_node = ?3, repo = ?4,
+               credentials = ?5, lending_hash = ?6, created_ms = ?7",
+            params![
+                row.path,
+                row.offer_id,
+                row.sender_node,
+                row.repo,
+                serde_json::to_string(&row.credentials)?,
+                row.lending_hash,
+                row.created_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn credential_hold(&self, path: &str) -> Result<Option<CredentialHoldRow>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT path, offer_id, sender_node, repo, credentials, lending_hash, created_ms
+                 FROM repo_credential_hold WHERE path = ?1",
+                [path],
+                |r| {
+                    let credentials: String = r.get(4)?;
+                    Ok(CredentialHoldRow {
+                        path: r.get(0)?,
+                        offer_id: r.get(1)?,
+                        sender_node: r.get(2)?,
+                        repo: r.get(3)?,
+                        credentials: serde_json::from_str(&credentials).unwrap_or_default(),
+                        lending_hash: r.get(5)?,
+                        created_ms: r.get(6)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Release a hold. True when there was one.
+    pub fn credential_hold_release(&self, path: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM repo_credential_hold WHERE path = ?1", [path])? == 1)
     }
 
     /// The claimed offer was not written: it waits for a decision again.

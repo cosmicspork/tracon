@@ -26,7 +26,7 @@ use crate::mesh::recipe::{
     self, Applied, Choices, Credentials, RepoRecipe, MAX_PENDING_PER_SENDER, OFFER_TTL_MS,
 };
 use crate::store::now_ms;
-use crate::store::recipe_offers::{RecipeOfferRow, Staged, MAX_OFFERS_PER_HOUR};
+use crate::store::recipe_offers::{CredentialHoldRow, RecipeOfferRow, Staged, MAX_OFFERS_PER_HOUR};
 
 fn unprocessable(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message)
@@ -500,6 +500,51 @@ pub async fn accept(
     }
 }
 
+#[derive(Deserialize)]
+struct StartBody {
+    /// The held entry's `path`, as the table writes it.
+    path: String,
+}
+
+/// `POST /api/repos/holds/start {path}`: start the build an accepted offer
+/// left held, lending the credentials the operator chose to keep to the
+/// preparation it changed. An admin action whose prompt says what is lent.
+pub async fn start_held(State(s): State<AppState>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024).await else {
+        return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+            .into_response();
+    };
+    if let Err(e) = super::passkey::json_or_empty(&parts.headers, &bytes) {
+        return e.into_response();
+    }
+    let body: StartBody = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(e) => return unprocessable(format!("name the held entry's path: {e}")).into_response(),
+    };
+    let repos = s.cfg.repos();
+    let held = repos
+        .iter()
+        .find(|entry| same_path(&entry.path, Path::new(&body.path)))
+        .and_then(|entry| recipe::held(s.store(), entry).map(|hold| (entry.clone(), hold)));
+    let Some((entry, hold)) = held else {
+        return ApiError::new(StatusCode::NOT_FOUND, format!("{} is not held", body.path))
+            .into_response();
+    };
+    if let Err(refusal) =
+        super::passkey::authorize_as(&s, &parts, &bytes, Some(start_summary(&hold))).await
+    {
+        return refusal.into_response();
+    }
+    match s.store().credential_hold_release(&hold.path) {
+        Ok(_) => {}
+        Err(e) => return ApiError::from(e).into_response(),
+    }
+    let building = start_build(&s, &entry);
+    tracing::info!(path = %hold.path, building, "held repository build started by the operator");
+    Json(json!({ "released": true, "building": building })).into_response()
+}
+
 fn stale() -> ApiError {
     ApiError::new(
         StatusCode::CONFLICT,
@@ -525,24 +570,47 @@ fn accept_summary(s: &AppState, p: &Prepared) -> String {
 }
 
 fn summary_line(sender: &str, repo: &str, fields: &[String], credentials: &Credentials) -> String {
-    let mut line = format!(
-        "Accept recipe from {sender} for {repo}: {}",
+    // What happens to lent credentials comes first, so a long line cannot
+    // push it out of the prompt.
+    let sender = recipe::display_name(sender);
+    let what = format!(
+        "accept recipe from {sender} for {repo} ({})",
         if fields.is_empty() {
             "changes nothing".to_string()
         } else {
             format!("changes {}", fields.join(", "))
         }
     );
-    match credentials {
-        Credentials::None => {}
-        Credentials::Unaffected(n) | Credentials::KeptOnChange(n) => {
-            line.push_str(&format!("; keeps lending {}", n.join(", ")))
+    let line = match credentials {
+        Credentials::None => {
+            let mut what = what;
+            what[..1].make_ascii_uppercase();
+            what
         }
-        Credentials::Dropped(n) => line.push_str(&format!("; drops {}", n.join(", "))),
-    }
-    // The prompt shows a line, not a document; the passkey sheet has room
-    // for little more.
-    line.chars().filter(|c| !c.is_control()).take(200).collect()
+        Credentials::KeptOnChange(n) => format!(
+            "KEEPS LENDING {} to {sender}'s changed preparation: {what}",
+            n.join(", ")
+        ),
+        Credentials::Unaffected(n) => format!(
+            "Keeps lending {} to the unchanged preparation: {what}",
+            n.join(", ")
+        ),
+        Credentials::Dropped(n) => format!("Stops lending {}: {what}", n.join(", ")),
+    };
+    // The prompt shows a line, not a document.
+    line.chars().take(240).collect()
+}
+
+/// The prompt for starting a held build: what is lent, to what.
+fn start_summary(hold: &CredentialHoldRow) -> String {
+    format!(
+        "Build {} with the offered preparation, lending {}",
+        hold.repo,
+        hold.credentials.join(", ")
+    )
+    .chars()
+    .take(240)
+    .collect()
 }
 
 /// Write a reviewed, confirmed accept. The offer is claimed first, so two
@@ -583,6 +651,19 @@ async fn commit(
             None => entries.push(applied.entry.clone()),
         }
         crate::config::validate_repos(entries).map_err(unprocessable)?;
+        // Held before the file or the live table names the new preparation,
+        // so nothing can build and warm it with the credentials in between.
+        if let Credentials::KeptOnChange(names) = &applied.credentials {
+            s.store().credential_hold_put(&CredentialHoldRow {
+                path: path.to_string_lossy().into(),
+                offer_id: id.to_string(),
+                sender_node: row.sender_node.clone(),
+                repo: row.repo.clone(),
+                credentials: names.clone(),
+                lending_hash: recipe::lending_hash(&applied.entry),
+                created_ms: now_ms(),
+            })?;
+        }
         Ok::<_, ApiError>(applied)
     });
     let (applied, outcome) = match written {
@@ -592,6 +673,11 @@ async fn commit(
             return Err(error);
         }
     };
+    if !matches!(applied.credentials, Credentials::KeptOnChange(_)) {
+        // Whatever an earlier accept held, the entry now lends nothing to a
+        // preparation the operator has not started.
+        s.store().credential_hold_release(&path.to_string_lossy())?;
+    }
     if !s
         .store()
         .recipe_offer_accepted(id, &path.to_string_lossy(), now_ms())?
@@ -648,12 +734,13 @@ fn offer_json(s: &AppState, row: &RecipeOfferRow) -> Value {
     value
 }
 
+/// A peer's name as the operator is shown it: clean and bounded.
 fn node_name(s: &AppState, node: &str) -> String {
     s.store()
         .get_node(node)
         .ok()
         .flatten()
-        .map(|row| row.name)
+        .map(|row| recipe::display_name(&row.name))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| node.chars().take(12).collect())
 }
@@ -806,31 +893,54 @@ fn start_build(s: &AppState, entry: &Repo) -> bool {
 mod tests {
     use super::*;
 
-    /// What the passkey prompt says is what the accept does to credentials.
+    /// What the passkey prompt says is what the accept does to credentials,
+    /// first, and a peer's name cannot push it out or hide it.
     #[test]
-    fn the_prompt_names_the_fields_and_the_credentials() {
+    fn the_prompt_leads_with_the_credentials() {
         let fields = vec!["prepare".to_string(), "egress".to_string()];
+        let line = |credentials: Credentials| {
+            summary_line("laptop", "github.com/acme/hdr", &fields, &credentials)
+        };
         assert_eq!(
-            summary_line(
-                "laptop",
-                "github.com/acme/hdr",
-                &fields,
-                &Credentials::KeptOnChange(vec!["nova".into()])
-            ),
-            "Accept recipe from laptop for github.com/acme/hdr: changes prepare, egress; keeps lending nova"
+            line(Credentials::KeptOnChange(vec!["nova".into()])),
+            "KEEPS LENDING nova to laptop's changed preparation: accept recipe from laptop for \
+             github.com/acme/hdr (changes prepare, egress)"
         );
         assert_eq!(
-            summary_line(
-                "laptop",
-                "github.com/acme/hdr",
-                &fields,
-                &Credentials::Dropped(vec!["nova".into()])
-            ),
-            "Accept recipe from laptop for github.com/acme/hdr: changes prepare, egress; drops nova"
+            line(Credentials::Unaffected(vec!["nova".into()])),
+            "Keeps lending nova to the unchanged preparation: accept recipe from laptop for \
+             github.com/acme/hdr (changes prepare, egress)"
+        );
+        assert_eq!(
+            line(Credentials::Dropped(vec!["nova".into()])),
+            "Stops lending nova: accept recipe from laptop for github.com/acme/hdr (changes \
+             prepare, egress)"
         );
         assert_eq!(
             summary_line("laptop", "github.com/acme/hdr", &[], &Credentials::None),
-            "Accept recipe from laptop for github.com/acme/hdr: changes nothing"
+            "Accept recipe from laptop for github.com/acme/hdr (changes nothing)"
+        );
+        let sneaky = format!("{}\u{202E}", "a".repeat(500));
+        let kept = summary_line(
+            &sneaky,
+            "github.com/acme/hdr",
+            &fields,
+            &Credentials::KeptOnChange(vec!["nova".into()]),
+        );
+        assert!(kept.starts_with("KEEPS LENDING nova to aaaa"), "{kept}");
+        assert!(!kept.contains('\u{202E}'));
+        assert!(kept.contains("…"));
+        assert_eq!(
+            start_summary(&CredentialHoldRow {
+                path: "github.com/acme/hdr".into(),
+                offer_id: "o".into(),
+                sender_node: "n".into(),
+                repo: "github.com/acme/hdr".into(),
+                credentials: vec!["nova".into()],
+                lending_hash: String::new(),
+                created_ms: 0,
+            }),
+            "Build github.com/acme/hdr with the offered preparation, lending nova"
         );
     }
 

@@ -490,7 +490,9 @@ Offering and accepting are admin actions, confirmed with a passkey from off the 
 an accept writes exactly what was reviewed or nothing. Accepting keeps the entry's
 comments and its own fields, except that credentials the entry lends its preparation are
 dropped when the offer changes what that preparation runs or reaches, unless you choose
-to keep them (and then nothing builds until you start it). The node then builds and pins
+to keep them: the repository is then held, and nothing builds or warms its cache with
+them until you start its build from Settings, which asks for your passkey off the node
+and says what it lends. The node then builds and pins
 its own image. An undecided offer is replaced by a newer one from the same node for the
 same repository, is withdrawn if that node leaves the channel, and lapses after 14 days.
 

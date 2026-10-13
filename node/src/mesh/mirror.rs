@@ -230,6 +230,9 @@ impl Mirror {
             // Our own presence echoed back; nothing to learn.
             return Applied::Duplicate;
         }
+        // A peer names itself; what it says is shown in prompts and
+        // notifications, so nothing in it may reorder or hide text.
+        row.name = super::recipe::without_hidden(&row.name);
         row.is_self = 0;
         row.reachable = 1;
         row.last_seen_ms = Some(now_ms());

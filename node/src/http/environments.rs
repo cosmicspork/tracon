@@ -33,7 +33,10 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
                         == Some(index)
                 })
                 .collect();
-            json!({ "entry": entry, "builds": builds })
+            // An entry that keeps lending credentials to a preparation a
+            // peer's recipe changed builds nothing until it is started.
+            let hold = crate::mesh::recipe::held(s.store(), entry);
+            json!({ "entry": entry, "builds": builds, "hold": hold })
         })
         .collect();
     Ok(Json(json!({
@@ -96,6 +99,15 @@ pub async fn build(
             repo.display()
         ))
     })?;
+    if let Some(hold) = crate::mesh::recipe::held(s.store(), &entry) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "{}; start it with the held entry's Start the build, which says what it lends",
+                crate::mesh::recipe::held_reason(&hold)
+            ),
+        ));
+    }
     if s.manager.backend().image_builder().is_none() {
         return Err(unprocessable(format!(
             "the {} runtime cannot build images",

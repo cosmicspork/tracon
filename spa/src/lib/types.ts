@@ -1620,7 +1620,20 @@ export interface RepoEnvironments {
   can_build: boolean
   /** Preset name, and the hosts it opens. */
   presets: [string, string[]][]
-  entries: { entry: RepoEntry; builds: RepoImageBuild[] }[]
+  entries: { entry: RepoEntry; builds: RepoImageBuild[]; hold?: CredentialHold | null }[]
+}
+
+/**
+ * An entry that keeps lending credentials to a preparation a peer's recipe
+ * changed: nothing is built or warmed for it until the operator starts it.
+ */
+export interface CredentialHold {
+  path: string
+  offer_id: string
+  sender_node: string
+  repo: string
+  credentials: string[]
+  created_ms: number
 }
 
 /**

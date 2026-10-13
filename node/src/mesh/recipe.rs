@@ -30,6 +30,10 @@ pub const MAX_PENDING_PER_SENDER: i64 = 32;
 const MAX_COMMANDS: usize = 64;
 const MAX_COMMAND_BYTES: usize = 4096;
 const MAX_NOTE_CHARS: usize = 1000;
+/// The most a recipe may take, as JSON: well past any real one.
+const MAX_RECIPE_BYTES: usize = 64 * 1024;
+/// The most of a peer's node name an operator is shown in one line.
+const MAX_NAME_CHARS: usize = 40;
 
 /// The fields of a `[[repo]]` entry that are this node's alone and are never
 /// offered: kept as they are when an offer is accepted onto the entry.
@@ -134,6 +138,12 @@ impl RepoRecipe {
     /// A recipe as a peer sent it: only the fields a recipe has, and only
     /// values that pass [`validate`](Self::validate).
     pub fn parse(value: &Value) -> Result<Self, String> {
+        if value.to_string().len() > MAX_RECIPE_BYTES {
+            return Err(format!(
+                "the recipe is larger than {} KiB",
+                MAX_RECIPE_BYTES / 1024
+            ));
+        }
         if let Some(object) = value.as_object() {
             for field in object.keys() {
                 if LOCAL_ONLY.contains(&field.as_str()) || field.contains("digest") {
@@ -165,13 +175,7 @@ impl RepoRecipe {
             if hidden_char(entry).is_some() {
                 return Err("egress has a control or invisible character".into());
             }
-            // A literal host is all a host rule may be; one made only of
-            // numbers is an address, which names a machine, not a service.
-            if entry.contains('.')
-                && entry
-                    .split('.')
-                    .all(|label| label.bytes().all(|b| b.is_ascii_digit()))
-            {
+            if address_like(entry) {
                 return Err(format!(
                     "egress {entry:?} is an IP address; a recipe names registries by host name"
                 ));
@@ -434,6 +438,95 @@ fn local_path(command: &str) -> Option<String> {
                 })
         })
         .map(str::to_string)
+}
+
+/// Whether an egress entry is, or could be read as, an address rather than a
+/// host name: anything `inet_aton` accepts (one to four parts, each decimal,
+/// octal or `0x` hex, as in `127.1` or `0x7f.0.0.1`), any `0x` label, or a
+/// last label of digits, which no top-level domain is. An address names a
+/// machine on someone's network, not a registry.
+pub fn address_like(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.contains(':') || host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    let numeric = |label: &str| {
+        !label.is_empty()
+            && (label.bytes().all(|b| b.is_ascii_digit())
+                || label
+                    .strip_prefix("0x")
+                    .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit())))
+    };
+    (labels.len() <= 4 && labels.iter().all(|l| numeric(l)))
+        || labels.iter().any(|l| l.starts_with("0x"))
+        || labels
+            .last()
+            .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A peer's node name as this node shows it to its operator: without
+/// control, format or separator characters, and short enough that what
+/// follows it on a line is still seen.
+pub fn display_name(name: &str) -> String {
+    let clean = without_hidden(name);
+    let clean = clean.trim();
+    if clean.chars().count() > MAX_NAME_CHARS {
+        let cut: String = clean.chars().take(MAX_NAME_CHARS - 1).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        clean.to_string()
+    }
+}
+
+/// `text` without control, format or separator characters: how a name a
+/// peer chose for itself is recorded and shown.
+pub fn without_hidden(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !(c.is_control() || is_format(c) || c == '\u{2028}' || c == '\u{2029}'))
+        .collect()
+}
+
+/// What credentials an entry lends would be lent to: its preparation, the
+/// hosts that reaches, the image it runs in, and the credentials. A hold is
+/// on exactly this; an entry edited since no longer matches it.
+pub fn lending_hash(entry: &Repo) -> String {
+    use sha2::{Digest, Sha256};
+    let lent = json!({
+        "prepare": entry.prepare,
+        "egress": entry.egress,
+        "dockerfile": entry.dockerfile,
+        "context": entry.context,
+        "prepare_credentials": entry.prepare_credentials,
+    });
+    hex::encode(Sha256::digest(lent.to_string().as_bytes()))
+}
+
+/// The hold on `entry`, if it keeps lending credentials to a preparation a
+/// peer changed and the operator has not yet started its build. Read by
+/// everything that would build its image or warm its cache with them.
+pub fn held(
+    store: &crate::store::Store,
+    entry: &Repo,
+) -> Option<crate::store::recipe_offers::CredentialHoldRow> {
+    if entry.prepare_credentials.is_empty() {
+        return None;
+    }
+    store
+        .credential_hold(&entry.path.to_string_lossy())
+        .ok()
+        .flatten()
+        .filter(|hold| hold.lending_hash == lending_hash(entry))
+}
+
+/// What a held entry's runs say instead of building.
+pub fn held_reason(hold: &crate::store::recipe_offers::CredentialHoldRow) -> String {
+    format!(
+        "held: {} is lent to a preparation a peer's recipe changed, so nothing is built or \
+         warmed for {} until you start its build in Settings, Repositories",
+        hold.credentials.join(", "),
+        hold.path
+    )
 }
 
 /// An operator's note on an offer: trimmed, empty as none, and refused when
@@ -765,6 +858,83 @@ mod tests {
         ] {
             assert!(note(Some(hidden.into())).is_err(), "{hidden:?}");
         }
+    }
+
+    #[test]
+    fn anything_inet_aton_reads_as_an_address_is_refused() {
+        for address in [
+            "10.0.0.1",
+            "127.1",
+            "2130706433",
+            "0x7f.0.0.1",
+            "0x7f000001",
+            "017700000001",
+            "0177.0.0.1",
+            "169.254.169.254.",
+            "registry.0x10",
+            "evil.example.123",
+        ] {
+            assert!(address_like(address), "{address}");
+        }
+        for host in [
+            "registry.npmjs.org",
+            "cafe.be",
+            "nova.laravel.com",
+            "1password.com",
+            "a1.b2.example",
+        ] {
+            assert!(!address_like(host), "{host}");
+        }
+        let mut recipe = offered();
+        recipe.egress = vec!["0x7f.1".into()];
+        assert!(recipe.validate().unwrap_err().contains("IP address"));
+    }
+
+    #[test]
+    fn a_peer_name_is_shown_clean_and_short() {
+        assert_eq!(display_name("laptop"), "laptop");
+        assert_eq!(display_name("lap\u{202E}top\u{200B}\n"), "laptop");
+        let long = display_name(&"x".repeat(200));
+        assert_eq!(long.chars().count(), MAX_NAME_CHARS);
+        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn an_oversized_recipe_is_refused() {
+        let mut wire = serde_json::to_value(offered()).unwrap();
+        wire["prepare"] = json!(vec!["x".repeat(3000); 40]);
+        assert!(RepoRecipe::parse(&wire).unwrap_err().contains("KiB"));
+    }
+
+    /// A hold is on what the credentials would be lent to: an entry edited
+    /// since, or one that lends nothing, is not held.
+    #[test]
+    fn a_hold_covers_the_entry_as_it_was_kept() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let mine = entry();
+        store
+            .credential_hold_put(&crate::store::recipe_offers::CredentialHoldRow {
+                path: mine.path.to_string_lossy().into(),
+                offer_id: "o".into(),
+                sender_node: "n".into(),
+                repo: "github.com/acme/app".into(),
+                credentials: vec!["nova".into()],
+                lending_hash: lending_hash(&mine),
+                created_ms: 1,
+            })
+            .unwrap();
+        let hold = held(&store, &mine).unwrap();
+        assert!(held_reason(&hold).starts_with("held: nova"));
+        let mut edited = mine.clone();
+        edited.prepare.push("npm test".into());
+        assert!(held(&store, &edited).is_none());
+        let mut lends_nothing = mine.clone();
+        lends_nothing.prepare_credentials.clear();
+        assert!(held(&store, &lends_nothing).is_none());
+        assert!(store
+            .credential_hold_release(&mine.path.to_string_lossy())
+            .unwrap());
+        assert!(held(&store, &mine).is_none());
     }
 
     /// What the operator reads must be what runs: a command, an egress entry

@@ -152,6 +152,10 @@ pub fn environment_with(
             ..
         }) => match built() {
             Some(row) => (row.image, REPOSITORY_DOCKERFILE),
+            None if entry.is_some_and(|entry| crate::mesh::recipe::held(store, entry).is_some()) => (
+                harness_image(cfg),
+                "harness image (repository image held: start its build in Settings, Repositories)",
+            ),
             None => (
                 harness_image(cfg),
                 "harness image (repository image not built)",
