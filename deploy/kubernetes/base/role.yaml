@@ -1,6 +1,10 @@
 # Exactly the verbs the node's `runtime` check asserts, and no more: it
 # creates, watches, attaches to, reads the logs of, and deletes its harness
 # pods, and reads the NetworkPolicy it verifies. It cannot edit that policy.
+# The secrets rule is the one optional set: a run lent credentials (or an
+# egress grant) keeps them in a Secret of its own, `<pod>-env`, rather than
+# in its pod spec. Without the rule the node still runs, and refuses those
+# runs instead of putting the values in plaintext.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -21,3 +25,9 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get"]
+  # Create before the pod, patch its owner to the pod, delete once the pod
+  # has started, list what a node that died left. Nothing reads one back, so
+  # no `get`.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch", "delete", "list"]

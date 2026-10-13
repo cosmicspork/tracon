@@ -57,10 +57,96 @@ impl Mount {
     }
 }
 
+/// Environment whose values must reach the process and nothing else: not a
+/// pod spec anyone with `get pods` can read, not an argv any local user can
+/// list, not a log line. Lent registry credentials and an egress grant's
+/// proxy URL travel here. Its `Debug` names the variables and never their
+/// values, so a `RunnerCommand` can still be logged whole.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SecretEnv(Vec<(String, String)>);
+
+impl std::fmt::Debug for SecretEnv {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_list()
+            .entries(self.0.iter().map(|(name, _)| name))
+            .finish()
+    }
+}
+
+impl SecretEnv {
+    pub fn new(env: Vec<(String, String)>) -> Self {
+        Self(env)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &(String, String)> {
+        self.0.iter()
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|(name, _)| name.as_str())
+    }
+
+    pub fn contains_name(&self, name: &str) -> bool {
+        self.names().any(|n| n == name)
+    }
+
+    /// Refuse a name that is not a plain environment variable name
+    /// (`[A-Za-z_][A-Za-z0-9_]*`). Podman would read `NAME=x` on its argv as
+    /// a name and a value, and a Secret key allows less than a variable
+    /// name can hold; a name that fits both is safe in both.
+    pub fn validate(&self) -> Result<(), RunnerError> {
+        for name in self.names() {
+            let mut bytes = name.bytes();
+            let plain = bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if !plain {
+                return Err(RunnerError::Other(format!(
+                    "secret environment variable {name:?} is not a plain variable name"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `name` is set to `value` here. For tests that assert where a
+    /// value went.
+    pub fn contains(&self, name: &str, value: &str) -> bool {
+        self.0.iter().any(|(n, v)| n == name && v == value)
+    }
+}
+
+impl From<Vec<(String, String)>> for SecretEnv {
+    fn from(env: Vec<(String, String)>) -> Self {
+        Self(env)
+    }
+}
+
+impl Extend<(String, String)> for SecretEnv {
+    fn extend<I: IntoIterator<Item = (String, String)>>(&mut self, items: I) {
+        self.0.extend(items);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunnerCommand {
     pub argv: Vec<String>,
+    /// Environment that may be seen: rendered into a pod spec, passed on an
+    /// argv. Anything that must not be goes in `secret_env`.
     pub env: Vec<(String, String)>,
+    /// Environment the runner delivers without writing the values anywhere
+    /// another reader could find them. Podman takes each as `--env NAME` with
+    /// the value in its own process environment; Kubernetes puts them in a
+    /// Secret of the run's own and refers to it, and refuses the run when it
+    /// may not. A name here wins over the same name in `env` and over the
+    /// runner's own defaults.
+    pub secret_env: SecretEnv,
     pub mounts: Vec<Mount>,
     pub workdir: Option<String>,
     /// An approved preparation image may replace the harness image for a
@@ -73,6 +159,21 @@ pub struct RunnerCommand {
     /// pod's own address on the cluster network — and reports where in
     /// `Spawned::endpoint`. Unset for every stdio harness.
     pub expose: Option<u16>,
+}
+
+impl RunnerCommand {
+    /// `env` without the names `secret_env` sets: one name, one value, and
+    /// the hidden one is the one that was meant.
+    pub fn plain_env(&self) -> impl Iterator<Item = &(String, String)> {
+        self.env
+            .iter()
+            .filter(|(name, _)| !self.secret_env.contains_name(name))
+    }
+
+    /// Whether the command sets `name` itself, in either list.
+    pub fn sets(&self, name: &str) -> bool {
+        self.env.iter().any(|(n, _)| n == name) || self.secret_env.contains_name(name)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -294,6 +395,7 @@ pub mod local {
             let mut c = Command::new(bin);
             c.args(args)
                 .envs(cmd.env)
+                .envs(cmd.secret_env.iter().cloned())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -330,6 +432,7 @@ pub mod local {
             let mut c = Command::new(bin);
             c.args(args)
                 .envs(cmd.env)
+                .envs(cmd.secret_env.iter().cloned())
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -543,5 +646,39 @@ pub mod local {
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command is logged whole in places; its secret values never are.
+    #[test]
+    fn a_logged_command_names_its_secrets_and_shows_none() {
+        let cmd = RunnerCommand {
+            env: vec![("PLAIN".into(), "visible".into())],
+            secret_env: SecretEnv::new(vec![("NPM_TOKEN".into(), "npm_0123456789".into())]),
+            ..Default::default()
+        };
+        let logged = format!("{cmd:?}");
+        assert!(logged.contains("NPM_TOKEN"), "{logged}");
+        assert!(!logged.contains("npm_0123456789"), "{logged}");
+        assert!(logged.contains("visible"), "{logged}");
+    }
+
+    #[test]
+    fn a_secret_name_wins_over_the_same_plain_one() {
+        let cmd = RunnerCommand {
+            env: vec![
+                ("HTTPS_PROXY".into(), "http://gw:8888".into()),
+                ("KEEP".into(), "1".into()),
+            ],
+            secret_env: SecretEnv::new(vec![("HTTPS_PROXY".into(), "http://u:p@gw:1".into())]),
+            ..Default::default()
+        };
+        let plain: Vec<_> = cmd.plain_env().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(plain, vec!["KEEP"]);
+        assert!(cmd.sets("HTTPS_PROXY") && cmd.sets("KEEP") && !cmd.sets("OTHER"));
     }
 }

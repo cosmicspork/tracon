@@ -1153,6 +1153,7 @@ async fn launch(node: &Node, name: &str, model: &str, env: Vec<(String, String)>
         log: Arc::new(Mutex::new(String::new())),
     };
     let spec = LaunchSpec {
+        secret_env: Default::default(),
         cwd_in_runner: work.to_string_lossy().into_owned(),
         model: model.into(),
         container_name: container.clone(),

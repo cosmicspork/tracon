@@ -667,6 +667,7 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
     };
     let container = format!("tracon-manifest-live-{}", std::process::id());
     let spec = LaunchSpec {
+        secret_env: Default::default(),
         cwd_in_runner: work.to_string_lossy().into_owned(),
         model: "anthropic/claude-x".into(),
         container_name: container.clone(),

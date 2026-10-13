@@ -57,6 +57,7 @@ fn spec() -> LaunchSpec {
 /// parallel threads, and `set_var` in one would reach every launch in flight.
 fn spec_env(env: Vec<(String, String)>) -> LaunchSpec {
     LaunchSpec {
+        secret_env: Default::default(),
         cwd_in_runner: "/work".into(),
         model: "opus".into(),
         container_name: "tracon-h-test".into(),

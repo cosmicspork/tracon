@@ -859,6 +859,7 @@ async fn run(
                     let cmd = RunnerCommand {
                         argv: crate::review::output::merged_shell(command),
                         env,
+                        secret_env: Default::default(),
                         mounts: vec![
                             Mount::volume(copy.clone(), "/work", false),
                             Mount::volume(cache.clone(), "/cache", true),
