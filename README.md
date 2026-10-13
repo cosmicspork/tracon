@@ -947,6 +947,16 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # memory_request = "1Gi"            # renders its requests and memory limit, so a LimitRange
 # memory_limit = "4Gi"              # never fills them in; no CPU limit unless one is set
 # cpu_limit = "2"                   # (cpu_limit). A limit below its request is refused at load
+# [runtime.kubernetes.builder]      # build repository images on a cluster ("Images on Kubernetes");
+                                    # left out, a pod-hosted node builds nothing
+# addr = "tcp://buildkitd.tracon-build.svc:1234"  # BuildKit's mutual-TLS listener
+# tls_dir = "/etc/tracon/buildkit"  # the client certificate: ca.crt, tls.crt, tls.key
+# registry = "registry.digitalocean.com/<registry>"  # host/namespace built images are pushed to
+# docker_config = "/etc/tracon/registry"  # a directory holding config.json with the push credential
+# timeout_secs = 2700               # one build's limit; left out, 45 minutes
+# buildctl = "buildctl"             # the client to run; the node image carries one on PATH
+# do_token_file = "/etc/tracon/do/token"  # DigitalOcean only: an API token for removing old images,
+                                    # when the registry refuses a delete; left out, the credential's own
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
 # [[repo]]                          # one repository's environment (also Settings → Repositories and
@@ -1250,6 +1260,54 @@ every run carrying a credential is refused with the rule to add. No value is eve
 written into a pod spec instead. The rights make the node able to read every Secret in
 its namespace, so keep nothing else there that a harness should not reach through a
 compromised node.
+
+#### Images on Kubernetes
+
+A pod-hosted node builds a `[[repo]]` entry's `dockerfile` only when
+`[runtime.kubernetes.builder]` names a BuildKit daemon and a registry. Without it the
+entry needs a digest-pinned `image`, and the `runtime` check says the builder is not
+configured. The node image carries `buildctl`; the daemon is the deployment's own (a
+rootless `moby/buildkit` in a namespace of its own, for example), listening for mutual
+TLS. Each build sends the default branch's tree and the Dockerfile from the node
+(`--local`), pushes the result (`push=true`), and pins the digest the daemon reports.
+The node names images as Podman does, `localhost/tracon-repo-…`, and that prefix becomes
+the configured `registry` here: `localhost/tracon-repo-app-1a2b3c4d5e:0123` is pushed as
+`<registry>/tracon-repo-app-1a2b3c4d5e:0123`. The image serves checks and preparation;
+a session on Kubernetes still runs in its harness's own image.
+
+What the node pod needs:
+
+- **The client certificate.** A Secret holding `ca.crt`, `tls.crt` and `tls.key` (what
+  cert-manager issues), mounted at `tls_dir`. The daemon's certificate must name the
+  host in `addr`.
+- **The push credential.** A Docker `config.json` with a credential that may push to
+  `registry`, mounted in the directory `docker_config` names (a
+  `kubernetes.io/dockerconfigjson` Secret with its `.dockerconfigjson` key mounted as
+  `config.json`). `buildctl` reads it as `DOCKER_CONFIG` and answers the daemon's
+  requests for registry tokens itself, so the daemon never holds the credential. The
+  node reads the same file to look images up and remove superseded ones. Credential
+  helpers are not consulted.
+- **Egress.** TCP to the daemon's port, and HTTPS to every registry a build pulls from
+  or pushes to *and to their token services*, because the client fetches the tokens:
+  `auth.docker.io` and `registry-1.docker.io` for a `FROM` on Docker Hub, `ghcr.io` for
+  the harness images, `registry.digitalocean.com` and `api.digitalocean.com` for
+  DigitalOcean's registry.
+- **Room for a build context.** A context is materialised in the system temporary
+  directory before it is sent. Set `TMPDIR` to a directory on the state volume (the
+  node creates it) when a repository's tree is larger than the pod's ephemeral storage.
+- **Pull access for harness pods.** They pull the built images by digest with the
+  namespace's pull secrets; DigitalOcean's cluster integration adds them to the
+  `default` service account.
+
+The `runtime` check runs `buildctl debug workers` over mutual TLS and asks the
+registry's `/v2/` with the credential, and appends what it found to its detail. A
+builder that fails either never refuses the node: sessions and checks still run, and
+an entry's build reports why it did not happen. A superseded image is deleted from the
+registry by digest through the distribution API. DigitalOcean's registry routes that
+delete but may refuse it, so on that host the node falls back to the DigitalOcean API
+(`DELETE /v2/registries/<registry>/repositories/<repo>/digests/<digest>`) with
+`do_token_file`, or the credential's password. Deleting a manifest frees no space
+until the registry's garbage collection runs; schedule it.
 
 ### From source
 

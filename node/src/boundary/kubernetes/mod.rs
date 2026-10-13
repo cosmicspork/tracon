@@ -5,6 +5,7 @@
 //! labels and RBAC) is the deployment's, in `deploy/kubernetes/base`, and is
 //! verified rather than created here.
 
+pub mod build;
 pub mod checks;
 
 use std::sync::Arc;
@@ -33,6 +34,19 @@ pub struct KubeBackend {
     /// re-check that finds the rights granted (or withdrawn) applies to runs
     /// that start after it.
     secret_rights: SecretRights,
+    /// `[runtime.kubernetes.builder]`, or why it is not a builder. `None`
+    /// where none is configured.
+    builder: Option<Result<build::BuildKitBuilder, String>>,
+}
+
+/// The builder `[runtime.kubernetes.builder]` configures, if any.
+fn builder_for(cfg: &Config) -> Option<Result<build::BuildKitBuilder, String>> {
+    let settings = cfg.runtime.kubernetes.builder.as_ref()?;
+    // A repository's build context is materialised in the system temporary
+    // directory, which a pod may point at its state volume (TMPDIR) to hold a
+    // large one. Nothing there exists until something makes it.
+    let _ = std::fs::create_dir_all(std::env::temp_dir());
+    Some(build::BuildKitBuilder::new(settings))
 }
 
 impl KubeBackend {
@@ -42,6 +56,7 @@ impl KubeBackend {
             env: PodEnv::detect(cfg),
             client: tokio::sync::OnceCell::new(),
             secret_rights: SecretRights::default(),
+            builder: builder_for(cfg),
         }
     }
 
@@ -54,6 +69,27 @@ impl KubeBackend {
             env: Ok(env),
             client: tokio::sync::OnceCell::new_with(Some(Ok(client))),
             secret_rights: SecretRights::default(),
+            builder: builder_for(cfg),
+        }
+    }
+
+    /// What the builder check found, in the words the `runtime` check
+    /// carries. Never a failure: a node without a working builder still runs
+    /// everything but a repository's `dockerfile`, which says why it is not
+    /// built.
+    pub async fn builder_status(&self) -> String {
+        match &self.builder {
+            None => "builder: not configured ([runtime.kubernetes.builder]), so a repository's \
+                     dockerfile is not built here"
+                .to_string(),
+            Some(Err(why)) => format!(
+                "builder: [runtime.kubernetes.builder] is not usable ({why}), so no repository \
+                 image is built"
+            ),
+            Some(Ok(builder)) => match builder.check().await {
+                Ok(said) => format!("builder: {said}"),
+                Err(why) => format!("builder: {why}, so a repository's image cannot be built"),
+            },
         }
     }
 
@@ -186,7 +222,27 @@ impl Backend for KubeBackend {
     }
 
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport {
-        checks::check_all(self, cfg, deep).await
+        let mut report = checks::check_all(self, cfg, deep).await;
+        let builder = self.builder_status().await;
+        if let Some(runtime) = report
+            .checks
+            .iter_mut()
+            .find(|check| check.id == super::CheckId::Runtime)
+        {
+            runtime.detail = format!("{}; {builder}", runtime.detail);
+        }
+        report
+    }
+
+    fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
+        match &self.builder {
+            Some(Ok(builder)) => Some(builder),
+            _ => None,
+        }
+    }
+
+    fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
+        cfg.kubernetes_harness_image(harness_id)
     }
 
     /// Pods pull on use, so a cluster names each image and says nothing of it.
@@ -338,6 +394,67 @@ mod tests {
         cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         cfg.runtime.kubernetes.state_mount = state.to_path_buf();
         KubeBackend::new(&cfg)
+    }
+
+    /// Without `[runtime.kubernetes.builder]` nothing builds and the check
+    /// says so; a builder that cannot be one is not handed out, and the
+    /// check says why; a configured one is, and the check reports its
+    /// daemon. Layered images copy the harness from the release's images
+    /// either way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_builder_is_handed_out_only_when_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unconfigured = backend(tmp.path());
+        assert!(unconfigured.image_builder().is_none());
+        assert!(unconfigured
+            .builder_status()
+            .await
+            .contains("builder: not configured"));
+        let cfg = Config::default();
+        assert_eq!(
+            Backend::harness_image(&unconfigured, &cfg, "claude"),
+            format!(
+                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg.runtime.kubernetes.builder = Some(crate::config::KubeBuilder {
+            registry: "cosmicspork".into(),
+            ..Default::default()
+        });
+        let invalid = KubeBackend::new(&cfg);
+        assert!(invalid.image_builder().is_none());
+        let said = invalid.builder_status().await;
+        assert!(said.contains("is not usable (registry must be"), "{said}");
+
+        let buildctl = tmp.path().join("buildctl");
+        std::fs::write(
+            &buildctl,
+            "#!/bin/sh\necho 'error: connection refused' >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&buildctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cfg.runtime.kubernetes.builder = Some(crate::config::KubeBuilder {
+            registry: "registry.digitalocean.com/cosmicspork".into(),
+            buildctl: buildctl.to_string_lossy().into_owned(),
+            ..Default::default()
+        });
+        let configured = KubeBackend::new(&cfg);
+        assert!(configured.image_builder().is_some());
+        // Nothing is layered for a session no runner here would run in it.
+        assert!(!Backend::runs_sessions_in_repository_images(&configured));
+        let said = configured.builder_status().await;
+        assert!(
+            said.contains("tcp://buildkitd.tracon-build.svc:1234 refused")
+                && said.contains("connection refused")
+                && said.ends_with("so a repository's image cannot be built"),
+            "{said}"
+        );
     }
 
     #[cfg(unix)]

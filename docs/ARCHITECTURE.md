@@ -594,7 +594,13 @@ different one on every node. A check run builds first when the recipe has moved;
 approval only reads, so it cannot start a build, and a merged Dockerfile change is a
 different execution image and therefore different evidence. Image builds are the one
 place repository-authored commands run with the network and outside the boundary,
-which is why the operator names each one. A session runs in the same image with the
+which is why the operator names each one. The build goes through the runtime's
+`ImageBuilder`: Podman builds into its local store; on Kubernetes the node runs
+`buildctl` against a BuildKit daemon over mutual TLS, sends the materialised context
+itself, pushes to the configured registry, and takes the digest from the build's
+metadata. The registry credential stays in the node's pod, because `buildctl` answers
+the daemon's token requests, and `exists`, `identity` and `remove` are answered by a
+runtime-neutral OCI distribution client (`boundary::registry`). A session runs in the same image with the
 harness layered on: a second image, `FROM` the repository's by digest with the harness
 binary copied out of the harness image, keyed on both digests and probed before any
 session is told to launch in it. Checks stay on the repository's image, so a harness

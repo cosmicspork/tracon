@@ -10,6 +10,7 @@
 pub mod checks;
 pub mod kubernetes;
 pub mod podman;
+pub mod registry;
 
 use std::sync::Arc;
 
@@ -180,6 +181,12 @@ pub trait Backend: Send + Sync {
         let _ = image;
         self.runner_for(harness_id, extra_mounts)
     }
+    /// Whether `runner_in` runs a session in the image it is given. Where it
+    /// does not, a session keeps the harness's image and nothing is layered
+    /// for it: a layer no session runs in would only be built and reported.
+    fn runs_sessions_in_repository_images(&self) -> bool {
+        false
+    }
     /// Each supported harness's image and its state: `current`, `stale`,
     /// `missing`, or `unknown` where this runtime cannot say. For display;
     /// `check_all` is what refuses a node whose images are not usable.
@@ -191,6 +198,11 @@ pub trait Backend: Send + Sync {
     /// given.
     fn image_builder(&self) -> Option<&dyn ImageBuilder> {
         None
+    }
+    /// The image a named harness runs in here, which a repository's image
+    /// copies the harness from. Podman's unless a runtime says otherwise.
+    fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
+        cfg.podman_harness_image(harness_id)
     }
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.

@@ -942,6 +942,11 @@ pub struct Kubernetes {
     pub uid: i64,
     /// The name the harness pod resolves to the node's pod IP.
     pub gateway_host: String,
+    /// What builds a repository's image here, `[runtime.kubernetes.builder]`.
+    /// Left out, the node builds nothing and a `[[repo]]` entry needs a
+    /// pinned `image`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builder: Option<KubeBuilder>,
     /// How long a harness pod may take to start (scheduling, pulling its
     /// image, mounting) before the run is given up with the reason it was
     /// still waiting. Only the start is bounded here: a started command runs
@@ -1176,11 +1181,59 @@ impl Default for Kubernetes {
             harness_home: "/home/harness".into(),
             uid: 65532,
             gateway_host: "tracon-gw".into(),
+            builder: None,
             // A first pull of a repository image can be gigabytes.
             start_timeout_secs: 15 * 60,
             resources: KubeResources::default(),
             image_pull_secrets: Vec::new(),
             shm_size: "1Gi".into(),
+        }
+    }
+}
+
+/// A BuildKit daemon the node drives with `buildctl` over mutual TLS, and the
+/// registry it pushes what it builds to
+/// (`boundary::kubernetes::build::BuildKitBuilder`). The push credential stays
+/// with the node: `buildctl` answers the daemon's requests for registry
+/// tokens itself, so the daemon never holds one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KubeBuilder {
+    /// `tcp://buildkitd.tracon-build.svc:1234`.
+    pub addr: String,
+    /// The client certificate: `ca.crt`, `tls.crt` and `tls.key`, as a
+    /// cert-manager Secret mounts them.
+    pub tls_dir: PathBuf,
+    /// Where built images are pushed, as `host/namespace`:
+    /// `registry.digitalocean.com/<registry>`.
+    pub registry: String,
+    /// A directory holding a Docker `config.json` with a credential that may
+    /// push to `registry`: what `DOCKER_CONFIG` names for `buildctl`, and what
+    /// the node reads to look images up and remove them.
+    pub docker_config: PathBuf,
+    /// The longest one build may take. Left out, the node's own limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// A file holding a DigitalOcean API token, for removing an image when
+    /// the registry refuses a delete through the distribution API. Left out,
+    /// the registry credential's password is tried, which for a credential
+    /// DigitalOcean issued is an API token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub do_token_file: Option<PathBuf>,
+    /// The `buildctl` to run.
+    pub buildctl: String,
+}
+
+impl Default for KubeBuilder {
+    fn default() -> Self {
+        Self {
+            addr: "tcp://buildkitd.tracon-build.svc:1234".into(),
+            tls_dir: PathBuf::from("/etc/tracon/buildkit"),
+            registry: String::new(),
+            docker_config: PathBuf::from("/etc/tracon/registry"),
+            timeout_secs: None,
+            do_token_file: None,
+            buildctl: "buildctl".into(),
         }
     }
 }

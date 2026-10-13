@@ -322,6 +322,12 @@ pub async fn session_image(
             backend.kind()
         ));
     };
+    if !backend.runs_sessions_in_repository_images() {
+        return SessionImage::aside(format!(
+            "the {} runtime runs a session in its harness's own image",
+            backend.kind()
+        ));
+    }
     let base = match &entry.image {
         Some(image) => image.clone(),
         None => {
@@ -361,7 +367,7 @@ pub async fn session_image(
     let harness = SessionHarness {
         id: harness_id,
         version: harness_version,
-        image: cfg.podman_harness_image(harness_id),
+        image: backend.harness_image(cfg, harness_id),
         layer,
     };
     ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await
@@ -1485,6 +1491,103 @@ mod tests {
         assert!(opencode.note.unwrap().contains("runs in its own image"));
         let unbuildable = ask("/src/app", "claude").await;
         assert!(unbuildable.note.unwrap().contains("cannot build images"));
+    }
+
+    /// A runtime that pulls its harness images from a registry names the one
+    /// a layered build copies the harness from, not Podman's local name.
+    #[tokio::test]
+    async fn the_layer_copies_the_harness_from_the_runtimes_own_image() {
+        struct Pulling {
+            builder: FakeBuilder,
+        }
+        #[async_trait]
+        impl Backend for Pulling {
+            fn kind(&self) -> &'static str {
+                "pulling"
+            }
+            async fn setup(
+                &self,
+                _cfg: &Config,
+                _rebuild: bool,
+            ) -> Result<(), crate::boundary::BoundaryError> {
+                Ok(())
+            }
+            async fn check_all(
+                &self,
+                _cfg: &Config,
+                _deep: bool,
+            ) -> crate::boundary::BoundaryReport {
+                crate::boundary::BoundaryReport { checks: Vec::new() }
+            }
+            fn runner(&self, _extra: Vec<crate::runner::Mount>) -> Arc<dyn Runner> {
+                Arc::new(ProbeRunner::saying("1 (Claude Code)", 0))
+            }
+            fn runner_for(&self, _id: &str, _extra: Vec<crate::runner::Mount>) -> Arc<dyn Runner> {
+                Arc::new(ProbeRunner::saying("1 (Claude Code)", 0))
+            }
+            fn image_builder(&self) -> Option<&dyn ImageBuilder> {
+                Some(&self.builder)
+            }
+            fn harness_image(&self, _cfg: &Config, harness_id: &str) -> String {
+                format!("ghcr.io/cosmicspork/tracon-harness-{harness_id}:9")
+            }
+            fn runs_sessions_in_repository_images(&self) -> bool {
+                true
+            }
+            async fn import_volume(
+                &self,
+                _volume: &str,
+                _source: &Path,
+            ) -> Result<(), crate::boundary::BoundaryError> {
+                Ok(())
+            }
+            async fn export_volume(
+                &self,
+                _volume: &str,
+                _destination: &Path,
+            ) -> Result<(), crate::boundary::BoundaryError> {
+                Ok(())
+            }
+            fn harness_host(&self) -> String {
+                "localhost".into()
+            }
+            fn harness_home(&self) -> String {
+                "/home/harness".into()
+            }
+            async fn reconcile(&self, _names: &[String]) {}
+        }
+
+        let pulling = Arc::new(Pulling {
+            builder: FakeBuilder::default(),
+        });
+        let backend: Arc<dyn Backend> = pulling.clone();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let cfg = Arc::new(Config {
+            repo: vec![Repo {
+                path: "/src/app".into(),
+                image: Some(BASE_IMAGE.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let got = session_image(
+            &backend,
+            &cfg,
+            &store,
+            Path::new("/src/app"),
+            ("claude", "1"),
+            &|| {},
+        )
+        .await;
+        assert!(got.image.is_some(), "{got:?}");
+        let builds = pulling.builder.builds.lock().unwrap();
+        assert!(
+            builds[0]
+                .1
+                .starts_with("FROM ghcr.io/cosmicspork/tracon-harness-claude:9@sha256:"),
+            "{}",
+            builds[0].1
+        );
     }
 
     /// The layer copies the harness out of its image and has to set what that

@@ -84,6 +84,23 @@ COPY . .
 COPY --from=spa /build/spa/dist spa/dist
 RUN cargo build -p tracon --release --bin tracon
 
+# buildctl, the client a pod-hosted node builds repository images with
+# (`[runtime.kubernetes.builder]`): it talks to a BuildKit daemon over mutual
+# TLS and answers that daemon's registry token requests from the node's own
+# DOCKER_CONFIG. The client only; the daemon is the deployment's. The release
+# tarball is held to its published sha256 before anything is unpacked. The node
+# image is built for linux/amd64 alone, so the tarball is that platform's.
+FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS buildctl
+ARG BUILDKIT_VERSION=v0.34.0
+ARG BUILDKIT_SHA256=14813b1fb2a40082114e6d386c6fc5e7dd5298176ce7ee1a18bc33e73e109ac3
+RUN set -eu; \
+    curl -fsSL -o /tmp/buildkit.tar.gz \
+      "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz"; \
+    echo "${BUILDKIT_SHA256}  /tmp/buildkit.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/buildkit.tar.gz -C /tmp bin/buildctl; \
+    install -m 0755 /tmp/bin/buildctl /usr/local/bin/buildctl; \
+    /usr/local/bin/buildctl --version
+
 # consulta, at a pinned commit, with its environment resolved at build time so
 # the first query does not wait on a download inside the boundary.
 FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051 AS consulta
@@ -118,6 +135,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 COPY --from=builder /build/target/release/tracon /usr/local/bin/tracon
 COPY --from=consulta /opt/consulta /opt/consulta
 COPY --from=opencode-ui /opt/tracon/opencode-ui /opt/tracon/opencode-ui
+COPY --from=buildctl /usr/local/bin/buildctl /usr/local/bin/buildctl
 ENV UV_NO_SYNC=1 UV_OFFLINE=1 UV_CACHE_DIR=/tmp/uv-cache
 # The bundle is on the image's filesystem rather than in the state volume,
 # which is a mount and would shadow it. The node verifies the tree digest at
