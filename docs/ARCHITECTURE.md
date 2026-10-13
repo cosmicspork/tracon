@@ -1461,15 +1461,23 @@ Three surfaces, three answers, and the differences are the point.
   behind it the operator, cookie or not, on the routes that rewrite `node.toml`.
   So a request is local only when the TCP peer is loopback, it carries no
   forwarding header (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, and the
-  CDN client-IP headers), its `Host` and any absolute target name `localhost`,
-  `127.0.0.0/8` or `::1`, and its `Origin`, if any, is an HTTP(S) loopback
-  origin. The Host and Origin checks are also the DNS-rebinding defence. The
-  port is not compared, so `kubectl port-forward` to another local port and the
-  Vite dev server stay local; a proxy that rewrites `Host` presents the bound
-  port anyway. There is no list of trusted proxies. What the test cannot see is
-  a same-host relay that strips forwarding headers and rewrites `Host` to its
+  CDN, Envoy and Tailscale client headers), its `Host` and any absolute target
+  name `localhost`, `127.0.0.0/8` or `::1`, and its `Origin`, if any, is an
+  HTTP(S) loopback origin with the same host and port as that `Host`. A page on
+  another loopback origin (the OpenCode UI listener, a dev server on another
+  port) is another site: it can send a simple cross-origin POST without a
+  preflight, so it must not count as the operator. The Host and Origin checks
+  are also the DNS-rebinding defence. The `Host` port is not compared with the
+  bound port, so `kubectl port-forward` to another local port and the Vite dev
+  server stay local; a proxy that rewrites `Host` presents the bound port
+  anyway. There is no list of trusted proxies. What the test cannot see is a
+  same-host relay that strips forwarding headers and rewrites `Host` to its
   upstream, which is by construction a request from the machine; proxies in
-  front of a node must send `X-Forwarded-For`.
+  front of a node must send `X-Forwarded-For`. Nor can it see a layer-4 relay
+  of the operator port (`tailscale serve --tcp`, `socat`, `ssh -R`, `kubectl
+  port-forward --address 0.0.0.0`): it adds no header and a non-browser client
+  behind it chooses its own `Host`, so it is local. Don't relay the operator
+  port that way.
 - **`[auth] public_origin`** is the name the node answers to from elsewhere:
   an `https:` origin on a domain name (plain `http:` only for `localhost`),
   normalised at load. An IP address is refused, loopback included, because a

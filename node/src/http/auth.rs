@@ -98,10 +98,14 @@ pub struct AuthState {
 impl AuthState {
     /// `_bind` is the address the operator listener is bound to. It is no
     /// longer consulted: whether a caller is local is a property of the
-    /// request ([`is_local`]), and a `Host` naming a non-loopback bind address
-    /// can only arrive with a loopback peer through a relay. The parameter
-    /// stays so the many callers that build an `AppState` do not all change
-    /// at once.
+    /// request ([`is_local`]), which accepts only loopback names in `Host`.
+    /// A `Host` naming the bind address is refused even where it is honest,
+    /// as with `curl http://0.0.0.0:7420` on a node bound to `0.0.0.0`
+    /// (which connects from `127.0.0.1`): failing closed costs that caller
+    /// nothing but typing `localhost`, while a specific non-loopback bind
+    /// address arrives with a loopback peer only through a relay. The
+    /// parameter stays so the many callers that build an `AppState` do not
+    /// all change at once.
     pub fn new(_bind: String, token_hash: Option<String>) -> Self {
         Self {
             token_hash: Mutex::new(token_hash),
@@ -170,10 +174,10 @@ fn is_public(req: &Request) -> bool {
 /// Headers a proxy adds to say whom it is forwarding for. A client on this
 /// machine talking to the node directly sends none of them, so any one of
 /// them means the loopback peer is a relay for someone else: `tailscale
-/// serve`, `cloudflared`, Caddy, a pod's sidecar, a forward proxy the CLI was
-/// pointed at. Every one makes the request remote; there is no list of
-/// trusted proxies, because a proxy the node trusted would make every caller
-/// behind it the operator.
+/// serve`, `cloudflared`, Caddy, nginx, Envoy or Istio, a CDN, a pod's
+/// sidecar, a forward proxy the CLI was pointed at. Every one makes the
+/// request remote; there is no list of trusted proxies, because a proxy the
+/// node trusted would make every caller behind it the operator.
 const FORWARDING_HEADERS: &[&str] = &[
     "forwarded",
     "x-forwarded-for",
@@ -184,7 +188,15 @@ const FORWARDING_HEADERS: &[&str] = &[
     "x-real-ip",
     "x-client-ip",
     "true-client-ip",
+    "x-forwarded-scheme",
+    "x-forwarded-ssl",
+    "x-forwarded-client-cert",
+    "x-original-forwarded-for",
+    "x-envoy-external-address",
+    "x-cluster-client-ip",
     "cf-connecting-ip",
+    "fastly-client-ip",
+    "tailscale-user-login",
     "via",
 ];
 
@@ -214,17 +226,27 @@ fn host_is_loopback(value: &str) -> bool {
         && url.host().is_some_and(|host| loopback_host(&host))
 }
 
-/// Whether an `Origin` is an HTTP(S) origin on this machine's loopback.
-/// `null`, and any other scheme, is not.
-fn origin_is_loopback(value: &str) -> bool {
-    let Ok(url) = url::Url::parse(value.trim()) else {
-        return false;
-    };
-    matches!(url.scheme(), "http" | "https")
+/// An `Origin` that is an HTTP(S) origin on this machine's loopback, parsed.
+/// `null`, and any other scheme, is not one.
+fn loopback_origin(value: &str) -> Option<url::Url> {
+    let url = url::Url::parse(value.trim()).ok()?;
+    (matches!(url.scheme(), "http" | "https")
         && url.username().is_empty()
         && url.password().is_none()
         && matches!(url.path(), "" | "/")
-        && url.host().is_some_and(|host| loopback_host(&host))
+        && url.host().is_some_and(|host| loopback_host(&host)))
+    .then_some(url)
+}
+
+/// Whether `origin` is the origin the request was addressed to: the same host
+/// and the same port as `authority` (a `Host` value), reading a port-less
+/// `Host` with the origin's own scheme's default.
+fn origin_matches(origin: &url::Url, authority: &str) -> bool {
+    let Ok(addressed) = url::Url::parse(&format!("{}://{authority}", origin.scheme())) else {
+        return false;
+    };
+    addressed.host() == origin.host()
+        && addressed.port_or_known_default() == origin.port_or_known_default()
 }
 
 /// The single answer to "is this the operator at the node's own machine":
@@ -239,13 +261,19 @@ fn origin_is_loopback(value: &str) -> bool {
 ///   loopback (`localhost`, `127.0.0.0/8`, `[::1]`), which is also the
 ///   DNS-rebinding defence: a page on `evil.example` that resolves to
 ///   `127.0.0.1` still sends `Host: evil.example`;
-/// - an `Origin`, when the caller sends one, is an HTTP(S) loopback origin.
+/// - an `Origin`, when the caller sends one, is an HTTP(S) loopback origin
+///   with the same host and port the request was addressed to (its `Host`).
+///   A page on another loopback origin, such as the OpenCode UI listener or
+///   any dev server on another port, is another site and is not the operator.
 ///
-/// The port is not compared. `kubectl port-forward 8080:7420` and the Vite dev
-/// server (`just dev`, which proxies `/api` with the browser's own `Host`)
-/// both reach the node with a loopback `Host` on another port, and both are
-/// the operator at the machine. A proxy that rewrites `Host` to its upstream
+/// The `Host` port is not compared with the port the node is bound to.
+/// `kubectl port-forward 8080:7420` and the Vite dev server (`just dev`,
+/// which proxies `/api` with the browser's own `Host` and `Origin`) both
+/// reach the node with a loopback `Host` on another port, and both are the
+/// operator at the machine. A proxy that rewrites `Host` to its upstream
 /// would present the bound port anyway, so checking it would stop nothing.
+/// What is compared is the `Origin` against that `Host`: the page must be the
+/// one the request was addressed to.
 ///
 /// A missing `Host` is allowed: browsers always send one, so it is not a
 /// rebinding vector, and a bare local client may omit it. A duplicated
@@ -267,24 +295,32 @@ pub(crate) fn is_local(peer: Option<IpAddr>, uri: &Uri, headers: &HeaderMap) -> 
         return false;
     }
     let mut hosts = headers.get_all(header::HOST).iter();
-    match (hosts.next(), hosts.next()) {
-        (None, _) => {}
-        (Some(host), None) => {
-            if !host.to_str().is_ok_and(host_is_loopback) {
-                return false;
-            }
-        }
+    let host = match (hosts.next(), hosts.next()) {
+        (None, _) => None,
+        (Some(host), None) => match host.to_str() {
+            Ok(host) if host_is_loopback(host) => Some(host),
+            _ => return false,
+        },
         _ => return false,
-    }
-    if let Some(authority) = uri.authority() {
-        if !host_is_loopback(authority.as_str()) {
-            return false;
-        }
+    };
+    let authority = uri.authority().map(|authority| authority.as_str());
+    if authority.is_some_and(|authority| !host_is_loopback(authority)) {
+        return false;
     }
     let mut origins = headers.get_all(header::ORIGIN).iter();
     match (origins.next(), origins.next()) {
         (None, _) => true,
-        (Some(origin), None) => origin.to_str().is_ok_and(origin_is_loopback),
+        (Some(origin), None) => {
+            let Some(origin) = origin.to_str().ok().and_then(loopback_origin) else {
+                return false;
+            };
+            // Another loopback origin is another site: the OpenCode UI
+            // listener, a dev server on some other port. Its page can send a
+            // simple cross-origin POST with no preflight, so a loopback
+            // Origin alone would let it drive the node credential-free.
+            host.or(authority)
+                .is_some_and(|addressed| origin_matches(&origin, addressed))
+        }
         _ => false,
     }
 }
@@ -827,6 +863,58 @@ mod tests {
         assert!(local("127.0.0.1", "/api/node", &[]));
         // HTTP/2 carries the authority in the target rather than in Host.
         assert!(local("127.0.0.1", "http://127.0.0.1:7420/api/node", &[]));
+    }
+
+    /// Another loopback origin is another site. The OpenCode UI listener
+    /// (`127.0.0.1:7423`) must never drive the node, and a dev server on some
+    /// other port is somebody else's page: either can send a simple
+    /// cross-origin POST with no preflight, so neither may be credential-free.
+    #[test]
+    fn a_page_on_another_loopback_origin_is_not_local() {
+        for origin in [
+            "http://127.0.0.1:7423",
+            "http://127.0.0.1:7422",
+            "http://localhost:3000",
+            "http://localhost:7420",
+            "http://[::1]:7420",
+        ] {
+            assert!(
+                !local(
+                    "127.0.0.1",
+                    "/api/sessions/s1/kill",
+                    &[("host", "127.0.0.1:7420"), ("origin", origin)]
+                ),
+                "{origin}"
+            );
+        }
+        // An Origin with nothing to compare it with is not trusted either.
+        assert!(!local(
+            "127.0.0.1",
+            "/api/node",
+            &[("origin", "http://127.0.0.1:7420")]
+        ));
+        // The same origin, spelled with or without its default port.
+        assert!(local(
+            "127.0.0.1",
+            "/api/node",
+            &[("host", "localhost"), ("origin", "http://localhost:80")]
+        ));
+        assert!(local(
+            "127.0.0.1",
+            "/api/node",
+            &[("host", "localhost:80"), ("origin", "http://localhost")]
+        ));
+        // HTTP/2: the authority is what the page was addressed to.
+        assert!(local(
+            "127.0.0.1",
+            "http://127.0.0.1:7420/api/node",
+            &[("origin", "http://127.0.0.1:7420")]
+        ));
+        assert!(!local(
+            "127.0.0.1",
+            "http://127.0.0.1:7420/api/node",
+            &[("origin", "http://127.0.0.1:7423")]
+        ));
     }
 
     #[test]

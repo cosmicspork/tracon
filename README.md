@@ -194,14 +194,18 @@ public_origin = "https://<machine>.<tailnet>.ts.net"   # an https: origin on a d
 A proxy on the node's own machine connects to it from `127.0.0.1`, but what it relays
 is not you at the machine. The node treats a request as local only when it comes
 from loopback directly: no `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`
-header, a `Host` of `localhost`, `127.x.x.x` or `[::1]`, and a loopback `Origin` if
-there is one. Tailscale Serve sends `X-Forwarded-For`, so the phone behind it signs
+header, a `Host` of `localhost`, `127.x.x.x` or `[::1]`, and, if there is an
+`Origin`, the same host and port as that `Host` (a page on another local port, such
+as a dev server, is another site and not you). Tailscale Serve sends `X-Forwarded-For`, so the phone behind it signs
 in with its cookie like any other remote client, and the controls that only work at
 the node (Settings that rewrite `node.toml`, providers, policy, mesh setup) stay
 disabled there. Any other proxy you put in front of a node must send
 `X-Forwarded-For` too (Caddy, cloudflared and Traefik do by default; nginx needs
 `proxy_set_header X-Forwarded-For $remote_addr;`): one that strips it and rewrites
-`Host` to `127.0.0.1` looks exactly like a client on the machine.
+`Host` to `127.0.0.1` looks exactly like a client on the machine. Never relay the
+operator port at layer 4 (`tailscale serve --tcp`, `socat`, `ssh -R`, `kubectl
+port-forward --address 0.0.0.0`): a TCP relay adds no header, and a non-browser
+client at the far end chooses its own `Host`, so it would be local.
 
 `auth issue` prints the operator token once — and, given `--url`, a QR code. Scan it
 with the phone's camera: the token rides the URL fragment (never sent to any server,

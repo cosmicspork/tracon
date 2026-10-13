@@ -55,6 +55,15 @@ fn node() -> Node {
         Default::default(),
         Arc::new(tracon::runner::local::LocalBackend),
     );
+    // Providers wired as `serve` wires them, so a sign-in can start.
+    store.channel_put("personal", &[], "{}").unwrap();
+    manager.set_providers(tracon::providers::Providers::new(
+        cfg.clone(),
+        tools.broker.clone(),
+        proto::envelope::DataKey::from_bytes([7; 32]),
+        "n1".into(),
+        manager.bus().clone(),
+    ));
     let state = AppState {
         manager,
         cfg,
@@ -83,10 +92,11 @@ async fn call(
     headers: &[(&str, &str)],
     body: Option<Value>,
 ) -> (StatusCode, Vec<String>, Value) {
-    let mut b = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("host", host);
+    let mut b = Request::builder().method(method).uri(uri);
+    // An empty host sends none at all, as a bare local client may.
+    if !host.is_empty() {
+        b = b.header("host", host);
+    }
     for (k, v) in headers {
         b = b.header(*k, *v);
     }
@@ -1150,7 +1160,7 @@ async fn a_direct_request_on_the_machine_is_still_local() {
             assert_eq!(v["local"], true, "{headers:?}: {v}");
 
             // A `Loopback` route answers with its own result, not the gate's.
-            let (_, _, v) = call(
+            let (s, _, v) = call(
                 &n,
                 "GET",
                 "/api/mesh/enroll",
@@ -1160,13 +1170,8 @@ async fn a_direct_request_on_the_machine_is_still_local() {
                 None,
             )
             .await;
-            assert!(
-                !v["error"]["message"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("at the node itself"),
-                "{headers:?}: {v}"
-            );
+            assert_ne!(s, StatusCode::FORBIDDEN, "{headers:?}: {v}");
+            assert_ne!(s, StatusCode::UNAUTHORIZED, "{headers:?}: {v}");
         }
     }
 
@@ -1179,5 +1184,184 @@ async fn a_direct_request_on_the_machine_is_still_local() {
         let (s, _, v) = call(&n, "GET", "/api/node", LOCAL, host, headers, None).await;
         assert_eq!(s, StatusCode::OK, "{host}: {v}");
         assert_eq!(v["loopback"], true, "{host}: {v}");
+    }
+}
+
+/// A page on another loopback origin is another site, not the operator. The
+/// OpenCode UI listener (`127.0.0.1:7423`) and any other local dev server can
+/// send a simple cross-origin POST, which needs no preflight; were a loopback
+/// Origin enough, it could kill sessions with no credential at all.
+#[tokio::test]
+async fn a_page_on_another_loopback_origin_cannot_drive_the_node() {
+    state::isolate();
+    let n = node();
+    for origin in ["http://127.0.0.1:7423", "http://localhost:3000"] {
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            "/api/sessions/s1/kill",
+            LOCAL,
+            "127.0.0.1:7420",
+            &[("origin", origin)],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{origin}: {v}");
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("tracon auth issue"),
+            "{origin} was refused by something other than the guard: {v}"
+        );
+    }
+
+    // With a token the page is simply unauthenticated.
+    set_token(&n, "trc1.secret").await;
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/sessions/s1/kill",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[("origin", "http://127.0.0.1:7423")],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+
+    // The node's own page, and the CLI, reach the handler, which answers for
+    // itself about a session that does not exist.
+    for headers in [&[("origin", "http://127.0.0.1:7420")][..], &[][..]] {
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            "/api/sessions/s1/kill",
+            LOCAL,
+            "127.0.0.1:7420",
+            headers,
+            None,
+        )
+        .await;
+        assert_ne!(s, StatusCode::FORBIDDEN, "{headers:?}: {v}");
+        assert_ne!(s, StatusCode::UNAUTHORIZED, "{headers:?}: {v}");
+    }
+}
+
+/// A request with no `Host` at all is not a browser, so it is not a
+/// rebinding vector: from loopback, directly, it is the operator.
+#[tokio::test]
+async fn a_bare_local_request_without_a_host_is_local() {
+    state::isolate();
+    let n = node();
+    let (s, _, v) = call(&n, "GET", "/api/node", LOCAL, "", &[], None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["loopback"], true, "{v}");
+    // Relayed, it is not.
+    let (s, _, v) = call(
+        &n,
+        "GET",
+        "/api/node",
+        LOCAL,
+        "",
+        &[("x-forwarded-for", "198.51.100.4")],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+}
+
+/// A pending sign-in is handed back as it started; cancel it so the next
+/// attempt starts its own.
+async fn cancel_sign_in(n: &Node) {
+    let (s, _, v) = call(
+        n,
+        "POST",
+        "/api/providers/anthropic/disconnect",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// The provider sign-in only offers a callback on this machine's loopback to
+/// a browser on this machine. Relayed through a proxy on the node's host, the
+/// browser is elsewhere, and a loopback redirect would land on its own
+/// machine, so it is given the paste flow.
+#[tokio::test]
+async fn only_a_local_browser_is_offered_the_local_sign_in_callback() {
+    state::isolate();
+    let n = node();
+    set_token(&n, "trc1.secret").await;
+    let body = json!({ "channels": ["personal"], "local_callback": true });
+
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/connect",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[("origin", "http://127.0.0.1:7420")],
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["completion"], "local_callback", "{v}");
+    cancel_sign_in(&n).await;
+
+    let (s, cookies, _) = call(
+        &n,
+        "POST",
+        "/api/login",
+        REMOTE,
+        "tracon.example",
+        &[],
+        Some(json!({ "token": "trc1.secret" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let cookie = cookie_of(&cookies);
+    for (host, forwarded) in PROXIES {
+        let mut headers = forwarded.to_vec();
+        headers.push(("cookie", &cookie));
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            "/api/providers/anthropic/connect",
+            LOCAL,
+            host,
+            &headers,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{host}: {v}");
+        assert_eq!(v["completion"], "paste", "{host}: {v}");
+        cancel_sign_in(&n).await;
+    }
+}
+
+/// The administrator screens tell the interface whether it is at the node, so
+/// it can disable what only works there. Both need a credential even on the
+/// machine; only the flag differs.
+#[tokio::test]
+async fn the_admin_screens_report_local_only_for_a_direct_request() {
+    state::isolate();
+    let n = node();
+    set_token(&n, "trc1.secret").await;
+    let bearer = ("authorization", "Bearer trc1.secret");
+    for path in ["/api/admin/mesh", "/api/admin/maintenance"] {
+        let (s, _, v) = call(&n, "GET", path, LOCAL, "127.0.0.1:7420", &[bearer], None).await;
+        assert_eq!(s, StatusCode::OK, "{path}: {v}");
+        assert_eq!(v["local"], true, "{path}: {v}");
+        for (host, forwarded) in PROXIES {
+            let mut headers = forwarded.to_vec();
+            headers.push(bearer);
+            let (s, _, v) = call(&n, "GET", path, LOCAL, host, &headers, None).await;
+            assert_eq!(s, StatusCode::OK, "{path} via {host}: {v}");
+            assert_eq!(v["local"], false, "{path} via {host}: {v}");
+        }
     }
 }
