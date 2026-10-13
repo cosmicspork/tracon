@@ -286,35 +286,52 @@ fn file_id(meta: &Metadata) -> FileId {
 #[derive(Debug, Clone)]
 struct Place {
     label: String,
+    origin: Origin,
     lexical: PathBuf,
+    /// As the kernel would resolve it, even where it does not exist yet: the
+    /// deepest part that exists, resolved, and the rest as written. So the
+    /// export area under `/home/<user>` (a link to `/var/home/<user>`) is
+    /// recognised before it is made.
     canonical: Option<PathBuf>,
-    id: Option<FileId>,
-    /// The identities of this place and every directory above it.
-    above: Vec<FileId>,
+}
+
+/// What made a place one an agent can write, where that matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    StateDir,
+    StateVolume,
+    Other,
 }
 
 impl Place {
     fn new(label: impl Into<String>, path: PathBuf) -> Self {
-        let canonical = std::fs::canonicalize(&path).ok();
-        let above = canonical
-            .as_deref()
-            .map(|c| {
-                c.ancestors()
-                    .filter_map(|a| std::fs::metadata(a).ok().map(|m| file_id(&m)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        Self::of(label, Origin::Other, path)
+    }
+
+    fn of(label: impl Into<String>, origin: Origin, path: PathBuf) -> Self {
         Self {
             label: label.into(),
-            id: std::fs::metadata(&path).ok().map(|m| file_id(&m)),
-            canonical,
-            above,
+            origin,
+            canonical: path
+                .is_absolute()
+                .then(|| walk(&path).ok().map(|walked| walked.resolved))
+                .flatten(),
             lexical: path,
         }
     }
 
-    /// `path` is this place or inside it.
+    /// Its identity on disk, asked each time: a place made after the guard
+    /// was is still recognised.
+    fn id(&self) -> Option<FileId> {
+        std::fs::metadata(&self.lexical).ok().map(|m| file_id(&m))
+    }
+
+    /// `path` is this place or inside it. A place that is not an absolute
+    /// path holds nothing: every path starts with the empty one.
     fn holds(&self, path: &Path) -> bool {
+        if !self.lexical.is_absolute() {
+            return false;
+        }
         if path.starts_with(&self.lexical)
             || self
                 .canonical
@@ -323,7 +340,7 @@ impl Place {
         {
             return true;
         }
-        let Some(id) = self.id else {
+        let Some(id) = self.id() else {
             return false;
         };
         path.ancestors().any(|at| {
@@ -335,6 +352,9 @@ impl Place {
 
     /// This place is `path` or inside it.
     fn within(&self, path: &Path) -> bool {
+        if !self.lexical.is_absolute() {
+            return false;
+        }
         if self.lexical.starts_with(path)
             || self
                 .canonical
@@ -343,16 +363,25 @@ impl Place {
         {
             return true;
         }
-        std::fs::metadata(path)
-            .ok()
-            .is_some_and(|m| self.above.contains(&file_id(&m)))
+        let Some(target) = std::fs::metadata(path).ok().map(|m| file_id(&m)) else {
+            return false;
+        };
+        let start = self.canonical.as_deref().unwrap_or(&self.lexical);
+        start.ancestors().any(|at| {
+            std::fs::metadata(at)
+                .ok()
+                .is_some_and(|m| file_id(&m) == target)
+        })
     }
 
     /// `path` is this place itself.
     fn is(&self, path: &Path) -> bool {
-        path == self.lexical
-            || self.canonical.as_deref() == Some(path)
-            || self.id.is_some() && std::fs::metadata(path).ok().map(|m| file_id(&m)) == self.id
+        self.lexical.is_absolute()
+            && (path == self.lexical
+                || self.canonical.as_deref() == Some(path)
+                || self.id().is_some_and(|id| {
+                    std::fs::metadata(path).ok().map(|m| file_id(&m)) == Some(id)
+                }))
     }
 
     fn shown(&self) -> String {
@@ -374,6 +403,10 @@ pub struct Layout {
     pub homes: Vec<PathBuf>,
     /// The `PATH` a bare program name is looked up on.
     pub path_var: Option<OsString>,
+    /// The volume the state directory lives on, when that volume is one
+    /// harness pods mount (on Kubernetes): found from the running process,
+    /// not from `node.toml`, so no edit can move it.
+    pub state_volume: Option<PathBuf>,
     /// Places an agent can write besides those `node.toml` names.
     pub agent_roots: Vec<(String, PathBuf)>,
     /// Package managers' prefixes, where an operator's tools are installed
@@ -426,7 +459,13 @@ impl Layout {
         }
         let config_path = Config::config_path();
         let state_dir = Config::state_dir();
+        // In a pod, the state directory is on the claim every harness pod
+        // mounts a part of. Which part is not the guard's to know, so all
+        // of it counts.
+        let state_volume =
+            std::env::var_os("KUBERNETES_SERVICE_HOST").and_then(|_| mount_root(&state_dir));
         Self {
+            state_volume,
             data_dir: dirs::data_dir()
                 .map(|data| data.join("tracon"))
                 .unwrap_or_else(|| state_dir.join("data")),
@@ -441,6 +480,17 @@ impl Layout {
             trusted_prefixes,
         }
     }
+}
+
+/// The top of the filesystem `path` is on: its highest ancestor on the same
+/// device.
+fn mount_root(path: &Path) -> Option<PathBuf> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let device = std::fs::metadata(&path).ok()?.dev();
+    path.ancestors()
+        .take_while(|at| std::fs::metadata(at).is_ok_and(|m| m.dev() == device))
+        .last()
+        .map(Path::to_path_buf)
 }
 
 /// The home directory the password database gives this process's user.
@@ -493,7 +543,18 @@ pub struct Guard {
 
 impl Guard {
     pub fn new(layout: Layout, configs: &[&Config]) -> Self {
-        let mut agent_roots = vec![Place::new("the state directory", layout.state_dir.clone())];
+        let mut agent_roots = vec![Place::of(
+            "the state directory",
+            Origin::StateDir,
+            layout.state_dir.clone(),
+        )];
+        if let Some(volume) = &layout.state_volume {
+            agent_roots.push(Place::of(
+                "the state volume",
+                Origin::StateVolume,
+                volume.clone(),
+            ));
+        }
         for (label, path) in &layout.agent_roots {
             agent_roots.push(Place::new(label.clone(), path.clone()));
         }
@@ -501,7 +562,11 @@ impl Guard {
         for cfg in configs {
             let mount = &cfg.runtime.kubernetes.state_mount;
             if mount.is_absolute() {
-                agent_roots.push(Place::new("the state volume", mount.clone()));
+                agent_roots.push(Place::of(
+                    "the state volume",
+                    Origin::StateVolume,
+                    mount.clone(),
+                ));
             }
             let root = &cfg.session.worktree_root;
             if root.is_absolute() {
@@ -579,6 +644,7 @@ impl Guard {
                     state_dir: PathBuf::new(),
                     config_dir: PathBuf::new(),
                     data_dir: PathBuf::new(),
+                    state_volume: None,
                     homes: Vec::new(),
                     path_var: None,
                     agent_roots: Vec::new(),
@@ -905,9 +971,11 @@ impl Guard {
         plain_absolute(path)?;
         let walked = walk(path)?;
         self.not_a_node_secret(path, &walked)?;
-        // On macOS the configuration directory is the state directory, so
-        // the secrets directory sits inside it; nothing an agent sends is
-        // ever staged there.
+        // The configuration directory's secrets are the node's own even
+        // where that directory sits in the state directory (macOS) or on
+        // the state volume (Kubernetes, `/state/config`): nothing an agent
+        // sends is staged there, and a harness pod mounts only the claim's
+        // top-level `tracon-*` volumes.
         let in_config_secrets =
             self.secret_dirs[0].holds(path) && self.secret_dirs[0].holds(&walked.resolved);
         self.outside_agent_roots_but(path, &walked, in_config_secrets)?;
@@ -996,6 +1064,11 @@ impl Guard {
         };
         if !own_area && forms.iter().any(|p| self.config.holds(p)) {
             return Err(refuse(format!("is inside {}", self.config.shown())));
+        }
+        // An agent can write a marker, a bundle or a symbolic link into its
+        // own volume as easily as anywhere else it writes.
+        if !own_area && matches!(kind, PathKind::WriteDir | PathKind::ManagedDir) {
+            self.outside_agent_roots(path, &walked)?;
         }
         for place in [&self.config, &self.state] {
             if forms.iter().any(|p| place.within(p)) {
@@ -1113,15 +1186,19 @@ impl Guard {
         self.outside_agent_roots_but(path, walked, false)
     }
 
-    /// As `outside_agent_roots`, passing over the state directory itself
-    /// (the first root) when `but_state`.
+    /// As `outside_agent_roots`, passing over the state directory and the
+    /// state volume when `but_state`.
     fn outside_agent_roots_but(
         &self,
         path: &Path,
         walked: &Walked,
         but_state: bool,
     ) -> Result<(), Problem> {
-        for root in self.agent_roots.iter().skip(usize::from(but_state)) {
+        for root in self
+            .agent_roots
+            .iter()
+            .filter(|root| !but_state || root.origin == Origin::Other)
+        {
             if root.holds(path) || root.holds(&walked.resolved) {
                 return Err(refuse(format!(
                     "is inside {}, which an agent can write",
@@ -1217,6 +1294,16 @@ impl Guard {
             )));
         }
         Ok(())
+    }
+
+    /// Hold `other`'s agent places and worktree roots as well as these.
+    fn add_places_of(&mut self, other: &Guard) {
+        if other.off {
+            return;
+        }
+        self.agent_roots.extend(other.agent_roots.iter().cloned());
+        self.worktree_roots
+            .extend(other.worktree_roots.iter().cloned());
     }
 
     #[cfg(test)]
@@ -1417,6 +1504,18 @@ pub fn refuse_new(before: Option<&Config>, after: &Config) -> Result<(), String>
 }
 
 fn refuse_new_in(layout: Layout, before: Option<&Config>, after: &Config) -> Result<(), String> {
+    refuse_new_with(layout, current(), before, after)
+}
+
+/// `running` is the guard the serving node installed for the file it
+/// started with: its places stand until a restart, whatever an edit says
+/// they are now, so two edits cannot move a root and then use it.
+fn refuse_new_with(
+    layout: Layout,
+    running: Option<&Guard>,
+    before: Option<&Config>,
+    after: &Config,
+) -> Result<(), String> {
     let default;
     let before = match before {
         Some(before) => before,
@@ -1425,6 +1524,17 @@ fn refuse_new_in(layout: Layout, before: Option<&Config>, after: &Config) -> Res
             &default
         }
     };
+    let (was, now) = (
+        &before.runtime.kubernetes.state_mount,
+        &after.runtime.kubernetes.state_mount,
+    );
+    if was != now {
+        return Err(format!(
+            "refused by the path guard: runtime.kubernetes.state_mount decides where agents can write, so it is changed in node.toml on the host, not by an edit (it would move from {} to {})",
+            was.display(),
+            now.display()
+        ));
+    }
     // What the old file already broke, by its own places only; what the new
     // one breaks, by the places either names, so moving a root away in the
     // same edit does not unmake it.
@@ -1433,7 +1543,11 @@ fn refuse_new_in(layout: Layout, before: Option<&Config>, after: &Config) -> Res
         .into_iter()
         .map(|refusal| (refusal.key, refusal.value))
         .collect();
-    let new: Vec<String> = Guard::new(layout, &[before, after])
+    let mut guard = Guard::new(layout, &[before, after]);
+    if let Some(running) = running {
+        guard.add_places_of(running);
+    }
+    let new: Vec<String> = guard
         .check(after)
         .into_iter()
         .filter(|refusal| {
@@ -1560,7 +1674,7 @@ pub fn install_for_serve(cfg: &Config) {
             true => tracing::debug!(%refusal, "node.toml names a path that does not exist"),
             false => tracing::warn!(
                 %refusal,
-                "node.toml names a path the path guard refuses; an edit could not write it, and the node will not run a program, or write a directory, it refuses"
+                "node.toml names a value the path guard refuses, so no edit could write it. The node still starts. At use it refuses a program, an export or bundle directory, or a secret file or directory that breaks a rule; a secret file that is only outside the secrets directories is still read until it is moved; a root or the state mount is reported here and nowhere else"
             ),
         }
     }
@@ -1639,6 +1753,7 @@ mod tests {
                 path_var: Some(
                     std::env::join_paths([self.at("home/bin"), PathBuf::from("/usr/bin")]).unwrap(),
                 ),
+                state_volume: None,
                 agent_roots: Vec::new(),
                 trusted_prefixes: vec![self.at("brew")],
             }
@@ -2427,6 +2542,138 @@ mod tests {
                 Stage::Edit
             )
             .is_err());
+    }
+
+    /// The reviewer's probe: an agent writes the marker (and a bundle) into
+    /// its own Podman volume; neither directory may then be named.
+    #[test]
+    fn an_agents_volume_is_never_an_export_or_bundle_directory() {
+        let node = Node::new();
+        let mut layout = node.layout();
+        layout
+            .agent_roots
+            .push(("Podman's container storage".into(), node.at("containers")));
+        let guard = node.guard_with(layout, &node.config());
+        let volume = node.dir("containers/storage/volumes/tracon-workspace-x/_data");
+        node.file(
+            "containers/storage/volumes/tracon-workspace-x/_data/.tracon-export",
+            "",
+        );
+        let refusal = guard
+            .path("docs.export_dir", &shown(&volume), Stage::Use)
+            .unwrap_err();
+        assert!(
+            refusal.reason.contains("which an agent can write"),
+            "{refusal}"
+        );
+        let refusal = guard
+            .path(
+                "ui.opencode_bundle_dir",
+                &shown(&volume.join("ui")),
+                Stage::Edit,
+            )
+            .unwrap_err();
+        assert!(
+            refusal.reason.contains("which an agent can write"),
+            "{refusal}"
+        );
+    }
+
+    /// Kubernetes: the claim is mounted at `/state`, the state directory is
+    /// `/state/tracon`, harness pods mount `/state/tracon-*`, and the
+    /// configuration is in `/state/config/tracon`.
+    fn pod(node: &Node) -> Layout {
+        let mut layout = node.layout();
+        layout.state_dir = node.dir("pvc/tracon");
+        layout.config_dir = node.dir("pvc/config/tracon");
+        layout.homes = vec![node.dir("pvc/home")];
+        layout.state_volume = Some(node.at("pvc"));
+        layout
+    }
+
+    /// Moving the state mount and then naming a workspace on the claim is
+    /// refused at either step: the claim is found from the running process,
+    /// and the running node's places stand until it restarts.
+    #[test]
+    fn two_edits_cannot_move_the_state_volume_and_then_use_it() {
+        let node = Node::new();
+        let mut running_cfg = node.config();
+        running_cfg.runtime.kubernetes.state_mount = node.at("pvc");
+        node.file(
+            "pvc/tracon-workspace-x/pyproject.toml",
+            "[project]\nname = \"consulta\"\n",
+        );
+        let workspace = shown(&node.at("pvc/tracon-workspace-x"));
+
+        // Edit 1: the mount moves.
+        let mut moved = running_cfg.clone();
+        moved.runtime.kubernetes.state_mount = node.at("elsewhere");
+        let error = refuse_new_with(pod(&node), None, Some(&running_cfg), &moved).unwrap_err();
+        assert!(error.contains("state_mount"), "{error}");
+
+        // Edit 2, as if the first had been written by hand: consulta's
+        // project in a workspace on the claim.
+        let mut after = moved.clone();
+        after.consulta.command = "uv".into();
+        after.consulta.args = ["run", "--project", &workspace, "consulta"]
+            .map(String::from)
+            .to_vec();
+        // Refused by the claim the process found...
+        let error = refuse_new_with(pod(&node), None, Some(&moved), &after).unwrap_err();
+        assert!(error.contains("consulta.args"), "{error}");
+        // ...and by the running node's places without it.
+        let mut bare = pod(&node);
+        bare.state_volume = None;
+        let running = Guard::new(bare.clone(), &[&running_cfg]);
+        let error = refuse_new_with(bare, Some(&running), Some(&moved), &after).unwrap_err();
+        assert!(error.contains("consulta.args"), "{error}");
+    }
+
+    /// The configuration's secrets directory is the node's own on the claim
+    /// too; the rest of the claim is not.
+    #[test]
+    fn a_pods_secrets_directory_on_the_claim_is_allowed() {
+        let node = Node::new();
+        let mut cfg = node.config();
+        cfg.runtime.kubernetes.state_mount = node.at("pvc");
+        let guard = node.guard_with(pod(&node), &cfg);
+        let key = node.file("pvc/config/tracon/secrets/embed.key", "sk");
+        guard
+            .path("embed.api_key_file", &shown(&key), Stage::Edit)
+            .unwrap();
+        let planted = node.file("pvc/tracon-workspace-x/embed.key", "sk");
+        let refusal = guard
+            .path("embed.api_key_file", &shown(&planted), Stage::Use)
+            .unwrap_err();
+        assert!(refusal.reason.contains("state volume"), "{refusal}");
+    }
+
+    /// Bazzite: `/home` is a link to `/var/home`. The export area named in
+    /// either spelling is the node's own, before and after it is made,
+    /// without a new guard.
+    #[test]
+    fn the_export_area_is_recognised_through_a_linked_home_before_it_exists() {
+        let node = Node::new();
+        let real = node.dir("var/home/jd");
+        let link = node.at("home-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut layout = node.layout();
+        layout.homes = vec![link.clone()];
+        layout.data_dir = link.join(".local/share/tracon");
+        let guard = node.guard_with(layout, &node.config());
+        for spelling in [&link, &real] {
+            let exports = spelling.join(".local/share/tracon/exports");
+            guard
+                .path("docs.export_dir", &shown(&exports), Stage::Edit)
+                .unwrap();
+        }
+        node.dir("var/home/jd/.local/share/tracon/exports");
+        for spelling in [&link, &real] {
+            let exports = spelling.join(".local/share/tracon/exports");
+            guard
+                .path("docs.export_dir", &shown(&exports), Stage::Use)
+                .unwrap();
+        }
     }
 
     #[test]

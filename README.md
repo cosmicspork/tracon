@@ -988,8 +988,9 @@ point one at something an agent wrote or at a secret. In short:
   `uv` flags allowed), with nothing after `consulta`;
 - a secret file lives in `~/.config/tracon/secrets/` (on macOS, `secrets/` beside
   `node.toml`) or `/etc/tracon/`;
-- documents export into the node's own export area, or into a directory you marked by
-  creating a `.tracon-export` file in it;
+- documents export into the node's own export area (`~/.local/share/tracon/exports` on
+  Linux), or into a directory you marked by creating a `.tracon-export` file in it,
+  which must be outside anywhere an agent can write;
 - the UI bundle directory is the node's own, new, or already a bundle.
 
 An edit that breaks a rule is refused with the reason. A file that already breaks one
@@ -1207,7 +1208,9 @@ enabled = false
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 
 [docs]
-# export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/
+# export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/;
+                                    # the node's export area, or a directory holding a
+                                    # .tracon-export file you created (the path guard)
 export_channel = ""                 # empty: [session] default_channel
 export_every_secs = 1800            # at startup, then this often (at least 60)
 preview_listen = "127.0.0.1:7422"   # isolated HTML capability origin
@@ -1218,7 +1221,7 @@ enabled = false
 base_url = "http://127.0.0.1:8080"  # an OpenAI-shaped /v1/embeddings
 model = "bge-m3"
 dim = 1024                          # must match the model; changing it rebuilds the index
-# api_key_file = "<home>/.config/llama-server.key"
+# api_key_file = "<home>/.config/tracon/secrets/llama-server.key"  # only under secrets/ or /etc/tracon
 # provider = "anthropic"            # instead of base_url: through the gateway, so the channel ceiling applies
 batch = 16
 timeout_secs = 60

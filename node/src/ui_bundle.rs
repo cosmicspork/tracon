@@ -159,6 +159,9 @@ pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Resul
             .unwrap_or_else(|| "opencode-ui".into())
     ));
     let _ = std::fs::remove_dir_all(&staging);
+    // Made fresh here, so a link left at its name is an error rather than
+    // somewhere the bundle is unpacked into.
+    std::fs::create_dir(&staging).with_context(|| format!("creating {}", staging.display()))?;
     let unpacked = unpack(&bytes, &staging).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&staging);
     })?;
@@ -197,8 +200,7 @@ pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Resul
     }
     let _ = std::fs::remove_dir_all(&retired);
     if let Some(marker) = marker(&dir) {
-        std::fs::write(&marker, b"")
-            .with_context(|| format!("marking {} as tracon's", dir.display()))?;
+        write_marker(&marker).with_context(|| format!("marking {} as tracon's", dir.display()))?;
     }
 
     Ok(Outcome::Installed { dir, files, source })
@@ -211,11 +213,33 @@ fn marker(dir: &Path) -> Option<PathBuf> {
     Some(dir.parent()?.join(format!(".{name}.tracon-bundle")))
 }
 
+/// The marker, written without following a link: one already at its name
+/// is refused rather than written through.
+fn write_marker(marker: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if std::fs::symlink_metadata(marker).is_ok_and(|m| !m.is_file()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not a regular file", marker.display()),
+        ));
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
+        .open(marker)
+        .map(drop)
+}
+
 /// Whether `dir` is a bundle: one the node would serve, one tracon put
 /// there, or an older install at the default place in the state directory.
 pub fn recognised(dir: &Path) -> bool {
     ui::Bundle::load(dir).is_ok()
-        || marker(dir).is_some_and(|marker| marker.is_file())
+        || marker(dir).is_some_and(|marker| {
+            std::fs::symlink_metadata(marker).is_ok_and(|m| m.file_type().is_file())
+        })
         || (dir == Config::state_dir().join("opencode-ui") && dir.join("index.html").is_file())
 }
 
@@ -464,6 +488,21 @@ mod tests {
         assert!(replaceable(&empty));
         std::fs::write(home.path().join(".src.tracon-bundle"), b"").unwrap();
         assert!(replaceable(&dir));
+    }
+
+    /// A marker name holding a link is neither trusted nor written through.
+    #[test]
+    fn a_linked_marker_is_not_a_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("ui");
+        std::fs::create_dir_all(dir.join("x")).unwrap();
+        let target = home.path().join("elsewhere");
+        std::fs::write(&target, "keep").unwrap();
+        let marker = marker(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+        assert!(!recognised(&dir));
+        assert!(write_marker(&marker).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
     }
 
     /// An archive carrying a symlink is refused before the digest is reached —

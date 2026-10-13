@@ -348,7 +348,11 @@ impl Registry {
 
     fn credentials(&self, host: &str) -> Result<Option<(String, String)>, RegistryError> {
         match self.docker_config.as_deref() {
-            Some(dir) => credentials(dir, host),
+            Some(dir) => {
+                crate::config::path_guard::path("runtime.kubernetes.builder.docker_config", dir)
+                    .map_err(|error| RegistryError(error.to_string()))?;
+                credentials(dir, host)
+            }
             None => Ok(None),
         }
     }
@@ -602,9 +606,12 @@ impl Registry {
             .split_once('/')
             .ok_or_else(|| RegistryError(format!("{} names no registry", reference.name)))?;
         let token = match &self.digitalocean_token {
-            Some(file) => std::fs::read_to_string(file)
-                .map(|token| token.trim().to_string())
-                .map_err(|error| RegistryError(format!("{}: {error}", file.display())))?,
+            Some(file) => crate::config::path_guard::read_secret(
+                "runtime.kubernetes.builder.do_token_file",
+                file,
+            )
+            .map(|token| token.trim().to_string())
+            .map_err(|error| RegistryError(format!("{}: {error}", file.display())))?,
             None => {
                 self.credentials(&reference.host)?
                     .ok_or_else(|| RegistryError("no API token and no registry credential".into()))?

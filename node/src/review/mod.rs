@@ -152,9 +152,10 @@ const GIT_SAFE: &[&str] = &[
 /// Git is pointed at an agent-owned repository, so no local, global, or
 /// system Git configuration may select a program or replacement object. The
 /// remaining commands address objects by hash and never invoke a shell.
-fn hardened_git(dir: &str) -> Command {
-    let mut command = Command::new("git");
+fn hardened_git(dir: &str) -> std::io::Result<Command> {
+    let mut command = Command::new(crate::config::path_guard::program("publish.git", "git")?);
     command
+        .env("PATH", crate::config::path_guard::child_path())
         .arg("-C")
         .arg(dir)
         .args(GIT_SAFE)
@@ -173,11 +174,11 @@ fn hardened_git(dir: &str) -> Command {
         .env_remove("GIT_EXTERNAL_DIFF")
         .env_remove("GIT_DIFF_PATH_COUNTER")
         .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
-    command
+    Ok(command)
 }
 
 async fn git(dir: &str, op: &'static str, args: &[&str]) -> Result<String, ReviewError> {
-    let out = hardened_git(dir).args(args).output().await?;
+    let out = hardened_git(dir)?.args(args).output().await?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     } else {
@@ -315,15 +316,17 @@ pub async fn authorship(
 /// Whether `head` descends from `ancestor`, a commit this worktree holds. A
 /// commit it does not hold is not an ancestor it can vouch for.
 pub async fn descends_from(worktree: &str, head: &str, ancestor: &str) -> bool {
-    hardened_git(worktree)
-        .args(["merge-base", "--is-ancestor", ancestor, head])
+    let Ok(mut git) = hardened_git(worktree) else {
+        return false;
+    };
+    git.args(["merge-base", "--is-ancestor", ancestor, head])
         .output()
         .await
         .is_ok_and(|out| out.status.success())
 }
 
 async fn git_bytes(dir: &str, op: &'static str, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
-    let out = hardened_git(dir).args(args).output().await?;
+    let out = hardened_git(dir)?.args(args).output().await?;
     if out.status.success() {
         Ok(out.stdout)
     } else {
@@ -347,7 +350,7 @@ async fn cat_file(
     if objects.is_empty() {
         return Ok(Vec::new());
     }
-    let mut child = hardened_git(dir)
+    let mut child = hardened_git(dir)?
         .args(["cat-file", mode])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -952,7 +955,7 @@ pub async fn file_at_submit(
     // Not `git`: that trims, and a file's trailing newline is part of the
     // file. Losing it here would make the editor build a patch that quietly
     // strips it.
-    let out = hardened_git(worktree)
+    let out = hardened_git(worktree)?
         .args(["cat-file", "blob", &f.blob])
         .output()
         .await?;

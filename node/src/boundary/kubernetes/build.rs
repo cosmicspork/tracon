@@ -242,6 +242,16 @@ impl BuildKitBuilder {
             "runtime.kubernetes.builder.buildctl",
             &self.settings.buildctl,
         )?;
+        // What buildctl reads its certificate and push credential from,
+        // checked again with it.
+        crate::config::path_guard::path(
+            "runtime.kubernetes.builder.tls_dir",
+            &self.settings.tls_dir,
+        )?;
+        crate::config::path_guard::path(
+            "runtime.kubernetes.builder.docker_config",
+            &self.settings.docker_config,
+        )?;
         // Made here, not once at startup: the claim is mounted by then, and
         // something may have removed the directory since.
         let _ = std::fs::create_dir_all(&self.scratch);

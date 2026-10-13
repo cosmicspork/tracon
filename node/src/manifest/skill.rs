@@ -105,7 +105,8 @@ pub fn parse_source(argument: &str) -> Result<SkillSource, ManifestError> {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, ManifestError> {
-    let out = std::process::Command::new("git")
+    let out = std::process::Command::new(crate::config::path_guard::program("publish.git", "git")?)
+        .env("PATH", crate::config::path_guard::child_path())
         .arg("-C")
         .arg(repo)
         .args(args)
