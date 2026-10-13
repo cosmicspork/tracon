@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, Multipart, Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -287,7 +287,7 @@ pub async fn get_node(
     // Whether this client may change what the node *is*. The interface asks
     // rather than guesses, and disables those controls with a reason instead
     // of hiding them.
-    v["loopback"] = json!(super::auth::extensions_are_loopback(&parts.extensions));
+    v["loopback"] = json!(super::auth::parts_are_local(&parts));
     Ok(Json(v))
 }
 
@@ -297,7 +297,7 @@ pub async fn list_nodes(
     parts: axum::http::request::Parts,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rows = s.store().list_nodes()?;
-    let local = super::auth::extensions_are_loopback(&parts.extensions);
+    let local = super::auth::parts_are_local(&parts);
     let mut out: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
@@ -5296,27 +5296,6 @@ pub async fn list_providers(State(s): State<AppState>) -> ApiResult<Json<serde_j
     }
 }
 
-pub struct ObservedPeer(Option<std::net::SocketAddr>);
-
-impl<S> axum::extract::FromRequestParts<S> for ObservedPeer
-where
-    S: Send + Sync,
-{
-    type Rejection = std::convert::Infallible;
-
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        Ok(Self(
-            parts
-                .extensions
-                .get::<ConnectInfo<std::net::SocketAddr>>()
-                .map(|ConnectInfo(address)| *address),
-        ))
-    }
-}
-
 #[derive(Deserialize)]
 pub struct ConnectBody {
     #[serde(default)]
@@ -5347,20 +5326,22 @@ impl Default for ConnectBody {
 /// open. The card then takes the paste-back.
 pub async fn connect_provider(
     State(s): State<AppState>,
-    ObservedPeer(peer): ObservedPeer,
+    super::auth::Local(local): super::auth::Local,
     Path(name): Path<String>,
     body: Option<Json<ConnectBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
-    let local_callback = callback_allowed(&s, peer, body.local_callback);
+    let local_callback = callback_allowed(&s, local, body.local_callback);
     connect_local(&s, &name, body.channels, body.share, local_callback)
         .await
         .map(Json)
 }
-fn callback_allowed(s: &AppState, peer: Option<std::net::SocketAddr>, requested: bool) -> bool {
-    requested
-        && peer.is_some_and(|address| address.ip().is_loopback())
-        && s.cfg.runtime.kind == crate::config::RuntimeKind::Podman
+
+/// A login callback on this machine's loopback is only reachable by a browser
+/// on this machine, so it is offered only to a [local](super::auth::is_local)
+/// caller.
+fn callback_allowed(s: &AppState, local: bool, requested: bool) -> bool {
+    requested && local && s.cfg.runtime.kind == crate::config::RuntimeKind::Podman
 }
 
 async fn connect_local(
@@ -5509,13 +5490,13 @@ async fn peer_command(
 
 pub async fn node_connect_provider(
     State(s): State<AppState>,
-    ObservedPeer(peer): ObservedPeer,
+    super::auth::Local(local): super::auth::Local,
     Path((node_id, name)): Path<(String, String)>,
     body: Option<Json<ConnectBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     if node_id == s.node_id {
-        let local_callback = callback_allowed(&s, peer, body.local_callback);
+        let local_callback = callback_allowed(&s, local, body.local_callback);
         return connect_local(&s, &name, body.channels, body.share, local_callback)
             .await
             .map(Json);

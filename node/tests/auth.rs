@@ -55,6 +55,15 @@ fn node() -> Node {
         Default::default(),
         Arc::new(tracon::runner::local::LocalBackend),
     );
+    // Providers wired as `serve` wires them, so a sign-in can start.
+    store.channel_put("personal", &[], "{}").unwrap();
+    manager.set_providers(tracon::providers::Providers::new(
+        cfg.clone(),
+        tools.broker.clone(),
+        proto::envelope::DataKey::from_bytes([7; 32]),
+        "n1".into(),
+        manager.bus().clone(),
+    ));
     let state = AppState {
         manager,
         cfg,
@@ -83,10 +92,11 @@ async fn call(
     headers: &[(&str, &str)],
     body: Option<Value>,
 ) -> (StatusCode, Vec<String>, Value) {
-    let mut b = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("host", host);
+    let mut b = Request::builder().method(method).uri(uri);
+    // An empty host sends none at all, as a bare local client may.
+    if !host.is_empty() {
+        b = b.header("host", host);
+    }
     for (k, v) in headers {
         b = b.header(*k, *v);
     }
@@ -939,4 +949,419 @@ async fn the_external_door_is_guarded_like_the_operator_api() {
             .contains("[external]"),
         "{v}"
     );
+}
+
+/// What a same-host reverse proxy sends on behalf of a caller somewhere else.
+/// Each connects to the node from loopback.
+const PROXIES: &[(&str, &[(&str, &str)])] = &[
+    // `tailscale serve`: the tailnet name in Host and the caller's address in
+    // the forwarding headers.
+    (
+        "laptop.tail1234.ts.net",
+        &[
+            ("x-forwarded-for", "100.101.102.103"),
+            ("x-forwarded-host", "laptop.tail1234.ts.net"),
+            ("x-forwarded-proto", "https"),
+        ],
+    ),
+    // A proxy that rewrites Host to its upstream and says whom it forwards
+    // for: a pod's sidecar, Go's default reverse proxy, cloudflared.
+    ("127.0.0.1:7420", &[("x-forwarded-for", "198.51.100.4")]),
+    (
+        "127.0.0.1:7420",
+        &[("forwarded", "for=198.51.100.4;proto=https")],
+    ),
+    ("127.0.0.1:7420", &[("x-real-ip", "198.51.100.4")]),
+    // One that passes the public Host through and adds nothing.
+    ("tracon-node.example.org", &[]),
+];
+
+/// Every kind of decision that used to rest on the peer address alone, made
+/// for a request a proxy on the node's own host relayed: none of them treats
+/// it as the operator at the machine.
+#[tokio::test]
+async fn a_request_relayed_by_a_same_host_proxy_is_not_local() {
+    state::isolate();
+    let n = node();
+    // `/api/nodes` reports the flag on this node's own row.
+    let mut me = n.store.get_node("n1").unwrap().unwrap();
+    me.is_self = 1;
+    n.store.put_node(&me).unwrap();
+
+    // 1. The guard's credential-less branch: with no token the node answers
+    //    nobody but the machine, and a relayed request is not the machine.
+    for (host, forwarded) in PROXIES {
+        let (s, _, v) = call(&n, "GET", "/api/node", LOCAL, host, forwarded, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{host} {forwarded:?}: {v}");
+    }
+
+    set_token(&n, "trc1.secret").await;
+
+    // With a token, a relayed request without a credential is asked for one.
+    for (host, forwarded) in PROXIES {
+        let (s, _, v) = call(&n, "GET", "/api/node", LOCAL, host, forwarded, None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{host} {forwarded:?}: {v}");
+    }
+
+    // A relayed login gets a `Secure` cookie: the browser is on HTTPS at the
+    // proxy, not on this machine's plain HTTP.
+    let (host, forwarded) = PROXIES[1];
+    let (s, cookies, _) = call(
+        &n,
+        "POST",
+        "/api/login",
+        LOCAL,
+        host,
+        forwarded,
+        Some(json!({ "token": "trc1.secret" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let raw = cookies
+        .iter()
+        .find(|c| c.starts_with("tracon_session="))
+        .expect("a session cookie");
+    assert!(raw.contains("Secure"), "{raw}");
+    let cookie = cookie_of(&cookies);
+
+    // 2. `Loopback`: a live cookie relayed through the proxy reaches none of
+    //    the routes that rewrite what the node is.
+    let gated: &[(&str, &str, Option<Value>)] = &[
+        ("PUT", "/api/config", Some(json!({}))),
+        ("GET", "/api/model-catalogue", None),
+        ("POST", "/api/providers", Some(json!({}))),
+        ("POST", "/api/manifest/skills", Some(json!({}))),
+        ("PUT", "/api/manifest/text", Some(json!({}))),
+        ("DELETE", "/api/manifest/skill/x", None),
+        ("POST", "/api/mesh/init", Some(json!({}))),
+        ("POST", "/api/mesh/unpair", Some(json!({}))),
+        ("GET", "/api/mesh/enroll", None),
+        ("POST", "/api/mesh/enroll", Some(json!({}))),
+        ("POST", "/api/admin/policy/initialize", Some(json!({}))),
+        ("POST", "/api/admin/policy/preview", Some(json!({}))),
+        ("POST", "/api/admin/policy/apply", Some(json!({}))),
+        (
+            "POST",
+            "/api/admin/maintenance/boundary-check",
+            Some(json!({})),
+        ),
+        ("POST", "/api/admin/maintenance/restart", Some(json!({}))),
+        ("POST", "/api/admin/maintenance/install", Some(json!({}))),
+        ("POST", "/api/admin/maintenance/uninstall", Some(json!({}))),
+        ("POST", "/api/maintenance/storage", Some(json!({}))),
+        ("PUT", "/api/repos/environments", Some(json!({}))),
+        ("POST", "/api/repos/environments/build", Some(json!({}))),
+    ];
+    for (host, forwarded) in PROXIES {
+        let mut headers = forwarded.to_vec();
+        headers.push(("cookie", &cookie));
+        for (method, path, body) in gated {
+            let (s, _, v) = call(&n, method, path, LOCAL, host, &headers, body.clone()).await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} via {host}: {v}");
+            assert!(
+                v["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("at the node itself"),
+                "{method} {path} via {host} was refused by something other than the loopback gate: {v}"
+            );
+        }
+
+        // 3. What the interface is told: not local, so it disables the
+        //    controls rather than offering ones that will be refused.
+        let (s, _, v) = call(&n, "GET", "/api/node", LOCAL, host, &headers, None).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["loopback"], false, "{host}: {v}");
+        let (s, _, v) = call(&n, "GET", "/api/nodes", LOCAL, host, &headers, None).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let me = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["is_self"] == true)
+            .expect("this node's own row");
+        assert_eq!(me["loopback"], false, "{host}: {me}");
+        let (s, _, v) = call(&n, "GET", "/api/admin/access", LOCAL, host, &headers, None).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["local"], false, "{host}: {v}");
+        assert_eq!(v["authenticated"], true, "{host}: {v}");
+    }
+
+    // 4. A push subscription belongs to the machine only when it comes from
+    //    the machine: a relayed bearer client holds no session to tie it to.
+    let (host, forwarded) = PROXIES[1];
+    let mut headers = forwarded.to_vec();
+    headers.push(("authorization", "Bearer trc1.secret"));
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/push/subscriptions",
+        LOCAL,
+        host,
+        &headers,
+        Some(json!({
+            "endpoint": "https://push.example/relayed",
+            "keys": {
+                "p256dh": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+                "auth": "BTBZMqHH6r4Tts7J_aSIgg"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("logged-in browser"),
+        "{v}"
+    );
+}
+
+/// The same routes, asked directly on the machine: the CLI (a Host and no
+/// Origin) and the desktop app's webview (the node's own origin) are still
+/// the operator, with or without a token.
+#[tokio::test]
+async fn a_direct_request_on_the_machine_is_still_local() {
+    state::isolate();
+    let n = node();
+    let cli: &[(&str, &str)] = &[];
+    let desktop: &[(&str, &str)] = &[("origin", "http://127.0.0.1:7420")];
+
+    for token in [false, true] {
+        if token {
+            set_token(&n, "trc1.secret").await;
+        }
+        for headers in [cli, desktop] {
+            let (s, _, v) = call(
+                &n,
+                "GET",
+                "/api/node",
+                LOCAL,
+                "127.0.0.1:7420",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            assert_eq!(v["loopback"], true, "{headers:?}: {v}");
+
+            let (s, _, v) = call(
+                &n,
+                "GET",
+                "/api/admin/access",
+                LOCAL,
+                "127.0.0.1:7420",
+                headers,
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            assert_eq!(v["local"], true, "{headers:?}: {v}");
+
+            // A `Loopback` route answers with its own result, not the gate's.
+            let (s, _, v) = call(
+                &n,
+                "GET",
+                "/api/mesh/enroll",
+                LOCAL,
+                "127.0.0.1:7420",
+                headers,
+                None,
+            )
+            .await;
+            assert_ne!(s, StatusCode::FORBIDDEN, "{headers:?}: {v}");
+            assert_ne!(s, StatusCode::UNAUTHORIZED, "{headers:?}: {v}");
+        }
+    }
+
+    // `kubectl port-forward` to another local port, and `just dev`'s Vite
+    // server, still reach the node with a loopback Host and Origin.
+    for (host, headers) in [
+        ("localhost:8080", cli),
+        ("localhost:5173", &[("origin", "http://localhost:5173")][..]),
+    ] {
+        let (s, _, v) = call(&n, "GET", "/api/node", LOCAL, host, headers, None).await;
+        assert_eq!(s, StatusCode::OK, "{host}: {v}");
+        assert_eq!(v["loopback"], true, "{host}: {v}");
+    }
+}
+
+/// A page on another loopback origin is another site, not the operator. The
+/// OpenCode UI listener (`127.0.0.1:7423`) and any other local dev server can
+/// send a simple cross-origin POST, which needs no preflight; were a loopback
+/// Origin enough, it could kill sessions with no credential at all.
+#[tokio::test]
+async fn a_page_on_another_loopback_origin_cannot_drive_the_node() {
+    state::isolate();
+    let n = node();
+    for origin in ["http://127.0.0.1:7423", "http://localhost:3000"] {
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            "/api/sessions/s1/kill",
+            LOCAL,
+            "127.0.0.1:7420",
+            &[("origin", origin)],
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{origin}: {v}");
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("tracon auth issue"),
+            "{origin} was refused by something other than the guard: {v}"
+        );
+    }
+
+    // With a token the page is simply unauthenticated.
+    set_token(&n, "trc1.secret").await;
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/sessions/s1/kill",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[("origin", "http://127.0.0.1:7423")],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+
+    // The node's own page, and the CLI, reach the handler, which answers for
+    // itself about a session that does not exist.
+    for headers in [&[("origin", "http://127.0.0.1:7420")][..], &[][..]] {
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            "/api/sessions/s1/kill",
+            LOCAL,
+            "127.0.0.1:7420",
+            headers,
+            None,
+        )
+        .await;
+        assert_ne!(s, StatusCode::FORBIDDEN, "{headers:?}: {v}");
+        assert_ne!(s, StatusCode::UNAUTHORIZED, "{headers:?}: {v}");
+    }
+}
+
+/// A request with no `Host` at all is not a browser, so it is not a
+/// rebinding vector: from loopback, directly, it is the operator.
+#[tokio::test]
+async fn a_bare_local_request_without_a_host_is_local() {
+    state::isolate();
+    let n = node();
+    let (s, _, v) = call(&n, "GET", "/api/node", LOCAL, "", &[], None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["loopback"], true, "{v}");
+    // Relayed, it is not.
+    let (s, _, v) = call(
+        &n,
+        "GET",
+        "/api/node",
+        LOCAL,
+        "",
+        &[("x-forwarded-for", "198.51.100.4")],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+}
+
+/// A pending sign-in is handed back as it started; cancel it so the next
+/// attempt starts its own.
+async fn cancel_sign_in(n: &Node) {
+    let (s, _, v) = call(
+        n,
+        "POST",
+        "/api/providers/anthropic/disconnect",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// The provider sign-in only offers a callback on this machine's loopback to
+/// a browser on this machine. Relayed through a proxy on the node's host, the
+/// browser is elsewhere, and a loopback redirect would land on its own
+/// machine, so it is given the paste flow.
+#[tokio::test]
+async fn only_a_local_browser_is_offered_the_local_sign_in_callback() {
+    state::isolate();
+    let n = node();
+    set_token(&n, "trc1.secret").await;
+    let body = json!({ "channels": ["personal"], "local_callback": true });
+
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/connect",
+        LOCAL,
+        "127.0.0.1:7420",
+        &[("origin", "http://127.0.0.1:7420")],
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["completion"], "local_callback", "{v}");
+    cancel_sign_in(&n).await;
+
+    let (s, cookies, _) = call(
+        &n,
+        "POST",
+        "/api/login",
+        REMOTE,
+        "tracon.example",
+        &[],
+        Some(json!({ "token": "trc1.secret" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let cookie = cookie_of(&cookies);
+    for (host, forwarded) in PROXIES {
+        let mut headers = forwarded.to_vec();
+        headers.push(("cookie", &cookie));
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            "/api/providers/anthropic/connect",
+            LOCAL,
+            host,
+            &headers,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{host}: {v}");
+        assert_eq!(v["completion"], "paste", "{host}: {v}");
+        cancel_sign_in(&n).await;
+    }
+}
+
+/// The administrator screens tell the interface whether it is at the node, so
+/// it can disable what only works there. Both need a credential even on the
+/// machine; only the flag differs.
+#[tokio::test]
+async fn the_admin_screens_report_local_only_for_a_direct_request() {
+    state::isolate();
+    let n = node();
+    set_token(&n, "trc1.secret").await;
+    let bearer = ("authorization", "Bearer trc1.secret");
+    for path in ["/api/admin/mesh", "/api/admin/maintenance"] {
+        let (s, _, v) = call(&n, "GET", path, LOCAL, "127.0.0.1:7420", &[bearer], None).await;
+        assert_eq!(s, StatusCode::OK, "{path}: {v}");
+        assert_eq!(v["local"], true, "{path}: {v}");
+        for (host, forwarded) in PROXIES {
+            let mut headers = forwarded.to_vec();
+            headers.push(bearer);
+            let (s, _, v) = call(&n, "GET", path, LOCAL, host, &headers, None).await;
+            assert_eq!(s, StatusCode::OK, "{path} via {host}: {v}");
+            assert_eq!(v["local"], false, "{path} via {host}: {v}");
+        }
+    }
 }

@@ -496,22 +496,6 @@ pub(crate) fn hostname(value: &str) -> &str {
     v.rsplit_once(':').map(|(h, _)| h).unwrap_or(v)
 }
 
-/// Whether a `Host`/`Origin` host is one the operator API answers to: loopback,
-/// or the exact address the node was told to bind. This is the DNS-rebinding
-/// defence — a page on `evil.example` that resolves to `127.0.0.1` still sends
-/// `Host: evil.example`, which is refused.
-pub(crate) fn host_is_local(host: Option<&str>, bind: &str) -> bool {
-    match host {
-        // No Host header at all is not a browser (they always send one), so it
-        // is not a rebinding vector; local non-browser clients are allowed.
-        None => true,
-        Some(h) => {
-            let h = hostname(h);
-            matches!(h, "localhost" | "127.0.0.1" | "::1") || h == bind
-        }
-    }
-}
-
 /// What the harness can reach: a liveness probe and the node's tools. No
 /// operator API, so a harness that finds the forward cannot drive sessions.
 pub fn harness_router(state: AppState) -> Router {
@@ -1232,7 +1216,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_unix_exclusive, host_is_local, hostname};
+    use super::{bind_unix_exclusive, hostname};
 
     #[tokio::test]
     async fn a_live_socket_is_refused_and_a_stale_one_replaced() {
@@ -1260,21 +1244,5 @@ mod tests {
         assert_eq!(hostname("http://[::1]:7420"), "::1");
         assert_eq!(hostname("http://evil.example"), "evil.example");
         assert_eq!(hostname("evil.example:80"), "evil.example");
-    }
-
-    #[test]
-    fn loopback_and_the_bind_address_are_allowed_others_are_refused() {
-        let bind = "127.0.0.1";
-        assert!(host_is_local(Some("localhost:7420"), bind));
-        assert!(host_is_local(Some("127.0.0.1:7420"), bind));
-        assert!(host_is_local(Some("[::1]:7420"), bind));
-        // A rebinding attack keeps the attacker's name in Host.
-        assert!(!host_is_local(Some("evil.example"), bind));
-        assert!(!host_is_local(Some("evil.example:7420"), bind));
-        // A non-loopback bind allows its own address.
-        assert!(host_is_local(Some("10.0.0.5:7420"), "10.0.0.5"));
-        assert!(!host_is_local(Some("10.0.0.9:7420"), "10.0.0.5"));
-        // A missing Host is not a browser and is not a rebinding vector.
-        assert!(host_is_local(None, bind));
     }
 }

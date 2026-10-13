@@ -184,6 +184,29 @@ tailscale serve --bg 7420                                # HTTPS at https://<mac
 tracon auth issue --url https://<machine>.<tailnet>.ts.net
 ```
 
+Tell the node the name it now answers to, in `node.toml`:
+
+```toml
+[auth]
+public_origin = "https://<machine>.<tailnet>.ts.net"   # an https: origin on a domain name; no path, no IP address
+```
+
+A proxy on the node's own machine connects to it from `127.0.0.1`, but what it relays
+is not you at the machine. The node treats a request as local only when it comes
+from loopback directly: no `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`
+header, a `Host` of `localhost`, `127.x.x.x` or `[::1]`, and, if there is an
+`Origin`, the same host and port as that `Host` (a page on another local port, such
+as a dev server, is another site and not you). Tailscale Serve sends `X-Forwarded-For`, so the phone behind it signs
+in with its cookie like any other remote client, and the controls that only work at
+the node (Settings that rewrite `node.toml`, providers, policy, mesh setup) stay
+disabled there. Any other proxy you put in front of a node must send
+`X-Forwarded-For` too (Caddy, cloudflared and Traefik do by default; nginx needs
+`proxy_set_header X-Forwarded-For $remote_addr;`): one that strips it and rewrites
+`Host` to `127.0.0.1` looks exactly like a client on the machine. Never relay the
+operator port at layer 4 (`tailscale serve --tcp`, `socat`, `ssh -R`, `kubectl
+port-forward --address 0.0.0.0`): a TCP relay adds no header, and a non-browser
+client at the far end chooses its own `Host`, so it would be local.
+
 `auth issue` prints the operator token once — and, given `--url`, a QR code. Scan it
 with the phone's camera: the token rides the URL fragment (never sent to any server,
 stripped from the address bar before login), the browser exchanges it for a cookie,
@@ -199,8 +222,9 @@ one it cannot write to, so set it in `node.toml` before expecting the phone to b
 contact = "mailto:you@example.com"   # or an https: URL you answer at
 ```
 
-Without one the node sends nothing and says so: in Settings, under Notifications,
-and in `tracon push ls`. A contact that is not a `mailto:` address on a real domain
+With no contact, the node signs with `[auth] public_origin` when that is a public
+`https:` origin. Without either the node sends nothing and says so: in Settings,
+under Notifications, and in `tracon push ls`. A contact that is not a `mailto:` address on a real domain
 or a public `https:` URL stops `tracon serve` at load. When a push service does
 refuse a push, what it said (Apple's `{"reason":"BadJwtToken"}`, for instance) is
 kept on the device, with the count of failures in a row, in the same two places; a
@@ -1056,7 +1080,10 @@ max_diff_lines = 10000              # added plus removed lines; a bigger submiss
 max_files = 200
 
 [notify]
-# contact = "mailto:you@example.com"    # what a push service may write to about this sender; no pushes without it
+# contact = "mailto:you@example.com"    # what a push service may write to about this sender; falls back to [auth] public_origin
+
+[auth]
+# public_origin = "https://tracon.example.org"  # where remote browsers reach this node; https: on a domain name (http: for localhost)
 
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false

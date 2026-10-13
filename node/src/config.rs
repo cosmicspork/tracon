@@ -47,6 +47,8 @@ pub struct Config {
     pub supervision: Supervision,
     pub review: ReviewLimits,
     pub notify: Notify,
+    /// The node's public name, for clients that are not on this machine.
+    pub auth: Auth,
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
@@ -126,7 +128,7 @@ impl Ui {
 
     /// The host the UI listener answers to, for the `Host` check that is the
     /// DNS-rebinding defence on this origin — the same question
-    /// `http::host_is_local` asks of the operator listener.
+    /// `http::auth::is_local` asks of the operator listener.
     pub fn opencode_host(&self) -> Result<String, String> {
         let origin = self.opencode_origin()?;
         Ok(crate::http::hostname(&origin).to_string())
@@ -538,6 +540,72 @@ pub fn validate_contact(contact: &str) -> Result<(), String> {
         _ => Err(format!(
             "notify.contact {contact:?} must be a mailto: address or an https: URL on a public host"
         )),
+    }
+}
+
+/// How clients that are not on this machine reach the node.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Auth {
+    /// The origin a remote browser opens the node at, behind whatever
+    /// terminates TLS: `https://tracon-node.example.org`. It names the node
+    /// to the outside world: the push subject falls back to it when
+    /// `[notify] contact` is unset, and it is what a passkey is bound to.
+    /// Unset, the node knows no public name for itself.
+    pub public_origin: Option<String>,
+}
+
+impl Auth {
+    /// The configured public origin, normalised to `scheme://host[:port]`
+    /// (lower-case host, default port dropped), or why it is not one.
+    ///
+    /// HTTPS only, because the operator cookie is `Secure` off this machine
+    /// and a passkey is refused on an insecure origin; plain HTTP is accepted
+    /// only for `localhost`, which browsers treat as secure. The host is a
+    /// domain name, never an IP address, because a passkey's relying-party ID
+    /// must be one. An origin and nothing else: no credentials, path, query or
+    /// fragment.
+    pub fn public_origin(&self) -> Result<Option<String>, String> {
+        let Some(configured) = self.public_origin.as_deref() else {
+            return Ok(None);
+        };
+        let url = url::Url::parse(configured.trim())
+            .map_err(|error| format!("auth.public_origin is not a valid URL: {error}"))?;
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || !matches!(url.path(), "" | "/")
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "auth.public_origin must be an origin without credentials, path, query, or fragment"
+                    .into(),
+            );
+        }
+        // A passkey is bound to a relying-party ID, which must be a domain
+        // name: browsers refuse WebAuthn on an IP-literal origin, loopback
+        // included. `localhost` is the one name that needs no certificate,
+        // which is what local passkey testing runs against.
+        let localhost =
+            match url.host() {
+                Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+                Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => return Err(
+                    "auth.public_origin must name the node by a domain name, not an IP address: \
+                     a passkey is bound to a domain, and browsers refuse one on an IP address \
+                     (use http://localhost:<port> for local testing)"
+                        .into(),
+                ),
+                None => return Err("auth.public_origin has no host".into()),
+            };
+        match url.scheme() {
+            "https" => {}
+            "http" if localhost => {}
+            _ => return Err(
+                "auth.public_origin must be an https: origin; http: is allowed only for localhost"
+                    .into(),
+            ),
+        }
+        Ok(Some(url.origin().ascii_serialization()))
     }
 }
 
@@ -1710,6 +1778,7 @@ impl Default for Config {
             supervision: Supervision::default(),
             review: ReviewLimits::default(),
             notify: Notify::default(),
+            auth: Auth::default(),
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
@@ -2003,11 +2072,12 @@ impl Config {
         Self::state_dir().join("harness-state")
     }
 
-    /// The HTTPS origin clients reach this node at, when the node knows it.
-    /// Nothing records one yet; it is the seam a configured public origin
-    /// plugs into, and the push subject falls back to it.
+    /// The origin clients reach this node at from elsewhere, normalised:
+    /// `[auth] public_origin`. The push subject falls back to it. `None` when
+    /// unset; a value that does not validate stops `try_load`, so a running
+    /// node never holds one.
     pub fn public_origin(&self) -> Option<String> {
-        None
+        self.auth.public_origin().ok().flatten()
     }
 
     pub fn load() -> Self {
@@ -2074,6 +2144,10 @@ impl Config {
                 config
                     .ui
                     .opencode_origin()
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                config
+                    .auth
+                    .public_origin()
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 validate_repos(&config.repo)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -3153,5 +3227,139 @@ models = [{ id = "gpt-6" }]
         ] {
             assert_eq!(kube_quantity(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_public_origin_is_an_https_origin_and_nothing_more() {
+        let mut auth = Auth::default();
+        assert_eq!(auth.public_origin().unwrap(), None);
+
+        for (written, normalised) in [
+            (
+                "https://tracon-node.0x69.xyz",
+                "https://tracon-node.0x69.xyz",
+            ),
+            (
+                "https://tracon-node.0x69.xyz/",
+                "https://tracon-node.0x69.xyz",
+            ),
+            (
+                "  HTTPS://Tracon.Example.org:443/ ",
+                "https://tracon.example.org",
+            ),
+            (
+                "https://tracon.example.org:8443",
+                "https://tracon.example.org:8443",
+            ),
+            // Plain HTTP only where a browser already treats it as secure,
+            // and where a passkey can still be made: local testing.
+            ("http://localhost:7420", "http://localhost:7420"),
+            ("http://LocalHost:7420/", "http://localhost:7420"),
+            ("https://localhost:8443", "https://localhost:8443"),
+        ] {
+            auth.public_origin = Some(written.into());
+            assert_eq!(
+                auth.public_origin().unwrap().as_deref(),
+                Some(normalised),
+                "{written}"
+            );
+        }
+
+        for invalid in [
+            "tracon.example.org",
+            "http://tracon.example.org",
+            "http://192.168.1.10:7420",
+            "http://localhost.example.org",
+            "ftp://tracon.example.org",
+            "https://tracon.example.org/tracon",
+            "https://user@tracon.example.org",
+            "https://user:pw@tracon.example.org",
+            "https://tracon.example.org?x=1",
+            "https://tracon.example.org#f",
+            "",
+        ] {
+            auth.public_origin = Some(invalid.into());
+            assert!(auth.public_origin().is_err(), "{invalid:?}");
+        }
+
+        // An IP address is never a relying-party ID, loopback or public, and
+        // the refusal says why and what to use instead.
+        for ip in [
+            "https://203.0.113.5",
+            "https://100.101.102.103:8443",
+            "https://[2001:db8::1]",
+            "http://127.0.0.1:7420",
+            "https://127.0.0.1:7420",
+            "http://[::1]:7420",
+        ] {
+            auth.public_origin = Some(ip.into());
+            let error = auth.public_origin().unwrap_err();
+            assert!(error.contains("domain name"), "{ip}: {error}");
+            assert!(error.contains("localhost"), "{ip}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_public_origin_is_checked_at_load_and_names_the_push_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+
+        std::fs::write(
+            &path,
+            "[auth]\npublic_origin = \"http://tracon.example.org\"\n",
+        )
+        .unwrap();
+        let error = Config::try_load_from(&path).unwrap_err();
+        assert!(error.contains("auth.public_origin"), "{error}");
+
+        // Unset: no public name, and so no push subject without a contact.
+        std::fs::write(&path, "").unwrap();
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert_eq!(cfg.public_origin(), None);
+        assert_eq!(
+            cfg.notify.subject(cfg.public_origin().as_deref()),
+            Err(NO_PUSH_CONTACT)
+        );
+
+        // Set, with no contact: the origin is the subject, as written once.
+        std::fs::write(
+            &path,
+            "[auth]\npublic_origin = \"https://Tracon-Node.0x69.xyz/\"\n",
+        )
+        .unwrap();
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert_eq!(
+            cfg.public_origin().as_deref(),
+            Some("https://tracon-node.0x69.xyz")
+        );
+        assert_eq!(
+            cfg.notify.subject(cfg.public_origin().as_deref()).unwrap(),
+            "https://tracon-node.0x69.xyz"
+        );
+
+        // A contact still wins.
+        std::fs::write(
+            &path,
+            "[auth]\npublic_origin = \"https://tracon-node.0x69.xyz\"\n\n[notify]\ncontact = \"mailto:ops@example.org\"\n",
+        )
+        .unwrap();
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert_eq!(
+            cfg.notify.subject(cfg.public_origin().as_deref()).unwrap(),
+            "mailto:ops@example.org"
+        );
+
+        // A loopback origin is valid for the node but is no push subject:
+        // Apple will not write to this machine.
+        std::fs::write(&path, "[auth]\npublic_origin = \"http://localhost:7420\"\n").unwrap();
+        let cfg = Config::try_load_from(&path).unwrap();
+        assert_eq!(
+            cfg.public_origin().as_deref(),
+            Some("http://localhost:7420")
+        );
+        assert_eq!(
+            cfg.notify.subject(cfg.public_origin().as_deref()),
+            Err(NO_PUSH_CONTACT)
+        );
     }
 }
