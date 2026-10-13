@@ -22,13 +22,34 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        # Seed the config onto the state volume once. After that the file on
+        # the volume is the node's own: `tracon enroll`, Settings and
+        # `tracon repo set` write to it, which a ConfigMap mount would refuse.
+        # Delete it to reseed from the ConfigMap.
+        - name: seed-config
+          image: ghcr.io/cosmicspork/tracon-node:latest
+          command:
+            - sh
+            - -c
+            - mkdir -p /state/config/tracon && [ -f /state/config/tracon/node.toml ] || cp /seed/node.toml /state/config/tracon/node.toml
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: seed
+              mountPath: /seed
+              readOnly: true
       containers:
         - name: node
           image: ghcr.io/cosmicspork/tracon-node:latest
           args: ["serve"]
           env:
             - name: XDG_CONFIG_HOME
-              value: /config
+              value: /state/config
             - name: XDG_STATE_HOME
               value: /state
             - name: HOME
@@ -59,9 +80,6 @@ spec:
           volumeMounts:
             - name: state
               mountPath: /state
-            - name: config
-              mountPath: /config/tracon
-              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -70,6 +88,6 @@ spec:
         - name: state
           persistentVolumeClaim:
             claimName: tracon-state
-        - name: config
+        - name: seed
           configMap:
             name: tracon-node

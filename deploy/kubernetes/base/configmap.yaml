@@ -3,6 +3,10 @@ kind: ConfigMap
 metadata:
   name: tracon-node
 data:
+  # Seeded onto the state volume on first start (see the deployment's
+  # seed-config init container); after that the file on the volume is
+  # authoritative, because the node writes to it. Edit it there, or delete it
+  # to reseed from here.
   node.toml: |
     node_name = "work"
 

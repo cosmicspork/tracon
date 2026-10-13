@@ -428,8 +428,8 @@ pub struct Embed {
     /// Its dimension. A change rebuilds the index from empty.
     pub dim: usize,
     /// A file holding the bearer token for `base_url`, when the endpoint wants
-    /// one. A path rather than the token itself: `node.toml` is a plain file
-    /// and a read-only ConfigMap in a pod, so the secret stays somewhere that
+    /// one. A path rather than the token itself: `node.toml` is a plain file,
+    /// seeded from a ConfigMap in a pod, so the secret stays somewhere that
     /// can be a Secret, and rotating it does not mean editing config.
     ///
     /// Not the broker. The broker holds what a *harness* may be given; this is
@@ -947,6 +947,220 @@ pub struct Kubernetes {
     /// still waiting. Only the start is bounded here: a started command runs
     /// until it ends or its caller stops it, as it does under Podman.
     pub start_timeout_secs: u64,
+    /// Requests and limits for harness pods, `[runtime.kubernetes.resources]`.
+    pub resources: KubeResources,
+    /// Secrets a harness pod pulls its image with. Empty leaves the pod
+    /// without any, so the namespace's `default` service account supplies
+    /// its own (a registry integration that patches that account works
+    /// unchanged). Naming any replaces that account's list for these pods.
+    pub image_pull_secrets: Vec<String>,
+    /// Size of the memory-backed `/dev/shm` every harness pod gets. Chromium
+    /// keeps its renderers' shared memory there, and the 64 MiB a container
+    /// runtime gives by default crashes a browser test. It counts against
+    /// the pod's memory limit, so it must fit within both limits.
+    pub shm_size: String,
+}
+
+/// What a harness pod asks the scheduler for. Two kinds: a session (the
+/// harness and whatever it runs while the operator works), and a command run
+/// to completion (a check, a preparation, a probe), which is where a test
+/// suite with a bundler and a browser lands.
+///
+/// Every pod renders explicit requests and a memory limit. A namespace's
+/// LimitRange otherwise fills in its own, and a request above its default
+/// limit is refused at admission rather than defaulted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KubeResources {
+    pub session: PodResources,
+    pub command: PodResources,
+}
+
+/// One kind of harness pod's requests and limits, as Kubernetes quantities
+/// (`500m`, `2Gi`). An unset key takes the default for its kind
+/// (`KubeResources::session`, `KubeResources::command`), so a table that
+/// changes one value keeps the rest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PodResources {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit: Option<String>,
+    /// Unset by default: a CPU limit throttles a build or a test run on a
+    /// node that has idle cores, and buys nothing a request does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_limit: Option<String>,
+}
+
+/// A pod's resources with every default filled in: what is rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodSizing {
+    pub cpu_request: String,
+    pub memory_request: String,
+    pub memory_limit: String,
+    pub cpu_limit: Option<String>,
+}
+
+impl PodResources {
+    fn over(&self, base: PodSizing) -> PodSizing {
+        PodSizing {
+            cpu_request: self.cpu_request.clone().unwrap_or(base.cpu_request),
+            memory_request: self.memory_request.clone().unwrap_or(base.memory_request),
+            memory_limit: self.memory_limit.clone().unwrap_or(base.memory_limit),
+            cpu_limit: self.cpu_limit.clone().or(base.cpu_limit),
+        }
+    }
+}
+
+impl KubeResources {
+    /// A session's pod. The defaults suit one shared 4 vCPU / 8 GiB node: a
+    /// harness idles near a few hundred MiB, but a session also runs the
+    /// project's tests, so the limit leaves room for a browser.
+    pub fn session(&self) -> PodSizing {
+        self.session.over(PodSizing {
+            cpu_request: "250m".into(),
+            memory_request: "1Gi".into(),
+            memory_limit: "4Gi".into(),
+            cpu_limit: None,
+        })
+    }
+
+    /// A check's or a preparation's pod. A Laravel suite with Vite and
+    /// Playwright peaks around 2 to 3 GiB, so that much is requested rather
+    /// than hoped for.
+    pub fn command(&self) -> PodSizing {
+        self.command.over(PodSizing {
+            cpu_request: "500m".into(),
+            memory_request: "2Gi".into(),
+            memory_limit: "4Gi".into(),
+            cpu_limit: None,
+        })
+    }
+}
+
+/// A Kubernetes resource quantity (`250m`, `1.5`, `2Gi`, `1e3`) in base
+/// units, or `None` for anything the API server would refuse. Negative values
+/// are refused too: no request or limit can be one.
+pub fn kube_quantity(value: &str) -> Option<f64> {
+    let unsigned = value.strip_prefix('+').unwrap_or(value);
+    let split = unsigned
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(unsigned.len());
+    let (number, suffix) = unsigned.split_at(split);
+    // Digits and dots only, so `inf` and `nan` never reach the parse.
+    let number: f64 = number.parse().ok()?;
+    let scale = match suffix {
+        "" => 1.0,
+        "n" => 1e-9,
+        "u" => 1e-6,
+        "m" => 1e-3,
+        "k" => 1e3,
+        "M" => 1e6,
+        "G" => 1e9,
+        "T" => 1e12,
+        "P" => 1e15,
+        "E" => 1e18,
+        "Ki" => 1024f64,
+        "Mi" => 1024f64.powi(2),
+        "Gi" => 1024f64.powi(3),
+        "Ti" => 1024f64.powi(4),
+        "Pi" => 1024f64.powi(5),
+        "Ei" => 1024f64.powi(6),
+        exponent => {
+            let digits = exponent
+                .strip_prefix('e')
+                .or_else(|| exponent.strip_prefix('E'))?;
+            let unsigned = digits.strip_prefix(['+', '-']).unwrap_or(digits);
+            if unsigned.is_empty() || !unsigned.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            10f64.powi(digits.parse().ok()?)
+        }
+    };
+    Some(number * scale)
+}
+
+/// A Secret's name: a DNS subdomain, as the API server checks it.
+fn dns_subdomain(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
+impl Kubernetes {
+    /// Refuse sizing the API server would reject at every pod create, or that
+    /// could never hold: a limit below its own request is refused by the
+    /// API, and found at load it points at the line rather than at a
+    /// session that will not start.
+    pub fn validate(&self) -> Result<(), String> {
+        for (kind, sizing) in [
+            ("session", self.resources.session()),
+            ("command", self.resources.command()),
+        ] {
+            let key = |name: &str| format!("runtime.kubernetes.resources.{kind}.{name}");
+            let parse = |name: &str, value: &str| {
+                kube_quantity(value)
+                    .ok_or_else(|| format!("{}: {value:?} is not a quantity", key(name)))
+            };
+            let cpu_request = parse("cpu_request", &sizing.cpu_request)?;
+            let memory_request = parse("memory_request", &sizing.memory_request)?;
+            let memory_limit = parse("memory_limit", &sizing.memory_limit)?;
+            if memory_limit < memory_request {
+                return Err(format!(
+                    "{} ({}) is below memory_request ({})",
+                    key("memory_limit"),
+                    sizing.memory_limit,
+                    sizing.memory_request
+                ));
+            }
+            if let Some(limit) = &sizing.cpu_limit {
+                if parse("cpu_limit", limit)? < cpu_request {
+                    return Err(format!(
+                        "{} ({limit}) is below cpu_request ({})",
+                        key("cpu_limit"),
+                        sizing.cpu_request
+                    ));
+                }
+            }
+            let shm = kube_quantity(&self.shm_size)
+                .filter(|size| *size > 0.0)
+                .ok_or_else(|| {
+                    format!(
+                        "runtime.kubernetes.shm_size: {:?} is not a positive quantity",
+                        self.shm_size
+                    )
+                })?;
+            if shm > memory_limit {
+                return Err(format!(
+                    "runtime.kubernetes.shm_size ({}) is larger than {} ({}): shared memory \
+                     counts against the pod's memory limit",
+                    self.shm_size,
+                    key("memory_limit"),
+                    sizing.memory_limit
+                ));
+            }
+        }
+        if let Some(name) = self
+            .image_pull_secrets
+            .iter()
+            .find(|name| !dns_subdomain(name))
+        {
+            return Err(format!(
+                "runtime.kubernetes.image_pull_secrets: {name:?} is not a Secret name"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for Kubernetes {
@@ -964,6 +1178,9 @@ impl Default for Kubernetes {
             gateway_host: "tracon-gw".into(),
             // A first pull of a repository image can be gigabytes.
             start_timeout_secs: 15 * 60,
+            resources: KubeResources::default(),
+            image_pull_secrets: Vec::new(),
+            shm_size: "1Gi".into(),
         }
     }
 }
@@ -1861,6 +2078,11 @@ impl Config {
                 validate_repos(&config.repo)
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 validate_services(&config.service)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                config
+                    .runtime
+                    .kubernetes
+                    .validate()
                     .map_err(|error| format!("{}: {error}", path.display()))?;
                 if let Some(contact) = config.notify.contact.as_deref() {
                     validate_contact(contact)
@@ -2822,6 +3044,114 @@ models = [{ id = "gpt-6" }]
         ] {
             ui.opencode_url = Some(invalid.into());
             assert!(ui.opencode_origin().is_err(), "{invalid}");
+        }
+    }
+
+    /// Every harness pod renders explicit requests and a memory limit, so a
+    /// namespace's LimitRange never fills in a default the node did not
+    /// choose; a check gets more than a session because a test suite with a
+    /// browser needs it.
+    #[test]
+    fn kubernetes_pods_are_sized_by_default() {
+        let k = Config::default().runtime.kubernetes;
+        k.validate().unwrap();
+        let session = k.resources.session();
+        assert_eq!(session.cpu_request, "250m");
+        assert_eq!(session.memory_request, "1Gi");
+        assert_eq!(session.memory_limit, "4Gi");
+        assert_eq!(session.cpu_limit, None);
+        let command = k.resources.command();
+        assert_eq!(command.cpu_request, "500m");
+        assert_eq!(command.memory_request, "2Gi");
+        assert_eq!(command.memory_limit, "4Gi");
+        assert_eq!(command.cpu_limit, None);
+        assert!(k.image_pull_secrets.is_empty());
+        assert_eq!(k.shm_size, "1Gi");
+    }
+
+    /// A table that changes one value keeps its own kind's defaults for the
+    /// rest, not the other kind's.
+    #[test]
+    fn a_partial_resources_table_keeps_its_kinds_defaults() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [runtime.kubernetes]
+            image_pull_secrets = ["registry-tracon"]
+            shm_size = "512Mi"
+            [runtime.kubernetes.resources.command]
+            memory_limit = "6Gi"
+            cpu_limit = "3"
+            "#,
+        )
+        .unwrap();
+        let k = &cfg.runtime.kubernetes;
+        k.validate().unwrap();
+        let command = k.resources.command();
+        assert_eq!(command.memory_limit, "6Gi");
+        assert_eq!(command.memory_request, "2Gi");
+        assert_eq!(command.cpu_limit.as_deref(), Some("3"));
+        assert_eq!(
+            k.resources.session(),
+            Config::default().runtime.kubernetes.resources.session()
+        );
+        assert_eq!(k.image_pull_secrets, ["registry-tracon"]);
+        assert_eq!(k.shm_size, "512Mi");
+    }
+
+    #[test]
+    fn kubernetes_sizing_the_api_would_refuse_is_refused_at_load() {
+        let refused = |toml_text: &str, needle: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("node.toml");
+            std::fs::write(&path, toml_text).unwrap();
+            let error = Config::try_load_from(&path).unwrap_err();
+            assert!(error.contains(needle), "{needle}: {error}");
+        };
+        refused(
+            "[runtime.kubernetes.resources.session]\nmemory_request = \"6Gi\"\n",
+            "runtime.kubernetes.resources.session.memory_limit (4Gi) is below memory_request (6Gi)",
+        );
+        refused(
+            "[runtime.kubernetes.resources.command]\ncpu_request = \"2\"\ncpu_limit = \"1500m\"\n",
+            "resources.command.cpu_limit (1500m) is below cpu_request (2)",
+        );
+        refused(
+            "[runtime.kubernetes.resources.command]\nmemory_limit = \"4 GB\"\n",
+            "resources.command.memory_limit: \"4 GB\" is not a quantity",
+        );
+        refused(
+            "[runtime.kubernetes]\nshm_size = \"8Gi\"\n",
+            "shm_size (8Gi) is larger than",
+        );
+        refused(
+            "[runtime.kubernetes]\nshm_size = \"0\"\n",
+            "not a positive quantity",
+        );
+        refused(
+            "[runtime.kubernetes]\nimage_pull_secrets = [\"Registry_Creds\"]\n",
+            "\"Registry_Creds\" is not a Secret name",
+        );
+        // Equal is allowed: a Guaranteed pod is a limit that meets its request.
+        let mut k = Config::default().runtime.kubernetes;
+        k.resources.command.memory_limit = Some("2048Mi".into());
+        k.resources.command.cpu_limit = Some("0.5".into());
+        k.validate().unwrap();
+    }
+
+    #[test]
+    fn kubernetes_quantities_parse_as_the_api_writes_them() {
+        assert_eq!(kube_quantity("250m"), Some(0.25));
+        assert_eq!(kube_quantity("2"), Some(2.0));
+        assert_eq!(kube_quantity("+1.5"), Some(1.5));
+        assert_eq!(kube_quantity("1Gi"), Some(1024f64.powi(3)));
+        assert_eq!(kube_quantity("2048Mi"), kube_quantity("2Gi"));
+        assert_eq!(kube_quantity("1G"), Some(1e9));
+        assert_eq!(kube_quantity("1e3"), Some(1000.0));
+        assert_eq!(kube_quantity("5E-1"), Some(0.5));
+        for bad in [
+            "", "Gi", "-1", "1.2.3Gi", "1gb", "1 Gi", "inf", "1e", "1Gix",
+        ] {
+            assert_eq!(kube_quantity(bad), None, "{bad}");
         }
     }
 }

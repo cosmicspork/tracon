@@ -10,9 +10,11 @@
 mod support;
 use support::kube_api::{KubeApi, Script};
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use tracon::config::{Config, RuntimeKind};
 use tracon::runner::kube::{KubeRunner, KubeSpec, PodEnv};
 use tracon::runner::toolchain::IMAGE_ENTRYPOINT;
@@ -343,4 +345,93 @@ async fn checks_in_a_repository_image_get_no_entrypoint() {
     let harness = container(2);
     assert_eq!(harness.command, Some(vec![IMAGE_ENTRYPOINT.to_string()]));
     assert_eq!(harness.args, Some(argv));
+}
+
+/// What reaches the API server for a check: the command's requests and
+/// memory limit (a namespace's LimitRange would otherwise fill in its own and
+/// refuse a request above its default limit), the configured pull secrets,
+/// a memory-backed `/dev/shm` for a browser, and a writable `TMPDIR`.
+#[tokio::test(start_paused = true)]
+async fn a_captured_pod_is_created_sized_with_shared_memory_and_pull_secrets() {
+    let api = KubeApi::new(NAMESPACE).default_script(Script::exits(0));
+    let state = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.runtime.kind = RuntimeKind::Kubernetes;
+    cfg.runtime.kubernetes.image_pull_secrets = vec!["registry-tracon".into()];
+    cfg.runtime.kubernetes.resources.command.memory_limit = Some("5Gi".into());
+    cfg.runtime.kubernetes.validate().unwrap();
+    let mut spec = KubeSpec::for_harness(
+        &cfg,
+        "claude",
+        PodEnv {
+            namespace: NAMESPACE.into(),
+            pod_ip: "10.244.0.9".into(),
+            node_name: "general-1".into(),
+        },
+    );
+    spec.state_mount = state.path().to_path_buf();
+    let runner = KubeRunner::new(api.client(), spec);
+
+    runner
+        .run_capture(check("tracon-c-browser", Some(pinned("app"))))
+        .await
+        .unwrap();
+
+    let created = api.created();
+    assert_eq!(created.len(), 1);
+    let spec = created[0].spec.clone().unwrap();
+    let pull: Vec<_> = spec
+        .image_pull_secrets
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(pull, ["registry-tracon"]);
+
+    let container = &spec.containers[0];
+    let resources = container.resources.clone().unwrap();
+    let get = |map: &Option<BTreeMap<String, Quantity>>, key: &str| {
+        map.as_ref().and_then(|m| m.get(key)).map(|q| q.0.clone())
+    };
+    assert_eq!(get(&resources.requests, "cpu").as_deref(), Some("500m"));
+    assert_eq!(get(&resources.requests, "memory").as_deref(), Some("2Gi"));
+    assert_eq!(get(&resources.limits, "memory").as_deref(), Some("5Gi"));
+    assert_eq!(get(&resources.limits, "cpu"), None);
+
+    let volumes = spec.volumes.unwrap();
+    let shm = volumes
+        .iter()
+        .find(|v| {
+            v.empty_dir
+                .as_ref()
+                .is_some_and(|e| e.medium.as_deref() == Some("Memory"))
+        })
+        .expect("a memory-backed emptyDir");
+    assert_eq!(
+        shm.empty_dir
+            .as_ref()
+            .unwrap()
+            .size_limit
+            .as_ref()
+            .map(|q| q.0.as_str()),
+        Some("1Gi")
+    );
+    let mounts = container.volume_mounts.clone().unwrap();
+    assert!(mounts
+        .iter()
+        .any(|m| m.name == shm.name && m.mount_path == "/dev/shm"));
+    let tmpdir = container
+        .env
+        .iter()
+        .flatten()
+        .find(|e| e.name == "TMPDIR")
+        .and_then(|e| e.value.clone())
+        .expect("TMPDIR");
+    let scratch = mounts
+        .iter()
+        .find(|m| m.mount_path == tmpdir)
+        .expect("TMPDIR is a mount of its own");
+    assert!(volumes
+        .iter()
+        .any(|v| v.name == scratch.name && v.empty_dir.is_some()));
 }

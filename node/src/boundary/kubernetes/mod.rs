@@ -156,7 +156,7 @@ impl Backend for KubeBackend {
         // needs around it is applied by the operator. Say what that is.
         println!("{}", Self::manifests());
         eprintln!(
-            "apply the manifests above (kubectl apply -k deploy/kubernetes/lab, or your template); \
+            "apply the manifests above (kubectl apply -k deploy/kubernetes/base, or an overlay of it); \
              then `tracon check-boundary --deep` inside the node pod"
         );
         Ok(())

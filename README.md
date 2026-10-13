@@ -935,6 +935,15 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # scheduled, pull its image and start before the run is given
                                     # up with the reason it was waiting. Only the start: a started
                                     # check or preparation runs until it ends or its own timeout
+# image_pull_secrets = []           # (under [runtime.kubernetes]) Secrets harness pods pull with; empty
+                                    # leaves them to the namespace's default service account
+# shm_size = "1Gi"                  # (under [runtime.kubernetes]) memory-backed /dev/shm for browsers;
+                                    # counts against the memory limit, so it must fit within it
+# [runtime.kubernetes.resources.session]   # a session's pod; [...resources.command] is a check's,
+# cpu_request = "250m"              # a preparation's or a probe's (500m, 2Gi, 4Gi). Every pod
+# memory_request = "1Gi"            # renders its requests and memory limit, so a LimitRange
+# memory_limit = "4Gi"              # never fills them in; no CPU limit unless one is set
+# cpu_limit = "2"                   # (cpu_limit). A limit below its request is refused at load
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
 
 # [[repo]]                          # one repository's environment (also Settings → Repositories and
@@ -1214,6 +1223,14 @@ kubectl apply -k deploy/kubernetes/base
 kubectl -n <namespace> exec deploy/tracon-node -- tracon check-boundary --deep
 kubectl -n <namespace> port-forward deploy/tracon-node 7420:7420
 ```
+
+The ConfigMap only seeds `node.toml`. An init container copies it onto the state
+volume once, and from then on the node reads and writes the copy there
+(`/state/config/tracon/node.toml`); delete that file to reseed. Every harness pod
+names its own requests and memory limit (`[runtime.kubernetes.resources]`, sized by
+default for one shared 4 vCPU / 8 GB node), so a namespace's LimitRange never
+substitutes its defaults. Each pod also gets a memory-backed `/dev/shm` for browsers
+and an emptyDir at `/tmp` that `TMPDIR` names.
 
 ### From source
 
