@@ -508,6 +508,9 @@ pub async fn publish_review(
         outputs: edited_outputs,
         recover,
     } = request;
+    // The publish keys (`[publish]`, `[supervision]`) as they apply now.
+    let live = ctx.cfg.live();
+    let cfg: &crate::config::Config = &live;
     // Before anything is read from the worktree or the forge: if a newer
     // revision landed after the decision was made, this approval is for bytes
     // that are no longer what the review holds. Refuse it here, where the
@@ -566,7 +569,7 @@ pub async fn publish_review(
             ctx.store,
             ctx.manager.backend().as_ref(),
             &review.id,
-            ctx.cfg,
+            cfg,
         )
         .await
         .map_err(PublishError::Conflict)?;
@@ -599,7 +602,7 @@ pub async fn publish_review(
     // description: what the operator approved is what ships, held to the
     // same rules the submission was.
     let (_, style) = crate::review::prose::rules(
-        ctx.cfg,
+        cfg,
         ctx.store,
         &review.channel,
         submitter
@@ -751,7 +754,7 @@ pub async fn publish_review(
     };
     match crate::review::publish::publish(
         ctx.broker,
-        ctx.cfg,
+        cfg,
         &crate::review::publish::Publication {
             channel: &review.channel,
             node_id: ctx.node_id,

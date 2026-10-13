@@ -223,33 +223,51 @@ pub fn from_store(store: &Store, channel: &str) -> Result<(Vec<ExportDoc>, usize
 }
 
 /// `[docs] export_dir` on its timer: at startup, then every
-/// `export_every_secs`. Off while `export_dir` is unset.
+/// `export_every_secs`. Off while `export_dir` is unset. All three keys are
+/// read again before each export, so an edit of them applies from the next
+/// one; a node started with the export off looks again once a minute.
 pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
-    let Some(dir) = cfg
-        .docs
-        .export_dir
-        .as_deref()
-        .map(crate::config::expand_home)
-    else {
-        return;
-    };
-    let channel = if cfg.docs.export_channel.is_empty() {
-        cfg.session.default_channel.clone()
-    } else {
-        cfg.docs.export_channel.clone()
-    };
-    if channel.is_empty() {
-        tracing::warn!(
-            "[docs] export_dir is set, but neither export_channel nor [session] default_channel names a channel; nothing is exported"
-        );
-        return;
-    }
-    let mut tick = tokio::time::interval(Duration::from_secs(cfg.docs.export_every_secs.max(60)));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    const IDLE: Duration = Duration::from_secs(60);
+    let mut said_no_channel = false;
     loop {
-        tick.tick().await;
+        // Read live each time, and the guard below checks this value, the
+        // one about to be written to, not the one the node started with.
+        let (configured, dir, channel, every) = {
+            let live = cfg.live();
+            let configured = live.docs.export_dir.clone().unwrap_or_default();
+            let dir = live
+                .docs
+                .export_dir
+                .as_deref()
+                .map(crate::config::expand_home);
+            let channel = if live.docs.export_channel.is_empty() {
+                live.session.default_channel.clone()
+            } else {
+                live.docs.export_channel.clone()
+            };
+            (
+                configured,
+                dir,
+                channel,
+                Duration::from_secs(live.docs.export_every_secs.max(60)),
+            )
+        };
+        let Some(dir) = dir else {
+            tokio::time::sleep(IDLE).await;
+            continue;
+        };
+        if channel.is_empty() {
+            if !said_no_channel {
+                tracing::warn!(
+                    "[docs] export_dir is set, but neither export_channel nor [session] default_channel names a channel; nothing is exported"
+                );
+                said_no_channel = true;
+            }
+            tokio::time::sleep(IDLE).await;
+            continue;
+        }
+        said_no_channel = false;
         let (store, from) = (store.clone(), channel.clone());
-        let configured = cfg.docs.export_dir.clone().unwrap_or_default();
         let done = tokio::task::spawn_blocking(move || {
             // Checked before every export, not only when the key was written,
             // and written only through the descriptor the check vouched for.
@@ -275,6 +293,7 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
             }
             Err(e) => tracing::warn!(error = %e, "document export stopped"),
         }
+        tokio::time::sleep(every).await;
     }
 }
 

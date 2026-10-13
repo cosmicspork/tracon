@@ -599,7 +599,16 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Serve { listen } => http::serve(listen).await,
+        Command::Serve { listen } => {
+            http::serve(listen).await?;
+            // Stopped to be started again (a restart in a pod): exit now,
+            // whatever background work is left, so the supervisor sees the
+            // process go and starts it.
+            if tracon::restart::exit_was_requested() {
+                std::process::exit(0);
+            }
+            Ok(())
+        }
         Command::Setup { rebuild, ui_bundle } => {
             let cfg = config::Config::load();
             let backend = boundary::backend_for(&cfg).await;

@@ -38,6 +38,7 @@ pub mod providers;
 pub mod readiness;
 pub mod repo_image;
 pub mod repo_setup;
+pub mod restart;
 pub mod review;
 pub mod runner;
 pub mod service;

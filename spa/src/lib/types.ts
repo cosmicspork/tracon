@@ -120,6 +120,35 @@ export interface AwakeState {
   last_suspend: { woke_ms: number; asleep_ms: number } | null
 }
 
+/** What a restart of this node would change and the one waiting, from `/api/restart` and the `restart` stream event. */
+export interface RestartStatus {
+  /** Null on a node that did not record the file it started from. */
+  config: {
+    boot_hash: string
+    /** The file now: what a restart request names as `expected_hash`. */
+    hash: string
+    /** Restart-only keys that differ from what the node started with. */
+    keys: string[]
+    /** The file does not load now (does not parse, or fails a start's checks). */
+    unparseable: boolean
+  } | null
+  restart: { available: boolean; mechanism: string | null; reason: string | null }
+  plan: {
+    mode: RestartMode
+    requested_ms: number
+    deadline_ms: number
+    state: 'draining' | 'restarting'
+    expected_hash: string
+  } | null
+  /** What `when_idle` waits on: turns, running checks, and review submissions whose checks have not all run. */
+  busy: { turns: string[]; checks: number; reviews: number }
+  /** Live sessions a restart ends. */
+  closing: { id: string; channel: string; repo_path: string; branch: string; state: string; turn_active: boolean }[]
+  last_error: string | null
+}
+
+export type RestartMode = 'when_idle' | 'now'
+
 /** Hub reachability, from `/api/mesh` and the `mesh` stream event. */
 export interface MeshState {
   hub: { state: 'disabled' } | { state: 'connected' } | { state: 'unreachable'; since_ms: number }
@@ -1515,6 +1544,7 @@ export type Frame =
   | { type: 'promotions'; waiting: Promotion[] }
   | { type: 'changes'; channel: string; changes: { table: string; id: string; op: string }[] }
   | ({ type: 'awake' } & AwakeState)
+  | ({ type: 'restart' } & RestartStatus)
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

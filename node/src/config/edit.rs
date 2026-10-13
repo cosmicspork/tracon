@@ -425,16 +425,20 @@ pub fn snapshot() -> Result<Snapshot, EditError> {
 pub fn snapshot_at(path: &Path) -> Result<Snapshot, EditError> {
     let bytes = read(path)?;
     let text = String::from_utf8(bytes).map_err(|_| unparseable(path, "not UTF-8"))?;
-    // The retired harness is migrated as a load migrates it, in memory: the
-    // file itself is rewritten by the next start, not by a reader.
-    let loaded = match crate::legacy::migrate_config(&text) {
-        Some(migration) => Config::from_toml(&migration.text, path),
-        None => Config::from_toml(&text, path),
-    };
     Ok(Snapshot {
-        config: loaded.map_err(EditError::Unparseable)?,
+        config: load_text(&text, path).map_err(EditError::Unparseable)?,
         hash: hash(text.as_bytes()),
     })
+}
+
+/// `text` as a start would load it, without writing anything: the retired
+/// harness is migrated in memory, as a load migrates it (the file itself is
+/// rewritten by the next start, not by a reader).
+pub fn load_text(text: &str, path: &Path) -> Result<Config, String> {
+    match crate::legacy::migrate_config(text) {
+        Some(migration) => Config::from_toml(&migration.text, path),
+        None => Config::from_toml(text, path),
+    }
 }
 
 /// Settle the audit rows an interrupted edit left pending: landed if the
@@ -623,12 +627,12 @@ pub fn apply_to_text(text: &str, ops: &[Op]) -> Result<String, EditError> {
 /// for this process (so nothing can hold it across an `.await`), and an
 /// exclusive lock on `node.toml.lock` beside the file for every other one,
 /// so `tracon mesh init` and a serving node cannot lose each other's edits.
-struct Held {
+pub(crate) struct Held {
     _process: std::sync::MutexGuard<'static, ()>,
     _file: std::fs::File,
 }
 
-fn lock(path: &Path) -> Result<Held, EditError> {
+pub(crate) fn lock(path: &Path) -> Result<Held, EditError> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let process = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -665,7 +669,7 @@ fn lock(path: &Path) -> Result<Held, EditError> {
 
 /// The table every `[[repo]]` writer reads, changes and writes under, from
 /// `Config::repos()` through `LiveRepos::set`. Taken before the edit lock.
-fn repo_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn repo_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -698,7 +702,11 @@ pub fn update_repos_at<T, E: From<EditError>>(
     let outcome = update_at(path, store, actor, |file| {
         Op::replace_repos(&file.repo, &entries)
     })?;
-    cfg.live_repo.set(outcome.config.repo.clone());
+    if outcome.wrote() {
+        cfg.apply_edit_at(path, &outcome);
+    } else {
+        cfg.live_repo.set(outcome.config.repo.clone());
+    }
     Ok((value, outcome))
 }
 
@@ -751,7 +759,7 @@ fn announce(
     }))
 }
 
-fn audit_entry(change: &Change) -> serde_json::Value {
+pub(crate) fn audit_entry(change: &Change) -> serde_json::Value {
     let at: Vec<String> = change
         .key
         .schema_key()
@@ -800,7 +808,7 @@ fn redacted(at: &[String], value: &toml::Value) -> serde_json::Value {
 /// The keys whose values differ between two texts of the file, down to the
 /// values themselves: a table that appears or goes is each of its keys. An
 /// array of tables whose length changed is one change at the array.
-fn diff(before: &str, after: &str) -> Vec<Change> {
+pub(crate) fn diff(before: &str, after: &str) -> Vec<Change> {
     let parse = |text: &str| toml::from_str::<toml::Table>(text).unwrap_or_default();
     let (before, after) = (parse(before), parse(after));
     let mut out = Vec::new();

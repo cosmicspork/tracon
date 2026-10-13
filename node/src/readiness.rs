@@ -219,7 +219,7 @@ pub async fn readiness(
 
     let environment = crate::environment::environment_for(cfg, store, Some(repo_path));
     let remote = if repo_exists {
-        crate::corpus::project::identify(channel, repo_path, &cfg.publish.git)
+        crate::corpus::project::identify(channel, repo_path, &cfg.live().publish.git)
             .await
             .2
     } else {

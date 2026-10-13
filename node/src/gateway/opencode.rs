@@ -64,7 +64,7 @@ pub(super) const MOUNT: &str = "/api/opencode/";
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn forward_timeout(s: &AppState) -> Duration {
-    match s.cfg.session.harness_api_timeout_secs {
+    match s.cfg.live().session.harness_api_timeout_secs {
         0 => FORWARD_TIMEOUT,
         secs => Duration::from_secs(secs),
     }
@@ -1408,6 +1408,13 @@ async fn mediate(
         }
 
         Mediation::Policy(action) => {
+            // A command or a compaction is a turn: none starts while a
+            // restart waits for the running ones to finish.
+            if matches!(action, "command" | "compact") {
+                if let Some(why) = s.manager.restart().refusal() {
+                    return answer(StatusCode::CONFLICT, &why);
+                }
+            }
             let decision = {
                 let policy = s.manager.policy().read();
                 policy.decide(&PolicyRequest {

@@ -24,6 +24,8 @@ import type {
   ManagedRepo,
   Memory,
   AwakeState,
+  RestartMode,
+  RestartStatus,
   MeshState,
   ModelOption,
   NodeConfig,
@@ -255,6 +257,10 @@ export const api = {
   nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
   mesh: () => call<MeshState>('GET', '/api/mesh'),
   awake: () => call<AwakeState>('GET', '/api/awake'),
+  restartStatus: () => call<RestartStatus>('GET', '/api/restart'),
+  restart: (mode: RestartMode, expected_hash: string, confirm = false) =>
+    call<RestartStatus>('POST', '/api/admin/restart', { mode, expected_hash, confirm }),
+  cancelRestart: () => call<RestartStatus>('DELETE', '/api/admin/restart'),
   channels: () => call<ChannelInfo[]>('GET', '/api/channels'),
   /** Optional hub aggregate; never substitutes for this node's local metrics. */
   hubRollups: (channel: string) =>

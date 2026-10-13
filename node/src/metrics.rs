@@ -332,7 +332,7 @@ pub fn channel_metrics(
     let tokens: i64 = usage.iter().map(|(_, _, i, o, _)| i + o).sum();
     let mut cost = None;
     for (_, provider, i, o, _) in &usage {
-        if let Some(price) = cfg.providers.get(provider).and_then(|p| p.price) {
+        if let Some(price) = cfg.live().providers.get(provider).and_then(|p| p.price) {
             *cost.get_or_insert(0.0) += price.cost(*i, *o);
         }
     }

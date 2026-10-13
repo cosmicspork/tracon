@@ -727,7 +727,8 @@ async fn a_settings_save_is_audited_and_a_repeat_writes_nothing() {
     let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch.clone())).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["changed"], json!(["review.max_files"]));
-    assert_eq!(v["restart_required"], true);
+    // A review limit applies to the running node at once.
+    assert_eq!(v["restart_required"], false);
     let rows = n.store.config_audit_recent(10).unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].actor, "Settings");

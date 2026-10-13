@@ -322,7 +322,7 @@ pub async fn list_nodes(
             // interface keeps its node in, so the answer has to live here too.
             if r.is_self == 1 {
                 v["loopback"] = json!(local);
-                v["default_channel"] = json!(s.cfg.session.default_channel);
+                v["default_channel"] = json!(s.cfg.live().session.default_channel);
                 build_facts(&mut v);
             }
             v
@@ -615,7 +615,7 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     };
     let mut v = node_row_json(&n);
     v["providers"] = json!(providers_json(s));
-    v["default_channel"] = json!(s.cfg.session.default_channel);
+    v["default_channel"] = json!(s.cfg.live().session.default_channel);
     // The policy this node runs beside the one its build ships, so Home can
     // say when a newer bundle is waiting to be applied. Read without waiting:
     // a caller may already hold the policy, and the line can wait a frame.
@@ -886,7 +886,7 @@ pub async fn import_transfer(
         None => {
             match transfers::import_workspace(
                 &transfer,
-                &s.cfg.publish.git,
+                &s.cfg.live().publish.git,
                 s.manager.backend().as_ref(),
             )
             .await
@@ -1219,7 +1219,7 @@ pub async fn import_workspace(
             "select at least one file or folder",
         ));
     }
-    let workspace = crate::workspace::seed_from_files(&s.cfg.publish.git, &selected, &id)
+    let workspace = crate::workspace::seed_from_files(&s.cfg.live().publish.git, &selected, &id)
         .await
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     let result = crate::workspace::import(
@@ -3862,7 +3862,7 @@ pub async fn publish_operator_issue(
     );
     // Checked before the draft is marked as publishing, so a refused `gh`
     // leaves it a draft rather than an uncertain publication.
-    let gh = crate::config::path_guard::program("publish.gh", &s.cfg.publish.gh)
+    let gh = crate::config::path_guard::program("publish.gh", &s.cfg.live().publish.gh)
         .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
     if !s.store().begin_issue_publication(&id)? {
         return Err(ApiError(
@@ -6642,9 +6642,11 @@ pub async fn put_config(
     if !outcome.wrote() {
         changed.clear();
     }
+    // The live keys apply now; the others wait for a restart, which the
+    // node's restart status names (`GET /api/restart`).
+    s.cfg.apply_edit(&outcome);
     Ok(Json(json!({
         "changed": changed,
-        // The running node holds its config in an Arc taken at startup.
         "restart_required": outcome.restart_required,
     })))
 }

@@ -660,7 +660,7 @@ pub async fn deliver(
     n: &Notification,
     now: i64,
 ) -> webpush::Outcome {
-    let subject = match cfg.notify.subject(cfg.public_origin().as_deref()) {
+    let subject = match cfg.live().notify.subject(cfg.public_origin().as_deref()) {
         Ok(subject) => subject,
         Err(why) => {
             static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -729,7 +729,10 @@ pub async fn deliver(
 
 /// Why this node sends no pushes at all, when it sends none.
 pub fn not_sending(cfg: &Config) -> Option<&'static str> {
-    cfg.notify.subject(cfg.public_origin().as_deref()).err()
+    cfg.live()
+        .notify
+        .subject(cfg.public_origin().as_deref())
+        .err()
 }
 
 /// Send a push that opens OpenCode's own view for one session.

@@ -8,8 +8,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub mod edit;
+pub mod last_good;
+pub mod live;
 pub mod path_guard;
 pub use edit::{edit, snapshot, update, EditError, EditOutcome, KeyPath, Op, Snapshot};
+pub use live::{ConfigHandle, Live, PendingRestart};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,6 +39,10 @@ pub struct Config {
     /// one repository's environment.
     #[serde(skip)]
     pub live_repo: LiveRepos,
+    /// The newest file the running node has taken in, for the keys that
+    /// apply without a restart (`Config::live`). Not part of the file.
+    #[serde(skip)]
+    pub live: ConfigHandle,
     /// Services a session may ask for by name (`service_start`): each a
     /// digest-pinned image run beside the session in its network namespace.
     pub service: Vec<Service>,
@@ -1893,6 +1900,7 @@ impl Default for Config {
             runtime: Runtime::default(),
             repo: Vec::new(),
             live_repo: LiveRepos::default(),
+            live: ConfigHandle::default(),
             service: Vec::new(),
             providers: default_providers(),
             declared_providers: Default::default(),

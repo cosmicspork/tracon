@@ -475,5 +475,8 @@ Kept as intent, off the plan until the supported configuration has earned them.
   points at the gateway.
 - A full IDE, general file editor, or per-project editor configuration.
 - Business-domain features such as invoicing and billing.
-- Arbitrary host execution through the node API. Service/CLI installation and node restarts
-  remain explicit desktop/CLI operations; file imports use a picker/upload flow.
+- Arbitrary host execution through the node API. Service/CLI installation remains an
+  explicit desktop/CLI operation; file imports use a picker/upload flow. A node restart is
+  the one lifecycle action the API takes from an administrator, fixed in what it does
+  (`POST /api/admin/restart`: drain, then the supervisor's own restart, or exit for the
+  kubelet), so `node.toml` changes apply without `kubectl exec` or a shell on the host.

@@ -1059,7 +1059,7 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
         let tree = crate::review::snapshot_candidate(
             &repo.to_string_lossy(),
             &commit,
-            cfg.supervision.max_snapshot_bytes,
+            cfg.live().supervision.max_snapshot_bytes,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -1477,7 +1477,7 @@ async fn build(
         &scratch,
         &dir,
         &recipe.context_tree,
-        cfg.supervision.max_snapshot_bytes,
+        cfg.live().supervision.max_snapshot_bytes,
     )
     .await
     .map_err(|e| staged(format!("build context: {e}")))?;

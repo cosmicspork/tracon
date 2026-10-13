@@ -21,6 +21,7 @@
   import DeviceApproval from './routes/DeviceApproval.svelte'
   import PasskeyOffer from './components/PasskeyOffer.svelte'
   import StepUpPrompt from './components/StepUpPrompt.svelte'
+  import RestartBanner from './components/RestartBanner.svelte'
   import { attention } from './lib/attention'
   import { stashToken, tokenFromHash } from './lib/auth'
   import { approvalFromHash, stashApproval, stashedApproval } from './lib/device'
@@ -266,6 +267,7 @@
         <button class="lnk" type="button" onclick={() => location.reload()}>Reload</button>
       </div>
     {/if}
+    <RestartBanner />
     <!-- Degraded is a state, not an error: quiet, persistent, not dismissable. -->
     {#if hubDown}
       <div class="banner dim">Hub unavailable <b>· local sessions continue. Queued shared updates are not yet confirmed on peers.</b></div>

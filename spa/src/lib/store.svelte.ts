@@ -15,6 +15,7 @@ import type {
   Frame,
   AwakeState,
   MeshState,
+  RestartStatus,
   NodeInfo,
   OperatorIssue,
   OperatorQuestion,
@@ -42,6 +43,8 @@ class Store {
   mesh = $state<MeshState | null>(null)
   /** Whether this node is holding its machine awake for a session. */
   awake = $state<AwakeState | null>(null)
+  /** What a restart of this node would change, and one waiting. */
+  restart = $state<RestartStatus | null>(null)
   /** Channels this node can start sessions on, and who is bound to each. */
   channels = $state<ChannelInfo[]>([])
   /** Model providers on the serving node and whether each is connected. */
@@ -146,6 +149,7 @@ class Store {
       'promotions',
       'changes',
       'awake',
+      'restart',
     ] as const) {
       this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
@@ -170,6 +174,7 @@ class Store {
       .awake()
       .then((a) => (this.awake = a))
       .catch(() => {})
+    void this.refreshRestart()
     const [nodes, mesh, channels, queue, sessions, providers] = results
     this.loads = {
       nodes: settledLoad(this.loads.nodes, nodes),
@@ -368,11 +373,25 @@ class Store {
         this.awake = frame
         break
       }
+      case 'restart': {
+        this.restart = frame
+        break
+      }
       case 'changes': {
         if (frame.changes.some((c) => c.table === 'document')) this.docsVersion += 1
         if (frame.changes.some((c) => c.table === 'work_item')) this.workVersion += 1
         break
       }
+    }
+  }
+
+  /** Read the restart status again: after a save, the node's own frame
+      can be up to one look behind. An older node has no such route. */
+  async refreshRestart() {
+    try {
+      this.restart = await api.restartStatus()
+    } catch {
+      // Keep what was shown.
     }
   }
 
