@@ -5750,7 +5750,7 @@ fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: 
 /// or approval, needs the sender in that channel, and the target must be this
 /// node's own: a command is never relayed on to a third node under this
 /// node's identity. A provider command needs the sender in every channel the
-/// sign-in binds and in one the credential it would replace serves. The
+/// sign-in binds and in every one the credential it would replace serves. The
 /// commands not named here check their own scope as they run.
 fn authorise_forwarded(
     s: &AppState,
@@ -5786,12 +5786,20 @@ fn authorise_forwarded(
                 .credential_channels(name)
                 .map_err(provider_err)?
             {
-                Some(serves) if !serves.iter().any(|c| shares(s, sender, c)) => Err(ApiError(
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "sender shares no channel with the {name} credential this sign-in would replace"
-                    ),
-                )),
+                // A credential bound to no channel is this node's alone, and
+                // one serving a channel the sender is not in would be taken
+                // from that channel's sessions: neither is a peer's to replace.
+                Some(serves)
+                    if serves.is_empty() || !serves.iter().all(|c| shares(s, sender, c)) =>
+                {
+                    Err(ApiError(
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "sender is not a member of every channel the {name} credential \
+                             this sign-in would replace serves"
+                        ),
+                    ))
+                }
                 _ => Ok(()),
             }
         }

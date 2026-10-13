@@ -784,13 +784,13 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
         "{seen}"
     );
 
-    // Nor may a member sign in over a credential that serves only channels
-    // it is not in.
+    // Nor may a member sign in over a credential that also serves a channel
+    // it is not in: sharing one of its channels is not enough.
     let credential = Config::default().providers["anthropic"].credential.clone();
     b.broker.write().unwrap().put(
         &credential,
         tracon::broker::Credential {
-            channels: vec!["private".into()],
+            channels: vec!["personal".into(), "private".into()],
             ..Default::default()
         },
     );
@@ -807,6 +807,30 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
         )
         .await;
     assert!(refused_with(&result, "would replace"), "{result:?}");
+    // Once it serves only channels the member shares, the member may.
+    b.broker.write().unwrap().put(
+        &credential,
+        tracon::broker::Credential {
+            channels: vec!["personal".into()],
+            ..Default::default()
+        },
+    );
+    let started = a
+        .client
+        .command(
+            &bi,
+            Command::ProviderConnect {
+                name: "anthropic".into(),
+                channels: vec!["personal".into()],
+                share: true,
+            },
+            t,
+        )
+        .await;
+    assert!(
+        started.as_ref().is_ok_and(|v| v["url"].is_string()),
+        "{started:?}"
+    );
 
     // A member drives a session in a channel it shares.
     b.store

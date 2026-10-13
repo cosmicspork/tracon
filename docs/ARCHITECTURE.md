@@ -936,8 +936,9 @@ Invariants on top of the wire:
   permission's or approval's session or channel) is its own and that the sender and
   the owner are both members of that channel, by the owner's own record. It never
   relays a command on to a third node under its own identity. A provider sign-in
-  needs the sender in every channel it would bind and in at least one channel served
-  by the credential it would replace; a pasted code or a cancel is held to the
+  needs the sender in every channel it would bind and in every channel served by the
+  credential it would replace (one bound to no channel is the owner's alone and never
+  replaced by a peer); a pasted code or a cancel is held to the
   channels of the sign-in the sender started. Create, verdict, notification, evidence
   and review-detail commands check their own channel as they run. A refusal is acked
   to the sender with its reason, logged, and shown as the mesh's last refusal.
