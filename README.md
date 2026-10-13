@@ -485,11 +485,14 @@ sessions reach them, and the time limit, with the repository named by its forge 
 to preparation, its path, or how its commits are published; a command naming a home
 directory is refused. Each receiving node only stages the offer and notifies its
 operator, who sees what would change on the entry it lands on (the entry already
-answering for the repository, or one they name) and accepts or declines it. Offering and
-accepting are admin actions, confirmed with a passkey from off the node. Accepting keeps
-the entry's comments and its own fields, and the node then builds and pins its own image. An undecided
-offer is replaced by a newer one from the same node for the same repository, and lapses
-after 14 days.
+answering for the repository by name, or one they name) and accepts or declines it.
+Offering and accepting are admin actions, confirmed with a passkey from off the node, and
+an accept writes exactly what was reviewed or nothing. Accepting keeps the entry's
+comments and its own fields, except that credentials the entry lends its preparation are
+dropped when the offer changes what that preparation runs or reaches, unless you choose
+to keep them (and then nothing builds until you start it). The node then builds and pins
+its own image. An undecided offer is replaced by a newer one from the same node for the
+same repository, is withdrawn if that node leaves the channel, and lapses after 14 days.
 
 A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy

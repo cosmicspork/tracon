@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from '../../lib/api'
   import { formatAge, formatDuration } from '../../lib/format'
-  import { inboxOrder, shown } from '../../lib/recipes'
+  import { inboxOrder, reviewIsStale, shown } from '../../lib/recipes'
   import { store } from '../../lib/store.svelte'
   import type { RecipeOffer, RecipeOfferView } from '../../lib/types'
 
@@ -14,6 +14,7 @@
   let view = $state<RecipeOfferView | null>(null)
   let path = $state('')
   let replaceImage = $state(false)
+  let keepCredentials = $state(false)
   let busy = $state('')
   let error = $state('')
   let note = $state('')
@@ -21,6 +22,10 @@
   const ordered = $derived(inboxOrder(offers))
   const pending = $derived(offers.filter((offer) => offer.state === 'pending').length)
   const pinned = $derived(Boolean(view?.before?.image && view?.offer.recipe.dockerfile))
+  const lends = $derived(view?.credentials.state === 'dropped' || view?.credentials.state === 'kept')
+  // An accept writes only what was reviewed: a change to the form waits for
+  // another comparison.
+  const stale = $derived(reviewIsStale(view, path, replaceImage, keepCredentials))
 
   async function load() {
     try {
@@ -32,14 +37,14 @@
   }
   void load()
 
-  async function show(offer: RecipeOffer, chosen = '') {
+  async function compare(offer: RecipeOffer) {
     busy = `view:${offer.id}`
     error = ''
     try {
-      view = await api.recipeOffer(offer.id, chosen, replaceImage)
-      open = offer.id
+      view = await api.recipeOffer(offer.id, path.trim(), replaceImage, keepCredentials)
       path = view.target.path
     } catch (cause) {
+      view = null
       error = cause instanceof Error ? cause.message : String(cause)
     } finally {
       busy = ''
@@ -52,17 +57,26 @@
       view = null
       return
     }
+    open = offer.id
+    view = null
+    path = ''
     replaceImage = false
-    void show(offer)
+    keepCredentials = false
+    void compare(offer)
   }
 
   async function accept(offer: RecipeOffer) {
-    if (busy) return
+    if (busy || !view || stale) return
     busy = `accept:${offer.id}`
     error = ''
     note = ''
     try {
-      const done = await api.acceptRecipeOffer(offer.id, { path, replace_image: replaceImage })
+      const done = await api.acceptRecipeOffer(offer.id, {
+        path: view.target.path,
+        replace_image: view.replace_image,
+        keep_credentials: view.keep_credentials,
+        viewed_hash: view.viewed_hash,
+      })
       note = `Accepted onto ${done.path} in node.toml.${done.building ? ' This node is building its own image from it now.' : ''}`
       open = null
       view = null
@@ -121,48 +135,75 @@
             </button>
           </div>
         {/if}
-        {#if open === offer.id && view}
+        {#if open === offer.id}
           <div class="review">
             <label>
               <span>Apply to</span>
               <input bind:value={path} spellcheck="false" placeholder={offer.repo} disabled={busy !== ''} />
               <small>
-                {view.target.exists ? 'The entry already answering for this repository.' : 'A new entry.'} Name another
-                entry's path, or an absolute checkout, to put it there.
+                {#if view}{view.target.exists ? 'The entry already answering for this repository.' : 'A new entry.'}{/if}
+                Name another entry's path, or an absolute checkout, to put it there.
               </small>
             </label>
             {#if pinned}
               <label class="toggle">
-                <input type="checkbox" bind:checked={replaceImage} disabled={busy !== ''} />
+                <input
+                  type="checkbox"
+                  checked={replaceImage}
+                  onchange={(event) => {
+                    replaceImage = event.currentTarget.checked
+                    void compare(offer)
+                  }}
+                  disabled={busy !== ''}
+                />
                 Build the offered Dockerfile in place of the image this entry pins
               </label>
             {/if}
+            {#if lends && view}
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  checked={keepCredentials}
+                  onchange={(event) => {
+                    keepCredentials = event.currentTarget.checked
+                    void compare(offer)
+                  }}
+                  disabled={busy !== ''}
+                />
+                Keep lending {view.credentials.names.join(', ')} to the preparation this offer changes
+              </label>
+              <small>The offer changes what that preparation runs or reaches. Kept, nothing builds until you start it.</small>
+            {/if}
             <div class="acts">
-              <button class="lnk" type="button" onclick={() => void show(offer, path)} disabled={busy !== ''}>Compare again</button>
+              <button class="lnk" type="button" onclick={() => void compare(offer)} disabled={busy !== '' || !stale}>Compare</button>
             </div>
-            {#if view.changes.length}
-              <table>
-                <thead><tr><th>Field</th><th>Here now</th><th>Offered</th></tr></thead>
-                <tbody>
-                  {#each view.changes as change (change.field)}
-                    <tr>
-                      <th scope="row">{change.field}</th>
-                      <td><pre>{shown(change.before)}</pre></td>
-                      <td><pre>{shown(change.after)}</pre></td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {:else}
-              <p class="dim">The entry already reads this way: accepting changes nothing.</p>
-            {/if}
-            {#each view.notes as line (line)}<p class="caution">{line}</p>{/each}
-            <p class="dim">Kept as this node has them: {view.kept.join(', ')}.</p>
-            {#if !local}
-              <p class="dim">Accepting writes node.toml, so from off the node it asks for your passkey.</p>
+            {#if view && !stale}
+              {#if view.changes.length}
+                <table>
+                  <thead><tr><th>Field</th><th>Here now</th><th>Offered</th></tr></thead>
+                  <tbody>
+                    {#each view.changes as change (change.field)}
+                      <tr>
+                        <th scope="row">{change.field}</th>
+                        <td><pre>{shown(change.before)}</pre></td>
+                        <td><pre>{shown(change.after)}</pre></td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {:else}
+                <p class="dim">The entry already reads this way: accepting changes nothing.</p>
+              {/if}
+              {#each view.notes as line (line)}<p class="caution">{line}</p>{/each}
+              {#if view.kept.length}<p class="dim">Kept as this node has them: {view.kept.join(', ')}.</p>{/if}
+              {#if !local}
+                <p class="dim">Accepting writes node.toml, so from off the node it asks for your passkey.</p>
+              {/if}
+            {:else if view}
+              <p class="dim">Compare again to see what this would write.</p>
             {/if}
             <div class="acts">
-              <button class="btn p" type="button" onclick={() => void accept(offer)} disabled={busy !== ''}>
+              <button class="btn p" type="button" onclick={() => void accept(offer)} disabled={busy !== '' || !view || stale}>
                 {busy === `accept:${offer.id}` ? 'Accepting…' : 'Accept'}
               </button>
             </div>

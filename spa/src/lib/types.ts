@@ -1650,7 +1650,8 @@ export interface RecipeOffer {
   note: string | null
   received_ms: number
   expires_ms: number
-  state: 'pending' | 'accepted' | 'declined' | 'superseded' | 'expired'
+  /** `accepting` while an accept holds it; `withdrawn` once its sender left the channel. */
+  state: 'pending' | 'accepting' | 'accepted' | 'declined' | 'superseded' | 'expired' | 'withdrawn'
   decided_ms: number | null
   /** The `[[repo]]` path an accepted offer was written to. */
   decided_path: string | null
@@ -1664,8 +1665,14 @@ export interface RecipeOfferView {
   after: RepoEntry
   changes: { field: string; before: unknown; after: unknown }[]
   notes: string[]
-  /** The entry's fields an offer never changes. */
+  /** The entry's own fields (never offered) it still has after the offer. */
   kept: string[]
+  /** What becomes of credentials the entry lends its preparation. */
+  credentials: { state: 'none' | 'unaffected' | 'dropped' | 'kept'; names: string[] }
+  replace_image: boolean
+  keep_credentials: boolean
+  /** Names exactly this review; an accept must carry it. */
+  viewed_hash: string
 }
 
 /** What one node made of an offer this node sent it. */

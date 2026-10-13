@@ -18,6 +18,9 @@ use tower::ServiceExt;
 
 use support::fake::FakeAdapter;
 use tracon::{
+    boundary::{
+        Backend, BoundaryError, BoundaryReport, BuildFailure, BuiltImage, ImageBuild, ImageBuilder,
+    },
     broker::Broker,
     config::Config,
     http::{
@@ -66,8 +69,12 @@ struct Node {
 /// A node serving the configuration in `node.toml`, with the guard layered
 /// on as `serve` builds it, sharing `personal` with `PEER`.
 fn node() -> Node {
+    node_with(NODE_TOML, Arc::new(tracon::runner::local::LocalBackend))
+}
+
+fn node_with(toml: &str, backend: Arc<dyn Backend>) -> Node {
     state::isolate();
-    std::fs::write(Config::config_path(), NODE_TOML).unwrap();
+    std::fs::write(Config::config_path(), toml).unwrap();
     let cfg = Arc::new(Config::try_load().unwrap());
     let store = Arc::new(Store::open_in_memory().unwrap());
     for (node, channel) in [
@@ -106,7 +113,7 @@ fn node() -> Node {
         "n1".into(),
         tools.clone(),
         Default::default(),
-        Arc::new(tracon::runner::local::LocalBackend),
+        backend,
     );
     let state = AppState {
         manager,
@@ -206,6 +213,54 @@ async fn staged(n: &Node, recipe: Value) -> String {
     answer["offer_id"].as_str().unwrap().to_string()
 }
 
+/// The offer as the operator reviews it with `query` (`?path=…&…`).
+async fn review(n: &Node, id: &str, query: &str) -> Value {
+    let (s, v) = call(
+        n,
+        "GET",
+        &format!("/api/repos/offers/{id}{query}"),
+        LOCAL,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v
+}
+
+/// Accept `id` with `placement`, naming what a review with the same
+/// placement showed, as the interface does.
+async fn accept(n: &Node, id: &str, peer: &str, placement: Value) -> (StatusCode, Value) {
+    let mut query = Vec::new();
+    if let Some(path) = placement["path"].as_str() {
+        query.push(format!("path={}", path.replace(' ', "%20")));
+    }
+    for flag in ["replace_image", "keep_credentials"] {
+        if placement[flag] == true {
+            query.push(format!("{flag}=true"));
+        }
+    }
+    let query = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    let seen = review(n, id, &query).await;
+    let mut body = if placement.is_object() {
+        placement
+    } else {
+        json!({})
+    };
+    body["viewed_hash"] = seen["viewed_hash"].clone();
+    call(
+        n,
+        "POST",
+        &format!("/api/repos/offers/{id}/accept"),
+        peer,
+        Some(body),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn an_accepted_offer_changes_the_entry_and_keeps_what_is_local() {
     let _guard = state::config_lock().await;
@@ -231,21 +286,37 @@ async fn an_accepted_offer_changes_the_entry_and_keeps_what_is_local() {
         .iter()
         .map(|c| c["field"].as_str().unwrap())
         .collect();
-    assert_eq!(fields, ["dockerfile", "checks", "prepare", "egress"], "{v}");
-    assert_eq!(v["after"]["prepare_credentials"], json!(["nova"]));
-    assert!(v["notes"].to_string().contains("nova"), "{v}");
+    assert_eq!(
+        fields,
+        [
+            "prepare_credentials",
+            "dockerfile",
+            "checks",
+            "prepare",
+            "egress"
+        ],
+        "{v}"
+    );
+    // A peer changed what the default branch's preparation runs and
+    // reaches, so the credential it was lent is not lent to that by default.
+    assert_eq!(v["after"]["prepare_credentials"], Value::Null, "{v}");
+    assert_eq!(
+        v["credentials"],
+        json!({ "state": "dropped", "names": ["nova"] })
+    );
+    assert!(v["notes"].to_string().contains("no longer lent"), "{v}");
+    assert_eq!(v["kept"], json!(["path", "commits"]));
 
     // An operator elsewhere reads it, but nothing is applied from off the
     // node: what an entry's `prepare` names, the node runs.
     let (s, v) = call(&n, "GET", &format!("/api/repos/offers/{id}"), REMOTE, None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    let accept = format!("/api/repos/offers/{id}/accept");
     // Accepting is an admin action: off the node a bearer token never
     // passes, and a signed-in browser is asked for a passkey first.
-    let (s, v) = call(&n, "POST", &accept, REMOTE, Some(json!({}))).await;
+    let (s, v) = accept(&n, &id, REMOTE, json!({})).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
     assert!(v.to_string().contains("passkey"), "{v}");
-    let (s, v) = call(&n, "POST", &accept, REMOTE_BROWSER, Some(json!({}))).await;
+    let (s, v) = accept(&n, &id, REMOTE_BROWSER, json!({})).await;
     assert_ne!(s, StatusCode::OK, "{v}");
     assert!(
         v["error"]["kind"]
@@ -259,9 +330,21 @@ async fn an_accepted_offer_changes_the_entry_and_keeps_what_is_local() {
         NODE_TOML
     );
 
-    let (s, v) = call(&n, "POST", &accept, LOCAL, Some(json!({}))).await;
+    // An accept that names nothing reviewed is refused.
+    let (s, v) = call(
+        &n,
+        "POST",
+        &format!("/api/repos/offers/{id}/accept"),
+        LOCAL,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+
+    let (s, v) = accept(&n, &id, LOCAL, json!({})).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["changed"], true);
+    assert_eq!(v["credentials"]["state"], "dropped");
     assert_eq!(v["restart_required"], false);
     assert_eq!(v["path"], "github.com/acme/hdr");
 
@@ -285,7 +368,7 @@ async fn an_accepted_offer_changes_the_entry_and_keeps_what_is_local() {
         entry.checks.as_deref(),
         Some(&["just check".to_string()][..])
     );
-    assert_eq!(entry.prepare_credentials, ["nova"]);
+    assert!(entry.prepare_credentials.is_empty());
     assert!(matches!(entry.commits, Some(tracon::config::Commits::Keep)));
     assert_eq!(file.repo[1].path, std::path::PathBuf::from("/srv/notes"));
     // The running node resolves against it already.
@@ -297,8 +380,303 @@ async fn an_accepted_offer_changes_the_entry_and_keeps_what_is_local() {
     let row = n.store.recipe_offer(&id).unwrap().unwrap();
     assert_eq!(row.state, "accepted");
     assert_eq!(row.decided_path.as_deref(), Some("github.com/acme/hdr"));
-    let (s, _) = call(&n, "POST", &accept, LOCAL, Some(json!({}))).await;
+    let (s, _) = call(
+        &n,
+        "POST",
+        &format!("/api/repos/offers/{id}/accept"),
+        LOCAL,
+        Some(json!({ "viewed_hash": "x" })),
+    )
+    .await;
     assert_eq!(s, StatusCode::CONFLICT);
+}
+
+/// Keeping the credentials for a preparation a peer changed is the
+/// operator's explicit choice, and then nothing is built until they start it.
+#[tokio::test]
+async fn credentials_are_kept_only_when_asked_and_then_nothing_builds() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let id = staged(&n, recipe()).await;
+    let v = review(&n, &id, "?keep_credentials=true").await;
+    assert_eq!(
+        v["credentials"],
+        json!({ "state": "kept", "names": ["nova"] })
+    );
+    assert_eq!(v["after"]["prepare_credentials"], json!(["nova"]));
+    assert!(v["kept"].to_string().contains("prepare_credentials"), "{v}");
+
+    // A choice the operator did not review is refused: keeping them was
+    // reviewed, dropping them was not, and the other way about.
+    let dropped = review(&n, &id, "").await;
+    let (s, v) = call(
+        &n,
+        "POST",
+        &format!("/api/repos/offers/{id}/accept"),
+        LOCAL,
+        Some(json!({ "keep_credentials": true, "viewed_hash": dropped["viewed_hash"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(v.to_string().contains("review"), "{v}");
+    assert_eq!(
+        std::fs::read_to_string(Config::config_path()).unwrap(),
+        NODE_TOML
+    );
+
+    let (s, v) = accept(&n, &id, LOCAL, json!({ "keep_credentials": true })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["credentials"]["state"], "kept");
+    assert_eq!(v["building"], false);
+    let file = Config::try_load().unwrap();
+    assert_eq!(file.repo[0].prepare_credentials, ["nova"]);
+    assert_eq!(file.repo[0].prepare, ["composer install", "npm ci"]);
+}
+
+/// The table moving between the review and the accept refuses the accept
+/// rather than writing something the operator did not see.
+#[tokio::test]
+async fn an_accept_against_a_table_that_moved_is_refused() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let id = staged(&n, recipe()).await;
+    let seen = review(&n, &id, "").await;
+    let mut entries = n.state.cfg.repos().as_ref().clone();
+    entries[0].commits = None;
+    n.state.cfg.live_repo.set(entries);
+    let (s, v) = call(
+        &n,
+        "POST",
+        &format!("/api/repos/offers/{id}/accept"),
+        LOCAL,
+        Some(json!({ "viewed_hash": seen["viewed_hash"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(n.store.recipe_offer(&id).unwrap().unwrap().state, "pending");
+    assert_eq!(
+        std::fs::read_to_string(Config::config_path()).unwrap(),
+        NODE_TOML
+    );
+}
+
+/// An offer whose sender has left the channel it came on is withdrawn: it
+/// can be neither reviewed nor accepted, and the list says so.
+#[tokio::test]
+async fn an_offer_from_a_sender_that_left_the_channel_is_withdrawn() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let id = staged(&n, recipe()).await;
+    let seen = review(&n, &id, "").await;
+    n.store.node_channels_set(PEER, &[]).unwrap();
+    let (s, v) = call(
+        &n,
+        "POST",
+        &format!("/api/repos/offers/{id}/accept"),
+        LOCAL,
+        Some(json!({ "viewed_hash": seen["viewed_hash"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(v.to_string().contains("withdrawn"), "{v}");
+    assert_eq!(
+        n.store.recipe_offer(&id).unwrap().unwrap().state,
+        "withdrawn"
+    );
+    let (_, v) = call(&n, "GET", "/api/repos/offers", LOCAL, None).await;
+    assert_eq!(v["offers"][0]["state"], "withdrawn");
+    // The list withdraws one it finds too.
+    n.store.node_channel_add(PEER, "personal").unwrap();
+    let other = staged(&n, recipe()).await;
+    n.store.node_channels_set(PEER, &[]).unwrap();
+    let (_, v) = call(&n, "GET", "/api/repos/offers", LOCAL, None).await;
+    let listed = v["offers"].as_array().unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|o| o["id"] == other.as_str() && o["state"] == "withdrawn"),
+        "{v}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(Config::config_path()).unwrap(),
+        NODE_TOML
+    );
+}
+
+/// A relative entry that only ends like the offered repository might be for
+/// another forge's repository of that name: the operator names the entry.
+#[tokio::test]
+async fn a_suffix_match_is_not_chosen_for_the_operator() {
+    let _guard = state::config_lock().await;
+    let n = node_with(
+        "[[repo]]\npath = \"acme/hdr\"\nchecks = []\n",
+        Arc::new(tracon::runner::local::LocalBackend),
+    );
+    let id = staged(&n, recipe()).await;
+    let (s, v) = call(&n, "GET", &format!("/api/repos/offers/{id}"), LOCAL, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(v.to_string().contains("name the entry"), "{v}");
+    let (s, v) = accept(&n, &id, LOCAL, json!({ "path": "acme/hdr" })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(Config::try_load().unwrap().repo[0].prepare.len(), 2);
+}
+
+/// A runtime that builds, as far as an accept can tell: it says it can and
+/// records nothing else.
+struct Building {
+    inner: tracon::runner::local::LocalBackend,
+    builder: Refusing,
+}
+
+struct Refusing;
+
+#[async_trait::async_trait]
+impl ImageBuilder for Refusing {
+    async fn build(&self, _build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
+        Err(BuildFailure::transient("this builder builds nothing"))
+    }
+    async fn exists(&self, _image: &str) -> bool {
+        false
+    }
+    async fn identity(&self, _image: &str) -> Option<String> {
+        None
+    }
+    async fn remove(&self, _image: &str) {}
+}
+
+#[async_trait::async_trait]
+impl Backend for Building {
+    fn kind(&self) -> &'static str {
+        "building"
+    }
+    async fn setup(&self, cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
+        self.inner.setup(cfg, rebuild).await
+    }
+    async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport {
+        self.inner.check_all(cfg, deep).await
+    }
+    fn runner(&self, extra: Vec<tracon::runner::Mount>) -> Arc<dyn tracon::runner::Runner> {
+        self.inner.runner(extra)
+    }
+    fn runner_for(
+        &self,
+        id: &str,
+        extra: Vec<tracon::runner::Mount>,
+    ) -> Arc<dyn tracon::runner::Runner> {
+        self.inner.runner_for(id, extra)
+    }
+    fn image_builder(&self) -> Option<&dyn ImageBuilder> {
+        Some(&self.builder)
+    }
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        self.inner.import_volume(volume, source).await
+    }
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        self.inner.export_volume(volume, destination).await
+    }
+    fn harness_host(&self) -> String {
+        self.inner.harness_host()
+    }
+    fn harness_home(&self) -> String {
+        self.inner.harness_home()
+    }
+    async fn reconcile(&self, names: &[String]) {
+        self.inner.reconcile(names).await
+    }
+}
+
+/// On a runtime that builds, an accepted entry that names a Dockerfile for a
+/// checkout on this node starts building at once, unless it keeps lending
+/// credentials to a preparation the offer changed.
+#[tokio::test]
+async fn an_accept_starts_the_build_unless_credentials_are_kept() {
+    let _guard = state::config_lock().await;
+    state::isolate();
+    let checkout = state::scratch("recipe-offer-checkout");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let toml = format!(
+        "[[repo]]\npath = {:?}\ndockerfile = \"Dockerfile\"\nprepare = [\"composer install\"]\n\
+         egress = [\"packagist\"]\nprepare_credentials = [\"nova\"]\n",
+        checkout.to_string_lossy()
+    );
+    let n = node_with(
+        &toml,
+        Arc::new(Building {
+            inner: tracon::runner::local::LocalBackend,
+            builder: Refusing,
+        }),
+    );
+    let path = checkout.to_string_lossy().to_string();
+    let id = staged(&n, recipe()).await;
+    let (s, v) = accept(&n, &id, LOCAL, json!({ "path": path })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["building"], true, "{v}");
+    assert_eq!(v["credentials"]["state"], "dropped", "{v}");
+
+    let n = node_with(
+        &toml,
+        Arc::new(Building {
+            inner: tracon::runner::local::LocalBackend,
+            builder: Refusing,
+        }),
+    );
+    let id = staged(&n, recipe()).await;
+    let (s, v) = accept(
+        &n,
+        &id,
+        LOCAL,
+        json!({ "path": path, "keep_credentials": true }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["credentials"]["state"], "kept", "{v}");
+    assert_eq!(v["building"], false, "{v}");
+}
+
+/// A note or a command that hides what it says is refused on receipt.
+#[tokio::test]
+async fn an_offer_hiding_characters_is_refused_on_receipt() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let mut bidi = recipe();
+    bidi["prepare"] = json!(["npm ci \u{202E}lmth.x"]);
+    let refused = n
+        .state
+        .execute(PEER, offer(bidi, "personal", later()))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("invisible"), "{refused}");
+    let refused = n
+        .state
+        .execute(
+            PEER,
+            Command::RecipeOffer {
+                recipe: recipe(),
+                from_channel: "personal".into(),
+                note: Some("fine\u{200B}".into()),
+                not_after_ms: later(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.contains("note"), "{refused}");
+    let mut address = recipe();
+    address["egress"] = json!(["169.254.169.254"]);
+    let refused = n
+        .state
+        .execute(PEER, offer(address, "personal", later()))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("IP address"), "{refused}");
+    assert!(n.store.recipe_offers(10).unwrap().is_empty());
 }
 
 /// An operator may put an offer on an entry of their choosing, or a new one;
@@ -316,23 +694,23 @@ async fn an_offer_lands_where_the_operator_puts_it() {
     assert_eq!(v["target"]["exists"], false);
     assert_eq!(v["before"], Value::Null);
 
-    let accept = format!("/api/repos/offers/{id}/accept");
+    let accept_path = format!("/api/repos/offers/{id}/accept");
     for (path, why) in [
         ("/srv/notes/sub/../x", "climb"),
         ("not a path/../x", "neither"),
     ] {
-        let (s, v) = call(&n, "POST", &accept, LOCAL, Some(json!({ "path": path }))).await;
+        let (s, v) = call(
+            &n,
+            "POST",
+            &accept_path,
+            LOCAL,
+            Some(json!({ "path": path, "viewed_hash": "x" })),
+        )
+        .await;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {v}");
         assert!(v.to_string().contains(why), "{path}: {v}");
     }
-    let (s, v) = call(
-        &n,
-        "POST",
-        &accept,
-        LOCAL,
-        Some(json!({ "path": "/srv/notes" })),
-    )
-    .await;
+    let (s, v) = accept(&n, &id, LOCAL, json!({ "path": "/srv/notes" })).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let file = Config::try_load().unwrap();
     assert_eq!(file.repo.len(), 2);
@@ -340,14 +718,7 @@ async fn an_offer_lands_where_the_operator_puts_it() {
 
     // A new entry for a checkout no entry answers for is added.
     let id = staged(&n, recipe()).await;
-    let (s, v) = call(
-        &n,
-        "POST",
-        &format!("/api/repos/offers/{id}/accept"),
-        LOCAL,
-        Some(json!({ "path": "/elsewhere/hdr" })),
-    )
-    .await;
+    let (s, v) = accept(&n, &id, LOCAL, json!({ "path": "/elsewhere/hdr" })).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     let file = Config::try_load().unwrap();
     assert_eq!(file.repo.len(), 3);
@@ -373,7 +744,7 @@ async fn an_offer_is_declined_superseded_or_lapses() {
         "POST",
         &format!("/api/repos/offers/{first}/accept"),
         LOCAL,
-        Some(json!({})),
+        Some(json!({ "viewed_hash": "x" })),
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT);
@@ -426,7 +797,7 @@ async fn an_offer_is_declined_superseded_or_lapses() {
         "POST",
         &format!("/api/repos/offers/{id}/accept"),
         LOCAL,
-        Some(json!({})),
+        Some(json!({ "viewed_hash": "x" })),
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");

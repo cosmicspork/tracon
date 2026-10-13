@@ -1,4 +1,4 @@
-import type { ChannelInfo, NodeInfo, RecipeOffer } from './types'
+import type { ChannelInfo, NodeInfo, RecipeOffer, RecipeOfferView } from './types'
 
 export interface OfferTarget {
   channel: string
@@ -57,4 +57,23 @@ export function offerResultLine(result: { name: string; node: string; state: str
     default:
       return `${who}: refused${result.detail ? ` (${result.detail})` : ''}`
   }
+}
+
+/**
+ * Whether what the form now says differs from what the operator last
+ * reviewed: an accept writes only what was reviewed, so it waits for another
+ * comparison.
+ */
+export function reviewIsStale(
+  view: RecipeOfferView | null,
+  path: string,
+  replaceImage: boolean,
+  keepCredentials: boolean,
+): boolean {
+  if (!view) return true
+  return (
+    path.trim() !== view.target.path ||
+    replaceImage !== view.replace_image ||
+    keepCredentials !== view.keep_credentials
+  )
 }

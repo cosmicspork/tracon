@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { forgeIdentity, inboxOrder, offerResultLine, offerTargets, shown } from './recipes'
-import type { ChannelInfo, NodeInfo, RecipeOffer } from './types'
+import { forgeIdentity, inboxOrder, offerResultLine, offerTargets, reviewIsStale, shown } from './recipes'
+import type { ChannelInfo, NodeInfo, RecipeOffer, RecipeOfferView } from './types'
 
 const channel = (name: string, nodes: string[], archived: number | null = null) =>
   ({ name, nodes, archived, bindings: {}, ceiling: {} }) as unknown as ChannelInfo
@@ -48,4 +48,13 @@ test('each node an offer went to is reported', () => {
   expect(offerResultLine({ name: 'homelab', node: 'n', state: 'offered' })).toContain('its operator decides')
   expect(offerResultLine({ name: '', node: 'abcdef0123456789', state: 'queued' })).toContain('abcdef012345')
   expect(offerResultLine({ name: 'old', node: 'n', state: 'refused', detail: 'older build' })).toContain('older build')
+})
+
+test('an accept waits for a review of exactly what it would write', () => {
+  const view = { target: { path: 'github.com/acme/app', exists: true }, replace_image: false, keep_credentials: false } as RecipeOfferView
+  expect(reviewIsStale(null, '', false, false)).toBe(true)
+  expect(reviewIsStale(view, 'github.com/acme/app ', false, false)).toBe(false)
+  expect(reviewIsStale(view, '/srv/app', false, false)).toBe(true)
+  expect(reviewIsStale(view, 'github.com/acme/app', true, false)).toBe(true)
+  expect(reviewIsStale(view, 'github.com/acme/app', false, true)).toBe(true)
 })

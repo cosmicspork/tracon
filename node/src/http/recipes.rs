@@ -10,19 +10,23 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use axum::extract::{Path as UrlPath, Query, State};
+use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::api::{ApiError, ApiResult, AppState};
 use super::auth::{AdminAction, LocalOrAdministrator};
 use crate::config::{Config, Repo};
 use crate::mesh::forward::CommandError;
-use crate::mesh::recipe::{self, RepoRecipe, MAX_PENDING_PER_SENDER, OFFER_TTL_MS};
+use crate::mesh::recipe::{
+    self, Applied, Choices, Credentials, RepoRecipe, MAX_PENDING_PER_SENDER, OFFER_TTL_MS,
+};
 use crate::store::now_ms;
-use crate::store::recipe_offers::{RecipeOfferRow, Staged};
+use crate::store::recipe_offers::{RecipeOfferRow, Staged, MAX_OFFERS_PER_HOUR};
 
 fn unprocessable(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message)
@@ -119,6 +123,7 @@ pub async fn offer(
         (_, Some(repo)) => {
             let index = entry_for_identity(&s.cfg, &repos, repo)
                 .await
+                .map_err(unprocessable)?
                 .ok_or_else(|| {
                     ApiError::new(
                         StatusCode::NOT_FOUND,
@@ -146,7 +151,7 @@ pub async fn offer(
     let offered = RepoRecipe::from_entry(&entry, &identity);
     offered.validate().map_err(unprocessable)?;
     let recipe = serde_json::to_value(&offered).map_err(|e| unprocessable(e.to_string()))?;
-    let note = recipe::clean_note(body.note);
+    let note = recipe::note(body.note).map_err(unprocessable)?;
     let expires_ms = now_ms().saturating_add(OFFER_TTL_MS);
     let wait = Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
     let state = &s;
@@ -204,6 +209,7 @@ pub(super) async fn receive(
     not_after_ms: i64,
 ) -> ApiResult<Value> {
     let offered = RepoRecipe::parse(&recipe).map_err(unprocessable)?;
+    let note = recipe::note(note).map_err(unprocessable)?;
     let now = now_ms();
     let expires_ms = not_after_ms.min(now.saturating_add(OFFER_TTL_MS));
     if expires_ms <= now {
@@ -220,7 +226,7 @@ pub(super) async fn receive(
         // Stored as this node parsed it, so what the operator reads is what
         // an accept applies.
         recipe: serde_json::to_value(&offered).map_err(|e| unprocessable(e.to_string()))?,
-        note: recipe::clean_note(note),
+        note,
         received_ms: now,
         expires_ms,
         state: "pending".into(),
@@ -238,10 +244,26 @@ pub(super) async fn receive(
                 ),
             ))
         }
+        Staged::TooOften => {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "the sender has offered this node {MAX_OFFERS_PER_HOUR} recipes in the last \
+                     hour; offer again later"
+                ),
+            ))
+        }
     };
     let sender_name = node_name(s, sender);
     tracing::info!(from = %sender, repo = %row.repo, offer = %row.id, superseded, "repository recipe offer staged");
-    let (store, cfg, id) = (s.store().clone(), s.cfg.clone(), row.id.clone());
+    let (store, cfg) = (s.store().clone(), s.cfg.clone());
+    // One notification per sender and repository: a newer offer replaces the
+    // one on the operator's devices rather than adding to it.
+    let tag = format!(
+        "recipe-offer-{}-{}",
+        sender.chars().take(16).collect::<String>(),
+        row.repo.replace('/', "-")
+    );
     let body = format!(
         "{sender_name} offers a recipe for {} on {from_channel}. Nothing changes until you accept it.",
         row.repo
@@ -250,7 +272,7 @@ pub(super) async fn receive(
         crate::notify::send_operator(
             &store,
             &cfg,
-            &format!("recipe-offer-{id}"),
+            &tag,
             "Repository recipe offered".into(),
             body,
             "/settings".into(),
@@ -266,117 +288,326 @@ pub(super) async fn receive(
     }))
 }
 
-/// `GET /api/repos/offers`: every offer this node holds, newest first.
+/// `GET /api/repos/offers`: every offer this node holds, undecided first.
+/// A pending offer whose sender no longer shares its channel is withdrawn.
 pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
-    s.store().recipe_offers_expire(now_ms())?;
-    let offers: Vec<Value> = s
-        .store()
-        .recipe_offers(100)?
-        .into_iter()
-        .map(|row| offer_json(&s, &row))
-        .collect();
+    let now = now_ms();
+    s.store().recipe_offers_expire(now)?;
+    let mut rows = s.store().recipe_offers(100)?;
+    for row in rows.iter_mut().filter(|row| row.state == "pending") {
+        if !still_shared(&s, row)?
+            && s.store()
+                .recipe_offer_decide(&row.id, "withdrawn", None, now)?
+        {
+            row.state = "withdrawn".into();
+        }
+    }
+    let offers: Vec<Value> = rows.iter().map(|row| offer_json(&s, row)).collect();
     Ok(Json(json!({ "offers": offers })))
 }
 
 #[derive(Deserialize, Default)]
 pub struct Placement {
     /// The `[[repo]]` path to apply the offer to: an entry's own path, or a
-    /// new entry's. Left out, the entry already answering for the offered
-    /// repository, or a new entry named by its forge identity.
+    /// new entry's. Left out, the entry whose path is the offered
+    /// repository's identity (or that names its clone), or a new entry
+    /// named by that identity.
     #[serde(default)]
     path: Option<String>,
     /// Build the offered Dockerfile in place of an image this node pinned.
     #[serde(default)]
     replace_image: bool,
+    /// Keep lending the entry's credentials to a preparation the offer
+    /// changes. Without it they are dropped.
+    #[serde(default)]
+    keep_credentials: bool,
 }
 
-/// `GET /api/repos/offers/{id}?path=&replace_image=`: the offer, the entry
-/// it would be applied to, and what would change there.
-pub async fn view(
-    State(s): State<AppState>,
-    UrlPath(id): UrlPath<String>,
-    Query(placement): Query<Placement>,
-) -> ApiResult<Json<Value>> {
-    s.store().recipe_offers_expire(now_ms())?;
-    let row = offer_row(&s, &id)?;
-    let offered = RepoRecipe::parse(&row.recipe).map_err(unprocessable)?;
-    let repos = s.cfg.repos();
-    let target = target(&s.cfg, &repos, &offered, placement.path.as_deref()).await?;
-    let before = target.index.map(|i| &repos[i]);
-    let applied = offered.apply(before, target.path.clone(), placement.replace_image);
-    Ok(Json(json!({
-        "offer": offer_json(&s, &row),
-        "target": {
-            "path": target.path,
-            "exists": target.index.is_some(),
-        },
-        "before": before,
-        "after": applied.entry,
-        "changes": recipe::changes(before, &applied.entry),
-        "notes": applied.notes,
-        "kept": recipe::LOCAL_ONLY,
-    })))
+impl Placement {
+    fn choices(&self) -> Choices {
+        Choices {
+            replace_image: self.replace_image,
+            keep_credentials: self.keep_credentials,
+        }
+    }
 }
 
-/// `POST /api/repos/offers/{id}/accept {path?, replace_image?}`: apply the
-/// offer to an entry and write it to `node.toml` through the `[[repo]]`
-/// writer, which keeps every comment and every field the offer does not
-/// carry. An admin action: off the node's machine it needs a passkey
-/// assertion for this exact request, because what an entry's `prepare`
-/// names, the node runs. When the entry builds an image and the repository
-/// is on this node, the build starts now.
-pub async fn accept(
-    State(s): State<AppState>,
-    UrlPath(id): UrlPath<String>,
-    AdminAction(Json(placement)): AdminAction<Json<Placement>>,
-) -> ApiResult<Json<Value>> {
-    s.store().recipe_offers_expire(now_ms())?;
-    let row = offer_row(&s, &id)?;
-    if row.state != "pending" {
+/// What an accept would write, worked out the same way for the view and for
+/// the accept itself.
+struct Prepared {
+    row: RecipeOfferRow,
+    offered: RepoRecipe,
+    target: Target,
+    before: Option<Repo>,
+    applied: Applied,
+    /// What the operator reviewed: see [`viewed_hash`].
+    hash: String,
+}
+
+async fn prepare(s: &AppState, id: &str, placement: &Placement) -> ApiResult<Prepared> {
+    let now = now_ms();
+    s.store().recipe_offers_expire(now)?;
+    let row = offer_row(s, id)?;
+    if row.state == "pending" && !still_shared(s, &row)? {
+        s.store().recipe_offer_decide(id, "withdrawn", None, now)?;
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            format!("this offer is {}, not waiting for a decision", row.state),
+            format!(
+                "this offer is withdrawn: its sender no longer shares {} with this node",
+                row.channel
+            ),
         ));
     }
     let offered = RepoRecipe::parse(&row.recipe).map_err(unprocessable)?;
     let repos = s.cfg.repos();
     let target = target(&s.cfg, &repos, &offered, placement.path.as_deref()).await?;
-    let path = target.path.clone();
-    let actor = format!("recipe offer from {}", node_name(&s, &row.sender_node));
-    let (written, outcome) =
-        crate::config::edit::update_repos(&s.cfg, s.store(), &actor, |entries| {
-            // Found again in the table as it is under the lock, by path: an
-            // entry may have moved since the target was resolved.
-            let index = entries
-                .iter()
-                .position(|entry| same_path(&entry.path, &path));
-            let applied = offered.apply(
-                index.map(|i| &entries[i]),
-                path.clone(),
-                placement.replace_image,
-            );
-            match index {
-                Some(i) => entries[i] = applied.entry.clone(),
-                None => entries.push(applied.entry.clone()),
-            }
-            crate::config::validate_repos(entries).map_err(unprocessable)?;
-            Ok::<_, ApiError>(applied.entry)
-        })?;
-    let decided =
-        s.store()
-            .recipe_offer_decide(&id, "accepted", Some(&path.to_string_lossy()), now_ms())?;
-    if !decided {
-        tracing::warn!(offer = %id, "an accepted offer was decided elsewhere while it was written");
-    }
-    let building = start_build(&s, &written);
-    tracing::info!(offer = %id, repo = %row.repo, path = %path.display(), building, "repository recipe accepted");
+    let before = target.index.map(|i| repos[i].clone());
+    let applied = offered.apply(before.as_ref(), target.path.clone(), placement.choices());
+    let hash = viewed_hash(
+        &target.path,
+        before.is_some(),
+        &applied.entry,
+        placement.choices(),
+    );
+    Ok(Prepared {
+        row,
+        offered,
+        target,
+        before,
+        applied,
+        hash,
+    })
+}
+
+/// The identity of what an operator reviewed: where the offer lands, whether
+/// onto an existing entry, the entry as it would be written, and the choices
+/// that shaped it. An accept names it, and is refused if the table has moved
+/// so that the same choices would now write something else.
+fn viewed_hash(path: &Path, exists: bool, after: &Repo, choices: Choices) -> String {
+    let seen = json!({
+        "path": path,
+        "exists": exists,
+        "after": after,
+        "replace_image": choices.replace_image,
+        "keep_credentials": choices.keep_credentials,
+    });
+    hex::encode(Sha256::digest(seen.to_string().as_bytes()))
+}
+
+/// `GET /api/repos/offers/{id}?path=&replace_image=&keep_credentials=`: the
+/// offer, the entry it would be applied to, what would change there, and the
+/// `viewed_hash` an accept of exactly this names.
+pub async fn view(
+    State(s): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    Query(placement): Query<Placement>,
+) -> ApiResult<Json<Value>> {
+    let p = prepare(&s, &id, &placement).await?;
     Ok(Json(json!({
+        "offer": offer_json(&s, &p.row),
+        "target": {
+            "path": p.target.path,
+            "exists": p.target.index.is_some(),
+        },
+        "before": p.before,
+        "after": p.applied.entry,
+        "changes": recipe::changes(p.before.as_ref(), &p.applied.entry),
+        "notes": p.applied.notes,
+        "kept": p.applied.kept,
+        "credentials": credentials_json(&p.applied.credentials),
+        "replace_image": placement.replace_image,
+        "keep_credentials": placement.keep_credentials,
+        "viewed_hash": p.hash,
+    })))
+}
+
+fn credentials_json(credentials: &Credentials) -> Value {
+    let (state, names) = match credentials {
+        Credentials::None => ("none", &[][..]),
+        Credentials::Unaffected(n) => ("unaffected", &n[..]),
+        Credentials::Dropped(n) => ("dropped", &n[..]),
+        Credentials::KeptOnChange(n) => ("kept", &n[..]),
+    };
+    json!({ "state": state, "names": names })
+}
+
+#[derive(Deserialize)]
+struct AcceptBody {
+    #[serde(flatten)]
+    placement: Placement,
+    /// The `viewed_hash` of the view the operator decided on.
+    viewed_hash: String,
+}
+
+/// `POST /api/repos/offers/{id}/accept {path?, replace_image?,
+/// keep_credentials?, viewed_hash}`: apply the offer to an entry and write it
+/// to `node.toml` through the `[[repo]]` writer, which keeps every comment
+/// and every field the offer does not carry.
+///
+/// An admin action, confirmed off the node with a passkey for this exact
+/// request, whose prompt names the sender, the repository, the fields that
+/// change and what becomes of lent credentials: what an entry's `prepare`
+/// names, the node runs. Refused unless the operator reviewed what it would
+/// write. When the entry builds an image and the repository is on this node,
+/// the build starts now, unless credentials are lent to a preparation the
+/// offer changed; then it waits for the operator.
+pub async fn accept(
+    State(s): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    req: Request,
+) -> Response {
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+        return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+            .into_response();
+    };
+    if let Err(e) = super::passkey::json_or_empty(&parts.headers, &bytes) {
+        return e.into_response();
+    }
+    let decision: AcceptBody = match serde_json::from_slice(&bytes) {
+        Ok(decision) => decision,
+        Err(e) => {
+            return unprocessable(format!(
+                "an accept names what was reviewed (`viewed_hash`, from the offer's view): {e}"
+            ))
+            .into_response()
+        }
+    };
+    let prepared = match prepare(&s, &id, &decision.placement).await {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+    if prepared.row.state != "pending" {
+        return ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "this offer is {}, not waiting for a decision",
+                prepared.row.state
+            ),
+        )
+        .into_response();
+    }
+    if prepared.hash != decision.viewed_hash {
+        return stale().into_response();
+    }
+    let summary = accept_summary(&s, &prepared);
+    if let Err(refusal) = super::passkey::authorize_as(&s, &parts, &bytes, Some(summary)).await {
+        return refusal.into_response();
+    }
+    match commit(&s, &id, prepared, &decision).await {
+        Ok(answer) => Json(answer).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+fn stale() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "this would no longer write what you reviewed (the repository table or your choices \
+         changed); review the offer again",
+    )
+}
+
+/// The passkey prompt's line: who offered what, which fields change, and
+/// what becomes of the credentials the entry lends.
+fn accept_summary(s: &AppState, p: &Prepared) -> String {
+    let fields: Vec<String> = recipe::changes(p.before.as_ref(), &p.applied.entry)
+        .iter()
+        .filter_map(|c| c["field"].as_str().map(str::to_string))
+        .filter(|f| f != "prepare_credentials")
+        .collect();
+    summary_line(
+        &node_name(s, &p.row.sender_node),
+        &p.offered.repo,
+        &fields,
+        &p.applied.credentials,
+    )
+}
+
+fn summary_line(sender: &str, repo: &str, fields: &[String], credentials: &Credentials) -> String {
+    let mut line = format!(
+        "Accept recipe from {sender} for {repo}: {}",
+        if fields.is_empty() {
+            "changes nothing".to_string()
+        } else {
+            format!("changes {}", fields.join(", "))
+        }
+    );
+    match credentials {
+        Credentials::None => {}
+        Credentials::Unaffected(n) | Credentials::KeptOnChange(n) => {
+            line.push_str(&format!("; keeps lending {}", n.join(", ")))
+        }
+        Credentials::Dropped(n) => line.push_str(&format!("; drops {}", n.join(", "))),
+    }
+    // The prompt shows a line, not a document; the passkey sheet has room
+    // for little more.
+    line.chars().filter(|c| !c.is_control()).take(200).collect()
+}
+
+/// Write a reviewed, confirmed accept. The offer is claimed first, so two
+/// accepts cannot both apply it, and released again if nothing was written.
+async fn commit(
+    s: &AppState,
+    id: &str,
+    prepared: Prepared,
+    decision: &AcceptBody,
+) -> ApiResult<Value> {
+    if !s.store().recipe_offer_claim(id, now_ms())? {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this offer is no longer waiting for a decision",
+        ));
+    }
+    let Prepared {
+        row,
+        offered,
+        target,
+        ..
+    } = prepared;
+    let path = target.path.clone();
+    let choices = decision.placement.choices();
+    let actor = format!("recipe offer from {}", node_name(s, &row.sender_node));
+    let written = crate::config::edit::update_repos(&s.cfg, s.store(), &actor, |entries| {
+        // Found again in the table as it is under the lock, by path, and
+        // held to what the operator reviewed.
+        let index = entries
+            .iter()
+            .position(|entry| same_path(&entry.path, &path));
+        let applied = offered.apply(index.map(|i| &entries[i]), path.clone(), choices);
+        if viewed_hash(&path, index.is_some(), &applied.entry, choices) != decision.viewed_hash {
+            return Err(stale());
+        }
+        match index {
+            Some(i) => entries[i] = applied.entry.clone(),
+            None => entries.push(applied.entry.clone()),
+        }
+        crate::config::validate_repos(entries).map_err(unprocessable)?;
+        Ok::<_, ApiError>(applied)
+    });
+    let (applied, outcome) = match written {
+        Ok(written) => written,
+        Err(error) => {
+            s.store().recipe_offer_release(id)?;
+            return Err(error);
+        }
+    };
+    if !s
+        .store()
+        .recipe_offer_accepted(id, &path.to_string_lossy(), now_ms())?
+    {
+        tracing::warn!(offer = %id, "an accepted offer's claim was lost while it was written");
+    }
+    let building = applied.credentials.allows_build() && start_build(s, &applied.entry);
+    tracing::info!(offer = %id, repo = %row.repo, path = %path.display(), building, "repository recipe accepted");
+    Ok(json!({
         "accepted": true,
         "path": path,
         "changed": outcome.wrote(),
         "restart_required": outcome.restart_required,
         "building": building,
-    })))
+        "credentials": credentials_json(&applied.credentials),
+    }))
 }
 
 /// `POST /api/repos/offers/{id}/decline`.
@@ -396,6 +627,13 @@ pub async fn decline(
         ));
     }
     Ok(Json(json!({ "declined": true })))
+}
+
+/// Whether the sender and this node are both still members of the channel
+/// the offer came on, by this node's own record.
+fn still_shared(s: &AppState, row: &RecipeOfferRow) -> ApiResult<bool> {
+    let members = s.store().nodes_in_channel(&row.channel)?;
+    Ok(members.contains(&row.sender_node) && members.contains(&s.node_id))
 }
 
 fn offer_row(s: &AppState, id: &str) -> ApiResult<RecipeOfferRow> {
@@ -434,16 +672,21 @@ async fn target(
 ) -> ApiResult<Target> {
     let chosen = chosen.map(str::trim).filter(|p| !p.is_empty());
     let Some(chosen) = chosen else {
-        return Ok(match entry_for_identity(cfg, repos, &offered.repo).await {
-            Some(index) => Target {
-                path: repos[index].path.clone(),
-                index: Some(index),
+        return Ok(
+            match entry_for_identity(cfg, repos, &offered.repo)
+                .await
+                .map_err(unprocessable)?
+            {
+                Some(index) => Target {
+                    path: repos[index].path.clone(),
+                    index: Some(index),
+                },
+                None => Target {
+                    path: PathBuf::from(&offered.repo),
+                    index: None,
+                },
             },
-            None => Target {
-                path: PathBuf::from(&offered.repo),
-                index: None,
-            },
-        });
+        );
     };
     let path = PathBuf::from(chosen);
     if let Some(index) = repos.iter().position(|entry| same_path(&entry.path, &path)) {
@@ -477,26 +720,40 @@ async fn target(
 }
 
 /// The first entry that answers for the repository `identity` names: one
-/// whose relative path it ends in, one naming this node's managed clone of
-/// it, or one naming a checkout whose origin it is.
-async fn entry_for_identity(cfg: &Config, repos: &[Repo], identity: &str) -> Option<usize> {
+/// whose path is that identity, one naming this node's managed clone of it,
+/// or one naming a checkout whose origin it is. A relative entry that only
+/// ends the same way (`acme/app` for `github.com/acme/app`) might be for
+/// another forge's repository of that name, so it is not chosen for the
+/// operator; they name the entry instead.
+async fn entry_for_identity(
+    cfg: &Config,
+    repos: &[Repo],
+    identity: &str,
+) -> Result<Option<usize>, String> {
     let clone = crate::forge::managed_root(&Config::state_dir()).join(identity);
     for (index, entry) in repos.iter().enumerate() {
         let path = crate::config::expand_home(&entry.path);
         if !path.is_absolute() {
+            if entry.path == Path::new(identity) {
+                return Ok(Some(index));
+            }
             if crate::config::repo_path_matches(&entry.path, Path::new(identity)) {
-                return Some(index);
+                return Err(format!(
+                    "the entry {} answers for {identity} by the end of its path, and might be for \
+                     another repository of that name; name the entry to apply the offer to",
+                    entry.path.display()
+                ));
             }
             continue;
         }
         if entry.matches(&clone) {
-            return Some(index);
+            return Ok(Some(index));
         }
         if path.is_dir() && origin_of(cfg, &path).await.as_deref() == Some(identity) {
-            return Some(index);
+            return Ok(Some(index));
         }
     }
-    None
+    Ok(None)
 }
 
 /// The forge identity an entry is for: its own path when that is one, else
@@ -543,4 +800,68 @@ fn start_build(s: &AppState, entry: &Repo) -> bool {
         crate::repo_image::ensure_base(backend.as_ref(), &cfg, &store, &repo, true).await;
     });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the passkey prompt says is what the accept does to credentials.
+    #[test]
+    fn the_prompt_names_the_fields_and_the_credentials() {
+        let fields = vec!["prepare".to_string(), "egress".to_string()];
+        assert_eq!(
+            summary_line(
+                "laptop",
+                "github.com/acme/hdr",
+                &fields,
+                &Credentials::KeptOnChange(vec!["nova".into()])
+            ),
+            "Accept recipe from laptop for github.com/acme/hdr: changes prepare, egress; keeps lending nova"
+        );
+        assert_eq!(
+            summary_line(
+                "laptop",
+                "github.com/acme/hdr",
+                &fields,
+                &Credentials::Dropped(vec!["nova".into()])
+            ),
+            "Accept recipe from laptop for github.com/acme/hdr: changes prepare, egress; drops nova"
+        );
+        assert_eq!(
+            summary_line("laptop", "github.com/acme/hdr", &[], &Credentials::None),
+            "Accept recipe from laptop for github.com/acme/hdr: changes nothing"
+        );
+    }
+
+    /// The reviewed identity covers every choice that shapes the write.
+    #[test]
+    fn the_viewed_hash_covers_the_choices() {
+        let entry = Repo::default();
+        let base = viewed_hash(Path::new("a"), true, &entry, Choices::default());
+        for other in [
+            viewed_hash(Path::new("b"), true, &entry, Choices::default()),
+            viewed_hash(Path::new("a"), false, &entry, Choices::default()),
+            viewed_hash(
+                Path::new("a"),
+                true,
+                &entry,
+                Choices {
+                    keep_credentials: true,
+                    ..Default::default()
+                },
+            ),
+            viewed_hash(
+                Path::new("a"),
+                true,
+                &Repo {
+                    prepare: vec!["x".into()],
+                    ..Default::default()
+                },
+                Choices::default(),
+            ),
+        ] {
+            assert_ne!(base, other);
+        }
+    }
 }

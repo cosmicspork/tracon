@@ -133,7 +133,8 @@ A `recipe_offer` command `{ recipe, from_channel, note?, not_after_ms }` offers 
 receiver a repository recipe on a channel both are members of, which the receiver
 checks by its own record. `recipe` is `{ repo, dockerfile?, context?, checks?, prepare,
 egress, session_egress, timeout_secs? }`, `repo` a forge identity (`host/owner/name`);
-a receiver refuses any other field. It is staged for the receiver's operator, never
+a receiver refuses any other field, and any string in it, or the note, that carries a
+control, format or separator character. It is staged for the receiver's operator, never
 applied on receipt, and acks `{ offer_id, state, expires_ms, superseded }`. The op is
 additive and the contract version is unmoved: a node that predates it answers that it
 runs an older build.

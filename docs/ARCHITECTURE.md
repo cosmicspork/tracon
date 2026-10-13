@@ -1080,19 +1080,34 @@ Invariants on top of the wire:
   portable part of the entry: `dockerfile`, `context`, `checks`, `prepare`,
   `egress`, `session_egress` and `timeout_secs`. It never carries the entry's
   `image` (a digest names what one node built or chose), `prepare_credentials`,
-  its `path`, or its `commits` and `style`, and a command naming a home directory
-  is refused. Both ends check this: the sender before it sends, and the receiver,
-  which also refuses any field a recipe does not have and holds the sender to the
-  named channel by its own record, as it does every command. The receiver only
-  stages the offer (`repo_recipe_offer`, node-local, never replicated) and
-  announces it on the operator's devices; nothing reaches `node.toml` until the
-  operator, having seen what would change on the entry it lands on, accepts it,
-  which is an admin action (a passkey from off the node). Offering is one too.
-  Accepting goes through the one `[[repo]]` writer, so the entry keeps
-  its comments and every field the recipe does not carry, and the node then builds
-  and pins its own image from the recipe. A newer offer from the same sender for
-  the same repository supersedes an undecided one, a sender holds at most 32
-  undecided offers on a node, and an offer lapses after 14 days.
+  its `path`, or its `commits` and `style`. Both ends check it: the sender before
+  it sends, and the receiver, which also refuses any field a recipe does not have
+  and holds the sender to the named channel by its own record, as it does every
+  command. Either refuses a command naming a home directory, an egress entry that
+  is an IP address, and any command, egress entry, path or note carrying a
+  control, format (bidirectional overrides, zero-width characters) or separator
+  character, so what the operator reads is what runs. The receiver only stages
+  the offer (`repo_recipe_offer`, node-local, never replicated) and announces it,
+  one notification per sender and repository; nothing reaches `node.toml` until
+  the operator, having seen what would change on the entry it lands on, accepts
+  it. Accepting and offering are admin actions (a passkey from off the node), and
+  the accept's prompt names the sender, the repository, the fields that change and
+  what becomes of lent credentials. An accept names the review it was decided on
+  (`viewed_hash`, over the target, the resulting entry and the operator's
+  choices) and is refused if the table has moved since. The entry lands where it
+  already answers for the identity exactly (or for this node's clone of it, or a
+  checkout whose origin it is); a relative entry that only ends the same way is
+  not chosen for the operator. Credentials the entry lends its preparation are
+  dropped when the offer changes that preparation's commands, egress, Dockerfile
+  or context, because a peer would otherwise choose what runs with them and where
+  it may send them; the operator may keep them explicitly, and then the node
+  starts no build on its own. Accepting goes through the one `[[repo]]` writer,
+  so the entry keeps its comments and every field the recipe does not carry, and
+  the node then builds and pins its own image from the recipe. A newer offer from
+  the same sender for the same repository supersedes an undecided one; a sender
+  holds at most 32 undecided offers on a node and makes at most 10 an hour; an
+  offer lapses after 14 days, is withdrawn once its sender no longer shares its
+  channel, and decided offers are forgotten after 30 days.
 - **The hello may carry state, not secrets.** A node's models and its provider
   summary (names, states, identities — and a pending login URL) ride the hello,
   sealed to the operator's own mesh. Credential values never do; those move only as

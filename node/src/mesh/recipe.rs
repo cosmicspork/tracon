@@ -59,12 +59,61 @@ pub struct RepoRecipe {
     pub timeout_secs: Option<u64>,
 }
 
+/// How the operator asked for an offer to be applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Choices {
+    /// Build the offered Dockerfile in place of an image this node pinned.
+    pub replace_image: bool,
+    /// Keep lending the entry's `prepare_credentials` to a preparation the
+    /// offer changes. Off unless asked for: see [`Credentials::Dropped`].
+    pub keep_credentials: bool,
+}
+
+/// What becomes of the credentials an entry lends its default branch's
+/// preparation when an offer is applied to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credentials {
+    /// The entry lends none.
+    None,
+    /// The offer leaves what preparation runs and reaches as it was, so the
+    /// credentials are lent to the same commands as before.
+    Unaffected(Vec<String>),
+    /// The offer changes the commands, the hosts they reach or the image
+    /// they run in, so a peer would choose what runs with the credentials
+    /// and where it may send them. They are no longer lent; the operator
+    /// re-adds them at the node once they have read what would run.
+    Dropped(Vec<String>),
+    /// The operator chose to keep lending them to the changed preparation.
+    /// The node then builds nothing until the operator starts it.
+    KeptOnChange(Vec<String>),
+}
+
+impl Credentials {
+    pub fn names(&self) -> &[String] {
+        match self {
+            Credentials::None => &[],
+            Credentials::Unaffected(n) | Credentials::Dropped(n) | Credentials::KeptOnChange(n) => {
+                n
+            }
+        }
+    }
+
+    /// Whether a build may start on its own once the offer is written: not
+    /// while credentials are lent to a preparation a peer just changed.
+    pub fn allows_build(&self) -> bool {
+        !matches!(self, Credentials::KeptOnChange(_))
+    }
+}
+
 /// An entry with an offer applied, and what the operator should know about
 /// how it was applied.
 #[derive(Debug, Clone)]
 pub struct Applied {
     pub entry: Repo,
     pub notes: Vec<String>,
+    /// The fields in [`LOCAL_ONLY`] the entry still has its own value for.
+    pub kept: Vec<&'static str>,
+    pub credentials: Credentials,
 }
 
 impl RepoRecipe {
@@ -104,6 +153,30 @@ impl RepoRecipe {
     /// something of the sender's machine to the receiver's.
     pub fn validate(&self) -> Result<(), String> {
         valid_identity(&self.repo)?;
+        for (field, value) in [
+            ("dockerfile", self.dockerfile.as_deref()),
+            ("context", self.context.as_deref()),
+        ] {
+            if value.is_some_and(|v| hidden_char(v).is_some()) {
+                return Err(format!("{field} has a control or invisible character"));
+            }
+        }
+        for entry in &self.egress {
+            if hidden_char(entry).is_some() {
+                return Err("egress has a control or invisible character".into());
+            }
+            // A literal host is all a host rule may be; one made only of
+            // numbers is an address, which names a machine, not a service.
+            if entry.contains('.')
+                && entry
+                    .split('.')
+                    .all(|label| label.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return Err(format!(
+                    "egress {entry:?} is an IP address; a recipe names registries by host name"
+                ));
+            }
+        }
         for (field, commands) in [
             ("checks", self.checks.as_deref().unwrap_or_default()),
             ("prepare", &self.prepare[..]),
@@ -115,8 +188,16 @@ impl RepoRecipe {
                 if command.trim().is_empty() {
                     return Err(format!("{field} has an empty command"));
                 }
-                if command.len() > MAX_COMMAND_BYTES || command.contains('\0') {
+                if command.len() > MAX_COMMAND_BYTES {
                     return Err(format!("{field} has a command that is too long"));
+                }
+                // What the operator reads must be what runs: no control
+                // characters, and nothing that reorders or hides text.
+                if let Some(c) = hidden_char(command) {
+                    return Err(format!(
+                        "{field} has a command with a control or invisible character (U+{:04X})",
+                        c as u32
+                    ));
                 }
                 if let Some(path) = local_path(command) {
                     return Err(format!(
@@ -150,14 +231,17 @@ impl RepoRecipe {
     }
 
     /// `existing` (or a new entry at `path`) with this recipe applied. The
-    /// fields in [`LOCAL_ONLY`] stay as the entry has them. A recipe that
-    /// names no Dockerfile leaves the entry's own image source alone: its
-    /// sender pins an image, which is never offered. One that names a
-    /// Dockerfile replaces an image this node pinned only when
-    /// `replace_image` says so.
-    pub fn apply(&self, existing: Option<&Repo>, path: PathBuf, replace_image: bool) -> Applied {
+    /// fields in [`LOCAL_ONLY`] stay as the entry has them, with two
+    /// exceptions the operator controls. A recipe that names a Dockerfile
+    /// replaces an image this node pinned only when `replace_image` says so
+    /// (one that names none leaves the entry's own image source alone: its
+    /// sender pins an image, which is never offered). And credentials the
+    /// entry lends its preparation are dropped when the offer changes what
+    /// that preparation runs, reaches or runs in, unless `keep_credentials`.
+    pub fn apply(&self, existing: Option<&Repo>, path: PathBuf, choices: Choices) -> Applied {
         let mut notes = Vec::new();
-        let mut entry = existing.cloned().unwrap_or_default();
+        let was = existing.cloned().unwrap_or_default();
+        let mut entry = was.clone();
         entry.path = path;
         entry.checks = self.checks.clone();
         entry.prepare = self.prepare.clone();
@@ -173,7 +257,7 @@ impl RepoRecipe {
                     );
                 }
             }
-            (Some(_), true) if !replace_image => notes.push(
+            (Some(_), true) if !choices.replace_image => notes.push(
                 "This entry pins an image of its own, which it keeps; the offered Dockerfile is \
                  not applied unless the pinned image is replaced."
                     .into(),
@@ -190,13 +274,54 @@ impl RepoRecipe {
                 entry.context = self.context.clone();
             }
         }
-        if !entry.prepare_credentials.is_empty() {
+        let lent = entry.prepare_credentials.clone();
+        let preparation_changed = was.prepare != entry.prepare
+            || was.egress != entry.egress
+            || was.dockerfile != entry.dockerfile
+            || was.context != entry.context;
+        let credentials = if lent.is_empty() {
+            Credentials::None
+        } else if !preparation_changed {
             notes.push(format!(
-                "This node keeps lending {} to the default branch's preparation.",
-                entry.prepare_credentials.join(", ")
+                "This node keeps lending {} to the default branch's preparation, which the offer \
+                 leaves as it was.",
+                lent.join(", ")
             ));
+            Credentials::Unaffected(lent)
+        } else if choices.keep_credentials {
+            notes.push(format!(
+                "This node keeps lending {} to a preparation the offer changes. Nothing is built \
+                 until you start it.",
+                lent.join(", ")
+            ));
+            Credentials::KeptOnChange(lent)
+        } else {
+            entry.prepare_credentials.clear();
+            notes.push(format!(
+                "Credentials no longer lent: {}. The offer changes what preparation runs or \
+                 reaches; re-add them at the node once you have read it.",
+                lent.join(", ")
+            ));
+            Credentials::Dropped(lent)
+        };
+        let kept = LOCAL_ONLY
+            .iter()
+            .copied()
+            .filter(|field| match *field {
+                "path" => existing.is_some(),
+                "image" => entry.image.is_some(),
+                "prepare_credentials" => !entry.prepare_credentials.is_empty(),
+                "commits" => entry.commits.is_some(),
+                "style" => entry.style.is_some(),
+                _ => false,
+            })
+            .collect();
+        Applied {
+            entry,
+            notes,
+            kept,
+            credentials,
         }
-        Applied { entry, notes }
     }
 }
 
@@ -206,6 +331,11 @@ pub fn changes(before: Option<&Repo>, after: &Repo) -> Vec<Value> {
     let was = before.unwrap_or(&blank);
     let pairs = [
         ("image", json!(was.image), json!(after.image)),
+        (
+            "prepare_credentials",
+            json!(was.prepare_credentials),
+            json!(after.prepare_credentials),
+        ),
         ("dockerfile", json!(was.dockerfile), json!(after.dockerfile)),
         ("context", json!(was.context), json!(after.context)),
         ("checks", json!(was.checks), json!(after.checks)),
@@ -306,16 +436,61 @@ fn local_path(command: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// An operator's note on an offer, as it is shown: trimmed, without control
-/// characters, and bounded.
-pub fn clean_note(note: Option<String>) -> Option<String> {
-    let note: String = note?
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\n')
-        .take(MAX_NOTE_CHARS)
-        .collect();
+/// An operator's note on an offer: trimmed, empty as none, and refused when
+/// it is too long or carries a control or invisible character.
+pub fn note(note: Option<String>) -> Result<Option<String>, String> {
+    let Some(note) = note else {
+        return Ok(None);
+    };
+    // Checked before trimming, which would take a trailing separator.
+    if let Some(c) = hidden_char(&note) {
+        return Err(format!(
+            "the note has a control or invisible character (U+{:04X})",
+            c as u32
+        ));
+    }
     let note = note.trim();
-    (!note.is_empty()).then(|| note.to_string())
+    if note.chars().count() > MAX_NOTE_CHARS {
+        return Err(format!(
+            "the note is longer than {MAX_NOTE_CHARS} characters"
+        ));
+    }
+    Ok((!note.is_empty()).then(|| note.to_string()))
+}
+
+/// The first character in `text` that is a control (Unicode Cc), a format
+/// character (Cf: bidirectional overrides and isolates, zero-width joiners
+/// and spaces, the byte-order mark, tag characters) or a line or paragraph
+/// separator (Zl, Zp). An operator reading a command must see what runs.
+pub fn hidden_char(text: &str) -> Option<char> {
+    text.chars()
+        .find(|&c| c.is_control() || is_format(c) || c == '\u{2028}' || c == '\u{2029}')
+}
+
+/// Unicode general category Cf, as of Unicode 15.1.
+fn is_format(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD
+        | 0x0600..=0x0605
+        | 0x061C
+        | 0x06DD
+        | 0x070F
+        | 0x0890..=0x0891
+        | 0x08E2
+        | 0x180E
+        | 0x200B..=0x200F
+        | 0x202A..=0x202E
+        | 0x2060..=0x2064
+        | 0x2066..=0x206F
+        | 0xFEFF
+        | 0xFFF9..=0xFFFB
+        | 0x110BD
+        | 0x110CD
+        | 0x13430..=0x1343F
+        | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A
+        | 0xE0001
+        | 0xE0020..=0xE007F)
 }
 
 #[cfg(test)]
@@ -430,9 +605,8 @@ mod tests {
         assert!(egress.validate().unwrap_err().contains("egress"));
     }
 
-    #[test]
-    fn applying_keeps_what_is_this_nodes_own() {
-        let recipe = RepoRecipe {
+    fn offered() -> RepoRecipe {
+        RepoRecipe {
             repo: "github.com/acme/app".into(),
             dockerfile: Some("Dockerfile".into()),
             context: None,
@@ -441,11 +615,20 @@ mod tests {
             egress: vec!["npm".into()],
             session_egress: false,
             timeout_secs: None,
-        };
+        }
+    }
+
+    const KEEP_IMAGE: Choices = Choices {
+        replace_image: false,
+        keep_credentials: false,
+    };
+
+    #[test]
+    fn applying_keeps_what_is_this_nodes_own() {
+        let recipe = offered();
         let mut mine = entry();
-        let applied = recipe.apply(Some(&mine), mine.path.clone(), false);
+        let applied = recipe.apply(Some(&mine), mine.path.clone(), KEEP_IMAGE);
         assert_eq!(applied.entry.path, mine.path);
-        assert_eq!(applied.entry.prepare_credentials, ["nova"]);
         assert!(matches!(
             applied.entry.commits,
             Some(crate::config::Commits::Keep)
@@ -453,29 +636,108 @@ mod tests {
         assert_eq!(applied.entry.dockerfile.as_deref(), Some("Dockerfile"));
         assert_eq!(applied.entry.checks, Some(vec!["just all".to_string()]));
         assert!(!applied.entry.session_egress);
+        assert_eq!(applied.kept, ["path", "commits"]);
 
         // A pinned image stays unless the operator replaces it.
         mine.image = Some(format!("localhost/app@sha256:{}", "b".repeat(64)));
         mine.dockerfile = None;
         mine.context = None;
-        let kept = recipe.apply(Some(&mine), mine.path.clone(), false);
+        mine.prepare_credentials.clear();
+        let kept = recipe.apply(Some(&mine), mine.path.clone(), KEEP_IMAGE);
         assert_eq!(kept.entry.image, mine.image);
         assert_eq!(kept.entry.dockerfile, None);
         assert!(kept.notes.iter().any(|n| n.contains("pins an image")));
-        let replaced = recipe.apply(Some(&mine), mine.path.clone(), true);
+        assert!(kept.kept.contains(&"image"));
+        let replace = Choices {
+            replace_image: true,
+            ..KEEP_IMAGE
+        };
+        let replaced = recipe.apply(Some(&mine), mine.path.clone(), replace);
         assert_eq!(replaced.entry.image, None);
         assert_eq!(replaced.entry.dockerfile.as_deref(), Some("Dockerfile"));
+        assert!(!replaced.kept.contains(&"image"));
 
         // An offer with no Dockerfile leaves the entry's own source.
         let no_build = RepoRecipe {
             dockerfile: None,
             ..recipe
         };
-        let applied = no_build.apply(Some(&mine), mine.path.clone(), true);
+        let applied = no_build.apply(Some(&mine), mine.path.clone(), replace);
         assert_eq!(applied.entry.image, mine.image);
-        let fresh = no_build.apply(None, "github.com/acme/app".into(), false);
+        let fresh = no_build.apply(None, "github.com/acme/app".into(), KEEP_IMAGE);
         assert_eq!(fresh.entry.path, PathBuf::from("github.com/acme/app"));
         assert!(fresh.entry.prepare_credentials.is_empty());
+        assert!(fresh.kept.is_empty());
+    }
+
+    /// A peer that changes what preparation runs or reaches would choose
+    /// what runs with the credentials it is lent: they are dropped unless the
+    /// operator keeps them, and kept ones stop the node building on its own.
+    #[test]
+    fn credentials_are_not_lent_to_a_preparation_a_peer_changed() {
+        let mine = entry();
+        let dropped = offered().apply(Some(&mine), mine.path.clone(), KEEP_IMAGE);
+        assert!(dropped.entry.prepare_credentials.is_empty());
+        assert_eq!(
+            dropped.credentials,
+            Credentials::Dropped(vec!["nova".into()])
+        );
+        assert!(dropped.credentials.allows_build());
+        assert!(dropped.notes.iter().any(|n| n.contains("no longer lent")));
+        assert!(changes(Some(&mine), &dropped.entry)
+            .iter()
+            .any(|c| c["field"] == "prepare_credentials"));
+
+        let keep = Choices {
+            keep_credentials: true,
+            ..KEEP_IMAGE
+        };
+        let kept = offered().apply(Some(&mine), mine.path.clone(), keep);
+        assert_eq!(kept.entry.prepare_credentials, ["nova"]);
+        assert_eq!(
+            kept.credentials,
+            Credentials::KeptOnChange(vec!["nova".into()])
+        );
+        assert!(!kept.credentials.allows_build());
+
+        // Only checks changed: the preparation they are lent to is the same.
+        let same = RepoRecipe {
+            checks: Some(vec!["just all".into()]),
+            ..RepoRecipe::from_entry(&mine, "github.com/acme/app")
+        };
+        let unaffected = same.apply(Some(&mine), mine.path.clone(), KEEP_IMAGE);
+        assert_eq!(unaffected.entry.prepare_credentials, ["nova"]);
+        assert_eq!(
+            unaffected.credentials,
+            Credentials::Unaffected(vec!["nova".into()])
+        );
+        assert!(unaffected.credentials.allows_build());
+        for (field, changed) in [
+            (
+                "egress",
+                RepoRecipe {
+                    egress: vec!["npm".into()],
+                    ..same.clone()
+                },
+            ),
+            (
+                "dockerfile",
+                RepoRecipe {
+                    dockerfile: Some("Other".into()),
+                    ..same.clone()
+                },
+            ),
+            (
+                "context",
+                RepoRecipe {
+                    context: Some("sub".into()),
+                    ..same.clone()
+                },
+            ),
+        ] {
+            let applied = changed.apply(Some(&mine), mine.path.clone(), KEEP_IMAGE);
+            assert!(applied.entry.prepare_credentials.is_empty(), "{field}");
+        }
     }
 
     #[test]
@@ -491,14 +753,63 @@ mod tests {
 
     #[test]
     fn a_note_is_trimmed_and_bounded() {
-        assert_eq!(
-            clean_note(Some("  \u{7}hi\n".into())).as_deref(),
-            Some("hi")
-        );
-        assert_eq!(clean_note(Some("   ".into())), None);
-        assert_eq!(
-            clean_note(Some("x".repeat(5000))).unwrap().chars().count(),
-            MAX_NOTE_CHARS
-        );
+        assert_eq!(note(Some("  hi  ".into())).unwrap().as_deref(), Some("hi"));
+        assert_eq!(note(Some("   ".into())).unwrap(), None);
+        assert!(note(Some("x".repeat(5000))).is_err());
+        for hidden in [
+            "a\u{7}b",
+            "two\nlines",
+            "rtl\u{202E}txt",
+            "zero\u{200B}width",
+            "sep\u{2028}",
+        ] {
+            assert!(note(Some(hidden.into())).is_err(), "{hidden:?}");
+        }
+    }
+
+    /// What the operator reads must be what runs: a command, an egress entry
+    /// or a path with a control, bidirectional or zero-width character is
+    /// refused, and so is an egress entry that is an address.
+    #[test]
+    fn hidden_characters_and_addresses_are_refused() {
+        for hidden in [
+            "npm ci\u{202E}",
+            "npm\u{200B} ci",
+            "npm ci\ttest",
+            "npm ci\r",
+            "npm\u{2066}ci\u{2069}",
+            "npm\u{FEFF}ci",
+            "npm\u{E0041}ci",
+            "npm\u{2029}ci",
+        ] {
+            let mut recipe = offered();
+            recipe.prepare = vec![hidden.into()];
+            assert!(
+                recipe.validate().unwrap_err().contains("invisible"),
+                "{hidden:?}"
+            );
+            let mut checks = offered();
+            checks.checks = Some(vec![hidden.into()]);
+            assert!(checks.validate().is_err(), "{hidden:?}");
+        }
+        let mut egress = offered();
+        egress.egress = vec!["registry.npmjs.org\u{200D}".into()];
+        assert!(egress.validate().is_err());
+        let mut dockerfile = offered();
+        dockerfile.dockerfile = Some("Docker\u{202E}file".into());
+        assert!(dockerfile.validate().is_err());
+        for address in ["10.0.0.1", "169.254.169.254", "127.0.0.1"] {
+            let mut recipe = offered();
+            recipe.egress = vec![address.into()];
+            assert!(
+                recipe.validate().unwrap_err().contains("IP address"),
+                "{address}"
+            );
+        }
+        // Plain text, including non-Latin letters, is fine.
+        let mut fine = offered();
+        fine.prepare = vec!["echo 'héllo wörld'".into()];
+        fine.validate().unwrap();
+        assert_eq!(hidden_char("plain"), None);
     }
 }

@@ -641,14 +641,18 @@ export const api = {
   offerRecipe: (body: { path?: string; repo?: string; channel: string; to_nodes?: string[]; note?: string }) =>
     call<{ repo: string; expires_ms: number; results: RecipeOfferResult[] }>('POST', '/api/repos/offer', body),
   recipeOffers: () => call<{ offers: RecipeOffer[] }>('GET', '/api/repos/offers'),
-  recipeOffer: (id: string, path = '', replaceImage = false) => {
+  recipeOffer: (id: string, path = '', replaceImage = false, keepCredentials = false) => {
     const query = new URLSearchParams()
     if (path) query.set('path', path)
     if (replaceImage) query.set('replace_image', 'true')
+    if (keepCredentials) query.set('keep_credentials', 'true')
     const suffix = query.size ? `?${query}` : ''
     return call<RecipeOfferView>('GET', `/api/repos/offers/${encodeURIComponent(id)}${suffix}`)
   },
-  acceptRecipeOffer: (id: string, body: { path?: string; replace_image?: boolean }) =>
+  acceptRecipeOffer: (
+    id: string,
+    body: { path: string; replace_image: boolean; keep_credentials: boolean; viewed_hash: string },
+  ) =>
     call<{ accepted: boolean; path: string; changed: boolean; restart_required: boolean; building: boolean }>(
       'POST',
       `/api/repos/offers/${encodeURIComponent(id)}/accept`,
