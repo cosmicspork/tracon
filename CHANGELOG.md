@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.32.1](https://github.com/cosmicspork/tracon/compare/v0.32.0...v0.32.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **kube:** report real exit codes, deadlines and image pins for captured runs ([#471](https://github.com/cosmicspork/tracon/issues/471)) ([949d4de](https://github.com/cosmicspork/tracon/commit/949d4de54671016cfcdc0a57ef5d9fc64f8c69f9))
+* **mesh:** authorise the sender of every forwarded command and expire stale ones ([#473](https://github.com/cosmicspork/tracon/issues/473)) ([94e221c](https://github.com/cosmicspork/tracon/commit/94e221c7191944404849963ccd23ae83e24e56a5))
+* **notify:** get pushes past Apple and say why when they are refused ([#472](https://github.com/cosmicspork/tracon/issues/472)) ([f25cc12](https://github.com/cosmicspork/tracon/commit/f25cc124b6cc5c53021d427d92ebebff0169b61f))
+
 ## [0.32.0](https://github.com/cosmicspork/tracon/compare/v0.31.2...v0.32.0) (2026-10-13)
 
 
