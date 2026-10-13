@@ -13,17 +13,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, ContainerStatus, EnvVar, HostAlias,
-    PersistentVolumeClaimVolumeSource, Pod, PodDNSConfig, PodSchedulingGate, PodSecurityContext,
-    PodSpec, PodStatus, SeccompProfile, SecurityContext, Volume, VolumeMount,
+    Capabilities, Container, ContainerPort, ContainerStatus, EmptyDirVolumeSource, EnvVar,
+    HostAlias, LocalObjectReference, PersistentVolumeClaimVolumeSource, Pod, PodDNSConfig,
+    PodSchedulingGate, PodSecurityContext, PodSpec, PodStatus, ResourceRequirements,
+    SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{AttachParams, DeleteParams, LogParams};
 use kube::{Api, Client};
 
 use super::toolchain::image_entrypoint;
 use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
-use crate::config::Config;
+use crate::config::{Config, KubeResources, PodSizing};
 
 mod secret;
 pub use secret::{secret_name, SecretRights, PID_LABEL, RUN_LABEL, SWEEP_GRACE};
@@ -32,6 +34,12 @@ pub const ROLE_LABEL: &str = "tracon.dev/role";
 pub const SESSION_LABEL: &str = "tracon.dev/session";
 pub const PROBE_GATE: &str = "tracon.dev/probe";
 pub const STATE_VOLUME: &str = "state";
+pub const SHM_VOLUME: &str = "shm";
+pub const SCRATCH_VOLUME: &str = "scratch";
+/// Where a harness pod's `TMPDIR` points: an emptyDir of its own, so a
+/// repository image whose `/tmp` the harness uid cannot write still has
+/// somewhere to put temporary files, and nothing there outlives the pod.
+pub const SCRATCH_MOUNT: &str = "/tmp";
 
 /// What the node learns about its own pod from the downward API. The
 /// deployment sets these; a node without them is not running as a pod.
@@ -100,6 +108,13 @@ pub struct KubeSpec {
     /// How long a pod may stay unstarted (unscheduled, pulling, mounting)
     /// before the run is given up. `[runtime.kubernetes] start_timeout_secs`.
     pub start_timeout: Duration,
+    /// `[runtime.kubernetes.resources]`: a session's pod and a captured
+    /// command's are sized apart.
+    pub resources: KubeResources,
+    /// `[runtime.kubernetes] image_pull_secrets`.
+    pub image_pull_secrets: Vec<String>,
+    /// `[runtime.kubernetes] shm_size`.
+    pub shm_size: String,
 }
 
 impl KubeSpec {
@@ -127,6 +142,9 @@ impl KubeSpec {
             entrypoint: image_entrypoint(harness_id),
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
             start_timeout: Duration::from_secs(k.start_timeout_secs),
+            resources: k.resources.clone(),
+            image_pull_secrets: k.image_pull_secrets.clone(),
+            shm_size: k.shm_size.clone(),
         }
     }
 
@@ -189,6 +207,95 @@ impl KubeSpec {
             .collect()
     }
 
+    /// Every volume a harness pod has: the shared state claim, a
+    /// memory-backed `/dev/shm` (a container runtime's 64 MiB default crashes
+    /// Chromium), and the scratch directory `TMPDIR` names. Neither emptyDir
+    /// carries anything the node did not put there, so the boundary's
+    /// volume check is unchanged by them.
+    fn volumes(&self) -> Vec<Volume> {
+        vec![
+            Volume {
+                name: STATE_VOLUME.into(),
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: self.state_claim.clone(),
+                    read_only: Some(false),
+                }),
+                ..Default::default()
+            },
+            Volume {
+                name: SHM_VOLUME.into(),
+                empty_dir: Some(EmptyDirVolumeSource {
+                    medium: Some("Memory".into()),
+                    size_limit: Some(Quantity(self.shm_size.clone())),
+                }),
+                ..Default::default()
+            },
+            Volume {
+                name: SCRATCH_VOLUME.into(),
+                empty_dir: Some(EmptyDirVolumeSource::default()),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn scratch_mounts() -> [VolumeMount; 2] {
+        [
+            VolumeMount {
+                name: SHM_VOLUME.into(),
+                mount_path: "/dev/shm".into(),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: SCRATCH_VOLUME.into(),
+                mount_path: SCRATCH_MOUNT.into(),
+                ..Default::default()
+            },
+        ]
+    }
+
+    /// Explicit requests and a memory limit, always. A namespace's
+    /// LimitRange fills in whatever a pod leaves out, and a request above
+    /// its default limit is then refused at admission.
+    fn requirements(sizing: &PodSizing) -> ResourceRequirements {
+        let quantity = |value: &str| Quantity(value.to_string());
+        let mut limits = std::collections::BTreeMap::from([(
+            "memory".to_string(),
+            quantity(&sizing.memory_limit),
+        )]);
+        if let Some(cpu) = &sizing.cpu_limit {
+            limits.insert("cpu".into(), quantity(cpu));
+        }
+        ResourceRequirements {
+            requests: Some(std::collections::BTreeMap::from([
+                ("cpu".to_string(), quantity(&sizing.cpu_request)),
+                ("memory".to_string(), quantity(&sizing.memory_request)),
+            ])),
+            limits: Some(limits),
+            ..Default::default()
+        }
+    }
+
+    fn pull_secrets(&self) -> Option<Vec<LocalObjectReference>> {
+        (!self.image_pull_secrets.is_empty()).then(|| {
+            self.image_pull_secrets
+                .iter()
+                .map(|name| LocalObjectReference { name: name.clone() })
+                .collect()
+        })
+    }
+
+    /// The pod for a command run to completion (`Runner::run_capture`): no
+    /// stdin, and sized as a command rather than a session.
+    pub fn capture_pod(&self, name: &str, cmd: &RunnerCommand) -> Result<Pod, RunnerError> {
+        let mut pod = self.pod(name, cmd, false)?;
+        if let Some(c) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) {
+            c.stdin = None;
+            c.stdin_once = None;
+            c.resources = Some(Self::requirements(&self.resources.command()));
+        }
+        Ok(pod)
+    }
+
     /// Render the pod. `gated` adds a scheduling gate so the pod is admitted
     /// (and therefore mutated by whatever admission the cluster runs) but never
     /// scheduled: the boundary checks read the result and delete it.
@@ -201,6 +308,7 @@ impl KubeSpec {
             ("HTTP_PROXY", proxy),
             ("NO_PROXY", super::no_proxy(&self.gateway_host)),
             ("no_proxy", super::no_proxy(&self.gateway_host)),
+            ("TMPDIR", SCRATCH_MOUNT.to_string()),
             (self.state_env, state),
         ]
         .into_iter()
@@ -293,14 +401,8 @@ impl KubeSpec {
                     }),
                     ..Default::default()
                 }),
-                volumes: Some(vec![Volume {
-                    name: STATE_VOLUME.into(),
-                    persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                        claim_name: self.state_claim.clone(),
-                        read_only: Some(false),
-                    }),
-                    ..Default::default()
-                }]),
+                volumes: Some(self.volumes()),
+                image_pull_secrets: self.pull_secrets(),
                 containers: vec![Container {
                     name: HARNESS_CONTAINER.into(),
                     image: Some(image),
@@ -331,7 +433,10 @@ impl KubeSpec {
                         }]
                     }),
                     env: Some(env),
-                    volume_mounts: Some(self.volume_mounts(cmd)?),
+                    volume_mounts: Some(
+                        [self.volume_mounts(cmd)?, Self::scratch_mounts().into()].concat(),
+                    ),
+                    resources: Some(Self::requirements(&self.resources.session())),
                     // The gate: no capabilities, no way to gain any.
                     security_context: Some(SecurityContext {
                         privileged: Some(false),
@@ -767,11 +872,7 @@ impl Runner for KubeRunner {
         self.ensure_mount_roots(&cmd).await?;
         let name = self.capture_name(&Self::name_for(&cmd, "tracon-x"));
         let asked = cmd.image.clone().unwrap_or_else(|| self.spec.image.clone());
-        let mut pod = self.spec.pod(&name, &cmd, false)?;
-        if let Some(c) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) {
-            c.stdin = None;
-            c.stdin_once = None;
-        }
+        let pod = self.spec.capture_pod(&name, &cmd)?;
         let pods = self.pods();
         self.remove(&name).await;
         // Dropped with this future before it is released, the guard deletes
@@ -1011,6 +1112,35 @@ mod tests {
         assert!(spec().pod("tracon-w-1", &c, false).is_err());
     }
 
+    /// A captured run carries its secret environment by reference as a
+    /// session does, and is still sized as a command, with a TMPDIR a lent
+    /// value does not displace.
+    #[test]
+    fn a_capture_pod_keeps_secret_refs_and_command_sizing() {
+        let mut c = cmd();
+        c.secret_env = crate::runner::SecretEnv::new(vec![(
+            "COMPOSER_AUTH".into(),
+            r#"{"http-basic":{}}"#.into(),
+        )]);
+        let pod = spec().capture_pod("tracon-w-2", &c).unwrap();
+        let rendered = serde_json::to_string(&pod).unwrap();
+        assert!(!rendered.contains("http-basic"), "{rendered}");
+        let container = pod.spec.unwrap().containers[0].clone();
+        let env = container.env.unwrap();
+        let auth = env.iter().find(|e| e.name == "COMPOSER_AUTH").unwrap();
+        let selector = auth
+            .value_from
+            .as_ref()
+            .and_then(|v| v.secret_key_ref.as_ref())
+            .unwrap();
+        assert_eq!(selector.name, "tracon-w-2-env");
+        assert!(env
+            .iter()
+            .any(|e| e.name == "TMPDIR" && e.value.as_deref() == Some(SCRATCH_MOUNT)));
+        let requests = container.resources.unwrap().requests.unwrap();
+        assert_eq!(requests["memory"].0, "2Gi");
+    }
+
     #[test]
     fn mounts_become_sub_paths_of_the_shared_volume() {
         let pod = spec().pod("p", &cmd(), false).unwrap();
@@ -1030,7 +1160,143 @@ mod tests {
             Some("tracon-scratch-repo-x/gitconfig")
         );
         assert_eq!(cfg.read_only, Some(true));
-        assert!(mounts.iter().all(|m| m.name == STATE_VOLUME));
+        // Everything a command mounts is a sub path of the claim; the only
+        // other volumes are the pod's own emptyDirs.
+        assert!(mounts
+            .iter()
+            .all(|m| m.name == STATE_VOLUME
+                || [SHM_VOLUME, SCRATCH_VOLUME].contains(&m.name.as_str())));
+    }
+
+    fn quantities(
+        map: &Option<std::collections::BTreeMap<String, Quantity>>,
+    ) -> Vec<(String, String)> {
+        map.iter()
+            .flatten()
+            .map(|(k, v)| (k.clone(), v.0.clone()))
+            .collect()
+    }
+
+    /// A namespace's LimitRange fills in what a pod leaves out, and refuses a
+    /// request above its default limit; so every pod names its own requests
+    /// and memory limit, and a check is sized for a test suite.
+    #[test]
+    fn sessions_and_captured_commands_are_sized_apart() {
+        let spec = spec();
+        let session = spec.pod("tracon-h-1", &cmd(), false).unwrap();
+        let c = &session.spec.unwrap().containers[0];
+        let r = c.resources.as_ref().unwrap();
+        assert_eq!(
+            quantities(&r.requests),
+            [
+                ("cpu".into(), "250m".into()),
+                ("memory".into(), "1Gi".into())
+            ]
+        );
+        // No CPU limit unless one is configured: a limit throttles a build on
+        // a node with idle cores.
+        assert_eq!(quantities(&r.limits), [("memory".into(), "4Gi".into())]);
+        assert_eq!(c.stdin, Some(true));
+
+        let capture = spec.capture_pod("tracon-c-1", &cmd()).unwrap();
+        let c = &capture.spec.unwrap().containers[0];
+        let r = c.resources.as_ref().unwrap();
+        assert_eq!(
+            quantities(&r.requests),
+            [
+                ("cpu".into(), "500m".into()),
+                ("memory".into(), "2Gi".into())
+            ]
+        );
+        assert_eq!(quantities(&r.limits), [("memory".into(), "4Gi".into())]);
+        assert_eq!(c.stdin, None);
+        assert_eq!(c.stdin_once, None);
+
+        let mut spec = spec;
+        spec.resources.command.cpu_limit = Some("2".into());
+        spec.resources.command.memory_limit = Some("6Gi".into());
+        let capture = spec.capture_pod("tracon-c-2", &cmd()).unwrap();
+        let r = capture.spec.unwrap().containers[0]
+            .resources
+            .clone()
+            .unwrap();
+        assert_eq!(
+            quantities(&r.limits),
+            [("cpu".into(), "2".into()), ("memory".into(), "6Gi".into())]
+        );
+    }
+
+    /// Unnamed, the pod carries none, so the namespace's default service
+    /// account supplies its own; named, they are the pod's.
+    #[test]
+    fn pull_secrets_are_named_only_when_configured() {
+        let mut spec = spec();
+        let pod = spec.pod("p", &cmd(), false).unwrap();
+        assert!(pod.spec.unwrap().image_pull_secrets.is_none());
+        spec.image_pull_secrets = vec!["registry-tracon".into(), "ghcr".into()];
+        for pod in [
+            spec.pod("p", &cmd(), false).unwrap(),
+            spec.capture_pod("p", &cmd()).unwrap(),
+            spec.pod("probe", &cmd(), true).unwrap(),
+        ] {
+            let names: Vec<String> = pod
+                .spec
+                .unwrap()
+                .image_pull_secrets
+                .unwrap()
+                .into_iter()
+                .map(|r| r.name)
+                .collect();
+            assert_eq!(names, ["registry-tracon", "ghcr"]);
+        }
+    }
+
+    /// Chromium crashes in a runtime's 64 MiB `/dev/shm`, and a repository
+    /// image's `/tmp` may not be writable by the harness uid.
+    #[test]
+    fn browsers_get_shared_memory_and_a_writable_tmpdir() {
+        let mut spec = spec();
+        spec.shm_size = "768Mi".into();
+        let pod = spec.capture_pod("p", &cmd()).unwrap();
+        let s = pod.spec.unwrap();
+        let volumes = s.volumes.unwrap();
+        let shm = volumes.iter().find(|v| v.name == SHM_VOLUME).unwrap();
+        let shm = shm.empty_dir.as_ref().unwrap();
+        assert_eq!(shm.medium.as_deref(), Some("Memory"));
+        assert_eq!(shm.size_limit, Some(Quantity("768Mi".into())));
+        let scratch = volumes.iter().find(|v| v.name == SCRATCH_VOLUME).unwrap();
+        assert!(scratch.empty_dir.is_some());
+        let c = &s.containers[0];
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        let mounted = |name: &str| {
+            mounts
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| (m.mount_path.as_str(), m.sub_path.is_none(), m.read_only))
+        };
+        assert_eq!(mounted(SHM_VOLUME), Some(("/dev/shm", true, None)));
+        assert_eq!(mounted(SCRATCH_VOLUME), Some((SCRATCH_MOUNT, true, None)));
+        let tmpdirs: Vec<_> = c
+            .env
+            .iter()
+            .flatten()
+            .filter(|e| e.name == "TMPDIR")
+            .map(|e| e.value.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(tmpdirs, [SCRATCH_MOUNT]);
+
+        // A command that names its own TMPDIR keeps it, once.
+        let mut own = cmd();
+        own.env.push(("TMPDIR".into(), "/work/.tmp".into()));
+        let pod = spec.pod("p", &own, false).unwrap();
+        let tmpdirs: Vec<_> = pod.spec.unwrap().containers[0]
+            .env
+            .iter()
+            .flatten()
+            .filter(|e| e.name == "TMPDIR")
+            .map(|e| e.value.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(tmpdirs, ["/work/.tmp"]);
     }
 
     #[test]

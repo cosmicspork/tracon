@@ -374,6 +374,22 @@ image reference itself when it is pinned by digest, because the kubelet runs not
 else under it, so an approval asked of a runner that has run nothing still finds it. A
 tag is confirmed only by the `imageID` a run of that same tag reported.
 
+**A harness pod is sized and given what a browser needs.** Every pod names its own
+CPU and memory requests and a memory limit (`[runtime.kubernetes.resources]`), because
+a namespace's LimitRange fills in whatever a pod leaves out and refuses a request above
+its default limit at admission. A session and a command run to completion are sized
+apart: by default a session asks for 250m and 1Gi and a check or preparation for 500m
+and 2Gi, both limited to 4Gi of memory and neither to CPU, which suits one shared
+4 vCPU / 8 GB node where a Laravel suite with Vite and Playwright peaks around 2 to
+3 GiB. A limit below its request is refused when `node.toml` loads. Each pod gets a
+memory-backed `/dev/shm` (`shm_size`, 1Gi), since a container runtime's 64 MiB crashes
+Chromium, and an emptyDir at `/tmp` that `TMPDIR` names, so a repository image whose
+own `/tmp` the harness uid cannot write still has scratch space. Neither emptyDir
+carries anything the node did not put there, so the boundary's volume check holds.
+`image_pull_secrets` names the Secrets a pod pulls with; left empty, the pod names
+none and the namespace's default service account supplies its own, which is how a
+registry integration that patches that account keeps working.
+
 **The checks verify what runs.** They render the same run specification a session
 uses onto a probe that is created but never started, so a mutating admission webhook
 that adds privilege fails the check rather than passing the rendering, and a second
