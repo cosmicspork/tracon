@@ -210,7 +210,23 @@ client at the far end chooses its own `Host`, so it would be local.
 `auth issue` prints the operator token once — and, given `--url`, a QR code. Scan it
 with the phone's camera: the token rides the URL fragment (never sent to any server,
 stripped from the address bar before login), the browser exchanges it for a cookie,
-and you are in. Add the page to the Home Screen — iOS only delivers push to an
+and you are in.
+
+The app then offers to add a passkey. Take it: from off the node, every admin
+action (the operator token, credentials, forge and provider keys, authority grants,
+channel bindings, mesh invitations and members, passkeys themselves) is confirmed
+with a passkey, one prompt per save, and the cookie alone cannot make them. A
+freshly paired browser may add the node's first passkey without one for 15 minutes;
+after that, adding another is itself confirmed with an existing passkey, so a token
+that leaks later buys a sign-in but not admin. Passkeys are bound to
+`[auth] public_origin`, so set it first; without it the node refuses admin actions
+from afar and says why. Everyday use asks for nothing: the cookie is the sign-in.
+At the node itself (and through `kubectl port-forward`) nothing is asked, which is
+also how you recover from losing every passkey (see `docs/RECOVERY.md`). A bearer
+token (`TRACON_TOKEN` with `TRACON_URL`) never confirms an admin action from afar:
+run those at the node.
+
+Add the page to the Home Screen — iOS only delivers push to an
 installed web app — then open **Nodes** and switch on **Push to this device**. The
 node pushes straight to the phone's push service, sealed to the phone's own key.
 

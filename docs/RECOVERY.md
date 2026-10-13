@@ -201,6 +201,43 @@ session to read from it rather than assuming it can.
 `tracon setup` builds an image for each, and a session runs the one it names
 whatever `[harness] id` says. A subscription session reopens on Claude Code only.
 
+## Locked out of admin from afar
+
+Admin actions made from off the node need a passkey; made at the node they need
+nothing. The node's own machine is therefore the recovery root, and on
+Kubernetes "at the node" is a port-forward to the pod, which reaches the node
+from `127.0.0.1` with no forwarding header:
+
+```sh
+kubectl -n <namespace> port-forward deploy/tracon-node 7420:7420
+TRACON_URL=http://127.0.0.1:7420 tracon auth sessions   # or open http://localhost:7420
+```
+
+Bind the forward to loopback only (the default). `--address 0.0.0.0` would make
+every caller who can reach that port the operator.
+
+**Lost every passkey** (the phone is gone and none was synced):
+
+1. At the node, list them: `curl -s http://127.0.0.1:7420/api/passkeys`.
+2. Remove each one, at the node:
+   `curl -s -X DELETE http://127.0.0.1:7420/api/passkeys/<id>`.
+3. Pair again: `tracon auth issue --url https://<public origin>` and scan the QR
+   within 15 minutes. With none enrolled, the freshly paired browser may add the
+   first passkey without one.
+
+Issuing a new token signs every browser out but keeps the passkeys, so it is the
+right move after a phone is lost and the wrong one for a forgotten passkey: it
+never reopens the enrollment window while any passkey is enrolled.
+
+**A phone was lost but the passkey is synced elsewhere.** Rotate the token (at the
+node, or from another signed-in device with the passkey), then remove the lost
+device's passkey if it was not synced. Sign-ins and passkeys are separate:
+revoking one does not revoke the other.
+
+**`step_up_unavailable` with `no_public_origin`.** `[auth] public_origin` is
+unset or did not load, so the node does not know which origin its passkeys
+belong to and refuses rather than guess. Set it (at the node) and restart.
+
 ## Recovering the node itself
 
 Everything a node is lives in two directories. On Linux that is

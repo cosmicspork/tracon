@@ -170,6 +170,26 @@ node's fingerprint, expiry) → received (the other node's name and fingerprint;
 "fingerprints match, admit" or "they differ — cancel") → enrolled. The confirm is
 reading two short strings, so the phone does it too.
 
+**Pair a phone.** `tracon auth issue --url` on the node prints a QR → the phone
+opens it, the token in the fragment is spent for a cookie and stripped → the app
+offers a passkey straight away ("Add a passkey for this device?"), which this
+browser may add without already having one for fifteen minutes, and only while
+the node has none → the system passkey sheet → "Passkey added". "Not now" leaves
+Settings → Access → Passkeys to do it later, within the same window. Everyday use
+asks for nothing more: the cookie is the sign-in.
+
+**Confirm an admin action.** Save (a token, a credential, a grant, a provider key, a
+mesh admission, a passkey) → the node refuses it with `step_up_required` → a sheet
+names the action (`POST /api/authority/grants`) and offers Confirm and Cancel →
+Confirm opens the passkey sheet → the same save is sent once more with the proof,
+and goes through. One sheet per save, however much the save changes. The button is
+not decoration: iOS shows the passkey sheet only from a tap. A sheet the system
+closed (cancel, timeout, an iOS PWA hang cut off at 60 seconds) says what the
+browser reported and offers Try again on the same challenge; Cancel abandons the
+save and nothing changes. At the node itself, and in the desktop app, nothing is
+refused this way and the sheet never appears. A browser that cannot make passkeys
+is told to make the change from one that can, or at the node.
+
 **Degraded.** Hub gone: banner everywhere, local sessions continue, auto-allowed
 actions continue, approvals queue and deliver on return, recall falls back to the
 local replica — and the agent is not told anything changed; degradation is the
@@ -248,3 +268,9 @@ operator's information, not the model's.
     waiting (an approval, a review, a promotion, a question an agent asked); after
     a restart, only what no push service ever took is announced again, once, so a
     redeploy does not re-announce the queue the phone already shows.
+16. **A passkey confirms admin, never sign-in.** The cookie a paired browser holds
+    is how it signs in, so a lost phone is revoked like any client, and nobody is
+    shown a passkey sheet to read their queue. What a passkey guards is what a
+    stolen cookie could use to keep its access or reach further: tokens,
+    credentials, grants, providers, mesh membership, and the passkeys. Losing every passkey is recovered at the node
+    (`docs/RECOVERY.md`), never by a weaker path from afar.
