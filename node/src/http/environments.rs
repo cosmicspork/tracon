@@ -4,19 +4,21 @@ use std::path::{Path, PathBuf};
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api::{ApiError, ApiResult, AppState};
-use super::auth::Loopback;
+use super::passkey::{config_summary, AdminRequest};
 use crate::config::Config;
 use crate::repo_image;
 
 /// Every entry, with the newest build of each repository it answers for. A
 /// relative `path` can match several clones, so an entry may carry more than
-/// one build.
+/// one build. `hash` is `node.toml`'s version, which a save names.
 pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
+    let hash = crate::config::edit::file_hash(&Config::config_path())?;
     let builds = s.store().repo_images()?;
     let repos = s.cfg.repos();
     let entries: Vec<Value> = repos
@@ -43,37 +45,76 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
         "can_build": s.manager.backend().image_builder().is_some(),
         "presets": crate::config::egress_presets(),
         "entries": entries,
+        "hash": hash,
     })))
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SaveBody {
     entries: Vec<crate::config::Repo>,
+    /// `node.toml`'s `hash` as the list gave it. Required: the table is
+    /// saved whole, so a save decided against an older file would undo
+    /// whatever changed since.
+    #[serde(default)]
+    expected_hash: Option<String>,
 }
 
 /// Replace the table: refused whole if any entry is one the node could not
 /// honour, written to `node.toml`, and in effect for the next session and
 /// the next check without a restart. A session already running keeps the
-/// image and the egress it started with.
+/// image and the egress it started with. An admin action: off this machine
+/// a passkey confirms it, and the prompt lists the keys it changes.
 pub async fn save(
-    _: Loopback,
     State(s): State<AppState>,
-    Json(body): Json<SaveBody>,
-) -> ApiResult<Json<Value>> {
+    req: AdminRequest,
+) -> Result<Json<Value>, super::config_api::Refused> {
+    let body: SaveBody = req.json().map_err(IntoResponse::into_response)?;
+    let Some(expected) = body
+        .expected_hash
+        .as_deref()
+        .or(req.if_match())
+        .map(str::to_string)
+    else {
+        return Err(ApiError::new(
+            StatusCode::PRECONDITION_REQUIRED,
+            "name the version this table was read from: expected_hash is the list's hash",
+        )
+        .into());
+    };
     crate::config::validate_repos(&body.entries)
-        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error))?;
-    let ((), outcome) = crate::config::edit::update_repos(
+        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error).into_response())?;
+    let now = crate::config::snapshot().map_err(super::config_api::edit_refusal)?;
+    if now.hash != expected {
+        return Err(super::config_api::edit_refusal(
+            crate::config::EditError::Conflict { current: now.hash },
+        ));
+    }
+    let ops = crate::config::Op::replace_repos(&now.config.repo, &body.entries)
+        .map_err(super::config_api::edit_refusal)?;
+    let keys = super::config_api::keys_changed(&ops)?;
+    if keys.is_empty() {
+        return Ok(Json(json!({
+            "changed": false,
+            "restart_required": false,
+            "hash": now.hash,
+        })));
+    }
+    req.confirm(&s, &config_summary(&keys))
+        .await
+        .map_err(IntoResponse::into_response)?;
+    let outcome = crate::config::edit::replace_repos_expecting(
         &s.cfg,
         s.store(),
+        &expected,
+        &body.entries,
         "Settings (repositories)",
-        |entries| {
-            *entries = body.entries;
-            Ok::<_, ApiError>(())
-        },
-    )?;
+    )
+    .map_err(super::config_api::edit_refusal)?;
     Ok(Json(json!({
         "changed": outcome.wrote(),
         "restart_required": outcome.restart_required,
+        "hash": outcome.new_hash,
     })))
 }
 
@@ -85,12 +126,21 @@ pub struct BuildBody {
 /// Build a repository's image now, whether or not its recipe changed. The
 /// recipe is resolved before answering, so a Dockerfile the default branch
 /// does not hold is refused here rather than discovered by polling; the build
-/// itself runs on after the response and is read back from the list.
+/// itself runs on after the response and is read back from the list. An
+/// admin action: a build runs the repository's Dockerfile with the node's
+/// builder and registry credentials.
 pub async fn build(
-    _: Loopback,
     State(s): State<AppState>,
-    Json(body): Json<BuildBody>,
-) -> ApiResult<Json<Value>> {
+    req: AdminRequest,
+) -> Result<Json<Value>, super::passkey::Refusal> {
+    let body: BuildBody = req.json()?;
+    // Confirmed before the name is resolved: resolving it looks at the
+    // host's directories, which is not for a caller who has not confirmed.
+    req.confirm(
+        &s,
+        &format!("Build the image for the repository {}", body.repo.trim()),
+    )
+    .await?;
     let unprocessable = |message: String| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message);
     let repo = repo_root(&body.repo).map_err(unprocessable)?;
     let entry = repo_image::building_entry(&s.cfg, &repo).ok_or_else(|| {
@@ -106,13 +156,15 @@ pub async fn build(
                 "{}; start it with the held entry's Start the build, which says what it lends",
                 crate::mesh::recipe::held_reason(&hold)
             ),
-        ));
+        )
+        .into());
     }
     if s.manager.backend().image_builder().is_none() {
         return Err(unprocessable(format!(
             "the {} runtime cannot build images",
             s.manager.backend().kind()
-        )));
+        ))
+        .into());
     }
     let recipe = repo_image::recipe(&repo, &entry, &repo_image::RunAs::of(&s.cfg))
         .await

@@ -115,7 +115,9 @@ what the file holds now decides again when another edit lands first.
 
 `config_schema` describes every key: whether a change applies live or at restart,
 whether writing it is an admin action (every key is), whether it names an executable the
-node runs or a host path it reads or writes (and which rules of the path guard hold it), and whether its value is a secret the audit log redacts. A test
+node runs or a host path it reads or writes (and which rules of the path guard hold it),
+whether its value is a secret the audit log redacts, and whether it is changed at the
+node only (`host_only`). A test
 walks the `Config` structs' own `Deserialize` and fails on a key without an entry, so a
 new setting cannot arrive without saying which it is. The one other writer is the
 load-time migration of a retired harness, which rewrites the file once and keeps the
@@ -178,6 +180,50 @@ under the edit lock), puts last-good in its place, and on the next successful st
 records a `config_audit` row (actor `last-known-good restore`) and pushes it. A file equal
 to last-good is never replaced, so the restore cannot loop. Undoing one is in
 [RECOVERY.md](RECOVERY.md).
+
+#### Editing from elsewhere
+
+Every key is editable from wherever the operator is (`http::config_api`), except the one
+the path guard reserves for the host. `GET /api/config` returns the file as written
+(`document`), as it loads with every default filled in (`effective`), the redacted
+document as TOML text, the file's `hash`, and the schema of every key. A secret's value
+is never sent, and neither is the value of a key the node does not read (the schema holds
+an unknown key to the secret rule, since a retired section can hold a credential); the
+text is rendered from the redacted document rather than sent as written, because a
+comment can hold anything, a commented-out key among it. Reading needs only the cookie.
+
+`PATCH /api/config {expected_hash, ops}` takes typed operations (set a key or an array
+entry to a JSON value, remove a key or entry, insert an entry into an array of tables,
+reorder one), at most 256, and maps them onto `config::edit`. `expected_hash` (or
+`If-Match`, which the admin `op_hash` already binds) is required. Before anything is
+confirmed the node answers what it can from its own state: a stale version is `409`
+with the hash now; operations that do not apply or leave a file that would not load,
+a key the node does not read, a secret's placeholder sent back as its value, and a
+host-only key are `422`, field by field. A change that changes nothing writes nothing
+and confirms nothing. Then the request is an admin action: off the machine it is
+confirmed with a passkey bound to its exact bytes, and the prompt the node opens lists
+the keys it changes ("Change node.toml: publish.gh, runtime.kubernetes.resources.session.memory_request
+and 3 more"), worked out by the node from the file and that request, cleaned and capped
+at 160 characters, never taken from the client. Because the request names the version
+it was decided against, the keys the prompt shows are exactly the keys the write
+changes. The path guard runs when the edit is written, after the confirmation, so what
+it knows about the host's files (who owns a path, whether it exists) is not answered to
+a cookie alone; its refusals come back as `422` with each refused key and its reason.
+An edit that touches `[[repo]]` moves the live table with the file, as the repository
+editor does.
+
+The routes that wrote `node.toml` (or what a harness runs) at the machine only are admin
+actions now, confirmed the same way, each with a prompt the node words from its body:
+the Settings save (`PUT /api/config`, listing its keys), the repository table and its
+image builds, adding a provider (naming the credential and the host it is sent to), the
+launch manifest's instructions and agents, and starting, joining or leaving a mesh
+(naming the hub). The repository table is saved whole, so its `PUT` requires the
+`hash` its list returned, and a stale one is a conflict. What stays at the machine
+(`auth::Loopback`) is what acts on the host itself rather than on configuration:
+importing a skill package (it reads a host directory the caller names), the policy
+signing key and bundle installation, the service lifecycle (install, uninstall,
+restart), the storage sweep and the boundary re-check. The state mount is changed in the
+file on the host.
 
 #### The path guard
 
@@ -710,10 +756,10 @@ Bundles are signed with a key never present on the hub, so a compromised hub can
 serve stale policy but not new policy.
 
 **Administration is an explicit operator capability, not a loopback exemption.**
-Mesh admission, removal, and hub-key sharing accept authenticated administrators
-from the remote UI, each confirmed there with a passkey (see [Reaching a
-node](#reaching-a-node)). Policy signing/install and host service actions additionally
-require a local request (see [Reaching a node](#reaching-a-node)), which a proxy on
+Mesh admission, removal, and hub-key sharing, starting, joining and leaving a mesh,
+and every `node.toml` edit accept authenticated administrators from the remote UI,
+each confirmed there with a passkey (see [Reaching a node](#reaching-a-node)). Policy
+signing/install and host service actions additionally require a local request (see [Reaching a node](#reaching-a-node)), which a proxy on
 the node's own host does not make. Service actions name only the supported fixed supervisor,
 refuse active work or ambiguous process identity, and report scheduling rather
 than pretending a restart has already succeeded. The restart route that applies a
@@ -1888,7 +1934,13 @@ Three surfaces, three answers, and the differences are the point.
   built from source, so the static musl build stays static): attestation
   `none`, user verification required, a discoverable credential preferred and
   no attachment pinned, so a synced phone passkey, a hybrid phone across the
-  room and a security key all work. Loopback-only routes stay loopback-only.
+  room and a security key all work. Every `node.toml` write is one of these
+  admin actions too, including the whole-file `PATCH /api/config`, where the
+  prompt lists the keys the save changes (see [Editing from
+  elsewhere](#editing-from-elsewhere)). What remains loopback-only acts on the
+  host rather than on configuration: skill import from a host directory, policy
+  signing and installation, the service lifecycle, the storage sweep and the
+  boundary re-check.
 - **Pairing enrolls the first passkey.** Spending the token stamps the session's
   `paired_ms`; for fifteen minutes after, and only while no passkey is
   enrolled, that session may enroll one without confirming. The insert itself

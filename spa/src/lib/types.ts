@@ -1612,6 +1612,53 @@ export interface NodeConfig {
   providers: Record<string, ProviderConfig>
   readonly: { hub_url: string | null; runtime: string; config_path: string }
   running: { harness_id: string; harness_version: string; node_name: string }
+  /** The file's version: what a `PATCH /api/config` is decided against. */
+  hash: string
+  /** node.toml as written, secrets (and keys the node does not read) as `redacted`. */
+  document: Record<string, unknown>
+  /** node.toml as it loads, every default filled in, redacted the same way. */
+  effective: Record<string, unknown>
+  /** The redacted document as TOML text, without the file's comments. */
+  toml: string
+  /** The placeholder shown in place of a secret's value. */
+  redacted: string
+  /** What each key is (`config_schema.rs`). */
+  keys: ConfigKeySpec[]
+}
+
+/** One `node.toml` key as the node describes it. A map's entries are `*`;
+    an array of tables' fields sit under the array's own name. */
+export interface ConfigKeySpec {
+  key: string
+  /** `live`: the next session or check uses it. `restart`: after a restart. */
+  apply: 'live' | 'restart'
+  admin: boolean
+  /** Names a program the node runs (or what that program runs). */
+  exec_path: boolean
+  /** Names a file or directory on the host. */
+  fs_path: boolean
+  path: string | null
+  /** Written, never read back. */
+  secret: boolean
+  /** False for a key only the host's own node.toml may change. */
+  editable: boolean
+  why_not?: string
+}
+
+/** One typed edit of node.toml (`PATCH /api/config`). Keys are dotted
+    paths as the file writes them: `publish.gh`, `repo[2].egress`. */
+export type ConfigOp =
+  | { op: 'set'; key: string; value: unknown }
+  | { op: 'remove'; key: string }
+  | { op: 'insert'; array: string; index?: number; entry: Record<string, unknown> }
+  | { op: 'reorder'; array: string; order: number[] }
+
+export interface ConfigPatchResult {
+  changed: string[]
+  hash: string
+  old_hash?: string
+  restart_required: boolean
+  audit_id?: string | null
 }
 
 /** One `[[repo]]` entry, as `node.toml` holds it. */
@@ -1652,6 +1699,8 @@ export interface RepoImageBuild {
 
 export interface RepoEnvironments {
   can_build: boolean
+  /** node.toml's version: a save names the one its table was read from. */
+  hash: string
   /** Preset name, and the hosts it opens. */
   presets: [string, string[]][]
   entries: { entry: RepoEntry; builds: RepoImageBuild[]; hold?: CredentialHold | null }[]

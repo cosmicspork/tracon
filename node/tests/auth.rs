@@ -1029,18 +1029,9 @@ async fn a_request_relayed_by_a_same_host_proxy_is_not_local() {
     let cookie = cookie_of(&cookies);
 
     // 2. `Loopback`: a live cookie relayed through the proxy reaches none of
-    //    the routes that rewrite what the node is.
+    //    the routes that act on the host itself.
     let gated: &[(&str, &str, Option<Value>)] = &[
-        ("PUT", "/api/config", Some(json!({}))),
-        ("GET", "/api/model-catalogue", None),
-        ("POST", "/api/providers", Some(json!({}))),
         ("POST", "/api/manifest/skills", Some(json!({}))),
-        ("PUT", "/api/manifest/text", Some(json!({}))),
-        ("DELETE", "/api/manifest/skill/x", None),
-        ("POST", "/api/mesh/init", Some(json!({}))),
-        ("POST", "/api/mesh/unpair", Some(json!({}))),
-        ("GET", "/api/mesh/enroll", None),
-        ("POST", "/api/mesh/enroll", Some(json!({}))),
         ("POST", "/api/admin/policy/initialize", Some(json!({}))),
         ("POST", "/api/admin/policy/preview", Some(json!({}))),
         ("POST", "/api/admin/policy/apply", Some(json!({}))),
@@ -1053,12 +1044,84 @@ async fn a_request_relayed_by_a_same_host_proxy_is_not_local() {
         ("POST", "/api/admin/maintenance/install", Some(json!({}))),
         ("POST", "/api/admin/maintenance/uninstall", Some(json!({}))),
         ("POST", "/api/maintenance/storage", Some(json!({}))),
-        ("PUT", "/api/repos/environments", Some(json!({}))),
-        ("POST", "/api/repos/environments/build", Some(json!({}))),
+    ];
+    // And the routes that rewrite what the node is (`node.toml`, the hub it
+    // trusts, the launch manifest) are admin actions: a relayed request is
+    // not the machine, so it is asked for a passkey, which this node, with no
+    // public origin, cannot take.
+    let hash = {
+        let (s, _, v) = call(&n, "GET", "/api/config", LOCAL, "127.0.0.1:7420", &[], None).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        v["hash"].as_str().unwrap().to_string()
+    };
+    let confirmed: &[(&str, &str, Option<Value>)] = &[
+        (
+            "PUT",
+            "/api/config",
+            Some(json!({ "review": { "max_files": 77 } })),
+        ),
+        (
+            "PATCH",
+            "/api/config",
+            Some(json!({
+                "expected_hash": hash,
+                "ops": [{ "op": "set", "key": "review.max_files", "value": 77 }],
+            })),
+        ),
+        (
+            "POST",
+            "/api/providers",
+            Some(json!({
+                "name": "openrouter",
+                "upstream": "https://openrouter.ai/api/v1",
+                "shape": "openai",
+                "credential": "openrouter",
+            })),
+        ),
+        (
+            "PUT",
+            "/api/manifest/text",
+            Some(json!({ "kind": "instruction", "name": "x", "body": "y" })),
+        ),
+        ("DELETE", "/api/manifest/skill/x", None),
+        (
+            "POST",
+            "/api/mesh/init",
+            Some(json!({ "hub_url": "https://hub.example.com" })),
+        ),
+        ("POST", "/api/mesh/unpair", Some(json!({}))),
+        (
+            "POST",
+            "/api/mesh/enroll",
+            Some(json!({ "invitation": "https://hub.example.com/#enroll=7KQ4M2XA" })),
+        ),
+        (
+            "PUT",
+            "/api/repos/environments",
+            Some(json!({ "entries": [{ "path": "/src/x" }], "expected_hash": hash })),
+        ),
+        (
+            "POST",
+            "/api/repos/environments/build",
+            Some(json!({ "repo": "/src/x" })),
+        ),
     ];
     for (host, forwarded) in PROXIES {
         let mut headers = forwarded.to_vec();
         headers.push(("cookie", &cookie));
+        for (method, path, body) in confirmed {
+            let (s, _, v) = call(&n, method, path, LOCAL, host, &headers, body.clone()).await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} via {host}: {v}");
+            assert_eq!(
+                v["error"]["kind"], "step_up_unavailable",
+                "{method} {path} via {host}: {v}"
+            );
+        }
+        // What used to be read at the node only is an operator read now.
+        for path in ["/api/model-catalogue", "/api/mesh/enroll"] {
+            let (s, _, v) = call(&n, "GET", path, LOCAL, host, &headers, None).await;
+            assert_eq!(s, StatusCode::OK, "GET {path} via {host}: {v}");
+        }
         for (method, path, body) in gated {
             let (s, _, v) = call(&n, method, path, LOCAL, host, &headers, body.clone()).await;
             assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} via {host}: {v}");

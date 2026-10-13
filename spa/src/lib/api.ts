@@ -34,6 +34,8 @@ import type {
   RecipeOffer,
   RecipeOfferResult,
   RecipeOfferView,
+  ConfigOp,
+  ConfigPatchResult,
   NodeInfo,
   OperatorIssue,
   OperatorQuestion,
@@ -663,9 +665,16 @@ export const api = {
   config: () => call<NodeConfig>('GET', '/api/config'),
   putConfig: (patch: unknown) =>
     call<{ changed: string[]; restart_required: boolean }>('PUT', '/api/config', patch),
+  /** Typed edits of node.toml, decided against `expectedHash` (a 409 carries
+      the hash now). Off the node's machine a passkey confirms it. */
+  patchConfig: (expectedHash: string, ops: ConfigOp[]) =>
+    call<ConfigPatchResult>('PATCH', '/api/config', { expected_hash: expectedHash, ops }),
   repoEnvironments: () => call<RepoEnvironments>('GET', '/api/repos/environments'),
-  saveRepoEnvironments: (entries: RepoEntry[]) =>
-    call<{ changed: boolean; restart_required: boolean }>('PUT', '/api/repos/environments', { entries }),
+  saveRepoEnvironments: (entries: RepoEntry[], expectedHash: string) =>
+    call<{ changed: boolean; restart_required: boolean; hash: string }>('PUT', '/api/repos/environments', {
+      entries,
+      expected_hash: expectedHash,
+    }),
   buildRepoEnvironment: (repo: string) =>
     call<{ repo: string; since_ms: number }>('POST', '/api/repos/environments/build', { repo }),
   offerRecipe: (body: { path?: string; repo?: string; channel: string; to_nodes?: string[]; note?: string }) =>
@@ -777,8 +786,9 @@ export const api = {
     call<{ shared: string; to: string }>('POST', `/api/credentials/${name}/share`, { to }),
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
   /** Register a new provider naming an already-sealed credential (seal it
-      first with `importCredentials`). Loopback only; the serving node always,
-      since a peer's node.toml is not this browser's to write. */
+      first with `importCredentials`). An admin action: a passkey off the
+      node's machine. The serving node always, since a peer's node.toml is
+      not this browser's to write. */
   createProvider: (body: { name: string; upstream: string; shape: string; credential: string; login?: string | null }) =>
     call<{ created: string; restart_required: boolean }>('POST', '/api/providers', body),
   connectProvider: (name: string, channels: string[], localCallback = false, share = true) =>

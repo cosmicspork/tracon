@@ -99,10 +99,15 @@ impl From<crate::config::EditError> for ApiError {
             // Another edit landed first, or the file is one the node will
             // not rewrite: the caller's view is stale, not its request.
             E::Conflict { .. } | E::Unparseable(_) => StatusCode::CONFLICT,
-            E::Op(_) | E::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            E::Op(_) | E::Invalid(_) | E::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
             E::Audit(_) | E::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        ApiError(status, error.to_string())
+        // Said to a caller who may not be at the node: where the file is
+        // wrong and why, not the lines of it the parser quotes.
+        ApiError(
+            status,
+            crate::config::edit::without_excerpt(&error.to_string()),
+        )
     }
 }
 
@@ -6510,14 +6515,34 @@ const KNOWN_SHAPES: &[&str] = &[
     crate::config::SHAPE_OPENAI_CODEX,
 ];
 
-/// Register a new provider naming an already-sealed credential. Loopback
-/// only, for the reason `put_config` is: this decides which upstream the
-/// gateway forwards to and, on a new host, adds to the allowlist it dials.
+/// Register a new provider naming an already-sealed credential. An admin
+/// action (a passkey off this machine), like every `node.toml` write: this
+/// decides which upstream the gateway forwards the credential to and, on a
+/// new host, adds to the allowlist it dials. The prompt names both.
 pub async fn create_provider(
-    _: super::auth::Loopback,
     State(s): State<AppState>,
-    Json(body): Json<CreateProviderBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+    req: super::passkey::AdminRequest,
+) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
+    let body: CreateProviderBody = req.json()?;
+    let host = check_new_provider(&body)?;
+    let name = body.name.trim();
+    req.confirm(
+        &s,
+        &format!(
+            "Add the provider {name}, sending the {} credential to {host}",
+            body.credential.trim()
+        ),
+    )
+    .await?;
+    add_provider(&s, &body, &host)?;
+    Ok(Json(json!({
+        "created": name,
+        "restart_required": true,
+    })))
+}
+
+/// What a new provider's upstream host is, or why the body cannot be one.
+fn check_new_provider(body: &CreateProviderBody) -> ApiResult<String> {
     let name = body.name.trim();
     if name.is_empty() {
         return Err(ApiError(
@@ -6555,7 +6580,11 @@ pub async fn create_provider(
             )
         })?
         .to_string();
+    Ok(host)
+}
 
+fn add_provider(s: &AppState, body: &CreateProviderBody, host: &str) -> ApiResult<()> {
+    let name = body.name.trim();
     // The file as it is now, never the defaults: a node.toml that does not
     // parse is reported, not replaced with defaults plus this provider.
     crate::config::update(s.store(), "Connections (add a provider)", |cfg| {
@@ -6580,11 +6609,11 @@ pub async fn create_provider(
         // gateway call — but here the operator is *adding* the provider, so a
         // host that isn't allowed yet is added rather than refused.
         let allowed = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
-            .map(|a| a.allows(&host))
+            .map(|a| a.allows(host))
             .unwrap_or(false);
         if !allowed {
             let mut hosts = cfg.gateway.allow_hosts.clone();
-            hosts.push(crate::boundary::podman::setup::anchor_literal_host(&host));
+            hosts.push(crate::boundary::podman::setup::anchor_literal_host(host));
             ops.push(crate::config::Op::set(
                 crate::config::KeyPath::keys(&["gateway", "allow_hosts"]),
                 hosts,
@@ -6604,34 +6633,27 @@ pub async fn create_provider(
         )?);
         Ok(ops)
     })?;
-
-    Ok(Json(json!({
-        "created": name,
-        "restart_required": true,
-    })))
+    Ok(())
 }
 
-/// The configuration this interface writes.
-pub async fn get_config(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let cfg = Config::try_load().map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut v = super::settings::config_view(&cfg);
-    // What is running, so the pane can say a change is owed a restart rather
-    // than pretend it already took.
-    v["running"] = json!({
-        "harness_id": s.cfg.harness.id,
-        "harness_version": s.cfg.harness.version,
-        "node_name": s.cfg.node_name,
-    });
-    Ok(Json(v))
-}
-
-/// Write the configuration. Loopback only: these keys decide which binaries
-/// the node executes.
+/// Write the settings the Settings pane names (`settings::apply`). An admin
+/// action, like every `node.toml` write: these keys decide which binaries
+/// the node executes, so off this machine a passkey confirms it, and the
+/// prompt lists the keys the patch changes. `PATCH /api/config` is the
+/// whole-file form of the same thing.
 pub async fn put_config(
-    _: super::auth::Loopback,
     State(s): State<AppState>,
-    Json(patch): Json<serde_json::Value>,
-) -> ApiResult<Json<serde_json::Value>> {
+    req: super::passkey::AdminRequest,
+) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
+    let patch: serde_json::Value = req.json()?;
+    let now = crate::config::snapshot()?;
+    let planned = super::settings::apply(&now.config, &patch)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    if planned.ops.is_empty() {
+        return Ok(Json(json!({ "changed": [], "restart_required": false })));
+    }
+    req.confirm(&s, &super::passkey::config_summary(&planned.changed))
+        .await?;
     let mut changed = Vec::new();
     let outcome = crate::config::update(s.store(), "Settings", |cfg| {
         let patch = super::settings::apply(cfg, &patch)
@@ -6653,10 +6675,11 @@ pub async fn put_config(
 
 /// The cached OpenCode model catalogue `default_models` draws its tier-1
 /// defaults from — what the Connections pane offers as suggestions, not what
-/// any provider is currently declared to serve. Loopback only, the same
-/// guard `put_config` uses: it is a detail of this node's own fetch/cache
-/// state, not something a remote peer's operator should read off it.
-pub async fn get_model_catalogue(_: super::auth::Loopback) -> ApiResult<Json<serde_json::Value>> {
+/// any provider is currently declared to serve. An ordinary operator read:
+/// a provider is configured from wherever the operator is, and the
+/// catalogue is a public list the node fetched, with nothing of its own in
+/// it.
+pub async fn get_model_catalogue() -> ApiResult<Json<serde_json::Value>> {
     let catalogue = crate::models_catalogue::cached();
     Ok(Json(json!({
         "fetched_ms": catalogue.fetched_ms,
@@ -6745,9 +6768,12 @@ pub struct SkillImportBody {
     pub channel: Option<String>,
 }
 
-/// Import a skill package. Loopback only, and for the reason `put_config` is:
-/// this reads a directory on the node's own machine and puts its contents
-/// where a harness will execute them.
+/// Import a skill package. Done at the node: this reads a directory (or a
+/// revision of a repository) on the node's own machine, at a path the caller
+/// names, and puts its contents where a harness will read and run them. A
+/// caller elsewhere, passkey or not, does not get to have the node read a
+/// host path of its choosing into a session; nothing it holds is uploaded
+/// here.
 pub async fn post_skill(
     _: super::auth::Loopback,
     State(s): State<AppState>,
@@ -6803,29 +6829,36 @@ pub struct ManifestTextBody {
     pub channel: Option<String>,
 }
 
-/// Add or replace a standing instruction or an agent definition.
+/// Add or replace a standing instruction or an agent definition. An admin
+/// action: what it writes is put where a harness will run it.
 pub async fn put_manifest_text(
-    _: super::auth::Loopback,
     State(s): State<AppState>,
-    Json(body): Json<ManifestTextBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+    req: super::passkey::AdminRequest,
+) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
+    let body: ManifestTextBody = req.json()?;
     let channel = body
         .channel
         .clone()
         .filter(|c| !c.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_CHANNELS[0].to_string());
+    req.confirm(
+        &s,
+        &format!("Set the {} {} on {channel}", body.kind, body.name),
+    )
+    .await?;
     s.store()
         .manifest_put_text(&channel, &body.kind, &body.name, &body.body)
         .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     Ok(Json(json!({ "channel": channel, "name": body.name })))
 }
 
-/// Remove one item from a channel's manifest.
+/// Remove one item from a channel's manifest. An admin action, as adding
+/// one is.
 pub async fn delete_manifest_item(
-    _: super::auth::Loopback,
     State(s): State<AppState>,
     Path((kind, name)): Path<(String, String)>,
     Query(q): Query<ChannelQuery>,
+    super::passkey::AdminAction(()): super::passkey::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     let channel = q.channel();
     if !s.store().manifest_remove(&channel, &kind, &name)? {
@@ -6882,13 +6915,16 @@ fn validate_hub_base(value: &str) -> ApiResult<String> {
 }
 
 /// The first node: mint the mesh channel here and point this node at a hub.
-/// Loopback only — this decides which hub the node trusts.
+/// An admin action, named in the prompt by the hub: this decides which hub
+/// the node trusts, as `mesh.hub_url` does.
 pub async fn mesh_init(
-    _: super::auth::Loopback,
     State(s): State<AppState>,
-    Json(body): Json<HubBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+    req: super::passkey::AdminRequest,
+) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
+    let body: HubBody = req.json()?;
     let hub = validate_hub_base(&body.hub_url)?;
+    req.confirm(&s, &format!("Start a mesh with the hub at {hub}"))
+        .await?;
     let identity = crate::mesh::identity::load_or_generate()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .0;
@@ -6916,10 +6952,10 @@ pub async fn mesh_init(
 /// `POST /api/mesh/unpair`: forget the hub. The mesh channel and this node's
 /// keys stay, so pairing again is the join it was the first time; the hub
 /// still lists this node until `tracon mesh remove` is run there. Takes
-/// effect on restart, like every `node.toml` change.
+/// effect on restart, like every `node.toml` change. An admin action.
 pub async fn mesh_unpair(
-    _: super::auth::Loopback,
     State(s): State<AppState>,
+    super::passkey::AdminAction(()): super::passkey::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     let mut was = None;
     crate::config::update(s.store(), "Settings (leave the mesh)", |cfg| {
@@ -6987,12 +7023,13 @@ pub struct EnrollBody {
     pub name: Option<String>,
 }
 
-/// Join a mesh from an invitation. Loopback only: this sets the trust root.
+/// Join a mesh from an invitation. An admin action, named in the prompt by
+/// the hub: this sets the trust root.
 pub async fn start_enroll(
-    _: super::auth::Loopback,
     State(s): State<AppState>,
-    Json(body): Json<EnrollBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+    req: super::passkey::AdminRequest,
+) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
+    let body: EnrollBody = req.json()?;
     let (hub_from_url, code) = proto::enroll::parse_invite(&body.invitation).ok_or(ApiError(
         StatusCode::UNPROCESSABLE_ENTITY,
         "that is not an invitation URL or code".into(),
@@ -7002,13 +7039,15 @@ pub async fn start_enroll(
         "paste the full invitation URL: a bare code does not say which hub".into(),
     ))?;
     let hub = validate_hub_base(&hub)?;
+    req.confirm(&s, &format!("Join the mesh at {hub}")).await?;
     {
         let job = s.enroll.lock().unwrap();
         if !job.lines.is_empty() && !job.done {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 "an enrolment is already running".into(),
-            ));
+            )
+            .into());
         }
     }
     let identity = crate::mesh::identity::load_or_generate()
@@ -7066,11 +7105,9 @@ pub async fn start_enroll(
     Ok(Json(json!({ "started": true })))
 }
 
-/// Where an enrolment has got to.
-pub async fn enroll_status(
-    _: super::auth::Loopback,
-    State(s): State<AppState>,
-) -> ApiResult<Json<serde_json::Value>> {
+/// Where an enrolment has got to: an ordinary operator read, so the
+/// browser that started one can watch it.
+pub async fn enroll_status(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let job = s.enroll.lock().unwrap();
     Ok(Json(json!({
         "lines": job.lines,

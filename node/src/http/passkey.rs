@@ -249,6 +249,12 @@ impl From<ApiError> for Refusal {
     }
 }
 
+impl From<crate::config::EditError> for Refusal {
+    fn from(e: crate::config::EditError) -> Self {
+        Refusal::Api(ApiError::from(e))
+    }
+}
+
 impl From<crate::store::StoreError> for Refusal {
     fn from(e: crate::store::StoreError) -> Self {
         Refusal::Api(ApiError::from(e))
@@ -452,6 +458,10 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
         ("POST", ["api", "admin", "restart"]) => "Restart the node".to_string(),
         ("DELETE", ["api", "admin", "restart"]) => "Withdraw the node's restart".to_string(),
         ("POST", ["api", "passkeys", "register", "options"]) => "Add a passkey".to_string(),
+        ("POST", ["api", "mesh", "unpair"]) => "Leave the mesh (forget the hub)".to_string(),
+        ("DELETE", ["api", "manifest", kind, name]) => {
+            format!("Remove the {kind} {name} from a launch manifest")
+        }
         ("DELETE", ["api", "passkeys", _]) => "Remove a passkey".to_string(),
         _ => return None,
     };
@@ -590,6 +600,106 @@ where
             .map(AdminAction)
             .map_err(IntoResponse::into_response)
     }
+}
+
+/// An admin request whose body is read before it is confirmed, so the
+/// prompt can say what this body does rather than what the route is: the
+/// keys a `node.toml` edit changes, the hub a mesh is started with. The
+/// summary is the node's, computed from the very bytes the confirmation is
+/// bound to (`op_hash`), never a description the client sent.
+///
+/// Nothing may act on the request before [`AdminRequest::confirm`] has
+/// passed. What may come before it is only what the node can answer without
+/// looking past its own state: parsing, a stale version, a value that would
+/// not load.
+pub struct AdminRequest {
+    parts: Parts,
+    body: Bytes,
+}
+
+impl FromRequest<AppState> for AdminRequest {
+    type Rejection = Response;
+
+    async fn from_request(req: Request, _state: &AppState) -> Result<Self, Self::Rejection> {
+        let (parts, body) = req.into_parts();
+        let body = axum::body::to_bytes(body, MAX_ADMIN_BODY)
+            .await
+            .map_err(|_| {
+                ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+                    .into_response()
+            })?;
+        json_or_empty(&parts.headers, &body).map_err(IntoResponse::into_response)?;
+        Ok(AdminRequest { parts, body })
+    }
+}
+
+impl AdminRequest {
+    /// The body, read as `T`. An empty body reads as JSON `null`.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, ApiError> {
+        let bytes: &[u8] = match self.body.is_empty() {
+            true => b"null",
+            false => &self.body,
+        };
+        serde_json::from_slice(bytes).map_err(|e| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("the request body does not read: {e}"),
+            )
+        })
+    }
+
+    /// The version the request expects to change, from `If-Match`, with any
+    /// quotes an entity tag carries taken off.
+    pub fn if_match(&self) -> Option<&str> {
+        expected(&self.parts.headers).map(|v| v.trim().trim_matches('"'))
+    }
+
+    /// Whether this is the operator at the node's own machine, who confirms
+    /// nothing.
+    pub fn is_local(&self) -> bool {
+        auth::parts_are_local(&self.parts)
+    }
+
+    /// Go ahead only if this request is local, or confirmed with a passkey
+    /// for exactly these bytes; otherwise the refusal opens the challenge,
+    /// with `summary` as the line the prompt shows.
+    pub async fn confirm(&self, s: &AppState, summary: &str) -> Result<(), Refusal> {
+        authorize_as(s, &self.parts, &self.body, Some(summary.to_string())).await
+    }
+}
+
+/// The line a prompt shows for a change to `node.toml`: the keys it
+/// changes, as many as fit, and how many more.
+pub fn config_summary(keys: &[String]) -> String {
+    const MAX: usize = 150;
+    let head = "Change node.toml: ";
+    let mut line = head.to_string();
+    let mut shown = 0;
+    for key in keys {
+        let key = clean_text(key, 80);
+        let sep = if shown == 0 { "" } else { ", " };
+        let rest = keys.len() - shown - 1;
+        let tail = if rest > 0 {
+            format!(" and {rest} more")
+        } else {
+            String::new()
+        };
+        if line.chars().count() + sep.len() + key.chars().count() + tail.chars().count() > MAX
+            && shown > 0
+        {
+            break;
+        }
+        line.push_str(sep);
+        line.push_str(&key);
+        shown += 1;
+    }
+    if shown < keys.len() {
+        line.push_str(&format!(" and {} more", keys.len() - shown));
+    }
+    if keys.is_empty() {
+        line.push_str("nothing");
+    }
+    clean_text(&line, 160)
 }
 
 /// Whether `session` may enroll the node's first passkey without one: none is
@@ -1030,6 +1140,34 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_config_summary_names_the_keys_that_fit_and_counts_the_rest() {
+        assert_eq!(
+            config_summary(&["publish.gh".into(), "repo[2].egress".into()]),
+            "Change node.toml: publish.gh, repo[2].egress"
+        );
+        let many: Vec<String> = (0..50)
+            .map(|i| format!("providers.provider-{i:02}.upstream"))
+            .collect();
+        let line = config_summary(&many);
+        assert!(line.chars().count() <= 160, "{line}");
+        assert!(line.starts_with("Change node.toml: providers.provider-00.upstream, "));
+        let shown = line.matches(".upstream").count();
+        assert!(
+            line.ends_with(&format!(" and {} more", 50 - shown)),
+            "{line}"
+        );
+        // A key is text from the file: kept to one printable line.
+        let odd = config_summary(&["a\u{202e}b\nc".into()]);
+        assert_eq!(odd, "Change node.toml: abc");
+        // One key longer than the line is cut, not dropped.
+        let long = config_summary(&["k".repeat(400)]);
+        assert!(
+            long.chars().count() <= 160 && long.contains("kkkk"),
+            "{long}"
+        );
+    }
 
     #[test]
     fn the_op_hash_binds_every_part_of_the_request() {

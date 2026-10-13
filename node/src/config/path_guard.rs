@@ -1600,19 +1600,44 @@ pub fn refuse_new(before: Option<&Config>, after: &Config) -> Result<(), String>
     refuse_new_in(Layout::of_this_process(), before, after)
 }
 
+/// The keys [`refuse_new`] refuses, each with its reason: none when the
+/// edit may go ahead.
+pub fn new_refusals(before: Option<&Config>, after: &Config) -> Vec<Refusal> {
+    new_refusals_with(Layout::of_this_process(), current(), before, after)
+}
+
+/// How an edit's refusals read as one message.
+pub fn describe(refusals: &[Refusal]) -> String {
+    let each: Vec<String> = refusals.iter().map(Refusal::to_string).collect();
+    format!("refused by the path guard: {}", each.join("; "))
+}
+
 fn refuse_new_in(layout: Layout, before: Option<&Config>, after: &Config) -> Result<(), String> {
     refuse_new_with(layout, current(), before, after)
 }
 
-/// `running` is the guard the serving node installed for the file it
-/// started with: its places stand until a restart, whatever an edit says
-/// they are now, so two edits cannot move a root and then use it.
 fn refuse_new_with(
     layout: Layout,
     running: Option<&Guard>,
     before: Option<&Config>,
     after: &Config,
 ) -> Result<(), String> {
+    let refusals = new_refusals_with(layout, running, before, after);
+    match refusals.is_empty() {
+        true => Ok(()),
+        false => Err(describe(&refusals)),
+    }
+}
+
+/// `running` is the guard the serving node installed for the file it
+/// started with: its places stand until a restart, whatever an edit says
+/// they are now, so two edits cannot move a root and then use it.
+fn new_refusals_with(
+    layout: Layout,
+    running: Option<&Guard>,
+    before: Option<&Config>,
+    after: &Config,
+) -> Vec<Refusal> {
     let default;
     let before = match before {
         Some(before) => before,
@@ -1626,11 +1651,16 @@ fn refuse_new_with(
         &after.runtime.kubernetes.state_mount,
     );
     if was != now {
-        return Err(format!(
-            "refused by the path guard: runtime.kubernetes.state_mount decides where agents can write, so it is changed in node.toml on the host, not by an edit (it would move from {} to {})",
-            was.display(),
-            now.display()
-        ));
+        return vec![Refusal {
+            key: "runtime.kubernetes.state_mount".into(),
+            value: now.display().to_string(),
+            reason: format!(
+                "{} (it would move from {})",
+                crate::config_schema::HOST_ONLY_REASON,
+                was.display()
+            ),
+            missing: false,
+        }];
     }
     // What the old file already broke, by its own places only; what the new
     // one breaks, by the places either names, so moving a root away in the
@@ -1644,18 +1674,13 @@ fn refuse_new_with(
     if let Some(running) = running {
         guard.add_places_of(running);
     }
-    let new: Vec<String> = guard
+    guard
         .check(after)
         .into_iter()
         .filter(|refusal| {
             !refusal.missing && !already.contains(&(refusal.key.clone(), refusal.value.clone()))
         })
-        .map(|refusal| refusal.to_string())
-        .collect();
-    match new.is_empty() {
-        true => Ok(()),
-        false => Err(format!("refused by the path guard: {}", new.join("; "))),
-    }
+        .collect()
 }
 
 /// The file as the node would load it, without rewriting it: a retired

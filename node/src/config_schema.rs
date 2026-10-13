@@ -86,8 +86,14 @@ pub struct KeySpec {
     /// is `exec_path` or `fs_path`.
     pub path: Option<PathKind>,
     /// Its value is never shown: the audit log records that it changed, not
-    /// what to.
+    /// what to, and `GET /api/config` sends a placeholder in its place. It
+    /// can be written, never read back.
     pub secret: bool,
+    /// Changed only in `node.toml` on the host, never by an edit: it decides
+    /// what the path guard counts as a place an agent can write, so an edit
+    /// that moved it could unmake the guard's own rules
+    /// (`config::path_guard::refuse_new`). Shown, not offered for editing.
+    pub host_only: bool,
 }
 
 const fn restart(key: &'static str) -> KeySpec {
@@ -99,6 +105,7 @@ const fn restart(key: &'static str) -> KeySpec {
         fs_path: false,
         path: None,
         secret: false,
+        host_only: false,
     }
 }
 
@@ -139,6 +146,13 @@ impl KeySpec {
     const fn secret(self) -> Self {
         KeySpec {
             secret: true,
+            ..self
+        }
+    }
+
+    const fn host_only(self) -> Self {
+        KeySpec {
+            host_only: true,
             ..self
         }
     }
@@ -215,7 +229,9 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image"),
     restart("runtime.kubernetes.state_claim"),
-    restart("runtime.kubernetes.state_mount").path(PathKind::Mount),
+    restart("runtime.kubernetes.state_mount")
+        .path(PathKind::Mount)
+        .host_only(),
     restart("runtime.kubernetes.harness_home"),
     restart("runtime.kubernetes.uid"),
     restart("runtime.kubernetes.gateway_host"),
@@ -331,6 +347,7 @@ const UNKNOWN: KeySpec = KeySpec {
     fs_path: false,
     path: None,
     secret: true,
+    host_only: false,
 };
 
 fn matches(pattern: &str, key: &[&str]) -> bool {
@@ -371,8 +388,23 @@ pub fn lookup(key: &[&str]) -> KeySpec {
         fs_path: under.iter().any(|spec| spec.fs_path),
         path: None,
         secret: under.iter().any(|spec| spec.secret),
+        host_only: under.iter().any(|spec| spec.host_only),
     }
 }
+
+/// Whether `key` (table segments, any index left out) is one the node reads,
+/// or a table holding some: what an edit may set. A key nobody reads is
+/// only ever removed.
+pub fn known(key: &[&str]) -> bool {
+    !key.is_empty()
+        && KEYS
+            .iter()
+            .any(|spec| spec.key.split('.').count() >= key.len() && matches(spec.key, key))
+}
+
+/// Why a host-only key is not edited remotely, in words for the operator.
+pub const HOST_ONLY_REASON: &str =
+    "decides where agents can write, so it is changed in node.toml on the host, not by an edit";
 
 #[cfg(test)]
 mod tests {
@@ -451,6 +483,42 @@ mod tests {
                 Some(_) => assert!(spec.fs_path && !spec.exec_path, "{}", spec.key),
                 None => assert!(!spec.exec_path && !spec.fs_path, "{}", spec.key),
             }
+        }
+    }
+
+    #[test]
+    fn only_the_state_mount_is_left_to_the_host() {
+        let host_only: Vec<&str> = KEYS
+            .iter()
+            .filter(|spec| spec.host_only)
+            .map(|spec| spec.key)
+            .collect();
+        assert_eq!(host_only, ["runtime.kubernetes.state_mount"]);
+        assert!(lookup(&["runtime", "kubernetes"]).host_only);
+        assert!(!lookup(&["runtime", "kubernetes", "namespace"]).host_only);
+    }
+
+    #[test]
+    fn a_key_is_known_if_the_node_reads_it_or_a_table_holding_one() {
+        for key in [
+            &["publish", "gh"][..],
+            &["publish"],
+            &["repo"],
+            &["repo", "egress"],
+            &["providers", "anything", "models", "id"],
+            &["providers", "anything"],
+            &["github", "dispatch", "owner/name"],
+        ] {
+            assert!(known(key), "{key:?}");
+        }
+        for key in [
+            &[][..],
+            &["qa"],
+            &["publish", "ghh"],
+            &["publish", "gh", "deeper"],
+            &["repo", "mystery"],
+        ] {
+            assert!(!known(key), "{key:?}");
         }
     }
 
