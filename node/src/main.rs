@@ -852,12 +852,19 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
         }
         MeshCommand::Init { hub } => {
             let (id, _) = identity::load_or_generate()?;
-            let store = tracon::store::Store::open(&config::Config::db_path())?;
+            let store =
+                std::sync::Arc::new(tracon::store::Store::open(&config::Config::db_path())?);
             tracon::mesh::channels::create(&store, &id, proto::frame::MESH_CHANNEL)?;
-            let mut cfg = config::Config::try_load().map_err(|e| anyhow::anyhow!(e))?;
-            cfg.mesh.hub_url = Some(hub.trim_end_matches('/').to_string());
-            cfg.save()?;
-            println!("hub:         {}", cfg.mesh.hub_url.as_deref().unwrap_or(""));
+            let hub = hub.trim_end_matches('/').to_string();
+            config::update(&store, "tracon mesh init", |_| {
+                Ok::<_, config::EditError>(vec![config::Op::set(
+                    config::KeyPath::keys(&["mesh", "hub_url"]),
+                    hub.as_str(),
+                )])
+            })?
+            .settle()
+            .await;
+            println!("hub:         {hub}");
             println!("node id:     {}", id.node_id());
             println!("admit it on the hub with TRACON_HUB_ADMIT={}", id.node_id());
             println!("then `tracon serve`; other nodes join with `tracon mesh invite`");
@@ -959,9 +966,10 @@ async fn enroll_command(
     if fresh {
         eprintln!("generated this node's identity");
     }
-    let mut cfg = config::Config::try_load().map_err(|e| anyhow::anyhow!(e))?;
+    let cfg = config::Config::try_load().map_err(|e| anyhow::anyhow!(e))?;
     let name = name.unwrap_or_else(|| cfg.node_name.clone());
     let store = std::sync::Arc::new(tracon::store::Store::open(&config::Config::db_path())?);
+    let audit_store = store.clone();
     let facts = format!("{} {}", std::env::consts::ARCH, std::env::consts::OS);
     let channels = tracon::mesh::enroll::accept(
         store,
@@ -974,8 +982,14 @@ async fn enroll_command(
         &Stderr,
     )
     .await?;
-    cfg.mesh.hub_url = Some(hub.trim_end_matches('/').to_string());
-    cfg.save()?;
+    config::update(&audit_store, "tracon enroll", |_| {
+        Ok::<_, config::EditError>(vec![config::Op::set(
+            config::KeyPath::keys(&["mesh", "hub_url"]),
+            hub.trim_end_matches('/'),
+        )])
+    })?
+    .settle()
+    .await;
     println!("enrolled as {name}; channels: {}", channels.join(", "));
     println!("next: tracon setup, then tracon serve");
     Ok(())

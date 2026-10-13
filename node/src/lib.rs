@@ -8,6 +8,7 @@ pub mod boundary;
 pub mod broker;
 pub mod build_info;
 pub mod config;
+pub mod config_schema;
 pub mod continuation;
 pub mod corpus;
 pub mod data;

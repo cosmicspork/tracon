@@ -512,6 +512,9 @@ pub fn harness_router(state: AppState) -> Router {
 pub async fn serve(listen: SocketAddr) -> Result<()> {
     // A config that does not parse is fatal here, not a warning: a typo in
     // `[mesh]` must not quietly run this node unmeshed.
+    // Before the load, which may migrate the retired harness and so rewrite
+    // the file: an interrupted edit is settled against this version too.
+    let config_before_load = crate::config::edit::file_hash(&Config::config_path()).ok();
     let cfg = Arc::new(Config::try_load().map_err(|e| anyhow::anyhow!(e))?);
     let store = Arc::new(Store::open(&Config::db_path()).context("open store")?);
     // Only the serving node's own startup interrupts a stale `running` check;
@@ -520,6 +523,15 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     store
         .reconcile_interrupted_runs()
         .context("reconcile interrupted checks")?;
+    // An edit of node.toml interrupted between its audit row and its rename.
+    match crate::config::edit::reconcile_audit(&store, config_before_load.as_deref()) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            rows = n,
+            "settled node.toml audit rows an interrupted edit left pending"
+        ),
+        Err(error) => tracing::warn!(%error, "could not settle pending node.toml audit rows"),
+    }
     match store.repair_search_index() {
         Ok(true) => {
             tracing::warn!("the full-text search index had drifted from its tables; rebuilt it")

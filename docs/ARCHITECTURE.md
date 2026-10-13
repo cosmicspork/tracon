@@ -87,6 +87,40 @@ musl is also why consulta stays a Python sidecar: every Rust Oracle crate wraps 
 dynamically linked glibc blob, and `oracledb` thin mode is a pure-Python wire
 implementation. Recorded so the rewrite is not re-decided.
 
+### Configuration
+
+`node.toml` is the operator's file, and the node writes it through one path,
+`config::edit`. Every writer (Settings, the provider and repository editors, mesh pairing
+and enrolment, an approved egress ask or repository setup, the CLI) states its change as
+typed operations: set a key, remove one, insert or remove an entry of an array of tables.
+The edit applies them to the file as it stands with `toml_edit`, so comments, key order
+and formatting survive and nothing the operator did not change is rewritten. Writing the
+whole struct back instead turned every default into a pinned value and dropped every
+comment.
+
+Under one lock, an edit reads the file and checks the version the caller decided against
+(the SHA-256 of its bytes; a mismatch is a conflict carrying the current hash), applies
+the operations, and loads the result with every check a start makes. A result that would
+not load is refused with the file untouched, so a write can never leave a node that will
+not start. It then records a pending `config_audit` row (who, when, the hashes before
+and after, each changed key with its values), renames the synced new file into place and
+marks the row landed; a failed write withdraws its row, and a start settles a row an
+interrupted edit left pending by the file's hash. The lock is a process mutex plus a
+lock file beside `node.toml`, so the CLI and the serving node serialise too. The
+`[[repo]]` table changes under one more lock, held from reading the live table to
+setting it again, and its entries are matched by `path`, so a removed or moved entry
+takes its own comments with it. The operator's devices get a push through the ordinary
+operator notification path, keyed by the audit row. A writer whose operations depend on
+what the file holds now decides again when another edit lands first.
+
+`config_schema` describes every key: whether a change applies live or at restart (only
+`[[repo]]` is live today), whether writing it is an admin action (every key is), whether
+it names an executable the node runs, and whether its value is a secret the audit log
+redacts. A test walks the `Config` structs' own `Deserialize` and fails on a key without
+an entry, so a new setting cannot arrive without saying which it is. The one other writer
+is the load-time migration of a retired harness, which rewrites the file once and keeps
+the original beside it.
+
 ## Harness control
 
 **The adapter trait is the interface**, and each harness reaches it over its own

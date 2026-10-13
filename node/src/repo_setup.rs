@@ -546,34 +546,37 @@ pub async fn draft(
 /// What the entry says about its sessions' egress, and which credentials it
 /// lends its default branch's preparation, is kept as it was: neither is an
 /// agent's to propose.
-pub fn save(cfg: &Config, repo: &Path, entry: Repo) -> Result<String, String> {
-    let _edit = Config::edit_lock();
-    let mut file = Config::try_load()?;
-    let mut entries: Vec<Repo> = cfg.repos().as_ref().clone();
-    let path = match entries.iter_mut().find(|current| current.matches(repo)) {
-        Some(current) => {
-            *current = Repo {
-                path: current.path.clone(),
-                session_egress: current.session_egress,
-                prepare_credentials: current.prepare_credentials.clone(),
-                ..entry
-            };
-            current.path.display().to_string()
-        }
-        None => {
-            entries.push(Repo {
-                path: repo.to_path_buf(),
-                session_egress: false,
-                prepare_credentials: Vec::new(),
-                ..entry
-            });
-            repo.display().to_string()
-        }
-    };
-    crate::config::validate_repos(&entries)?;
-    file.repo = entries.clone();
-    file.save().map_err(|error| error.to_string())?;
-    cfg.live_repo.set(entries);
+pub fn save(
+    cfg: &Config,
+    store: &std::sync::Arc<crate::store::Store>,
+    repo: &Path,
+    entry: Repo,
+    actor: &str,
+) -> Result<String, String> {
+    let (path, _) = crate::config::edit::update_repos(cfg, store, actor, |entries| {
+        let path = match entries.iter_mut().find(|current| current.matches(repo)) {
+            Some(current) => {
+                *current = Repo {
+                    path: current.path.clone(),
+                    session_egress: current.session_egress,
+                    prepare_credentials: current.prepare_credentials.clone(),
+                    ..entry
+                };
+                current.path.display().to_string()
+            }
+            None => {
+                entries.push(Repo {
+                    path: repo.to_path_buf(),
+                    session_egress: false,
+                    prepare_credentials: Vec::new(),
+                    ..entry
+                });
+                repo.display().to_string()
+            }
+        };
+        crate::config::validate_repos(entries)?;
+        Ok::<_, String>(path)
+    })?;
     Ok(path)
 }
 

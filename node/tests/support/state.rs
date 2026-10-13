@@ -114,7 +114,7 @@ pub fn scratch(name: &str) -> PathBuf {
 /// `node.toml` is one file per test binary (`Config::config_path`, guarded by
 /// `TRACON_CONFIG_DIR` the same way `TRACON_STATE_DIR` is above), unlike
 /// `Store::open_in_memory()`, which every test gets its own copy of. The node
-/// keeps concurrent edits of it from losing each other (`Config::edit_lock`),
+/// keeps concurrent edits of it from losing each other (`config::edit`),
 /// so tests that change different keys need nothing more. Two tests that
 /// change the same key and assert what landed on disk still interleave under
 /// `cargo test`, which runs every `#[tokio::test]` in a file concurrently:

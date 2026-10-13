@@ -423,7 +423,13 @@ pub fn write(access: &SessionAccess, ctx: &CallContext, args: &Value) -> Result<
         return Err("the proposal names a repository other than this session's".into());
     }
     let entry = entry_from(args, &repo)?.ok_or("the proposal names no field")?;
-    let saved = repo_setup::save(access.manager.cfg(), &repo, entry)?;
+    let saved = repo_setup::save(
+        access.manager.cfg(),
+        &access.store,
+        &repo,
+        entry,
+        &format!("an approved repository setup (session {session_id})"),
+    )?;
     let repos = access.manager.cfg().repos();
     let written = repos.iter().find(|entry| entry.matches(&repo)).cloned();
     let mut out = json!({ "repo": saved, "entry": written });

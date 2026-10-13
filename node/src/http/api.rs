@@ -92,6 +92,20 @@ impl From<SessionError> for ApiError {
     }
 }
 
+impl From<crate::config::EditError> for ApiError {
+    fn from(error: crate::config::EditError) -> Self {
+        use crate::config::EditError as E;
+        let status = match &error {
+            // Another edit landed first, or the file is one the node will
+            // not rewrite: the caller's view is stale, not its request.
+            E::Conflict { .. } | E::Unparseable(_) => StatusCode::CONFLICT,
+            E::Op(_) | E::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            E::Audit(_) | E::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(status, error.to_string())
+    }
+}
+
 impl From<crate::store::StoreError> for ApiError {
     fn from(e: crate::store::StoreError) -> Self {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -6319,6 +6333,7 @@ const KNOWN_SHAPES: &[&str] = &[
 /// gateway forwards to and, on a new host, adds to the allowlist it dials.
 pub async fn create_provider(
     _: super::auth::Loopback,
+    State(s): State<AppState>,
     Json(body): Json<CreateProviderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let name = body.name.trim();
@@ -6359,53 +6374,54 @@ pub async fn create_provider(
         })?
         .to_string();
 
-    // try_load, never load: a node.toml that does not parse must be
-    // reported, not silently replaced with defaults plus this provider.
-    let _edit = Config::edit_lock();
-    let mut cfg = Config::try_load().map_err(|e| {
-        ApiError(
-            StatusCode::CONFLICT,
-            format!("node.toml does not parse, so it will not be rewritten: {e}"),
-        )
+    // The file as it is now, never the defaults: a node.toml that does not
+    // parse is reported, not replaced with defaults plus this provider.
+    crate::config::update(s.store(), "Connections (add a provider)", |cfg| {
+        // A built-in the file does not name is the operator's to take over:
+        // `openai` is always present, and this is how it gets its upstream and key.
+        if cfg.declared_providers.contains(name) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!("providers.{name} already exists"),
+            ));
+        }
+        if cfg.providers.get(name).is_some_and(|p| p.login.is_some()) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "{name} is the subscription sign-in; give the API-key provider another name"
+                ),
+            ));
+        }
+        let mut ops = Vec::new();
+        // The upstream must also pass the egress allowlist, same as every other
+        // gateway call — but here the operator is *adding* the provider, so a
+        // host that isn't allowed yet is added rather than refused.
+        let allowed = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
+            .map(|a| a.allows(&host))
+            .unwrap_or(false);
+        if !allowed {
+            let mut hosts = cfg.gateway.allow_hosts.clone();
+            hosts.push(crate::boundary::podman::setup::anchor_literal_host(&host));
+            ops.push(crate::config::Op::set(
+                crate::config::KeyPath::keys(&["gateway", "allow_hosts"]),
+                hosts,
+            ));
+        }
+        let provider = Provider {
+            credential: body.credential.clone(),
+            upstream: body.upstream.clone(),
+            shape: body.shape.clone(),
+            login: body.login.clone(),
+            price: None,
+            models: crate::config::default_models(name),
+        };
+        ops.push(crate::config::Op::set_serialized(
+            crate::config::KeyPath::keys(&["providers", name]),
+            &provider,
+        )?);
+        Ok(ops)
     })?;
-    // A built-in the file does not name is the operator's to take over:
-    // `openai` is always present, and this is how it gets its upstream and key.
-    if cfg.declared_providers.contains(name) {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            format!("providers.{name} already exists"),
-        ));
-    }
-    if cfg.providers.get(name).is_some_and(|p| p.login.is_some()) {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            format!("{name} is the subscription sign-in; give the API-key provider another name"),
-        ));
-    }
-
-    // The upstream must also pass the egress allowlist, same as every other
-    // gateway call — but here the operator is *adding* the provider, so a
-    // host that isn't allowed yet is added rather than refused.
-    let allowed = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
-        .map(|a| a.allows(&host))
-        .unwrap_or(false);
-    if !allowed {
-        cfg.gateway
-            .allow_hosts
-            .push(crate::boundary::podman::setup::anchor_literal_host(&host));
-    }
-
-    let provider = Provider {
-        credential: body.credential.clone(),
-        upstream: body.upstream.clone(),
-        shape: body.shape.clone(),
-        login: body.login.clone(),
-        price: None,
-        models: crate::config::default_models(name),
-    };
-    cfg.providers.insert(name.to_string(), provider);
-    cfg.save()
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({
         "created": name,
@@ -6431,27 +6447,23 @@ pub async fn get_config(State(s): State<AppState>) -> ApiResult<Json<serde_json:
 /// the node executes.
 pub async fn put_config(
     _: super::auth::Loopback,
+    State(s): State<AppState>,
     Json(patch): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // try_load, never load: a node.toml that does not parse must be reported,
-    // not silently replaced with defaults plus this patch.
-    let _edit = Config::edit_lock();
-    let mut cfg = Config::try_load().map_err(|e| {
-        ApiError(
-            StatusCode::CONFLICT,
-            format!("node.toml does not parse, so it will not be rewritten: {e}"),
-        )
+    let mut changed = Vec::new();
+    let outcome = crate::config::update(s.store(), "Settings", |cfg| {
+        let patch = super::settings::apply(cfg, &patch)
+            .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        changed = patch.changed;
+        Ok::<_, ApiError>(patch.ops)
     })?;
-    let changed = super::settings::apply(&mut cfg, &patch)
-        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    if !changed.is_empty() {
-        cfg.save()
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !outcome.wrote() {
+        changed.clear();
     }
     Ok(Json(json!({
         "changed": changed,
         // The running node holds its config in an Arc taken at startup.
-        "restart_required": !changed.is_empty(),
+        "restart_required": outcome.restart_required,
     })))
 }
 
@@ -6698,16 +6710,15 @@ pub async fn mesh_init(
         .0;
     crate::mesh::channels::create(s.store(), &identity, proto::frame::MESH_CHANNEL)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _edit = Config::edit_lock();
-    let mut cfg = Config::try_load().map_err(|e| {
-        ApiError(
-            StatusCode::CONFLICT,
-            format!("node.toml does not parse, so it will not be rewritten: {e}"),
-        )
-    })?;
-    cfg.mesh.hub_url = Some(hub.clone());
-    cfg.save()
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::config::edit(
+        s.store(),
+        &[crate::config::Op::set(
+            crate::config::KeyPath::keys(&["mesh", "hub_url"]),
+            hub.as_str(),
+        )],
+        None,
+        "Settings (start a mesh)",
+    )?;
     Ok(Json(json!({
         "hub_url": hub,
         "node_id": identity.node_id(),
@@ -6724,20 +6735,18 @@ pub async fn mesh_init(
 /// effect on restart, like every `node.toml` change.
 pub async fn mesh_unpair(
     _: super::auth::Loopback,
-    State(_): State<AppState>,
+    State(s): State<AppState>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _edit = Config::edit_lock();
-    let mut cfg = Config::try_load().map_err(|e| {
-        ApiError(
-            StatusCode::CONFLICT,
-            format!("node.toml does not parse, so it will not be rewritten: {e}"),
-        )
+    let mut was = None;
+    crate::config::update(s.store(), "Settings (leave the mesh)", |cfg| {
+        was = cfg.mesh.hub_url.clone();
+        Ok::<_, ApiError>(match was {
+            Some(_) => vec![crate::config::Op::remove(crate::config::KeyPath::keys(&[
+                "mesh", "hub_url",
+            ]))],
+            None => Vec::new(),
+        })
     })?;
-    let was = cfg.mesh.hub_url.take();
-    if was.is_some() {
-        cfg.save()
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
     Ok(Json(json!({
         "unpaired": was,
         "restart_required": was.is_some(),
@@ -6829,6 +6838,7 @@ pub async fn start_enroll(
 
     let slot = s.enroll.clone();
     let store = s.store().clone();
+    let audit_store = store.clone();
     tokio::spawn(async move {
         let facts = format!("{} {}", std::env::consts::ARCH, std::env::consts::OS);
         let progress = BufProgress(slot.clone());
@@ -6849,18 +6859,17 @@ pub async fn start_enroll(
                 // The hub is written only once the mesh has actually taken
                 // this node: a config pointing at a hub that refused it is
                 // worse than no config at all.
-                let _edit = Config::edit_lock();
-                match Config::try_load() {
-                    Ok(mut cfg) => {
-                        cfg.mesh.hub_url = Some(hub.clone());
-                        if let Err(e) = cfg.save() {
-                            job.error =
-                                Some(format!("enrolled, but node.toml was not written: {e}"));
-                        }
-                    }
-                    Err(e) => {
-                        job.error = Some(format!("enrolled, but node.toml does not parse: {e}"))
-                    }
+                let written = crate::config::edit(
+                    &audit_store,
+                    &[crate::config::Op::set(
+                        crate::config::KeyPath::keys(&["mesh", "hub_url"]),
+                        hub.as_str(),
+                    )],
+                    None,
+                    "Settings (join a mesh)",
+                );
+                if let Err(e) = written {
+                    job.error = Some(format!("enrolled, but node.toml was not written: {e}"));
                 }
                 job.lines
                     .push("enrolled; restart the node to dial the hub".into());

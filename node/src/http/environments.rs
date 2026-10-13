@@ -59,17 +59,18 @@ pub async fn save(
 ) -> ApiResult<Json<Value>> {
     crate::config::validate_repos(&body.entries)
         .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error))?;
-    let _edit = Config::edit_lock();
-    let mut file = Config::try_load()
-        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    let changed = json!(file.repo) != json!(body.entries);
-    file.repo = body.entries.clone();
-    file.save()
-        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    s.cfg.live_repo.set(body.entries);
+    let ((), outcome) = crate::config::edit::update_repos(
+        &s.cfg,
+        s.store(),
+        "Settings (repositories)",
+        |entries| {
+            *entries = body.entries;
+            Ok::<_, ApiError>(())
+        },
+    )?;
     Ok(Json(json!({
-        "changed": changed,
-        "restart_required": false,
+        "changed": outcome.wrote(),
+        "restart_required": outcome.restart_required,
     })))
 }
 
