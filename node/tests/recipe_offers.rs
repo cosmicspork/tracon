@@ -94,6 +94,7 @@ fn node_with(toml: &str, backend: Arc<dyn Backend>) -> Node {
             expires_ms: now + 3_600_000,
             user_agent: None,
             paired_ms: None,
+            delegated_from: None,
         })
         .unwrap();
     let mut peer = support::rows::node_row(PEER, "laptop");
