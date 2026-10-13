@@ -188,7 +188,7 @@ Tell the node the name it now answers to, in `node.toml`:
 
 ```toml
 [auth]
-public_origin = "https://<machine>.<tailnet>.ts.net"   # an https: origin; no path
+public_origin = "https://<machine>.<tailnet>.ts.net"   # an https: origin on a domain name; no path, no IP address
 ```
 
 A proxy on the node's own machine connects to it from `127.0.0.1`, but what it relays
@@ -1079,7 +1079,7 @@ max_files = 200
 # contact = "mailto:you@example.com"    # what a push service may write to about this sender; falls back to [auth] public_origin
 
 [auth]
-# public_origin = "https://tracon.example.org"  # where remote browsers reach this node; https: only (http: for localhost)
+# public_origin = "https://tracon.example.org"  # where remote browsers reach this node; https: on a domain name (http: for localhost)
 
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false

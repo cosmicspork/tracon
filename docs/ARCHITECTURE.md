@@ -1471,8 +1471,10 @@ Three surfaces, three answers, and the differences are the point.
   upstream, which is by construction a request from the machine; proxies in
   front of a node must send `X-Forwarded-For`.
 - **`[auth] public_origin`** is the name the node answers to from elsewhere:
-  an `https:` origin (plain `http:` only for a loopback host), normalised at
-  load. It is not a credential and does not widen what is local. The push
+  an `https:` origin on a domain name (plain `http:` only for `localhost`),
+  normalised at load. An IP address is refused, loopback included, because a
+  passkey's relying-party ID must be a domain and browsers refuse WebAuthn on
+  an IP-literal origin. It is not a credential and does not widen what is local. The push
   subject falls back to it when `[notify] contact` is unset, and it is what a
   passkey's origin and relying-party ID will be pinned to.
 - **The operator from anywhere else** needs the token, exchanged for an HttpOnly,

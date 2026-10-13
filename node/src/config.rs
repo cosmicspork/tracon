@@ -561,8 +561,10 @@ impl Auth {
     ///
     /// HTTPS only, because the operator cookie is `Secure` off this machine
     /// and a passkey is refused on an insecure origin; plain HTTP is accepted
-    /// only for a loopback host, which browsers treat as secure. An origin and
-    /// nothing else: no credentials, path, query or fragment.
+    /// only for `localhost`, which browsers treat as secure. The host is a
+    /// domain name, never an IP address, because a passkey's relying-party ID
+    /// must be one. An origin and nothing else: no credentials, path, query or
+    /// fragment.
     pub fn public_origin(&self) -> Result<Option<String>, String> {
         let Some(configured) = self.public_origin.as_deref() else {
             return Ok(None);
@@ -580,15 +582,24 @@ impl Auth {
                     .into(),
             );
         }
-        let loopback = match url.host() {
-            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            None => return Err("auth.public_origin has no host".into()),
-        };
+        // A passkey is bound to a relying-party ID, which must be a domain
+        // name: browsers refuse WebAuthn on an IP-literal origin, loopback
+        // included. `localhost` is the one name that needs no certificate,
+        // which is what local passkey testing runs against.
+        let localhost =
+            match url.host() {
+                Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+                Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => return Err(
+                    "auth.public_origin must name the node by a domain name, not an IP address: \
+                     a passkey is bound to a domain, and browsers refuse one on an IP address \
+                     (use http://localhost:<port> for local testing)"
+                        .into(),
+                ),
+                None => return Err("auth.public_origin has no host".into()),
+            };
         match url.scheme() {
             "https" => {}
-            "http" if loopback => {}
+            "http" if localhost => {}
             _ => return Err(
                 "auth.public_origin must be an https: origin; http: is allowed only for localhost"
                     .into(),
@@ -3240,10 +3251,11 @@ models = [{ id = "gpt-6" }]
                 "https://tracon.example.org:8443",
                 "https://tracon.example.org:8443",
             ),
-            // Plain HTTP only where a browser already treats it as secure.
+            // Plain HTTP only where a browser already treats it as secure,
+            // and where a passkey can still be made: local testing.
             ("http://localhost:7420", "http://localhost:7420"),
-            ("http://127.0.0.1:7420/", "http://127.0.0.1:7420"),
-            ("http://[::1]:7420", "http://[::1]:7420"),
+            ("http://LocalHost:7420/", "http://localhost:7420"),
+            ("https://localhost:8443", "https://localhost:8443"),
         ] {
             auth.public_origin = Some(written.into());
             assert_eq!(
@@ -3257,6 +3269,7 @@ models = [{ id = "gpt-6" }]
             "tracon.example.org",
             "http://tracon.example.org",
             "http://192.168.1.10:7420",
+            "http://localhost.example.org",
             "ftp://tracon.example.org",
             "https://tracon.example.org/tracon",
             "https://user@tracon.example.org",
@@ -3267,6 +3280,22 @@ models = [{ id = "gpt-6" }]
         ] {
             auth.public_origin = Some(invalid.into());
             assert!(auth.public_origin().is_err(), "{invalid:?}");
+        }
+
+        // An IP address is never a relying-party ID, loopback or public, and
+        // the refusal says why and what to use instead.
+        for ip in [
+            "https://203.0.113.5",
+            "https://100.101.102.103:8443",
+            "https://[2001:db8::1]",
+            "http://127.0.0.1:7420",
+            "https://127.0.0.1:7420",
+            "http://[::1]:7420",
+        ] {
+            auth.public_origin = Some(ip.into());
+            let error = auth.public_origin().unwrap_err();
+            assert!(error.contains("domain name"), "{ip}: {error}");
+            assert!(error.contains("localhost"), "{ip}: {error}");
         }
     }
 
