@@ -1292,17 +1292,20 @@ What the node pod needs:
   `auth.docker.io` and `registry-1.docker.io` for a `FROM` on Docker Hub, `ghcr.io` for
   the harness images, `registry.digitalocean.com` and `api.digitalocean.com` for
   DigitalOcean's registry.
-- **Room for a build context.** A context is materialised in the system temporary
-  directory before it is sent. Set `TMPDIR` to a directory on the state volume (the
-  node creates it) when a repository's tree is larger than the pod's ephemeral storage.
+- **Room for a build context.** A build stages the default branch's tree and its
+  Containerfile under `<state_mount>/tmp` on the state volume, and runs `buildctl`
+  with `TMPDIR` there, so a large repository does not fill the node container's
+  ephemeral storage. (A harness pod's `TMPDIR` is its own `/tmp` emptyDir.)
 - **Pull access for harness pods.** They pull the built images by digest with the
   namespace's pull secrets; DigitalOcean's cluster integration adds them to the
   `default` service account.
 
 The `runtime` check runs `buildctl debug workers` over mutual TLS and asks the
 registry's `/v2/` with the credential, and appends what it found to its detail. A
-builder that fails either never refuses the node: sessions and checks still run, and
-an entry's build reports why it did not happen. A superseded image is deleted from the
+table that cannot be a builder, or a builder that fails either probe, is a warning
+there and never refuses the node: sessions and checks still run. A build attempted
+anyway fails with the same reason the check gave, recorded against the repository's
+image. A superseded image is deleted from the
 registry by digest through the distribution API. DigitalOcean's registry routes that
 delete but may refuse it, so on that host the node falls back to the DigitalOcean API
 (`DELETE /v2/registries/<registry>/repositories/<repo>/digests/<digest>`) with

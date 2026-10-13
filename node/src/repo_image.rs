@@ -483,7 +483,7 @@ async fn build_session(
         error,
         log_tail: String::new(),
     };
-    let stage = tempfile::tempdir().map_err(|e| staged(e.to_string()))?;
+    let stage = stage_dir(builder).map_err(|e| staged(e.to_string()))?;
     let containerfile = stage.path().join("Session.Containerfile");
     std::fs::write(&containerfile, layered(base, harness_image, &harness.layer))
         .map_err(|e| staged(e.to_string()))?;
@@ -852,6 +852,17 @@ pub async fn build_for_trial(
     }
 }
 
+/// A directory to stage one build in, where the builder wants it.
+fn stage_dir(builder: &dyn ImageBuilder) -> std::io::Result<tempfile::TempDir> {
+    match builder.scratch_dir() {
+        Some(scratch) => {
+            std::fs::create_dir_all(&scratch)?;
+            tempfile::tempdir_in(scratch)
+        }
+        None => tempfile::tempdir(),
+    }
+}
+
 fn source_tag(repo: &Path, recipe_hash: &str) -> String {
     format!(
         "{}-src:{}",
@@ -874,7 +885,7 @@ async fn build(
         log_tail: String::new(),
     };
     let dir = repo.to_string_lossy();
-    let stage = tempfile::tempdir().map_err(|e| staged(e.to_string()))?;
+    let stage = stage_dir(builder).map_err(|e| staged(e.to_string()))?;
     let dockerfile = crate::review::blob(
         &dir,
         &format!("{}:{}", recipe.source_commit, recipe.dockerfile),
@@ -883,7 +894,9 @@ async fn build(
     .map_err(|e| staged(e.to_string()))?;
     let containerfile = stage.path().join("Containerfile");
     std::fs::write(&containerfile, dockerfile).map_err(|e| staged(e.to_string()))?;
-    let context = crate::review::snapshot_candidate(
+    let scratch = builder.scratch_dir().unwrap_or_else(std::env::temp_dir);
+    let context = crate::review::snapshot_candidate_in(
+        &scratch,
         &dir,
         &recipe.context_tree,
         cfg.supervision.max_snapshot_bytes,

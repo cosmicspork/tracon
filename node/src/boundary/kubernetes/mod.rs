@@ -36,17 +36,21 @@ pub struct KubeBackend {
     secret_rights: SecretRights,
     /// `[runtime.kubernetes.builder]`, or why it is not a builder. `None`
     /// where none is configured.
-    builder: Option<Result<build::BuildKitBuilder, String>>,
+    builder: Option<Result<build::BuildKitBuilder, build::Unusable>>,
 }
 
-/// The builder `[runtime.kubernetes.builder]` configures, if any.
-fn builder_for(cfg: &Config) -> Option<Result<build::BuildKitBuilder, String>> {
+/// The builder `[runtime.kubernetes.builder]` configures, if any, staging on
+/// the state volume.
+fn builder_for(cfg: &Config) -> Option<Result<build::BuildKitBuilder, build::Unusable>> {
     let settings = cfg.runtime.kubernetes.builder.as_ref()?;
-    // A repository's build context is materialised in the system temporary
-    // directory, which a pod may point at its state volume (TMPDIR) to hold a
-    // large one. Nothing there exists until something makes it.
-    let _ = std::fs::create_dir_all(std::env::temp_dir());
-    Some(build::BuildKitBuilder::new(settings))
+    let scratch = cfg.runtime.kubernetes.state_mount.join(build::SCRATCH);
+    Some(
+        build::BuildKitBuilder::new(settings, scratch).map_err(|why| {
+            build::Unusable(format!(
+                "[runtime.kubernetes.builder] is not usable ({why})"
+            ))
+        }),
+    )
 }
 
 impl KubeBackend {
@@ -82,13 +86,10 @@ impl KubeBackend {
             None => "builder: not configured ([runtime.kubernetes.builder]), so a repository's \
                      dockerfile is not built here"
                 .to_string(),
-            Some(Err(why)) => format!(
-                "builder: [runtime.kubernetes.builder] is not usable ({why}), so no repository \
-                 image is built"
-            ),
+            Some(Err(build::Unusable(why))) => format!("builder: {}", build::unusable(why)),
             Some(Ok(builder)) => match builder.check().await {
                 Ok(said) => format!("builder: {said}"),
-                Err(why) => format!("builder: {why}, so a repository's image cannot be built"),
+                Err(why) => format!("builder: {}", build::unusable(&why)),
             },
         }
     }
@@ -237,7 +238,8 @@ impl Backend for KubeBackend {
     fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
         match &self.builder {
             Some(Ok(builder)) => Some(builder),
-            _ => None,
+            Some(Err(unusable)) => Some(unusable),
+            None => None,
         }
     }
 
@@ -397,10 +399,10 @@ mod tests {
     }
 
     /// Without `[runtime.kubernetes.builder]` nothing builds and the check
-    /// says so; a builder that cannot be one is not handed out, and the
-    /// check says why; a configured one is, and the check reports its
-    /// daemon. Layered images copy the harness from the release's images
-    /// either way.
+    /// says so. A table that cannot be a builder, and a builder whose daemon
+    /// does not answer, are warnings in the check, and a build attempted
+    /// anyway fails with the check's own reason. Builds stage on the state
+    /// volume. Layered images copy the harness from the release's images.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_builder_is_handed_out_only_when_configured() {
@@ -427,14 +429,37 @@ mod tests {
             ..Default::default()
         });
         let invalid = KubeBackend::new(&cfg);
-        assert!(invalid.image_builder().is_none());
         let said = invalid.builder_status().await;
         assert!(said.contains("is not usable (registry must be"), "{said}");
+        std::fs::write(tmp.path().join("Containerfile"), "FROM scratch\n").unwrap();
+        async fn attempt(backend: &KubeBackend, dir: &std::path::Path) -> String {
+            let containerfile = dir.join("Containerfile");
+            backend
+                .image_builder()
+                .expect("a builder is handed out")
+                .build(crate::boundary::ImageBuild {
+                    tag: "localhost/tracon-repo-a:t",
+                    containerfile: &containerfile,
+                    context: dir,
+                    labels: &[],
+                    timeout: std::time::Duration::from_secs(30),
+                })
+                .await
+                .unwrap_err()
+                .error
+        }
+        assert_eq!(
+            Some(attempt(&invalid, tmp.path()).await.as_str()),
+            said.strip_prefix("builder: ")
+        );
 
         let buildctl = tmp.path().join("buildctl");
         std::fs::write(
             &buildctl,
-            "#!/bin/sh\necho 'error: connection refused' >&2\nexit 1\n",
+            format!(
+                "#!/bin/sh\necho \"$TMPDIR\" > {}/tmpdir\necho 'error: connection refused' >&2\nexit 1\n",
+                tmp.path().display()
+            ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -444,8 +469,12 @@ mod tests {
             buildctl: buildctl.to_string_lossy().into_owned(),
             ..Default::default()
         });
+        cfg.runtime.kubernetes.state_mount = tmp.path().join("state");
         let configured = KubeBackend::new(&cfg);
-        assert!(configured.image_builder().is_some());
+        assert_eq!(
+            configured.image_builder().unwrap().scratch_dir(),
+            Some(tmp.path().join("state/tmp"))
+        );
         // Nothing is layered for a session no runner here would run in it.
         assert!(!Backend::runs_sessions_in_repository_images(&configured));
         let said = configured.builder_status().await;
@@ -454,6 +483,16 @@ mod tests {
                 && said.contains("connection refused")
                 && said.ends_with("so a repository's image cannot be built"),
             "{said}"
+        );
+        assert_eq!(
+            Some(attempt(&configured, tmp.path()).await.as_str()),
+            said.strip_prefix("builder: ")
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("tmpdir"))
+                .unwrap()
+                .trim(),
+            tmp.path().join("state/tmp").to_string_lossy()
         );
     }
 

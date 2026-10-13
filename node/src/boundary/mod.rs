@@ -135,6 +135,12 @@ pub trait ImageBuilder: Send + Sync {
     /// Drop an image nothing uses any more. Best effort: one a container
     /// still runs from stays.
     async fn remove(&self, image: &str);
+    /// Where a build's context and Containerfile are staged. `None` is the
+    /// system temporary directory; a builder whose host keeps that on small
+    /// ephemeral storage (a pod's container filesystem) names one with room.
+    fn scratch_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// One harness's image as the runtime holds it.

@@ -14,9 +14,15 @@
 //! Images are named as Podman names them, `localhost/tracon-repo-…`, and that
 //! prefix is the configured registry here: a build under one pushes to the
 //! registry, and `exists`, `identity` and `remove` take either spelling.
+//!
+//! What a build stages (the context, the Containerfile, `buildctl`'s own
+//! `TMPDIR`) goes under `<state_mount>/tmp` on the state volume, not the
+//! node container's `/tmp`: a repository's tree can be larger than a pod's
+//! ephemeral storage. A harness pod's `TMPDIR` is its own emptyDir instead
+//! (`runner::kube::SCRATCH_MOUNT`); this one is the node's.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,6 +33,15 @@ use crate::config::KubeBuilder;
 
 const LOCAL: &str = "localhost/";
 
+/// The directory under the state mount a build stages in.
+pub const SCRATCH: &str = "tmp";
+
+/// Why no repository image can be built, in the words both the `runtime`
+/// check and a build that is attempted anyway report.
+pub fn unusable(why: &str) -> String {
+    format!("{why}, so a repository's image cannot be built")
+}
+
 /// How long `buildctl debug workers` may take to answer the check.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -35,12 +50,36 @@ pub struct BuildKitBuilder {
     /// `registry` without a trailing slash.
     prefix: String,
     registry: Registry,
+    /// Where builds stage, and `buildctl`'s `TMPDIR`.
+    scratch: PathBuf,
+}
+
+/// A `[runtime.kubernetes.builder]` that cannot be a builder. Handed out in
+/// its place, so a repository whose image would be built hears why it was
+/// not, rather than that the runtime cannot build at all.
+pub struct Unusable(pub String);
+
+#[async_trait]
+impl ImageBuilder for Unusable {
+    async fn build(&self, _build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
+        Err(BuildFailure {
+            error: unusable(&self.0),
+            log_tail: String::new(),
+        })
+    }
+    async fn exists(&self, _image: &str) -> bool {
+        false
+    }
+    async fn identity(&self, _image: &str) -> Option<String> {
+        None
+    }
+    async fn remove(&self, _image: &str) {}
 }
 
 impl BuildKitBuilder {
-    /// The builder `[runtime.kubernetes.builder]` describes, or why it cannot
-    /// be one.
-    pub fn new(settings: &KubeBuilder) -> Result<Self, String> {
+    /// The builder `[runtime.kubernetes.builder]` describes, staging under
+    /// `scratch`, or why it cannot be one.
+    pub fn new(settings: &KubeBuilder, scratch: PathBuf) -> Result<Self, String> {
         let addr = settings.addr.trim();
         if !addr.starts_with("tcp://") {
             return Err(format!(
@@ -78,7 +117,16 @@ impl BuildKitBuilder {
             settings: settings.clone(),
             prefix,
             registry,
+            scratch,
         })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(settings: &KubeBuilder) -> Result<Self, String> {
+        Self::new(
+            settings,
+            std::env::temp_dir().join("tracon-build-test-scratch"),
+        )
     }
 
     #[doc(hidden)]
@@ -153,10 +201,14 @@ impl BuildKitBuilder {
     }
 
     fn command(&self, args: &[OsString]) -> tokio::process::Command {
+        // Made here, not once at startup: the claim is mounted by then, and
+        // something may have removed the directory since.
+        let _ = std::fs::create_dir_all(&self.scratch);
         let mut command = tokio::process::Command::new(&self.settings.buildctl);
         command
             .args(args)
             .env("DOCKER_CONFIG", &self.settings.docker_config)
+            .env("TMPDIR", &self.scratch)
             .stdin(std::process::Stdio::null())
             // A build abandoned at its deadline must not keep running: the
             // daemon cancels it when this client's session goes.
@@ -238,7 +290,9 @@ impl ImageBuilder for BuildKitBuilder {
             log_tail: crate::boundary::podman::log_tail(log),
         };
         let target = self.pushed_name(build.tag);
-        let stage = tempfile::tempdir().map_err(|error| failure(error.to_string(), &[]))?;
+        let stage = std::fs::create_dir_all(&self.scratch)
+            .and_then(|()| tempfile::tempdir_in(&self.scratch))
+            .map_err(|error| failure(format!("{}: {error}", self.scratch.display()), &[]))?;
         let metadata = stage.path().join("metadata.json");
         let argv = self.argv(&build, &target, &metadata);
         let timeout = self
@@ -249,7 +303,10 @@ impl ImageBuilder for BuildKitBuilder {
         let out = match tokio::time::timeout(timeout, self.command(&argv).output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(error)) => {
-                return Err(failure(format!("{}: {error}", self.settings.buildctl), &[]))
+                return Err(failure(
+                    unusable(&format!("{}: {error}", self.settings.buildctl)),
+                    &[],
+                ))
             }
             Err(_) => {
                 return Err(failure(
@@ -263,8 +320,13 @@ impl ImageBuilder for BuildKitBuilder {
         };
         let log = [out.stdout, out.stderr].concat();
         if !out.status.success() {
-            let exit = out.status.code().unwrap_or(-1);
-            return Err(failure(format!("buildctl build exited {exit}"), &log));
+            // The daemon or the registry, rather than the Dockerfile, is
+            // reported as the check reports it: one reason in both places.
+            let error = match self.check().await {
+                Err(why) => unusable(&why),
+                Ok(_) => format!("buildctl build exited {}", out.status.code().unwrap_or(-1)),
+            };
+            return Err(failure(error, &log));
         }
         let digest = std::fs::read_to_string(&metadata)
             .map_err(|error| format!("build metadata: {error}"))
@@ -282,6 +344,10 @@ impl ImageBuilder for BuildKitBuilder {
 
     async fn identity(&self, image: &str) -> Option<String> {
         self.registry.identity(&self.resolve(image)).await
+    }
+
+    fn scratch_dir(&self) -> Option<PathBuf> {
+        Some(self.scratch.clone())
     }
 
     /// Only what this node pushed: an image in another registry, such as a
@@ -346,7 +412,10 @@ mod tests {
 
     #[test]
     fn a_misconfigured_builder_says_what_is_wrong() {
-        assert!(BuildKitBuilder::new(&settings("registry.digitalocean.com/cosmicspork")).is_ok());
+        assert!(
+            BuildKitBuilder::new_for_test(&settings("registry.digitalocean.com/cosmicspork"))
+                .is_ok()
+        );
         for (registry, addr) in [
             ("", "tcp://b:1234"),
             ("cosmicspork", "tcp://b:1234"),
@@ -359,7 +428,10 @@ mod tests {
         ] {
             let mut bad = settings(registry);
             bad.addr = addr.into();
-            assert!(BuildKitBuilder::new(&bad).is_err(), "{registry} {addr}");
+            assert!(
+                BuildKitBuilder::new_for_test(&bad).is_err(),
+                "{registry} {addr}"
+            );
         }
     }
 
@@ -369,7 +441,8 @@ mod tests {
     #[test]
     fn the_build_is_rendered_as_one_buildctl_call() {
         let builder =
-            BuildKitBuilder::new(&settings("registry.digitalocean.com/cosmicspork/")).unwrap();
+            BuildKitBuilder::new_for_test(&settings("registry.digitalocean.com/cosmicspork/"))
+                .unwrap();
         let target = builder.pushed_name("localhost/tracon-repo-app-0123456789-src:abc");
         assert_eq!(
             target,
@@ -414,7 +487,8 @@ mod tests {
 
     #[test]
     fn names_move_into_the_registry_and_others_stay_as_they_are() {
-        let builder = BuildKitBuilder::new(&settings("registry.digitalocean.com/cs")).unwrap();
+        let builder =
+            BuildKitBuilder::new_for_test(&settings("registry.digitalocean.com/cs")).unwrap();
         assert_eq!(
             builder.resolve("localhost/tracon-repo-a@sha256:00"),
             "registry.digitalocean.com/cs/tracon-repo-a@sha256:00"
@@ -485,7 +559,7 @@ mod tests {
                  printf '{{\"containerimage.digest\":\"{DIGEST}\"}}' > \"$2\""
             ),
         );
-        let builder = BuildKitBuilder::new(&config).unwrap();
+        let builder = BuildKitBuilder::new_for_test(&config).unwrap();
         let built = builder
             .build(ImageBuild {
                 tag: "localhost/tracon-repo-a:t",
@@ -508,12 +582,22 @@ mod tests {
             "/etc/tracon/registry"
         );
 
+        // A Dockerfile that fails, with the daemon and the registry well, is
+        // the build's own failure; with the daemon gone it is the daemon's.
         config.buildctl = stub(
             tmp.path(),
-            "echo 'ERROR: failed to solve: no such package' >&2; exit 1",
+            "if [ \"$5\" = debug ]; then printf 'ID PLATFORMS\\nw linux/amd64\\n'; exit 0; fi\n\
+             echo 'ERROR: failed to solve: no such package' >&2; exit 1",
         );
-        let failed = BuildKitBuilder::new(&config)
+        let (_fake, host) = serve().await;
+        let credential = docker_config(&host);
+        let fake_registry =
+            || Registry::new(Some(credential.path().to_path_buf())).for_test("unused", "unused");
+        let mut at_fake = config.clone();
+        at_fake.registry = format!("{host}/cs");
+        let failed = BuildKitBuilder::new_for_test(&at_fake)
             .unwrap()
+            .with_registry(fake_registry())
             .build(ImageBuild {
                 tag: "localhost/tracon-repo-a:t",
                 containerfile: &containerfile,
@@ -526,9 +610,27 @@ mod tests {
         assert_eq!(failed.error, "buildctl build exited 1");
         assert!(failed.log_tail.contains("no such package"));
 
+        config.buildctl = stub(tmp.path(), "echo 'error: connection refused' >&2; exit 1");
+        let failed = BuildKitBuilder::new_for_test(&config)
+            .unwrap()
+            .build(ImageBuild {
+                tag: "localhost/tracon-repo-a:t",
+                containerfile: &containerfile,
+                context: tmp.path(),
+                labels: &[],
+                timeout: Duration::from_secs(30),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failed.error,
+            "buildkitd at tcp://buildkitd.tracon-build.svc:1234 refused `buildctl debug workers`: \
+             error: connection refused, so a repository's image cannot be built"
+        );
+
         // Exited 0 but pushed nothing it would name.
         config.buildctl = stub(tmp.path(), "exit 0");
-        let failed = BuildKitBuilder::new(&config)
+        let failed = BuildKitBuilder::new_for_test(&config)
             .unwrap()
             .build(ImageBuild {
                 tag: "localhost/tracon-repo-a:t",
@@ -557,7 +659,7 @@ mod tests {
         );
         config.timeout_secs = Some(1);
         let started = std::time::Instant::now();
-        let failed = BuildKitBuilder::new(&config)
+        let failed = BuildKitBuilder::new_for_test(&config)
             .unwrap()
             .build(ImageBuild {
                 tag: "localhost/tracon-repo-a:t",
@@ -596,7 +698,7 @@ mod tests {
         settings.docker_config = config.path().to_path_buf();
         let registry =
             Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
-        let builder = BuildKitBuilder::new(&settings)
+        let builder = BuildKitBuilder::new_for_test(&settings)
             .unwrap()
             .with_registry(registry);
 
@@ -660,7 +762,7 @@ mod tests {
             ..Default::default()
         };
         let plain = Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
-        let builder = BuildKitBuilder::new(&settings)
+        let builder = BuildKitBuilder::new_for_test(&settings)
             .unwrap()
             .with_registry(plain);
         builder.check().await.unwrap();
@@ -735,7 +837,7 @@ mod tests {
             tmp.path(),
             "echo 'error: tls: failed to verify certificate: x509: certificate signed by unknown authority' >&2; exit 1",
         );
-        let error = BuildKitBuilder::new(&settings)
+        let error = BuildKitBuilder::new_for_test(&settings)
             .unwrap()
             .with_registry(registry())
             .check()
@@ -751,7 +853,7 @@ mod tests {
         );
 
         settings.buildctl = stub(tmp.path(), "echo 'ID PLATFORMS'; echo 'abc linux/amd64'");
-        let said = BuildKitBuilder::new(&settings)
+        let said = BuildKitBuilder::new_for_test(&settings)
             .unwrap()
             .with_registry(registry())
             .check()
@@ -763,7 +865,7 @@ mod tests {
         );
 
         let empty = tempfile::tempdir().unwrap();
-        let error = BuildKitBuilder::new(&settings)
+        let error = BuildKitBuilder::new_for_test(&settings)
             .unwrap()
             .with_registry(
                 Registry::new(Some(empty.path().to_path_buf())).for_test("unused", "unused"),
