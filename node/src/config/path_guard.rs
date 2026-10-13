@@ -332,6 +332,19 @@ impl Place {
         std::fs::metadata(&self.lexical).ok().map(|m| file_id(&m))
     }
 
+    /// `walked` lands in this place, and every link on the way there is
+    /// outside every place an agent can write: what an exception for the
+    /// node's own areas is decided by. A system or operator link (`/var` to
+    /// `/private/var` on macOS, `/home` to `/var/home`) is fine; a link an
+    /// agent made is not, so an agent's own path does not come along.
+    fn reached_by(&self, walked: &Walked, agent_roots: &[Place]) -> bool {
+        self.holds_lexically(&walked.resolved)
+            && walked
+                .links
+                .iter()
+                .all(|dir| !agent_roots.iter().any(|root| root.holds(dir)))
+    }
+
     /// `path` is this place or inside it by its spelling alone, as written
     /// or as the place resolves, without asking the filesystem: what an
     /// exception for the node's own areas is decided by, so a link an agent
@@ -1041,8 +1054,7 @@ impl Guard {
         // top-level `tracon-*` volumes.
         // Decided by spelling alone, written and resolved: a link an agent
         // made into the secrets directory does not make its own path one.
-        let in_config_secrets = self.secret_dirs[0].holds_lexically(path)
-            && self.secret_dirs[0].holds_lexically(&walked.resolved);
+        let in_config_secrets = self.secret_dirs[0].reached_by(&walked, &self.agent_roots);
         self.outside_agent_roots_but(path, &walked, in_config_secrets)?;
         outside(KERNEL, path, &walked, "a kernel interface")?;
         if let Some(store) = self
@@ -1124,7 +1136,7 @@ impl Guard {
         // Decided by spelling alone, written and resolved alike: a path is
         // in one of the node's own areas only if both say so, so a link an
         // agent made into one does not bring the agent's own path along.
-        let own = |place: &Place| forms.iter().all(|p| place.holds_lexically(p));
+        let own = |place: &Place| place.reached_by(&walked, &self.agent_roots);
         let own_area = match kind {
             PathKind::WriteDir => own(&self.exports),
             PathKind::ManagedDir => own(&self.state) || own(&self.data),
@@ -1183,7 +1195,7 @@ impl Guard {
     /// The export directory: the node's own export area, or a directory
     /// that exists and holds the marker an operator put there by hand.
     fn export_allowed(&self, path: &Path, walked: &Walked) -> Result<(), Problem> {
-        if self.exports.holds_lexically(path) && self.exports.holds_lexically(&walked.resolved) {
+        if self.exports.reached_by(walked, &self.agent_roots) {
             return Ok(());
         }
         if [path, walked.resolved.as_path()]
@@ -1878,17 +1890,42 @@ mod tests {
     /// data and home, a worktree root, and a "package manager prefix" the
     /// tests can put trusted programs in.
     struct Node {
-        root: tempfile::TempDir,
+        _tmp: tempfile::TempDir,
+        /// Where the tree is spelled: the temporary directory itself, or a
+        /// link to a directory in it, as macOS's `/var` is a link to
+        /// `/private/var`.
+        base: PathBuf,
     }
 
     impl Node {
         fn new() -> Self {
-            let node = Node {
-                root: tempfile::Builder::new()
-                    .prefix("tracon-path-guard")
-                    .tempdir()
-                    .unwrap(),
+            Self::made(false)
+        }
+
+        /// The whole tree reached through a system-style link, so its
+        /// written spelling and its resolved one differ everywhere.
+        fn behind_link() -> Self {
+            Self::made(true)
+        }
+
+        fn made(linked: bool) -> Self {
+            let tmp = tempfile::Builder::new()
+                .prefix("tracon-path-guard")
+                .tempdir()
+                .unwrap();
+            let base = match linked {
+                false => tmp.path().to_path_buf(),
+                true => {
+                    let real = tmp.path().join("private");
+                    std::fs::create_dir(&real).unwrap();
+                    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    let alias = tmp.path().join("var");
+                    std::os::unix::fs::symlink(&real, &alias).unwrap();
+                    alias
+                }
             };
+            let node = Node { _tmp: tmp, base };
             for dir in [
                 "state",
                 "config/secrets",
@@ -1909,7 +1946,7 @@ mod tests {
             let path = self.at(rel);
             std::fs::create_dir_all(&path).unwrap();
             let mut at = path.clone();
-            while at.starts_with(self.root.path()) && at != self.root.path() {
+            while at.starts_with(&self.base) && at != self.base {
                 std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
                 at.pop();
             }
@@ -1917,7 +1954,7 @@ mod tests {
         }
 
         fn at(&self, rel: &str) -> PathBuf {
-            self.root.path().join(rel)
+            self.base.join(rel)
         }
 
         fn layout(&self) -> Layout {
@@ -2368,7 +2405,7 @@ mod tests {
             (shown(&node.at("work/docs")), "worktree root"),
             (shown(&node.at("brew/bin")), "programs are installed"),
             (shown(&node.at("home")), "home directory itself"),
-            (shown(node.root.path()), "holds"),
+            (shown(&node.base), "holds"),
             ("~/.bashrc.d".to_string(), "marked for exports"),
             ("~/.claude/agents".to_string(), "marked for exports"),
             ("~/.npm-global/bin".to_string(), "marked for exports"),
@@ -2424,11 +2461,7 @@ mod tests {
     fn a_worktree_root_may_not_be_slash_or_hold_the_state_or_config() {
         let node = Node::new();
         let guard = node.guard();
-        for dir in [
-            "/".to_string(),
-            shown(node.root.path()),
-            "/usr/local/src".into(),
-        ] {
+        for dir in ["/".to_string(), shown(&node.base), "/usr/local/src".into()] {
             assert!(
                 guard
                     .path("session.worktree_root", &dir, Stage::Edit)
@@ -2683,7 +2716,12 @@ mod tests {
     /// directory, the export area and the bundle's default all sit there.
     #[test]
     fn a_layout_whose_configuration_is_its_state_still_has_its_own_areas() {
-        let node = Node::new();
+        for node in [Node::new(), Node::behind_link()] {
+            configuration_in_state(node);
+        }
+    }
+
+    fn configuration_in_state(node: Node) {
         let mut layout = node.layout();
         layout.config_dir = node.at("state");
         layout.data_dir = node.at("state");
@@ -2831,7 +2869,12 @@ mod tests {
     /// without a new guard.
     #[test]
     fn the_export_area_is_recognised_through_a_linked_home_before_it_exists() {
-        let node = Node::new();
+        for node in [Node::new(), Node::behind_link()] {
+            export_area_through_a_linked_home(node);
+        }
+    }
+
+    fn export_area_through_a_linked_home(node: Node) {
         let real = node.dir("var/home/jd");
         let link = node.at("home-link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -2860,7 +2903,12 @@ mod tests {
     /// reaching the state directory that way.
     #[test]
     fn a_link_an_agent_made_into_an_own_area_does_not_bring_its_path_along() {
-        let node = Node::new();
+        for node in [Node::new(), Node::behind_link()] {
+            agent_link_into_an_own_area(node);
+        }
+    }
+
+    fn agent_link_into_an_own_area(node: Node) {
         let mut layout = node.layout();
         layout
             .agent_roots
@@ -2893,7 +2941,12 @@ mod tests {
     /// linked into the configuration's secrets is the workspace's.
     #[test]
     fn a_link_from_a_workspace_into_the_secrets_directory_is_refused() {
-        let node = Node::new();
+        for node in [Node::new(), Node::behind_link()] {
+            workspace_link_into_secrets(node);
+        }
+    }
+
+    fn workspace_link_into_secrets(node: Node) {
         let mut cfg = node.config();
         cfg.runtime.kind = super::super::RuntimeKind::Kubernetes;
         cfg.runtime.kubernetes.state_mount = node.at("pvc");

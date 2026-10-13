@@ -214,11 +214,11 @@ runs. `config::path_guard` holds each such key to rules for what it names
 The node's own areas (the export area, the state and data directories for the bundle,
 the configuration directory's `secrets`) are an exception to "never in a place an agent
 can write" only where they themselves sit in one (macOS keeps them all in the state
-directory; a pod keeps them on the claim), and the exception is decided by spelling
-alone: a path is in an own area only if it is, as written and as resolved, under that
-area's own spelling, and it passes through no link kept in any place an agent can write.
-A path an agent made, lexically in its own volume and linked into an own area, is
-refused like any other path in the volume.
+directory; a pod keeps them on the claim), and the exception holds only for a path that
+resolves into the area and passes through no link kept in any place an agent can write.
+System and operator links on the way (`/var` to `/private/var` on macOS, `/home` to
+`/var/home`) are fine; a link an agent made is not, so a path spelled in an agent's own
+volume and linked into an own area is refused like any other path in the volume.
 
 A place an agent can write is the state directory, the state volume, the session
 worktree root, Podman's container storage (the data directory's `containers`, and
