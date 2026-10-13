@@ -646,9 +646,10 @@ pub fn read_text(path: &Path) -> Result<(String, String), EditError> {
     Ok((text, hash))
 }
 
-/// [`edit`], for a node that is running on `cfg`: the `[[repo]]` table it
-/// resolves against follows the file, as `update_repos` keeps it, so an
-/// edit of a live key is live. Taken under the table's lock, so it cannot
+/// [`edit`], for a node that is running on `cfg`: every key the schema
+/// calls live applies at once through `cfg`'s `ConfigHandle`
+/// (`Config::apply_edit`), the `[[repo]]` table among them, and the rest
+/// is owed a restart. Taken under the table's lock, so it cannot
 /// interleave with a `[[repo]]` writer.
 pub fn edit_live(
     cfg: &Config,
@@ -677,14 +678,9 @@ pub fn edit_live_at(
 ) -> Result<EditOutcome, EditError> {
     let _repos = repo_lock();
     let outcome = edit_at(path, store, ops, expected_hash, actor)?;
-    let repo = KeyPath::keys(&["repo"]);
-    if outcome
-        .changes
-        .iter()
-        .any(|c| c.key.0.first() == repo.0.first())
-    {
-        cfg.live_repo.set(outcome.config.repo.clone());
-    }
+    // The live keys (the `[[repo]]` table among them) apply now; the
+    // others wait for a restart (`Config::apply_edit`).
+    cfg.apply_edit_at(path, &outcome);
     Ok(outcome)
 }
 
@@ -725,7 +721,7 @@ pub fn replace_repos_expecting_at(
     }
     let ops = Op::replace_repos(&snapshot.config.repo, entries)?;
     let outcome = edit_at(path, store, &ops, Some(expected_hash), actor)?;
-    cfg.live_repo.set(outcome.config.repo.clone());
+    cfg.apply_edit_at(path, &outcome);
     Ok(outcome)
 }
 

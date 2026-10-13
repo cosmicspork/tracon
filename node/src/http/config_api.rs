@@ -199,6 +199,13 @@ pub async fn get_config(State(s): State<AppState>) -> Result<Json<Value>, Refuse
         "node_name": s.cfg.node_name,
     });
     v["hash"] = json!(hash);
+    // What the node runs: the live keys of `running_hash`, the rest of the
+    // file it started from, and what a restart would change.
+    v["running_hash"] = json!(s.cfg.running_hash());
+    v["pending_restart"] = json!(crate::config::live::pending_restart_at(
+        &s.cfg,
+        &Config::config_path()
+    ));
     v["document"] = serde_json::to_value(&document).unwrap_or_default();
     v["effective"] = serde_json::to_value(&effective).unwrap_or_default();
     v["toml"] = json!(rendered);
@@ -616,13 +623,35 @@ pub async fn patch_config(
 
     let outcome = edit::edit_live(&s.cfg, s.store(), &ops, Some(&expected), actor(&req))
         .map_err(edit_refusal)?;
+    let (restart_required, pending) = restart_owed(&s, &outcome).await;
     Ok(Json(json!({
         "changed": outcome.changed(),
         "old_hash": outcome.old_hash,
         "hash": outcome.new_hash,
-        "restart_required": outcome.restart_required,
+        "restart_required": restart_required,
+        "pending_restart": pending,
         "audit_id": outcome.audit_id,
     })))
+}
+
+/// What the node owes a restart once `outcome` is written, as the restart
+/// banner says it (`GET /api/restart`): every restart-only key that differs
+/// from the file the node started from, not only this edit's. The banner is
+/// told at once rather than at the next tick. A node that never recorded
+/// the file it started from (a test's) says whether this edit changed a
+/// restart-only key, with no list.
+pub(crate) async fn restart_owed(s: &AppState, outcome: &edit::EditOutcome) -> (bool, Value) {
+    let pending = crate::config::live::pending_restart_at(&s.cfg, &Config::config_path());
+    if outcome.wrote() {
+        crate::restart::publish(&s.manager).await;
+    }
+    match pending {
+        Some(pending) => (
+            !pending.keys.is_empty() || pending.unparseable,
+            serde_json::to_value(&pending).unwrap_or_default(),
+        ),
+        None => (outcome.restart_required, Value::Null),
+    }
 }
 
 #[cfg(test)]

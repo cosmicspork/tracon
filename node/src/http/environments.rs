@@ -92,9 +92,11 @@ pub async fn save(
         "Settings (repositories)",
     )
     .map_err(super::config_api::edit_refusal)?;
+    let (restart_required, pending) = super::config_api::restart_owed(&s, &outcome).await;
     Ok(Json(json!({
         "changed": outcome.wrote(),
-        "restart_required": outcome.restart_required,
+        "restart_required": restart_required,
+        "pending_restart": pending,
         "hash": outcome.new_hash,
     })))
 }

@@ -6683,11 +6683,13 @@ pub async fn put_config(
         "Settings",
     )
     .map_err(super::config_api::edit_refusal)?;
+    // The live keys apply now; the others wait for a restart, which the
+    // node's restart status names (`GET /api/restart`).
+    let (restart_required, pending) = super::config_api::restart_owed(&s, &outcome).await;
     Ok(Json(json!({
         "changed": planned.changed,
-        // The live keys apply now; the others wait for a restart, which the
-        // node's restart status names (`GET /api/restart`).
-        "restart_required": outcome.restart_required,
+        "restart_required": restart_required,
+        "pending_restart": pending,
         "hash": outcome.new_hash,
     })))
 }

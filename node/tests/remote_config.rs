@@ -47,6 +47,7 @@ const TOKEN: &str = "trc1.secret";
 struct Node {
     app: axum::Router,
     store: Arc<Store>,
+    cfg: Arc<Config>,
 }
 
 fn node() -> Node {
@@ -76,7 +77,7 @@ fn node() -> Node {
     store.channel_put("personal", &[], "{}").unwrap();
     let state = AppState {
         manager,
-        cfg,
+        cfg: cfg.clone(),
         adapter: Arc::new(FakeAdapter {
             tx: Arc::new(tokio::sync::Mutex::new(None)),
             tokens: Arc::new(tokio::sync::Mutex::new(0)),
@@ -89,7 +90,7 @@ fn node() -> Node {
     };
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));
-    Node { app, store }
+    Node { app, store, cfg }
 }
 
 struct Reply {
@@ -341,7 +342,8 @@ async fn the_file_is_read_whole_with_nothing_secret_in_it() {
         assert_eq!(spec("publish.gh")["exec_path"], true);
         assert_eq!(spec("publish.gh")["path"], "executable");
         assert_eq!(spec("repo.egress")["apply"], "live");
-        assert_eq!(spec("review.max_files")["apply"], "restart");
+        assert_eq!(spec("review.max_files")["apply"], "live");
+        assert_eq!(spec("mesh.hub_url")["apply"], "restart");
         let mount = spec("runtime.kubernetes.state_mount");
         assert_eq!(mount["editable"], false);
         assert!(mount["why_not"].as_str().unwrap().contains("on the host"));
@@ -1010,4 +1012,55 @@ async fn every_former_loopback_writer_goes_ahead_once_confirmed() {
         .channel_get(proto::frame::MESH_CHANNEL)
         .unwrap()
         .is_some());
+}
+
+/// A live key edited from here applies to the running node at once; a
+/// restart-only one is owed a restart, which the answer names as the
+/// restart banner does, counted from the file the node started from.
+#[tokio::test]
+async fn a_live_key_applies_at_once_and_a_restart_key_is_named_as_owed() {
+    let _lock = state::config_lock().await;
+    let n = node();
+    write_file(HAND_WRITTEN);
+    n.cfg.set_boot_text(HAND_WRITTEN);
+    let before = n.cfg.live().session.budget_tokens;
+    let r = local(
+        &n,
+        "PATCH",
+        "/api/config",
+        Some(&patch(
+            &hash(&n).await,
+            vec![set("session.budget_tokens", json!(before + 1))],
+        )),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["restart_required"], false, "{}", r.body);
+    assert_eq!(r.body["pending_restart"]["keys"], json!([]), "{}", r.body);
+    assert_eq!(n.cfg.live().session.budget_tokens, before + 1);
+
+    let r = local(
+        &n,
+        "PATCH",
+        "/api/config",
+        Some(&patch(
+            &hash(&n).await,
+            vec![set("gateway.proxy_port", json!(4199))],
+        )),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["restart_required"], true, "{}", r.body);
+    assert_eq!(
+        r.body["pending_restart"]["keys"],
+        json!(["gateway.proxy_port"]),
+        "{}",
+        r.body
+    );
+    let r = local(&n, "GET", "/api/config", None).await;
+    assert_eq!(
+        r.body["pending_restart"]["keys"],
+        json!(["gateway.proxy_port"])
+    );
+    assert_eq!(r.body["running_hash"], r.body["hash"], "{}", r.body);
 }
