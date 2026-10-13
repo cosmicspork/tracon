@@ -25,7 +25,7 @@ async fn volume_copy_in(
 ) -> Result<(), BoundaryError> {
     let podman_bin = &guarded_podman(podman_bin)?;
     crate::workspace::validate_tree(source).map_err(|e| BoundaryError::Other(e.to_string()))?;
-    let created = tokio::process::Command::new(podman_bin)
+    let created = podman_at(podman_bin)
         .args(["volume", "create", "--ignore", volume])
         .output()
         .await
@@ -37,7 +37,7 @@ async fn volume_copy_in(
         )));
     }
     let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
-    let created = tokio::process::Command::new(podman_bin)
+    let created = podman_at(podman_bin)
         .args([
             "create",
             "--name",
@@ -56,7 +56,7 @@ async fn volume_copy_in(
             String::from_utf8_lossy(&created.stderr).trim()
         )));
     }
-    let copied = tokio::process::Command::new(podman_bin)
+    let copied = podman_at(podman_bin)
         .args([
             "cp",
             &format!("{}/.", source.display()),
@@ -65,7 +65,7 @@ async fn volume_copy_in(
         .output()
         .await
         .map_err(BoundaryError::Io);
-    let _ = tokio::process::Command::new(podman_bin)
+    let _ = podman_at(podman_bin)
         .args(["rm", "-f", &name])
         .output()
         .await;
@@ -123,7 +123,7 @@ async fn workspace_copy_out(
 ) -> Result<(), BoundaryError> {
     let podman_bin = &guarded_podman(podman_bin)?;
     let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
-    let staged = tokio::process::Command::new(podman_bin)
+    let staged = podman_at(podman_bin)
         .args([
             "run",
             "--name",
@@ -153,7 +153,7 @@ async fn workspace_copy_out(
         ))),
         Err(error) => Err(error),
     };
-    let _ = tokio::process::Command::new(podman_bin)
+    let _ = podman_at(podman_bin)
         .args(["rm", "-f", &name])
         .output()
         .await;
@@ -169,7 +169,7 @@ async fn copy_out(podman_bin: &str, source: &str, destination: &Path) -> Result<
     // `podman cp <container>:<dir>/. <dest>` copies into `<dest>`'s parent when
     // `<dest>` does not exist yet; it must exist first to receive the tree.
     std::fs::create_dir_all(destination)?;
-    let copied = tokio::process::Command::new(podman_bin)
+    let copied = podman_at(podman_bin)
         .args(["cp", source, &destination.to_string_lossy()])
         .output()
         .await
@@ -192,7 +192,7 @@ async fn volume_copy_out(
 ) -> Result<(), BoundaryError> {
     let podman_bin = &guarded_podman(podman_bin)?;
     let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
-    let created = tokio::process::Command::new(podman_bin)
+    let created = podman_at(podman_bin)
         .args([
             "create",
             "--name",
@@ -212,7 +212,7 @@ async fn volume_copy_out(
         )));
     }
     let copied = copy_out(podman_bin, &format!("{name}:/data/."), destination).await;
-    let _ = tokio::process::Command::new(podman_bin)
+    let _ = podman_at(podman_bin)
         .args(["rm", "-f", &name])
         .output()
         .await;
@@ -555,6 +555,14 @@ pub(crate) fn resolve_podman_env(cfg: &Config) -> String {
     }
 }
 
+/// A podman command for a path `guarded_podman` returned, given the PATH
+/// the guard leaves a child.
+fn podman_at(bin: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(bin);
+    command.env("PATH", crate::config::path_guard::child_path());
+    command
+}
+
 /// `bin` as the path guard finds it now, for the spawns of one operation.
 pub(super) fn guarded_podman(bin: &str) -> std::io::Result<String> {
     crate::config::path_guard::program("boundary.podman", bin)
@@ -576,7 +584,7 @@ impl super::ImageBuilder for PodmanBackend {
                 })
             }
         };
-        let mut command = tokio::process::Command::new(bin);
+        let mut command = podman_at(&bin);
         command.arg("build");
         for (name, value) in build.labels {
             command.arg("--label").arg(format!("{name}={value}"));
@@ -671,7 +679,7 @@ pub(crate) async fn podman(args: &[&str]) -> Result<String, BoundaryError> {
             BoundaryError::Io(e)
         }
     };
-    let out = tokio::process::Command::new(guarded_podman(bin).map_err(unusable)?)
+    let out = podman_at(&guarded_podman(bin).map_err(unusable)?)
         .args(args)
         .output()
         .await

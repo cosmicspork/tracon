@@ -291,10 +291,12 @@ impl PodmanRunner {
 
     /// `podman`, checked by the path guard just before it is spawned.
     fn podman(&self) -> std::io::Result<Command> {
-        Ok(Command::new(crate::config::path_guard::program(
+        let mut command = Command::new(crate::config::path_guard::program(
             "boundary.podman",
             &self.spec.podman_bin,
-        )?))
+        )?);
+        command.env("PATH", crate::config::path_guard::child_path());
+        Ok(command)
     }
 
     async fn ensure_volumes(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {

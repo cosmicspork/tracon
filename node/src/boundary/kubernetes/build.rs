@@ -248,6 +248,7 @@ impl BuildKitBuilder {
         let mut command = tokio::process::Command::new(program);
         command
             .args(args)
+            .env("PATH", crate::config::path_guard::child_path())
             .env("DOCKER_CONFIG", &self.settings.docker_config)
             .env("TMPDIR", &self.scratch)
             .stdin(std::process::Stdio::null())

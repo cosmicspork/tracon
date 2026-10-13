@@ -214,7 +214,7 @@ async fn run_sidecar(
         // A clean environment: the sidecar gets the credential and nothing
         // inherited that might contain another one.
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .envs(env)
         .kill_on_drop(true);

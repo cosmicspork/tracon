@@ -1715,7 +1715,7 @@ async fn run_cli(
         .args(args)
         .current_dir(dir)
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", git_remote::home(PUBLISH_HOME))
         .envs(env)
         .kill_on_drop(true);

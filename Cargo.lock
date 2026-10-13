@@ -3510,6 +3510,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tracon",
  "tracon-hub",
  "tracon-proto",
  "tracon-sync",

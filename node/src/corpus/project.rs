@@ -59,7 +59,7 @@ pub async fn identify(channel: &str, repo: &Path, git: &str) -> (String, String,
                 .arg(repo)
                 .args(["config", "--get", "remote.origin.url"])
                 .env_clear()
-                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("PATH", crate::config::path_guard::child_path())
                 .output()
                 .await
         }

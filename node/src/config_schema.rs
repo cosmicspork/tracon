@@ -29,33 +29,40 @@ pub enum Apply {
 #[serde(rename_all = "snake_case")]
 pub enum PathKind {
     /// A program the node runs on its host: an absolute path or a bare name
-    /// found on the node's `PATH`. Its file and every directory above it
-    /// (and above any link on the way) must be out of an agent's reach and
-    /// writable by nobody but root and, inside a package manager's prefix,
-    /// the node's own user. Checked again just before every spawn.
+    /// found on the node's `PATH`, called exactly what its key runs. Its file
+    /// and every directory above it (and above any link on the way) must be
+    /// out of an agent's reach and owned and writable by nobody but root
+    /// and, inside a package manager's prefix, the node's own user. Checked
+    /// again just before every spawn.
     Executable,
     /// Arguments to such a program that decide what it in turn runs
     /// (`consulta.args`: `uv run --project <dir> consulta`). Held to a fixed
-    /// shape, and every path among them to the rules for a secret.
+    /// shape, its project to consulta's own.
     ExecArgs,
     /// A file whose content the node reads as a credential and sends on.
-    /// Never inside an agent's reach, never one of the node's own secrets,
-    /// never an operator's well-known credential store, and writable by
-    /// nobody but root and the node's own user.
+    /// Only inside a directory set aside for the node's secrets
+    /// (`<config dir>/secrets`, `/etc/tracon`); never one of the node's own
+    /// secrets or an operator's credential store, and writable by nobody but
+    /// root and the node's own user.
     SecretFile,
     /// A directory of credential files the node reads; as `SecretFile`.
     SecretDir,
-    /// A directory the node writes files into. Never a system directory, the
-    /// configuration or state directory, a worktree root or a package
-    /// manager's prefix, and never inside or around any of them.
+    /// A directory the node writes files into: only the node's own export
+    /// area, or a directory an operator marked for it on the host. Never a
+    /// system directory, the configuration or state directory, a worktree
+    /// root or a package manager's prefix.
     WriteDir,
-    /// A directory the node replaces whole and serves files from; as
-    /// `WriteDir`, except that it may sit inside the state directory.
+    /// A directory the node replaces whole and serves files from: only
+    /// inside the state or data directory, or one that does not exist yet.
     ManagedDir,
     /// A directory under which worktrees are made or accepted. Never `/`, a
     /// system directory or a package manager's prefix, and never the state
     /// or configuration directory or a directory holding either.
     Root,
+    /// Where the state volume is mounted. Never `/` or a system directory;
+    /// it holds the state and configuration directories by design, and
+    /// everything under it counts as a place an agent can write.
+    Mount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -207,7 +214,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image"),
     restart("runtime.kubernetes.state_claim"),
-    restart("runtime.kubernetes.state_mount"),
+    restart("runtime.kubernetes.state_mount").path(PathKind::Mount),
     restart("runtime.kubernetes.harness_home"),
     restart("runtime.kubernetes.uid"),
     restart("runtime.kubernetes.gateway_host"),

@@ -92,7 +92,15 @@ tempfile = "3"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 openssl = { version = "0.10", features = ["vendored"] }
 
+[features]
+# What only a test build has: `config::path_guard::Guard::unchecked` and
+# `install`, so an integration test's stand-in `gh` in a temporary directory
+# can run. Enabled for this package's own tests through the dev-dependency
+# below; never by a release build.
+test-support = []
+
 [dev-dependencies]
+tracon = { path = ".", features = ["test-support"] }
 tracon-hub = { path = "../hub" }
 tower = { version = "0.5.3", features = ["util"] }
 # Reading a response body frame by frame: an SSE stream never ends, so a test

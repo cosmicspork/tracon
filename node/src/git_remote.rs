@@ -98,7 +98,7 @@ fn base(git: &str, home_name: &str, credential: &Credential<'_>) -> std::io::Res
         // Nothing the node inherited reaches git: not the operator's `GIT_*`,
         // not `SSH_AUTH_SOCK`, not an askpass the desktop session set.
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", home(home_name))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

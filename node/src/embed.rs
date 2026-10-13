@@ -87,10 +87,9 @@ impl Embedder {
         };
         // Checked at every read, not only when the key was written: its
         // content goes to `base_url`, so it must not have become one of the
-        // node's own secrets, or a file an agent wrote, since.
-        crate::config::path_guard::path("embed.api_key_file", path)
-            .map_err(|e| EmbedError::Http(format!("embed.api_key_file: {e}")))?;
-        let key = std::fs::read_to_string(path)
+        // node's own secrets, or a file an agent wrote, since. Read from the
+        // file the check passed, not whatever the path names a moment later.
+        let key = crate::config::path_guard::read_secret("embed.api_key_file", path)
             .map_err(|e| EmbedError::Http(format!("reading {}: {e}", path.display())))?;
         Ok(Some(key.trim().to_string()))
     }

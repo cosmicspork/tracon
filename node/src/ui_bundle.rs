@@ -109,9 +109,16 @@ pub fn absent_advice() -> String {
 /// `--rebuild` means for every other thing `setup` owns.
 pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Result<Outcome> {
     let dir = cfg.ui.opencode_bundle_path();
-    // An install moves whatever is at `dir` aside and deletes it.
+    // An install moves whatever is at `dir` aside and deletes it, so it
+    // replaces only a bundle, never a directory that holds something else.
     if let Some(configured) = &cfg.ui.opencode_bundle_dir {
         crate::config::path_guard::path("ui.opencode_bundle_dir", configured)?;
+    }
+    if !replaceable(&dir) {
+        bail!(
+            "{} holds something other than an OpenCode UI bundle; tracon replaces only a bundle it installed, so it leaves this directory alone",
+            dir.display()
+        );
     }
     if !force {
         if let Ok(bundle) = ui::Bundle::load(&dir) {
@@ -189,8 +196,36 @@ pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Resul
         return Err(e).with_context(|| format!("installing the bundle at {}", dir.display()));
     }
     let _ = std::fs::remove_dir_all(&retired);
+    if let Some(marker) = marker(&dir) {
+        std::fs::write(&marker, b"")
+            .with_context(|| format!("marking {} as tracon's", dir.display()))?;
+    }
 
     Ok(Outcome::Installed { dir, files, source })
+}
+
+/// The file beside a bundle directory that says tracon installed it there.
+/// Beside, not inside: the bundle's own tree is pinned by its digest.
+fn marker(dir: &Path) -> Option<PathBuf> {
+    let name = dir.file_name()?.to_string_lossy();
+    Some(dir.parent()?.join(format!(".{name}.tracon-bundle")))
+}
+
+/// Whether `dir` is a bundle: one the node would serve, one tracon put
+/// there, or an older install at the default place in the state directory.
+pub fn recognised(dir: &Path) -> bool {
+    ui::Bundle::load(dir).is_ok()
+        || marker(dir).is_some_and(|marker| marker.is_file())
+        || (dir == Config::state_dir().join("opencode-ui") && dir.join("index.html").is_file())
+}
+
+/// What an install may move aside and delete: nothing, an empty
+/// directory, or a bundle.
+fn replaceable(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Err(_) => true,
+        Ok(mut entries) => entries.next().is_none() || recognised(dir),
+    }
 }
 
 async fn fetch(url: &str) -> Result<Vec<u8>> {
@@ -399,6 +434,36 @@ mod tests {
             install(&cfg, Some(&tarball), true).await.unwrap(),
             Outcome::Installed { .. }
         ));
+    }
+
+    /// A directory that holds anything but a bundle is never moved aside or
+    /// deleted, whatever `force` says: the bundle directory is a key, and a
+    /// key could name the operator's source tree.
+    #[tokio::test]
+    async fn a_directory_that_is_not_a_bundle_is_left_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        let dir = home.path().join("src");
+        std::fs::create_dir_all(dir.join("project")).unwrap();
+        std::fs::write(dir.join("project/main.rs"), "fn main() {}").unwrap();
+        cfg.ui.opencode_bundle_dir = Some(dir.clone());
+        let tarball = home.path().join("bundle.tar.gz");
+        std::fs::write(&tarball, b"not even a tarball").unwrap();
+        for force in [false, true] {
+            let err = install(&cfg, Some(&tarball), force).await.unwrap_err();
+            assert!(
+                err.to_string().contains("leaves this directory alone"),
+                "{err}"
+            );
+            assert!(dir.join("project/main.rs").is_file());
+        }
+        // An empty directory, or one tracon marked as its bundle, may be.
+        assert!(replaceable(&home.path().join("absent")));
+        let empty = home.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(replaceable(&empty));
+        std::fs::write(home.path().join(".src.tracon-bundle"), b"").unwrap();
+        assert!(replaceable(&dir));
     }
 
     /// An archive carrying a symlink is refused before the digest is reached —

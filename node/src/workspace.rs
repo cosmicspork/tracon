@@ -887,7 +887,7 @@ async fn run_git<'a>(
     let mut command = Command::new(crate::config::path_guard::program("publish.git", git)?);
     command
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", crate::config::Config::state_dir().join("git-home"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

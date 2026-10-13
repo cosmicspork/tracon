@@ -7,22 +7,33 @@
 //! those files as a program would let an agent's bytes run as the node; a
 //! key whose file the node reads and sends on (`embed.api_key_file` goes to
 //! `embed.base_url` as a bearer token) could carry the node's identity seed
-//! or the operator's GitHub token to a host the writer chose; a directory
-//! the node writes or replaces could be pointed at one that matters.
+//! or the operator's SSH key to a host the writer chose; a directory the
+//! node writes or replaces could be one that something else reads or runs.
 //!
 //! So each such key is held to rules for what it names
-//! (`config_schema::PathKind`), at three points:
+//! (`config_schema::PathKind`). Where a rule can be an allowlist it is one:
+//! a secret is read only from a dedicated secrets directory, documents are
+//! exported only into the node's own export area or a directory the operator
+//! marked for it, and a program is only ever the one its key runs.
+//!
+//! The rules apply at three points:
 //!
 //! - **An edit** (`config::edit`) refuses a change that makes any guarded key
 //!   break a rule it did not already break. A key that was already wrong is
-//!   reported, not a reason to refuse an unrelated edit.
+//!   reported at start, not a reason to refuse an unrelated edit.
 //! - **Start** (`serve`) checks the whole file and warns about each key that
 //!   breaks a rule. It does not refuse to start: a node that cannot start
 //!   cannot be reconfigured remotely either.
 //! - **Use**: a program is checked again just before every spawn, and refused
-//!   there; the embedding key file before every read; the export directory
-//!   before every export; the UI bundle directory before it is replaced. A
-//!   file swapped after the edit that allowed its path is caught here.
+//!   there; the embedding key file before every read (the allowlist of
+//!   secret directories aside, so a key file the operator placed by hand
+//!   before this guard existed keeps working until it is moved); the export
+//!   directory before every export; the UI bundle directory before it is
+//!   replaced. A file swapped after the edit that allowed its path is caught
+//!   here. What remains is the moment between a check and the `exec` or
+//!   `open` that follows it, which only someone who can write the program's
+//!   directories (root, or the operator inside a package manager's prefix)
+//!   can use.
 //!
 //! What "an agent can write" means here: the state directory (workspaces,
 //! sessions and caches are staged there), the state volume on Kubernetes
@@ -30,12 +41,17 @@
 //! worktree root, Podman's container storage (where named volumes and
 //! container layers live), and the node's runtime directory. Every path is
 //! resolved through its symbolic links first, and each link's own directory
-//! counts, so a link cannot launder a path in or out.
+//! counts, so a link cannot launder a path in or out. Places are matched by
+//! spelling, by resolved spelling and by the identity of the directory on
+//! disk, so `/home` and `/var/home`, `/tmp` and `/private/tmp`, or a
+//! different letter case on macOS, are the same place.
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::Metadata;
+use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
@@ -62,6 +78,7 @@ pub const GUARDED: &[(&str, PathKind)] = &[
         "runtime.kubernetes.builder.do_token_file",
         PathKind::SecretFile,
     ),
+    ("runtime.kubernetes.state_mount", PathKind::Mount),
     ("embed.api_key_file", PathKind::SecretFile),
     ("docs.export_dir", PathKind::WriteDir),
     ("ui.opencode_bundle_dir", PathKind::ManagedDir),
@@ -72,14 +89,13 @@ pub const GUARDED: &[(&str, PathKind)] = &[
 /// The keys whose reader expands a leading `~/` to the operator's home.
 const EXPANDS_HOME: &[&str] = &["docs.export_dir", "external.repo_roots"];
 
-/// What each program key may be called. A key that runs `gh` cannot be
-/// pointed at a shell or an interpreter that happens to be installed
-/// somewhere trusted: the node would hand it arguments, and run it in a
-/// directory, that an agent chose. A name may carry a suffix after a dash
-/// (`podman-remote`).
+/// What each program key may be called, exactly. A key that runs `gh`
+/// cannot be pointed at a shell or an interpreter that happens to be
+/// installed somewhere trusted: the node would hand it arguments, and run
+/// it in a directory, that an agent chose.
 fn program_names(key: &str) -> &'static [&'static str] {
     match key {
-        "boundary.podman" => &["podman"],
+        "boundary.podman" => &["podman", "podman-remote"],
         "publish.gh" => &["gh"],
         "publish.glab" => &["glab"],
         "publish.git" => &["git"],
@@ -102,10 +118,10 @@ const NODE_SECRETS: &[&str] = &[
     "policy-key",
 ];
 
-/// Where an operator's own credentials usually live, under their home. A
-/// key whose file the node sends on is kept out of these as well as out of
-/// the node's own secrets. Best effort: it names the usual places, not every
-/// place a credential could be.
+/// Where an operator's own credentials usually live, under their home.
+/// Secrets are read only from the dedicated directories below, so this
+/// list matters only for a key file placed before that rule existed, which
+/// is still read: it is kept out of these. Best effort.
 const HOME_CREDENTIAL_STORES: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -116,9 +132,15 @@ const HOME_CREDENTIAL_STORES: &[&str] = &[
     ".netrc",
     ".git-credentials",
     ".password-store",
+    ".claude",
+    ".claude.json",
+    ".codex",
     ".config/gh",
     ".config/glab-cli",
     ".config/gcloud",
+    ".config/claude",
+    ".config/opencode",
+    ".local/share/opencode",
     "Library/Keychains",
 ];
 
@@ -127,10 +149,20 @@ const SYSTEM_CREDENTIAL_STORES: &[&str] = &[
     "/etc/gshadow",
     "/etc/sudoers",
     "/etc/ssh",
-    "/private/etc/shadow",
-    "/private/etc/sudoers",
-    "/private/etc/ssh",
+    "/var/run/secrets",
+    "/run/secrets/kubernetes.io",
 ];
+
+/// The only places a secret key may name: a directory set aside for the
+/// node's secrets in its configuration directory, and `/etc/tracon`, where
+/// a pod mounts its Secrets. Relative to the configuration directory for the
+/// first.
+const SECRETS_SUBDIR: &str = "secrets";
+const ETC_SECRETS: &str = "/etc/tracon";
+
+/// The file that marks a directory as one the operator set aside for
+/// exported documents. Only someone on the host can make it: no key can.
+pub const EXPORT_MARKER: &str = ".tracon-export";
 
 /// Interfaces to the kernel rather than files: `/proc/self/environ` reads
 /// as a regular file and holds the node's environment.
@@ -166,7 +198,8 @@ const SYSTEM_DIRS: &[&str] = &[
 /// The options `uv run` may take in `consulta.args`. Anything else is
 /// refused, because most of what `uv run` accepts chooses what it runs:
 /// `--with` a package, `--python` an interpreter, `--index-url` where
-/// packages come from, a script instead of a command.
+/// packages come from, `--directory` where a project is discovered, a
+/// script instead of a command.
 const UV_RUN_FLAGS: &[&str] = &[
     "--frozen",
     "--locked",
@@ -177,7 +210,6 @@ const UV_RUN_FLAGS: &[&str] = &[
     "-q",
     "--no-progress",
 ];
-const UV_RUN_PATHS: &[&str] = &["--project", "--directory"];
 
 /// One key the guard refuses, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +242,17 @@ impl From<Refusal> for std::io::Error {
     }
 }
 
+/// Whether a value is being written (an edit, or the start's report of
+/// what an edit would refuse) or used. The two differ only for a secret
+/// key: at use, a file outside the dedicated secret directories is still
+/// read, so a key file an operator placed before the guard existed keeps
+/// working until it is moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Edit,
+    Use,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Problem {
     reason: String,
@@ -230,41 +273,86 @@ fn missing(reason: impl Into<String>) -> Problem {
     }
 }
 
-/// A directory the rules name, as written and as it resolves, so a path
-/// reached through either spelling (`/tmp` and `/private/tmp`, `/home` and
-/// `/var/home`) is recognised.
+type FileId = (u64, u64);
+
+fn file_id(meta: &Metadata) -> FileId {
+    (meta.dev(), meta.ino())
+}
+
+/// A file or directory the rules name, as written, as it resolves, and as
+/// the filesystem identifies it, so a path reached through any spelling of
+/// it is recognised: `/tmp` and `/private/tmp`, `/home` and `/var/home`,
+/// `~/.SSH` on a case-insensitive volume, a hard link.
 #[derive(Debug, Clone)]
 struct Place {
     label: String,
     lexical: PathBuf,
     canonical: Option<PathBuf>,
+    id: Option<FileId>,
+    /// The identities of this place and every directory above it.
+    above: Vec<FileId>,
 }
 
 impl Place {
     fn new(label: impl Into<String>, path: PathBuf) -> Self {
+        let canonical = std::fs::canonicalize(&path).ok();
+        let above = canonical
+            .as_deref()
+            .map(|c| {
+                c.ancestors()
+                    .filter_map(|a| std::fs::metadata(a).ok().map(|m| file_id(&m)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             label: label.into(),
-            canonical: std::fs::canonicalize(&path).ok(),
+            id: std::fs::metadata(&path).ok().map(|m| file_id(&m)),
+            canonical,
+            above,
             lexical: path,
         }
     }
 
     /// `path` is this place or inside it.
     fn holds(&self, path: &Path) -> bool {
-        path.starts_with(&self.lexical)
+        if path.starts_with(&self.lexical)
             || self
                 .canonical
                 .as_deref()
                 .is_some_and(|c| path.starts_with(c))
+        {
+            return true;
+        }
+        let Some(id) = self.id else {
+            return false;
+        };
+        path.ancestors().any(|at| {
+            std::fs::metadata(at)
+                .ok()
+                .is_some_and(|m| file_id(&m) == id)
+        })
     }
 
     /// This place is `path` or inside it.
     fn within(&self, path: &Path) -> bool {
-        self.lexical.starts_with(path)
+        if self.lexical.starts_with(path)
             || self
                 .canonical
                 .as_deref()
                 .is_some_and(|c| c.starts_with(path))
+        {
+            return true;
+        }
+        std::fs::metadata(path)
+            .ok()
+            .is_some_and(|m| self.above.contains(&file_id(&m)))
+    }
+
+    /// `path` is this place itself.
+    fn is(&self, path: &Path) -> bool {
+        path == self.lexical
+            || self.canonical.as_deref() == Some(path)
+            || self.id.is_some() && std::fs::metadata(path).ok().map(|m| file_id(&m)) == self.id
     }
 
     fn shown(&self) -> String {
@@ -278,23 +366,33 @@ impl Place {
 pub struct Layout {
     pub state_dir: PathBuf,
     pub config_dir: PathBuf,
-    pub home: Option<PathBuf>,
+    /// The node's own data area: `<data dir>/tracon`, where documents are
+    /// exported unless the operator marked another directory.
+    pub data_dir: PathBuf,
+    /// The operator's home, as `HOME` gives it and as the password database
+    /// does, when they differ.
+    pub homes: Vec<PathBuf>,
     /// The `PATH` a bare program name is looked up on.
     pub path_var: Option<OsString>,
     /// Places an agent can write besides those `node.toml` names.
     pub agent_roots: Vec<(String, PathBuf)>,
     /// Package managers' prefixes, where an operator's tools are installed
     /// and owned by the operator's own user (Homebrew on macOS and Linux,
-    /// `~/.local/bin`, `~/.cargo/bin`). A program there may be writable by
-    /// the node's user; anywhere else it may not.
+    /// `~/.local/bin`, `~/.cargo/bin`). A program there may be owned and
+    /// writable by the node's user; anywhere else it may not.
     pub trusted_prefixes: Vec<PathBuf>,
 }
 
 impl Layout {
     pub fn of_this_process() -> Self {
-        let home = std::env::var_os("HOME")
+        let mut homes: Vec<PathBuf> = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .filter(|home| home.is_absolute());
+            .filter(|home| home.is_absolute())
+            .into_iter()
+            .collect();
+        if let Some(home) = passwd_home().filter(|home| !homes.contains(home)) {
+            homes.push(home);
+        }
         let mut agent_roots = vec![(
             "the node's runtime directory".to_string(),
             Config::runtime_dir(),
@@ -322,18 +420,22 @@ impl Layout {
             PathBuf::from("/usr/local"),
             PathBuf::from("/home/linuxbrew/.linuxbrew"),
         ];
-        if let Some(home) = &home {
+        if let Some(home) = homes.first() {
             trusted_prefixes.push(home.join(".local/bin"));
             trusted_prefixes.push(home.join(".cargo/bin"));
         }
         let config_path = Config::config_path();
+        let state_dir = Config::state_dir();
         Self {
-            state_dir: Config::state_dir(),
+            data_dir: dirs::data_dir()
+                .map(|data| data.join("tracon"))
+                .unwrap_or_else(|| state_dir.join("data")),
+            state_dir,
             config_dir: config_path
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or(config_path),
-            home,
+            homes,
             path_var: std::env::var_os("PATH"),
             agent_roots,
             trusted_prefixes,
@@ -341,10 +443,35 @@ impl Layout {
     }
 }
 
+/// The home directory the password database gives this process's user.
+fn passwd_home() -> Option<PathBuf> {
+    let mut buffer = vec![0u8; 16 * 1024];
+    // SAFETY: an all-zero `passwd` is a valid value to be overwritten.
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live, correctly sized local; the
+    // strings `entry` points at live in `buffer`, read before it drops.
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            &mut entry,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut found,
+        )
+    };
+    if status != 0 || found.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: getpwuid_r succeeded, so pw_dir is a NUL-terminated string
+    // inside `buffer`.
+    let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+    let dir = PathBuf::from(OsStr::from_bytes(dir.to_bytes()));
+    dir.is_absolute().then_some(dir)
+}
+
 /// The rules, for one node: its layout, and the places one or more
-/// `node.toml` versions name. An edit is checked against both the file it
-/// replaces and the result, so a key that moves a root cannot unmake the
-/// root another key is checked against in the same edit.
+/// `node.toml` versions name.
 #[derive(Debug, Clone)]
 pub struct Guard {
     off: bool,
@@ -352,12 +479,15 @@ pub struct Guard {
     egid: u32,
     state: Place,
     config: Place,
-    home: Option<Place>,
+    data: Place,
+    exports: Place,
+    homes: Vec<Place>,
     agent_roots: Vec<Place>,
     worktree_roots: Vec<Place>,
     trusted: Vec<Place>,
-    secrets: Vec<PathBuf>,
-    credential_stores: Vec<PathBuf>,
+    secret_dirs: Vec<Place>,
+    secrets: Vec<Place>,
+    credential_stores: Vec<Place>,
     path_var: Option<OsString>,
 }
 
@@ -380,10 +510,16 @@ impl Guard {
                 worktree_roots.push(place);
             }
         }
-        let mut credential_stores: Vec<PathBuf> =
-            SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
-        if let Some(home) = &layout.home {
-            credential_stores.extend(HOME_CREDENTIAL_STORES.iter().map(|s| home.join(s)));
+        let mut credential_stores: Vec<Place> = SYSTEM_CREDENTIAL_STORES
+            .iter()
+            .map(|path| Place::new("a credential store", PathBuf::from(path)))
+            .collect();
+        for home in &layout.homes {
+            credential_stores.extend(
+                HOME_CREDENTIAL_STORES
+                    .iter()
+                    .map(|rel| Place::new("the operator's credentials", home.join(rel))),
+            );
         }
         Self {
             off: false,
@@ -393,13 +529,27 @@ impl Guard {
             egid: unsafe { libc::getegid() },
             secrets: NODE_SECRETS
                 .iter()
-                .map(|name| layout.state_dir.join(name))
+                .map(|name| Place::new(*name, layout.state_dir.join(name)))
                 .collect(),
+            secret_dirs: vec![
+                Place::new(
+                    "the node's secrets directory",
+                    layout.config_dir.join(SECRETS_SUBDIR),
+                ),
+                Place::new("the node's secrets directory", PathBuf::from(ETC_SECRETS)),
+            ],
             state: Place::new("the state directory", layout.state_dir),
             config: Place::new("the configuration directory", layout.config_dir),
-            home: layout
-                .home
-                .map(|home| Place::new("the home directory", home)),
+            exports: Place::new(
+                "the node's export directory",
+                layout.data_dir.join("exports"),
+            ),
+            data: Place::new("the node's data directory", layout.data_dir),
+            homes: layout
+                .homes
+                .into_iter()
+                .map(|home| Place::new("the home directory", home))
+                .collect(),
             agent_roots,
             worktree_roots,
             trusted: layout
@@ -418,8 +568,9 @@ impl Guard {
         Self::new(Layout::of_this_process(), &[&cfg])
     }
 
-    /// Checks nothing. For a test binary whose stand-in programs live in a
-    /// temporary directory; nothing derives it from configuration.
+    /// Checks nothing. Only a test build has it: an integration test's
+    /// stand-in programs live in a temporary directory.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn unchecked() -> Self {
         Self {
             off: true,
@@ -427,7 +578,8 @@ impl Guard {
                 Layout {
                     state_dir: PathBuf::new(),
                     config_dir: PathBuf::new(),
-                    home: None,
+                    data_dir: PathBuf::new(),
+                    homes: Vec::new(),
                     path_var: None,
                     agent_roots: Vec::new(),
                     trusted_prefixes: Vec::new(),
@@ -437,7 +589,7 @@ impl Guard {
         }
     }
 
-    /// Every guarded key in `cfg` that breaks a rule.
+    /// Every guarded key in `cfg` that an edit could not write.
     pub fn check(&self, cfg: &Config) -> Vec<Refusal> {
         values(cfg)
             .into_iter()
@@ -454,7 +606,7 @@ impl Guard {
             }
             Some(PathKind::Executable) => self.program(key, value).map(drop),
             Some(PathKind::ExecArgs) => self.consulta_args(&cfg.consulta),
-            Some(_) => self.path(key, value),
+            Some(_) => self.path(key, value, Stage::Edit),
             None => Ok(()),
         }
     }
@@ -498,7 +650,7 @@ impl Guard {
         let name = Path::new(wanted)
             .file_name()
             .unwrap_or_else(|| OsStr::new(""));
-        if !names.is_empty() && !named(name, names) {
+        if !names.is_empty() && !names.iter().any(|n| OsStr::new(n) == name) {
             return Err(refused(refuse(format!(
                 "names a program called {:?}, and this key runs {}",
                 name,
@@ -514,13 +666,9 @@ impl Guard {
                 .map_err(refused);
         }
         let mut skipped = Vec::new();
-        let on_path = self
-            .path_var
-            .as_deref()
-            .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let candidates = on_path
-            .iter()
+        let candidates = self
+            .path_entries()
+            .into_iter()
             .map(|dir| dir.join(wanted))
             .chain(fallbacks.iter().map(|path| path.to_path_buf()));
         for candidate in candidates {
@@ -544,11 +692,54 @@ impl Guard {
         }))
     }
 
+    fn path_entries(&self) -> Vec<PathBuf> {
+        self.path_var
+            .as_deref()
+            .map(|path| std::env::split_paths(path).collect())
+            .unwrap_or_default()
+    }
+
+    /// The node's `PATH` less every entry a program could not be run from:
+    /// empty or relative ones, and ones inside a place an agent can write or
+    /// writable by anyone the guard does not trust. What every guarded
+    /// program is given as its own `PATH`, so a program that runs another
+    /// (git its helpers, uv its tools) does not find a planted one.
+    pub fn child_path(&self) -> OsString {
+        if self.off {
+            return std::env::var_os("PATH").unwrap_or_default();
+        }
+        let kept: Vec<PathBuf> = self
+            .path_entries()
+            .into_iter()
+            .filter(|dir| self.program_dir(dir).is_ok())
+            .collect();
+        std::env::join_paths(kept).unwrap_or_default()
+    }
+
+    /// A directory programs may be run from, as a `PATH` entry.
+    fn program_dir(&self, dir: &Path) -> Result<(), Problem> {
+        if !dir.is_absolute() {
+            return Err(refuse("is not absolute"));
+        }
+        let walked = walk(dir)?;
+        if !walked.exists {
+            return Err(missing("does not exist"));
+        }
+        self.outside_agent_roots(dir, &walked)?;
+        let writers = match self.is_trusted(dir) || self.is_trusted(&walked.resolved) {
+            true => Writers::Foreign,
+            false => Writers::AnyButRoot,
+        };
+        self.chains(&walked, writers)
+    }
+
     /// The `consulta` program, with its arguments held to the shape the
     /// node runs it in.
     pub fn consulta(&self, consulta: &Consulta) -> Result<PathBuf, Refusal> {
         let program = self.program("consulta.command", &consulta.command);
-        if self.off {
+        // A refused command is the reason; one not installed yet still has
+        // its arguments checked.
+        if self.off || program.as_ref().is_err_and(|refusal| !refusal.missing) {
             return program;
         }
         self.consulta_args(consulta)?;
@@ -556,31 +747,32 @@ impl Guard {
     }
 
     /// The arguments alone, by the program the command names, whether or
-    /// not that program is installed yet.
+    /// not that program is installed yet. The node appends the query's own
+    /// arguments after these; nothing here may add more, since consulta's
+    /// own options include where it writes its output.
     fn consulta_args(&self, consulta: &Consulta) -> Result<(), Refusal> {
         let refused = |problem: Problem| Refusal {
             key: "consulta.args".into(),
             value: consulta.args.join(" "),
             reason: problem.reason,
-            missing: false,
+            missing: problem.missing,
         };
         let name = Path::new(&consulta.command)
             .file_name()
             .unwrap_or_else(|| OsStr::new(""));
-        if named(name, &["uv"]) {
+        if name == "uv" {
             return self.uv_run(&consulta.args).map_err(refused);
         }
-        for arg in &consulta.args {
-            let value = option_value(arg).unwrap_or(arg);
-            if looks_like_path(value) {
-                self.argument_path(value).map_err(refused)?;
-            }
+        match consulta.args.first() {
+            None => Ok(()),
+            Some(arg) => Err(refused(refuse(format!(
+                "passes {arg:?} to consulta; when the command is consulta itself it takes no arguments here"
+            )))),
         }
-        Ok(())
     }
 
-    /// `uv run [options] consulta [arguments]`, and nothing else uv can be
-    /// asked to run.
+    /// `uv run [options] [--project <consulta>] consulta`, and nothing else
+    /// uv can be asked to run or consulta asked to do.
     fn uv_run(&self, args: &[String]) -> Result<(), Problem> {
         let mut args = args.iter();
         if args.next().map(String::as_str) != Some("run") {
@@ -591,23 +783,19 @@ impl Guard {
         let mut program = false;
         while let Some(arg) = args.next() {
             if program {
-                let value = option_value(arg).unwrap_or(arg);
-                if looks_like_path(value) {
-                    self.argument_path(value)?;
-                }
+                return Err(refuse(format!(
+                    "passes {arg:?} to consulta after it; nothing may follow `consulta` here, since the node supplies consulta's arguments itself"
+                )));
+            }
+            if let Some(project) = arg.strip_prefix("--project=") {
+                self.consulta_project(project)?;
                 continue;
             }
-            if let Some((flag, value)) = arg.split_once('=') {
-                if UV_RUN_PATHS.contains(&flag) {
-                    self.argument_path(value)?;
-                    continue;
-                }
-            }
-            if UV_RUN_PATHS.contains(&arg.as_str()) {
-                let value = args
+            if arg == "--project" {
+                let project = args
                     .next()
-                    .ok_or_else(|| refuse(format!("`{arg}` needs a directory after it")))?;
-                self.argument_path(value)?;
+                    .ok_or_else(|| refuse("`--project` needs a directory after it"))?;
+                self.consulta_project(project)?;
                 continue;
             }
             if UV_RUN_FLAGS.contains(&arg.as_str()) {
@@ -615,19 +803,14 @@ impl Guard {
             }
             if arg.starts_with('-') {
                 return Err(refuse(format!(
-                    "`uv run {arg}` could choose what runs; the options allowed here are {} and {}",
-                    UV_RUN_PATHS.join(", "),
+                    "`uv run {arg}` could choose what runs; the options allowed here are --project and {}",
                     UV_RUN_FLAGS.join(", ")
                 )));
             }
-            let name = Path::new(arg).file_name().unwrap_or_else(|| OsStr::new(""));
-            if !named(name, &["consulta"]) {
+            if arg != "consulta" {
                 return Err(refuse(format!(
                     "runs {arg:?} through uv; only consulta runs here"
                 )));
-            }
-            if arg.contains('/') {
-                self.argument_path(arg)?;
             }
             program = true;
         }
@@ -639,22 +822,49 @@ impl Guard {
         Ok(())
     }
 
-    /// A path among a program's arguments: what it names may decide what
-    /// runs (a project, a script), so it is held to what a secret is,
-    /// except that the node's own user may write it (the image's
+    /// The project `uv run` runs consulta from: what it holds decides what
+    /// runs, so it must be consulta's own, kept out of an agent's reach and
+    /// owned as a secret is (the node's own user may write it: the image's
     /// `/opt/consulta` is the node's, for uv's own bookkeeping).
-    fn argument_path(&self, value: &str) -> Result<(), Problem> {
+    fn consulta_project(&self, value: &str) -> Result<(), Problem> {
         let path = Path::new(value);
         plain_absolute(path)?;
         let walked = walk(path)?;
+        if [path, walked.resolved.as_path()]
+            .iter()
+            .any(|p| p.parent().is_none())
+        {
+            return Err(refuse("is the root directory"));
+        }
         self.outside_agent_roots(path, &walked)?;
         self.not_a_node_secret(path, &walked)?;
         outside(KERNEL, path, &walked, "a kernel interface")?;
-        self.chains(&walked, Writers::Foreign)
+        outside(SYSTEM_DIRS, path, &walked, "a system directory")?;
+        self.chains(&walked, Writers::Foreign)?;
+        if !walked.exists {
+            return Err(missing(format!("{} does not exist", path.display())));
+        }
+        let manifest = walked.resolved.join("pyproject.toml");
+        let meta = std::fs::symlink_metadata(&manifest)
+            .map_err(|_| refuse("holds no pyproject.toml, so it is not consulta's project"))?;
+        if !meta.file_type().is_file() {
+            return Err(refuse("its pyproject.toml is not a regular file"));
+        }
+        self.component(&manifest, &meta, Writers::Foreign)?;
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| refuse(format!("{}: {e}", manifest.display())))?;
+        let name = text
+            .parse::<toml::Table>()
+            .ok()
+            .and_then(|t| t.get("project")?.get("name")?.as_str().map(String::from));
+        match name.as_deref() {
+            Some("consulta") => Ok(()),
+            other => Err(refuse(format!("is the project {other:?}, not consulta's"))),
+        }
     }
 
     /// A non-program key's value, by its kind.
-    pub fn path(&self, key: &str, value: &str) -> Result<(), Refusal> {
+    pub fn path(&self, key: &str, value: &str, stage: Stage) -> Result<(), Refusal> {
         if self.off {
             return Ok(());
         }
@@ -672,10 +882,11 @@ impl Guard {
             false => PathBuf::from(value),
         };
         match kind {
-            PathKind::SecretFile | PathKind::SecretDir => self.secret(&path, kind),
+            PathKind::SecretFile | PathKind::SecretDir => self.secret(&path, kind, stage),
             PathKind::WriteDir | PathKind::ManagedDir | PathKind::Root => {
                 self.directory(&path, kind)
             }
+            PathKind::Mount => self.mount(&path),
             PathKind::Executable | PathKind::ExecArgs => Ok(()),
         }
         .map_err(refused)
@@ -683,28 +894,45 @@ impl Guard {
 
     fn expand_home(&self, value: &str) -> Result<PathBuf, Problem> {
         let path = Path::new(value);
-        match (path.strip_prefix("~"), &self.home) {
+        match (path.strip_prefix("~"), self.homes.first()) {
             (Ok(rest), Some(home)) => Ok(home.lexical.join(rest)),
             (Ok(_), None) => Err(refuse("starts with ~, and the node has no home directory")),
             (Err(_), _) => Ok(path.to_path_buf()),
         }
     }
 
-    fn secret(&self, path: &Path, kind: PathKind) -> Result<(), Problem> {
+    fn secret(&self, path: &Path, kind: PathKind, stage: Stage) -> Result<(), Problem> {
         plain_absolute(path)?;
         let walked = walk(path)?;
         self.not_a_node_secret(path, &walked)?;
-        self.outside_agent_roots(path, &walked)?;
+        // On macOS the configuration directory is the state directory, so
+        // the secrets directory sits inside it; nothing an agent sends is
+        // ever staged there.
+        let in_config_secrets =
+            self.secret_dirs[0].holds(path) && self.secret_dirs[0].holds(&walked.resolved);
+        self.outside_agent_roots_but(path, &walked, in_config_secrets)?;
         outside(KERNEL, path, &walked, "a kernel interface")?;
-        if kind == PathKind::SecretFile {
-            for store in &self.credential_stores {
-                if path.starts_with(store) || walked.resolved.starts_with(store) {
-                    return Err(refuse(format!(
-                        "is inside {}, where the operator's own credentials are kept; the node sends this file's content on",
-                        store.display()
-                    )));
-                }
-            }
+        if let Some(store) = self
+            .credential_stores
+            .iter()
+            .find(|store| store.holds(path) || store.holds(&walked.resolved))
+        {
+            return Err(refuse(format!(
+                "is inside {}; the node sends this file's content on",
+                store.shown()
+            )));
+        }
+        if stage == Stage::Edit
+            && !self
+                .secret_dirs
+                .iter()
+                .any(|dir| dir.holds(&walked.resolved))
+        {
+            return Err(refuse(format!(
+                "is outside the directories set aside for the node's secrets ({} and {}); put the file there",
+                self.secret_dirs[0].lexical.display(),
+                ETC_SECRETS
+            )));
         }
         if kind == PathKind::SecretDir && self.state.within(&walked.resolved) {
             return Err(refuse("holds the state directory"));
@@ -723,6 +951,22 @@ impl Guard {
         self.chains(&walked, Writers::Foreign)
     }
 
+    /// `runtime.kubernetes.state_mount`: where the state volume is mounted.
+    /// Not `/` or a system directory; it holds the state and configuration
+    /// directories by design.
+    fn mount(&self, path: &Path) -> Result<(), Problem> {
+        plain_absolute(path)?;
+        let walked = walk(path)?;
+        if [path, walked.resolved.as_path()]
+            .iter()
+            .any(|p| p.parent().is_none())
+        {
+            return Err(refuse("is the root directory"));
+        }
+        outside(SYSTEM_DIRS, path, &walked, "a system directory")?;
+        Ok(())
+    }
+
     fn directory(&self, path: &Path, kind: PathKind) -> Result<(), Problem> {
         plain_absolute(path)?;
         let walked = walk(path)?;
@@ -732,37 +976,30 @@ impl Guard {
             return Err(refuse("is the root directory"));
         }
         outside(SYSTEM_DIRS, path, &walked, "a system directory")?;
-        if kind != PathKind::Root {
-            if let Some(home) = &self.home {
-                if forms
-                    .iter()
-                    .any(|p| *p == home.lexical || home.canonical.as_deref() == Some(*p))
-                {
-                    return Err(refuse("is the home directory itself"));
-                }
-            }
+        if kind != PathKind::Root
+            && self
+                .homes
+                .iter()
+                .any(|home| forms.iter().any(|p| home.is(p)))
+        {
+            return Err(refuse("is the home directory itself"));
         }
-        if forms.iter().any(|p| self.config.holds(p)) {
+        // The node's own areas are fixed by its layout, not by any key, and
+        // on macOS they sit in the directory that is both configuration and
+        // state.
+        let own_area = match kind {
+            PathKind::WriteDir => forms.iter().any(|p| self.exports.holds(p)),
+            PathKind::ManagedDir => [&self.state, &self.data]
+                .iter()
+                .any(|place| forms.iter().any(|p| place.holds(p))),
+            _ => false,
+        };
+        if !own_area && forms.iter().any(|p| self.config.holds(p)) {
             return Err(refuse(format!("is inside {}", self.config.shown())));
         }
         for place in [&self.config, &self.state] {
             if forms.iter().any(|p| place.within(p)) {
                 return Err(refuse(format!("holds {}", place.shown())));
-            }
-        }
-        if kind == PathKind::WriteDir {
-            if forms.iter().any(|p| self.state.holds(p)) {
-                return Err(refuse(format!(
-                    "is inside {}, beside the node's database and identity",
-                    self.state.shown()
-                )));
-            }
-            if let Some(root) = self
-                .worktree_roots
-                .iter()
-                .find(|root| forms.iter().any(|p| root.holds(p)))
-            {
-                return Err(refuse(format!("is inside {}", root.shown())));
             }
         }
         for prefix in &self.trusted {
@@ -782,12 +1019,67 @@ impl Guard {
         if walked.exists && !std::fs::metadata(resolved).is_ok_and(|m| m.is_dir()) {
             return Err(refuse("is not a directory"));
         }
-        self.chains(&walked, Writers::Foreign)
+        self.chains(&walked, Writers::Foreign)?;
+        match kind {
+            PathKind::WriteDir => self.export_allowed(path, &walked),
+            PathKind::ManagedDir => {
+                let ours = [&self.state, &self.data]
+                    .iter()
+                    .any(|place| forms.iter().any(|p| place.holds(p)));
+                match ours || !walked.exists || crate::ui_bundle::recognised(resolved) {
+                    true => Ok(()),
+                    false => Err(refuse(format!(
+                        "is a directory that already exists, holds no UI bundle and is outside {} and {}; the node replaces this directory whole",
+                        self.state.shown(),
+                        self.data.shown()
+                    ))),
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The export directory: the node's own export area, or a directory
+    /// that exists and holds the marker an operator put there by hand.
+    fn export_allowed(&self, path: &Path, walked: &Walked) -> Result<(), Problem> {
+        if self.exports.holds(path) && self.exports.holds(&walked.resolved) {
+            return Ok(());
+        }
+        if [path, walked.resolved.as_path()]
+            .iter()
+            .any(|p| self.state.holds(p))
+        {
+            return Err(refuse(format!(
+                "is inside {}, beside the node's database and identity",
+                self.state.shown()
+            )));
+        }
+        if let Some(root) = self
+            .worktree_roots
+            .iter()
+            .find(|root| root.holds(path) || root.holds(&walked.resolved))
+        {
+            return Err(refuse(format!("is inside {}", root.shown())));
+        }
+        let marker = walked.resolved.join(EXPORT_MARKER);
+        match std::fs::symlink_metadata(&marker) {
+            Ok(meta) if walked.exists && meta.file_type().is_file() => {
+                self.component(&marker, &meta, Writers::Foreign)
+            }
+            _ => Err(refuse(format!(
+                "is neither inside {} nor a directory marked for exports; create {} in it on the host to set it aside",
+                self.exports.shown(),
+                EXPORT_MARKER
+            ))),
+        }
     }
 
     fn executable_at(&self, path: &Path) -> Result<(), Problem> {
         let walked = walk(path)?;
         self.outside_agent_roots(path, &walked)?;
+        // A program whose path as written is inside a prefix is held to the
+        // prefix's rules even where a link there points outside it, as
+        // uv's tool links into `~/.local/share/uv` do.
         let writers = match self.is_trusted(path) || self.is_trusted(&walked.resolved) {
             true => Writers::Foreign,
             false => Writers::AnyButRoot,
@@ -818,7 +1110,18 @@ impl Guard {
     }
 
     fn outside_agent_roots(&self, path: &Path, walked: &Walked) -> Result<(), Problem> {
-        for root in &self.agent_roots {
+        self.outside_agent_roots_but(path, walked, false)
+    }
+
+    /// As `outside_agent_roots`, passing over the state directory itself
+    /// (the first root) when `but_state`.
+    fn outside_agent_roots_but(
+        &self,
+        path: &Path,
+        walked: &Walked,
+        but_state: bool,
+    ) -> Result<(), Problem> {
+        for root in self.agent_roots.iter().skip(usize::from(but_state)) {
             if root.holds(path) || root.holds(&walked.resolved) {
                 return Err(refuse(format!(
                     "is inside {}, which an agent can write",
@@ -837,24 +1140,16 @@ impl Guard {
     }
 
     fn not_a_node_secret(&self, path: &Path, walked: &Walked) -> Result<(), Problem> {
-        let target = std::fs::metadata(&walked.resolved).ok();
-        for secret in &self.secrets {
-            let same_path = path == secret
-                || walked.resolved == *secret
-                || std::fs::canonicalize(secret).is_ok_and(|c| c == walked.resolved);
-            // A hard link elsewhere is the same file under another name.
-            let same_file = match (&target, std::fs::metadata(secret)) {
-                (Some(target), Ok(secret)) => {
-                    target.dev() == secret.dev() && target.ino() == secret.ino()
-                }
-                _ => false,
-            };
-            if same_path || same_file {
-                let name = secret.file_name().unwrap_or_default().to_string_lossy();
-                return Err(refuse(format!("is the node's own {name}")));
-            }
+        // `holds` matches by identity too, so a hard link elsewhere is the
+        // same file under another name.
+        match self
+            .secrets
+            .iter()
+            .find(|secret| secret.holds(path) || secret.holds(&walked.resolved))
+        {
+            Some(secret) => Err(refuse(format!("is the node's own {}", secret.label))),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// The writer rules over what a path resolved to and over every
@@ -911,11 +1206,13 @@ impl Guard {
                 at.display()
             )));
         }
-        let by_node = (self.euid != 0 && uid == self.euid && mode & 0o200 != 0)
-            || (own_group && mode & 0o020 != 0 && !sticky);
+        // An owner can always make a file writable, so a file or directory
+        // the node owns is one it can change, whatever its mode says.
+        let by_node =
+            (self.euid != 0 && uid == self.euid) || (own_group && mode & 0o020 != 0 && !sticky);
         if writers == Writers::AnyButRoot && by_node {
             return Err(refuse(format!(
-                "{} is writable by the node's own user or group, so anything the node can be made to write could replace what it runs; install it where only root can write, or under a package manager's prefix",
+                "{} is owned or writable by the node's own user or group, so anything the node can be made to write could replace what it runs; install it where only root can write, or under a package manager's prefix",
                 at.display()
             )));
         }
@@ -951,38 +1248,11 @@ fn trusted_group(gid: u32) -> bool {
     gid == 0 || (cfg!(target_os = "macos") && gid == 80)
 }
 
-fn named(name: &OsStr, names: &[&str]) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    names.iter().any(|wanted| {
-        name == *wanted
-            || name
-                .strip_prefix(wanted)
-                .is_some_and(|rest| rest.starts_with('-'))
-    })
-}
-
 fn kind_of(key: &str) -> Option<PathKind> {
     GUARDED
         .iter()
         .find(|(guarded, _)| *guarded == key)
         .map(|(_, kind)| *kind)
-}
-
-/// `--flag=value`'s value.
-fn option_value(arg: &str) -> Option<&str> {
-    arg.strip_prefix('-')
-        .and_then(|_| arg.split_once('='))
-        .map(|(_, value)| value)
-}
-
-fn looks_like_path(value: &str) -> bool {
-    !value.contains("://")
-        && (value.starts_with('/')
-            || value.starts_with('~')
-            || value.starts_with('.')
-            || value.contains('/'))
 }
 
 fn plain_absolute(path: &Path) -> Result<(), Problem> {
@@ -1103,6 +1373,10 @@ fn values(cfg: &Config) -> Vec<(&'static str, String)> {
         ("consulta.command", cfg.consulta.command.clone()),
         ("consulta.args", cfg.consulta.args.join(" ")),
         ("session.worktree_root", shown(&cfg.session.worktree_root)),
+        (
+            "runtime.kubernetes.state_mount",
+            shown(&cfg.runtime.kubernetes.state_mount),
+        ),
     ];
     if let Some(builder) = &cfg.runtime.kubernetes.builder {
         out.push((
@@ -1139,6 +1413,10 @@ fn values(cfg: &Config) -> Vec<(&'static str, String)> {
 /// What an edit may not do: make a guarded key break a rule it did not
 /// break before. `before` is the file the edit replaces, when it loaded.
 pub fn refuse_new(before: Option<&Config>, after: &Config) -> Result<(), String> {
+    refuse_new_in(Layout::of_this_process(), before, after)
+}
+
+fn refuse_new_in(layout: Layout, before: Option<&Config>, after: &Config) -> Result<(), String> {
     let default;
     let before = match before {
         Some(before) => before,
@@ -1147,13 +1425,15 @@ pub fn refuse_new(before: Option<&Config>, after: &Config) -> Result<(), String>
             &default
         }
     };
-    let guard = Guard::new(Layout::of_this_process(), &[before, after]);
-    let already: BTreeSet<(String, String)> = guard
+    // What the old file already broke, by its own places only; what the new
+    // one breaks, by the places either names, so moving a root away in the
+    // same edit does not unmake it.
+    let already: BTreeSet<(String, String)> = Guard::new(layout.clone(), &[before])
         .check(before)
         .into_iter()
         .map(|refusal| (refusal.key, refusal.value))
         .collect();
-    let new: Vec<String> = guard
+    let new: Vec<String> = Guard::new(layout, &[before, after])
         .check(after)
         .into_iter()
         .filter(|refusal| {
@@ -1183,11 +1463,15 @@ fn quiet_load() -> Config {
 
 static INSTALLED: OnceLock<Guard> = OnceLock::new();
 
-/// Make `guard` the one every spawn and read below is checked against. The
-/// first one installed stays; `serve` installs the guard for the file it
-/// loaded before it runs anything.
-pub fn install(guard: Guard) {
+fn install_guard(guard: Guard) {
     let _ = INSTALLED.set(guard);
+}
+
+/// Make `guard` the one every spawn and read is checked against, for a test
+/// binary. The first one installed stays.
+#[cfg(any(test, feature = "test-support"))]
+pub fn install(guard: Guard) {
+    install_guard(guard);
 }
 
 /// The installed guard, or one made from this node's `node.toml` the first
@@ -1226,18 +1510,49 @@ pub fn consulta(consulta: &Consulta) -> std::io::Result<PathBuf> {
     }
 }
 
+/// The `PATH` a guarded program is given (`Guard::child_path`).
+pub fn child_path() -> OsString {
+    match current() {
+        Some(guard) => guard.child_path(),
+        None => std::env::var_os("PATH").unwrap_or_default(),
+    }
+}
+
 /// A file or directory key's value, checked now, before the node reads,
 /// writes or replaces what it names.
 pub fn path(key: &str, value: &Path) -> std::io::Result<()> {
     match current() {
-        Some(guard) => Ok(guard.path(key, &value.to_string_lossy())?),
+        Some(guard) => Ok(guard.path(key, &value.to_string_lossy(), Stage::Use)?),
         None => Ok(()),
     }
 }
 
-/// Warn about every key in the file `serve` loaded that the guard refuses,
-/// then install the guard for it. A start does not refuse: what is refused
-/// is running, reading or writing what such a key names.
+/// A secret key's file, read after it is checked, and read from the file
+/// that was checked: it is opened first, and its identity compared with
+/// what the path names once the check has passed, so a swap in between is
+/// refused rather than read.
+pub fn read_secret(key: &str, value: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(value)?;
+    let opened = file_id(&file.metadata()?);
+    path(key, value)?;
+    let named = file_id(&std::fs::metadata(value)?);
+    if named != opened {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refused by the path guard: {key}: {} changed while it was being read",
+                value.display()
+            ),
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+/// Warn about every key in the file `serve` loaded that an edit could not
+/// write, then install the guard for it. A start does not refuse: what is
+/// refused is running, reading or writing what such a key names.
 pub fn install_for_serve(cfg: &Config) {
     let guard = Guard::new(Layout::of_this_process(), &[cfg]);
     for refusal in guard.check(cfg) {
@@ -1245,22 +1560,22 @@ pub fn install_for_serve(cfg: &Config) {
             true => tracing::debug!(%refusal, "node.toml names a path that does not exist"),
             false => tracing::warn!(
                 %refusal,
-                "node.toml names a path the path guard refuses; the node will not run, read or write it until the key is fixed"
+                "node.toml names a path the path guard refuses; an edit could not write it, and the node will not run a program, or write a directory, it refuses"
             ),
         }
     }
-    if let Some(path) = &guard.path_var {
-        for dir in std::env::split_paths(path) {
-            if let Some(root) = guard.agent_roots.iter().find(|root| root.holds(&dir)) {
+    for dir in guard.path_entries() {
+        if let Err(problem) = guard.program_dir(&dir) {
+            if !problem.missing {
                 tracing::warn!(
                     entry = %dir.display(),
-                    root = %root.shown(),
-                    "a PATH entry is inside a place an agent can write; programs there are never run"
+                    reason = %problem.reason,
+                    "a PATH entry is refused; programs there are never run, and guarded programs are not given it"
                 );
             }
         }
     }
-    install(guard);
+    install_guard(guard);
 }
 
 #[cfg(test)]
@@ -1269,9 +1584,9 @@ mod tests {
 
     use super::*;
 
-    /// A node laid out under one temporary directory: its state, config and
-    /// home, a worktree root, and a "package manager prefix" the tests can
-    /// put trusted programs in.
+    /// A node laid out under one temporary directory: its state, config,
+    /// data and home, a worktree root, and a "package manager prefix" the
+    /// tests can put trusted programs in.
     struct Node {
         root: tempfile::TempDir,
     }
@@ -1284,7 +1599,15 @@ mod tests {
                     .tempdir()
                     .unwrap(),
             };
-            for dir in ["state", "config", "home", "work", "brew/bin", "volume"] {
+            for dir in [
+                "state",
+                "config/secrets",
+                "data",
+                "home",
+                "work",
+                "brew/bin",
+                "volume",
+            ] {
                 node.dir(dir);
             }
             node
@@ -1311,7 +1634,8 @@ mod tests {
             Layout {
                 state_dir: self.at("state"),
                 config_dir: self.at("config"),
-                home: Some(self.at("home")),
+                data_dir: self.at("data"),
+                homes: vec![self.at("home")],
                 path_var: Some(
                     std::env::join_paths([self.at("home/bin"), PathBuf::from("/usr/bin")]).unwrap(),
                 ),
@@ -1364,7 +1688,7 @@ mod tests {
     }
 
     /// The temporary tree itself lives under directories this user owns
-    /// (and `/tmp`), which the node-writable rule would refuse for a program
+    /// (and `/tmp`), which the node-owned rule would refuse for a program
     /// outside a trusted prefix. These tests put programs in `brew/`, the
     /// layout's trusted prefix, unless they are testing exactly that.
     #[test]
@@ -1378,27 +1702,27 @@ mod tests {
     #[test]
     fn a_root_owned_system_program_is_allowed_by_bare_name() {
         let node = Node::new();
-        let git = ["/usr/bin/git", "/bin/git"]
-            .into_iter()
-            .find(|p| Path::new(p).exists());
-        let Some(_) = git else {
+        if !Path::new("/usr/bin/git").exists() {
             return;
-        };
-        let guard = node.guard();
-        let found = guard.program("publish.git", "git").unwrap();
-        assert!(found.is_absolute() && found.ends_with("git"), "{found:?}");
+        }
+        let found = node.guard().program("publish.git", "git").unwrap();
+        assert_eq!(found, PathBuf::from("/usr/bin/git"));
     }
 
     #[test]
-    fn a_program_the_nodes_user_can_write_outside_a_trusted_prefix_is_refused() {
+    fn a_program_the_node_owns_outside_a_trusted_prefix_is_refused() {
         let node = Node::new();
         let gh = node.program("elsewhere/gh");
+        // Read-only does not help: its owner can make it writable again.
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(node.at("elsewhere"), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
         let refusal = node.guard().program("publish.gh", &shown(&gh)).unwrap_err();
+        std::fs::set_permissions(node.at("elsewhere"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         assert!(!refusal.missing);
         assert!(
-            refusal
-                .reason
-                .contains("writable by the node's own user or group"),
+            refusal.reason.contains("owned or writable by the node"),
             "{refusal}"
         );
     }
@@ -1436,12 +1760,11 @@ mod tests {
     #[test]
     fn a_link_kept_in_an_agents_directory_is_refused_even_to_a_good_target() {
         let node = Node::new();
-        let sh = sh();
         let dir = node.dir("work/bin");
         // Named `git`, pointing at a real root-owned program: the link
         // itself is what an agent could repoint.
         let link = dir.join("git");
-        std::os::unix::fs::symlink(&sh, &link).unwrap();
+        std::os::unix::fs::symlink(sh(), &link).unwrap();
         let refusal = node
             .guard()
             .program("publish.git", &shown(&link))
@@ -1453,15 +1776,21 @@ mod tests {
     }
 
     #[test]
-    fn a_path_entry_inside_the_state_volume_is_never_used() {
+    fn a_path_entry_inside_the_state_volume_is_never_used_or_passed_on() {
         // Kubernetes: HOME is /state/home, so ~/.local/bin is on the volume
         // harness pods mount.
         let node = Node::new();
         node.program("volume/home/.local/bin/buildctl");
         let mut layout = node.layout();
-        layout.home = Some(node.at("volume/home"));
+        layout.homes = vec![node.at("volume/home")];
         layout.path_var = Some(
-            std::env::join_paths([node.at("volume/home/.local/bin"), node.at("brew/bin")]).unwrap(),
+            std::env::join_paths([
+                node.at("volume/home/.local/bin"),
+                PathBuf::from(""),
+                PathBuf::from("relative/bin"),
+                node.at("brew/bin"),
+            ])
+            .unwrap(),
         );
         layout
             .trusted_prefixes
@@ -1472,6 +1801,11 @@ mod tests {
             .unwrap_err();
         assert!(!refusal.missing);
         assert!(refusal.reason.contains("the state volume"), "{refusal}");
+        // What a child is given keeps only the entry it could run from.
+        assert_eq!(
+            guard.child_path(),
+            std::env::join_paths([node.at("brew/bin")]).unwrap()
+        );
 
         // With a real one later on PATH, that one runs instead.
         let real = node.program("brew/bin/buildctl");
@@ -1501,16 +1835,11 @@ mod tests {
         }
         // Writable by the node's own group, as a Kubernetes volume's
         // fsGroup makes everything: the node's own, so allowed in a
-        // package manager's prefix and refused outside one.
+        // package manager's prefix.
         let dir = node.at("brew/own-group");
         let gh = node.program("brew/own-group/gh");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
         node.guard().program("publish.gh", &shown(&gh)).unwrap();
-        let dir = node.at("elsewhere/own-group");
-        let gh = node.program("elsewhere/own-group/gh");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
-        let refusal = node.guard().program("publish.gh", &shown(&gh)).unwrap_err();
-        assert!(refusal.reason.contains("own user or group"), "{refusal}");
         // Sticky, like /tmp: each user replaces only their own entries.
         let dir = node.at("brew/sticky");
         let gh = node.program("brew/sticky/gh");
@@ -1562,7 +1891,7 @@ mod tests {
     }
 
     #[test]
-    fn a_program_must_be_the_one_its_key_runs() {
+    fn a_program_must_be_exactly_the_one_its_key_runs() {
         let node = Node::new();
         let refusal = node
             .guard()
@@ -1573,16 +1902,19 @@ mod tests {
         node.guard()
             .program("boundary.podman", &shown(&remote))
             .unwrap();
+        // No suffix is a wildcard: `git-shell` is not git.
+        let shell = node.program("brew/bin/git-shell");
+        assert!(node.guard().program("publish.git", &shown(&shell)).is_err());
     }
 
     #[test]
     fn a_bare_name_not_on_path_is_missing_not_unsafe() {
         let node = Node::new();
-        let refusal = node
-            .guard()
-            .program("publish.glab", "glab-not-installed-anywhere")
-            .unwrap_err();
-        assert!(refusal.missing, "{refusal}");
+        let refusal = node.guard().program("publish.glab", "glab").unwrap_err();
+        assert!(
+            refusal.missing || refusal.reason.contains("only where"),
+            "{refusal}"
+        );
         // A missing file in a place an agent can write is unsafe all the
         // same: an agent could put it there later.
         let refusal = node
@@ -1612,44 +1944,110 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_is_read_only_from_the_secrets_directories() {
+        let node = Node::new();
+        let guard = node.guard();
+        let key = node.file("config/secrets/embed.key", "sk-1");
+        guard
+            .path("embed.api_key_file", &shown(&key), Stage::Edit)
+            .unwrap();
+        for (key, value) in [
+            (
+                "embed.api_key_file",
+                node.file("home/.config/embed.key", "sk-1"),
+            ),
+            (
+                "runtime.kubernetes.builder.do_token_file",
+                node.file("home/token", "x"),
+            ),
+            ("runtime.kubernetes.builder.tls_dir", node.dir("home/tls")),
+            (
+                "runtime.kubernetes.builder.docker_config",
+                node.dir("home/registry"),
+            ),
+        ] {
+            let refusal = guard.path(key, &shown(&value), Stage::Edit).unwrap_err();
+            assert!(
+                refusal.reason.contains("set aside for the node's secrets"),
+                "{key}: {refusal}"
+            );
+        }
+        // A file placed by hand before the guard is still read at use.
+        let old = node.file("home/.config/old.key", "sk-0");
+        guard
+            .path("embed.api_key_file", &shown(&old), Stage::Use)
+            .unwrap();
+        // Not through a link out of the secrets directory.
+        let link = node.at("config/secrets/link.key");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        assert!(guard
+            .path("embed.api_key_file", &shown(&link), Stage::Edit)
+            .is_err());
+    }
+
+    #[test]
     fn the_embedding_key_cannot_be_the_nodes_own_secrets() {
         let node = Node::new();
         let db = node.file("state/node.db", "SQLite format 3");
         let seed = node.file("state/node-identity.seed", &"ab".repeat(32));
         let guard = node.guard();
-        for secret in [&db, &seed] {
-            let refusal = guard
-                .path("embed.api_key_file", &shown(secret))
-                .unwrap_err();
-            assert!(refusal.reason.contains("node's own"), "{refusal}");
+        for stage in [Stage::Edit, Stage::Use] {
+            for secret in [&db, &seed] {
+                let refusal = guard
+                    .path("embed.api_key_file", &shown(secret), stage)
+                    .unwrap_err();
+                assert!(refusal.reason.contains("node's own"), "{refusal}");
+            }
         }
-        // Not through a link outside the state directory, nor a hard link.
-        let link = node.at("home/key");
+        // Not through a link outside the state directory, nor a hard link
+        // in the secrets directory itself.
+        let link = node.at("config/secrets/key");
         std::os::unix::fs::symlink(&seed, &link).unwrap();
-        let refusal = guard.path("embed.api_key_file", &shown(&link)).unwrap_err();
+        let refusal = guard
+            .path("embed.api_key_file", &shown(&link), Stage::Use)
+            .unwrap_err();
         assert!(refusal.reason.contains("node's own"), "{refusal}");
-        let hard = node.at("home/key-2");
+        let hard = node.at("config/secrets/key-2");
         std::fs::hard_link(&seed, &hard).unwrap();
-        let refusal = guard.path("embed.api_key_file", &shown(&hard)).unwrap_err();
+        let refusal = guard
+            .path("embed.api_key_file", &shown(&hard), Stage::Use)
+            .unwrap_err();
         assert!(refusal.reason.contains("node-identity.seed"), "{refusal}");
     }
 
+    /// Every spelling of the home directory is the home directory: through
+    /// a link to it (`/home` and `/var/home`), and by identity.
     #[test]
-    fn the_embedding_key_cannot_be_an_operators_credentials_or_the_kernel() {
+    fn an_operators_credentials_are_refused_whatever_the_homes_spelling() {
         let node = Node::new();
-        let token = node.file("home/.config/gh/hosts.yml", "oauth_token: x");
-        let guard = node.guard();
-        let refusal = guard
-            .path("embed.api_key_file", &shown(&token))
-            .unwrap_err();
-        assert!(refusal.reason.contains("credentials"), "{refusal}");
-        let refusal = guard
-            .path("embed.api_key_file", "/proc/self/environ")
+        let key = node.file("home/.ssh/id_ed25519", "-----BEGIN");
+        let alias = node.at("home-link");
+        std::os::unix::fs::symlink(node.at("home"), &alias).unwrap();
+        let other = node.file("home/.claude/.credentials.json", "{}");
+        for homes in [vec![node.at("home")], vec![alias.clone()]] {
+            let mut layout = node.layout();
+            layout.homes = homes;
+            let guard = node.guard_with(layout, &node.config());
+            for path in [
+                key.clone(),
+                alias.join(".ssh/id_ed25519"),
+                other.clone(),
+                alias.join(".claude/.credentials.json"),
+            ] {
+                let refusal = guard
+                    .path("embed.api_key_file", &shown(&path), Stage::Use)
+                    .unwrap_err();
+                assert!(
+                    refusal.reason.contains("credentials"),
+                    "{path:?}: {refusal}"
+                );
+            }
+        }
+        let refusal = node
+            .guard()
+            .path("embed.api_key_file", "/proc/self/environ", Stage::Use)
             .unwrap_err();
         assert!(refusal.reason.contains("kernel"), "{refusal}");
-        // The operator's own key file, in their config, is fine.
-        let key = node.file("home/.config/embed.key", "sk-1");
-        guard.path("embed.api_key_file", &shown(&key)).unwrap();
     }
 
     #[test]
@@ -1658,13 +2056,17 @@ mod tests {
         let planted = node.file("work/tracon-1/token", "x");
         let refusal = node
             .guard()
-            .path("runtime.kubernetes.builder.do_token_file", &shown(&planted))
+            .path(
+                "runtime.kubernetes.builder.do_token_file",
+                &shown(&planted),
+                Stage::Use,
+            )
             .unwrap_err();
         assert!(refusal.reason.contains("agent"), "{refusal}");
     }
 
     #[test]
-    fn the_export_directory_stays_out_of_system_config_state_and_worktrees() {
+    fn documents_are_exported_only_into_the_export_area_or_a_marked_directory() {
         let node = Node::new();
         let guard = node.guard();
         for (dir, words) in [
@@ -1676,14 +2078,55 @@ mod tests {
             (shown(&node.at("brew/bin")), "programs are installed"),
             (shown(&node.at("home")), "home directory itself"),
             (shown(node.root.path()), "holds"),
+            ("~/.bashrc.d".to_string(), "marked for exports"),
+            ("~/.claude/agents".to_string(), "marked for exports"),
+            ("~/.npm-global/bin".to_string(), "marked for exports"),
         ] {
-            let refusal = guard.path("docs.export_dir", &dir).unwrap_err();
+            node.dir("home/.claude/agents");
+            let refusal = guard
+                .path("docs.export_dir", &dir, Stage::Edit)
+                .unwrap_err();
             assert!(refusal.reason.contains(words), "{dir}: {refusal}");
         }
         guard
-            .path("docs.export_dir", &shown(&node.at("home/notes")))
+            .path(
+                "docs.export_dir",
+                &shown(&node.at("data/exports/notes")),
+                Stage::Edit,
+            )
             .unwrap();
-        guard.path("docs.export_dir", "~/notes").unwrap();
+        // The operator marks a directory by hand; then it may be named.
+        let notes = node.dir("home/notes");
+        assert!(guard
+            .path("docs.export_dir", "~/notes", Stage::Edit)
+            .is_err());
+        node.file("home/notes/.tracon-export", "");
+        guard
+            .path("docs.export_dir", &shown(&notes), Stage::Edit)
+            .unwrap();
+        guard
+            .path("docs.export_dir", "~/notes", Stage::Use)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_ui_bundle_directory_is_the_nodes_own_or_does_not_exist_yet() {
+        let node = Node::new();
+        let guard = node.guard();
+        let src = node.dir("home/src");
+        let refusal = guard
+            .path("ui.opencode_bundle_dir", &shown(&src), Stage::Edit)
+            .unwrap_err();
+        assert!(refusal.reason.contains("already exists"), "{refusal}");
+        for ok in [
+            node.at("state/opencode-ui"),
+            node.dir("data/opencode-ui"),
+            node.at("home/new-ui"),
+        ] {
+            guard
+                .path("ui.opencode_bundle_dir", &shown(&ok), Stage::Edit)
+                .unwrap();
+        }
     }
 
     #[test]
@@ -1696,70 +2139,172 @@ mod tests {
             "/usr/local/src".into(),
         ] {
             assert!(
-                guard.path("session.worktree_root", &dir).is_err(),
+                guard
+                    .path("session.worktree_root", &dir, Stage::Edit)
+                    .is_err(),
                 "{dir} was allowed"
             );
         }
         guard
-            .path("session.worktree_root", &shown(&node.at("work")))
+            .path(
+                "session.worktree_root",
+                &shown(&node.at("work")),
+                Stage::Edit,
+            )
             .unwrap();
-        guard.path("external.repo_roots", "~/src").unwrap();
+        guard
+            .path("external.repo_roots", "~/src", Stage::Edit)
+            .unwrap();
         // A link to `/` is `/`.
         let link = node.at("home/everything");
         std::os::unix::fs::symlink("/", &link).unwrap();
-        assert!(guard.path("external.repo_roots", &shown(&link)).is_err());
+        assert!(guard
+            .path("external.repo_roots", &shown(&link), Stage::Edit)
+            .is_err());
+    }
+
+    #[test]
+    fn the_state_mount_is_never_slash_or_a_system_directory() {
+        let node = Node::new();
+        let guard = node.guard();
+        for dir in ["/", "/usr/lib/state", "state"] {
+            assert!(
+                guard
+                    .path("runtime.kubernetes.state_mount", dir, Stage::Edit)
+                    .is_err(),
+                "{dir} was allowed"
+            );
+        }
+        guard
+            .path("runtime.kubernetes.state_mount", "/state", Stage::Edit)
+            .unwrap();
+    }
+
+    /// An edit judged against the places both files name: a root moved onto
+    /// a program's directory is refused, and so is a root moved away from a
+    /// program it held in the same edit.
+    #[test]
+    fn a_root_moved_onto_or_away_from_a_program_is_refused() {
+        let node = Node::new();
+        let gh = node.program("brew/bin/gh");
+        let mut before = node.config();
+        before.publish.gh = shown(&gh);
+        let mut after = before.clone();
+        after.session.worktree_root = node.at("brew/bin");
+        let error = refuse_new_in(node.layout(), Some(&before), &after).unwrap_err();
+        assert!(error.contains("session.worktree_root"), "{error}");
+
+        let planted = node.program("work/tracon-1/gh");
+        let mut after = before.clone();
+        after.session.worktree_root = node.dir("elsewhere-work");
+        after.publish.gh = shown(&planted);
+        let error = refuse_new_in(node.layout(), Some(&before), &after).unwrap_err();
+        assert!(error.contains("publish.gh"), "{error}");
+
+        // And a key already wrong does not block an unrelated change.
+        let mut broken = before.clone();
+        broken.publish.gh = shown(&planted);
+        let mut after = broken.clone();
+        after.node_name = "other".into();
+        refuse_new_in(node.layout(), Some(&broken), &after).unwrap();
+    }
+
+    fn consulta(command: &Path, args: &[&str]) -> Consulta {
+        Consulta {
+            command: shown(command),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            timeout_secs: 60,
+        }
     }
 
     #[test]
     fn consulta_runs_only_consulta_through_uv() {
         let node = Node::new();
         let uv = node.program("brew/bin/uv");
-        node.dir("home/src/consulta");
+        node.file(
+            "home/src/consulta/pyproject.toml",
+            "[project]\nname = \"consulta\"\n",
+        );
         let guard = node.guard();
-        let consulta = |args: &[&str]| Consulta {
-            command: shown(&uv),
-            args: args.iter().map(|s| s.to_string()).collect(),
-            timeout_secs: 60,
-        };
         let project = shown(&node.at("home/src/consulta"));
         guard
-            .consulta(&consulta(&["run", "--project", &project, "consulta"]))
+            .consulta(&consulta(&uv, &["run", "--project", &project, "consulta"]))
             .unwrap();
         guard
-            .consulta(&consulta(&[
-                "run",
-                "--frozen",
-                &format!("--project={project}"),
-                "consulta",
-            ]))
+            .consulta(&consulta(
+                &uv,
+                &[
+                    "run",
+                    "--frozen",
+                    &format!("--project={project}"),
+                    "consulta",
+                ],
+            ))
             .unwrap();
+        node.file(
+            "home/src/other/pyproject.toml",
+            "[project]\nname = \"other\"\n",
+        );
+        node.dir("home/src/empty");
         for (args, words) in [
             (vec!["run", "python", "-c", "x"], "only consulta"),
             (
                 vec!["run", "--with", "evil", "consulta"],
                 "could choose what runs",
             ),
+            (
+                vec!["run", "--directory", "/tmp", "consulta"],
+                "could choose what runs",
+            ),
             (vec!["tool", "run", "consulta"], "must start with `run`"),
             (vec!["run", "--project"], "needs a directory"),
             (vec!["run"], "names no program"),
+            (
+                vec!["run", "--project", &project, "consulta", "--output", "/x"],
+                "nothing may follow",
+            ),
+            (
+                vec!["run", "consulta", "--profile", "x"],
+                "nothing may follow",
+            ),
+            (vec!["run", "--project", "/", "consulta"], "root directory"),
+            (
+                vec![
+                    "run",
+                    "--project",
+                    &shown(&node.at("home/src/other")),
+                    "consulta",
+                ],
+                "not consulta's",
+            ),
+            (
+                vec![
+                    "run",
+                    "--project",
+                    &shown(&node.at("home/src/empty")),
+                    "consulta",
+                ],
+                "no pyproject",
+            ),
         ] {
-            let refusal = guard.consulta(&consulta(&args)).unwrap_err();
+            let refusal = guard.consulta(&consulta(&uv, &args)).unwrap_err();
             assert_eq!(refusal.key, "consulta.args");
             assert!(refusal.reason.contains(words), "{args:?}: {refusal}");
         }
         let planted = shown(&node.dir("state/sessions/x"));
         let refusal = guard
-            .consulta(&consulta(&["run", "--project", &planted, "consulta"]))
+            .consulta(&consulta(&uv, &["run", "--project", &planted, "consulta"]))
             .unwrap_err();
         assert!(refusal.reason.contains("agent"), "{refusal}");
-        // A shell is not consulta's command at all.
+        // consulta itself takes nothing from here.
+        let direct = node.program("brew/bin/consulta");
+        guard.consulta(&consulta(&direct, &[])).unwrap();
         let refusal = guard
-            .consulta(&Consulta {
-                command: shown(&sh()),
-                args: vec!["-c".into(), "id".into()],
-                timeout_secs: 60,
-            })
+            .consulta(&consulta(&direct, &["--output", "/home/x/.bashrc"]))
             .unwrap_err();
+        assert!(refusal.reason.contains("takes no arguments"), "{refusal}");
+        // A shell is not consulta's command at all.
+        let refusal = guard.consulta(&consulta(&sh(), &["-c", "id"])).unwrap_err();
         assert_eq!(refusal.key, "consulta.command");
     }
 
@@ -1841,5 +2386,52 @@ mod tests {
         let planted = node.program("private-tmp/tracon-1/gh");
         let refusal = guard.program("publish.gh", &shown(&planted)).unwrap_err();
         assert!(refusal.reason.contains("worktree root"), "{refusal}");
+    }
+
+    /// macOS keeps `node.toml` in the state directory, so the secrets
+    /// directory, the export area and the bundle's default all sit there.
+    #[test]
+    fn a_layout_whose_configuration_is_its_state_still_has_its_own_areas() {
+        let node = Node::new();
+        let mut layout = node.layout();
+        layout.config_dir = node.at("state");
+        layout.data_dir = node.at("state");
+        let guard = node.guard_with(layout, &node.config());
+        let key = node.file("state/secrets/embed.key", "sk-1");
+        guard
+            .path("embed.api_key_file", &shown(&key), Stage::Edit)
+            .unwrap();
+        guard
+            .path(
+                "docs.export_dir",
+                &shown(&node.at("state/exports")),
+                Stage::Edit,
+            )
+            .unwrap();
+        guard
+            .path(
+                "ui.opencode_bundle_dir",
+                &shown(&node.at("state/opencode-ui")),
+                Stage::Edit,
+            )
+            .unwrap();
+        // Elsewhere in it is still the state directory.
+        let staged = node.file("state/workspaces/x/token", "x");
+        assert!(guard
+            .path("embed.api_key_file", &shown(&staged), Stage::Use)
+            .is_err());
+        assert!(guard
+            .path(
+                "docs.export_dir",
+                &shown(&node.at("state/docs")),
+                Stage::Edit
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn the_password_database_knows_this_users_home() {
+        let home = passwd_home().expect("no home in the password database");
+        assert!(home.is_absolute());
     }
 }

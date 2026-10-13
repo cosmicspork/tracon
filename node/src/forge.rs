@@ -674,6 +674,7 @@ pub async fn host_identity(git: &str) -> Option<Identity> {
     let git = &git;
     let read = |key: &'static str| async move {
         let out = tokio::process::Command::new(git)
+            .env("PATH", crate::config::path_guard::child_path())
             .args(["config", "--global", "--get", key])
             .output()
             .await

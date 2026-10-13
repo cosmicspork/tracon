@@ -976,20 +976,27 @@ with who made it and which keys it changed, and pushed to your subscribed device
 Keys that name a program the node runs (`podman`, `gh`, `glab`, `git`, `[consulta]`, the
 builder's `buildctl`) or a file or directory it reads, sends on or writes
 (`embed.api_key_file`, the builder's certificate, registry and token paths,
-`docs.export_dir`, `ui.opencode_bundle_dir`, `worktree_root`, `repo_roots`) are held to a
-path guard, so neither an agent nor a stolen session can point one at something an agent
-wrote or at a secret. In short: a program is an absolute path or a bare name on the
-node's `PATH`, is called what its key runs, and lives where no agent can write and only
-root can, or under a package manager's prefix (Homebrew, `~/.local/bin`, `~/.cargo/bin`),
-where your own user may; `[consulta] args` reads `run --project <dir> consulta`, with a
-few plain flags allowed; a key file the node sends on is never the node's own database,
-identity or credential store, nor one of your usual credential stores (`~/.ssh`,
-`~/.config/gh`, ...); and a directory the node writes is never a system directory, the
-configuration or state directory, or a worktree root. An edit that breaks a rule is
-refused with the reason. A file that already breaks one still starts, with a warning
-naming the key, and the node refuses to run the program, or read the key file, it names
-until it is fixed. The
-rules in full are in `docs/ARCHITECTURE.md` ("The path guard").
+`docs.export_dir`, `ui.opencode_bundle_dir`, `worktree_root`, `repo_roots`,
+`state_mount`) are held to a path guard, so neither an agent nor a stolen session can
+point one at something an agent wrote or at a secret. In short:
+
+- a program is an absolute path or a bare name on the node's `PATH`, is called exactly
+  what its key runs, and lives where no agent can write and only root can, or under a
+  package manager's prefix (Homebrew, `~/.local/bin`, `~/.cargo/bin`), where your own
+  user may;
+- `[consulta] args` reads `run --project <consulta's checkout> consulta` (a few plain
+  `uv` flags allowed), with nothing after `consulta`;
+- a secret file lives in `~/.config/tracon/secrets/` (on macOS, `secrets/` beside
+  `node.toml`) or `/etc/tracon/`;
+- documents export into the node's own export area, or into a directory you marked by
+  creating a `.tracon-export` file in it;
+- the UI bundle directory is the node's own, new, or already a bundle.
+
+An edit that breaks a rule is refused with the reason. A file that already breaks one
+still starts, with a warning naming the key; the node refuses to run such a program or
+write such a directory until it is fixed, and still reads a key file you placed outside
+the secrets directory, until you move it. The rules in full are in
+`docs/ARCHITECTURE.md` ("The path guard").
 
 The full set, with defaults:
 
