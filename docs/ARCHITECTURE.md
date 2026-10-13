@@ -221,19 +221,29 @@ order that tells a caller nothing about a hidden value:
 Then the request is an admin action: off the machine it is confirmed with a passkey
 bound to its exact bytes, and the node words the prompt (`http::config_prompt`). It is
 the one thing a phished confirmation would be judged by, so what could change what the
-node runs, trusts, reads, sends or reaches comes first, with its new value: programs and
-host paths, secrets (named, value not shown), host-only keys, keys the node does not
-read, `auth`, `mesh`, `runtime`, `boundary`, `consulta`, the gateway's allowlist, a
-provider's upstream, credential and sign-in, a repository's preparation, lent
-credentials, egress, image, Dockerfile and checks, a service's image and command,
-plugins, the embedding endpoint and key, and the GitHub dispatch list. Those are never
-cut short: an edit whose sensitive keys do not all fit 600 characters is refused, to be
-split. Routine keys follow, as many as fit, and how many more. An entry of an array of
-tables is named by its own `path`, `name` or `id` with the fields that change ("repo
-/src/app added: dockerfile = Dockerfile, prepare = [composer install],
-prepare_credentials = [NOVA]"), and a key inside one by its entry. A map entry's name
-is capped at 24 characters and every part is cleaned of control, format and bidi
-characters. Because the request names the version it was decided against, what the
+node runs, trusts, reads, sends or reaches comes first, in full: programs and host
+paths, secrets (named, value not shown), host-only keys, keys the node does not read,
+`auth`, `mesh`, `runtime`, `boundary`, `consulta`, `[harness]`, the gateway's allowlist
+and socket, a provider's upstream, credential and sign-in, a repository's path,
+preparation, lent credentials, egress, image, Dockerfile, context and checks, a
+service's name, image and command, the checks run on submissions, plugins, the embedding
+endpoint, key and provider, the GitHub dispatch list, the OpenCode UI and preview
+origins and listeners, external harnesses, the default and export channels and the
+push contact. A value is never cut: a list shows the elements it gains and loses
+(`gateway.allow_hosts: + "evil.example"`), a value its old and new (`repo[0]
+("/src/app").path: "/src/app" -> "/src/other"`), every string quoted with its quotes
+escaped, so nothing in a key or value can pass for the prompt's punctuation. An edit
+whose sensitive part does not fit 600 characters is refused, to be split. Routine keys
+(`[memory]`, `[review]` limits, the session budget and timeouts, supervision's timeout
+and dependency inputs, a provider's models and prices) follow, as many as fit, and how
+many more. An entry of an array of tables is named by its own `path`, `name` or `id` as
+it was before the edit, with the fields that change ("repo "/src/app" added:
+dockerfile = "Dockerfile", prepare = ["composer install"], prepare_credentials =
+["NOVA"]"), and a key inside one by that entry; an entry under a key the node does not
+read is named only by its index. A map entry's name is capped at 24 characters and
+every part is cleaned of control, format and bidi characters. If a line ever has to be
+cut on its way to a prompt (a device approval's included), it ends in an ellipsis.
+Because the request names the version it was decided against, what the
 prompt shows is exactly what the write changes. The path guard runs when the edit is
 written, after the confirmation, so what it knows about the host's files (who owns a
 path, whether it exists) is not answered to a cookie alone; its refusals come back as

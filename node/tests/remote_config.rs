@@ -639,7 +639,7 @@ async fn a_remote_edit_is_confirmed_with_a_passkey_that_names_its_keys() {
     let summary = r.body["step_up"]["summary"].as_str().unwrap();
     assert!(summary.chars().count() <= 600, "{summary}");
     assert!(
-        summary.starts_with("Change node.toml: publish.gh = /usr/bin/gh; providers."),
+        summary.starts_with("Change node.toml: publish.gh = \"/usr/bin/gh\"; providers."),
         "{summary}"
     );
     assert!(summary.ends_with("more"), "{summary}");
@@ -690,13 +690,13 @@ async fn a_repository_entry_is_named_in_the_prompt_with_what_it_lends() {
     let r = remote(&n, &cookie, "PATCH", "/api/config", Some(&body), None).await;
     assert_eq!(r.kind(), "step_up_required", "{}", r.body);
     let summary = r.body["step_up"]["summary"].as_str().unwrap();
-    assert!(summary.contains("repo /src/app added:"), "{summary}");
+    assert!(summary.contains("repo \"/src/app\" added:"), "{summary}");
     assert!(
-        summary.contains("prepare_credentials = [NOVA_AUTH]"),
+        summary.contains("prepare_credentials = [\"NOVA_AUTH\"]"),
         "{summary}"
     );
     assert!(
-        summary.contains("prepare = [composer install]"),
+        summary.contains("prepare = [\"composer install\"]"),
         "{summary}"
     );
 }
@@ -957,7 +957,7 @@ async fn every_former_loopback_writer_goes_ahead_once_confirmed() {
                 }))
             }),
             StatusCode::OK,
-            "Change node.toml: repo /src/app added: egress = [crates]",
+            "Change node.toml: repo \"/src/app\" added: egress = [\"crates\"]",
         ),
         (
             "POST",
@@ -1063,4 +1063,31 @@ async fn a_live_key_applies_at_once_and_a_restart_key_is_named_as_owed() {
         json!(["gateway.proxy_port"])
     );
     assert_eq!(r.body["running_hash"], r.body["hash"], "{}", r.body);
+}
+
+/// What a list gains is in the prompt, however long the list: a host
+/// appended to a long allowlist cannot hide past a cut.
+#[tokio::test]
+async fn a_host_appended_to_a_long_allowlist_is_in_the_prompt() {
+    let _lock = state::config_lock().await;
+    let (n, cookie, _key) = paired().await;
+    let hosts: Vec<String> = (0..20)
+        .map(|i| format!("^mirror-{i:02}\\.a-rather-long-name\\.example\\.org$"))
+        .collect();
+    write_file(&format!(
+        "{HAND_WRITTEN}\n[gateway]\nallow_hosts = {}\n",
+        toml::Value::try_from(&hosts).unwrap()
+    ));
+    let mut more = hosts.clone();
+    more.push("evil.example".into());
+    let body = patch(
+        &hash(&n).await,
+        vec![set("gateway.allow_hosts", json!(more))],
+    );
+    let r = remote(&n, &cookie, "PATCH", "/api/config", Some(&body), None).await;
+    assert_eq!(r.kind(), "step_up_required", "{}", r.body);
+    assert_eq!(
+        r.body["step_up"]["summary"],
+        "Change node.toml: gateway.allow_hosts: + \"evil.example\""
+    );
 }

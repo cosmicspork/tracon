@@ -63,6 +63,9 @@ pub const STEP_UP_HEADER: &str = "x-tracon-step-up";
 /// lists every sensitive key it changes with its new value
 /// (`config_prompt`), so it is longer than a route's one line.
 pub const MAX_SUMMARY: usize = 600;
+/// The longest line a device-approval prompt shows: a summary with what
+/// it is for in front ("Confirm for another window: "), whole.
+pub const MAX_APPROVAL_LINE: usize = MAX_SUMMARY + 40;
 /// How long a challenge may be answered.
 pub const CHALLENGE_TTL_MS: i64 = 2 * 60 * 1000;
 /// How long a proof may be spent once its assertion verified.
@@ -91,6 +94,23 @@ pub(crate) const NOT_DELEGABLE: &str = "not-delegable";
 pub(crate) fn clean_text(value: &str, max: usize) -> String {
     let kept: String = value.chars().filter(|c| !hidden(*c)).collect();
     kept.trim().chars().take(max).collect()
+}
+
+/// [`clean_text`] for a line a prompt shows whole: cut only if it is
+/// longer than `max`, and then visibly, ending in an ellipsis, so nothing is
+/// ever dropped from a prompt without its saying so.
+pub(crate) fn fit_text(value: &str, max: usize) -> String {
+    let clean = clean_text(value, usize::MAX);
+    match clean.chars().count() > max {
+        true => format!(
+            "{}\u{2026}",
+            clean
+                .chars()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+        ),
+        false => clean,
+    }
 }
 
 /// Unicode general categories Cc, Cf, Zl and Zp.
@@ -349,7 +369,7 @@ fn open_assertion(
     delegable: bool,
 ) -> Result<Value, Refusal> {
     let action = action.map(|a| clean_text(a, 160));
-    let summary = summary.map(|a| clean_text(a, MAX_SUMMARY));
+    let summary = summary.map(|a| fit_text(a, MAX_SUMMARY));
     let (action, summary) = (action.as_deref(), summary.as_deref());
     let passkeys: Vec<Passkey> = enrolled(s)?.into_iter().map(|(_, p)| p).collect();
     if passkeys.is_empty() {
@@ -1107,6 +1127,16 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_line_is_cut_only_visibly() {
+        assert_eq!(fit_text("short\u{202e}", 10), "short");
+        let cut = fit_text(&"x".repeat(20), 10);
+        assert_eq!(cut, format!("{}\u{2026}", "x".repeat(9)));
+        // What a summary may hold fits the line a device approval shows.
+        let line = format!("Confirm for another window: {}", "y".repeat(MAX_SUMMARY));
+        assert!(!fit_text(&line, MAX_APPROVAL_LINE).ends_with('\u{2026}'));
+    }
 
     #[test]
     fn the_op_hash_binds_every_part_of_the_request() {
