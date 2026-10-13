@@ -387,6 +387,10 @@ pub struct LaunchSpec {
     pub tools: Vec<String>,
     /// Environment for the harness process: the gateway wiring.
     pub env: Vec<(String, String)>,
+    /// Environment for the harness process that must not be readable from
+    /// its pod spec or the runtime's argv: the session's egress grant, whose
+    /// proxy URL carries a password. See `RunnerCommand::secret_env`.
+    pub secret_env: crate::runner::SecretEnv,
     /// A file inside the runner appended to the harness's system prompt: the
     /// session's orientation.
     pub system_prompt_file: Option<String>,

@@ -14,7 +14,7 @@ use rust_embed::Embed;
 
 use super::{Backend, BoundaryError, BoundaryReport};
 use crate::config::Config;
-use crate::runner::kube::{KubeRunner, KubeSpec, PodEnv};
+use crate::runner::kube::{KubeRunner, KubeSpec, PodEnv, SecretRights};
 use crate::runner::{Mount, Runner};
 
 /// The manifests a node of this kind expects around it, printed by
@@ -28,6 +28,11 @@ pub struct KubeBackend {
     /// Resolved once; a node that cannot learn its own pod facts is not a pod.
     env: Result<PodEnv, String>,
     client: tokio::sync::OnceCell<Result<kube::Client, String>>,
+    /// Whether the node may keep a run's secret environment in a Secret, as
+    /// the runtime check last found. Every runner handed out shares it, so a
+    /// re-check that finds the rights granted (or withdrawn) applies to runs
+    /// that start after it.
+    secret_rights: SecretRights,
 }
 
 impl KubeBackend {
@@ -36,7 +41,24 @@ impl KubeBackend {
             cfg: cfg.clone(),
             env: PodEnv::detect(cfg),
             client: tokio::sync::OnceCell::new(),
+            secret_rights: SecretRights::default(),
         }
+    }
+
+    /// A backend for a pod whose facts and client are given rather than
+    /// detected: a test's fake API.
+    #[doc(hidden)]
+    pub fn with_client(cfg: &Config, env: PodEnv, client: kube::Client) -> Self {
+        Self {
+            cfg: cfg.clone(),
+            env: Ok(env),
+            client: tokio::sync::OnceCell::new_with(Some(Ok(client))),
+            secret_rights: SecretRights::default(),
+        }
+    }
+
+    pub fn secret_rights(&self) -> &SecretRights {
+        &self.secret_rights
     }
 
     pub async fn client(&self) -> Result<kube::Client, String> {
@@ -65,7 +87,8 @@ impl KubeBackend {
     pub async fn runner_for(&self, extra_mounts: Vec<Mount>) -> Result<KubeRunner, String> {
         let mut spec = self.spec()?;
         spec.extra_mounts = extra_mounts;
-        Ok(KubeRunner::new(self.client().await?, spec))
+        Ok(KubeRunner::new(self.client().await?, spec)
+            .with_secret_rights(self.secret_rights.clone()))
     }
 
     /// Copy a volume on the claim to a node-owned path through a staging
@@ -195,7 +218,9 @@ impl Backend for KubeBackend {
         match self.spec_for(harness_id) {
             Ok(mut spec) => {
                 spec.extra_mounts = extra_mounts;
-                Arc::new(KubeRunner::new(client, spec))
+                Arc::new(
+                    KubeRunner::new(client, spec).with_secret_rights(self.secret_rights.clone()),
+                )
             }
             Err(e) => Arc::new(Unavailable(e)),
         }
@@ -263,12 +288,18 @@ impl Backend for KubeBackend {
         Some(self.cfg.gateway.proxy_port)
     }
 
+    /// Remove the named harnesses, and with them any run Secret a node that
+    /// died left behind (`KubeRunner::sweep_run_secrets`).
     async fn reconcile(&self, names: &[String]) {
         let Ok(runner) = self.runner_for(Vec::new()).await else {
             return;
         };
         for name in names {
             let _ = runner.kill(name).await;
+        }
+        let swept = runner.sweep_run_secrets().await;
+        if swept > 0 {
+            tracing::info!(swept, "removed run secrets left by an earlier node");
         }
     }
 

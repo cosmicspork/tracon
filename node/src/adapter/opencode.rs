@@ -236,6 +236,7 @@ impl OpenCodeAdapter {
                 "INFO".into(),
             ],
             env,
+            secret_env: spec.secret_env.clone(),
             workdir: Some(spec.cwd_in_runner.clone()),
             name: spec.container_name.clone(),
             expose: Some(port),
@@ -2154,6 +2155,7 @@ mod tests {
     #[test]
     fn the_server_is_launched_with_a_password_and_on_loopback() {
         let spec = LaunchSpec {
+            secret_env: Default::default(),
             cwd_in_runner: "/work".into(),
             model: "anthropic/claude-opus-5".into(),
             container_name: "tracon-h-1".into(),

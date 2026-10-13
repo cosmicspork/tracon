@@ -529,6 +529,7 @@ async fn launch(node: &Node, binary: &str, cursor: Arc<dyn DurableCursor>) -> Li
         log: Arc::new(Mutex::new(String::new())),
     };
     let spec = LaunchSpec {
+        secret_env: Default::default(),
         cwd_in_runner: work.to_string_lossy().into_owned(),
         model: MODEL.into(),
         container_name: container.clone(),

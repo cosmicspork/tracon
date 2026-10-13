@@ -69,6 +69,70 @@ const RIGHTS: &[(&str, &str, &str, &str)] = &[
     ("networking.k8s.io", "networkpolicies", "", "get"),
 ];
 
+/// The verbs a run's own Secret needs (`runner::kube::secret`): create it
+/// before its pod, patch its owner to the pod, delete it once the pod has
+/// started, list what a node that died left. Optional: a node without them
+/// runs everything that carries no secret environment and refuses what does.
+/// No `get`: nothing reads a Secret back.
+pub const SECRET_RIGHTS: &[(&str, &str, &str, &str)] = &[
+    ("", "secrets", "", "create"),
+    ("", "secrets", "", "patch"),
+    ("", "secrets", "", "delete"),
+    ("", "secrets", "", "list"),
+];
+
+/// Whether this service account may do each of `rights` in `namespace`:
+/// the first right it may not, or an error asking.
+async fn first_refused(
+    reviews: &Api<SelfSubjectAccessReview>,
+    namespace: &str,
+    rights: &[(&str, &str, &str, &str)],
+) -> Result<Option<String>, kube::Error> {
+    for (group, resource, sub, verb) in rights {
+        let review = SelfSubjectAccessReview {
+            spec: SelfSubjectAccessReviewSpec {
+                resource_attributes: Some(ResourceAttributes {
+                    group: Some(group.to_string()),
+                    resource: Some(resource.to_string()),
+                    subresource: (!sub.is_empty()).then(|| sub.to_string()),
+                    verb: Some(verb.to_string()),
+                    namespace: Some(namespace.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let allowed = reviews
+            .create(&PostParams::default(), &review)
+            .await?
+            .status
+            .is_some_and(|s| s.allowed);
+        if !allowed {
+            let what = if sub.is_empty() {
+                resource.to_string()
+            } else {
+                format!("{resource}/{sub}")
+            };
+            return Ok(Some(format!("{verb} {what}")));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the node may keep a run's secret environment in a Secret of its
+/// own, in the words a refused run repeats.
+pub async fn secret_rights(client: kube::Client, namespace: &str) -> Result<(), String> {
+    let reviews: Api<SelfSubjectAccessReview> = Api::all(client);
+    match first_refused(&reviews, namespace, SECRET_RIGHTS).await {
+        Ok(None) => Ok(()),
+        Ok(Some(refused)) => Err(format!(
+            "the service account may not {refused} in {namespace}"
+        )),
+        Err(e) => Err(format!("access review: {e}")),
+    }
+}
+
 pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryReport {
     let mut checks = Vec::new();
     let runtime = check_runtime(b, cfg).await;
@@ -106,6 +170,13 @@ pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryRep
             return BoundaryReport { checks };
         }
     };
+    // What a node that died left: a run Secret is owned by its pod, but one
+    // made in the moment before its pod was has no owner yet. Startup and
+    // every re-check come through here, with or without sessions to
+    // reconcile.
+    if b.secret_rights().is_granted() {
+        runner.sweep_run_secrets().await;
+    }
     match create_probe(&runner).await {
         Ok(pod) => {
             checks.push(check_unprivileged(&pod));
@@ -159,45 +230,35 @@ async fn check_runtime(b: &KubeBackend, cfg: &Config) -> CheckResult {
         Ok(c) => c,
         Err(e) => return CheckResult::fail(CheckId::Runtime, e),
     };
-    let reviews: Api<SelfSubjectAccessReview> = Api::all(client);
-    for (group, resource, sub, verb) in RIGHTS {
-        let review = SelfSubjectAccessReview {
-            spec: SelfSubjectAccessReviewSpec {
-                resource_attributes: Some(ResourceAttributes {
-                    group: Some(group.to_string()),
-                    resource: Some(resource.to_string()),
-                    subresource: (!sub.is_empty()).then(|| sub.to_string()),
-                    verb: Some(verb.to_string()),
-                    namespace: Some(spec.env.namespace.clone()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        match reviews.create(&PostParams::default(), &review).await {
-            Ok(r) if r.status.as_ref().map(|s| s.allowed).unwrap_or(false) => {}
-            Ok(_) => {
-                let what = if sub.is_empty() {
-                    resource.to_string()
-                } else {
-                    format!("{resource}/{sub}")
-                };
-                return CheckResult::fail(
-                    CheckId::Runtime,
-                    format!(
-                        "service account may not {verb} {what} in {}",
-                        spec.env.namespace
-                    ),
-                );
-            }
-            Err(e) => return CheckResult::fail(CheckId::Runtime, format!("access review: {e}")),
+    let reviews: Api<SelfSubjectAccessReview> = Api::all(client.clone());
+    match first_refused(&reviews, &spec.env.namespace, RIGHTS).await {
+        Ok(None) => {}
+        Ok(Some(refused)) => {
+            return CheckResult::fail(
+                CheckId::Runtime,
+                format!(
+                    "service account may not {refused} in {}",
+                    spec.env.namespace
+                ),
+            )
         }
+        Err(e) => return CheckResult::fail(CheckId::Runtime, format!("access review: {e}")),
     }
+    // Optional, and never a reason to refuse the node: what it decides is
+    // whether a run carrying credentials may start, which the runner asks.
+    let secrets = secret_rights(client, &spec.env.namespace).await;
+    b.secret_rights().set(secrets.clone());
+    let secrets = match secrets {
+        Ok(()) => "secrets granted, so a run lent credentials keeps them in a Secret of its own"
+            .to_string(),
+        Err(why) => format!(
+            "secrets not granted ({why}), so a run lent credentials or an egress grant is refused"
+        ),
+    };
     CheckResult::ok(
         CheckId::Runtime,
         format!(
-            "api reachable; pods/attach/log and networkpolicies granted in {}; node {}",
+            "api reachable; pods/attach/log and networkpolicies granted in {}; {secrets}; node {}",
             spec.env.namespace, spec.env.node_name
         ),
     )
@@ -575,6 +636,28 @@ mod tests {
             ..Default::default()
         };
         assert!(ingress_only_from_node(&[ingress(Some(vec![block]))]).is_err());
+    }
+
+    /// The Role the deployment ships grants the optional secrets set, and
+    /// exactly it: no `get`, since nothing reads a Secret back.
+    #[test]
+    fn the_shipped_role_grants_the_secret_rights() {
+        let role = super::super::Manifests::get("role.yaml").unwrap();
+        let role = String::from_utf8_lossy(&role.data);
+        let mut lines = role
+            .lines()
+            .skip_while(|l| !l.contains(r#"resources: ["secrets"]"#));
+        assert!(lines.next().is_some(), "no secrets rule:\n{role}");
+        let verbs = lines.next().unwrap_or_default();
+        let mut granted: Vec<&str> = verbs
+            .split(['[', ']', ',', '"'])
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && !v.starts_with("verbs"))
+            .collect();
+        granted.sort_unstable();
+        let mut asserted: Vec<&str> = SECRET_RIGHTS.iter().map(|(_, _, _, verb)| *verb).collect();
+        asserted.sort_unstable();
+        assert_eq!(granted, asserted);
     }
 
     #[test]

@@ -137,16 +137,17 @@ impl RunSpec {
             // A value the command sets itself is not also set here: two `-e`
             // entries for one name is a rule about ordering rather than a
             // choice.
-            if k.is_empty() || cmd.env.iter().any(|(name, _)| name == k) {
+            if k.is_empty() || cmd.sets(k) {
                 continue;
             }
             a.push("-e".into());
             a.push(format!("{k}={v}"));
         }
-        for (k, v) in &cmd.env {
+        for (k, v) in cmd.plain_env() {
             a.push("-e".into());
             a.push(format!("{k}={v}"));
         }
+        a.extend(secret_env_args(cmd));
         for m in self.extra_mounts.iter().chain(cmd.mounts.iter()) {
             let mut mount = format!("type=volume,src={},dst={}", m.volume, m.target);
             if !m.sub_path.is_empty() {
@@ -177,6 +178,27 @@ impl RunSpec {
         a.extend(cmd.argv.iter().cloned());
         a
     }
+}
+
+/// `--env NAME` for each of the command's secret variables, with no value:
+/// podman reads the value from its own environment, which the runner sets on
+/// the `podman` process alone (`secret_env_for`). An argv is world-readable in
+/// `/proc/<pid>/cmdline` for as long as `podman run` lives, which for a
+/// session is the session; a process environment is readable only by the
+/// same user. An env-file would put the values on disk instead, where a node
+/// that dies before removing it leaves them.
+fn secret_env_args(cmd: &RunnerCommand) -> Vec<String> {
+    cmd.secret_env
+        .names()
+        .flat_map(|name| ["--env".to_string(), name.to_string()])
+        .collect()
+}
+
+/// The `podman` process's own environment for a command: its secret values,
+/// checked first so a name can never be read as `NAME=value` on the argv.
+fn secret_env_for(cmd: &RunnerCommand) -> Result<Vec<(String, String)>, RunnerError> {
+    cmd.secret_env.validate()?;
+    Ok(cmd.secret_env.iter().cloned().collect())
 }
 
 impl RunSpec {
@@ -305,12 +327,14 @@ impl Runner for PodmanRunner {
             Some(_) => Some(super::free_loopback_port()?),
             None => None,
         };
+        let secrets = secret_env_for(&cmd)?;
         let args = self
             .spec
             .podman_args_publishing(&name, &cmd, false, host_port);
         tracing::debug!(container = %name, "podman run");
         let child = Command::new(&self.spec.podman_bin)
             .args(&args)
+            .envs(secrets)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -322,9 +346,11 @@ impl Runner for PodmanRunner {
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
         self.ensure_volumes(&cmd).await?;
         let name = self.capture_name(&cmd.name);
+        let secrets = secret_env_for(&cmd)?;
         let args = self.spec.podman_args(&name, &cmd, false);
         Command::new(&self.spec.podman_bin)
             .args(&args)
+            .envs(secrets)
             .output()
             .await
             .map_err(Into::into)
@@ -492,6 +518,67 @@ mod tests {
         assert!(!joined.contains("label=disable"));
         // Nothing is mounted at /work here, so the image's WORKDIR is used.
         assert!(!joined.contains(" -w "));
+    }
+
+    /// A lent value, or a grant's proxy URL, is never on the `podman run`
+    /// argv, which any local user can read in `/proc/<pid>/cmdline` for as
+    /// long as the container lives. The name goes there; the value goes to
+    /// the podman process's own environment.
+    #[test]
+    fn secret_values_are_never_on_the_argv() {
+        let token = "npm_lent0123456789";
+        let proxy = "http://prepare:grant-password@tracon-gw:8890";
+        let cmd = RunnerCommand {
+            argv: vec!["sh".into(), "-c".into(), "npm ci".into()],
+            env: vec![
+                ("npm_config_cache".into(), "/cache/npm".into()),
+                // Set both ways: the secret one is the one that goes.
+                ("NPM_TOKEN".into(), "a-plain-duplicate".into()),
+            ],
+            secret_env: crate::runner::SecretEnv::new(vec![
+                ("NPM_TOKEN".into(), token.into()),
+                ("HTTPS_PROXY".into(), proxy.into()),
+            ]),
+            ..Default::default()
+        };
+        let args = spec().podman_args("tracon-w-1", &cmd, false);
+        let line = args.join(" ");
+        for value in [token, proxy, "grant-password", "a-plain-duplicate"] {
+            assert!(!line.contains(value), "{value} is on the argv: {line}");
+        }
+        assert!(args.windows(2).any(|w| w == ["--env", "NPM_TOKEN"]));
+        assert!(args.windows(2).any(|w| w == ["--env", "HTTPS_PROXY"]));
+        // The harness proxy is not set beside the grant that replaces it.
+        assert!(
+            !line.contains("HTTPS_PROXY=http://tracon-gw:8888"),
+            "{line}"
+        );
+        assert!(line.contains("HTTP_PROXY=http://tracon-gw:8888"), "{line}");
+        assert!(line.contains("-e npm_config_cache=/cache/npm"));
+        // The image and the command still come last.
+        assert!(line.ends_with("localhost/tracon-harness-opencode sh -c npm ci"));
+
+        let env = secret_env_for(&cmd).unwrap();
+        assert!(env.contains(&("NPM_TOKEN".to_string(), token.to_string())));
+        assert!(env.contains(&("HTTPS_PROXY".to_string(), proxy.to_string())));
+    }
+
+    /// `--env A=b` would be a name and a value on the argv; such a name is
+    /// refused before podman runs.
+    #[test]
+    fn a_secret_name_that_could_carry_a_value_is_refused() {
+        for name in ["A=b", "", "1ST", "with space", "dash-ed"] {
+            let cmd = RunnerCommand {
+                secret_env: crate::runner::SecretEnv::new(vec![(name.into(), "v".into())]),
+                ..Default::default()
+            };
+            assert!(secret_env_for(&cmd).is_err(), "{name:?}");
+        }
+        let cmd = RunnerCommand {
+            secret_env: crate::runner::SecretEnv::new(vec![("_Ok_1".into(), "v".into())]),
+            ..Default::default()
+        };
+        assert!(secret_env_for(&cmd).is_ok());
     }
 
     #[test]

@@ -443,6 +443,7 @@ pub async fn run_required(
         let cmd = RunnerCommand {
             argv: output::merged_shell(command),
             env,
+            secret_env: Default::default(),
             mounts,
             workdir: Some("/work".into()),
             name: runner_name.clone(),
@@ -911,12 +912,15 @@ async fn prepare_steps(
     for (step, command) in environment.prepare.iter().enumerate() {
         let name = format!("{runner_name}-p{step}");
         let running = runner.capture_name(&name);
-        let mut env = cache_env();
-        env.extend(egress.env.iter().cloned());
-        env.extend(secrets.env().iter().cloned());
+        // The grant's proxy URL and anything lent are secret environment:
+        // on Kubernetes they reach the pod through a Secret of its own, and
+        // nowhere are they on an argv or in a pod spec.
+        let mut secret_env = egress.secret_env.clone();
+        secret_env.extend(secrets.env().iter().cloned());
         let cmd = RunnerCommand {
             argv: output::merged_shell(command),
-            env,
+            env: cache_env(),
+            secret_env,
             mounts: vec![
                 Mount::volume(work.to_string(), "/work", false),
                 Mount::volume(cache.to_string(), "/cache", false),
@@ -1862,6 +1866,12 @@ mod tests {
                     .find(|(key, _)| key == name)
                     .map(|(_, value)| value.clone())
             };
+            let secret = |cmd: &RunnerCommand, name: &str| {
+                cmd.secret_env
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            };
             for cmd in [prepare, check] {
                 assert_eq!(cmd.image.as_deref(), Some(TOOLCHAIN));
                 assert_eq!(
@@ -1874,16 +1884,19 @@ mod tests {
             assert!(!prepare.mounts[1].read_only && check.mounts[1].read_only);
             assert_eq!(prepare.mounts[1].volume, check.mounts[1].volume);
             assert_eq!(volume_kind(&prepare.mounts[1].volume), "run cache");
-            // Its own credentials, in both spellings of the variable.
+            // Its own credentials, in both spellings of the variable, and
+            // only as secret environment: the URL carries the password.
             assert_eq!(
-                var(prepare, "HTTPS_PROXY").as_deref(),
+                secret(prepare, "HTTPS_PROXY").as_deref(),
                 Some("http://prepare:token@gw:8890")
             );
             assert_eq!(
-                var(prepare, "https_proxy").as_deref(),
+                secret(prepare, "https_proxy").as_deref(),
                 Some("http://prepare:token@gw:8890")
             );
+            assert_eq!(var(prepare, "HTTPS_PROXY"), None);
             assert_eq!(var(check, "HTTPS_PROXY"), None);
+            assert_eq!(secret(check, "HTTPS_PROXY"), None);
             assert_eq!(var(check, "CARGO_NET_OFFLINE").as_deref(), Some("true"));
         }
 
@@ -2064,9 +2077,15 @@ mod tests {
         {
             let commands = recorded.commands.lock().unwrap();
             assert_eq!(commands.len(), 1);
+            // Lent as secret environment, so no runner renders it where
+            // anyone else can read it, and never as plain environment too.
             assert!(commands[0]
+                .secret_env
+                .contains("NPM_TOKEN", "npm_0123456789"));
+            assert!(!commands[0]
                 .env
-                .contains(&("NPM_TOKEN".to_string(), "npm_0123456789".to_string())));
+                .iter()
+                .any(|(_, value)| value.contains("npm_0123456789")));
         }
 
         let report = run_required(
