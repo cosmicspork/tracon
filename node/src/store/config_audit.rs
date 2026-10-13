@@ -58,16 +58,37 @@ impl Store {
         Ok(())
     }
 
-    /// Settle every pending row against the file's hash now: the one that
-    /// wrote this version landed, any other did not. Returns how many.
-    pub fn config_audit_settle(&self, current_hash: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
-        Ok(conn.execute(
-            "UPDATE config_audit
-             SET state = CASE WHEN new_hash = ?1 THEN 'landed' ELSE 'lost' END
-             WHERE state = 'pending'",
-            [current_hash],
-        )?)
+    /// Settle every pending row. One whose new hash is a version the file
+    /// has been in since (`versions`, or what a later landed write started
+    /// from) landed; any other did not. Returns how many were settled.
+    pub fn config_audit_settle(&self, versions: &[&str]) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut settled = 0;
+        for version in versions {
+            settled += tx.execute(
+                "UPDATE config_audit SET state = 'landed' WHERE state = 'pending' AND new_hash = ?1",
+                [version],
+            )?;
+        }
+        loop {
+            let built_on = tx.execute(
+                "UPDATE config_audit SET state = 'landed'
+                 WHERE state = 'pending' AND new_hash IN
+                   (SELECT old_hash FROM config_audit WHERE state = 'landed')",
+                [],
+            )?;
+            if built_on == 0 {
+                break;
+            }
+            settled += built_on;
+        }
+        settled += tx.execute(
+            "UPDATE config_audit SET state = 'lost' WHERE state = 'pending'",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(settled)
     }
 
     /// The newest `limit` rows, newest first.

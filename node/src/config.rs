@@ -2279,18 +2279,22 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         // On disk before it is named, so a crash leaves the old file or the
         // whole new one, never an empty one.
         file.sync_all()?;
-        std::fs::rename(&tmp, &target)?;
-        // And the rename itself, so the new name survives a crash too.
-        #[cfg(unix)]
-        if let Some(dir) = target.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-            std::fs::File::open(dir)?.sync_all()?;
-        }
-        Ok(())
+        std::fs::rename(&tmp, &target)
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
+        return written;
     }
-    written
+    // And the rename itself, so the new name survives a crash too. Past the
+    // rename the file has changed, so a failure here is not a failed write:
+    // it is said, and the write stands.
+    #[cfg(unix)]
+    if let Some(dir) = target.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        if let Err(error) = std::fs::File::open(dir).and_then(|dir| dir.sync_all()) {
+            tracing::warn!(%error, dir = %dir.display(), "node.toml was replaced, but its directory could not be synced");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

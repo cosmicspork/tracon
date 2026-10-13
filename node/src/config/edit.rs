@@ -439,15 +439,31 @@ pub fn snapshot_at(path: &Path) -> Result<Snapshot, EditError> {
 /// Settle the audit rows an interrupted edit left pending: landed if the
 /// file is now the version the row wrote, lost if not. The serving node runs
 /// this at start.
-pub fn reconcile_audit(store: &Store) -> Result<usize, EditError> {
-    reconcile_audit_at(&Config::config_path(), store)
+///
+/// `before_load` is the file's hash as it was before this start loaded it:
+/// a load that migrates the retired harness rewrites the file, and a row
+/// that wrote the version it migrated still landed.
+pub fn reconcile_audit(store: &Store, before_load: Option<&str>) -> Result<usize, EditError> {
+    reconcile_audit_at(&Config::config_path(), store, before_load)
 }
 
-pub fn reconcile_audit_at(path: &Path, store: &Store) -> Result<usize, EditError> {
-    let current = hash(&read(path)?);
+pub fn reconcile_audit_at(
+    path: &Path,
+    store: &Store,
+    before_load: Option<&str>,
+) -> Result<usize, EditError> {
+    let current = file_hash(path)?;
+    let mut versions = vec![current.as_str()];
+    versions.extend(before_load);
     store
-        .config_audit_settle(&current)
+        .config_audit_settle(&versions)
         .map_err(|e| EditError::Audit(e.to_string()))
+}
+
+/// The hash of the file at `path` as it is now: the empty file's when there
+/// is none.
+pub fn file_hash(path: &Path) -> Result<String, EditError> {
+    Ok(hash(&read(path)?))
 }
 
 /// Edit `node.toml` at its usual place. `expected_hash` is the version the
@@ -598,11 +614,27 @@ fn lock(path: &Path) -> Result<Held, EditError> {
     if let Some(dir) = target.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
+    let lock_path = target.with_extension("toml.lock");
+    // Made once, as private as the directory it is in; held through a read
+    // descriptor, which is all a lock needs.
+    match std::fs::OpenOptions::new()
         .write(true)
-        .open(target.with_extension("toml.lock"))?;
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(made) => {
+            #[cfg(unix)]
+            if let Some(dir) = lock_path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(dir)?.permissions().mode() & 0o666;
+                made.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            }
+            drop(made);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    let file = std::fs::File::open(&lock_path)?;
     file.lock()?;
     Ok(Held {
         _process: process,
@@ -994,7 +1026,13 @@ fn apply(doc: &mut DocumentMut, op: &Op) -> Result<(), EditError> {
             }
             match item {
                 Item::ArrayOfTables(tables) => {
-                    let old: Vec<Table> = tables.iter().cloned().collect();
+                    let mut old: Vec<Table> = tables.iter().cloned().collect();
+                    // A header or banner above the first entry belongs to
+                    // the place, not the entry: it stays first.
+                    let banner = match order.first() {
+                        Some(&first) if first != 0 => peel(&mut old[0]),
+                        _ => None,
+                    };
                     let mut rebuilt = ArrayOfTables::new();
                     // The entries move; the places they render at do not.
                     // What sits under a moved entry renders after it.
@@ -1003,6 +1041,11 @@ fn apply(doc: &mut DocumentMut, op: &Op) -> Result<(), EditError> {
                         if let Some(position) = old[slot].position() {
                             table.set_position(position);
                             place_children(&mut table, position);
+                        }
+                        if slot == 0 {
+                            if let Some(banner) = &banner {
+                                prepend(&mut table, banner);
+                            }
                         }
                         rebuilt.push(table);
                     }
@@ -1049,6 +1092,12 @@ fn apply(doc: &mut DocumentMut, op: &Op) -> Result<(), EditError> {
                         None => tables.push(new),
                         Some(at) if *at <= tables.len() => {
                             let mut all: Vec<Table> = tables.iter().cloned().collect();
+                            // The banner above the first entry stays first.
+                            if *at == 0 {
+                                if let Some(banner) = all.first_mut().and_then(peel) {
+                                    prepend(&mut new, &banner);
+                                }
+                            }
                             all.insert(*at, new);
                             let mut rebuilt = ArrayOfTables::new();
                             for table in all {
@@ -1084,6 +1133,29 @@ fn detached(table: &Table) -> Option<String> {
     kept.contains('#').then_some(kept)
 }
 
+/// Take the detached part off the comment above `table`'s header, leaving
+/// its own note.
+fn peel(table: &mut Table) -> Option<String> {
+    let banner = detached(table)?;
+    let prefix = table.decor().prefix()?.as_str()?.to_string();
+    let own = &prefix[banner.len()..];
+    table
+        .decor_mut()
+        .set_prefix(if own.is_empty() { "\n" } else { own }.to_string());
+    Some(banner)
+}
+
+/// Put `text` above the comment already above `table`'s header.
+fn prepend(table: &mut Table, text: &str) {
+    let below = table
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or("\n")
+        .to_string();
+    table.decor_mut().set_prefix(format!("{text}{below}"));
+}
+
 /// Put `text` above the first table rendered after `position`, or at the end
 /// of the file when none is.
 fn rehome(doc: &mut DocumentMut, position: isize, text: &str) {
@@ -1099,13 +1171,7 @@ fn rehome(doc: &mut DocumentMut, position: isize, text: &str) {
             if table.position() != Some(target) {
                 return false;
             }
-            let below = table
-                .decor()
-                .prefix()
-                .and_then(|p| p.as_str())
-                .unwrap_or("\n")
-                .to_string();
-            table.decor_mut().set_prefix(format!("{text}{below}"));
+            prepend(table, text);
             true
         })
     });
@@ -1815,6 +1881,13 @@ checks = []
             .collect();
         names.sort();
         assert_eq!(names, ["node.toml", "real.toml", "real.toml.lock"]);
+        // The lock is as private as its directory, and never executable.
+        let dir_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode();
+        let lock_mode = std::fs::metadata(dir.path().join("real.toml.lock"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(lock_mode & 0o777, dir_mode & 0o666);
     }
 
     #[test]
@@ -2132,11 +2205,60 @@ path = "/srv/notes"
         store
             .config_audit_insert(&pending("never-renamed", &hash(b"other")))
             .unwrap();
-        assert_eq!(reconcile_audit_at(&path, &store).unwrap(), 2);
+        // Landed, and a later write started from it: the file has moved on.
+        store
+            .config_audit_insert(&pending("built-on", &hash(b"middle")))
+            .unwrap();
+        let mut later = pending("later", &hash(b"later"));
+        later.old_hash = hash(b"middle");
+        store.config_audit_insert(&later).unwrap();
+        store.config_audit_landed("later").unwrap();
+        // Landed, and the start's own load then migrated the file.
+        store
+            .config_audit_insert(&pending("then-migrated", &hash(b"pre-migration")))
+            .unwrap();
+        let before_load = hash(b"pre-migration");
+        assert_eq!(
+            reconcile_audit_at(&path, &store, Some(&before_load)).unwrap(),
+            4
+        );
         let rows = store.config_audit_recent(10).unwrap();
         let state = |id: &str| rows.iter().find(|r| r.id == id).unwrap().state.clone();
         assert_eq!(state("landed-before-crash"), "landed");
+        assert_eq!(state("built-on"), "landed");
+        assert_eq!(state("then-migrated"), "landed");
         assert_eq!(state("never-renamed"), "lost");
+    }
+
+    const BANNERED: &str = "# File header.\n\n[[repo]]\n# a's note\npath = \"/a\"\n\n[[repo]]\npath = \"/b\"\n\n[[repo]]\npath = \"/c\"\n";
+
+    /// Whatever ends up first under the file's header, the header stays at
+    /// the top of the file.
+    #[test]
+    fn the_files_header_stays_first_whatever_moves() {
+        let repo = |p: &str| Repo {
+            path: p.into(),
+            ..Default::default()
+        };
+        let before = vec![repo("/a"), repo("/b"), repo("/c")];
+        for after in [
+            vec![repo("/c"), repo("/b")],
+            vec![repo("/c"), repo("/a"), repo("/b")],
+            vec![repo("/new"), repo("/a"), repo("/b"), repo("/c")],
+        ] {
+            let ops = Op::replace_repos(&before, &after).unwrap();
+            let next = apply_to_text(BANNERED, &ops).unwrap();
+            assert!(next.starts_with("# File header.\n"), "{ops:?}\n{next}");
+            assert_eq!(next.matches("# File header.").count(), 1, "{next}");
+            let back = Config::from_toml(&next, Path::new("node.toml")).unwrap();
+            let paths: Vec<_> = back.repo.iter().map(|r| r.path.clone()).collect();
+            let want: Vec<_> = after.iter().map(|r| r.path.clone()).collect();
+            assert_eq!(paths, want, "{next}");
+            // a's own note stays with a, wherever it went.
+            if let Some(a) = next.find("path = \"/a\"") {
+                assert!(next[..a].ends_with("# a's note\n"), "{next}");
+            }
+        }
     }
 
     #[test]
