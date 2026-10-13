@@ -422,6 +422,7 @@ fn opencode_layer(run_as: &RunAs) -> HarnessLayer {
                  && found=$(env | sed -n 's/^\\(OPENCODE_[A-Za-z0-9_]*\\)=.*/\\1/p' | tr '\\n' ' ') \
                  && if [ -n \"$found\" ]; then echo \"tracon: the repository's image sets ${found% }, \
                  which would override the node's OpenCode configuration\" >&2; exit 1; fi\n";
+    debug_assert!(guard.contains(LAYER_REFUSAL));
     let guard = match run_as {
         RunAs::Root => guard.to_string(),
         RunAs::Pod { uid, .. } => format!("USER 0:0\n{guard}USER {uid}:{uid}\n"),
@@ -439,6 +440,24 @@ fn opencode_layer(run_as: &RunAs) -> HarnessLayer {
             RunAs::Pod { .. } => format!("{probe} && {POD_INIT} --version"),
         },
     }
+}
+
+/// How a refusal the node's own layer prints begins, so a failed build says
+/// that and not only that the build exited.
+const LAYER_REFUSAL: &str = "tracon: the repository's image ";
+
+/// The node's own reason in a failed layer build's log, where its layer
+/// refused the image: the line that carries it, from the repository's image
+/// on, whatever the builder put in front of it (BuildKit's step and time
+/// prefixes, Podman's nothing). Builders also echo the failing `RUN` line,
+/// which holds the same words around the unexpanded `${found% }`; that echo
+/// is not the reason, and it is the only line with a `$` in it.
+fn layer_refusal(log: &str) -> Option<String> {
+    log.lines().rev().find_map(|line| {
+        let at = line.find(LAYER_REFUSAL)?;
+        let why = line[at + "tracon: ".len()..].trim();
+        (!why.contains('$')).then(|| why.to_string())
+    })
 }
 
 /// Where a pod's session image keeps its init. Copied from the harness
@@ -729,7 +748,13 @@ async fn build_session(
             labels: &[(RECIPE_LABEL.to_string(), key.to_string())],
             timeout: BUILD_TIMEOUT,
         })
-        .await?;
+        .await
+        .map_err(|mut failure| {
+            if let Some(why) = layer_refusal(&failure.log_tail) {
+                failure.error = why;
+            }
+            failure
+        })?;
     let probe = runner
         .run_capture(RunnerCommand {
             argv: ["sh", "-c", &harness.layer.probe]
@@ -1378,6 +1403,8 @@ mod tests {
         builds: StdMutex<Vec<(String, String, Vec<String>)>>,
         removed: StdMutex<Vec<String>>,
         fail: StdMutex<bool>,
+        /// What a failing build's log ends with, where not the default.
+        fail_log: StdMutex<Option<String>>,
         pruned: StdMutex<bool>,
         /// Fail as a builder that cannot build, not as a recipe.
         broken: StdMutex<bool>,
@@ -1412,7 +1439,12 @@ mod tests {
             if *self.fail.lock().unwrap() {
                 return Err(BuildFailure {
                     error: "podman build exited 1".into(),
-                    log_tail: "Error: no such package".into(),
+                    log_tail: self
+                        .fail_log
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "Error: no such package".into()),
                     ..Default::default()
                 });
             }
@@ -2369,6 +2401,67 @@ ENTRYPOINT ["/opt/tracon/bin/harness-entrypoint"]
         assert!(root
             .lines
             .contains(crate::runner::toolchain::IMAGE_ENTRYPOINT));
+    }
+
+    /// An image the OpenCode layer refuses says why in the session's note, not
+    /// only that the build failed, from either builder's log; the reason is
+    /// what the next session on the same images is told too.
+    #[tokio::test]
+    async fn a_refused_opencode_layer_names_the_variable_in_the_note() {
+        let says = "tracon: the repository's image sets OPENCODE_PERMISSION, which would \
+                    override the node's OpenCode configuration";
+        assert_eq!(
+            layer_refusal(&format!("STEP 9/12: RUN rm -rf ...\n{says}\nError: exit 1")).as_deref(),
+            Some(&says["tracon: ".len()..])
+        );
+        assert_eq!(
+            layer_refusal(&format!(
+                "#9 0.214 {says}\n#9 ERROR: process did not complete"
+            )),
+            layer_refusal(says)
+        );
+        assert_eq!(layer_refusal("Error: no such package"), None);
+        // Podman's error line echoes the step after the output it printed.
+        let echoed = format!(
+            "{says}\nError: building at STEP \"RUN rm -rf /etc/opencode ... echo \"tracon: the \
+             repository's image sets ${{found% }}, which would override the node's OpenCode \
+             configuration\" >&2; exit 1; fi\": while running runtime: exit status 1"
+        );
+        assert_eq!(layer_refusal(&echoed), layer_refusal(says));
+        assert_eq!(layer_refusal(echoed.lines().last().unwrap()), None);
+
+        let repo = Path::new("/src/app");
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        *builder.fail.lock().unwrap() = true;
+        *builder.fail_log.lock().unwrap() =
+            Some(format!("STEP 9/12: RUN ...\n{says}\nError: exit 1"));
+        let runner = ProbeRunner::saying("unused", 0);
+        let harness = SessionHarness {
+            id: "opencode",
+            version: crate::adapter::opencode::OpenCodeAdapter::PINNED_VERSION,
+            image: "localhost/tracon-harness-opencode".into(),
+            layer: harness_layer("opencode", &RunAs::Root).unwrap(),
+            run_as: RunAs::Root,
+        };
+        for _ in 0..2 {
+            let got =
+                ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+            assert_eq!(got.image, None);
+            assert_eq!(
+                got.note.as_deref(),
+                Some(
+                    "the repository's image sets OPENCODE_PERMISSION, which would override the \
+                     node's OpenCode configuration"
+                )
+            );
+        }
+        // The second session was told from the recorded failure.
+        let row = store
+            .latest_repo_image("/src/app", "session:opencode")
+            .unwrap()
+            .unwrap();
+        assert!(row.log_tail.contains(says));
     }
 
     /// The layer writes `/usr/local/bin/opencode` and `/opt/tracon`, and

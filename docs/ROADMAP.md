@@ -343,9 +343,8 @@ servers reaching the v2 session runner.
 - Required checks run in the image, and after the preparation, the operator named for the
   repository (`[[repo]]`), and in the harness image — which has no project toolchain —
   when they named none. A session of either harness runs in that same image with the
-  harness layered on, so it has its checks' tools. A Claude Code session reaches the
-  registries its repository opens to sessions (`session_egress`); an OpenCode session
-  keeps the harness proxy and reaches none. On Kubernetes that takes a builder, and the
+  harness layered on, so it has its checks' tools, and reaches the registries its
+  repository opens to sessions (`session_egress`). On Kubernetes that takes a builder, and the
   image runs as uid 65532, so its tools must be readable by any uid. OpenCode's language
   servers need glibc and `libstdc++` in the repository's image, and are reported
   unavailable where it has neither. An image the node

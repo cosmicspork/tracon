@@ -482,8 +482,8 @@ its own at `/opt/tracon/bin/node` for the JavaScript ones. That Node is on no `P
 the image cannot run (the baked Node needs glibc and `libstdc++`) shows as `unavailable` in
 the session header and the session runs without it. OpenCode reads its configuration from
 the node and nowhere else, so the layer deletes `/etc/opencode`, and a repository image
-whose environment sets any `OPENCODE_*` variable is refused, naming the variable in the
-build's log; the session then runs in the harness image.
+whose environment sets any `OPENCODE_*` variable is refused, and the session's note names
+the variable; the session then runs in the harness image.
 
 A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy
@@ -491,8 +491,10 @@ credentials that are the session's own, so "add this dependency and run the test
 ordinary task: `cargo add`, `bun add`, `composer require` work, and a host the entry does
 not name is refused. It is opt-in because a session is long-lived and runs what a model
 decides: a host that accepts uploads accepts them from it, and the `github` and
-`packagist` presets both carry `api.github.com`. OpenCode sessions keep the harness proxy
-and reach no registry either way.
+`packagist` presets both carry `api.github.com`. This holds for Claude Code and OpenCode
+sessions alike: the grant replaces the harness proxy for the harness and everything its
+shell runs, while the model and the node's tools stay on the gateway, which no proxy
+sits in front of.
 
 A private registry (Laravel Nova, a private npm scope, Private Packagist, GitHub
 Packages) is reached with a credential the node lends to one preparation only: the one

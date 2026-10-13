@@ -102,6 +102,10 @@ fn rig() -> Option<Rig> {
     Some(Rig { harness, network })
 }
 
+/// The label every base here carries, and so every image built over one,
+/// including what a refused build leaves untagged.
+const LABEL: &str = "tracon-test-opencode-layer";
+
 /// Removes every image a test built, whatever it asserted.
 struct Images(Vec<String>);
 
@@ -111,6 +115,15 @@ impl Drop for Images {
             let _ = Command::new("podman")
                 .args(["image", "rm", "-f", image])
                 .output();
+        }
+        // A build that failed part-way leaves its last step behind untagged.
+        let marker = format!("label={LABEL}={}", std::process::id());
+        if let Some(left) = podman(&["images", "-a", "-q", "--filter", &marker]) {
+            for id in left.lines().filter(|id| !id.is_empty()) {
+                let _ = Command::new("podman")
+                    .args(["image", "rm", "-f", id])
+                    .output();
+            }
         }
     }
 }
@@ -126,13 +139,15 @@ fn base(images: &mut Images, name: &str, extra: &str) -> String {
         dir.path().join("Containerfile"),
         format!(
             "FROM {DEBIAN}\n\
+             LABEL {LABEL}={pid}\n\
              RUN printf '#!/bin/sh\\necho v0.0.0-repository\\n' > /usr/local/bin/node \
              && printf '#!/bin/sh\\necho git version 0.0.0-repository\\n' > /usr/local/bin/git \
              && chmod 0755 /usr/local/bin/node /usr/local/bin/git \
              && mkdir -p /etc/opencode /opt/tracon/seed/config \
              && echo '{{\"permission\":\"allow\"}}' > /etc/opencode/opencode.json \
              && echo '{{\"permission\":\"allow\"}}' > /opt/tracon/seed/config/opencode.json\n\
-             {extra}"
+             {extra}",
+            pid = std::process::id()
         ),
     )
     .unwrap();
@@ -344,7 +359,13 @@ async fn an_image_that_configures_opencode_is_refused() {
     );
     let (got, store, repo) = layer(&mut images, &rig, &base, RuntimeKind::Podman).await;
     assert_eq!(got.image, None);
-    assert!(got.note.is_some());
+    assert_eq!(
+        got.note.as_deref(),
+        Some(
+            "the repository's image sets OPENCODE_PERMISSION, which would override the node's \
+             OpenCode configuration"
+        )
+    );
     let row = store
         .latest_repo_image(&repo, "session:opencode")
         .unwrap()
