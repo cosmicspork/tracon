@@ -52,8 +52,8 @@ use super::{
     auth::{self, set_cookie, DELEGATED_SESSION_TTL_MS},
     hostname,
     passkey::{
-        self, authorize_op, caller, internal, limited, random_secret, relying_party, Caller,
-        Refusal, PROOF_TTL_MS,
+        self, authorize_op, caller, clean_text, internal, limited, random_secret, relying_party,
+        Caller, Refusal, NOT_DELEGABLE, PROOF_TTL_MS,
     },
 };
 use crate::store::{
@@ -165,23 +165,16 @@ fn approval_summary(row: &DeviceApprovalRow) -> String {
             .unwrap_or("an admin action");
         format!("Confirm for another window: {what}")
     };
-    text.chars().filter(|c| !c.is_control()).take(160).collect()
-}
-
-fn printable(value: &str, max: usize) -> String {
-    value
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(max)
-        .collect()
+    clean_text(&text, 160)
 }
 
 /// What the asking window says it is.
 fn agent(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| printable(v, 200))
+        // Read whatever bytes were sent: what is shown is cleaned anyway.
+        .map(|v| clean_text(&String::from_utf8_lossy(v.as_bytes()), 160))
+        .filter(|v| !v.is_empty())
 }
 
 /// Where the asking window is, as far as the node can tell
@@ -364,6 +357,15 @@ pub async fn step_up(
     // (`/api/passkeys/assert/options` with nothing on record) does not, and
     // another browser would be asked to approve a hash it cannot read: the
     // window must make the request again for a challenge that says.
+    // Approving a device request is answered by the approving browser's own
+    // passkey, never by yet another device approval.
+    if challenge.granted_by.as_deref() == Some(NOT_DELEGABLE) {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::CONFLICT,
+            "approving a request from another window needs a passkey in this browser; \
+             open the link where your passkey is",
+        )));
+    }
     let Some(action) = challenge.action else {
         return Err(Refusal::Api(ApiError::new(
             StatusCode::GONE,
@@ -425,13 +427,15 @@ pub async fn token(
     }
     let now = now_ms();
     let addr = address(&s, &parts);
-    // Only polls with a code that answers to nothing are counted against an
-    // address: a real code is bounded by its own `slow_down`, and a stranger
-    // guessing must not be able to stop every window polling.
-    if s.auth.device_poll_blocked(addr, now) {
-        return too_many("too many polls; wait a few minutes").into_response();
-    }
+    // The code is looked up first, and only a poll whose code answers to
+    // nothing meets the limiter: a real code is bounded by its own
+    // `slow_down`, and junk, from however many addresses or one shared
+    // ingress, must not stop a window that holds one. A 256-bit secret is
+    // not guessed; the limiter only bounds the junk's load.
     let missed = || {
+        if s.auth.device_poll_blocked(addr, now) {
+            return too_many("too many polls; wait a few minutes").into_response();
+        }
         s.auth.device_poll_missed(addr, now);
         invalid_grant()
     };
@@ -679,10 +683,10 @@ pub async fn view(
         "requester_delegated_from": asker_delegated_from,
         "created_ms": row.created_ms,
         "expires_ms": row.expires_ms,
-        "requester_agent": row.requester_agent,
+        "requester_agent": row.requester_agent.as_deref().map(|a| clean_text(a, 160)),
         "requester_addr": row.requester_addr,
-        "action": row.action,
-        "summary": row.summary,
+        "action": row.action.as_deref().map(|a| clean_text(a, 160)),
+        "summary": row.summary.as_deref().map(|a| clean_text(a, 160)),
         "prompt": approval_summary(&row),
         "local": local,
         "passkeys": s.store().passkey_count()?,
@@ -742,6 +746,7 @@ pub async fn approve(
         || approval_op_hash(&row),
         &approval_detail(&row),
         Some(&approval_summary(&row)),
+        false,
     )?;
     let now = now_ms();
     if !s

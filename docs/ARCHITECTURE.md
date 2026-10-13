@@ -1655,8 +1655,10 @@ Three surfaces, three answers, and the differences are the point.
   The window polls `/api/auth/device/token` and is answered
   `authorization_pending`, `slow_down` (its interval raised five seconds),
   `access_denied`, `expired_token` (ten minutes) or `invalid_grant`, until it
-  collects, once, a new session cookie scoped like a login's. Only polls with
-  a code that answers to nothing count against an address. That session
+  collects, once, a new session cookie scoped like a login's. The code is
+  looked up before any limit applies, and only polls whose code answers to
+  nothing meet the per-address and global poll limits, so junk cannot block a
+  window that holds a real one. That session
   records `delegated_from` (the approving session's short ID, or `local`),
   lives 30 days rather than 90, never has `paired_ms`, so it cannot enroll the
   first passkey, and its sign-in is pushed to the operator's devices. For an
@@ -1666,7 +1668,14 @@ Three surfaces, three answers, and the differences are the point.
   (`webauthn_challenge.action`, `.summary`), and only such a challenge becomes
   an approval: one asked for by operation hash alone, with no refused request
   on record, is refused, and the window sends the request again for a fresh
-  refusal. The approval takes the operation, request and summary the node
+  refusal. Nor can approving a device request be delegated in turn: its
+  challenge (and any fresh one for the same operation) is marked
+  not-delegable, so the approving browser's own passkey answers it. Every
+  agent- or client-supplied word that reaches a prompt or the approval page
+  (a host, repository, Dockerfile, user agent) is stripped of control, format
+  (bidirectional, zero-width) and separator characters and bounded, and an
+  answer that edits an approval's arguments names the edited keys first in
+  its summary ("Edited host: Save …"). The approval takes the operation, request and summary the node
   recorded, is bound to the asking session (three waiting at most), and the
   poll (accepted only from that session) collects a proof for the original
   `op_hash`, with the same single-use, two-minute and session rules as one

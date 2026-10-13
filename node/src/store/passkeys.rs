@@ -245,23 +245,24 @@ impl Store {
     }
 
     /// What the newest assertion `session` opened for `op_hash` said it
-    /// confirms, so a fresh challenge for the same operation says it too.
+    /// confirms, and its `granted_by`, so a fresh challenge for the same
+    /// operation says the same and is held to the same.
     pub fn ceremony_describe(
         &self,
         session_hash: &str,
         op_hash: &str,
-    ) -> Result<(Option<String>, Option<String>)> {
+    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
         let conn = self.conn.lock().unwrap();
         Ok(conn
             .query_row(
-                "SELECT action, summary FROM webauthn_challenge
+                "SELECT action, summary, granted_by FROM webauthn_challenge
                   WHERE session_hash=?1 AND op_hash=?2 AND purpose='assert'
                   ORDER BY created_ms DESC LIMIT 1",
                 params![session_hash, op_hash],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
-            .unwrap_or((None, None)))
+            .unwrap_or((None, None, None)))
     }
 
     /// Spend a ceremony: the one with this ID, purpose and session, unused

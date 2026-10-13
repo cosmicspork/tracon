@@ -210,10 +210,11 @@ impl AuthState {
         self.device_starts.lock().unwrap().allow(ip, now)
     }
 
-    /// Whether a caller at `ip` may poll for a device approval now: only
-    /// polls with a code that answers to nothing count against it
-    /// ([`Self::device_poll_missed`]), so a stranger cannot spend the budget
-    /// of a window that holds a real one, which `slow_down` bounds per code.
+    /// Whether a poll from `ip` whose code answered to nothing is refused
+    /// now. Only such polls meet this limiter, after the lookup
+    /// (`http::device::token`): a poll with a real code never does, so junk
+    /// cannot spend the budget of a window that holds one, which `slow_down`
+    /// bounds per code.
     pub(crate) fn device_poll_blocked(&self, ip: Option<IpAddr>, now: i64) -> bool {
         self.device_polls.lock().unwrap().exhausted(ip, now)
     }

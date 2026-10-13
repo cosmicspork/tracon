@@ -74,6 +74,50 @@ const LOCAL: &str = "local";
 /// The longest name a passkey may be given.
 const MAX_LABEL: usize = 64;
 
+/// What a challenge's `granted_by` says when its assertion may only be made
+/// by the browser that asked: confirming a device approval with another
+/// device approval would let one browser approve on the strength of whatever
+/// approves the next, so the approving browser's own passkey must answer.
+pub(crate) const NOT_DELEGABLE: &str = "not-delegable";
+
+/// Text from outside the node (an agent's arguments, a client's user
+/// agent, a path) made fit to put in front of the operator: no control,
+/// format (bidirectional overrides, zero-width joiners and the like), line or
+/// paragraph separator characters, trimmed, and at most `max` characters.
+pub(crate) fn clean_text(value: &str, max: usize) -> String {
+    let kept: String = value.chars().filter(|c| !hidden(*c)).collect();
+    kept.trim().chars().take(max).collect()
+}
+
+/// Unicode general categories Cc, Cf, Zl and Zp.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c as u32,
+            0x00AD
+                | 0x0600..=0x0605
+                | 0x061C
+                | 0x06DD
+                | 0x070F
+                | 0x0890..=0x0891
+                | 0x08E2
+                | 0x180E
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x2064
+                | 0x2066..=0x206F
+                | 0xFEFF
+                | 0xFFF9..=0xFFFB
+                | 0x110BD
+                | 0x110CD
+                | 0x13430..=0x1343F
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        )
+}
+
 /// The operation a confirmation is for: the hash of the request's method,
 /// target (path and query), the version it expects to change (`If-Match`,
 /// when it sends one) and its exact body bytes. The client never computes
@@ -283,7 +327,8 @@ fn enrolled(s: &AppState) -> Result<Vec<(PasskeyRow, Passkey)>, Refusal> {
 }
 
 /// Open an assertion for `op_hash` on behalf of `session`, remembering what
-/// it confirms (`action`, `summary`) for a device approval made from it.
+/// it confirms (`action`, `summary`, cleaned) for a device approval made from
+/// it, and whether one may be made from it at all (`delegable`).
 fn open_assertion(
     s: &AppState,
     rp: &Webauthn,
@@ -291,7 +336,11 @@ fn open_assertion(
     op_hash: &str,
     action: Option<&str>,
     summary: Option<&str>,
+    delegable: bool,
 ) -> Result<Value, Refusal> {
+    let action = action.map(|a| clean_text(a, 160));
+    let summary = summary.map(|a| clean_text(a, 160));
+    let (action, summary) = (action.as_deref(), summary.as_deref());
     let passkeys: Vec<Passkey> = enrolled(s)?.into_iter().map(|(_, p)| p).collect();
     if passkeys.is_empty() {
         return Err(Refusal::unavailable(
@@ -311,7 +360,7 @@ fn open_assertion(
             purpose: CeremonyPurpose::Assert,
             op_hash: Some(op_hash.to_string()),
             session_hash: session.to_string(),
-            granted_by: None,
+            granted_by: (!delegable).then(|| NOT_DELEGABLE.to_string()),
             label: None,
             state: serde_json::to_string(&state).map_err(internal)?,
             created_ms: now,
@@ -400,7 +449,7 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
     };
     // Path segments are percent-encoded and bounded only by the URL; keep
     // the line short and printable.
-    Some(text.chars().filter(|c| !c.is_control()).take(120).collect())
+    Some(clean_text(&text, 120))
 }
 
 /// [`authorize`], with the line the prompt shows for what is confirmed.
@@ -417,6 +466,7 @@ pub async fn authorize_as(
         || parts_op_hash(parts, body),
         &action,
         summary.as_deref(),
+        true,
     )
 }
 
@@ -424,13 +474,15 @@ pub async fn authorize_as(
 /// confirmed by a step-up proof for exactly `op` from this cookie session.
 /// Otherwise the refusal opens the challenge for it. `op` is computed by the
 /// node, from the request or from what the node stored; `action` and
-/// `summary` are what the prompt shows for it.
+/// `summary` are what the prompt shows for it. Without `delegable`, the
+/// challenge cannot be handed to a device approval (`http::device`).
 pub(crate) fn authorize_op(
     s: &AppState,
     parts: &Parts,
     op: impl FnOnce() -> String,
     action: &str,
     summary: Option<&str>,
+    delegable: bool,
 ) -> Result<(), Refusal> {
     let session = match caller(s, parts) {
         Caller::Local => return Ok(()),
@@ -467,7 +519,7 @@ pub(crate) fn authorize_op(
             .into();
     }
     limited(s, &session)?;
-    let step_up = open_assertion(s, &rp, &session, &op, Some(action), summary)?;
+    let step_up = open_assertion(s, &rp, &session, &op, Some(action), summary, delegable)?;
     Err(Refusal::Required { message, step_up })
 }
 
@@ -823,7 +875,9 @@ pub async fn assert_options(
     }
     let rp = relying_party(&s.cfg)?;
     limited(&s, &session)?;
-    let (action, summary) = s.store().ceremony_describe(&session, &op)?;
+    // What the session's earlier challenge for this operation said it is,
+    // and whether it could be delegated: a fresh one is never more than that.
+    let (action, summary, granted_by) = s.store().ceremony_describe(&session, &op)?;
     Ok(Json(open_assertion(
         &s,
         &rp,
@@ -831,6 +885,7 @@ pub async fn assert_options(
         &op,
         action.as_deref(),
         summary.as_deref(),
+        granted_by.as_deref() != Some(NOT_DELEGABLE),
     )?))
 }
 
@@ -1010,6 +1065,16 @@ mod tests {
         assert_eq!(route_summary(&Method::GET, "/api/auth/token"), None);
         let long = format!("/api/credentials/{}/share", "x".repeat(500));
         assert!(route_summary(&Method::POST, &long).unwrap().chars().count() <= 120);
+    }
+
+    #[test]
+    fn text_shown_to_the_operator_hides_nothing() {
+        // A right-to-left override, zero-width characters, a line separator
+        // and a tag character, around a host.
+        let sneaky = "evil\u{202E}moc.elgoog\u{200B}\u{2028}\u{E0041}.example\u{FEFF}\n";
+        assert_eq!(clean_text(sneaky, 160), "evilmoc.elgoog.example");
+        assert_eq!(clean_text(&"x".repeat(500), 160).chars().count(), 160);
+        assert_eq!(clean_text("  café ✓ ", 160), "café ✓");
     }
 
     #[test]

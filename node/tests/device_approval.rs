@@ -1093,37 +1093,178 @@ async fn the_approver_types_the_code_and_three_wrong_ones_deny_the_request() {
     assert_eq!(r.kind(), "access_denied", "{}", r.body);
 }
 
-/// Only polls with a code that answers to nothing count against an address,
-/// so a stranger cannot stop a real window collecting.
+/// The reviewer's PoCs: junk polls from five addresses spend the whole poll
+/// budget, and junk through one untrusted ingress spends its address's;
+/// neither stops a window that holds a real code, because a real code is
+/// looked up before the limiter is consulted.
 #[tokio::test]
-async fn guessing_polls_are_limited_and_real_ones_are_not() {
+async fn junk_polls_never_block_a_window_holding_a_real_code() {
     let (n, _phone, _key) = with_phone().await;
-    let asked = ask_sign_in(&n).await;
-    for i in 0..600 {
-        let r = poll(&n, None, &json!(format!("guess-{i}"))).await;
-        assert_eq!(r.kind(), "invalid_grant", "{i}: {}", r.body);
+    let poll_from = |peer: String, code: Value| {
+        let n = &n;
+        async move {
+            at(
+                n,
+                &peer,
+                None,
+                "POST",
+                "/api/auth/device/token",
+                Some(&json!({ "device_code": code })),
+                None,
+            )
+            .await
+        }
+    };
+    let window = ask_sign_in(&n).await;
+    // Five addresses, six hundred guesses each: the global budget is gone.
+    for a in 0..5 {
+        for i in 0..600 {
+            let r = poll_from(
+                format!("198.51.100.{}:7000", 10 + a),
+                json!(format!("junk-{a}-{i}")),
+            )
+            .await;
+            assert_eq!(r.kind(), "invalid_grant", "{a}/{i}: {}", r.body);
+        }
     }
-    let r = poll(&n, None, &json!("guess-more")).await;
+    let r = poll_from("198.51.100.99:7000".into(), json!("more-junk")).await;
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.body);
-    // The guesser's address is spent; a window elsewhere is not, however
-    // often it polls its real code (it is only told to slow down).
-    for _ in 0..650 {
-        let r = at(
+    // The real window, from a fresh address and from a junk one, is answered.
+    let r = poll_from("198.51.100.99:7000".into(), window["device_code"].clone()).await;
+    assert_eq!(r.kind(), "authorization_pending", "{}", r.body);
+    let r = poll_from("198.51.100.10:7000".into(), window["device_code"].clone()).await;
+    assert_eq!(r.kind(), "slow_down", "polled again at once: {}", r.body);
+}
+
+#[tokio::test]
+async fn junk_through_a_shared_untrusted_ingress_does_not_block_the_window_behind_it() {
+    let (n, _phone, _key) = with_phone().await;
+    // An ingress the node was not told to trust: every caller is its address.
+    const INGRESS: &str = "10.244.1.5:8000";
+    let window = at(&n, INGRESS, None, "POST", "/api/auth/device", None, None).await;
+    assert_eq!(window.status, StatusCode::OK, "{}", window.body);
+    for i in 0..601 {
+        at(
             &n,
-            "198.51.100.77:7000",
+            INGRESS,
             None,
             "POST",
             "/api/auth/device/token",
-            Some(&json!({ "device_code": asked["device_code"] })),
+            Some(&json!({ "device_code": format!("junk-{i}") })),
             None,
         )
         .await;
-        assert!(
-            matches!(r.kind(), "authorization_pending" | "slow_down"),
-            "{}",
-            r.body
-        );
     }
+    let r = at(
+        &n,
+        INGRESS,
+        None,
+        "POST",
+        "/api/auth/device/token",
+        Some(&json!({ "device_code": "junk-again" })),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.body);
+    let r = poll(&n, None, &window.body["device_code"]).await;
+    assert_eq!(r.kind(), "authorization_pending", "{}", r.body);
+    let r = at(
+        &n,
+        INGRESS,
+        None,
+        "POST",
+        "/api/auth/device/token",
+        Some(&json!({ "device_code": window.body["device_code"] })),
+        None,
+    )
+    .await;
+    assert_eq!(r.kind(), "slow_down", "answered, not refused: {}", r.body);
+}
+
+/// Approving a device request is answered by the approving browser's own
+/// passkey: its challenge cannot be handed to yet another device approval,
+/// directly or through a fresh challenge for the same operation.
+#[tokio::test]
+async fn approving_a_request_cannot_itself_be_approved_from_another_window() {
+    let (n, _phone, _key) = with_phone().await;
+    let desktop = pair(&n).await;
+    let asked = ask_sign_in(&n).await;
+    let id = asked["approval_id"].as_str().unwrap();
+    let refused = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        &format!("/api/auth/device/approvals/{id}/approve"),
+        Some(&typed(asked["user_code"].as_str().unwrap())),
+        None,
+    )
+    .await;
+    assert_eq!(refused.kind(), "step_up_required", "{}", refused.body);
+    let r = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/auth/device/stepup",
+        Some(&json!({ "challenge_id": refused.body["step_up"]["challenge_id"] })),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    let fresh = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/passkeys/assert/options",
+        Some(&json!({ "op_hash": refused.body["step_up"]["op_hash"] })),
+        None,
+    )
+    .await;
+    assert_eq!(fresh.status, StatusCode::OK, "{}", fresh.body);
+    let r = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/auth/device/stepup",
+        Some(&json!({ "challenge_id": fresh.body["challenge_id"] })),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    // Only the sign-in request itself was ever made.
+    assert_eq!(n.store.device_approvals(10).unwrap().len(), 1);
+}
+
+/// What the asking window claims to be is shown cleaned and bounded.
+#[tokio::test]
+async fn the_askers_claims_are_cleaned_before_they_are_shown() {
+    let (n, phone_cookie, _key) = with_phone().await;
+    let agent = format!("Safari\u{202E}\u{200B}{}", "x".repeat(400));
+    let asked = send(
+        &n,
+        "POST",
+        "/api/auth/device",
+        DESKTOP,
+        &[("origin", ORIGIN), ("user-agent", &agent)],
+        None,
+    )
+    .await;
+    let id = asked.body["approval_id"].as_str().unwrap();
+    let view = phone(
+        &n,
+        &phone_cookie,
+        "GET",
+        &format!("/api/auth/device/approvals/{id}"),
+        None,
+        None,
+    )
+    .await;
+    let shown = view.body["requester_agent"].as_str().unwrap();
+    assert!(shown.starts_with("Safarixxx"), "{shown:?}");
+    assert_eq!(shown.chars().count(), 160);
 }
 
 /// Behind a proxy the node believes (loopback here), the address shown is
