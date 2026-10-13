@@ -114,7 +114,7 @@ pub(crate) fn fit_text(value: &str, max: usize) -> String {
 }
 
 /// Unicode general categories Cc, Cf, Zl and Zp.
-fn hidden(c: char) -> bool {
+pub(crate) fn hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c as u32,

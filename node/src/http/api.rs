@@ -6518,43 +6518,82 @@ const KNOWN_SHAPES: &[&str] = &[
 /// Register a new provider naming an already-sealed credential. An admin
 /// action (a passkey off this machine), like every `node.toml` write: this
 /// decides which upstream the gateway forwards the credential to and, on a
-/// new host, adds to the allowlist it dials. The prompt names both.
+/// new host, adds to the allowlist it dials. The write is decided against
+/// the file as it is now and its prompt made as every `node.toml` edit's is
+/// (`config_prompt`): the full upstream, the credential, the allowlist entry
+/// it adds, and that it replaces a built-in provider when it does.
 pub async fn create_provider(
     State(s): State<AppState>,
     req: super::passkey::AdminRequest,
-) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
-    let body: CreateProviderBody = req.json()?;
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
+    let raw: serde_json::Value = req.json()?;
+    super::config_api::refuse_hidden(&raw)?;
+    let body: CreateProviderBody = serde_json::from_value(raw).map_err(|e| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the request body does not read: {e}"),
+        )
+    })?;
     let host = check_new_provider(&body)?;
-    let name = body.name.trim();
-    req.confirm(
-        &s,
-        &format!(
-            "Add the provider {name}, sending the {} credential to {host}",
-            body.credential.trim()
-        ),
+    let (text, hash, cfg) = super::config_api::read_now()?;
+    let ops = provider_ops(&cfg, &body, &host)?;
+    let (_, summary) = super::config_api::prompt(&text, &ops)?;
+    req.confirm(&s, &summary).await?;
+    let outcome = crate::config::edit::edit_live(
+        &s.cfg,
+        s.store(),
+        &ops,
+        Some(&hash),
+        "Connections (add a provider)",
     )
-    .await?;
-    add_provider(&s, &body, &host)?;
+    .map_err(super::config_api::edit_refusal)?;
+    let (restart_required, pending) = super::config_api::restart_owed(&s, &outcome).await;
     Ok(Json(json!({
-        "created": name,
-        "restart_required": true,
+        "created": body.name,
+        "restart_required": restart_required || outcome.restart_required,
+        "pending_restart": pending,
+        "hash": outcome.new_hash,
     })))
+}
+
+/// A provider's or a credential's name: short, and plain enough to read in
+/// a prompt as what it is.
+fn plain_name(value: &str, what: &str, max: usize, upper: bool) -> ApiResult<()> {
+    let ok = !value.is_empty()
+        && value.chars().count() <= max
+        && value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && value.chars().all(|c| {
+            c.is_ascii_lowercase()
+                || c.is_ascii_digit()
+                || c == '-'
+                || c == '_'
+                || (upper && (c.is_ascii_uppercase() || c == '.'))
+        });
+    match ok {
+        true => Ok(()),
+        false => Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "{what} must be 1 to {max} characters of {}, starting with a letter or digit",
+                if upper {
+                    "letters, digits, `.`, `-` and `_`"
+                } else {
+                    "lowercase letters, digits, `-` and `_`"
+                }
+            ),
+        )),
+    }
 }
 
 /// What a new provider's upstream host is, or why the body cannot be one.
 fn check_new_provider(body: &CreateProviderBody) -> ApiResult<String> {
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "name is required".into(),
-        ));
-    }
-    if body.credential.trim().is_empty() {
-        return Err(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "credential is required".into(),
-        ));
+    plain_name(&body.name, "name", 32, false)?;
+    plain_name(&body.credential, "credential", 64, true)?;
+    if let Some(login) = &body.login {
+        plain_name(login, "login", 32, false)?;
     }
     if !KNOWN_SHAPES.contains(&body.shape.as_str()) {
         return Err(ApiError(
@@ -6583,57 +6622,56 @@ fn check_new_provider(body: &CreateProviderBody) -> ApiResult<String> {
     Ok(host)
 }
 
-fn add_provider(s: &AppState, body: &CreateProviderBody, host: &str) -> ApiResult<()> {
-    let name = body.name.trim();
-    // The file as it is now, never the defaults: a node.toml that does not
-    // parse is reported, not replaced with defaults plus this provider.
-    crate::config::update(s.store(), "Connections (add a provider)", |cfg| {
-        // A built-in the file does not name is the operator's to take over:
-        // `openai` is always present, and this is how it gets its upstream and key.
-        if cfg.declared_providers.contains(name) {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                format!("providers.{name} already exists"),
-            ));
-        }
-        if cfg.providers.get(name).is_some_and(|p| p.login.is_some()) {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                format!(
-                    "{name} is the subscription sign-in; give the API-key provider another name"
-                ),
-            ));
-        }
-        let mut ops = Vec::new();
-        // The upstream must also pass the egress allowlist, same as every other
-        // gateway call — but here the operator is *adding* the provider, so a
-        // host that isn't allowed yet is added rather than refused.
-        let allowed = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
-            .map(|a| a.allows(host))
-            .unwrap_or(false);
-        if !allowed {
-            let mut hosts = cfg.gateway.allow_hosts.clone();
-            hosts.push(crate::boundary::podman::setup::anchor_literal_host(host));
-            ops.push(crate::config::Op::set(
-                crate::config::KeyPath::keys(&["gateway", "allow_hosts"]),
-                hosts,
-            ));
-        }
-        let provider = Provider {
-            credential: body.credential.clone(),
-            upstream: body.upstream.clone(),
-            shape: body.shape.clone(),
-            login: body.login.clone(),
-            price: None,
-            models: crate::config::default_models(name),
-        };
-        ops.push(crate::config::Op::set_serialized(
-            crate::config::KeyPath::keys(&["providers", name]),
-            &provider,
-        )?);
-        Ok(ops)
-    })?;
-    Ok(())
+/// The edit that adds the provider `body` names to `cfg` (the file as it
+/// loads now), with its upstream's `host` on the allowlist.
+fn provider_ops(
+    cfg: &Config,
+    body: &CreateProviderBody,
+    host: &str,
+) -> ApiResult<Vec<crate::config::Op>> {
+    let name = body.name.as_str();
+    // A built-in the file does not name is the operator's to take over:
+    // `openai` is always present, and this is how it gets its upstream and key.
+    if cfg.declared_providers.contains(name) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("providers.{name} already exists"),
+        ));
+    }
+    if cfg.providers.get(name).is_some_and(|p| p.login.is_some()) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("{name} is the subscription sign-in; give the API-key provider another name"),
+        ));
+    }
+    let mut ops = Vec::new();
+    // The upstream must also pass the egress allowlist, same as every other
+    // gateway call — but here the operator is *adding* the provider, so a
+    // host that isn't allowed yet is added rather than refused.
+    let allowed = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
+        .map(|a| a.allows(host))
+        .unwrap_or(false);
+    if !allowed {
+        let mut hosts = cfg.gateway.allow_hosts.clone();
+        hosts.push(crate::boundary::podman::setup::anchor_literal_host(host));
+        ops.push(crate::config::Op::set(
+            crate::config::KeyPath::keys(&["gateway", "allow_hosts"]),
+            hosts,
+        ));
+    }
+    let provider = Provider {
+        credential: body.credential.clone(),
+        upstream: body.upstream.clone(),
+        shape: body.shape.clone(),
+        login: body.login.clone(),
+        price: None,
+        models: crate::config::default_models(name),
+    };
+    ops.push(crate::config::Op::set_serialized(
+        crate::config::KeyPath::keys(&["providers", name]),
+        &provider,
+    )?);
+    Ok(ops)
 }
 
 /// Write the settings the Settings pane names (`settings::apply`). An admin
@@ -6648,6 +6686,7 @@ pub async fn put_config(
     req: super::passkey::AdminRequest,
 ) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
     let mut patch: serde_json::Value = req.json()?;
+    super::config_api::refuse_hidden(&patch)?;
     let given = match patch
         .as_object_mut()
         .and_then(|o| o.remove("expected_hash"))
@@ -6862,15 +6901,86 @@ pub async fn put_manifest_text(
         .clone()
         .filter(|c| !c.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_CHANNELS[0].to_string());
+    manifest_item_names(
+        &body.kind,
+        &body.name,
+        &channel,
+        &[crate::store::KIND_INSTRUCTION, crate::store::KIND_AGENT],
+    )?;
+    // What a harness will be told is shown, not only named: newlines and
+    // tabs are written as escapes, and anything else a prompt could not show
+    // is refused.
+    if let Some(c) = super::config_api::hidden_char(&body.body, &['\n', '\t']) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "body holds U+{:04X}, a control, format or separator character a confirmation could not show",
+                c as u32
+            ),
+        )
+        .into());
+    }
+    let digest = crate::config::edit::hash(body.body.as_bytes());
+    let head: String = body.body.chars().take(200).collect();
+    let more = if body.body.chars().count() > 200 {
+        "..."
+    } else {
+        ""
+    };
     req.confirm(
         &s,
-        &format!("Set the {} {} on {channel}", body.kind, body.name),
+        &format!(
+            "Set the {} {} on {}: {} bytes, sha256 {}, reading {}{more}",
+            body.kind,
+            super::config_prompt::quote(&body.name),
+            super::config_prompt::quote(&channel),
+            body.body.len(),
+            &digest[..16],
+            super::config_prompt::quote(&head),
+        ),
     )
     .await?;
     s.store()
         .manifest_put_text(&channel, &body.kind, &body.name, &body.body)
         .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     Ok(Json(json!({ "channel": channel, "name": body.name })))
+}
+
+/// A manifest item's kind, name and channel, as plain as a prompt needs
+/// them: checked before anything is confirmed.
+fn manifest_item_names(kind: &str, name: &str, channel: &str, kinds: &[&str]) -> ApiResult<()> {
+    if !kinds.contains(&kind) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("`{kind}` is not one of {}", kinds.join(", ")),
+        ));
+    }
+    let plain = !name.is_empty()
+        && name.chars().count() <= 64
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !plain {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a name is 1 to 64 letters, digits, `.`, `-` and `_`, starting with a letter or digit"
+                .into(),
+        ));
+    }
+    if !proto::frame::valid_channel(channel) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "{} is not a channel name",
+                super::config_prompt::quote(channel)
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Remove one item from a channel's manifest. An admin action, as adding
@@ -6882,8 +6992,25 @@ pub async fn delete_manifest_item(
     req: super::passkey::AdminRequest,
 ) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
     let channel = q.channel();
-    req.confirm(&s, &format!("Remove the {kind} {name} from {channel}"))
-        .await?;
+    manifest_item_names(
+        &kind,
+        &name,
+        &channel,
+        &[
+            crate::store::KIND_SKILL,
+            crate::store::KIND_INSTRUCTION,
+            crate::store::KIND_AGENT,
+        ],
+    )?;
+    req.confirm(
+        &s,
+        &format!(
+            "Remove the {kind} {} from {}",
+            super::config_prompt::quote(&name),
+            super::config_prompt::quote(&channel)
+        ),
+    )
+    .await?;
     if !s.store().manifest_remove(&channel, &kind, &name)? {
         return Err(ApiError(
             StatusCode::NOT_FOUND,
@@ -6947,8 +7074,14 @@ pub async fn mesh_init(
 ) -> Result<Json<serde_json::Value>, super::passkey::Refusal> {
     let body: HubBody = req.json()?;
     let hub = validate_hub_base(&body.hub_url)?;
-    req.confirm(&s, &format!("Start a mesh with the hub at {hub}"))
-        .await?;
+    req.confirm(
+        &s,
+        &format!(
+            "Start a mesh with the hub at {}",
+            super::config_prompt::quote(&hub)
+        ),
+    )
+    .await?;
     let identity = crate::mesh::identity::load_or_generate()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .0;
@@ -7063,7 +7196,11 @@ pub async fn start_enroll(
         "paste the full invitation URL: a bare code does not say which hub".into(),
     ))?;
     let hub = validate_hub_base(&hub)?;
-    req.confirm(&s, &format!("Join the mesh at {hub}")).await?;
+    req.confirm(
+        &s,
+        &format!("Join the mesh at {}", super::config_prompt::quote(&hub)),
+    )
+    .await?;
     {
         let job = s.enroll.lock().unwrap();
         if !job.lines.is_empty() && !job.done {

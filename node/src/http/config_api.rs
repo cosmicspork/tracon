@@ -483,6 +483,68 @@ fn refused_keys(errors: &[KeyError]) -> Refused {
     refusal(StatusCode::UNPROCESSABLE_ENTITY, "refused", message, errors)
 }
 
+/// The first character in `text` a confirmation prompt could not show:
+/// a control (`\n`, `\t` and `\r` among them), format or line or paragraph
+/// separator character (Unicode Cc, Cf, Zl, Zp), other than those `allow`
+/// names.
+pub(crate) fn hidden_char(text: &str, allow: &[char]) -> Option<char> {
+    text.chars()
+        .find(|c| super::passkey::hidden(*c) && !allow.contains(c))
+}
+
+/// Where in `value` (a request body) a string or a key holds a character a
+/// confirmation prompt could not show, and which.
+fn hidden_in(value: &Value, at: &str) -> Option<(String, char)> {
+    match value {
+        Value::String(text) => hidden_char(text, &[]).map(|c| (at.to_string(), c)),
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(i, v)| hidden_in(v, &format!("{at}[{i}]"))),
+        Value::Object(map) => map.iter().find_map(|(k, v)| {
+            let here = match at.is_empty() {
+                true => k.clone(),
+                false => format!("{at}.{k}"),
+            };
+            match hidden_char(k, &[]) {
+                Some(c) => Some((here, c)),
+                None => hidden_in(v, &here),
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// Refuse a request body any of whose strings or keys holds a character a
+/// prompt could not show. A newline, a tab, a zero-width space or a
+/// direction override in a command, a path or a key would make what the
+/// operator confirms read differently from what is written. Decided from
+/// the request alone, before anything else.
+pub(crate) fn refuse_hidden(value: &Value) -> Result<(), Refused> {
+    match hidden_in(value, "") {
+        None => Ok(()),
+        Some((at, c)) => {
+            let at = if at.is_empty() {
+                "the body".to_string()
+            } else {
+                at
+            };
+            Err(refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "hidden_character",
+                format!(
+                    "{at} holds U+{:04X}, a control, format or separator character a confirmation could not show; it is refused",
+                    c as u32
+                ),
+                &[KeyError {
+                    key: at.clone(),
+                    message: format!("holds U+{:04X}", c as u32),
+                }],
+            ))
+        }
+    }
+}
+
 /// The version a request was decided against: `given` (its body's
 /// `expected_hash`) or its `If-Match`, which must agree. Required.
 pub(crate) fn expected_version(given: Option<&str>, req: &AdminRequest) -> Result<String, Refused> {
@@ -503,6 +565,13 @@ pub(crate) fn expected_version(given: Option<&str>, req: &AdminRequest) -> Resul
     }
 }
 
+/// The file's text, its hash and what it loads as, now.
+pub(crate) fn read_now() -> Result<(String, String, Config), Refused> {
+    let (text, hash) = edit::read_text(&Config::config_path()).map_err(edit_refusal)?;
+    let config = edit::preview(&text, &[]).map_err(edit_refusal)?.config;
+    Ok((text, hash, config))
+}
+
 /// The file's text and what it loads as, if it is still the version
 /// `expected` names; a conflict carrying the version now if not.
 pub(crate) fn read_expected(expected: &str) -> Result<(String, Config), Refused> {
@@ -520,8 +589,17 @@ pub(crate) fn read_expected(expected: &str) -> Result<(String, Config), Refused>
 pub(crate) fn prompt(text: &str, ops: &[Op]) -> Result<(Vec<Change>, String), Refused> {
     let seen = edit::preview(text, ops).map_err(edit_refusal)?;
     let parse = |t: &str| toml::from_str::<toml::Table>(t).unwrap_or_default();
-    let summary = super::config_prompt::summarize(&parse(text), &parse(&seen.text), &seen.changes)
-        .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
+    let effective = edit::preview(text, &[])
+        .ok()
+        .and_then(|now| toml::Table::try_from(&now.config).ok())
+        .unwrap_or_default();
+    let summary = super::config_prompt::summarize(
+        &parse(text),
+        &parse(&seen.text),
+        &effective,
+        &seen.changes,
+    )
+    .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
     Ok((seen.changes, summary))
 }
 
@@ -574,7 +652,16 @@ pub async fn patch_config(
     State(s): State<AppState>,
     req: AdminRequest,
 ) -> Result<Json<Value>, Refused> {
-    let body: PatchBody = req.json()?;
+    let raw: Value = req.json()?;
+    refuse_hidden(&raw)?;
+    let body: PatchBody = serde_json::from_value(raw).map_err(|e| {
+        refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            format!("the request body does not read: {e}"),
+            &[],
+        )
+    })?;
     let expected = expected_version(body.expected_hash.as_deref(), &req)?;
     if body.ops.is_empty() {
         return Err(refusal(

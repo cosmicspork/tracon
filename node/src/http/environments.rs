@@ -68,7 +68,14 @@ pub async fn save(
     State(s): State<AppState>,
     req: AdminRequest,
 ) -> Result<Json<Value>, super::config_api::Refused> {
-    let body: SaveBody = req.json()?;
+    let raw: Value = req.json()?;
+    super::config_api::refuse_hidden(&raw)?;
+    let body: SaveBody = serde_json::from_value(raw).map_err(|e| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the request body does not read: {e}"),
+        )
+    })?;
     let expected = super::config_api::expected_version(body.expected_hash.as_deref(), &req)?;
     crate::config::validate_repos(&body.entries)
         .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error))?;
@@ -117,11 +124,24 @@ pub async fn build(
     req: AdminRequest,
 ) -> Result<Json<Value>, super::passkey::Refusal> {
     let body: BuildBody = req.json()?;
+    if let Some(c) = super::config_api::hidden_char(&body.repo, &[]) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "repo holds U+{:04X}, a character a confirmation could not show",
+                c as u32
+            ),
+        )
+        .into());
+    }
     // Confirmed before the name is resolved: resolving it looks at the
     // host's directories, which is not for a caller who has not confirmed.
     req.confirm(
         &s,
-        &format!("Build the image for the repository {}", body.repo.trim()),
+        &format!(
+            "Build the image for the repository {}",
+            super::config_prompt::quote(body.repo.trim())
+        ),
     )
     .await?;
     let unprocessable = |message: String| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message);
