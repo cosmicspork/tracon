@@ -318,6 +318,10 @@ impl Backend for PodmanBackend {
         Some(self)
     }
 
+    fn runs_sessions_in_repository_images(&self) -> bool {
+        true
+    }
+
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
         volume_copy_in(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
@@ -551,6 +555,7 @@ impl super::ImageBuilder for PodmanBackend {
         let failure = |error: String, log: &[u8]| super::BuildFailure {
             error,
             log_tail: log_tail(log),
+            ..Default::default()
         };
         let out = match tokio::time::timeout(build.timeout, command.output()).await {
             Ok(Ok(out)) => out,
@@ -606,7 +611,7 @@ impl super::ImageBuilder for PodmanBackend {
     }
 }
 
-fn log_tail(bytes: &[u8]) -> String {
+pub(crate) fn log_tail(bytes: &[u8]) -> String {
     const MAX: usize = 8192;
     let text = String::from_utf8_lossy(bytes);
     let start = text.len().saturating_sub(MAX);

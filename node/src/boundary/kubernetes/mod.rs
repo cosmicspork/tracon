@@ -12,6 +12,7 @@
 //! port, and the node may keep the grant's credentials in a Secret of the
 //! run's own rather than in its pod spec.
 
+pub mod build;
 pub mod checks;
 
 use std::sync::Arc;
@@ -41,6 +42,9 @@ pub struct KubeBackend {
     /// re-check that finds the rights granted (or withdrawn) applies to runs
     /// that start after it.
     secret_rights: SecretRights,
+    /// `[runtime.kubernetes.builder]`, or why it is not a builder. `None`
+    /// where none is configured.
+    builder: Option<Result<build::BuildKitBuilder, build::Unusable>>,
     /// Every live per-client grant, served on the egress port.
     grants: Grants,
     /// Whether the policies let a harness pod reach the egress port, as the
@@ -50,6 +54,20 @@ pub struct KubeBackend {
     /// `internal_cidrs` entry that is not an address block, which turns
     /// per-client egress off and fails the runtime check.
     refusal: Result<Refusal, String>,
+}
+
+/// The builder `[runtime.kubernetes.builder]` configures, if any, staging on
+/// the state volume.
+fn builder_for(cfg: &Config) -> Option<Result<build::BuildKitBuilder, build::Unusable>> {
+    let settings = cfg.runtime.kubernetes.builder.as_ref()?;
+    let scratch = cfg.runtime.kubernetes.state_mount.join(build::SCRATCH);
+    Some(
+        build::BuildKitBuilder::new(settings, scratch).map_err(|why| {
+            build::Unusable(format!(
+                "[runtime.kubernetes.builder] is not usable ({why})"
+            ))
+        }),
+    )
 }
 
 /// Whether a harness pod can reach the node's egress port: the harness
@@ -111,6 +129,24 @@ impl KubeBackend {
             grants: Grants::default(),
             egress_port: EgressPort::default(),
             refusal,
+            builder: builder_for(cfg),
+        }
+    }
+
+    /// What the builder check found, in the words the `runtime` check
+    /// carries. Never a failure: a node without a working builder still runs
+    /// everything but a repository's `dockerfile`, which says why it is not
+    /// built.
+    pub async fn builder_status(&self) -> String {
+        match &self.builder {
+            None => "builder: not configured ([runtime.kubernetes.builder]), so a repository's \
+                     dockerfile is not built here"
+                .to_string(),
+            Some(Err(build::Unusable(why))) => format!("builder: {}", build::unusable(why)),
+            Some(Ok(builder)) => match builder.check().await {
+                Ok(said) => format!("builder: {said}"),
+                Err(why) => format!("builder: {}", build::unusable(&why)),
+            },
         }
     }
 
@@ -282,7 +318,28 @@ impl Backend for KubeBackend {
     }
 
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport {
-        checks::check_all(self, cfg, deep).await
+        let mut report = checks::check_all(self, cfg, deep).await;
+        let builder = self.builder_status().await;
+        if let Some(runtime) = report
+            .checks
+            .iter_mut()
+            .find(|check| check.id == super::CheckId::Runtime)
+        {
+            runtime.detail = format!("{}; {builder}", runtime.detail);
+        }
+        report
+    }
+
+    fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
+        match &self.builder {
+            Some(Ok(builder)) => Some(builder),
+            Some(Err(unusable)) => Some(unusable),
+            None => None,
+        }
+    }
+
+    fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
+        cfg.kubernetes_harness_image(harness_id)
     }
 
     /// Pods pull on use, so a cluster names each image and says nothing of it.
@@ -491,6 +548,104 @@ mod tests {
         cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         cfg.runtime.kubernetes.state_mount = state.to_path_buf();
         KubeBackend::new(&cfg)
+    }
+
+    /// Without `[runtime.kubernetes.builder]` nothing builds and the check
+    /// says so. A table that cannot be a builder, and a builder whose daemon
+    /// does not answer, are warnings in the check, and a build attempted
+    /// anyway fails with the check's own reason. Builds stage on the state
+    /// volume. Layered images copy the harness from the release's images.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_builder_is_handed_out_only_when_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unconfigured = backend(tmp.path());
+        assert!(unconfigured.image_builder().is_none());
+        assert!(unconfigured
+            .builder_status()
+            .await
+            .contains("builder: not configured"));
+        let cfg = Config::default();
+        assert_eq!(
+            Backend::harness_image(&unconfigured, &cfg, "claude"),
+            format!(
+                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg.runtime.kubernetes.builder = Some(crate::config::KubeBuilder {
+            registry: "cosmicspork".into(),
+            ..Default::default()
+        });
+        let invalid = KubeBackend::new(&cfg);
+        let said = invalid.builder_status().await;
+        assert!(said.contains("is not usable (registry must be"), "{said}");
+        std::fs::write(tmp.path().join("Containerfile"), "FROM scratch\n").unwrap();
+        async fn attempt(backend: &KubeBackend, dir: &std::path::Path) -> String {
+            let containerfile = dir.join("Containerfile");
+            backend
+                .image_builder()
+                .expect("a builder is handed out")
+                .build(crate::boundary::ImageBuild {
+                    tag: "localhost/tracon-repo-a:t",
+                    containerfile: &containerfile,
+                    context: dir,
+                    labels: &[],
+                    timeout: std::time::Duration::from_secs(30),
+                })
+                .await
+                .unwrap_err()
+                .error
+        }
+        assert_eq!(
+            Some(attempt(&invalid, tmp.path()).await.as_str()),
+            said.strip_prefix("builder: ")
+        );
+
+        let buildctl = tmp.path().join("buildctl");
+        std::fs::write(
+            &buildctl,
+            format!(
+                "#!/bin/sh\necho \"$TMPDIR\" > {}/tmpdir\necho 'error: connection refused' >&2\nexit 1\n",
+                tmp.path().display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&buildctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cfg.runtime.kubernetes.builder = Some(crate::config::KubeBuilder {
+            registry: "registry.digitalocean.com/cosmicspork".into(),
+            buildctl: buildctl.to_string_lossy().into_owned(),
+            ..Default::default()
+        });
+        cfg.runtime.kubernetes.state_mount = tmp.path().join("state");
+        let configured = KubeBackend::new(&cfg);
+        assert_eq!(
+            configured.image_builder().unwrap().scratch_dir(),
+            Some(tmp.path().join("state/tmp"))
+        );
+        // Nothing is layered for a session no runner here would run in it.
+        assert!(!Backend::runs_sessions_in_repository_images(&configured));
+        let said = configured.builder_status().await;
+        assert!(
+            said.contains("tcp://buildkitd.tracon-build.svc:1234 refused")
+                && said.contains("connection refused")
+                && said.ends_with("so a repository's image cannot be built"),
+            "{said}"
+        );
+        assert_eq!(
+            Some(attempt(&configured, tmp.path()).await.as_str()),
+            said.strip_prefix("builder: ")
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("tmpdir"))
+                .unwrap()
+                .trim(),
+            tmp.path().join("state/tmp").to_string_lossy()
+        );
     }
 
     #[cfg(unix)]

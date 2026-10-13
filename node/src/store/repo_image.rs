@@ -112,6 +112,43 @@ impl Store {
         Ok(())
     }
 
+    /// Drop a build that never got to its recipe: the builder could not
+    /// build at all. Recorded as failed it would stand against the recipe
+    /// until the operator asked again, though nothing was learned about it.
+    pub fn abandon_repo_image(&self, id: &str) -> Result<()> {
+        self.repo_image_conn()?.execute(
+            "DELETE FROM repo_image WHERE id = ?1 AND status = 'building'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Record the image a build stands on once it is known: for a
+    /// repository's own image, the image built from its Dockerfile before the
+    /// node's layer, by digest, so it can be removed by what it was rather
+    /// than by a tag a later build moved.
+    pub fn set_repo_image_parent(&self, id: &str, parent_image: &str) -> Result<()> {
+        self.repo_image_conn()?.execute(
+            "UPDATE repo_image SET parent_image = ?2 WHERE id = ?1",
+            params![id, parent_image],
+        )?;
+        Ok(())
+    }
+
+    /// Every finished build of a repository's images, of every kind, newest
+    /// first.
+    pub fn ready_repo_images(&self, repo_path: &str) -> Result<Vec<RepoImageRow>> {
+        let conn = self.repo_image_conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM repo_image WHERE repo_path = ?1 AND status = 'ready' \
+             ORDER BY started_ms DESC, id DESC"
+        ))?;
+        let rows = stmt
+            .query_map(params![repo_path], row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     /// The image a repository's work runs in: its newest build that finished.
     /// A later failure does not unseat it; the last image that worked is what
     /// keeps a repository usable while its Dockerfile is broken.

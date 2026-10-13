@@ -346,8 +346,12 @@ servers reaching the v2 session runner.
   harness layered on, so it has its checks' tools, and reaches the registries its
   repository opens to sessions (`session_egress`). An OpenCode session, and any session
   on Kubernetes, stays in the harness image and reaches no registry. An image the node
-  builds from a repository's Dockerfile is built on Podman only, and a superseded one is
-  removed only when nothing still runs from it.
+  builds from a repository's Dockerfile is built by Podman, or on Kubernetes by a
+  BuildKit daemon the deployment runs (`[runtime.kubernetes.builder]`) and pushed to a
+  registry. A superseded one is removed only when nothing still runs from it under
+  Podman; a registry's copy is deleted by digest, and frees space only when the
+  registry's garbage collection runs. No other node reuses a pushed image: each node
+  builds and pins its own.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. The base
   cache they start from is filled when the node builds a repository's image; an entry

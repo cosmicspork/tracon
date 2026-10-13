@@ -10,6 +10,7 @@
 pub mod checks;
 pub mod kubernetes;
 pub mod podman;
+pub mod registry;
 
 use std::sync::Arc;
 
@@ -113,10 +114,37 @@ pub struct BuiltImage {
 }
 
 /// A build that produced none.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BuildFailure {
     pub error: String,
     pub log_tail: String,
+    /// The builder could not build at all (a daemon that does not answer, a
+    /// registry that refuses the credential, a builder configured wrong),
+    /// rather than the recipe failing. Such a failure says nothing about the
+    /// recipe, so it is not remembered against it: the next start tries
+    /// again.
+    pub transient: bool,
+}
+
+impl BuildFailure {
+    /// A failure of the builder rather than of the recipe.
+    pub fn transient(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            transient: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// Whether a builder holds an image, as far as it can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Present,
+    Absent,
+    /// It could not be asked: a registry that did not answer. What is
+    /// standing keeps being used, and nothing is rebuilt on its account.
+    Unknown,
 }
 
 /// A runtime that can build an image where the node's runs will find it. A
@@ -134,6 +162,31 @@ pub trait ImageBuilder: Send + Sync {
     /// Drop an image nothing uses any more. Best effort: one a container
     /// still runs from stays.
     async fn remove(&self, image: &str);
+    /// Where a build's context and Containerfile are staged. `None` is the
+    /// system temporary directory; a builder whose host keeps that on small
+    /// ephemeral storage (a pod's container filesystem) names one with room.
+    fn scratch_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// `exists`, with a third answer for a builder that may be unable to ask.
+    async fn presence(&self, image: &str) -> Presence {
+        match self.exists(image).await {
+            true => Presence::Present,
+            false => Presence::Absent,
+        }
+    }
+    /// Why no build could succeed right now, asked before anything is staged
+    /// or recorded. `None` for a builder that is always there.
+    async fn unavailable(&self) -> Option<String> {
+        None
+    }
+    /// Whether a superseded image is kept for one more generation before it
+    /// is removed. A registry's is, because a pod already scheduled on it may
+    /// not have pulled it yet; a local store's need not be, because the
+    /// runtime refuses to remove an image a container uses.
+    fn retains_previous(&self) -> bool {
+        false
+    }
 }
 
 /// One harness's image as the runtime holds it.
@@ -180,6 +233,12 @@ pub trait Backend: Send + Sync {
         let _ = image;
         self.runner_for(harness_id, extra_mounts)
     }
+    /// Whether `runner_in` runs a session in the image it is given. Where it
+    /// does not, a session keeps the harness's image and nothing is layered
+    /// for it: a layer no session runs in would only be built and reported.
+    fn runs_sessions_in_repository_images(&self) -> bool {
+        false
+    }
     /// Each supported harness's image and its state: `current`, `stale`,
     /// `missing`, or `unknown` where this runtime cannot say. For display;
     /// `check_all` is what refuses a node whose images are not usable.
@@ -191,6 +250,11 @@ pub trait Backend: Send + Sync {
     /// given.
     fn image_builder(&self) -> Option<&dyn ImageBuilder> {
         None
+    }
+    /// The image a named harness runs in here, which a repository's image
+    /// copies the harness from. Podman's unless a runtime says otherwise.
+    fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
+        cfg.podman_harness_image(harness_id)
     }
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.

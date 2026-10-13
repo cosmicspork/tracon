@@ -566,8 +566,19 @@ pub async fn snapshot_candidate(
     head_sha: &str,
     max_bytes: u64,
 ) -> Result<CandidateSnapshot, ReviewError> {
+    snapshot_candidate_in(&std::env::temp_dir(), worktree, head_sha, max_bytes).await
+}
+
+/// `snapshot_candidate`, materialised under `parent` rather than the system
+/// temporary directory: an image builder's own scratch space.
+pub async fn snapshot_candidate_in(
+    parent: &Path,
+    worktree: &str,
+    head_sha: &str,
+    max_bytes: u64,
+) -> Result<CandidateSnapshot, ReviewError> {
     let tree = read_candidate(worktree, head_sha, max_bytes).await?;
-    let root = std::env::temp_dir()
+    let root = parent
         .join("tracon-candidates")
         .join(uuid::Uuid::now_v7().to_string());
     tokio::task::spawn_blocking(move || {
