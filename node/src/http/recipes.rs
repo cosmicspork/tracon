@@ -932,7 +932,7 @@ async fn identity_of_entry(cfg: &Config, entry: &Repo) -> Option<String> {
 }
 
 async fn origin_of(cfg: &Config, repo: &Path) -> Option<String> {
-    crate::corpus::project::identify("", repo, &cfg.publish.git)
+    crate::corpus::project::identify("", repo, &cfg.live().publish.git)
         .await
         .2
 }
