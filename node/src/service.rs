@@ -12,9 +12,10 @@
 //! separately authenticated, loopback-only scheduling of these same fixed
 //! install, remove, and restart operations; it never accepts a command, path,
 //! or service name from a caller. A harness inside the boundary still cannot
-//! drive them. The one restart the node starts itself is in a Kubernetes pod
-//! (`restart`): there it shuts down and exits, and the kubelet is what
-//! starts it again.
+//! drive them. The one restart the node starts itself is in a container its
+//! deployment restarts on exit (`restart::EXIT_ENV`, set by the Kubernetes
+//! manifests): there it shuts down and exits, and the kubelet is what starts
+//! it again.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -389,12 +390,6 @@ pub fn service_restart_available() -> Result<&'static str, String> {
     } else {
         "systemd user service"
     })
-}
-
-/// Whether this process runs in a Kubernetes pod, where a process that exits
-/// is started again by the kubelet (a Deployment's pods restart always).
-pub fn in_kubernetes() -> bool {
-    std::env::var_os("KUBERNETES_SERVICE_HOST").is_some_and(|v| !v.is_empty())
 }
 
 /// Schedule one fixed service lifecycle operation after the HTTP response has

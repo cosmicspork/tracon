@@ -1408,6 +1408,13 @@ async fn mediate(
         }
 
         Mediation::Policy(action) => {
+            // A command or a compaction is a turn: none starts while a
+            // restart waits for the running ones to finish.
+            if matches!(action, "command" | "compact") {
+                if let Some(why) = s.manager.restart().refusal() {
+                    return answer(StatusCode::CONFLICT, &why);
+                }
+            }
             let decision = {
                 let policy = s.manager.policy().read();
                 policy.decide(&PolicyRequest {

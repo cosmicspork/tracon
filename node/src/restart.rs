@@ -10,13 +10,20 @@
 //! - `now`: the node restarts at once, ending every live session. The caller
 //!   is shown which sessions those are and has to confirm them.
 //!
+//! Either way the file is read again just before the restart: one that
+//! changed since the request named it, or that no longer loads, is not
+//! restarted into.
+//!
 //! What restarts the node is whatever supervises it. Under the fixed user
 //! service (systemd, launchd) that is the service's own restart, as the
-//! maintenance route has always done. In a Kubernetes pod the node shuts down
-//! the way SIGTERM shuts it down and exits 0; the kubelet starts the
-//! container again, on the same volume and the same pod IP. Anywhere else
-//! nothing would start it again, so the request is refused with the reason.
+//! maintenance route has always done. Where the deployment says the
+//! container is restarted when its process exits ([`EXIT_ENV`], which the
+//! Kubernetes manifests set), the node shuts down the way SIGTERM shuts it
+//! down and exits 0, and the kubelet starts it again on the same volume and
+//! pod IP. Anywhere else nothing would start it again, so the request is
+//! refused with the reason.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,8 +39,16 @@ use crate::stream::Frame;
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
 /// The longest wait a caller may ask for.
 pub const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a restart handed to the supervisor may take before the node,
+/// still running and not stopping, decides it did not happen. Longer than
+/// the user unit's stop timeout.
+pub const WATCHDOG: Duration = Duration::from_secs(120);
 
-pub const KUBERNETES: &str = "kubernetes";
+/// Set to `1` where the container is restarted whenever its process exits
+/// (a Kubernetes Deployment's pods, a container run with a restart policy of
+/// always): a restart is then a clean exit.
+pub const EXIT_ENV: &str = "TRACON_RESTART_BY_EXIT";
+pub const EXIT: &str = "exit for the container to be restarted";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -44,7 +59,8 @@ pub enum Mode {
 }
 
 /// What starts the node again after it stops. The system's answer in
-/// production; a test's stand-in otherwise.
+/// production; a test's stand-in otherwise. Both calls may block (they run
+/// `systemctl`); callers on the runtime use [`mechanism_of`].
 pub trait Supervisor: Send + Sync {
     /// The mechanism that would restart this node, or why there is none.
     fn mechanism(&self) -> Result<&'static str, String>;
@@ -56,21 +72,26 @@ pub trait Supervisor: Send + Sync {
 /// The supervisor this process actually runs under.
 pub struct System;
 
+fn exit_opted_in() -> bool {
+    std::env::var(EXIT_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
 impl Supervisor for System {
     fn mechanism(&self) -> Result<&'static str, String> {
-        if crate::service::in_kubernetes() {
-            return Ok(KUBERNETES);
+        if exit_opted_in() {
+            return Ok(EXIT);
         }
         crate::service::service_restart_available().map_err(|why| {
             format!(
-                "{why}; nothing would start this node again, so restart it the way it was started"
+                "{why}; nothing would start this node again, so restart it the way it was started \
+                 (a container restarted whenever it exits sets {EXIT_ENV}=1)"
             )
         })
     }
 
     fn restart(&self) -> Result<(), String> {
         match self.mechanism()? {
-            KUBERNETES => {
+            EXIT => {
                 request_exit();
                 Ok(())
             }
@@ -80,9 +101,23 @@ impl Supervisor for System {
     }
 }
 
+/// [`Supervisor::mechanism`], off the async threads.
+pub async fn mechanism_of(supervisor: Arc<dyn Supervisor>) -> Result<&'static str, String> {
+    tokio::task::spawn_blocking(move || supervisor.mechanism())
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+}
+
+async fn restart_with(supervisor: Arc<dyn Supervisor>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || supervisor.restart())
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+}
+
 fn exit_sender() -> &'static tokio::sync::watch::Sender<bool> {
-    static EXIT: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> = std::sync::OnceLock::new();
-    EXIT.get_or_init(|| tokio::sync::watch::channel(false).0)
+    static EXIT_ASKED: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
+        std::sync::OnceLock::new();
+    EXIT_ASKED.get_or_init(|| tokio::sync::watch::channel(false).0)
 }
 
 /// Ask `serve` to shut down as SIGTERM would and the process to exit 0, for
@@ -103,6 +138,17 @@ pub fn exit_was_requested() -> bool {
     *exit_sender().borrow()
 }
 
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// `serve` has begun to shut down, for whatever reason.
+pub fn note_shutdown() {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+}
+
+fn shutting_down() -> bool {
+    SHUTTING_DOWN.load(Ordering::SeqCst) || exit_was_requested()
+}
+
 /// A restart asked for and not yet done.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
@@ -112,6 +158,8 @@ pub struct Plan {
     pub deadline_ms: i64,
     /// `draining` while it waits, `restarting` once the supervisor has it.
     pub state: &'static str,
+    /// When the supervisor was handed it.
+    pub restarting_ms: Option<i64>,
     /// The `node.toml` version it was decided against.
     pub expected_hash: String,
     #[serde(skip)]
@@ -134,6 +182,7 @@ pub struct Restart {
     state: parking_lot::Mutex<State>,
     supervisor: parking_lot::RwLock<Arc<dyn Supervisor>>,
     poll: parking_lot::RwLock<Duration>,
+    watchdog: parking_lot::RwLock<Duration>,
 }
 
 impl Default for Restart {
@@ -142,6 +191,7 @@ impl Default for Restart {
             state: Default::default(),
             supervisor: parking_lot::RwLock::new(Arc::new(System)),
             poll: parking_lot::RwLock::new(Duration::from_secs(2)),
+            watchdog: parking_lot::RwLock::new(WATCHDOG),
         }
     }
 }
@@ -175,6 +225,11 @@ impl Restart {
     /// How often a waiting restart looks at what is running.
     pub fn set_poll(&self, every: Duration) {
         *self.poll.write() = every;
+    }
+
+    /// How long a restart handed to the supervisor may take ([`WATCHDOG`]).
+    pub fn set_watchdog(&self, after: Duration) {
+        *self.watchdog.write() = after;
     }
 
     fn supervisor(&self) -> Arc<dyn Supervisor> {
@@ -214,7 +269,9 @@ pub enum Refused {
 pub struct Busy {
     /// Sessions on this node with a turn running.
     pub turns: Vec<String>,
-    /// Required checks running.
+    /// Required checks running that were started before the restart was
+    /// asked for. One started since belongs to a turn that will wait for it
+    /// after the restart, not to work the restart waits on.
     pub checks: i64,
 }
 
@@ -224,7 +281,9 @@ impl Busy {
     }
 }
 
-pub fn busy(manager: &Manager) -> Busy {
+/// What is running now; checks started at or after `before_ms` are not
+/// counted.
+pub fn busy(manager: &Manager, before_ms: Option<i64>) -> Busy {
     let store = manager.store();
     let turns = store
         .list_sessions(None)
@@ -237,13 +296,20 @@ pub fn busy(manager: &Manager) -> Busy {
         })
         .map(|s| s.id)
         .collect();
-    Busy {
-        turns,
-        checks: store
-            .running_check_run_ids()
-            .map(|ids| ids.len() as i64)
-            .unwrap_or(0),
-    }
+    let checks = store
+        .running_check_run_ids()
+        .unwrap_or_default()
+        .iter()
+        .filter(|id| match before_ms {
+            None => true,
+            Some(before) => store
+                .check_run(id)
+                .ok()
+                .flatten()
+                .is_some_and(|run| run.started_ms < before),
+        })
+        .count() as i64;
+    Busy { turns, checks }
 }
 
 /// The sessions a restart ends: every live one this node runs, as
@@ -274,11 +340,11 @@ pub fn closing(manager: &Manager) -> Vec<Value> {
 
 /// Everything the interface shows about restarting: what a restart would
 /// change, whether one can be done here and how, and the one waiting.
-pub fn status(manager: &Manager) -> Value {
+pub async fn status(manager: &Manager) -> Value {
     let cfg = manager.cfg();
     let pending = crate::config::live::pending_restart_at(cfg, &Config::config_path());
     let restart = manager.restart();
-    let mechanism = restart.supervisor().mechanism();
+    let mechanism = mechanism_of(restart.supervisor()).await;
     let (plan, last_error) = {
         let state = restart.state.lock();
         (state.plan.clone(), state.last_error.clone())
@@ -290,8 +356,8 @@ pub fn status(manager: &Manager) -> Value {
             "mechanism": mechanism.as_ref().ok(),
             "reason": mechanism.as_ref().err(),
         },
+        "busy": busy(manager, plan.as_ref().map(|p| p.requested_ms)),
         "plan": plan,
-        "busy": busy(manager),
         "closing": closing(manager),
         "last_error": last_error,
     })
@@ -301,7 +367,7 @@ pub fn status(manager: &Manager) -> Value {
 /// was last sent. Called from the node's 15-second tick, so the look itself
 /// is cheap: the file's hash and diff, and the plan. Asking the supervisor
 /// (which runs `systemctl`) is left to a change.
-pub fn publish(manager: &Manager) {
+pub async fn publish(manager: &Manager) {
     let shown = {
         let pending =
             crate::config::live::pending_restart_at(manager.cfg(), &Config::config_path());
@@ -319,28 +385,29 @@ pub fn publish(manager: &Manager) {
         }
         state.published = Some(shown);
     }
-    manager.bus().publish(Frame::Restart(status(manager)));
+    manager.bus().publish(Frame::Restart(status(manager).await));
+}
+
+/// The file as it is now, if it is `expected` and loads; else why not.
+fn file_is(expected: &str, since: &str) -> Result<(), String> {
+    let snapshot = crate::config::edit::snapshot_at(&Config::config_path())
+        .map_err(|e| format!("{e}; the node would not start from it"))?;
+    if snapshot.hash != expected {
+        return Err(format!(
+            "node.toml changed since {since}; it is now {}",
+            snapshot.hash
+        ));
+    }
+    Ok(())
 }
 
 /// Ask for a restart. On success the restart is waiting (`when_idle`) or
 /// under way (`now`), and the status is returned.
-pub fn request(manager: &Manager, req: Request) -> Result<Value, Refused> {
-    let path = Config::config_path();
-    let snapshot = crate::config::edit::snapshot_at(&path).map_err(|e| {
-        Refused::Conflict(format!(
-            "{e}; the node would not start from it, so it is not restarted"
-        ))
-    })?;
-    if snapshot.hash != req.expected_hash {
-        return Err(Refused::Conflict(format!(
-            "node.toml changed since it was read; it is now {}",
-            snapshot.hash
-        )));
-    }
+pub async fn request(manager: &Manager, req: Request) -> Result<Value, Refused> {
+    file_is(&req.expected_hash, "it was read").map_err(Refused::Conflict)?;
     let restart = manager.restart().clone();
-    restart
-        .supervisor()
-        .mechanism()
+    mechanism_of(restart.supervisor())
+        .await
         .map_err(Refused::Unavailable)?;
     if req.mode == Mode::Now && !req.confirm {
         return Err(Refused::ConfirmRequired(closing(manager)));
@@ -353,52 +420,63 @@ pub fn request(manager: &Manager, req: Request) -> Result<Value, Refused> {
     let now = crate::store::now_ms();
     let generation = {
         let mut state = restart.state.lock();
-        match &mut state.plan {
-            // Asked again while one waits: `now` hurries it along, and a
-            // second `when_idle` is the one already waiting.
-            Some(plan) if plan.state == "restarting" || req.mode == Mode::WhenIdle => {
-                let plan = plan.clone();
-                drop(state);
-                tracing::info!(mode = ?plan.mode, "a restart is already waiting");
-                return Ok(status(manager));
-            }
-            _ => {}
+        // Asked again while one waits: `now` hurries it along, and a second
+        // `when_idle` is the one already waiting.
+        let waiting = state
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.state == "restarting" || req.mode == Mode::WhenIdle);
+        if waiting {
+            None
+        } else {
+            state.generation += 1;
+            state.last_error = None;
+            state.plan = Some(Plan {
+                mode: req.mode,
+                requested_ms: now,
+                deadline_ms: now + wait.as_millis() as i64,
+                state: "draining",
+                restarting_ms: None,
+                expected_hash: req.expected_hash.clone(),
+                generation: state.generation,
+            });
+            Some(state.generation)
         }
-        state.generation += 1;
-        state.last_error = None;
-        state.plan = Some(Plan {
-            mode: req.mode,
-            requested_ms: now,
-            deadline_ms: now + wait.as_millis() as i64,
-            state: "draining",
-            expected_hash: req.expected_hash.clone(),
-            generation: state.generation,
-        });
-        state.generation
+    };
+    let Some(generation) = generation else {
+        tracing::info!("a restart is already waiting");
+        return Ok(status(manager).await);
     };
     tracing::warn!(mode = ?req.mode, wait_secs = wait.as_secs(), "restart requested; new sessions and turns are refused until it happens");
-    publish(manager);
+    publish(manager).await;
     tokio::spawn(drive(manager.clone(), generation));
-    Ok(status(manager))
+    Ok(status(manager).await)
 }
 
-/// Withdraw a waiting restart: the node takes work again. `false` when none
-/// was waiting or it is already under way.
-pub fn cancel(manager: &Manager) -> bool {
+/// Withdraw a restart: one still waiting for running work, or one the
+/// supervisor was handed longer than the watchdog ago and that evidently did
+/// not happen. The node takes work again. `false` when there is none to
+/// withdraw.
+pub async fn cancel(manager: &Manager) -> bool {
+    let restart = manager.restart();
+    let stuck_after = restart.watchdog.read().as_millis() as i64;
     let cancelled = {
-        let mut state = manager.restart().state.lock();
-        match &state.plan {
-            Some(plan) if plan.state == "draining" => {
-                state.plan = None;
-                state.generation += 1;
-                true
-            }
-            _ => false,
+        let mut state = restart.state.lock();
+        let withdrawable = state.plan.as_ref().is_some_and(|plan| match plan.state {
+            "draining" => true,
+            _ => plan
+                .restarting_ms
+                .is_some_and(|at| crate::store::now_ms() - at >= stuck_after),
+        });
+        if withdrawable {
+            state.plan = None;
+            state.generation += 1;
         }
+        withdrawable
     };
     if cancelled {
         tracing::info!("restart withdrawn; the node takes work again");
-        publish(manager);
+        publish(manager).await;
     }
     cancelled
 }
@@ -407,55 +485,83 @@ pub fn cancel(manager: &Manager) -> bool {
 /// up at the deadline.
 async fn drive(manager: Manager, generation: u64) {
     let restart = manager.restart().clone();
-    loop {
+    let plan = loop {
         let Some(plan) = restart.plan().filter(|p| p.generation == generation) else {
             return;
         };
         if plan.mode == Mode::Now {
             // Long enough for the answer to the request to leave.
             tokio::time::sleep(Duration::from_millis(300)).await;
-            break;
+            break plan;
         }
-        let busy = busy(&manager);
+        let busy = busy(&manager, Some(plan.requested_ms));
         if busy.idle() {
-            break;
+            break plan;
         }
         if crate::store::now_ms() >= plan.deadline_ms {
-            abandon(&manager, generation, &busy).await;
+            let why = format!(
+                "gave up waiting: {} turn{} and {} check{} still running at the deadline",
+                busy.turns.len(),
+                if busy.turns.len() == 1 { "" } else { "s" },
+                busy.checks,
+                if busy.checks == 1 { "" } else { "s" },
+            );
+            abandon(&manager, generation, why).await;
             return;
         }
         let poll = *restart.poll.read();
         tokio::time::sleep(poll).await;
+    };
+    // What the restart would load, read again now: the wait may have been
+    // long, and the file is only restarted into if it is still the one named.
+    if let Err(why) = file_is(&plan.expected_hash, "the restart was asked for") {
+        abandon(&manager, generation, why).await;
+        return;
     }
     {
         let mut state = restart.state.lock();
         match &mut state.plan {
-            Some(plan) if plan.generation == generation => plan.state = "restarting",
+            Some(plan) if plan.generation == generation => {
+                plan.state = "restarting";
+                plan.restarting_ms = Some(crate::store::now_ms());
+            }
             // Withdrawn while it waited.
             _ => return,
         }
     }
-    publish(&manager);
+    publish(&manager).await;
     tracing::warn!("restarting the node");
-    if let Err(why) = restart.supervisor().restart() {
-        tracing::error!(%why, "the restart could not be started; the node takes work again");
-        {
-            let mut state = restart.state.lock();
-            state.plan = None;
-            state.last_error = Some(why);
-        }
-        publish(&manager);
+    if let Err(why) = restart_with(restart.supervisor()).await {
+        abandon(
+            &manager,
+            generation,
+            format!("the restart could not be started: {why}"),
+        )
+        .await;
+        return;
     }
+    // Handed over. If the node is still here and not stopping once the
+    // supervisor has had ample time, the restart did not happen: say so,
+    // and take work again rather than refuse it for ever.
+    let after = *restart.watchdog.read();
+    tokio::time::sleep(after).await;
+    if shutting_down() {
+        return;
+    }
+    abandon(
+        &manager,
+        generation,
+        format!(
+            "the node was handed to its supervisor to restart and is still running {} s later",
+            after.as_secs()
+        ),
+    )
+    .await;
 }
 
-async fn abandon(manager: &Manager, generation: u64, busy: &Busy) {
-    let why = format!(
-        "gave up waiting: {} turn{} and {} check{} still running at the deadline",
-        busy.turns.len(),
-        if busy.turns.len() == 1 { "" } else { "s" },
-        busy.checks,
-        if busy.checks == 1 { "" } else { "s" },
-    );
+/// Give a restart up: the node takes work again, the reason is kept for the
+/// banner, and the operator's devices are told.
+async fn abandon(manager: &Manager, generation: u64, why: String) {
     {
         let mut state = manager.restart().state.lock();
         if state.plan.as_ref().map(|p| p.generation) != Some(generation) {
@@ -465,13 +571,13 @@ async fn abandon(manager: &Manager, generation: u64, busy: &Busy) {
         state.last_error = Some(why.clone());
     }
     tracing::warn!(%why, "restart abandoned; the node takes work again");
-    publish(manager);
+    publish(manager).await;
     crate::notify::send_operator(
         manager.store(),
         manager.cfg(),
         &uuid::Uuid::now_v7().to_string(),
         "Restart abandoned".into(),
-        format!("{why}. Restart now from Settings to end them."),
+        format!("{why}."),
         "/settings".into(),
         &[],
     )

@@ -56,6 +56,10 @@ spec:
               value: /state/home
             - name: RUST_LOG
               value: tracon=info
+            # A Deployment's pod is started again whenever its process exits,
+            # so a restart asked for through the API is a clean exit.
+            - name: TRACON_RESTART_BY_EXIT
+              value: "1"
             - name: TRACON_NAMESPACE
               valueFrom:
                 fieldRef:

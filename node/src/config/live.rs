@@ -32,6 +32,16 @@ pub struct ConfigHandle {
     boot: parking_lot::RwLock<Option<Boot>>,
     /// The hash of the file `current` was taken from.
     applied: parking_lot::RwLock<Option<String>>,
+    /// A changed file seen once from outside: taken in when the next look
+    /// sees the same version, so a file caught half written by an editor is
+    /// never applied.
+    candidate: parking_lot::RwLock<Option<String>>,
+    /// The version whose live keys could not be laid over the boot config,
+    /// so it is said once rather than at every look.
+    failed: parking_lot::RwLock<Option<String>>,
+    /// Held across reading the file and applying it, so an older version can
+    /// never be applied over a newer one.
+    order: parking_lot::Mutex<()>,
 }
 
 /// The file as the node loaded it at start.
@@ -50,6 +60,9 @@ impl Clone for ConfigHandle {
             current: parking_lot::RwLock::new(self.current.read().clone()),
             boot: parking_lot::RwLock::new(self.boot.read().clone()),
             applied: parking_lot::RwLock::new(self.applied.read().clone()),
+            candidate: Default::default(),
+            failed: Default::default(),
+            order: Default::default(),
         }
     }
 }
@@ -104,33 +117,70 @@ impl Config {
 
     /// Take in `newer`, the file as it now loads (its hash `hash`): its live
     /// keys apply from here on, and the `[[repo]]` table is replaced whole,
-    /// as a save of it always did. Called on the node's own `Arc<Config>`
-    /// after an edit, and when the file changed under the node.
-    pub fn apply_live(&self, newer: &Config, hash: &str) {
+    /// as a save of it always did. The caller holds `order`.
+    fn apply_ordered(&self, newer: &Config, hash: &str) {
+        self.live_repo.set(newer.repo.clone());
         match overlay(self, newer) {
             Ok(merged) => {
-                self.live_repo.set(merged.repo.clone());
                 *self.live.current.write() = Some(Arc::new(merged));
-                *self.live.applied.write() = Some(hash.to_string());
+                *self.live.failed.write() = None;
             }
             Err(error) => {
-                tracing::error!(%error, "node.toml changed, but its live keys could not be applied; they wait for a restart")
+                let said = self.live.failed.read().as_deref() == Some(hash);
+                if !said {
+                    tracing::error!(%error, "node.toml changed, but its live keys could not be applied; they wait for a restart");
+                    *self.live.failed.write() = Some(hash.to_string());
+                }
             }
         }
+        *self.live.applied.write() = Some(hash.to_string());
+    }
+
+    /// Take in `newer`, which an edit wrote as `hash`, if the file at `path`
+    /// is still that version; if another edit has landed since, take in the
+    /// file as it is now instead. Either way nothing older than what is
+    /// applied ever replaces it.
+    pub fn apply_live_at(&self, path: &std::path::Path, newer: &Config, hash: &str) {
+        let _order = self.live.order.lock();
+        let now = edit::file_hash(path).ok();
+        if now.as_deref() == Some(hash) {
+            self.apply_ordered(newer, hash);
+            return;
+        }
+        if now.is_none() || *self.live.applied.read() == now {
+            return;
+        }
+        if let Ok(snapshot) = edit::snapshot_at(path) {
+            self.apply_ordered(&snapshot.config, &snapshot.hash);
+        }
+    }
+
+    /// [`Config::apply_live_at`] at the node's own `node.toml`.
+    pub fn apply_live(&self, newer: &Config, hash: &str) {
+        self.apply_live_at(&super::Config::config_path(), newer, hash);
     }
 
     /// What an edit of the file left, applied to this running node.
     pub fn apply_edit(&self, outcome: &edit::EditOutcome) {
+        self.apply_edit_at(&super::Config::config_path(), outcome);
+    }
+
+    pub fn apply_edit_at(&self, path: &std::path::Path, outcome: &edit::EditOutcome) {
         if outcome.wrote() {
-            self.apply_live(&outcome.config, &outcome.new_hash);
+            self.apply_live_at(path, &outcome.config, &outcome.new_hash);
         }
     }
 
     /// Take in the file at `path` as it is now, if it differs from what was
-    /// last taken in and it loads. An edit made by another process (the
-    /// CLI, an editor) is noticed this way; the node's own edits apply as
-    /// they land.
+    /// last taken in, an earlier look saw the same version, and it loads. An
+    /// edit made by another process (the CLI, an editor) is noticed this
+    /// way; the node's own edits apply as they land.
     pub fn refresh_live_from(&self, path: &std::path::Path) {
+        // The `[[repo]]` writers read the live table, edit and set it under
+        // this lock; a refresh between their read and their set would hand
+        // the next one a table the file no longer holds.
+        let _repos = edit::repo_lock();
+        let _order = self.live.order.lock();
         let Ok(hash) = edit::file_hash(path) else {
             return;
         };
@@ -141,13 +191,21 @@ impl Config {
             .clone()
             .or_else(|| self.boot_hash());
         if seen.as_deref() == Some(hash.as_str()) {
+            *self.live.candidate.write() = None;
             return;
         }
+        if self.live.candidate.read().as_deref() != Some(hash.as_str()) {
+            *self.live.candidate.write() = Some(hash);
+            return;
+        }
+        *self.live.candidate.write() = None;
         match edit::snapshot_at(path) {
-            Ok(snapshot) => {
+            Ok(snapshot) if snapshot.hash == hash => {
                 tracing::info!(hash = %snapshot.hash, "node.toml changed outside the node; applying its live keys");
-                self.apply_live(&snapshot.config, &snapshot.hash);
+                self.apply_ordered(&snapshot.config, &snapshot.hash);
             }
+            // Changed again between the two reads: the next look sees it.
+            Ok(_) => {}
             // Said once per version, not every look.
             Err(error) => {
                 tracing::warn!(%error, "node.toml changed outside the node and does not load; nothing applied");
@@ -190,7 +248,9 @@ pub fn pending_restart_at(cfg: &Config, path: &std::path::Path) -> Option<Pendin
     };
     let hash = edit::hash(&bytes);
     let text = String::from_utf8_lossy(&bytes);
-    let unparseable = text.parse::<toml::Table>().is_err();
+    // Not only TOML: a file that parses and fails a start's checks would not
+    // start either.
+    let unparseable = hash != boot.hash && edit::load_text(&text, path).is_err();
     let keys = match hash == boot.hash || unparseable {
         true => Vec::new(),
         false => pending_restart(&boot.text, &text),
@@ -212,7 +272,8 @@ pub struct PendingRestart {
     pub hash: String,
     /// Restart-only keys that differ, as the file spells them.
     pub keys: Vec<String>,
-    /// The file does not parse now; a restart would not start.
+    /// The file does not load now (it does not parse, or fails a start's
+    /// checks); a restart would not start.
     pub unparseable: bool,
 }
 
@@ -385,10 +446,11 @@ mod tests {
         let cfg = Arc::new(load("[session]\nbudget_tokens = 5\n"));
         let shared = cfg.clone();
         let copied = (*cfg).clone();
-        cfg.apply_live(
-            &load("[session]\nbudget_tokens = 7\nworktree_root = \"/x\"\n"),
-            "h",
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let text = "[session]\nbudget_tokens = 7\nworktree_root = \"/x\"\n";
+        std::fs::write(&path, text).unwrap();
+        cfg.apply_live_at(&path, &load(text), &edit::hash(text.as_bytes()));
         assert_eq!(shared.live().session.budget_tokens, 7);
         assert_ne!(
             shared.live().session.worktree_root,
@@ -397,6 +459,53 @@ mod tests {
         assert_eq!(copied.live().session.budget_tokens, 5);
         // The boot value itself is untouched: `cfg.session` is what started.
         assert_eq!(cfg.session.budget_tokens, 5);
+    }
+
+    /// An edit applied after a newer one landed never puts the older file's
+    /// keys back: what is applied is the file as it is.
+    #[test]
+    fn an_older_version_never_replaces_a_newer_one() {
+        let cfg = load("[review]\nmax_files = 1\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        let older = "[review]\nmax_files = 2\n";
+        let newer = "[review]\nmax_files = 3\n";
+        std::fs::write(&path, newer).unwrap();
+        cfg.apply_live_at(&path, &load(newer), &edit::hash(newer.as_bytes()));
+        assert_eq!(cfg.live().review.max_files, 3);
+        // The edit that wrote the older version applies late.
+        cfg.apply_live_at(&path, &load(older), &edit::hash(older.as_bytes()));
+        assert_eq!(cfg.live().review.max_files, 3);
+        // And one whose file moved on applies the file as it now is.
+        let newest = "[review]\nmax_files = 4\n";
+        std::fs::write(&path, newest).unwrap();
+        cfg.apply_live_at(&path, &load(older), &edit::hash(older.as_bytes()));
+        assert_eq!(cfg.live().review.max_files, 4);
+    }
+
+    /// A change from outside is taken in once two looks agree on it, and one
+    /// that does not load is never applied.
+    #[test]
+    fn an_outside_change_is_applied_once_it_holds_still() {
+        let boot = "[review]\nmax_files = 1\n";
+        let cfg = load(boot);
+        cfg.set_boot_text(boot);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(&path, "[review]\nmax_files = 5\n").unwrap();
+        cfg.refresh_live_from(&path);
+        assert_eq!(cfg.live().review.max_files, 1);
+        // Changed again before the second look: still waiting.
+        std::fs::write(&path, "[review]\nmax_files = 6\n").unwrap();
+        cfg.refresh_live_from(&path);
+        assert_eq!(cfg.live().review.max_files, 1);
+        cfg.refresh_live_from(&path);
+        assert_eq!(cfg.live().review.max_files, 6);
+        std::fs::write(&path, "[review]\nmax_files = \"many\"\n").unwrap();
+        cfg.refresh_live_from(&path);
+        cfg.refresh_live_from(&path);
+        cfg.refresh_live_from(&path);
+        assert_eq!(cfg.live().review.max_files, 6);
     }
 
     #[test]

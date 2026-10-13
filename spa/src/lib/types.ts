@@ -129,6 +129,7 @@ export interface RestartStatus {
     hash: string
     /** Restart-only keys that differ from what the node started with. */
     keys: string[]
+    /** The file does not load now (does not parse, or fails a start's checks). */
     unparseable: boolean
   } | null
   restart: { available: boolean; mechanism: string | null; reason: string | null }

@@ -553,17 +553,31 @@ pub fn harness_router(state: AppState) -> Router {
 }
 
 pub async fn serve(listen: SocketAddr) -> Result<()> {
+    // The state directory is this node's alone: a second `serve` on it
+    // stops here, before it counts as a failed start of the first one's
+    // file (`config::last_good`).
+    let boots = crate::config::last_good::Paths::node();
+    let state_lock = match crate::config::last_good::claim(&boots) {
+        Ok(lock) => Some(lock),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            return Err(anyhow::anyhow!(error))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not lock the state directory; starts are not counted and node.toml.last-good is not kept");
+            None
+        }
+    };
+    // Counted before the load, so a file that keeps the node from starting
+    // is found out, and the last one it ran well on put back.
+    if state_lock.is_some() {
+        if let Err(error) = crate::config::last_good::on_boot(&boots, crate::store::now_ms()) {
+            tracing::warn!(%error, "could not count this start; node.toml.last-good will not be restored");
+        }
+    }
     // A config that does not parse is fatal here, not a warning: a typo in
     // `[mesh]` must not quietly run this node unmeshed.
     // Before the load, which may migrate the retired harness and so rewrite
     // the file: an interrupted edit is settled against this version too.
-    // Counted before the load, so a file that keeps the node from starting
-    // is found out, and the last one it ran well on put back
-    // (`config::last_good`).
-    let boots = crate::config::last_good::Paths::node();
-    if let Err(error) = crate::config::last_good::on_boot(&boots, crate::store::now_ms()) {
-        tracing::warn!(%error, "could not count this start; node.toml.last-good will not be restored");
-    }
     let config_before_load = crate::config::edit::file_hash(&Config::config_path()).ok();
     let cfg = Arc::new(Config::try_load().map_err(|e| anyhow::anyhow!(e))?);
     // The file as it loaded (after any migration the load wrote): what a
@@ -952,7 +966,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 // node.toml changed by another process (the CLI, an editor):
                 // its live keys apply from here.
                 cfg.refresh_live_from(&Config::config_path());
-                crate::restart::publish(&manager);
+                crate::restart::publish(&manager).await;
                 let grace = std::time::Duration::from_secs(cfg.live().session.claim_grace_secs);
                 // A deadline is judged only after a suspend has moved it on.
                 awake.catch_up().await;
@@ -1055,15 +1069,24 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     tokio::spawn(crate::corpus::export::run(store.clone(), cfg.clone()));
 
     tracing::info!(%listen, "serving");
-    // Started: a restore of last-good is recorded and told, and once the
-    // node has run a while on this file, it is the new last-good.
-    crate::config::last_good::settle(&boots, &store, &cfg);
-    {
+    // Started: a restore of last-good is recorded and told; serving a short
+    // while means this start did not fail; and once the node has run a
+    // while on this file, it is last-good, which then follows live edits.
+    if state_lock.is_some() {
+        use crate::config::last_good::{self, HEALTHY_AFTER, STARTED_GRACE};
+        last_good::settle(&boots, &store, &cfg);
         let boots = boots.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(crate::config::last_good::HEALTHY_AFTER).await;
-            if let Err(error) = crate::config::last_good::promote(&boots, &boot_text) {
+            tokio::time::sleep(STARTED_GRACE).await;
+            last_good::clean_stop(&boots);
+            tokio::time::sleep(HEALTHY_AFTER.saturating_sub(STARTED_GRACE)).await;
+            if let Err(error) = last_good::promote(&boots, &boot_text) {
                 tracing::warn!(%error, "could not keep node.toml as last-known-good");
+            }
+            let mut previous = None;
+            loop {
+                last_good::keep_current(&boots, &boot_text, &mut previous);
+                tokio::time::sleep(HEALTHY_AFTER).await;
             }
         });
     }
@@ -1090,7 +1113,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // outlives the process that gates it.
     manager.shutdown_all().await;
     // A stop, not a failed start.
-    crate::config::last_good::clean_stop(&boots);
+    if state_lock.is_some() {
+        crate::config::last_good::clean_stop(&boots);
+    }
+    drop(state_lock);
     Ok(())
 }
 
@@ -1320,6 +1346,7 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = crate::restart::exit_requested() => {},
     }
+    crate::restart::note_shutdown();
     tracing::info!("shutting down");
 }
 

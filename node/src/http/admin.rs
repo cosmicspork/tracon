@@ -738,7 +738,7 @@ pub async fn restart(
 /// can be done here, and the one waiting, if any. An ordinary operator read:
 /// it is what the interface's restart banner shows.
 pub async fn restart_status(State(s): State<AppState>) -> Json<Value> {
-    Json(crate::restart::status(&s.manager))
+    Json(crate::restart::status(&s.manager).await)
 }
 
 /// `POST /api/admin/restart`: restart this node into the `node.toml` the
@@ -761,7 +761,7 @@ pub async fn restart_node(
         }
         (StatusCode::CONFLICT, Json(v))
     };
-    match crate::restart::request(&s.manager, body) {
+    match crate::restart::request(&s.manager, body).await {
         Ok(status) => Ok((StatusCode::ACCEPTED, Json(status))),
         Err(Refused::Conflict(why)) | Err(Refused::Unavailable(why)) => {
             Err(refusal(why, Value::Null))
@@ -784,11 +784,11 @@ pub async fn cancel_restart(
     State(s): State<AppState>,
     AdminAction(()): AdminAction,
 ) -> ApiResult<Json<Value>> {
-    if !crate::restart::cancel(&s.manager) {
+    if !crate::restart::cancel(&s.manager).await {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "no restart is waiting to be withdrawn",
+            "no restart can be withdrawn: none is waiting, and one handed to the supervisor is withdrawn only once it has evidently not happened",
         ));
     }
-    Ok(Json(crate::restart::status(&s.manager)))
+    Ok(Json(crate::restart::status(&s.manager).await))
 }

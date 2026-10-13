@@ -1034,12 +1034,15 @@ most, then it gives up and says why), and restarts; **Restart now** lists the se
 would end and asks first. The same is `POST /api/admin/restart` with
 `{"mode": "when_idle" | "now", "expected_hash": "<GET /api/restart's config.hash>"}`. It
 is an administrator's action, confirmed with a passkey from anywhere but the node itself,
-and works under the user service and in a Kubernetes pod, where the node exits for the
-kubelet to start it again.
+and works under the user service and in a container restarted whenever it exits
+(`TRACON_RESTART_BY_EXIT=1`, set by the Kubernetes manifests), where the node exits for
+the kubelet to start it again.
 
-A node keeps the last file it ran well on as `node.toml.last-good`, and puts it back after
-three failed starts in a row of a different file, keeping the failed one as
-`node.toml.failed-<ms>`; see [RECOVERY.md](docs/RECOVERY.md). The full set, with defaults:
+A node keeps the last file it ran well on as `node.toml.last-good` (following live edits
+once they have run), and puts it back after three starts in a row that died before
+serving, when the file is to blame: it does not load, or a key that waits for a restart
+differs from last-good's. The failed one is kept as `node.toml.failed-<ms>`; see
+[RECOVERY.md](docs/RECOVERY.md). The full set, with defaults:
 
 ```toml
 node_name = "<hostname>"            # how this node is named in the mesh
@@ -1420,7 +1423,8 @@ volume once, and from then on the node reads and writes the copy there
 for a restart is applied with **Restart when idle** in the interface (or
 `POST /api/admin/restart`): the node drains, exits 0, and the kubelet starts the
 container again on the same volume and pod IP, so a phone with a passkey restarts it
-without `kubectl`. Every harness pod
+without `kubectl`. That needs `TRACON_RESTART_BY_EXIT=1` in the pod's environment, as
+`deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. Every harness pod
 names its own requests and memory limit (`[runtime.kubernetes.resources]`, sized by
 default for one shared 4 vCPU / 8 GB node), so a namespace's LimitRange never
 substitutes its defaults. Each pod also gets a memory-backed `/dev/shm` for browsers

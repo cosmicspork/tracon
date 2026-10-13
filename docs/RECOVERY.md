@@ -258,22 +258,28 @@ it with the code the app shows:
 `node.toml` can be edited from elsewhere now (Settings on another device, the CLI),
 and a restart applies whatever it says. So the node keeps a way back:
 
+- `serve` takes an exclusive lock on the state directory first. A second `serve` on
+  the same state (by mistake, or a supervisor racing a manual run) stops with
+  "another node owns this state directory" and counts as nothing.
+- Each start is counted in `boot-attempts.json` in the state directory, against the
+  file's hash, before the file is loaded. Serving for 30 seconds, or a clean stop,
+  clears the count, so only a start that dies before it is serving counts as failed.
 - Once a node has run for five minutes, the file it started from is copied to
-  `node.toml.last-good`, beside it and with its permissions.
-- Each start is counted in `boot-attempts.json` in the state directory, against
-  the file's hash, before the file is loaded. A clean stop, or five minutes of
-  running, clears the count.
-- A start that finds three failed starts in a row of a file that differs from
-  `node.toml.last-good` moves that file aside as `node.toml.failed-<ms>` (the time
-  of the restore, in milliseconds) and puts last-good in its place. The node starts
-  on it, records a `config_audit` row with the actor `last-known-good restore`, and
-  pushes "node.toml restored" to the operator's devices.
+  `node.toml.last-good`, beside it and with its permissions. Every five minutes after,
+  the file as it is then is kept instead, when it loads, has not changed since the
+  previous look, and differs from what the node runs only in keys that apply live.
+- A start that finds three failed starts in a row of one file restores last-good only
+  if the file is to blame: it does not load, or a key that waits for a restart differs
+  from last-good's. The failed file is moved aside as `node.toml.failed-<ms>` (the
+  time of the restore, in milliseconds; next to the real file when `node.toml` is a
+  symlink) and last-good is put in its place. The node starts on it, records a
+  `config_audit` row with the actor `last-known-good restore`, and pushes
+  "node.toml restored" to the operator's devices.
 
 It never loops and never discards the operator's file: a file equal to last-good is
 never replaced however often it fails, and the replaced file is always kept first.
-A start that fails for a reason that is not the file (a port another process holds)
-counts the same way, so a node that keeps failing on a file it once ran well on is
-not "fixed" by putting that same file back.
+A file that differs from last-good only in live keys is never blamed for a failed
+start.
 
 **To undo a restore** once the cause is fixed, put the failed file back and restart:
 

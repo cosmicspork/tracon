@@ -218,8 +218,8 @@ async fn live_keys_apply_to_the_running_node_without_a_restart() {
     );
     assert_eq!(env.checks, vec!["just live".to_string()]);
 
-    // An edit made by another process (the CLI, an editor) is taken in at
-    // the next look.
+    // An edit made by another process (the CLI, an editor) is taken in once
+    // two looks see the same version.
     tracon::config::edit(
         n.state.store(),
         &[Op::set(KeyPath::keys(&["review", "max_files"]), 77_i64)],
@@ -227,6 +227,8 @@ async fn live_keys_apply_to_the_running_node_without_a_restart() {
         "test (another process)",
     )
     .unwrap();
+    assert_ne!(n.state.cfg.live().review.max_files, 77);
+    n.state.cfg.refresh_live_from(&Config::config_path());
     assert_ne!(n.state.cfg.live().review.max_files, 77);
     n.state.cfg.refresh_live_from(&Config::config_path());
     assert_eq!(n.state.cfg.live().review.max_files, 77);
@@ -574,4 +576,191 @@ async fn when_idle_waits_for_a_running_check_too() {
         n.supervisor.restarts.load(Ordering::SeqCst) == 1
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_restart_is_abandoned_if_the_file_changed_while_it_waited() {
+    let _file = state::config_lock().await;
+    let n = node();
+    let mut busy = session_row("s-edit", "n1", "personal");
+    busy.turn_active = 1;
+    n.state.store().insert_session(&busy).unwrap();
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/admin/restart",
+        Some(json!({ "expected_hash": file_hash() })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    // While it waits, the file changes under it.
+    tracon::config::edit(
+        n.state.store(),
+        &[Op::set(
+            KeyPath::keys(&["node_name"]),
+            "edited-while-waiting",
+        )],
+        None,
+        "test",
+    )
+    .unwrap();
+    n.state
+        .store()
+        .update_session(
+            "s-edit",
+            SessionPatch {
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    eventually("the restart to be abandoned", || {
+        !n.state.manager.restart().draining()
+    })
+    .await;
+    assert_eq!(n.supervisor.restarts.load(Ordering::SeqCst), 0);
+    let (_, v) = call(&n, "GET", "/api/restart", None).await;
+    assert!(
+        v["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("changed since the restart was asked for"),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_the_supervisor_never_did_stops_refusing_work() {
+    let _file = state::config_lock().await;
+    let n = node();
+    n.state
+        .manager
+        .restart()
+        .set_watchdog(Duration::from_millis(300));
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/admin/restart",
+        Some(json!({ "expected_hash": file_hash() })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    eventually("the supervisor to be asked", || {
+        n.supervisor.restarts.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    // Handed over, and the node is still here: not withdrawable yet.
+    let (s, _) = call(&n, "DELETE", "/api/admin/restart", None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(n.state.manager.restart().draining());
+    // Past the watchdog it gives up and takes work again.
+    eventually("the watchdog", || !n.state.manager.restart().draining()).await;
+    let (_, v) = call(&n, "GET", "/api/restart", None).await;
+    assert!(
+        v["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("still running"),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn a_check_started_after_the_restart_was_asked_for_is_not_waited_on() {
+    let _file = state::config_lock().await;
+    let n = node();
+    let store = n.state.store().clone();
+    let mut busy = session_row("s-late", "n1", "personal");
+    busy.turn_active = 1;
+    store.insert_session(&busy).unwrap();
+    let (s, _) = call(
+        &n,
+        "POST",
+        "/api/admin/restart",
+        Some(json!({ "expected_hash": file_hash() })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    store
+        .insert_check_run(&tracon::store::CheckRunRow {
+            id: "run-late".into(),
+            candidate_id: None,
+            session_id: Some("s-late".into()),
+            command: Some("just check".into()),
+            definition_json: json!({ "command": "just check" }).to_string(),
+            definition_hash: None,
+            execution_image: None,
+            inputs_json: None,
+            reuse_key: None,
+            outcome: "running".into(),
+            source_outcome: None,
+            exit_code: None,
+            log: String::new(),
+            duration_ms: None,
+            started_ms: tracon::store::now_ms(),
+            finished_ms: None,
+            rerun_of: None,
+            reused_from_id: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    store
+        .update_session(
+            "s-late",
+            SessionPatch {
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    eventually("the restart", || {
+        n.supervisor.restarts.load(Ordering::SeqCst) == 1
+    })
+    .await;
+}
+
+/// The repro the last-known-good restore was reviewed against: further
+/// `tracon serve` runs on a running node's state directory, each failing,
+/// must not count as failed starts of its file, let alone replace it.
+#[test]
+fn a_second_serve_on_the_same_state_neither_counts_nor_restores() {
+    let dir = state::scratch("a_second_serve_on_the_same_state");
+    let config = dir.join("node.toml");
+    std::fs::write(&config, "node_name = \"running\"\n").unwrap();
+    std::fs::write(dir.join("node.toml.last-good"), "node_name = \"old\"\n").unwrap();
+    let paths = tracon::config::last_good::Paths {
+        config: config.clone(),
+        boots: dir.join("boot-attempts.json"),
+    };
+    // The running node.
+    let _held = tracon::config::last_good::claim(&paths).unwrap();
+    for _ in 0..5 {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
+            .args(["serve", "--listen", "127.0.0.1:0"])
+            .env("TRACON_STATE_DIR", &dir)
+            .env("TRACON_CONFIG_DIR", &dir)
+            .env("RUST_LOG", "error")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("another node owns"), "{stderr}");
+    }
+    assert!(!dir.join("boot-attempts.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        "node_name = \"running\"\n"
+    );
+    let failed = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("failed")
+        })
+        .count();
+    assert_eq!(failed, 0);
 }

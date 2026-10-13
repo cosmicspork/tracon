@@ -139,25 +139,37 @@ reports the restart-only keys that differ from it now (`GET /api/restart`, and a
 
 **Restart over HTTP.** `POST /api/admin/restart {mode, expected_hash}` restarts the node
 into the file the caller read; a file that changed since, or that would not load, is
-refused. `when_idle`, the default, refuses new sessions and turns, waits (30 minutes
-unless the request says otherwise) for running turns and required checks to finish, then
-restarts; if they have not finished it gives up, takes work again and pushes why. `now`
-answers with the live sessions it would end until the body confirms them. What restarts
-the node is its supervisor: the fixed user service where it runs under one, and in a
-Kubernetes pod the node drains, shuts down as SIGTERM would and exits 0 for the kubelet
-to start it again on the same volume and pod IP. Anywhere else the request is refused,
-because nothing would bring the node back. The route is an `AdminAction`: free at the
-node, and from anywhere else a passkey assertion bound to exactly this request, so the
-phone can ask while a bearer token never suffices off the node.
+refused, and the file is read again just before the restart, so one edited while the
+restart waited is not restarted into. `when_idle`, the default, refuses new sessions and
+turns (OpenCode commands and compactions included), waits (30 minutes unless the request
+says otherwise) for running turns and for the required checks that were running when it
+was asked, then restarts; if they have not finished it gives up, takes work again and
+pushes why. `now` answers with the live sessions it would end until the body confirms
+them. What restarts the node is its supervisor: the fixed user service where it runs
+under one; where the deployment declares that the container is restarted on exit
+(`TRACON_RESTART_BY_EXIT=1`, which the Kubernetes manifests set) the node drains, shuts
+down as SIGTERM would and exits 0 for the kubelet to start it again on the same volume
+and pod IP. Anywhere else the request is refused, because nothing would bring the node
+back. A restart handed to the supervisor that has not happened two minutes later (the
+node still running and not stopping) is given up the same way, so a failed restart never
+leaves the node refusing work for good. The route is an `AdminAction`: free at the node,
+and from anywhere else a passkey assertion bound to exactly this request, so the phone
+can ask while a bearer token never suffices off the node.
 
-**Last-known-good.** A node that has run five minutes copies the file it started from to
-`node.toml.last-good`, beside it with its permissions. Each start counts itself, before
-the configuration loads, in `boot-attempts.json` under the state directory, keyed by the
-file's hash; a clean stop or five healthy minutes clears the count. A start that finds
-three failed starts in a row of a file that differs from last-good keeps that file as
-`node.toml.failed-<ms>`, puts last-good in its place, and on the next successful start
-records a `config_audit` row (actor `last-known-good restore`) and pushes it. A file
-equal to last-good is never replaced, so the restore cannot loop. Undoing one is in
+**Last-known-good.** `serve` first takes an exclusive lock on its state directory; a second
+`serve` on it stops there, before it can count as anything. Each start then counts itself,
+before the configuration loads, in `boot-attempts.json`, keyed by the file's hash; serving
+for 30 seconds, or a clean stop, clears the count, so only a start that dies before it is
+serving is a failure. A node that has run five minutes keeps the file it started from as
+`node.toml.last-good`, beside it with its permissions, and every five minutes after keeps
+the file as it is then when it loads, has held still since the last look, and differs from
+what is running only in live keys, so last-good follows live edits rather than going
+stale. A start that finds three failed starts in a row of one file restores last-good only
+when the file is to blame: it does not load, or a restart-only key differs from
+last-good's. It then keeps the failed file as `node.toml.failed-<ms>` (through a symlink,
+under the edit lock), puts last-good in its place, and on the next successful start
+records a `config_audit` row (actor `last-known-good restore`) and pushes it. A file equal
+to last-good is never replaced, so the restore cannot loop. Undoing one is in
 [RECOVERY.md](RECOVERY.md).
 
 #### The path guard
