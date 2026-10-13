@@ -1233,6 +1233,8 @@ heartbeat_secs = 60
 poll_secs = 30
 command_timeout_secs = 15
 # renew_credentials = true          # on an always-on node: renew shared subscription sign-ins first
+# admin_peers = ["<node id>"]       # peers that may read and edit this node.toml and sign its providers in,
+                                    # each action confirmed with a passkey there; changed here, never by a peer
 
 [memory]
 promote_at = "02:00"                # the nightly promotion batch

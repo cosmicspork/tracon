@@ -171,6 +171,39 @@ fn main() {
             "signing_prefix_hex": hx(&prefix),
         }),
     );
+
+    // admin-statement: a peer config edit confirmed on the issuer.
+    let issuer = Identity::from_seed(&seed(0xa1));
+    let target = Identity::from_seed(&seed(0xa2));
+    let command = json!({
+        "op": "config_patch",
+        "expected_hash": "5e".repeat(32),
+        "ops": [{ "op": "set", "key": "review.max_files", "value": 40 }],
+    });
+    let op_hash = proto::admin::op_hash(&target.node_id(), &command);
+    let summary = "On beta: Change node.toml: review.max_files";
+    let statement = proto::admin::AdminStatement::sign_with_nonce(
+        &issuer,
+        &target.node_id(),
+        &op_hash,
+        summary,
+        "0123456789ab",
+        1_787_000_000_000,
+        &hx(&[0xa3; 16]),
+    );
+    write(
+        &out,
+        "admin-statement.json",
+        json!({
+            "contract_version": CONTRACT_VERSION,
+            "issuer_seed_hex": hx(&seed(0xa1)), "target_seed_hex": hx(&seed(0xa2)),
+            "command": command, "op_hash_hex": op_hash,
+            "summary": summary, "session": "0123456789ab",
+            "asserted_at_ms": 1_787_000_000_000i64, "nonce_hex": hx(&[0xa3; 16]),
+            "signing_bytes_hex": hx(&statement.signing_bytes()),
+            "sig_hex": statement.sig,
+        }),
+    );
 }
 
 fn write(dir: &Path, name: &str, v: Value) {

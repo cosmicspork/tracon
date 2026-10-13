@@ -1410,13 +1410,35 @@ Invariants on top of the wire:
   answer, kill, pause or resume runs, the owner checks that the session (or the
   permission's or approval's session or channel) is its own and that the sender and
   the owner are both members of that channel, by the owner's own record. It never
-  relays a command on to a third node under its own identity. A provider sign-in
-  needs the sender in every channel it would bind and in every channel served by the
-  credential it would replace (one bound to no channel is the owner's alone and never
-  replaced by a peer); a pasted code or a cancel is held to the
-  channels of the sign-in the sender started. Create, verdict, notification, evidence
+  relays a command on to a third node under its own identity. A provider sign-in,
+  a pasted code and a sign-out are admin commands: the owner runs one only for a
+  peer its own `[mesh] admin_peers` names, carrying an admin statement its
+  operator confirmed for exactly that command on the owner (below). Then the
+  sign-in still needs the sender in every channel it would bind and in every
+  channel served by the credential it would replace (one bound to no channel is the
+  owner's alone and never replaced by a peer); a pasted code or a cancel is held to
+  the channels of the sign-in the sender started. Create, verdict, notification, evidence
   and review-detail commands check their own channel as they run. A refusal is acked
   to the sender with its reason, logged, and shown as the mesh's last refusal.
+- **A peer administers a node only with the operator's confirmation, made where
+  the operator is.** An admin command from a peer (a provider sign-in, a read or
+  edit of `node.toml`) runs only if the owner's `[mesh] admin_peers` names the
+  sender. Every one but a read also carries an admin statement
+  (`spec/README.md`): the sending node's operator confirmed exactly that command on
+  exactly that owner with the sender's passkey (at the sender's own machine, by
+  being there), and the sender signed what was confirmed, the line its prompt
+  showed included, with its node key. The owner checks the signature against the
+  sender's node id, that the statement names it and the command it is about to run,
+  that it is no older than two minutes, and spends it once. The owner never sees the
+  passkey and never trusts the sender's description of the command: the statement
+  binds the command's own bytes. `admin_peers` is itself an admin key no peer can
+  change.
+- **A key handoff is taken only from a member.** A peer's `key_handoff` lands only
+  for a channel the sender is a member of by the receiver's record (asked of the
+  hub once more if the record lacks it), since a key from anyone else would add an
+  epoch the receiver then seals the channel's frames under. It carries the
+  channel's shared bindings; the ones a node keeps for itself (`external_stopped`,
+  `external_paused`, `notify`) are never taken from it.
 - **A command expires when its sender stops waiting.** A command sent with a
   timeout carries `not_after_ms`; past it (with 30 seconds' leeway for clock skew)
   the owner refuses it unrun, so a command the operator was told failed never runs

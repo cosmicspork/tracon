@@ -28,6 +28,7 @@ pub fn contract_major() -> u32 {
     CONTRACT_MAJOR
 }
 
+pub mod admin;
 pub mod auth;
 pub mod enroll;
 pub mod envelope;

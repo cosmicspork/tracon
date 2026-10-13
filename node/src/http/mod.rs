@@ -8,6 +8,7 @@ pub mod environments;
 pub mod evidence;
 mod mcp;
 pub mod passkey;
+mod peer_admin;
 mod policy_admin;
 pub mod preview;
 pub mod push;

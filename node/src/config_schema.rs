@@ -225,6 +225,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("mesh.stream_max_response_bytes"),
     restart("mesh.stream_max_concurrent"),
     restart("mesh.renew_credentials"),
+    live("mesh.admin_peers"),
     // [runtime]
     restart("runtime.kind"),
     live("runtime.approved_images"),

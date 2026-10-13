@@ -38,7 +38,18 @@ struct Node {
     cfg: Arc<Config>,
 }
 
+/// A node that lets A (seed 1) administer it, as the tests' operator does.
 async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Node {
+    node_admins(seed, name, hub, rings, &[identity(1).node_id()]).await
+}
+
+async fn node_admins(
+    seed: u8,
+    name: &str,
+    hub: &str,
+    rings: &[(&str, Keyring)],
+    admins: &[String],
+) -> Node {
     let id = identity(seed);
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
@@ -59,6 +70,8 @@ async fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)]) -> Nod
     cfg.mesh.heartbeat_secs = 5;
     cfg.mesh.command_timeout_secs = 10;
     cfg.session.permission_timeout_secs = 30;
+    cfg.node_name = name.to_string();
+    cfg.mesh.admin_peers = admins.to_vec();
     let cfg = Arc::new(cfg);
     // One broker for tools, providers, and the mesh client, as `serve` wires
     // it — a lifted or handed-off credential is visible everywhere.
@@ -148,6 +161,15 @@ async fn pair() -> (Node, Node) {
 /// As `pair`, with channels only B is admitted to, and optionally a third
 /// member the hub admits to `@mesh` that never runs: a node that never answers.
 async fn pair_with(b_only: &[&str], silent: Option<&Identity>) -> (Node, Node) {
+    pair_opts(b_only, silent, &[identity(1).node_id()]).await
+}
+
+/// As `pair_with`, with the peers B's `[mesh] admin_peers` names.
+async fn pair_opts(
+    b_only: &[&str],
+    silent: Option<&Identity>,
+    b_admins: &[String],
+) -> (Node, Node) {
     let a_id = identity(1);
     let b_id = identity(2);
     let both: &[&str] = &[MESH_CHANNEL, "personal"];
@@ -176,7 +198,7 @@ async fn pair_with(b_only: &[&str], silent: Option<&Identity>) -> (Node, Node) {
         &[(MESH_CHANNEL, mesh), ("personal", personal)],
     )
     .await;
-    let b = node(2, "beta", &hub, &b_rings).await;
+    let b = node_admins(2, "beta", &hub, &b_rings, b_admins).await;
     // Both say hello so each knows the other's sealing key.
     a.client.hello().await.unwrap();
     b.client.hello().await.unwrap();
@@ -219,6 +241,42 @@ fn permission(id: &str, node: &str, session_id: &str) -> tracon::store::Permissi
         created_mono_ms: 0,
         resolved_mono_ms: None,
         expires_ms: now + 60_000,
+    }
+}
+
+/// `command` with the statement A's operator confirmed for it on `target`,
+/// as A signs one for a peer that lets it administer it.
+fn confirmed(from: &Identity, target: &str, command: Command) -> Command {
+    let statement = proto::admin::AdminStatement::sign(
+        from,
+        target,
+        &tracon::mesh::admin::op_hash(target, &command),
+        "On beta: test",
+        "local",
+        tracon::store::now_ms(),
+    );
+    match command {
+        Command::ProviderConnect {
+            name,
+            channels,
+            share,
+            ..
+        } => Command::ProviderConnect {
+            name,
+            channels,
+            share,
+            statement: Some(statement),
+        },
+        Command::ProviderCode { name, code, .. } => Command::ProviderCode {
+            name,
+            code,
+            statement: Some(statement),
+        },
+        Command::ProviderDisconnect { name, .. } => Command::ProviderDisconnect {
+            name,
+            statement: Some(statement),
+        },
+        other => other,
     }
 }
 
@@ -763,11 +821,17 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
             reason: None,
             notes: None,
         },
-        Command::ProviderConnect {
-            name: "anthropic".into(),
-            channels: vec!["private".into()],
-            share: true,
-        },
+        // An admin peer, confirmed: still held to the channels it binds.
+        confirmed(
+            &a.id,
+            &bi,
+            Command::ProviderConnect {
+                name: "anthropic".into(),
+                channels: vec!["private".into()],
+                share: true,
+                statement: None,
+            },
+        ),
     ];
     for command in commands {
         let result = a.client.command(&bi, command.clone(), t).await;
@@ -802,11 +866,16 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
         .client
         .command(
             &bi,
-            Command::ProviderConnect {
-                name: "anthropic".into(),
-                channels: vec!["personal".into()],
-                share: true,
-            },
+            confirmed(
+                &a.id,
+                &bi,
+                Command::ProviderConnect {
+                    name: "anthropic".into(),
+                    channels: vec!["personal".into()],
+                    share: true,
+                    statement: None,
+                },
+            ),
             t,
         )
         .await;
@@ -823,11 +892,16 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
         .client
         .command(
             &bi,
-            Command::ProviderConnect {
-                name: "anthropic".into(),
-                channels: vec!["personal".into()],
-                share: true,
-            },
+            confirmed(
+                &a.id,
+                &bi,
+                Command::ProviderConnect {
+                    name: "anthropic".into(),
+                    channels: vec!["personal".into()],
+                    share: true,
+                    statement: None,
+                },
+            ),
             t,
         )
         .await;
@@ -1253,8 +1327,8 @@ async fn a_key_handoff_is_taken_from_a_member_and_never_changes_local_bindings()
     assert_eq!(private_after.bindings_json, private_before.bindings_json);
 
     // A is in `personal`: the shared binding lands, the local ones stay.
-    let ring = Keyring::from_bytes(&a.store.channel_get("personal").unwrap().unwrap().keyring)
-        .unwrap();
+    let ring =
+        Keyring::from_bytes(&a.store.channel_get("personal").unwrap().unwrap().keyring).unwrap();
     let handoff = proto::frame::Payload::KeyHandoff {
         channels: vec![proto::frame::ChannelHandoff {
             name: "personal".into(),
@@ -1293,5 +1367,132 @@ async fn a_key_handoff_is_taken_from_a_member_and_never_changes_local_bindings()
             "external_stopped": true,
             "notify": { "enabled": false },
         })
+    );
+}
+
+/// A peer's provider sign-in replaces what this node signs in with, so it is
+/// an admin command: B takes it only from a node its `[mesh] admin_peers`
+/// names, and only with the statement A's operator confirmed for exactly that
+/// command on B, once. Channel membership alone is not enough.
+#[tokio::test]
+async fn a_peers_provider_sign_in_needs_an_admin_peer_and_a_confirmation() {
+    state::isolate();
+    let t = Duration::from_secs(5);
+    let connect = || Command::ProviderConnect {
+        name: "anthropic".into(),
+        channels: vec!["personal".into()],
+        share: true,
+        statement: None,
+    };
+
+    // B names no admin peer: A, a co-member of `personal`, is refused
+    // whether or not its operator confirmed it.
+    let (a, b) = pair_opts(&[], None, &[]).await;
+    let bi = b.id.node_id();
+    let (st, v) = call_local(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/anthropic/connect"),
+        Some(json!({ "channels": ["personal"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("admin_peers"),
+        "{v}"
+    );
+    for command in [
+        connect(),
+        confirmed(&a.id, &bi, connect()),
+        confirmed(
+            &a.id,
+            &bi,
+            Command::ProviderDisconnect {
+                name: "anthropic".into(),
+                statement: None,
+            },
+        ),
+        confirmed(
+            &a.id,
+            &bi,
+            Command::ProviderCode {
+                name: "anthropic".into(),
+                code: "c".into(),
+                statement: None,
+            },
+        ),
+    ] {
+        let result = a.client.command(&bi, command.clone(), t).await;
+        assert!(
+            refused_with(&result, "admin_peers"),
+            "{command:?}: {result:?}"
+        );
+    }
+    drop((a, b));
+
+    // B names A. Unconfirmed, or confirmed for something else, or replayed:
+    // refused. Confirmed for exactly this: it runs.
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let result = a.client.command(&bi, connect(), t).await;
+    assert!(refused_with(&result, "carry the statement"), "{result:?}");
+    let for_openai = confirmed(
+        &a.id,
+        &bi,
+        Command::ProviderConnect {
+            name: "openai".into(),
+            channels: vec!["personal".into()],
+            share: true,
+            statement: None,
+        },
+    );
+    let Command::ProviderConnect { statement, .. } = for_openai else {
+        unreachable!()
+    };
+    let swapped = Command::ProviderConnect {
+        name: "anthropic".into(),
+        channels: vec!["personal".into()],
+        share: true,
+        statement,
+    };
+    let result = a.client.command(&bi, swapped, t).await;
+    assert!(refused_with(&result, "another operation"), "{result:?}");
+    let ok = confirmed(&a.id, &bi, connect());
+    let started = a.client.command(&bi, ok.clone(), t).await;
+    assert!(
+        started.as_ref().is_ok_and(|v| v["url"].is_string()),
+        "{started:?}"
+    );
+    let replayed = a.client.command(&bi, ok, t).await;
+    assert!(refused_with(&replayed, "already used"), "{replayed:?}");
+
+    // From A's interface: at A's machine it is confirmed by being there and
+    // still signed; off it, a passkey is needed first and nothing reaches B.
+    let (st, v) = call_local(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/anthropic/connect"),
+        Some(json!({ "channels": ["personal"] })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["completion"], "paste", "{v}");
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/anthropic/disconnect"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert!(
+        v["error"]["kind"]
+            .as_str()
+            .is_some_and(|k| k.starts_with("step_up")),
+        "{v}"
     );
 }
