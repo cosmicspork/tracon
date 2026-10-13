@@ -258,9 +258,10 @@ it with the code the app shows:
 `node.toml` can be edited from elsewhere now (Settings on another device, the CLI),
 and a restart applies whatever it says. So the node keeps a way back:
 
-- `serve` takes an exclusive lock on the state directory first. A second `serve` on
-  the same state (by mistake, or a supervisor racing a manual run) stops with
-  "another node owns this state directory" and counts as nothing.
+- `serve` takes an exclusive lock on the state directory, and one beside `node.toml`
+  (`node.toml.serve.lock`), first. A second `serve` on either (by mistake, a supervisor
+  racing a manual run, a scratch node pointed at the real config directory) stops with
+  "another node owns this ..." and counts as nothing.
 - Each start is counted in `boot-attempts.json` in the state directory, against the
   file's hash, before the file is loaded. Serving for 30 seconds, or a clean stop,
   clears the count, so only a start that dies before it is serving counts as failed.
@@ -269,8 +270,8 @@ and a restart applies whatever it says. So the node keeps a way back:
   the file as it is then is kept instead, when it loads, has not changed since the
   previous look, and differs from what the node runs only in keys that apply live.
 - A start that finds three failed starts in a row of one file restores last-good only
-  if the file is to blame: it does not load, or a key that waits for a restart differs
-  from last-good's. The failed file is moved aside as `node.toml.failed-<ms>` (the
+  if last-good itself loads and the file is to blame: it does not load, or a key that
+  waits for a restart differs from last-good's. The failed file is moved aside as `node.toml.failed-<ms>` (the
   time of the restore, in milliseconds; next to the real file when `node.toml` is a
   symlink) and last-good is put in its place. The node starts on it, records a
   `config_audit` row with the actor `last-known-good restore`, and pushes

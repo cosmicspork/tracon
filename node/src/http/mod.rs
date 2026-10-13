@@ -1076,6 +1076,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         use crate::config::last_good::{self, HEALTHY_AFTER, STARTED_GRACE};
         last_good::settle(&boots, &store, &cfg);
         let boots = boots.clone();
+        let cfg = cfg.clone();
         tokio::spawn(async move {
             tokio::time::sleep(STARTED_GRACE).await;
             last_good::clean_stop(&boots);
@@ -1085,7 +1086,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             }
             let mut previous = None;
             loop {
-                last_good::keep_current(&boots, &boot_text, &mut previous);
+                last_good::keep_current(&boots, &cfg, &mut previous);
                 tokio::time::sleep(HEALTHY_AFTER).await;
             }
         });

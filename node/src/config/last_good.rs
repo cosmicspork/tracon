@@ -91,15 +91,14 @@ fn sibling(config: &Path, suffix: &str) -> PathBuf {
     config.with_file_name(name)
 }
 
-/// This process's hold on the state directory, for as long as it serves.
+/// This process's hold on its state directory and its `node.toml`, for as
+/// long as it serves.
 pub struct StateLock {
-    _file: std::fs::File,
+    _state: std::fs::File,
+    _config: std::fs::File,
 }
 
-/// Take the state directory for this `serve`. `ErrorKind::WouldBlock` means
-/// another node holds it.
-pub fn claim(paths: &Paths) -> std::io::Result<StateLock> {
-    let path = paths.lock();
+fn try_lock(path: &Path, held: &str) -> std::io::Result<std::fs::File> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
@@ -107,18 +106,31 @@ pub fn claim(paths: &Paths) -> std::io::Result<StateLock> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)?;
+        .open(path)?;
     match file.try_lock() {
-        Ok(()) => Ok(StateLock { _file: file }),
+        Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(std::io::Error::new(
             std::io::ErrorKind::WouldBlock,
             format!(
-                "another node owns this state directory ({}); not starting a second one on it",
-                path.parent().unwrap_or(&path).display()
+                "another node owns this {held} ({}); not starting a second one on it",
+                path.display()
             ),
         )),
         Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
+}
+
+/// Take the state directory and the `node.toml` this `serve` runs on: a
+/// second node on either (a scratch node pointed at the real config
+/// directory, say) would otherwise count its failures against the first
+/// one's file. `ErrorKind::WouldBlock` means another node holds one of them.
+pub fn claim(paths: &Paths) -> std::io::Result<StateLock> {
+    let state = try_lock(&paths.lock(), "state directory")?;
+    let config = try_lock(&sibling(&paths.target(), ".serve.lock"), "node.toml")?;
+    Ok(StateLock {
+        _state: state,
+        _config: config,
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,13 +213,27 @@ fn write_atomic(path: &Path, bytes: &[u8], mode_of: Option<&Path>) -> std::io::R
     written
 }
 
+/// `text` as a start reads it: the retired harness migrated.
+fn migrated(text: &str) -> String {
+    match crate::legacy::migrate_config(text) {
+        Some(migration) => migration.text,
+        None => text.to_string(),
+    }
+}
+
 /// Why `current` is to blame for failing to start, against `good`; `None`
-/// when it is not (it loads, and differs from last-good only in live keys).
+/// when it is not (it loads, and differs from last-good only in live keys),
+/// or when last-good would not load either, so putting it back would not
+/// help.
 fn to_blame(paths: &Paths, current: &str, good: &str) -> Option<String> {
+    if let Err(why) = edit::load_text(good, &paths.config) {
+        tracing::warn!(%why, "node.toml.last-good does not load; it is not put back");
+        return None;
+    }
     if let Err(why) = edit::load_text(current, &paths.config) {
         return Some(format!("it does not load: {why}"));
     }
-    let keys = super::live::pending_restart(good, current);
+    let keys = super::live::pending_restart(&migrated(good), &migrated(current));
     (!keys.is_empty()).then(|| format!("it differs from last-good in {}", keys.join(", ")))
 }
 
@@ -240,6 +266,19 @@ pub fn on_boot(paths: &Paths, now_ms: i64) -> std::io::Result<Option<Restored>> 
                 // Under the lock every `node.toml` writer takes, so no edit
                 // lands between keeping the failed file and replacing it.
                 let _held = edit::lock(&paths.config).map_err(std::io::Error::other)?;
+                // And still the file that failed: one edited since is a new
+                // file, with a count of its own.
+                let again = read_or_empty(&paths.config)?;
+                if edit::hash(&again) != hash {
+                    tracing::warn!("node.toml changed as it was about to be restored; leaving it");
+                    boots = Boots {
+                        hash: edit::hash(&again),
+                        attempts: 1,
+                        restored: boots.restored.take(),
+                    };
+                    write_boots(&paths.boots, &boots)?;
+                    return Ok(None);
+                }
                 let target = paths.target();
                 let backup = paths.failed(now_ms);
                 // Kept first: if the restore fails half way, the operator's
@@ -310,21 +349,26 @@ pub fn promote(paths: &Paths, text: &str) -> std::io::Result<()> {
 
 /// One of the periodic looks once the node is healthy: keep the file as it
 /// is now as last-good if it loads, has not changed since the last look
-/// (`previous`, updated here), and differs from `boot_text` (what the node
-/// runs) only in live keys, which the node has been running with since.
-pub fn keep_current(paths: &Paths, boot_text: &str, previous: &mut Option<String>) {
+/// (`previous`, updated here), is the version the running node has taken
+/// in (its live keys applied, not refused), and differs from the file the
+/// node started from only in live keys. Such a file is one the node has been
+/// running with.
+pub fn keep_current(paths: &Paths, cfg: &super::Config, previous: &mut Option<String>) {
     let Ok(bytes) = read_or_empty(&paths.config) else {
         return;
     };
     let hash = edit::hash(&bytes);
     let held = previous.as_deref() == Some(hash.as_str());
-    *previous = Some(hash);
-    if !held {
+    *previous = Some(hash.clone());
+    if !held || cfg.running_hash().as_deref() != Some(hash.as_str()) {
         return;
     }
+    let Some(boot_text) = cfg.boot_text() else {
+        return;
+    };
     let text = String::from_utf8_lossy(&bytes);
     if edit::load_text(&text, &paths.config).is_err()
-        || !super::live::pending_restart(boot_text, &text).is_empty()
+        || !super::live::pending_restart(&boot_text, &text).is_empty()
     {
         return;
     }
@@ -591,21 +635,53 @@ mod tests {
         let boot = "node_name = \"n\"\n";
         write(&p.config, boot);
         promote(&p, boot).unwrap();
+        let cfg = super::super::Config::from_toml(boot, &p.config).unwrap();
+        cfg.set_boot_text(boot);
         let mut previous = None;
-        // A live edit: kept once two looks agree on it.
+        // A live edit the node has not taken in yet is not kept.
         let live = "node_name = \"n\"\n[supervision]\nchecks = [\"just check\"]\n";
         write(&p.config, live);
-        keep_current(&p, boot, &mut previous);
+        keep_current(&p, &cfg, &mut previous);
+        keep_current(&p, &cfg, &mut previous);
         assert_eq!(read(&p.last_good()), boot);
-        keep_current(&p, boot, &mut previous);
+        // Taken in: kept once two looks agree on it.
+        let loaded = super::super::Config::from_toml(live, &p.config).unwrap();
+        cfg.apply_live_at(&p.config, &loaded, &edit::hash(live.as_bytes()));
+        keep_current(&p, &cfg, &mut previous);
         assert_eq!(read(&p.last_good()), live);
         // A change that waits for a restart is not something the node has
         // run on, however long it sits there.
         let owed = "node_name = \"other\"\n";
         write(&p.config, owed);
-        keep_current(&p, boot, &mut previous);
-        keep_current(&p, boot, &mut previous);
+        keep_current(&p, &cfg, &mut previous);
+        keep_current(&p, &cfg, &mut previous);
         assert_eq!(read(&p.last_good()), live);
+    }
+
+    #[test]
+    fn a_last_good_that_does_not_load_is_not_put_back() {
+        let (_dir, p) = paths("bad-good");
+        write(&p.last_good(), "[review]\nmax_files = \"many\"\n");
+        write(&p.config, "node_name = \"bad\"\n");
+        for at in 0..10 {
+            assert_eq!(on_boot(&p, at).unwrap(), None);
+        }
+        assert_eq!(read(&p.config), "node_name = \"bad\"\n");
+    }
+
+    #[test]
+    fn a_second_node_on_the_same_node_toml_is_refused_whatever_its_state() {
+        let (dir, p) = paths("config-claim");
+        let held = claim(&p).unwrap();
+        let other = Paths {
+            config: p.config.clone(),
+            boots: dir.path().join("other-state").join("boots.json"),
+        };
+        let refused = claim(&other).err().expect("refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(refused.to_string().contains("node.toml"), "{refused}");
+        drop(held);
+        claim(&other).unwrap();
     }
 
     #[cfg(unix)]

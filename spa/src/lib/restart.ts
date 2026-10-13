@@ -23,6 +23,10 @@ export function keyList(keys: string[]): string {
   return keys.length > SHOWN_KEYS ? `${shown} and ${keys.length - SHOWN_KEYS} more` : shown
 }
 
+function list(items: string[]): string {
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items.join('')
+}
+
 function count(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
 }
@@ -42,11 +46,12 @@ export function restartBanner(s: RestartStatus | null): RestartBannerView | null
     const waiting = [
       s.busy.turns.length ? count(s.busy.turns.length, 'turn', 'turns') : '',
       s.busy.checks ? count(s.busy.checks, 'check', 'checks') : '',
+      s.busy.reviews ? count(s.busy.reviews, 'review', 'reviews') : '',
     ].filter(Boolean)
     return {
       tone: 'warn',
       headline: 'Restarting when idle',
-      detail: `${waiting.length ? `waiting for ${waiting.join(' and ')} to finish` : 'about to restart'}; new sessions and turns wait until the node is back.`,
+      detail: `${waiting.length ? `waiting for ${list(waiting)} to finish` : 'about to restart'}; new sessions and turns wait until the node is back.`,
       offer: false,
       withdraw: true,
     }

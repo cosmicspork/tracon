@@ -7,7 +7,7 @@ function status(over: Partial<RestartStatus> = {}): RestartStatus {
     config: { boot_hash: 'a', hash: 'a', keys: [], unparseable: false },
     restart: { available: true, mechanism: 'systemd user service', reason: null },
     plan: null,
-    busy: { turns: [], checks: 0 },
+    busy: { turns: [], checks: 0, reviews: 0 },
     closing: [],
     last_error: null,
     ...over,
@@ -41,10 +41,10 @@ test('a waiting restart names what it waits for and can be withdrawn', () => {
   const view = restartBanner(
     status({
       plan: { mode: 'when_idle', requested_ms: 1, deadline_ms: 2, state: 'draining', expected_hash: 'b' },
-      busy: { turns: ['s1', 's2'], checks: 1 },
+      busy: { turns: ['s1', 's2'], checks: 1, reviews: 1 },
     }),
   )
-  expect(view?.detail).toContain('waiting for 2 turns and 1 check')
+  expect(view?.detail).toContain('waiting for 2 turns, 1 check and 1 review')
   expect(view?.withdraw).toBe(true)
   expect(view?.offer).toBe(false)
 })

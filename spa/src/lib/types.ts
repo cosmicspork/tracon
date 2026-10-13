@@ -140,7 +140,8 @@ export interface RestartStatus {
     state: 'draining' | 'restarting'
     expected_hash: string
   } | null
-  busy: { turns: string[]; checks: number }
+  /** What `when_idle` waits on: turns, running checks, and review submissions whose checks have not all run. */
+  busy: { turns: string[]; checks: number; reviews: number }
   /** Live sessions a restart ends. */
   closing: { id: string; channel: string; repo_path: string; branch: string; state: string; turn_active: boolean }[]
   last_error: string | null

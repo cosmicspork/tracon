@@ -113,6 +113,17 @@ impl Checking {
             .collect()
     }
 
+    /// Submissions whose checks have not settled: each may start another
+    /// check after the one running now finishes.
+    pub fn in_flight(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.outcome().is_none())
+            .count()
+    }
+
     /// Checks still running under `key`.
     pub fn running(&self, key: &str) -> Option<Arc<Entry>> {
         self.entries

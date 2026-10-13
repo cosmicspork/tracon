@@ -269,21 +269,22 @@ pub enum Refused {
 pub struct Busy {
     /// Sessions on this node with a turn running.
     pub turns: Vec<String>,
-    /// Required checks running that were started before the restart was
-    /// asked for. One started since belongs to a turn that will wait for it
-    /// after the restart, not to work the restart waits on.
+    /// Required checks running.
     pub checks: i64,
+    /// Review submissions whose checks have not all run: a review's checks
+    /// run one after another, so between two of them none is running, and
+    /// the review is still in flight. New ones are refused during a drain.
+    pub reviews: i64,
 }
 
 impl Busy {
     pub fn idle(&self) -> bool {
-        self.turns.is_empty() && self.checks == 0
+        self.turns.is_empty() && self.checks == 0 && self.reviews == 0
     }
 }
 
-/// What is running now; checks started at or after `before_ms` are not
-/// counted.
-pub fn busy(manager: &Manager, before_ms: Option<i64>) -> Busy {
+/// What is running now.
+pub fn busy(manager: &Manager) -> Busy {
     let store = manager.store();
     let turns = store
         .list_sessions(None)
@@ -296,20 +297,14 @@ pub fn busy(manager: &Manager, before_ms: Option<i64>) -> Busy {
         })
         .map(|s| s.id)
         .collect();
-    let checks = store
-        .running_check_run_ids()
-        .unwrap_or_default()
-        .iter()
-        .filter(|id| match before_ms {
-            None => true,
-            Some(before) => store
-                .check_run(id)
-                .ok()
-                .flatten()
-                .is_some_and(|run| run.started_ms < before),
-        })
-        .count() as i64;
-    Busy { turns, checks }
+    Busy {
+        turns,
+        checks: store
+            .running_check_run_ids()
+            .map(|ids| ids.len() as i64)
+            .unwrap_or(0),
+        reviews: manager.checking().in_flight() as i64,
+    }
 }
 
 /// The sessions a restart ends: every live one this node runs, as
@@ -356,7 +351,7 @@ pub async fn status(manager: &Manager) -> Value {
             "mechanism": mechanism.as_ref().ok(),
             "reason": mechanism.as_ref().err(),
         },
-        "busy": busy(manager, plan.as_ref().map(|p| p.requested_ms)),
+        "busy": busy(manager),
         "plan": plan,
         "closing": closing(manager),
         "last_error": last_error,
@@ -464,9 +459,13 @@ pub async fn cancel(manager: &Manager) -> bool {
         let mut state = restart.state.lock();
         let withdrawable = state.plan.as_ref().is_some_and(|plan| match plan.state {
             "draining" => true,
-            _ => plan
-                .restarting_ms
-                .is_some_and(|at| crate::store::now_ms() - at >= stuck_after),
+            // Not once the node is stopping: the restart is happening.
+            _ => {
+                !shutting_down()
+                    && plan
+                        .restarting_ms
+                        .is_some_and(|at| crate::store::now_ms() - at >= stuck_after)
+            }
         });
         if withdrawable {
             state.plan = None;
@@ -494,17 +493,18 @@ async fn drive(manager: Manager, generation: u64) {
             tokio::time::sleep(Duration::from_millis(300)).await;
             break plan;
         }
-        let busy = busy(&manager, Some(plan.requested_ms));
+        let busy = busy(&manager);
         if busy.idle() {
             break plan;
         }
         if crate::store::now_ms() >= plan.deadline_ms {
+            let plural =
+                |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
             let why = format!(
-                "gave up waiting: {} turn{} and {} check{} still running at the deadline",
-                busy.turns.len(),
-                if busy.turns.len() == 1 { "" } else { "s" },
-                busy.checks,
-                if busy.checks == 1 { "" } else { "s" },
+                "gave up waiting: {}, {} and {} still running at the deadline",
+                plural(busy.turns.len(), "turn"),
+                plural(busy.checks as usize, "check"),
+                plural(busy.reviews as usize, "review submission"),
             );
             abandon(&manager, generation, why).await;
             return;

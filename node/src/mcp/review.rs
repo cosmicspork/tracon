@@ -220,6 +220,14 @@ async fn submit(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Value, String> {
+    // A submission starts required checks the restart would then have to
+    // wait on or cut off; it is refused, and made again once the node is back.
+    if let Some(why) = manager.restart().refusal() {
+        return Err(format!(
+            "submit_review is not taken while {}; submit again then",
+            why.trim_start_matches("the ")
+        ));
+    }
     // How long this call waits on its checks before handing the wait to
     // `review_status`, counted from the start so capture and the forge's
     // answers come out of the same budget.

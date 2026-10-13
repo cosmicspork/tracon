@@ -141,9 +141,10 @@ reports the restart-only keys that differ from it now (`GET /api/restart`, and a
 into the file the caller read; a file that changed since, or that would not load, is
 refused, and the file is read again just before the restart, so one edited while the
 restart waited is not restarted into. `when_idle`, the default, refuses new sessions and
-turns (OpenCode commands and compactions included), waits (30 minutes unless the request
-says otherwise) for running turns and for the required checks that were running when it
-was asked, then restarts; if they have not finished it gives up, takes work again and
+turns (OpenCode commands and compactions included) and new `submit_review` calls, waits
+(30 minutes unless the request says otherwise) for running turns, running required checks
+and every review submission whose checks have not all run (they run one after another,
+so a review between two checks is still in flight), then restarts; if they have not finished it gives up, takes work again and
 pushes why. `now` answers with the live sessions it would end until the body confirms
 them. What restarts the node is its supervisor: the fixed user service where it runs
 under one; where the deployment declares that the container is restarted on exit
@@ -156,17 +157,20 @@ leaves the node refusing work for good. The route is an `AdminAction`: free at t
 and from anywhere else a passkey assertion bound to exactly this request, so the phone
 can ask while a bearer token never suffices off the node.
 
-**Last-known-good.** `serve` first takes an exclusive lock on its state directory; a second
-`serve` on it stops there, before it can count as anything. Each start then counts itself,
+**Last-known-good.** `serve` first takes an exclusive lock on its state directory and one
+beside its `node.toml`; a second `serve` on either (a scratch node pointed at the real
+config directory included) stops there, before it can count as anything. Each start then counts itself,
 before the configuration loads, in `boot-attempts.json`, keyed by the file's hash; serving
 for 30 seconds, or a clean stop, clears the count, so only a start that dies before it is
 serving is a failure. A node that has run five minutes keeps the file it started from as
 `node.toml.last-good`, beside it with its permissions, and every five minutes after keeps
 the file as it is then when it loads, has held still since the last look, and differs from
 what is running only in live keys, so last-good follows live edits rather than going
-stale. A start that finds three failed starts in a row of one file restores last-good only
-when the file is to blame: it does not load, or a restart-only key differs from
-last-good's. It then keeps the failed file as `node.toml.failed-<ms>` (through a symlink,
+stale; a version is kept only once the running node has taken in its live keys. A start
+that finds three failed starts in a row of one file restores last-good only when last-good
+itself loads and the file is to blame: it does not load, or a restart-only key differs from
+last-good's (both read as a start reads them, the retired harness migrated). The file is
+read again under the edit lock first, and one edited meanwhile is left alone. It then keeps the failed file as `node.toml.failed-<ms>` (through a symlink,
 under the edit lock), puts last-good in its place, and on the next successful start
 records a `config_audit` row (actor `last-known-good restore`) and pushes it. A file equal
 to last-good is never replaced, so the restore cannot loop. Undoing one is in

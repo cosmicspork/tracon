@@ -110,6 +110,23 @@ impl Config {
         });
     }
 
+    /// The file this node started from, when `serve` recorded it.
+    pub fn boot_text(&self) -> Option<String> {
+        self.live.boot.read().as_ref().map(|boot| boot.text.clone())
+    }
+
+    /// The version of the file whose live keys this node is running with:
+    /// the last one taken in, unless its live keys could not be applied;
+    /// else the one it started from.
+    pub fn running_hash(&self) -> Option<String> {
+        let applied = self.live.applied.read().clone();
+        match applied {
+            Some(hash) if self.live.failed.read().as_deref() == Some(hash.as_str()) => None,
+            Some(hash) => Some(hash),
+            None => self.boot_hash(),
+        }
+    }
+
     /// The hash of the file this node started from, when `serve` recorded it.
     pub fn boot_hash(&self) -> Option<String> {
         self.live.boot.read().as_ref().map(|boot| boot.hash.clone())
@@ -137,21 +154,16 @@ impl Config {
     }
 
     /// Take in `newer`, which an edit wrote as `hash`, if the file at `path`
-    /// is still that version; if another edit has landed since, take in the
-    /// file as it is now instead. Either way nothing older than what is
-    /// applied ever replaces it.
+    /// is still that version, so nothing older than what is applied ever
+    /// replaces it.
     pub fn apply_live_at(&self, path: &std::path::Path, newer: &Config, hash: &str) {
         let _order = self.live.order.lock();
-        let now = edit::file_hash(path).ok();
-        if now.as_deref() == Some(hash) {
+        // Applied only while the file is still that version. Once it has
+        // moved on, what it is now is another writer's: the node's own edit
+        // applies itself, and one from outside is taken in by the refresh,
+        // once it has held still.
+        if edit::file_hash(path).ok().as_deref() == Some(hash) {
             self.apply_ordered(newer, hash);
-            return;
-        }
-        if now.is_none() || *self.live.applied.read() == now {
-            return;
-        }
-        if let Ok(snapshot) = edit::snapshot_at(path) {
-            self.apply_ordered(&snapshot.config, &snapshot.hash);
         }
     }
 
@@ -476,10 +488,15 @@ mod tests {
         // The edit that wrote the older version applies late.
         cfg.apply_live_at(&path, &load(older), &edit::hash(older.as_bytes()));
         assert_eq!(cfg.live().review.max_files, 3);
-        // And one whose file moved on applies the file as it now is.
+        // A file that moved on from outside is not taken in by a stale
+        // edit: the refresh takes it once it has held still.
         let newest = "[review]\nmax_files = 4\n";
         std::fs::write(&path, newest).unwrap();
         cfg.apply_live_at(&path, &load(older), &edit::hash(older.as_bytes()));
+        assert_eq!(cfg.live().review.max_files, 3);
+        cfg.refresh_live_from(&path);
+        assert_eq!(cfg.live().review.max_files, 3);
+        cfg.refresh_live_from(&path);
         assert_eq!(cfg.live().review.max_files, 4);
     }
 

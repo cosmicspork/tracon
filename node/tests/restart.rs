@@ -665,14 +665,102 @@ async fn a_restart_the_supervisor_never_did_stops_refusing_work() {
     );
 }
 
+/// A review's required checks run one after another, so between two of them
+/// none is running; the review is still in flight, and the restart waits for
+/// all of it.
 #[tokio::test]
-async fn a_check_started_after_the_restart_was_asked_for_is_not_waited_on() {
+async fn when_idle_waits_for_a_review_between_its_checks() {
     let _file = state::config_lock().await;
     let n = node();
     let store = n.state.store().clone();
-    let mut busy = session_row("s-late", "n1", "personal");
+    let checking = n.state.manager.checking().clone();
+    let entry = checking.begin(
+        "r-two",
+        "s-review",
+        "c1",
+        vec!["just lint".into(), "just test".into()],
+    );
+    let run = |id: &str, outcome: &str| tracon::store::CheckRunRow {
+        id: id.into(),
+        candidate_id: None,
+        session_id: Some("s-review".into()),
+        command: Some(id.into()),
+        definition_json: json!({ "command": id }).to_string(),
+        definition_hash: None,
+        execution_image: None,
+        inputs_json: None,
+        reuse_key: None,
+        outcome: outcome.into(),
+        source_outcome: None,
+        exit_code: None,
+        log: String::new(),
+        duration_ms: None,
+        started_ms: tracon::store::now_ms(),
+        finished_ms: None,
+        rerun_of: None,
+        reused_from_id: None,
+        metadata_json: "{}".into(),
+    };
+    store
+        .insert_check_run(&run("just lint", "running"))
+        .unwrap();
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/admin/restart",
+        Some(json!({ "expected_hash": file_hash() })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(v["busy"]["reviews"], 1, "{v}");
+    // The first check ends; the second has not started: nothing is running,
+    // and the review is not done.
+    store
+        .finish_check_run(
+            "just lint",
+            "passed",
+            None,
+            Some(0),
+            "",
+            Some(1),
+            &json!({}),
+        )
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(n.supervisor.restarts.load(Ordering::SeqCst), 0);
+    // The second check, started after the restart was asked for, is waited on.
+    store
+        .insert_check_run(&run("just test", "running"))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(n.supervisor.restarts.load(Ordering::SeqCst), 0);
+    store
+        .finish_check_run(
+            "just test",
+            "passed",
+            None,
+            Some(0),
+            "",
+            Some(1),
+            &json!({}),
+        )
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(n.supervisor.restarts.load(Ordering::SeqCst), 0);
+    entry.finish(Ok(json!({ "review_id": "r-two" })), true);
+    eventually("the restart", || {
+        n.supervisor.restarts.load(Ordering::SeqCst) == 1
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_new_review_is_refused_while_a_restart_waits() {
+    let _file = state::config_lock().await;
+    let n = node();
+    let mut busy = session_row("s-sub", "n1", "personal");
     busy.turn_active = 1;
-    store.insert_session(&busy).unwrap();
+    n.state.store().insert_session(&busy).unwrap();
     let (s, _) = call(
         &n,
         "POST",
@@ -681,43 +769,18 @@ async fn a_check_started_after_the_restart_was_asked_for_is_not_waited_on() {
     )
     .await;
     assert_eq!(s, StatusCode::ACCEPTED);
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    store
-        .insert_check_run(&tracon::store::CheckRunRow {
-            id: "run-late".into(),
-            candidate_id: None,
-            session_id: Some("s-late".into()),
-            command: Some("just check".into()),
-            definition_json: json!({ "command": "just check" }).to_string(),
-            definition_hash: None,
-            execution_image: None,
-            inputs_json: None,
-            reuse_key: None,
-            outcome: "running".into(),
-            source_outcome: None,
-            exit_code: None,
-            log: String::new(),
-            duration_ms: None,
-            started_ms: tracon::store::now_ms(),
-            finished_ms: None,
-            rerun_of: None,
-            reused_from_id: None,
-            metadata_json: "{}".into(),
-        })
-        .unwrap();
-    store
-        .update_session(
-            "s-late",
-            SessionPatch {
-                turn_active: Some(false),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    eventually("the restart", || {
-        n.supervisor.restarts.load(Ordering::SeqCst) == 1
-    })
-    .await;
+    let ctx = tracon::mcp::CallContext::session("s-sub", "personal", "n1");
+    let err = tracon::mcp::review::call(
+        n.state.store(),
+        &n.state.manager,
+        &ctx,
+        "submit_review",
+        &json!({ "title": "t", "body": "b" }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("submit_review is not taken"), "{err}");
+    assert!(err.contains("restarting"), "{err}");
 }
 
 /// The repro the last-known-good restore was reviewed against: further

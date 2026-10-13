@@ -1029,8 +1029,9 @@ timeouts, default channel, claim grace, suspend-after), `[publish]`, `[github] d
 `[runtime] approved_images` and the `[docs]` export keys, from the next session, turn,
 check or push. The rest wait for a restart, and every screen of the interface says which
 until then ("node.toml changed: restart to apply ..."). **Restart when idle** stops
-taking new sessions and turns, waits for running turns and checks to finish (30 minutes at
-most, then it gives up and says why), and restarts; **Restart now** lists the sessions it
+taking new sessions, turns and review submissions, waits for running turns, checks and
+reviews in progress to finish (30 minutes at most, then it gives up and says why), and
+restarts; **Restart now** lists the sessions it
 would end and asks first. The same is `POST /api/admin/restart` with
 `{"mode": "when_idle" | "now", "expected_hash": "<GET /api/restart's config.hash>"}`. It
 is an administrator's action, confirmed with a passkey from anywhere but the node itself,
