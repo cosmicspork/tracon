@@ -26,6 +26,7 @@ pub mod context;
 pub mod continuation;
 pub mod corpus;
 pub mod criteria;
+pub mod device;
 pub mod evidence;
 pub mod exhaustion;
 pub mod external;
@@ -51,6 +52,7 @@ pub mod transfers;
 pub mod ui;
 pub mod vectors;
 pub use corpus::*;
+pub use device::*;
 pub use evidence::*;
 pub use manifest::*;
 pub use opencode::*;
@@ -1827,6 +1829,11 @@ mod records {
         /// start of its window to enroll the node's first passkey. `None` for
         /// a session from before passkeys.
         pub paired_ms: Option<i64>,
+        /// For a session a signed-in browser approved for another window
+        /// (`http::device`): what approved it, `local` or the approving
+        /// session's short ID. Such a session never has `paired_ms`.
+        #[serde(default)]
+        pub delegated_from: Option<String>,
     }
 
     /// A phone (or any browser) this node pushes to. Keys are kept as the
@@ -1877,6 +1884,7 @@ mod records {
                 expires_ms: r.get("expires_ms")?,
                 user_agent: r.get("user_agent")?,
                 paired_ms: r.get("paired_ms")?,
+                delegated_from: r.get("delegated_from")?,
             })
         }
     }
@@ -2690,6 +2698,9 @@ impl Store {
         // rotating a leaked token must not also hand its holder a fresh
         // enrollment window.
         tx.execute("DELETE FROM webauthn_challenge", [])?;
+        // So were device approvals still waiting or not yet collected: one
+        // approved before the rotation must not mint a session after it.
+        tx.execute(device::REVOKE_DEVICE_APPROVALS, [now_ms()])?;
         // The devices those clients registered go with them; a browser on
         // this machine has no session and stays.
         tx.execute(
@@ -2703,15 +2714,17 @@ impl Store {
     pub fn auth_session_insert(&self, r: &AuthSessionRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO auth_session (token_hash, created_ms, last_seen_ms, expires_ms, user_agent, paired_ms)
-             VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO auth_session
+               (token_hash, created_ms, last_seen_ms, expires_ms, user_agent, paired_ms, delegated_from)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
             rusqlite::params![
                 r.token_hash,
                 r.created_ms,
                 r.last_seen_ms,
                 r.expires_ms,
                 r.user_agent,
-                r.paired_ms
+                r.paired_ms,
+                r.delegated_from
             ],
         )?;
         Ok(())

@@ -152,7 +152,7 @@ pub fn relying_party(cfg: &Config) -> Result<Webauthn, Refusal> {
 }
 
 /// Who is asking, as far as passkeys are concerned.
-enum Caller {
+pub(crate) enum Caller {
     /// At the node's own machine.
     Local,
     /// A browser with a live cookie session (its hash).
@@ -161,7 +161,7 @@ enum Caller {
     Other,
 }
 
-fn caller(s: &AppState, parts: &Parts) -> Caller {
+pub(crate) fn caller(s: &AppState, parts: &Parts) -> Caller {
     if auth::parts_are_local(parts) {
         return Caller::Local;
     }
@@ -191,7 +191,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    fn unavailable(reason: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn unavailable(reason: &'static str, message: impl Into<String>) -> Self {
         Refusal::Unavailable {
             reason,
             message: message.into(),
@@ -242,14 +242,14 @@ impl IntoResponse for Refusal {
     }
 }
 
-fn internal(e: impl std::fmt::Display) -> Refusal {
+pub(crate) fn internal(e: impl std::fmt::Display) -> Refusal {
     Refusal::Api(ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         e.to_string(),
     ))
 }
 
-fn limited(s: &AppState, session: &str) -> Result<(), Refusal> {
+pub(crate) fn limited(s: &AppState, session: &str) -> Result<(), Refusal> {
     if s.auth.allow_ceremony(session, now_ms()) {
         Ok(())
     } else {
@@ -260,11 +260,11 @@ fn limited(s: &AppState, session: &str) -> Result<(), Refusal> {
     }
 }
 
-fn b64(bytes: &[u8]) -> String {
+pub(crate) fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn random_secret() -> String {
+pub(crate) fn random_secret() -> String {
     let mut raw = [0u8; 32];
     rand::rng().fill_bytes(&mut raw);
     b64(&raw)
@@ -282,12 +282,15 @@ fn enrolled(s: &AppState) -> Result<Vec<(PasskeyRow, Passkey)>, Refusal> {
         .collect()
 }
 
-/// Open an assertion for `op_hash` on behalf of `session`.
+/// Open an assertion for `op_hash` on behalf of `session`, remembering what
+/// it confirms (`action`, `summary`) for a device approval made from it.
 fn open_assertion(
     s: &AppState,
     rp: &Webauthn,
     session: &str,
     op_hash: &str,
+    action: Option<&str>,
+    summary: Option<&str>,
 ) -> Result<Value, Refusal> {
     let passkeys: Vec<Passkey> = enrolled(s)?.into_iter().map(|(_, p)| p).collect();
     if passkeys.is_empty() {
@@ -313,15 +316,24 @@ fn open_assertion(
             state: serde_json::to_string(&state).map_err(internal)?,
             created_ms: now,
             expires_ms,
+            action: action.map(str::to_string),
+            summary: summary.map(str::to_string),
         },
         now,
     )?;
-    Ok(json!({
+    let mut step_up = json!({
         "op_hash": op_hash,
         "challenge_id": id,
         "options": options,
         "expires_ms": expires_ms,
-    }))
+    });
+    if let Some(action) = action {
+        step_up["action"] = json!(action);
+    }
+    if let Some(summary) = summary {
+        step_up["summary"] = json!(summary);
+    }
+    Ok(step_up)
 }
 
 /// Whether this admin request may go ahead: local, or confirmed by a step-up
@@ -398,6 +410,28 @@ pub async fn authorize_as(
     body: &[u8],
     summary: Option<String>,
 ) -> Result<(), Refusal> {
+    let action = format!("{} {}", parts.method, parts.uri.path());
+    authorize_op(
+        s,
+        parts,
+        || parts_op_hash(parts, body),
+        &action,
+        summary.as_deref(),
+    )
+}
+
+/// Whether the operation `op` names may go ahead for this caller: local, or
+/// confirmed by a step-up proof for exactly `op` from this cookie session.
+/// Otherwise the refusal opens the challenge for it. `op` is computed by the
+/// node, from the request or from what the node stored; `action` and
+/// `summary` are what the prompt shows for it.
+pub(crate) fn authorize_op(
+    s: &AppState,
+    parts: &Parts,
+    op: impl FnOnce() -> String,
+    action: &str,
+    summary: Option<&str>,
+) -> Result<(), Refusal> {
     let session = match caller(s, parts) {
         Caller::Local => return Ok(()),
         Caller::Session(h) => h,
@@ -410,7 +444,7 @@ pub async fn authorize_as(
         }
     };
     let rp = relying_party(&s.cfg)?;
-    let op = parts_op_hash(parts, body);
+    let op = op();
     let mut message = "confirm this with your passkey".to_string();
     if let Some(proof) = parts
         .headers
@@ -421,7 +455,7 @@ pub async fn authorize_as(
             .proof_spend(&auth::hash(proof.trim()), &op, &session, now_ms())?
         {
             tracing::info!(
-                action = %format!("{} {}", parts.method, parts.uri.path()),
+                action = %action,
                 session = %&session[..12.min(session.len())],
                 op_hash = %op,
                 "admin action confirmed with a passkey"
@@ -433,11 +467,7 @@ pub async fn authorize_as(
             .into();
     }
     limited(s, &session)?;
-    let mut step_up = open_assertion(s, &rp, &session, &op)?;
-    step_up["action"] = json!(format!("{} {}", parts.method, parts.uri.path()));
-    if let Some(summary) = summary {
-        step_up["summary"] = json!(summary);
-    }
+    let step_up = open_assertion(s, &rp, &session, &op, Some(action), summary)?;
     Err(Refusal::Required { message, step_up })
 }
 
@@ -646,6 +676,8 @@ pub async fn register_options(
             state: serde_json::to_string(&state).map_err(internal)?,
             created_ms: now,
             expires_ms,
+            action: None,
+            summary: None,
         },
         now,
     )?;
@@ -791,7 +823,15 @@ pub async fn assert_options(
     }
     let rp = relying_party(&s.cfg)?;
     limited(&s, &session)?;
-    Ok(Json(open_assertion(&s, &rp, &session, &op)?))
+    let (action, summary) = s.store().ceremony_describe(&session, &op)?;
+    Ok(Json(open_assertion(
+        &s,
+        &rp,
+        &session,
+        &op,
+        action.as_deref(),
+        summary.as_deref(),
+    )?))
 }
 
 #[derive(Deserialize)]

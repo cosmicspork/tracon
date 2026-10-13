@@ -237,6 +237,21 @@ revoking one does not revoke the other.
 **`step_up_unavailable` with `no_public_origin`.** `[auth] public_origin` is
 unset or did not load, so the node does not know which origin its passkeys
 belong to and refuses rather than guess. Set it (at the node) and restart.
+Device approval (the desktop app's way in to a remote node) needs it too.
+
+**A window was signed in that you did not approve** (a push says "Signed in from
+another window"). Someone approved a device request with a passkey, or talked
+you into it. At the node, `tracon auth sessions` lists the sessions; the one
+marked `approved by <id>` is it, and `<id>` is the session that approved it. Rotate the token (`tracon auth issue`), which
+signs out every browser and revokes every device request not yet collected,
+then pair again. If the approving session's ID is not one of yours, its
+passkey is compromised too: remove that passkey at the node.
+
+**No browser can approve the desktop app.** With no passkey enrolled, only the
+node can approve a device request. At the node, open the approval link from the
+app with its host changed (`http://localhost:7420/#approve=<id>`), or approve
+it with
+`curl -s -X POST http://127.0.0.1:7420/api/auth/device/approvals/<id>/approve`.
 
 ## Recovering the node itself
 

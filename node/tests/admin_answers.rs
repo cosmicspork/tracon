@@ -86,6 +86,7 @@ async fn rig() -> (Harness, SoftPasskey) {
             expires_ms: now + 600_000,
             user_agent: None,
             paired_ms: Some(now),
+            delegated_from: None,
         })
         .unwrap();
     let mut key = SoftPasskey::new(1, ORIGIN);

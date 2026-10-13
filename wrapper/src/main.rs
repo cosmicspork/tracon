@@ -15,6 +15,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod launcher;
+mod links;
 mod node;
 mod opencode;
 mod prefs;
@@ -26,6 +27,7 @@ mod updater;
 
 use std::sync::{Arc, Mutex};
 
+use links::browser_link;
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
@@ -559,12 +561,6 @@ fn build_main_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::E
         })
         .build()?;
     Ok(())
-}
-
-/// What the main window may send to the browser: `https`, with no credentials
-/// in the URL. The scope the opener plugin was granted, kept.
-fn browser_link(target: &tauri::Url) -> bool {
-    target.scheme() == "https" && target.username().is_empty() && target.password().is_none()
 }
 
 /// Raise the window: the one thing every path back to it wants.

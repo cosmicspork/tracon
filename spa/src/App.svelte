@@ -18,10 +18,12 @@
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
   import Evidence from './routes/Evidence.svelte'
+  import DeviceApproval from './routes/DeviceApproval.svelte'
   import PasskeyOffer from './components/PasskeyOffer.svelte'
   import StepUpPrompt from './components/StepUpPrompt.svelte'
   import { attention } from './lib/attention'
   import { stashToken, tokenFromHash } from './lib/auth'
+  import { approvalFromHash, stashApproval, stashedApproval } from './lib/device'
   import { shellSessionId } from './lib/opencode'
   import { clock } from './lib/clock.svelte'
   import { formatAge } from './lib/format'
@@ -42,6 +44,30 @@
       history.replaceState(null, '', location.pathname + location.search)
     }
   }
+  // A device approval's address (`#approve=<id>`), opened from a window that
+  // cannot make a passkey: the same treatment. Held through a login, then
+  // shown in place of the interface until it is decided or closed.
+  {
+    const a = approvalFromHash(location.hash)
+    if (a) {
+      stashApproval(a)
+      history.replaceState(null, '', location.pathname + location.search)
+    }
+  }
+  let approving = $state(stashedApproval())
+  function doneApproving() {
+    stashApproval(null)
+    approving = null
+  }
+  // An approval link opened in a tab already showing the interface changes
+  // only the fragment, so nothing above runs again.
+  window.addEventListener('hashchange', () => {
+    const a = approvalFromHash(location.hash)
+    if (!a) return
+    stashApproval(a)
+    approving = a
+    history.replaceState(history.state, '', location.pathname + location.search)
+  })
 
   router.start()
   surface.start()
@@ -135,6 +161,8 @@
 
 {#if store.authRequired}
   <Login />
+{:else if approving}
+  <DeviceApproval id={approving} ondone={doneApproving} />
 {:else if docPreviewRef}
   <DocPreview channel={docPreviewRef[1]} slug={docPreviewRef[2]} />
 {:else if opencodeId}

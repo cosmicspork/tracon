@@ -41,7 +41,7 @@ use super::api::{ApiError, AppState};
 /// Cookie name for a logged-in client.
 pub const COOKIE: &str = "tracon_session";
 /// How long a cookie lives without being used.
-const SESSION_TTL_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+pub(crate) const SESSION_TTL_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 /// Renew when more than a third of the life has been consumed, so an active
 /// client is extended about monthly rather than on every request.
 const RENEW_AFTER_MS: i64 = SESSION_TTL_MS / 3;
@@ -61,6 +61,15 @@ const LOGIN_GLOBAL: u32 = 50;
 /// same reason, and still bounds what many cookies together can do.
 const CEREMONY_PER_SESSION: u32 = 60;
 const CEREMONY_GLOBAL: u32 = 600;
+/// Device approvals a stranger may open per window (`http::device`), per
+/// address and in total. Each is a row and a prompt shown to the operator,
+/// so the bound is tight; behind an ingress the total is what holds.
+const DEVICE_START_PER_IP: u32 = 10;
+const DEVICE_START_GLOBAL: u32 = 30;
+/// Polls per window, per address and in total: a window polls every five
+/// seconds, sixty times in five minutes, and several may share an address.
+const DEVICE_POLL_PER_IP: u32 = 600;
+const DEVICE_POLL_GLOBAL: u32 = 3_000;
 
 pub fn hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -124,6 +133,8 @@ pub struct AuthState {
     token_hash: Mutex<Option<String>>,
     limiter: Mutex<Limiter>,
     ceremonies: Mutex<Limiter<String>>,
+    device_starts: Mutex<Limiter>,
+    device_polls: Mutex<Limiter>,
 }
 
 impl AuthState {
@@ -142,6 +153,8 @@ impl AuthState {
             token_hash: Mutex::new(token_hash),
             limiter: Mutex::new(Limiter::default()),
             ceremonies: Mutex::new(Limiter::new(CEREMONY_PER_SESSION, CEREMONY_GLOBAL)),
+            device_starts: Mutex::new(Limiter::new(DEVICE_START_PER_IP, DEVICE_START_GLOBAL)),
+            device_polls: Mutex::new(Limiter::new(DEVICE_POLL_PER_IP, DEVICE_POLL_GLOBAL)),
         }
     }
 
@@ -171,6 +184,16 @@ impl AuthState {
             .unwrap()
             .allow(Some(session.to_string()), now)
     }
+
+    /// Whether a caller at `ip` may open another device approval now.
+    pub(crate) fn allow_device_start(&self, ip: Option<IpAddr>, now: i64) -> bool {
+        self.device_starts.lock().unwrap().allow(ip, now)
+    }
+
+    /// Whether a caller at `ip` may poll for a device approval now.
+    pub(crate) fn allow_device_poll(&self, ip: Option<IpAddr>, now: i64) -> bool {
+        self.device_polls.lock().unwrap().allow(ip, now)
+    }
 }
 
 /// The value of one cookie in a `Cookie:` header.
@@ -197,13 +220,19 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// A path the guard lets through unauthenticated when a token is configured:
-/// login, the non-sensitive administrator access-status probe, and the SPA
-/// shell/assets. The shell is open-source code and the status probe contains
-/// no secret; serving them is what lets a remote login screen render. Every
-/// other `/api` path stays gated.
+/// login, asking for and collecting a device approval (`http::device`, which
+/// bounds and checks them itself), the non-sensitive administrator
+/// access-status probe, and the SPA shell/assets. The shell is open-source
+/// code and the status probe contains no secret; serving them is what lets a
+/// remote login screen render. Every other `/api` path stays gated.
 fn is_public(req: &Request) -> bool {
     let path = req.uri().path();
     if path == "/api/login" {
+        return true;
+    }
+    if req.method() == axum::http::Method::POST
+        && matches!(path, "/api/auth/device" | "/api/auth/device/token")
+    {
         return true;
     }
     if req.method() == axum::http::Method::GET && path == "/api/admin/access" {
@@ -605,7 +634,7 @@ pub async fn guard(
 /// origin" exception would. A local caller never needed the cookie for
 /// authentication anyway (`guard`'s step 1) — this only fixes the client's
 /// own `authenticated` readback.
-fn set_cookie(response: &mut Response, secret: &str, secure: bool, max_age_secs: i64) {
+pub(crate) fn set_cookie(response: &mut Response, secret: &str, secure: bool, max_age_secs: i64) {
     // SameSite=Lax rather than Strict: opening a review from a push
     // notification is a top-level cross-site navigation, and Strict would drop
     // the cookie on exactly that. Lax still withholds it from cross-site
@@ -667,6 +696,7 @@ pub async fn login(
             // Spending the token is the pairing: this client may enroll the
             // node's first passkey for a short while (`http::passkey`).
             paired_ms: Some(now),
+            delegated_from: None,
         })
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -756,6 +786,7 @@ pub async fn list_sessions(
                 "last_seen_ms": r.last_seen_ms,
                 "expires_ms": r.expires_ms,
                 "user_agent": r.user_agent,
+                "delegated_from": r.delegated_from,
             })
         })
         .collect();
@@ -817,6 +848,35 @@ mod tests {
             axum::http::Method::GET,
             "/api/admin/mesh",
         )));
+    }
+
+    #[test]
+    fn asking_for_and_collecting_a_device_approval_are_public_and_nothing_else_of_it() {
+        for path in ["/api/auth/device", "/api/auth/device/token"] {
+            assert!(
+                is_public(&request(axum::http::Method::POST, path)),
+                "{path}"
+            );
+            assert!(
+                !is_public(&request(axum::http::Method::GET, path)),
+                "{path}"
+            );
+        }
+        for path in [
+            "/api/auth/device/stepup",
+            "/api/auth/device/approvals/x",
+            "/api/auth/device/approvals/x/approve",
+            "/api/auth/device/approvals/x/deny",
+        ] {
+            assert!(
+                !is_public(&request(axum::http::Method::POST, path)),
+                "{path}"
+            );
+            assert!(
+                !is_public(&request(axum::http::Method::GET, path)),
+                "{path}"
+            );
+        }
     }
 
     #[test]

@@ -81,6 +81,11 @@ pub struct CeremonyRow {
     pub state: String,
     pub created_ms: i64,
     pub expires_ms: i64,
+    /// For an assertion, the request it confirms (`METHOD /path`) and the
+    /// node's line for it, kept so a device approval made from the
+    /// challenge shows the same words (`http::device`).
+    pub action: Option<String>,
+    pub summary: Option<String>,
 }
 
 impl CeremonyRow {
@@ -100,6 +105,8 @@ impl CeremonyRow {
             state: r.get("state")?,
             created_ms: r.get("created_ms")?,
             expires_ms: r.get("expires_ms")?,
+            action: r.get("action")?,
+            summary: r.get("summary")?,
         })
     }
 }
@@ -183,15 +190,17 @@ impl Store {
         Ok(())
     }
 
-    /// Remove a passkey, and with it every ceremony in flight and every
-    /// unspent proof: a proof does not record which passkey made it, so none
-    /// made before the removal outlives it. Whether there was one by that ID.
+    /// Remove a passkey, and with it every ceremony in flight, every unspent
+    /// proof and every device approval not yet collected: none records which
+    /// passkey made it, so none made before the removal outlives it. Whether
+    /// there was one by that ID.
     pub fn passkey_delete(&self, id: &str) -> Result<bool> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let removed = tx.execute("DELETE FROM webauthn_credential WHERE id=?1", [id])? == 1;
         if removed {
             tx.execute("DELETE FROM webauthn_challenge", [])?;
+            tx.execute(super::device::REVOKE_DEVICE_APPROVALS, [super::now_ms()])?;
         }
         tx.commit()?;
         Ok(removed)
@@ -215,8 +224,9 @@ impl Store {
         )?;
         conn.execute(
             "INSERT INTO webauthn_challenge
-               (id, purpose, op_hash, session_hash, granted_by, label, state, created_ms, expires_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               (id, purpose, op_hash, session_hash, granted_by, label, state, created_ms, expires_ms,
+                action, summary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 row.id,
                 row.purpose.as_str(),
@@ -226,10 +236,32 @@ impl Store {
                 row.label,
                 row.state,
                 row.created_ms,
-                row.expires_ms
+                row.expires_ms,
+                row.action,
+                row.summary
             ],
         )?;
         Ok(())
+    }
+
+    /// What the newest assertion `session` opened for `op_hash` said it
+    /// confirms, so a fresh challenge for the same operation says it too.
+    pub fn ceremony_describe(
+        &self,
+        session_hash: &str,
+        op_hash: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT action, summary FROM webauthn_challenge
+                  WHERE session_hash=?1 AND op_hash=?2 AND purpose='assert'
+                  ORDER BY created_ms DESC LIMIT 1",
+                params![session_hash, op_hash],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None)))
     }
 
     /// Spend a ceremony: the one with this ID, purpose and session, unused
@@ -327,6 +359,8 @@ mod tests {
             state: "{}".into(),
             created_ms: created,
             expires_ms: created + 120_000,
+            action: None,
+            summary: None,
         }
     }
 

@@ -2,11 +2,19 @@
   // The confirmation every admin action from off the node asks for. The
   // button is the user gesture the passkey sheet needs, which is why this is
   // a prompt and not something run silently behind the request.
+  import { isTauri } from '@tauri-apps/api/core'
+
   import { confirming } from '../lib/passkey'
   import { stepUp } from '../lib/stepup.svelte'
+  import DeviceCode from './DeviceCode.svelte'
+
+  const desktop = typeof window !== 'undefined' && isTauri()
 
   const pending = $derived(stepUp.pending)
   const what = $derived(pending ? confirming(pending.stepUp) : null)
+
+  /** Confirming in another browser, by choice or because this one cannot. */
+  const viaDevice = $derived(stepUp.elsewhere || !!stepUp.device)
 
   function onkey(e: KeyboardEvent) {
     if (e.key === 'Escape' && pending && !stepUp.busy) stepUp.cancel()
@@ -18,30 +26,46 @@
 {#if pending}
   <div class="scrim">
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="step-up-title" data-testid="step-up">
-      <h2 id="step-up-title">Confirm with your passkey</h2>
+      <h2 id="step-up-title">{viaDevice ? 'Confirm in a browser with your passkey' : 'Confirm with your passkey'}</h2>
       <p>
-        This changes who can use this node or what it holds for them, so it is confirmed on this
-        device each time.
+        This changes who can use this node or what it holds for them, so it is confirmed with a
+        passkey each time.
       </p>
       {#if what?.headline}<p class="what" data-testid="step-up-summary">{what.headline}</p>{/if}
       {#if what?.detail}<code class="action">{what.detail}</code>{/if}
-      {#if !stepUp.supported}
-        <p class="err">
-          This browser cannot use passkeys. Make this change from a browser that can, or at the node
-          itself.
-        </p>
+      {#if stepUp.device}
+        <DeviceCode start={stepUp.device} {desktop} />
+      {:else if viaDevice && !stepUp.problem}
+        <p>Asking the node…</p>
       {/if}
       {#if stepUp.problem}<p class="err" data-testid="step-up-problem">{stepUp.problem}</p>{/if}
       <div class="acts">
-        <button
-          class="btn p"
-          type="button"
-          onclick={() => void stepUp.confirm()}
-          disabled={stepUp.busy || !stepUp.supported}
-          data-testid="step-up-confirm"
-        >
-          {stepUp.busy ? 'Waiting for the passkey…' : stepUp.problem ? 'Try again' : 'Confirm'}
-        </button>
+        {#if stepUp.elsewhere}
+          {#if stepUp.problem}
+            <button class="btn p" type="button" onclick={() => void stepUp.confirmElsewhere()} data-testid="step-up-elsewhere">
+              Ask again
+            </button>
+          {/if}
+        {:else if !stepUp.device}
+          <button
+            class="btn p"
+            type="button"
+            onclick={() => void stepUp.confirm()}
+            disabled={stepUp.busy}
+            data-testid="step-up-confirm"
+          >
+            {stepUp.busy ? 'Waiting for the passkey…' : stepUp.problem ? 'Try again' : 'Confirm'}
+          </button>
+          <button
+            class="lnk"
+            type="button"
+            onclick={() => void stepUp.confirmElsewhere()}
+            disabled={stepUp.busy}
+            data-testid="step-up-elsewhere"
+          >
+            Use another device
+          </button>
+        {/if}
         <button class="lnk" type="button" onclick={() => stepUp.cancel()} disabled={stepUp.busy}>Cancel</button>
       </div>
     </div>

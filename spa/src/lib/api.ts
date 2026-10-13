@@ -75,6 +75,7 @@ import type {
 
 import type { HtmlBundleSelection } from './html-bundle'
 import type { CreationOptionsJSON, RequestOptionsJSON } from './passkey'
+import type { DeviceApprovalView, DeviceProof, DeviceStart } from './device'
 import type { AnswerProblem, ApprovalDetails } from './approval'
 
 /** A document edit that lost to another: the current state comes back. */
@@ -684,6 +685,23 @@ export const api = {
     }),
   deletePasskey: (id: string) =>
     call<{ removed: string }>('DELETE', `/api/passkeys/${encodeURIComponent(id)}`),
+  /** Ask to be signed in by a browser that is (device approval). */
+  deviceSignIn: () => call<DeviceStart>('POST', '/api/auth/device'),
+  /** Have another browser confirm the admin action whose challenge this is. */
+  deviceStepUp: (challengeId: string) =>
+    call<DeviceStart>('POST', '/api/auth/device/stepup', { challenge_id: challengeId }),
+  /** Poll for a device approval. A sign-in's answer sets this window's
+      cookie; a step-up's carries the proof. Throws the RFC 8628 refusals as
+      an `ApiError` whose `kind` names them. */
+  deviceToken: <T = DeviceProof | { ok: true; kind: 'sign-in' }>(deviceCode: string) =>
+    call<T>('POST', '/api/auth/device/token', { device_code: deviceCode }),
+  deviceApproval: (id: string) =>
+    call<DeviceApprovalView>('GET', `/api/auth/device/approvals/${encodeURIComponent(id)}`),
+  /** Approve: off the node, the step-up prompt asks for the passkey first. */
+  deviceApprove: (id: string) =>
+    call<{ id: string; status: string }>('POST', `/api/auth/device/approvals/${encodeURIComponent(id)}/approve`),
+  deviceDeny: (id: string) =>
+    call<{ id: string; status: string }>('POST', `/api/auth/device/approvals/${encodeURIComponent(id)}/deny`),
   meshInit: (hubUrl: string) =>
     call<{ hub_url: string; node_id: string; admit_with: string }>('POST', '/api/mesh/init', {
       hub_url: hubUrl,
