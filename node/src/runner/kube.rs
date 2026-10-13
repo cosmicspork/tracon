@@ -40,6 +40,11 @@ pub const SCRATCH_VOLUME: &str = "scratch";
 /// repository image whose `/tmp` the harness uid cannot write still has
 /// somewhere to put temporary files, and nothing there outlives the pod.
 pub const SCRATCH_MOUNT: &str = "/tmp";
+/// The init a session image built for a pod carries (`repo_image`), which a
+/// session in it runs under: a pod's first process is PID 1 of its container,
+/// which ignores any signal it has no handler for and inherits every orphan,
+/// and a pod has nothing like Podman's `--init` to stand in front of it.
+pub const SESSION_INIT: &str = "/usr/libexec/tracon/tini";
 
 /// What the node learns about its own pod from the downward API. The
 /// deployment sets these; a node without them is not running as a pod.
@@ -102,6 +107,9 @@ pub struct KubeSpec {
     /// command run in another image (a repository's, for its checks or its
     /// preparation) does not have this file.
     pub entrypoint: Option<String>,
+    /// An init `image` carries, run in front of everything else as `init --`.
+    /// Like `entrypoint` it belongs to `image` alone.
+    pub init: Option<String>,
     /// Seconds between the SIGTERM the kubelet sends and the SIGKILL that
     /// follows. See `Boundary::stop_timeout_secs`.
     pub stop_timeout_secs: u16,
@@ -140,6 +148,7 @@ impl KubeSpec {
             state_env: layout.env,
             state_dir: layout.dir,
             entrypoint: image_entrypoint(harness_id),
+            init: None,
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
             start_timeout: Duration::from_secs(k.start_timeout_secs),
             resources: k.resources.clone(),
@@ -339,7 +348,21 @@ impl KubeSpec {
         // Only the harness image has the harness's entrypoint. Forcing it onto
         // a repository image would run a path that image does not have, and
         // every check and preparation in it would fail before it started.
-        let entrypoint = self.entrypoint.as_ref().filter(|_| image == self.image);
+        let own = image == self.image;
+        let entrypoint = self.entrypoint.as_ref().filter(|_| own);
+        let mut command: Vec<String> = match self.init.as_ref().filter(|_| own) {
+            Some(init) => vec![init.clone(), "--".into()],
+            None => Vec::new(),
+        };
+        command.extend(entrypoint.cloned());
+        // An image entrypoint is named rather than replaced: a pod `command`
+        // overrides `ENTRYPOINT`, so an image that does work before
+        // `exec`ing the harness would have that work skipped here and
+        // nowhere else.
+        let (command, args) = match command.is_empty() {
+            true => (cmd.argv.clone(), None),
+            false => (command, Some(cmd.argv.clone())),
+        };
         Ok(Pod {
             metadata: ObjectMeta {
                 name: Some(name.into()),
@@ -349,12 +372,12 @@ impl KubeSpec {
             },
             spec: Some(PodSpec {
                 restart_policy: Some("Never".into()),
-                // How long the kubelet waits between SIGTERM and SIGKILL. The
-                // harness image runs a real init as PID 1 of the container's
-                // own namespace, so `shareProcessNamespace` is not needed and
-                // is deliberately not set: sharing one would put the harness
-                // and any sidecar in the same namespace, which is a wider
-                // grant than reaping needs. The namespace teardown at the end
+                // How long the kubelet waits between SIGTERM and SIGKILL.
+                // Reaping is left to the container's own PID namespace (a
+                // session image runs `init` as its PID 1), so
+                // `shareProcessNamespace` is deliberately not set: sharing one
+                // would put the harness and any sidecar in the same
+                // namespace, which is a wider grant than reaping needs. The namespace teardown at the end
                 // of this window is what actually removes the LSP and
                 // formatter children OpenCode never reaps
                 // (`config-state.md` §6.7).
@@ -407,15 +430,8 @@ impl KubeSpec {
                     name: HARNESS_CONTAINER.into(),
                     image: Some(image),
                     image_pull_policy: Some("IfNotPresent".into()),
-                    // An image entrypoint is named rather than replaced: a pod
-                    // `command` overrides `ENTRYPOINT`, so an image that does
-                    // work before `exec`ing the harness would have that work
-                    // skipped here and nowhere else.
-                    command: Some(match entrypoint {
-                        Some(entrypoint) => vec![entrypoint.clone()],
-                        None => cmd.argv.clone(),
-                    }),
-                    args: entrypoint.map(|_| cmd.argv.clone()),
+                    command: Some(command),
+                    args,
                     working_dir: Some(workdir),
                     stdin: Some(true),
                     stdin_once: Some(true),
@@ -1384,6 +1400,38 @@ mod tests {
             Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
         );
         assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
+    }
+
+    /// A session image's init goes in front of everything its image runs,
+    /// with `--` so the harness's own flags are never read as the init's,
+    /// and like an entrypoint it is never forced onto another image.
+    #[test]
+    fn an_init_runs_in_front_of_its_own_image_only() {
+        let mut spec = spec();
+        spec.image = "registry.example/app-claude@sha256:".to_string() + &"b".repeat(64);
+        spec.entrypoint = None;
+        spec.init = Some(SESSION_INIT.into());
+        let pod = spec.pod("tracon-h-1", &cmd(), false).unwrap();
+        let c = &pod.spec.unwrap().containers[0];
+        assert_eq!(c.image.as_deref(), Some(spec.image.as_str()));
+        assert_eq!(c.command, Some(vec![SESSION_INIT.into(), "--".into()]));
+        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
+
+        // With an entrypoint too, the init runs it.
+        spec.entrypoint = Some("/opt/entry".into());
+        let pod = spec.pod("tracon-h-2", &cmd(), false).unwrap();
+        let c = &pod.spec.unwrap().containers[0];
+        assert_eq!(
+            c.command,
+            Some(vec![SESSION_INIT.into(), "--".into(), "/opt/entry".into()])
+        );
+
+        let mut other = cmd();
+        other.image = Some("registry.example/app@sha256:".to_string() + &"a".repeat(64));
+        let pod = spec.pod("tracon-c-1", &other, false).unwrap();
+        let c = &pod.spec.unwrap().containers[0];
+        assert_eq!(c.command, Some(vec!["opencode".into(), "serve".into()]));
+        assert!(c.args.is_none());
     }
 
     #[test]

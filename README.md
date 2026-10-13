@@ -418,7 +418,7 @@ built, and rebuilds when the Dockerfile or its build context changes there. Only
 Dockerfile is honoured: a devcontainer's hooks, features, compose files and services are
 not, and `prepare` is where their work belongs. Over it the node adds one layer so every
 run meets the same thing whatever the Dockerfile ended on: root, `HOME=/root`, `/work`,
-no entrypoint. The first check (or `tracon repo build`) pays for the build; a build that
+no entrypoint (on Kubernetes, uid 65532 instead of root: see "Images on Kubernetes"). The first check (or `tracon repo build`) pays for the build; a build that
 fails leaves the last image that worked in place and is not retried until you ask. A
 build runs on this machine's Podman with the network, outside the boundary — the same
 trust `devcontainer up` asks for, which is why it is per repository and yours to name.
@@ -550,8 +550,8 @@ same egress grant, so `node_modules` and the like are there when the agent arriv
 bounded by the entry's `timeout_secs` and stopped with the session; a failure is recorded
 in the session's log and told to the agent in its orientation, and the session starts
 anyway. A session in the harness's own image has no cache to prepare against and is told
-the commands were not run, and why: on Kubernetes, which cannot build images yet, that is
-every session.
+the commands were not run, and why: on a Kubernetes node without a builder, that is every
+session.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -1338,8 +1338,27 @@ TLS. Each build sends the default branch's tree and the Dockerfile from the node
 (`--local`), pushes the result (`push=true`), and pins the digest the daemon reports.
 The node names images as Podman does, `localhost/tracon-repo-…`, and that prefix becomes
 the configured `registry` here: `localhost/tracon-repo-app-1a2b3c4d5e:0123` is pushed as
-`<registry>/tracon-repo-app-1a2b3c4d5e:0123`. The image serves checks and preparation;
-a session on Kubernetes still runs in its harness's own image.
+`<registry>/tracon-repo-app-1a2b3c4d5e:0123`. The image serves checks and preparation,
+and a Claude Code session runs in it with the harness layered on, as under Podman: the
+layer copies `claude` and a static `tini` out of the release's harness image, the
+session's pod runs under that `tini`, and the session gets its cache at `/cache` and its
+workspace prepared before the agent arrives. An OpenCode session still runs in its own
+harness image. Without a builder every session runs in its harness's own image and is
+told so.
+
+A harness pod is never root. It runs as `[runtime.kubernetes] uid` (65532) with
+`runAsNonRoot`, `HOME` at `harness_home` (`/home/harness`), and no capabilities, so the
+node's layer for Kubernetes differs from Podman's: it creates `/work`, `/cache` and the
+home owned by that uid, sets `HOME` there, ends on `USER 65532:65532`, and clears the
+entrypoint. Everything else in the image is the repository's, and **whatever its
+Dockerfile installs has to be readable and executable by any uid**: a toolchain under
+`/root`, or a cache only its build user can write, is not there for the run. A
+devcontainer that installs as root into `/usr/local` or `/opt` and leaves the default
+modes is fine; one that installs into its own user's home is not. Point the tool
+homes somewhere shared (`COMPOSER_HOME=/opt/composer`, `PLAYWRIGHT_BROWSERS_PATH` with
+`chmod -R a+rX`) and check with `podman run --user 65532:65532 -e HOME=/tmp/h <image>`.
+The profile is part of the image's key, so a Kubernetes image and a Podman one built
+from the same recipe never stand in for each other.
 
 What the node pod needs:
 
@@ -1385,8 +1404,8 @@ the node: sessions and checks still run. A build attempted anyway fails with the
 reason the check gave, and that failure is not held against the repository's recipe.
 The recipe is left alone for two minutes, so the check runs queued behind an outage
 do not each try again, and the next check or preparation after that tries again
-without `tracon repo build`, which retries at once (on Kubernetes a session never
-builds: it runs in its harness's own image). A registry that
+without `tracon repo build`, which retries at once. A session that finds the builder
+down starts in its harness's own image with the reason, rather than waiting. A registry that
 cannot be asked whether an image is still there leaves the standing image in use and
 triggers no rebuild.
 

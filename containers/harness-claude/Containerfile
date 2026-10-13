@@ -10,6 +10,11 @@ ARG CLAUDE_VERSION=2.1.295
 ARG CLAUDE_LINUX_ARM64_SHA256=a22d704eca7f241476445dfeb001c1848c1ebb6251e583be3dccfbfb1a5fd4aa
 ARG CLAUDE_LINUX_X64_SHA256=cf9cfb714ded1f27c1d3b7fb274faef50d72312c4b14525a74659188f59bd8b1
 ARG TARGETARCH
+# `tini` is not run in this image. Its statically linked build,
+# /usr/bin/tini-static, is the init a session image layered for a Kubernetes
+# pod copies in (`repo_image::layered`): static, because a repository's base
+# may not share this image's libc.
+#
 # CA certificates are needed before apt can reach the HTTPS snapshot below.
 # The base image's default sources are plain HTTP with Release signatures
 # verified against the pre-installed debian-archive-keyring, so bootstrapping
@@ -22,8 +27,9 @@ RUN apt-get update \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
       > /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
-    && apt-get install -y --no-install-recommends git curl \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends git curl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/tini-static --version
 # The official release archive is checked before its binary is extracted; the
 # mutable convenience installer is never part of this image build.
 RUN set -eu; case "${TARGETARCH}" in \

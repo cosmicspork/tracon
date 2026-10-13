@@ -216,6 +216,34 @@ impl KubeBackend {
         ))
     }
 
+    /// A runner for `harness_id` whose spec `adjust` has had its say over.
+    fn runner_with(
+        &self,
+        harness_id: &str,
+        extra_mounts: Vec<Mount>,
+        adjust: impl FnOnce(&mut KubeSpec),
+    ) -> Arc<dyn Runner> {
+        let client = match self.client.get() {
+            Some(Ok(c)) => c.clone(),
+            Some(Err(e)) => return Arc::new(Unavailable(e.clone())),
+            None => {
+                return Arc::new(Unavailable(
+                    "kubernetes client not initialised (checks did not run)".into(),
+                ))
+            }
+        };
+        match self.spec_for(harness_id) {
+            Ok(mut spec) => {
+                spec.extra_mounts = extra_mounts;
+                adjust(&mut spec);
+                Arc::new(
+                    KubeRunner::new(client, spec).with_secret_rights(self.secret_rights.clone()),
+                )
+            }
+            Err(e) => Arc::new(Unavailable(e)),
+        }
+    }
+
     pub async fn runner_for(&self, extra_mounts: Vec<Mount>) -> Result<KubeRunner, String> {
         let mut spec = self.spec()?;
         spec.extra_mounts = extra_mounts;
@@ -359,24 +387,35 @@ impl Backend for KubeBackend {
     }
 
     fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
-        let client = match self.client.get() {
-            Some(Ok(c)) => c.clone(),
-            Some(Err(e)) => return Arc::new(Unavailable(e.clone())),
-            None => {
-                return Arc::new(Unavailable(
-                    "kubernetes client not initialised (checks did not run)".into(),
-                ))
+        self.runner_with(harness_id, extra_mounts, |_| {})
+    }
+
+    /// As Podman's: the harness's spec with the session image in place of
+    /// the harness image. What belongs to the harness image goes with it (the
+    /// OpenCode entrypoint is a file only that image has), and the session
+    /// image's own init comes in: `repo_image` copies it into every image it
+    /// layers for a pod.
+    fn runner_in(
+        &self,
+        harness_id: &str,
+        image: &str,
+        extra_mounts: Vec<Mount>,
+    ) -> Arc<dyn Runner> {
+        self.runner_with(harness_id, extra_mounts, |spec| {
+            if spec.image != image {
+                spec.image = image.to_string();
+                spec.entrypoint = None;
+                spec.init = Some(crate::runner::kube::SESSION_INIT.to_string());
             }
-        };
-        match self.spec_for(harness_id) {
-            Ok(mut spec) => {
-                spec.extra_mounts = extra_mounts;
-                Arc::new(
-                    KubeRunner::new(client, spec).with_secret_rights(self.secret_rights.clone()),
-                )
-            }
-            Err(e) => Arc::new(Unavailable(e)),
-        }
+        })
+    }
+
+    /// A session runs in its repository's image wherever that image can be
+    /// built and layered, which takes `[runtime.kubernetes.builder]`. One
+    /// that is configured but unusable still says so through the session's
+    /// note, rather than as "this runtime cannot".
+    fn runs_sessions_in_repository_images(&self) -> bool {
+        self.builder.is_some()
     }
 
     async fn import_volume(
@@ -627,8 +666,11 @@ mod tests {
             configured.image_builder().unwrap().scratch_dir(),
             Some(tmp.path().join("state/tmp"))
         );
-        // Nothing is layered for a session no runner here would run in it.
-        assert!(!Backend::runs_sessions_in_repository_images(&configured));
+        // A session runs in its repository's image once a builder can make
+        // one, and in its harness's own without one.
+        assert!(Backend::runs_sessions_in_repository_images(&configured));
+        assert!(Backend::runs_sessions_in_repository_images(&invalid));
+        assert!(!Backend::runs_sessions_in_repository_images(&unconfigured));
         let said = configured.builder_status().await;
         assert!(
             said.contains("tcp://buildkitd.tracon-build.svc:1234 refused")
