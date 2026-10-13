@@ -341,6 +341,18 @@ impl MeshClient {
         recipient: &str,
         payload: &Payload,
     ) -> Result<(), HubError> {
+        let plaintext = serde_json::to_vec(payload).map_err(|e| HubError::Local(e.to_string()))?;
+        self.enqueue_direct_plaintext(channel, recipient, &plaintext)
+    }
+
+    /// As [`enqueue_direct`](Self::enqueue_direct), over a payload already
+    /// serialized.
+    pub(super) fn enqueue_direct_plaintext(
+        &self,
+        channel: &str,
+        recipient: &str,
+        plaintext: &[u8],
+    ) -> Result<(), HubError> {
         let x = self
             .peers
             .lock()
@@ -351,8 +363,15 @@ impl MeshClient {
         let pk = proto::keys::key32(&x)
             .map(x25519_dalek_public)
             .ok_or_else(|| HubError::Local("peer sealing key is malformed".into()))?;
-        let env = Envelope::seal_direct(&self.identity, channel, recipient, &pk, payload, now_ms())
-            .map_err(|e| HubError::Local(e.to_string()))?;
+        let env = Envelope::seal_direct_plaintext(
+            &self.identity,
+            channel,
+            recipient,
+            &pk,
+            plaintext,
+            now_ms(),
+        )
+        .map_err(|e| HubError::Local(e.to_string()))?;
         self.push_envelope(&env)
     }
 
@@ -569,6 +588,20 @@ impl MeshClient {
             // will not hold it forever, so park the ciphertext and say so;
             // `apply_held` opens it when the key lands.
             Err(e @ proto::frame::FrameError::UnknownEpoch(_)) => return self.hold(env, &e),
+            // Authentic and addressed here, but a payload this build cannot
+            // read: a newer peer's command still gets an answer saying why.
+            Err(proto::frame::FrameError::Payload(error))
+                if env.is_direct() && env.channel == MESH_CHANNEL =>
+            {
+                self.undecryptable.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(channel = %env.channel, sender = %sender, error = %error, "frame could not be read");
+                if let Ok(raw) = env.open_direct_json(&self.identity) {
+                    if raw["kind"] == "command" {
+                        self.refuse_unreadable_command(sender, &raw, &error.to_string());
+                    }
+                }
+                return Opened::Ignored;
+            }
             Err(e) => {
                 self.undecryptable.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(channel = %env.channel, sender = %sender, error = %e, "frame could not be opened");
@@ -759,8 +792,17 @@ impl MeshClient {
                     }
                 }
             }
-            Payload::Command { cmd_id, command } if env.is_direct() => {
-                self.run_command(sender.to_string(), cmd_id.clone(), command.clone());
+            Payload::Command {
+                cmd_id,
+                command,
+                not_after_ms,
+            } if env.is_direct() => {
+                self.run_command(
+                    sender.to_string(),
+                    cmd_id.clone(),
+                    command.clone(),
+                    *not_after_ms,
+                );
                 return Opened::Applied;
             }
             Payload::Ack { cmd_id, ok, err } if env.is_direct() => {
@@ -1273,7 +1315,7 @@ impl MeshClient {
         }
     }
 
-    fn note_refusal(&self, what: String) {
+    pub(crate) fn note_refusal(&self, what: String) {
         self.state.send_modify(|s| s.last_refusal = Some(what));
     }
 }

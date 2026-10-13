@@ -1611,7 +1611,8 @@ pub struct PromptBody {
 
 /// `POST /api/sessions/{id}/prompt`. A session whose turn is running holds
 /// the prompt rather than refusing it: the answer says which, and a queued
-/// one names the message whose delivery the log will show.
+/// one names the message whose delivery the log will show. A prompt for an
+/// unreachable owner is queued too, on this node, and names the owner instead.
 pub async fn prompt(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -1620,6 +1621,7 @@ pub async fn prompt(
     let body = match s.manager.prompt(&id, b.text).await? {
         Prompted::Sent => json!({ "queued": false }),
         Prompted::Queued { message_id } => json!({ "queued": true, "message_id": message_id }),
+        Prompted::QueuedForOwner { node_id } => json!({ "queued": true, "owner": node_id }),
     };
     Ok((StatusCode::ACCEPTED, Json(body)))
 }
@@ -5481,7 +5483,9 @@ async fn peer_command(
     mesh.command(node_id, command, timeout)
         .await
         .map_err(|e| match e {
-            CommandError::Timeout => ApiError(StatusCode::GATEWAY_TIMEOUT, e.to_string()),
+            CommandError::Timeout | CommandError::OlderPeer { .. } => {
+                ApiError(StatusCode::GATEWAY_TIMEOUT, e.to_string())
+            }
             CommandError::Refused(m) => ApiError(StatusCode::CONFLICT, m),
             CommandError::Local(m) => ApiError(StatusCode::INTERNAL_SERVER_ERROR, m),
         })
@@ -5740,6 +5744,120 @@ fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: 
         && !path.split('/').any(|part| part == "..")
 }
 
+/// Who may run a forwarded command here, checked before it runs. The mesh
+/// envelope proves which node sent it; membership of `@mesh` alone does not
+/// let that node drive this one. A command on a session, or on a permission
+/// or approval, needs the sender in that channel, and the target must be this
+/// node's own: a command is never relayed on to a third node under this
+/// node's identity. A provider command needs the sender in every channel the
+/// sign-in binds and in every one the credential it would replace serves. The
+/// commands not named here check their own scope as they run.
+fn authorise_forwarded(
+    s: &AppState,
+    sender: &str,
+    command: &proto::frame::Command,
+) -> ApiResult<()> {
+    use proto::frame::Command as C;
+    match command {
+        C::Prompt { session_id, .. }
+        | C::Kill { session_id }
+        | C::Pause { session_id, .. }
+        | C::Resume { session_id, .. } => forwarded_session(s, sender, session_id),
+        C::Answer { permission_id, .. } => {
+            if let Some(approval) = s.store().get_approval(permission_id)? {
+                owned_here(s, &approval.node_id, "approval")?;
+                return sender_in_channel(s, sender, &approval.channel, "approval");
+            }
+            let permission = s
+                .store()
+                .get_permission(permission_id)?
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "no such permission".into()))?;
+            owned_here(s, &permission.node_id, "permission")?;
+            let session_id = permission
+                .session_id
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "no such permission".into()))?;
+            forwarded_session(s, sender, &session_id)
+        }
+        C::ProviderConnect { name, channels, .. } => {
+            for channel in channels {
+                sender_in_channel(s, sender, channel, "sign-in")?;
+            }
+            match providers_of(s)?
+                .credential_channels(name)
+                .map_err(provider_err)?
+            {
+                // A credential bound to no channel is this node's alone, and
+                // one serving a channel the sender is not in would be taken
+                // from that channel's sessions: neither is a peer's to replace.
+                Some(serves)
+                    if serves.is_empty() || !serves.iter().all(|c| shares(s, sender, c)) =>
+                {
+                    Err(ApiError(
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "sender is not a member of every channel the {name} credential \
+                             this sign-in would replace serves"
+                        ),
+                    ))
+                }
+                _ => Ok(()),
+            }
+        }
+        C::ProviderCode { name, .. } | C::ProviderDisconnect { name } => {
+            // Only a sign-in the sender started is reachable from a peer (the
+            // provider refuses another owner's, and a stored credential is
+            // never disconnected remotely); this holds it to the channels it
+            // binds, in case the sender has left them since.
+            match providers_of(s)?.login_channels(name) {
+                Some(binds) if !binds.iter().any(|c| shares(s, sender, c)) => Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    format!("sender shares no channel with the {name} sign-in"),
+                )),
+                _ => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+fn forwarded_session(s: &AppState, sender: &str, session_id: &str) -> ApiResult<()> {
+    let row = s
+        .store()
+        .get_session(session_id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    owned_here(s, &row.node_id, "session")?;
+    sender_in_channel(s, sender, &row.channel, "session")
+}
+
+fn owned_here(s: &AppState, owner: &str, what: &str) -> ApiResult<()> {
+    if owner == s.node_id {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!("this {what} belongs to another node; send the command to its owner"),
+        ))
+    }
+}
+
+fn sender_in_channel(s: &AppState, sender: &str, channel: &str, what: &str) -> ApiResult<()> {
+    if shares(s, sender, channel) {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!("sender is not a member of this {what}'s channel"),
+        ))
+    }
+}
+
+/// Whether `sender` and this node are both members of `channel`.
+fn shares(s: &AppState, sender: &str, channel: &str) -> bool {
+    s.store()
+        .nodes_in_channel(channel)
+        .is_ok_and(|members| members.iter().any(|m| m == sender) && members.contains(&s.node_id))
+}
+
 /// Commands other nodes forward to this one run exactly as local requests do.
 #[async_trait::async_trait]
 impl crate::mesh::forward::CommandExecutor for AppState {
@@ -5749,6 +5867,13 @@ impl crate::mesh::forward::CommandExecutor for AppState {
         command: proto::frame::Command,
     ) -> Result<serde_json::Value, String> {
         use proto::frame::Command as C;
+        if let Err(ApiError(_, refusal)) = authorise_forwarded(self, sender, &command) {
+            tracing::warn!(from = %sender, error = %refusal, "mesh command refused");
+            if let Some(mesh) = &self.mesh {
+                mesh.note_refusal(format!("command from {sender}: {refusal}"));
+            }
+            return Err(refusal);
+        }
         let r: Result<serde_json::Value, ApiError> = match command {
             C::EvidenceCandidate { request } => {
                 crate::http::evidence::forwarded_candidate_evidence(self, sender, request)
@@ -5816,6 +5941,9 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     Prompted::Queued { message_id } => {
                         json!({ "accepted": true, "queued_message": message_id })
                     }
+                    // Unreachable here: a forwarded prompt is for a session
+                    // this node owns, never relayed on.
+                    Prompted::QueuedForOwner { .. } => json!({ "accepted": true }),
                 })
                 .map_err(Into::into),
             C::Answer {

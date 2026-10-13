@@ -123,6 +123,12 @@ revision is held to the commit alone as before, and the contract version is unmo
 row (absent on older builds); a new command op fails whole-payload deserialization on
 an older node, which drops the frame — the sender times out rather than erring, hence
 the version bump.
+A `command` payload may carry `not_after_ms`, the sender's wall-clock deadline in
+milliseconds: the owner refuses a command received past it (allowing for clock skew)
+rather than running it after the sender gave up. It is additive and defaulted, so a
+command without one runs whenever it lands, an older owner ignores the field, and the
+contract version is unmoved. A node that cannot parse a direct `command` payload acks
+its `cmd_id` with an error naming its older build instead of dropping it silently.
 Version 4 lets a review row and a queued card name no session: a harness the operator
 runs themselves calls with none. `session_id` on a `reviews` row and on a `queue` card
 may be `null`, a review row gains an optional `lane` (the caller's display label), and

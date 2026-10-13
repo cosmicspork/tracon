@@ -973,15 +973,18 @@ impl Manager {
         if queue_if_unreachable && !mesh.peer_reachable(node_id) {
             mesh.send_command(node_id, command)
                 .map_err(|e| SessionError::Rejected(e.to_string()))?;
-            return Ok(json!({ "queued": true }));
+            return Ok(json!({ "queued_for_owner": true }));
         }
         match mesh.command(node_id, command, timeout).await {
             Ok(v) => Ok(v),
             Err(crate::mesh::forward::CommandError::Timeout) => {
                 Err(SessionError::PeerUnreachable(node_id.to_string()))
             }
-            Err(crate::mesh::forward::CommandError::Refused(m)) => Err(SessionError::Rejected(m)),
-            Err(crate::mesh::forward::CommandError::Local(m)) => Err(SessionError::Rejected(m)),
+            Err(
+                e @ crate::mesh::forward::CommandError::OlderPeer { .. }
+                | e @ crate::mesh::forward::CommandError::Refused(_)
+                | e @ crate::mesh::forward::CommandError::Local(_),
+            ) => Err(SessionError::Rejected(e.to_string())),
         }
     }
 
@@ -2523,6 +2526,9 @@ impl Manager {
                 .map(|answer| match answer["queued_message"].as_str() {
                     Some(message_id) => Prompted::Queued {
                         message_id: message_id.to_string(),
+                    },
+                    None if answer["queued_for_owner"] == true => Prompted::QueuedForOwner {
+                        node_id: node.clone(),
                     },
                     None => Prompted::Sent,
                 }),

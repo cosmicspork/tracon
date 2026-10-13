@@ -142,6 +142,13 @@ pub enum Payload {
     Command {
         cmd_id: String,
         command: Command,
+        /// The sender's wall-clock deadline: past it the sender has stopped
+        /// waiting and told its operator the command failed, so the owner
+        /// refuses it rather than running it late. A sender on an older build
+        /// names none, and a command it sends runs whenever it arrives, as
+        /// before; an older owner ignores the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_after_ms: Option<i64>,
     },
     Ack {
         cmd_id: String,
@@ -536,12 +543,34 @@ impl Envelope {
         payload: &Payload,
         sent_ms: i64,
     ) -> Result<Envelope, FrameError> {
-        let recipient = key32(recipient_node_id).ok_or(FrameError::Malformed("recipient"))?;
-        let s = sender.verifying_key().to_bytes();
         let plaintext = serde_json::to_vec(payload)?;
-        let body = seal_to(
+        Self::seal_direct_plaintext(
+            sender,
+            channel,
+            recipient_node_id,
             recipient_x25519,
             &plaintext,
+            sent_ms,
+        )
+    }
+
+    /// As [`seal_direct`](Self::seal_direct), over a body already serialized:
+    /// how a test sends a payload a newer build would, which this build's
+    /// [`Payload`] cannot express.
+    #[doc(hidden)]
+    pub fn seal_direct_plaintext(
+        sender: &Identity,
+        channel: &str,
+        recipient_node_id: &str,
+        recipient_x25519: &PublicKey,
+        plaintext: &[u8],
+        sent_ms: i64,
+    ) -> Result<Envelope, FrameError> {
+        let recipient = key32(recipient_node_id).ok_or(FrameError::Malformed("recipient"))?;
+        let s = sender.verifying_key().to_bytes();
+        let body = seal_to(
+            recipient_x25519,
+            plaintext,
             &direct_aad(channel, &s, &recipient),
         )
         .to_bytes();
@@ -642,6 +671,17 @@ impl Envelope {
     /// Open a direct-sealed frame addressed to `me`. Does not verify; call
     /// [`verify`](Self::verify) first.
     pub fn open_direct(&self, me: &Identity) -> Result<Payload, FrameError> {
+        Ok(serde_json::from_slice(&self.open_direct_plaintext(me)?)?)
+    }
+
+    /// Open a direct-sealed frame to its JSON without reading it as a
+    /// [`Payload`]: what a node falls back to when its build cannot parse a
+    /// newer peer's payload, so it can still answer a command it cannot run.
+    pub fn open_direct_json(&self, me: &Identity) -> Result<Value, FrameError> {
+        Ok(serde_json::from_slice(&self.open_direct_plaintext(me)?)?)
+    }
+
+    fn open_direct_plaintext(&self, me: &Identity) -> Result<Vec<u8>, FrameError> {
         let (h, body) = self.parsed()?;
         if h.epoch.is_some() {
             return Err(FrameError::WrongSealing);
@@ -654,7 +694,7 @@ impl Envelope {
             &SealedBox::from_bytes(&body)?,
             &direct_aad(h.channel, &h.sender, &recipient),
         )?;
-        Ok(serde_json::from_slice(&plaintext)?)
+        Ok(plaintext)
     }
 
     pub fn is_direct(&self) -> bool {
@@ -800,6 +840,7 @@ mod tests {
             command: Command::Kill {
                 session_id: "s1".into(),
             },
+            not_after_ms: Some(2_000),
         };
         let f = Envelope::seal_direct(&a, MESH_CHANNEL, &b.node_id(), &b.x25519_public(), &p, 2)
             .unwrap();
@@ -817,6 +858,63 @@ mod tests {
         let mut t = f.clone();
         t.recipient = Some(c.node_id());
         assert!(matches!(t.verify(), Err(FrameError::BadId)));
+    }
+
+    /// A command's deadline is additive: a sender on an older build names
+    /// none and its command still parses, and a command with no deadline is
+    /// written without the field, byte for byte what that build sends.
+    #[test]
+    fn a_command_without_a_deadline_is_the_older_shape() {
+        let older: Payload = serde_json::from_value(serde_json::json!({
+            "kind": "command",
+            "cmd_id": "c1",
+            "command": { "op": "kill", "session_id": "s1" },
+        }))
+        .unwrap();
+        assert_eq!(
+            older,
+            Payload::Command {
+                cmd_id: "c1".into(),
+                command: Command::Kill {
+                    session_id: "s1".into()
+                },
+                not_after_ms: None,
+            }
+        );
+        let v = serde_json::to_value(&older).unwrap();
+        assert!(v.get("not_after_ms").is_none(), "{v}");
+        let dated = Payload::Command {
+            cmd_id: "c1".into(),
+            command: Command::Kill {
+                session_id: "s1".into(),
+            },
+            not_after_ms: Some(42),
+        };
+        assert_eq!(serde_json::to_value(&dated).unwrap()["not_after_ms"], 42);
+    }
+
+    /// A payload this build cannot parse still opens to its JSON, so the
+    /// receiver can answer a newer peer's command instead of dropping it.
+    #[test]
+    fn a_direct_frame_this_build_cannot_parse_still_opens_to_json() {
+        let (a, b, _) = ids();
+        let newer = serde_json::json!({
+            "kind": "command",
+            "cmd_id": "c2",
+            "command": { "op": "from_a_newer_build" },
+        });
+        let f = Envelope::seal_direct_plaintext(
+            &a,
+            MESH_CHANNEL,
+            &b.node_id(),
+            &b.x25519_public(),
+            &serde_json::to_vec(&newer).unwrap(),
+            3,
+        )
+        .unwrap();
+        f.verify().unwrap();
+        assert!(matches!(f.open_direct(&b), Err(FrameError::Payload(_))));
+        assert_eq!(f.open_direct_json(&b).unwrap(), newer);
     }
 
     /// A frame from a build on another wire version is refused by name, before

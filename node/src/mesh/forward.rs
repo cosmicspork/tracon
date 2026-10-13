@@ -12,7 +12,7 @@ use proto::frame::{Change, Command, Payload, MESH_CHANNEL};
 use serde_json::Value;
 
 use super::client::MeshClient;
-use crate::store::{EventRow, NewEvent};
+use crate::store::{now_ms, EventRow, NewEvent};
 use crate::stream::Frame;
 
 /// What runs a command on the owning node. Implemented by the HTTP layer's
@@ -22,10 +22,24 @@ pub trait CommandExecutor: Send + Sync {
     async fn execute(&self, sender: &str, command: Command) -> Result<Value, String>;
 }
 
+/// How far the owner's clock may run ahead of the sender's before a command
+/// that is still inside its deadline reads as expired. The deadline exists to
+/// stop a command running minutes or hours after its sender gave up; holding
+/// it to the millisecond across two machines' clocks would refuse fresh ones.
+pub const DEADLINE_SKEW_MS: i64 = 30_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
     #[error("the owner did not answer in time (unreachable, or on an older build)")]
     Timeout,
+    /// No answer from a peer that last announced an older build than this
+    /// one. A build that predates a command drops it unread, so this is the
+    /// likeliest reason, though not a certain one.
+    #[error(
+        "the owner did not answer in time and runs an older build ({peer}) than this node \
+         ({local}); it may not understand this command, so upgrade it"
+    )]
+    OlderPeer { peer: String, local: String },
     #[error("{0}")]
     Refused(String),
     #[error("{0}")]
@@ -33,7 +47,9 @@ pub enum CommandError {
 }
 
 impl MeshClient {
-    /// Queue a command for `node_id` without waiting for its answer.
+    /// Queue a command for `node_id` without waiting for its answer. It
+    /// carries no deadline: the operator asked for it to wait in the outbox
+    /// until the owner returns.
     pub fn send_command(&self, node_id: &str, command: Command) -> Result<String, CommandError> {
         let cmd_id = uuid::Uuid::now_v7().to_string();
         self.enqueue_direct(
@@ -42,32 +58,84 @@ impl MeshClient {
             &Payload::Command {
                 cmd_id: cmd_id.clone(),
                 command,
+                not_after_ms: None,
             },
         )
         .map_err(|e| CommandError::Local(e.to_string()))?;
         Ok(cmd_id)
     }
 
-    /// Send a command and wait for the owner's ack.
+    /// Send a command and wait for the owner's ack. The owner refuses it once
+    /// `timeout` has passed, so a command this node reported as failed never
+    /// runs later from the outbox.
     pub async fn command(
         &self,
         node_id: &str,
         command: Command,
         timeout: Duration,
     ) -> Result<Value, CommandError> {
+        let deadline = now_ms().saturating_add(timeout.as_millis().min(i64::MAX as u128) as i64);
+        self.command_until(node_id, command, timeout, Some(deadline))
+            .await
+    }
+
+    /// As [`command`](Self::command), with the deadline the owner holds it
+    /// to named outright. `None` is what a sender on an older build sends.
+    #[doc(hidden)]
+    pub async fn command_until(
+        &self,
+        node_id: &str,
+        command: Command,
+        timeout: Duration,
+        not_after_ms: Option<i64>,
+    ) -> Result<Value, CommandError> {
+        self.await_ack(node_id, timeout, |cmd_id| {
+            serde_json::to_vec(&Payload::Command {
+                cmd_id,
+                command,
+                not_after_ms,
+            })
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Send a command this build's [`Command`] cannot express, as a newer
+    /// build would, and wait for the answer.
+    #[doc(hidden)]
+    pub async fn command_json(
+        &self,
+        node_id: &str,
+        command: Value,
+        timeout: Duration,
+    ) -> Result<Value, CommandError> {
+        self.await_ack(node_id, timeout, |cmd_id| {
+            serde_json::to_vec(&serde_json::json!({
+                "kind": "command",
+                "cmd_id": cmd_id,
+                "command": command,
+            }))
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    async fn await_ack(
+        &self,
+        node_id: &str,
+        timeout: Duration,
+        payload: impl FnOnce(String) -> Result<Vec<u8>, String>,
+    ) -> Result<Value, CommandError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let cmd_id = uuid::Uuid::now_v7().to_string();
         self.pending.lock().unwrap().insert(cmd_id.clone(), tx);
-        if let Err(e) = self.enqueue_direct(
-            MESH_CHANNEL,
-            node_id,
-            &Payload::Command {
-                cmd_id: cmd_id.clone(),
-                command,
-            },
-        ) {
+        let queued = payload(cmd_id.clone()).and_then(|plaintext| {
+            self.enqueue_direct_plaintext(MESH_CHANNEL, node_id, &plaintext)
+                .map_err(|e| e.to_string())
+        });
+        if let Err(e) = queued {
             self.pending.lock().unwrap().remove(&cmd_id);
-            return Err(CommandError::Local(e.to_string()));
+            return Err(CommandError::Local(e));
         }
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
@@ -75,32 +143,89 @@ impl MeshClient {
             Ok(Err(_)) => Err(CommandError::Local("client shut down".into())),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&cmd_id);
-                Err(CommandError::Timeout)
+                Err(self.timed_out(node_id))
             }
         }
     }
 
+    /// What to say when a peer never answered: plain silence, unless the
+    /// peer last announced an older build, which drops a command it cannot
+    /// read.
+    fn timed_out(&self, node_id: &str) -> CommandError {
+        let local = env!("CARGO_PKG_VERSION");
+        match self
+            .store
+            .get_node(node_id)
+            .ok()
+            .flatten()
+            .and_then(|row| row.app_version)
+        {
+            Some(peer) if older_build(&peer, local) => CommandError::OlderPeer {
+                peer,
+                local: local.to_string(),
+            },
+            _ => CommandError::Timeout,
+        }
+    }
+
     /// Execute a command a peer sent us and ack it. Runs off the pull path so a
-    /// slow command does not stall ingestion.
-    pub(super) fn run_command(&self, sender: String, cmd_id: String, command: Command) {
+    /// slow command does not stall ingestion. A command past its sender's
+    /// deadline is refused unrun: the sender has already reported it failed.
+    pub(super) fn run_command(
+        &self,
+        sender: String,
+        cmd_id: String,
+        command: Command,
+        not_after_ms: Option<i64>,
+    ) {
         let Some(this) = self.weak.upgrade() else {
             return;
         };
         tokio::spawn(async move {
-            let result = match this.executor.get() {
-                Some(executor) => executor.execute(&sender, command).await,
-                None => Err("this node is not ready to run commands".into()),
+            let late_ms = not_after_ms.map(|deadline| now_ms().saturating_sub(deadline));
+            let result = match (this.executor.get(), late_ms) {
+                (_, Some(late)) if late > DEADLINE_SKEW_MS => {
+                    let refusal = format!(
+                        "this command expired {}s ago, after its sender stopped waiting; it was not run",
+                        late / 1000
+                    );
+                    tracing::warn!(from = %sender, cmd = %cmd_id, late_ms = late, "expired mesh command refused");
+                    this.note_refusal(format!("command from {sender}: {refusal}"));
+                    Err(refusal)
+                }
+                (Some(executor), _) => executor.execute(&sender, command).await,
+                (None, _) => Err("this node is not ready to run commands".into()),
             };
-            let (ok, err) = match result {
-                Ok(v) => (Some(v), None),
-                Err(e) => (None, Some(e)),
-            };
-            if let Err(e) =
-                this.enqueue_direct(MESH_CHANNEL, &sender, &Payload::Ack { cmd_id, ok, err })
-            {
-                tracing::warn!(to = %sender, error = %e, "could not queue an ack");
-            }
+            this.ack(&sender, cmd_id, result);
         });
+    }
+
+    /// Answer a command whose payload this build could not parse: a newer
+    /// sender's op or field shape. Without this the frame is dropped and the
+    /// sender waits out its timeout with no reason.
+    pub(super) fn refuse_unreadable_command(&self, sender: &str, payload: &Value, error: &str) {
+        let Some(cmd_id) = payload["cmd_id"].as_str() else {
+            return;
+        };
+        let op = payload["command"]["op"].as_str().unwrap_or("unknown");
+        let refusal = format!(
+            "the owner runs an older build ({}) that cannot read this `{op}` command ({error}); \
+             upgrade it",
+            env!("CARGO_PKG_VERSION")
+        );
+        tracing::warn!(from = %sender, op, error, "unreadable mesh command refused");
+        self.note_refusal(format!("command from {sender}: {refusal}"));
+        self.ack(sender, cmd_id.to_string(), Err(refusal));
+    }
+
+    fn ack(&self, to: &str, cmd_id: String, result: Result<Value, String>) {
+        let (ok, err) = match result {
+            Ok(v) => (Some(v), None),
+            Err(e) => (None, Some(e)),
+        };
+        if let Err(e) = self.enqueue_direct(MESH_CHANNEL, to, &Payload::Ack { cmd_id, ok, err }) {
+            tracing::warn!(to = %to, error = %e, "could not queue an ack");
+        }
     }
 
     /// Direct-seal credentials to a member, through the outbox — the same
@@ -313,5 +438,35 @@ impl MeshClient {
             }
         }
         n
+    }
+}
+
+/// Whether `peer` names an earlier release than `local`. Only plain
+/// `major.minor.patch` versions compare; anything else is not called older,
+/// so an unreadable version never blames the peer's build.
+fn older_build(peer: &str, local: &str) -> bool {
+    fn parts(v: &str) -> Option<(u64, u64, u64)> {
+        let core = v.trim().trim_start_matches('v');
+        let core = core.split(['-', '+']).next()?;
+        let mut it = core.split('.').map(|p| p.parse::<u64>().ok());
+        let parsed = (it.next()??, it.next()??, it.next()??);
+        it.next().is_none().then_some(parsed)
+    }
+    matches!((parts(peer), parts(local)), (Some(p), Some(l)) if p < l)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::older_build;
+
+    #[test]
+    fn only_a_readable_earlier_release_is_older() {
+        assert!(older_build("0.31.4", "0.32.0"));
+        assert!(older_build("v0.9.9", "0.10.0"));
+        assert!(!older_build("0.32.0", "0.32.0"));
+        assert!(!older_build("0.33.0", "0.32.0"));
+        assert!(!older_build("dev", "0.32.0"));
+        assert!(!older_build("", "0.32.0"));
+        assert!(!older_build("0.32", "0.32.0"));
     }
 }

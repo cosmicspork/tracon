@@ -946,13 +946,34 @@ Invariants on top of the wire:
   policy, store, and subprocesses; only the ack travels back. A provider sign-in's
   PKCE verifier, the code it exchanges, and the resulting credential never leave the
   owner.
+- **The owner authorises the sender, not just the envelope.** Every member is on
+  `@mesh`, so a verified sender proves only which node asked. Before a prompt,
+  answer, kill, pause or resume runs, the owner checks that the session (or the
+  permission's or approval's session or channel) is its own and that the sender and
+  the owner are both members of that channel, by the owner's own record. It never
+  relays a command on to a third node under its own identity. A provider sign-in
+  needs the sender in every channel it would bind and in every channel served by the
+  credential it would replace (one bound to no channel is the owner's alone and never
+  replaced by a peer); a pasted code or a cancel is held to the
+  channels of the sign-in the sender started. Create, verdict, notification, evidence
+  and review-detail commands check their own channel as they run. A refusal is acked
+  to the sender with its reason, logged, and shown as the mesh's last refusal.
+- **A command expires when its sender stops waiting.** A command sent with a
+  timeout carries `not_after_ms`; past it (with 30 seconds' leeway for clock skew)
+  the owner refuses it unrun, so a command the operator was told failed never runs
+  later from the outbox. A prompt queued on purpose for an unreachable owner carries
+  no deadline and is reported as queued, naming the owner, not as sent. A command
+  from a sender on an older build names no deadline and runs as before.
 - **The hello may carry state, not secrets.** A node's models and its provider
   summary (names, states, identities — and a pending login URL) ride the hello,
   sealed to the operator's own mesh. Credential values never do; those move only as
   direct-sealed handoffs.
 - One contract version, checked at enrollment. A peer on an older build drops
   payloads it cannot read; senders surface that as "unreachable, or on an older
-  build" rather than silence.
+  build" rather than silence, and as "runs an older build" when the peer's last
+  hello named an earlier release. From this build on, a node that cannot parse a
+  command still opens it far enough to ack it with "the owner runs an older build",
+  so the sender hears why at once instead of timing out.
 
 ### Owner streams
 
