@@ -8,7 +8,8 @@
 //!    against, refuses if the file is no longer that version;
 //! 2. applies the operations;
 //! 3. loads the result as a `Config`, with every check a load makes, and
-//!    refuses anything that would not load;
+//!    refuses anything that would not load, or that makes a key name a
+//!    program or path the path guard refuses (`config::path_guard`);
 //! 4. records who changed which keys in the audit log (`config_audit`), and
 //!    only then replaces the file, atomically;
 //! 5. tells the operator's devices what changed, by whom.
@@ -556,6 +557,15 @@ pub fn edit_at(
             notified: None,
         });
     }
+    // No key may come to name a program, a secret or a directory the path
+    // guard refuses. A key that already did is left to the start's warning,
+    // so it does not hold up an unrelated edit.
+    let before = match crate::legacy::migrate_config(&text) {
+        Some(migration) => Config::from_toml(&migration.text, path),
+        None => Config::from_toml(&text, path),
+    }
+    .ok();
+    super::path_guard::refuse_new(before.as_ref(), &config).map_err(EditError::Invalid)?;
 
     let new_hash = hash(next.as_bytes());
     let row = ConfigAuditRow {
@@ -2215,6 +2225,75 @@ path = "/srv/notes"
         let broken = format!("{COMMENTED}\n[runtime.kubernetes.builder]\nregistry = \"nope\"\n");
         let (_dir, path) = file(&broken);
         edit_at(&path, &store, &[set("node_name", "other")], None, "test").unwrap();
+    }
+
+    /// A program an agent could have written, or a secret of the node's own
+    /// as the embedding key, is refused; the file is untouched.
+    #[test]
+    fn a_path_the_guard_refuses_is_not_written() {
+        let planted = Config::state_dir().join("workspaces/planted/gh");
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (_dir, path) = file(COMMENTED);
+        let store = store();
+        for (key, value) in [
+            ("publish.gh", planted.to_string_lossy().into_owned()),
+            (
+                "embed.api_key_file",
+                Config::db_path().to_string_lossy().into_owned(),
+            ),
+            (
+                "embed.api_key_file",
+                crate::mesh::identity::seed_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ("consulta.args", String::new()),
+        ] {
+            let op = match key {
+                "consulta.args" => Op::set(
+                    KeyPath::parse(key).unwrap(),
+                    toml::Value::Array(
+                        ["run", "python", "-c", "print(1)"]
+                            .map(|a| toml::Value::String(a.into()))
+                            .to_vec(),
+                    ),
+                ),
+                _ => set(key, value.as_str()),
+            };
+            let err = edit_at(&path, &store, &[op], None, "test").err().unwrap();
+            assert!(matches!(err, EditError::Invalid(_)), "{key}: {err}");
+            assert!(err.to_string().contains("path guard"), "{key}: {err}");
+            assert_eq!(read(&path), COMMENTED);
+        }
+    }
+
+    /// A key that already broke a rule is the start's warning, not a reason
+    /// to refuse an edit of something else.
+    #[test]
+    fn a_key_already_refused_does_not_block_another_edit() {
+        let planted = Config::state_dir().join("workspaces/already/gh");
+        let broken = format!(
+            "{COMMENTED}\n[publish]\ngh = {:?}\n",
+            planted.to_string_lossy()
+        );
+        let (_dir, path) = file(&broken);
+        edit_at(&path, &store(), &[set("node_name", "other")], None, "test").unwrap();
+        // Writing it again as it is changes nothing; writing another bad
+        // value is refused.
+        let elsewhere = Config::state_dir().join("workspaces/other/gh");
+        let err = edit_at(
+            &path,
+            &store(),
+            &[set("publish.gh", elsewhere.to_string_lossy().as_ref())],
+            None,
+            "test",
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("path guard"), "{err}");
     }
 
     #[test]

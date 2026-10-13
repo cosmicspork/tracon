@@ -89,8 +89,11 @@ fn credential_env(credential: &Credential<'_>) -> Vec<(String, String)> {
 /// The isolation every Git command the node runs starts from. `home_name` is
 /// the directory under node state `$HOME` points at; it exists so a
 /// publication and a managed clone cannot read each other's Git state.
-fn base(git: &str, home_name: &str, credential: &Credential<'_>) -> Command {
-    let mut command = Command::new(git);
+///
+/// `git` is checked by the path guard here, just before the command is
+/// built, and refused if it names a program an agent could have written.
+fn base(git: &str, home_name: &str, credential: &Credential<'_>) -> std::io::Result<Command> {
+    let mut command = Command::new(crate::config::path_guard::program("publish.git", git)?);
     command
         // Nothing the node inherited reaches git: not the operator's `GIT_*`,
         // not `SSH_AUTH_SOCK`, not an askpass the desktop session set.
@@ -108,21 +111,30 @@ fn base(git: &str, home_name: &str, credential: &Credential<'_>) -> Command {
         // `git@host:` remote must fail rather than reach an agent's keys.
         .env("GIT_SSH_COMMAND", "false")
         .envs(credential_env(credential));
-    command
+    Ok(command)
 }
 
 /// A Git command with no repository of its own (`clone`, `init`).
-pub fn git(git_bin: &str, home_name: &str, credential: &Credential<'_>) -> Command {
-    let mut command = base(git_bin, home_name, credential);
+pub fn git(
+    git_bin: &str,
+    home_name: &str,
+    credential: &Credential<'_>,
+) -> std::io::Result<Command> {
+    let mut command = base(git_bin, home_name, credential)?;
     command.args(SAFE);
-    command
+    Ok(command)
 }
 
 /// A Git command run inside a working tree (`-C`).
-pub fn git_in(git_bin: &str, dir: &Path, home_name: &str, credential: &Credential<'_>) -> Command {
-    let mut command = base(git_bin, home_name, credential);
+pub fn git_in(
+    git_bin: &str,
+    dir: &Path,
+    home_name: &str,
+    credential: &Credential<'_>,
+) -> std::io::Result<Command> {
+    let mut command = base(git_bin, home_name, credential)?;
     command.arg("-C").arg(dir).args(SAFE);
-    command
+    Ok(command)
 }
 
 /// A Git command run against a bare repository (`--git-dir`).
@@ -131,10 +143,10 @@ pub fn git_bare(
     dir: &Path,
     home_name: &str,
     credential: &Credential<'_>,
-) -> Command {
-    let mut command = base(git_bin, home_name, credential);
+) -> std::io::Result<Command> {
+    let mut command = base(git_bin, home_name, credential)?;
     command.arg("--git-dir").arg(dir).args(SAFE);
-    command
+    Ok(command)
 }
 
 /// The brokered credential from a token the broker did or did not hand over.
@@ -168,7 +180,7 @@ mod tests {
 
     #[test]
     fn anonymous_still_discards_every_helper_a_config_file_could_name() {
-        let env = env_of(&git("git", "publish-home", &Credential::Anonymous));
+        let env = env_of(&git("git", "publish-home", &Credential::Anonymous).unwrap());
         assert_eq!(env.get("GIT_CONFIG_COUNT").unwrap(), "1");
         assert_eq!(env.get("GIT_CONFIG_KEY_0").unwrap(), "credential.helper");
         assert_eq!(env.get("GIT_CONFIG_VALUE_0").unwrap(), "");
@@ -189,7 +201,8 @@ mod tests {
                 user: "x-access-token",
                 token: "fake-token-for-tests",
             },
-        );
+        )
+        .unwrap();
         let env = env_of(&command);
         assert_eq!(env.get("GIT_CONFIG_COUNT").unwrap(), "2");
         // Index 0 is the reset, 1 is ours: git applies them in that order, so

@@ -128,7 +128,12 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
     loop {
         tick.tick().await;
         let (store, into, from) = (store.clone(), dir.clone(), channel.clone());
+        let configured = cfg.docs.export_dir.clone().unwrap_or_default();
         let done = tokio::task::spawn_blocking(move || {
+            // Before every export, not only when the key was written: what
+            // the directory is can change after.
+            crate::config::path_guard::path("docs.export_dir", &configured)
+                .map_err(|e| e.to_string())?;
             let (docs, skipped_html) = from_store(&store, &from).map_err(|e| e.to_string())?;
             let mut report = sync_dir(&into, &docs).map_err(|e| e.to_string())?;
             report.skipped_html = skipped_html;

@@ -347,7 +347,8 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     let args = gateway_args(cfg, super::selinux_enabled().await)?;
     if let Some(unit) = gateway_unit_path().filter(|_| !cfg!(target_os = "macos")) {
         if user_manager_running().await {
-            let podman_bin = super::resolve_podman_env(cfg);
+            // Checked here: systemd, not the node, runs what the unit names.
+            let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
             let text = gateway_unit_text(&podman_bin, &args, &service_path());
             write_unit(&unit, &text)?;
             systemctl(&["daemon-reload"]).await?;
@@ -405,7 +406,8 @@ pub async fn recover_gateway(cfg: &Config) -> Result<Recovery, BoundaryError> {
             // it came to be stopped), and a newer binary may describe it
             // differently. Both converge on the same unit.
             let args = gateway_args(cfg, super::selinux_enabled().await)?;
-            let podman_bin = super::resolve_podman_env(cfg);
+            // Checked here: systemd, not the node, runs what the unit names.
+            let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
             let text = gateway_unit_text(&podman_bin, &args, &service_path());
             write_unit(&unit, &text)?;
             systemctl(&["daemon-reload"]).await?;

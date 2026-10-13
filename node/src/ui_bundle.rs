@@ -109,6 +109,10 @@ pub fn absent_advice() -> String {
 /// `--rebuild` means for every other thing `setup` owns.
 pub async fn install(cfg: &Config, tarball: Option<&Path>, force: bool) -> Result<Outcome> {
     let dir = cfg.ui.opencode_bundle_path();
+    // An install moves whatever is at `dir` aside and deletes it.
+    if let Some(configured) = &cfg.ui.opencode_bundle_dir {
+        crate::config::path_guard::path("ui.opencode_bundle_dir", configured)?;
+    }
     if !force {
         if let Ok(bundle) = ui::Bundle::load(&dir) {
             return Ok(Outcome::Current {

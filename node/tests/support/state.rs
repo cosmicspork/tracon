@@ -44,8 +44,20 @@ extern "C" fn remove_ours() {
 /// credential store. It is removed again when this binary exits, and stale
 /// siblings are swept on the way in — a workspace run is dozens of binaries,
 /// and left to themselves they filled a tmpfs's inode table.
+///
+/// It also turns the path guard off for this binary: the stand-in `gh` and
+/// `git` these tests run live in temporary directories, which the guard
+/// refuses by design. `node/tests/path_guard.rs` keeps it on, through
+/// `isolate_dirs`.
 #[allow(dead_code)]
 pub fn isolate() {
+    isolate_dirs();
+    tracon::config::path_guard::install(tracon::config::path_guard::Guard::unchecked());
+}
+
+/// `isolate`, leaving the path guard as the library would have it.
+#[allow(dead_code)]
+pub fn isolate_dirs() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

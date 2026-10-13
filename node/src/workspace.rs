@@ -884,7 +884,7 @@ async fn run_git<'a>(
     op: &'static str,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), WorkspaceError> {
-    let mut command = Command::new(git);
+    let mut command = Command::new(crate::config::path_guard::program("publish.git", git)?);
     command
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())

@@ -23,6 +23,7 @@ async fn volume_copy_in(
     volume: &str,
     source: &Path,
 ) -> Result<(), BoundaryError> {
+    let podman_bin = &guarded_podman(podman_bin)?;
     crate::workspace::validate_tree(source).map_err(|e| BoundaryError::Other(e.to_string()))?;
     let created = tokio::process::Command::new(podman_bin)
         .args(["volume", "create", "--ignore", volume])
@@ -120,6 +121,7 @@ async fn workspace_copy_out(
     volume: &str,
     destination: &Path,
 ) -> Result<(), BoundaryError> {
+    let podman_bin = &guarded_podman(podman_bin)?;
     let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
     let staged = tokio::process::Command::new(podman_bin)
         .args([
@@ -160,6 +162,7 @@ async fn workspace_copy_out(
 }
 
 async fn copy_out(podman_bin: &str, source: &str, destination: &Path) -> Result<(), BoundaryError> {
+    let podman_bin = &guarded_podman(podman_bin)?;
     if destination.exists() {
         std::fs::remove_dir_all(destination)?;
     }
@@ -187,6 +190,7 @@ async fn volume_copy_out(
     volume: &str,
     destination: &Path,
 ) -> Result<(), BoundaryError> {
+    let podman_bin = &guarded_podman(podman_bin)?;
     let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
     let created = tokio::process::Command::new(podman_bin)
         .args([
@@ -518,18 +522,43 @@ pub fn resolve_podman(
     "podman".into()
 }
 
-pub(crate) fn resolve_podman_env(cfg: &Config) -> String {
-    let candidates = [
+/// Where podman is usually installed, for a node whose PATH lacks it.
+pub(crate) fn podman_candidates() -> [PathBuf; 3] {
+    [
         PathBuf::from("/opt/homebrew/bin/podman"),
         PathBuf::from("/usr/local/bin/podman"),
         PathBuf::from("/usr/bin/podman"),
-    ];
+    ]
+}
+
+/// The podman this node runs, as `resolve_podman` finds it but through the
+/// path guard: a PATH entry or a configured path an agent could have written
+/// is passed over or refused. A refused one is returned as configured, so
+/// every spawn's own check refuses it again with the reason.
+pub(crate) fn resolve_podman_env(cfg: &Config) -> String {
+    let candidates = podman_candidates();
     let refs: Vec<&Path> = candidates.iter().map(PathBuf::as_path).collect();
-    resolve_podman(
-        &cfg.boundary.podman,
-        std::env::var_os("PATH").as_deref(),
-        &refs,
-    )
+    match crate::config::path_guard::resolve("boundary.podman", &cfg.boundary.podman, &refs) {
+        Some(Ok(path)) => path.to_string_lossy().into_owned(),
+        Some(Err(refusal)) => {
+            tracing::warn!(%refusal, "podman");
+            match cfg.boundary.podman.is_empty() {
+                true => "podman".into(),
+                false => cfg.boundary.podman.clone(),
+            }
+        }
+        None => resolve_podman(
+            &cfg.boundary.podman,
+            std::env::var_os("PATH").as_deref(),
+            &refs,
+        ),
+    }
+}
+
+/// `bin` as the path guard finds it now, for the spawns of one operation.
+pub(super) fn guarded_podman(bin: &str) -> std::io::Result<String> {
+    crate::config::path_guard::program("boundary.podman", bin)
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 #[async_trait]
@@ -538,7 +567,16 @@ impl super::ImageBuilder for PodmanBackend {
         &self,
         build: super::ImageBuild<'_>,
     ) -> Result<super::BuiltImage, super::BuildFailure> {
-        let mut command = tokio::process::Command::new(resolve_podman_env(&self.cfg));
+        let bin = match guarded_podman(&resolve_podman_env(&self.cfg)) {
+            Ok(bin) => bin,
+            Err(error) => {
+                return Err(super::BuildFailure {
+                    error: format!("podman build: {error}"),
+                    ..Default::default()
+                })
+            }
+        };
+        let mut command = tokio::process::Command::new(bin);
         command.arg("build");
         for (name, value) in build.labels {
             command.arg("--label").arg(format!("{name}={value}"));
@@ -624,19 +662,20 @@ pub(crate) fn log_tail(bytes: &[u8]) -> String {
 /// Run `podman` with args and return stdout, or the stderr as an error.
 pub(crate) async fn podman(args: &[&str]) -> Result<String, BoundaryError> {
     let bin = podman_bin();
-    let out = tokio::process::Command::new(bin)
+    let unusable = |e: std::io::Error| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            BoundaryError::Other(format!(
+                "podman not found (tried `{bin}`); install podman or set `podman = \"/path/to/podman\"` under [boundary] in node.toml"
+            ))
+        } else {
+            BoundaryError::Io(e)
+        }
+    };
+    let out = tokio::process::Command::new(guarded_podman(bin).map_err(unusable)?)
         .args(args)
         .output()
         .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                BoundaryError::Other(format!(
-                    "podman not found (tried `{bin}`); install podman or set `podman = \"/path/to/podman\"` under [boundary] in node.toml"
-                ))
-            } else {
-                BoundaryError::Io(e)
-            }
-        })?;
+        .map_err(unusable)?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
