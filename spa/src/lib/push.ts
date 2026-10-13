@@ -85,6 +85,8 @@ export interface EnrollEnv {
   ready(): Promise<{ pushManager: Pick<PushManager, 'getSubscription' | 'subscribe'> }>
   key(): Promise<string>
   register(sub: PushSubscriptionJSON): Promise<unknown>
+  /** Tell the node to stop pushing to an endpoint this browser let go. */
+  forget(endpoint: string): Promise<unknown>
 }
 
 function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -121,6 +123,34 @@ const browser: EnrollEnv = {
   ready: () => within(navigator.serviceWorker.ready, READY_MS, 'not ready after 10 s'),
   key: async () => (await api.pushKey()).key,
   register: (sub) => api.putPushSubscription(sub),
+  forget: (endpoint) => api.deletePushSubscriptionByEndpoint(endpoint),
+}
+
+/** Whether a subscription was made with the node's key (base64url): null
+ *  when the browser does not say which key it used. */
+export function madeWith(sub: Pick<PushSubscription, 'options'>, key: string): boolean | null {
+  const had = sub.options?.applicationServerKey
+  if (!had) return null
+  const got = new Uint8Array(had)
+  const want = keyBytes(key)
+  return got.length === want.length && got.every((byte, i) => byte === want[i])
+}
+
+/** This browser's subscription for `key`. One made with another key (the
+ *  node's key was regenerated, or this is another node's) is refused on
+ *  every push, so it is let go, here and on the node, and replaced. */
+async function subscription(
+  manager: Pick<PushManager, 'getSubscription' | 'subscribe'>,
+  key: string,
+  forget: EnrollEnv['forget'],
+): Promise<PushSubscription> {
+  const existing = await manager.getSubscription()
+  if (existing && madeWith(existing, key) !== false) return existing
+  if (existing) {
+    await forget(existing.endpoint).catch(() => undefined)
+    await existing.unsubscribe().catch(() => false)
+  }
+  return manager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) })
 }
 
 /** Ask, subscribe, register, failing with the stage that stopped it. */
@@ -147,9 +177,7 @@ export async function enroll(env: EnrollEnv): Promise<void> {
   }
   let sub: PushSubscription
   try {
-    sub =
-      (await reg.pushManager.getSubscription()) ??
-      (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) }))
+    sub = await subscription(reg.pushManager, key, env.forget)
   } catch (cause) {
     // Chrome reports a permission revoked mid-flow from subscribe itself.
     if (cause instanceof Error && cause.name === 'NotAllowedError') {
@@ -192,12 +220,18 @@ export async function disable(): Promise<void> {
   }
 }
 
-/** After a login the cookie is new; re-register so the device follows it. */
+/** After a login the cookie is new; re-register so the device follows it,
+ *  replacing a subscription made with a key the node no longer signs with. */
 export async function resync(): Promise<void> {
   try {
-    const sub = await current()
-    if (sub) await api.putPushSubscription(sub.toJSON())
+    const reg = await registration()
+    const sub = await reg?.pushManager.getSubscription()
+    if (!reg || !sub) return
+    const fresh = await subscription(reg.pushManager, await browser.key(), browser.forget)
+    await api.putPushSubscription(fresh.toJSON())
   } catch {
-    // Best effort: the toggle shows the truth next time it is looked at.
+    // Best effort: the toggle shows the truth next time it is looked at. A
+    // browser that wants a tap before subscribing again reads as off, and
+    // one tap on the toggle enrolls it with the current key.
   }
 }

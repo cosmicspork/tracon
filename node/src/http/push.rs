@@ -67,12 +67,19 @@ pub async fn list(
                 "created_ms": r.created_ms,
                 "last_ok_ms": r.last_ok_ms,
                 "fail_count": r.fail_count,
+                "last_error": r.last_error,
+                "last_error_ms": r.last_error_ms,
                 "local": r.session_hash.is_none(),
                 "mine": r.session_hash.is_some() && r.session_hash == mine,
             })
         })
         .collect();
-    Ok(Json(json!({ "devices": devices })))
+    // Said beside the devices because it is the node's problem, not any
+    // one device's: nothing is sent to any of them until it is fixed.
+    Ok(Json(json!({
+        "devices": devices,
+        "not_sending": notify::not_sending(&s.cfg),
+    })))
 }
 
 /// `PushSubscription.toJSON()`, as the browser produces it.
@@ -111,6 +118,8 @@ pub async fn subscribe(
         created_ms: now_ms(),
         last_ok_ms: None,
         fail_count: 0,
+        last_error: None,
+        last_error_ms: None,
     })?;
     Ok(Json(json!({ "id": id })))
 }
@@ -171,5 +180,8 @@ pub async fn test(
             "service_accepted": service_accepted,
         }));
     }
-    Ok(Json(json!({ "sent": results })))
+    Ok(Json(json!({
+        "sent": results,
+        "not_sending": notify::not_sending(&s.cfg),
+    })))
 }

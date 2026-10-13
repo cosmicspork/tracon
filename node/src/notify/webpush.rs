@@ -266,15 +266,42 @@ fn derive(
 }
 
 /// What one delivery attempt came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Sent,
     /// The push service says this subscription no longer exists.
     Gone,
-    /// Refused with a status that retrying will not change.
-    Refused(u16),
-    /// Worth one more try later.
-    Unreachable,
+    /// Refused with a status that retrying will not change, and what the
+    /// service said about it (Apple names its reason in the body).
+    Refused {
+        status: u16,
+        reason: String,
+    },
+    /// Worth one more try later: no answer, a rate limit, or a server error.
+    Unreachable {
+        reason: String,
+    },
+    /// Never sent: this node cannot sign a push the service would take.
+    NotSent(&'static str),
+}
+
+/// How much of a push service's answer is kept: enough for Apple's
+/// `{"reason":"BadJwtToken"}` or a short HTML error, not a whole page.
+const REASON_MAX: usize = 300;
+
+/// A push service's answer, cut down to something a log line and a Settings
+/// row can hold.
+fn reason(status: u16, body: &str) -> String {
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut said: String = body.chars().take(REASON_MAX).collect();
+    if body.chars().count() > REASON_MAX {
+        said.push('…');
+    }
+    if said.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        format!("HTTP {status}: {said}")
+    }
 }
 
 /// The scheme and host of an endpoint, which is what the token is bound to.
@@ -309,7 +336,10 @@ pub async fn send(
     topic: &str,
 ) -> Outcome {
     let Ok(aud) = audience(sub.endpoint) else {
-        return Outcome::Refused(0);
+        return Outcome::Refused {
+            status: 0,
+            reason: PushError::BadEndpoint.to_string(),
+        };
     };
     let now = crate::store::now_ms() / 1000;
     let req = http
@@ -322,13 +352,24 @@ pub async fn send(
         .header("Topic", topic_of(topic))
         .body(body);
     match req.send().await {
-        Ok(res) => match res.status().as_u16() {
-            200..=299 => Outcome::Sent,
-            404 | 410 => Outcome::Gone,
-            429 | 500..=599 => Outcome::Unreachable,
-            s => Outcome::Refused(s),
+        Ok(res) => {
+            let status = res.status().as_u16();
+            if matches!(status, 200..=299 | 404 | 410) {
+                return if status < 300 {
+                    Outcome::Sent
+                } else {
+                    Outcome::Gone
+                };
+            }
+            let reason = reason(status, &res.text().await.unwrap_or_default());
+            match status {
+                429 | 500..=599 => Outcome::Unreachable { reason },
+                status => Outcome::Refused { status, reason },
+            }
+        }
+        Err(e) => Outcome::Unreachable {
+            reason: format!("not reached: {}", e.without_url()),
         },
-        Err(_) => Outcome::Unreachable,
     }
 }
 
@@ -454,6 +495,14 @@ mod tests {
             "http://127.0.0.1:9"
         );
         assert!(topic_of("tracon-perm-1234567890").len() <= 32);
+        assert_eq!(
+            reason(403, "{\"reason\":\"BadJwtToken\"}\n"),
+            "HTTP 403: {\"reason\":\"BadJwtToken\"}"
+        );
+        assert_eq!(reason(403, ""), "HTTP 403");
+        let long = reason(400, &"x".repeat(5_000));
+        assert!(long.chars().count() < REASON_MAX + 20, "{long}");
+        assert!(long.ends_with('…'));
         assert_eq!(topic_of("a"), topic_of("a"));
     }
 }

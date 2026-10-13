@@ -1251,6 +1251,9 @@ export interface PushDevice {
   created_ms: number
   last_ok_ms: number | null
   fail_count: number
+  /** What the push service said the last time it did not take a push. */
+  last_error: string | null
+  last_error_ms: number | null
   /** A browser on the node's own machine, which never logs in. */
   local: boolean
   /** Registered by this browser's session. */

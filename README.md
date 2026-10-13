@@ -191,6 +191,24 @@ and you are in. Add the page to the Home Screen — iOS only delivers push to an
 installed web app — then open **Nodes** and switch on **Push to this device**. The
 node pushes straight to the phone's push service, sealed to the phone's own key.
 
+Push needs a contact. Every push is signed with a VAPID subject, and Apple refuses
+one it cannot write to, so set it in `node.toml` before expecting the phone to buzz:
+
+```toml
+[notify]
+contact = "mailto:you@example.com"   # or an https: URL you answer at
+```
+
+Without one the node sends nothing and says so: in Settings, under Notifications,
+and in `tracon push ls`. A contact that is not a `mailto:` address on a real domain
+or a public `https:` URL stops `tracon serve` at load. When a push service does
+refuse a push, what it said (Apple's `{"reason":"BadJwtToken"}`, for instance) is
+kept on the device, with the count of failures in a row, in the same two places; a
+device the service reports gone (404 or 410) is forgotten. **Send a test** reports
+whether the push service accepted the push, which is as far as the node can see. If
+the node's key changed since the phone subscribed, the page subscribes again with
+the new key the next time it loads or the toggle is turned on.
+
 Any ingress or reverse proxy that terminates TLS works the same way; `localhost`
 counts as secure, which is why the laptop needed no ceremony. Issuing a token again
 rotates it and logs every client out. `tracon auth revoke` returns the node to
@@ -1026,7 +1044,7 @@ max_diff_lines = 10000              # added plus removed lines; a bigger submiss
 max_files = 200
 
 [notify]
-# contact = "mailto:you@example.com"    # what a push service may write to about this sender
+# contact = "mailto:you@example.com"    # what a push service may write to about this sender; no pushes without it
 
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false

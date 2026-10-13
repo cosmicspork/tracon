@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { ApiError } from './api'
-import { enroll, EnrollError, keyBytes, needsInstall, supported, type EnrollEnv, type EnrollStage } from './push'
+import { enroll, EnrollError, keyBytes, madeWith, needsInstall, supported, type EnrollEnv, type EnrollStage } from './push'
 
 test('the node key decodes to an uncompressed P-256 point', () => {
   const key = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4'
@@ -40,6 +40,7 @@ function env(over: Partial<EnrollEnv> = {}, unsubscribed: string[] = []): Enroll
     }),
     key: async () => 'AQ',
     register: async () => ({ id: 'd1' }),
+    forget: async () => undefined,
     ...over,
   }
 }
@@ -89,4 +90,65 @@ test('a device the node did not record is never left looking registered', async 
   const enrolled: string[] = []
   await enroll(env({}, enrolled))
   expect(enrolled).toEqual([])
+})
+
+/** A subscription a browser already holds, made with `key`. */
+function held(endpoint: string, key: string | null, log: string[]): PushSubscription {
+  return {
+    endpoint,
+    options: { userVisibleOnly: true, applicationServerKey: key === null ? null : keyBytes(key).buffer },
+    toJSON: () => ({ endpoint, keys: { p256dh: 'p', auth: 'a' } }),
+    unsubscribe: async () => {
+      log.push(`unsubscribe ${endpoint}`)
+      return true
+    },
+  } as unknown as PushSubscription
+}
+
+test('a subscription says whether it was made with the node key', () => {
+  expect(madeWith(held('e', 'AQID', []), 'AQID')).toBe(true)
+  expect(madeWith(held('e', 'AQID', []), 'AQIE')).toBe(false)
+  expect(madeWith(held('e', null, []), 'AQID')).toBeNull()
+})
+
+/** Enroll against a browser already holding `existing`, with the node on `key`. */
+async function enrollHolding(existing: PushSubscription, key: string, log: string[]) {
+  const fresh = held('https://push.test/new', key, log)
+  await enroll(
+    env({
+      key: async () => key,
+      ready: async () => ({
+        pushManager: {
+          getSubscription: async () => existing,
+          subscribe: async (options?: PushSubscriptionOptionsInit) => {
+            log.push(`subscribe ${new Uint8Array(options?.applicationServerKey as ArrayBuffer).join(',')}`)
+            return fresh
+          },
+        } as unknown as PushManager,
+      }),
+      forget: async (endpoint) => log.push(`forget ${endpoint}`),
+      register: async (sub) => log.push(`register ${sub.endpoint}`),
+    }),
+  )
+}
+
+test('a subscription made with an old node key is replaced, here and on the node', async () => {
+  const log: string[] = []
+  await enrollHolding(held('https://push.test/old', 'AQID', log), 'BAUG', log)
+  expect(log).toEqual([
+    'forget https://push.test/old',
+    'unsubscribe https://push.test/old',
+    'subscribe 4,5,6',
+    'register https://push.test/new',
+  ])
+})
+
+test('a subscription made with the current key is kept', async () => {
+  const log: string[] = []
+  await enrollHolding(held('https://push.test/same', 'BAUG', log), 'BAUG', log)
+  expect(log).toEqual(['register https://push.test/same'])
+  // A browser that does not say which key it used is not churned either.
+  const unknown: string[] = []
+  await enrollHolding(held('https://push.test/quiet', null, unknown), 'BAUG', unknown)
+  expect(unknown).toEqual(['register https://push.test/quiet'])
 })

@@ -1938,6 +1938,9 @@ async fn push_command(cmd: PushCommand) -> Result<()> {
         PushCommand::Ls => {
             let v = node_call(reqwest::Method::GET, "/api/push/subscriptions", None, None).await?;
             let devices = v["devices"].as_array().cloned().unwrap_or_default();
+            if let Some(why) = v["not_sending"].as_str() {
+                println!("not sending: {why}");
+            }
             if devices.is_empty() {
                 println!("no devices; enable notifications on the Nodes screen from the phone");
             }
@@ -1957,6 +1960,12 @@ async fn push_command(cmd: PushCommand) -> Result<()> {
                     d["fail_count"].as_i64().unwrap_or(0),
                     d["user_agent"].as_str().unwrap_or("-"),
                 );
+                if let Some(error) = d["last_error"].as_str() {
+                    println!(
+                        "    last error at {}: {error}",
+                        d["last_error_ms"].as_i64().unwrap_or(0)
+                    );
+                }
             }
             Ok(())
         }
@@ -1980,6 +1989,9 @@ async fn push_command(cmd: PushCommand) -> Result<()> {
             )
             .await?;
             let sent = v["sent"].as_array().cloned().unwrap_or_default();
+            if let Some(why) = v["not_sending"].as_str() {
+                println!("not sending: {why}");
+            }
             if sent.is_empty() {
                 println!("no devices to push to");
             }

@@ -240,3 +240,11 @@ operator's information, not the model's.
     reconcile, no token to publish with, a verdict already on its way). A decided
     review says how it was decided, links the change an approval opened, and offers
     no verdict.
+15. **A push is a hint, and a refused one says why.** A node with no contact to sign
+    pushes with sends none and says so in Settings, instead of sending a push its
+    service will refuse. A refusal is shown on the device it was meant for, in the
+    service's own words, and never forgets the device: a 403 is usually the node's
+    signature, not the phone. What waits on the operator pushes when it starts
+    waiting (an approval, a review, a promotion, a question an agent asked); after
+    a restart, only what no push service ever took is announced again, once, so a
+    redeploy does not re-announce the queue the phone already shows.
