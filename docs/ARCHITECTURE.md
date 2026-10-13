@@ -781,7 +781,9 @@ it, like every other live session. An entry may name the repository's Dockerfile
 image: the node then builds it (`crate::repo_image`) from the **default branch**, read
 through Git's object store and never from a working tree, adds one layer of its own,
 and records the digest it built in its own state — the recipe is configuration, the
-digest is not, because a locally built image has a different one on every node. The
+digest is not, because a locally built image has a different one on every node. That
+is also why a recipe can be offered to another node (see Mesh frames) and its digest
+never is. The
 layer depends on who a run is (`repo_image::RunAs`). Under Podman it is root with no
 capabilities in `/work`, `HOME=/root`, no entrypoint. A pod is never root: there the
 layer makes `/work`, `/cache` and `harness_home` owned by `[runtime.kubernetes] uid`
@@ -1252,6 +1254,55 @@ Invariants on top of the wire:
   later from the outbox. A prompt queued on purpose for an unreachable owner carries
   no deadline and is reported as queued, naming the owner, not as sent. A command
   from a sender on an older build names no deadline and runs as before.
+- **A repository recipe is offered, never applied.** An operator may offer a
+  `[[repo]]` entry's recipe to the other members of a channel it shares with them
+  (`RecipeOffer`, sealed to each receiver like any command). The recipe names the
+  repository by its forge identity (`github.com/owner/name`) and carries only the
+  portable part of the entry: `dockerfile`, `context`, `checks`, `prepare`,
+  `egress`, `session_egress` and `timeout_secs`. It never carries the entry's
+  `image` (a digest names what one node built or chose), `prepare_credentials`,
+  its `path`, or its `commits` and `style`. Both ends check it: the sender before
+  it sends, and the receiver, which also refuses any field a recipe does not have
+  and holds the sender to the named channel by its own record, as it does every
+  command. Either refuses a command naming a home directory, an egress entry
+  anything `inet_aton` would read as an address, a recipe over 64 KiB, and any
+  command, egress entry, path or note carrying a
+  control, format (bidirectional overrides, zero-width characters) or separator
+  character, so what the operator reads is what runs. The receiver only stages
+  the offer (`repo_recipe_offer`, node-local, never replicated) and announces it,
+  one notification per sender and repository; nothing reaches `node.toml` until
+  the operator, having seen what would change on the entry it lands on, accepts
+  it. Accepting and offering are admin actions (a passkey from off the node), and
+  the accept's prompt names the sender, the repository, the fields that change and
+  what becomes of lent credentials. An accept names the review it was decided on
+  (`viewed_hash`, over the target, the resulting entry and the operator's
+  choices) and is refused if the table has moved since. The entry lands where it
+  already answers for the identity exactly (or for this node's clone of it, or a
+  checkout whose origin it is); a relative entry that only ends the same way is
+  not chosen for the operator. Credentials the entry lends its preparation are
+  dropped when the offer changes that preparation's commands, egress, Dockerfile
+  or context, because a peer would otherwise choose what runs with them and where
+  it may send them. The operator may keep them explicitly; the entry is then held
+  (`repo_credential_hold`, on the preparation's commands and the credentials):
+  `ensure_base`, and so every check, preparation, session and default-branch
+  change, builds and warms nothing for it, using the image it last built, until
+  the operator starts that build, itself an admin action bound to the hold it
+  names, whose prompt names the entry, the peer whose preparation it is and what
+  is lent. A later offer onto a held entry that leaves its preparation as it is
+  keeps it held ("Still held"); one that changes it drops the credentials unless
+  kept again. An operator who rewrites the held entry's `prepare` or its
+  credentials at the node has decided what runs with what, and the hold lapses;
+  narrowing its egress or changing its Dockerfile does not. A write that fails
+  leaves the hold as it was. The accept prompt leads with what becomes of lent
+  credentials, and a peer's name is shown without control or format characters
+  and bounded. Accepting goes through the one `[[repo]]` writer, so the entry
+  keeps its comments and every field the recipe does not carry, and the node then
+  builds and pins its own image from the recipe. A newer offer from the same
+  sender for the same repository supersedes an undecided one; a sender holds at
+  most 32 undecided offers on a node and makes at most 10 an hour; an offer is
+  staged for at least an hour and lapses after 14 days, and is withdrawn once its
+  sender no longer shares its channel. Offers not taken up (superseded,
+  declined, lapsed, withdrawn) are forgotten after a day, accepted ones after 30.
 - **The hello may carry state, not secrets.** A node's models and its provider
   summary (names, states, identities — and a pending login URL) ride the hello,
   sealed to the operator's own mesh. Credential values never do; those move only as
@@ -1753,7 +1804,8 @@ Three surfaces, three answers, and the differences are the point.
   lends: setting or removing the operator token, authority grants, credential
   import, share and forge tokens, provider keys, sign-ins and channels, channel
   bindings, boundary setup, mesh invitation, admission, removal and hub sharing,
-  reopening a channel to external harnesses, and passkeys themselves. So are
+  reopening a channel to external harnesses, offering a repository recipe to
+  peers and accepting one into `[[repo]]`, and passkeys themselves. So are
   the approval answers that change the node rather than let one call run:
   allowing a repository setup proposal (it writes the `[[repo]]` entry),
   allowing a Dockerfile trial (a networked build outside the boundary), and

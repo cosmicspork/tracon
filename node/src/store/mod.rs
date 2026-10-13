@@ -42,6 +42,7 @@ pub mod pipeline_follow;
 pub mod policy_rollouts;
 pub mod publication;
 pub mod queued_prompt;
+pub mod recipe_offers;
 pub mod repo_image;
 pub mod reports;
 pub mod review_draft;

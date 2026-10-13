@@ -214,8 +214,9 @@ and you are in.
 
 The app then offers to add a passkey. Take it: from off the node, every admin
 action (the operator token, credentials, forge and provider keys, authority grants,
-channel bindings, mesh invitations and members, passkeys themselves) is confirmed
-with a passkey, one prompt per save, and the cookie alone cannot make them. A
+channel bindings, mesh invitations and members, repository recipe offers, passkeys
+themselves) is confirmed with a passkey, one prompt per save, and the cookie alone
+cannot make them. A
 freshly paired browser may add the node's first passkey without one for 15 minutes;
 after that, adding another is itself confirmed with an existing passkey, so a token
 that leaks later buys a sign-in but not admin. Passkeys are bound to
@@ -522,6 +523,27 @@ by accident. They are not a boundary against a hostile
 Dockerfile. The image you name for a repository is trusted as you trust its Dockerfile,
 which already builds with the network and supplies every command the agent runs; what
 keeps a session in bounds is the runtime around it, not what the image contains.
+
+**Offer a repository's recipe to another node.** On a mesh, an entry's **Offer to…** in
+Settings → Repositories sends its recipe to the other members of a channel you pick:
+the Dockerfile and its context, the checks, the preparation, its registries and whether
+sessions reach them, and the time limit, with the repository named by its forge identity
+(`github.com/owner/name`). Never its pinned image or any digest, the credentials it lends
+to preparation, its path, or how its commits are published; a command naming a home
+directory is refused. Each receiving node only stages the offer and notifies its
+operator, who sees what would change on the entry it lands on (the entry already
+answering for the repository by name, or one they name) and accepts or declines it.
+Offering and accepting are admin actions, confirmed with a passkey from off the node, and
+an accept writes exactly what was reviewed or nothing. Accepting keeps the entry's
+comments and its own fields, except that credentials the entry lends its preparation are
+dropped when the offer changes what that preparation runs or reaches, unless you choose
+to keep them: the repository is then held, and nothing builds or warms its cache with
+them until you start its build from Settings, which asks for your passkey off the node
+and says what it lends. A later offer that leaves that preparation as it is keeps the
+repository held; rewriting its `prepare` or its credentials yourself ends the hold. The
+node then builds and pins
+its own image. An undecided offer is replaced by a newer one from the same node for the
+same repository, is withdrawn if that node leaves the channel, and lapses after 14 days.
 
 A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy

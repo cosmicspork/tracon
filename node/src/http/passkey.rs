@@ -443,6 +443,12 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
         | ("DELETE", ["api", "external", channel, "stop"]) => {
             format!("Reopen {channel} to external harnesses")
         }
+        ("POST", ["api", "repos", "offer"]) => {
+            "Offer a repository recipe to channel members".to_string()
+        }
+        ("POST", ["api", "repos", "offers", _, "accept"]) => {
+            "Accept a repository recipe offer into node.toml".to_string()
+        }
         ("POST", ["api", "passkeys", "register", "options"]) => "Add a passkey".to_string(),
         ("DELETE", ["api", "passkeys", _]) => "Remove a passkey".to_string(),
         _ => return None,

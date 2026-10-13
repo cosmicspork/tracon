@@ -1487,6 +1487,43 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX device_approval_created ON device_approval(created_ms);
     "#,
+    // 64: `[[repo]]` recipes channel co-members offered this node, staged for
+    // its operator. `repo` is the forge identity the recipe names and
+    // `recipe_json` the recipe as received (never an image, a digest or a
+    // credential). `state` is `pending`, then `accepted`, `declined`,
+    // `superseded` (a newer offer from the same sender for the same
+    // repository arrived) or `expired`. Node-local: an offer is to this node.
+    r#"
+    CREATE TABLE repo_recipe_offer (
+        id           TEXT PRIMARY KEY,
+        sender_node  TEXT NOT NULL,
+        channel      TEXT NOT NULL,
+        repo         TEXT NOT NULL,
+        recipe_json  TEXT NOT NULL,
+        note         TEXT,
+        received_ms  INTEGER NOT NULL,
+        expires_ms   INTEGER NOT NULL,
+        state        TEXT NOT NULL DEFAULT 'pending',
+        decided_ms   INTEGER,
+        decided_path TEXT
+    );
+    CREATE INDEX repo_recipe_offer_sender ON repo_recipe_offer(sender_node, repo, state);
+    CREATE INDEX repo_recipe_offer_received ON repo_recipe_offer(received_ms);
+    -- A `[[repo]]` entry that keeps lending its credentials to a preparation
+    -- a peer's accepted recipe changed: the node builds and warms nothing
+    -- for it until the operator starts that build. `lending_hash` is of what
+    -- the credentials would be lent to; an entry the operator has edited
+    -- since no longer matches it and is not held.
+    CREATE TABLE repo_credential_hold (
+        path         TEXT PRIMARY KEY,
+        offer_id     TEXT NOT NULL,
+        sender_node  TEXT NOT NULL,
+        repo         TEXT NOT NULL,
+        credentials  TEXT NOT NULL,
+        lending_hash TEXT NOT NULL,
+        created_ms   INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

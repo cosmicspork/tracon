@@ -9,6 +9,7 @@ pub mod forward;
 pub mod frames;
 pub mod identity;
 pub mod mirror;
+pub mod recipe;
 pub mod stream;
 
 use serde::Serialize;

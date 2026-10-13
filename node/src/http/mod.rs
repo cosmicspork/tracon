@@ -9,6 +9,7 @@ pub mod passkey;
 mod policy_admin;
 pub mod preview;
 pub mod push;
+pub mod recipes;
 pub mod settings;
 mod spa;
 mod stream;
@@ -296,6 +297,12 @@ pub fn router(state: AppState) -> Router {
             get(environments::list).put(environments::save),
         )
         .route("/api/repos/environments/build", post(environments::build))
+        .route("/api/repos/offer", post(recipes::offer))
+        .route("/api/repos/holds/start", post(recipes::start_held))
+        .route("/api/repos/offers", get(recipes::list))
+        .route("/api/repos/offers/{id}", get(recipes::view))
+        .route("/api/repos/offers/{id}/accept", post(recipes::accept))
+        .route("/api/repos/offers/{id}/decline", post(recipes::decline))
         .route(
             "/api/workspaces/import",
             post(api::import_workspace).layer(DefaultBodyLimit::max(
