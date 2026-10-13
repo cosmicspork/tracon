@@ -10,6 +10,7 @@ use support::harness::{harness_with, Harness};
 use support::http::call;
 use support::state;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1158,6 +1159,51 @@ async fn fake_github(head: Arc<std::sync::Mutex<String>>) -> std::net::SocketAdd
 async fn with_github(h: &Harness, head: &str) -> Arc<std::sync::Mutex<String>> {
     let head = Arc::new(std::sync::Mutex::new(head.to_string()));
     let addr = fake_github(head.clone()).await;
+    github_at(h, addr);
+    head
+}
+
+/// A GitHub-shaped forge whose merge answers that the base branch moved the
+/// first `moves` times it is asked, as it does when another merge lands
+/// during this one. Counts the merges asked.
+async fn racing_github(moves: usize) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let merges = asked.clone();
+    let app = axum::Router::new()
+        .route(
+            "/repos/o/n/pulls/1",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "number": 1, "head": { "sha": "abcdef1" } }))
+            }),
+        )
+        .route(
+            "/repos/o/n/pulls/1/merge",
+            axum::routing::put(move || {
+                let n = merges.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n < moves {
+                        (
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            axum::Json(json!({
+                                "message": "Base branch was modified. Review and try the merge again."
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({ "merged": true, "sha": "merged1", "message": "ok" })),
+                        )
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, asked)
+}
+
+fn github_at(h: &Harness, addr: std::net::SocketAddr) {
     h.tools.broker.write().unwrap().put(
         "gh",
         tracon::broker::Credential {
@@ -1171,7 +1217,6 @@ async fn with_github(h: &Harness, head: &str) -> Arc<std::sync::Mutex<String>> {
             ..Default::default()
         },
     );
-    head
 }
 
 fn merge_args(operation_id: &str) -> Value {
@@ -1241,6 +1286,23 @@ async fn an_approved_merge_checks_the_head_again_when_it_runs() {
     let out = settled(&h, &id).await;
     assert_eq!(out["state"], "succeeded", "{out}");
     assert_eq!(out["result"]["merged"], true, "{out}");
+}
+
+/// GitHub refuses a merge whose base moved while it ran, as it does when
+/// several approved merges into one repository land together. Nothing was
+/// merged, so the approved merge is asked again at the same head and lands.
+#[tokio::test]
+async fn an_approved_merge_retries_when_the_base_moved_under_it() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (addr, asked) = racing_github(1).await;
+    github_at(&h, addr);
+    let id = ask(&h, "pr_merge", merge_args("op-race-1")).await;
+    answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["merged"], true, "{out}");
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
 }
 
 /// A call that finishes is not also logged as abandoned.
