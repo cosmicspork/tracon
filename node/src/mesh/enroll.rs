@@ -556,27 +556,104 @@ pub async fn push_policy(identity: &Identity, hub_url: &str) -> Result<usize, En
 
 // ------------------------------------------------------------------- invitee
 
-/// Merge handed-off keyrings into the channel table; returns how many
-/// channels this node now holds keys for from this handoff.
-pub fn apply_key_handoff(store: &Store, self_id: &str, channels: &[ChannelHandoff]) -> usize {
-    let mut n = 0;
-    for h in channels {
-        let ring = match store.channel_get(&h.name) {
-            Ok(Some(existing)) => match Keyring::from_bytes(&existing.keyring) {
-                Ok(mine) => Keyring::merge(&mine, &h.keyring),
-                Err(_) => h.keyring.clone(),
-            },
-            _ => h.keyring.clone(),
+/// Channel bindings a node keeps for itself, which no handoff changes:
+/// whether external harnesses may use the channel here (stopped at this
+/// node, and reopened only at it or with its passkey) and whether this node
+/// pushes the channel's events to its own devices. Every other binding is the
+/// channel's, shared by its members, and a member's handoff carries it.
+pub const LOCAL_BINDINGS: &[&str] = &["external_stopped", "external_paused", "notify"];
+
+/// The bindings a handoff leaves a channel with: the channel's shared
+/// bindings as `sent`, and this node's own value (or absence) for each of
+/// [`LOCAL_BINDINGS`], whatever the sender said of them. `local` is what
+/// this node holds now, `None` for a channel new to it.
+pub fn merged_bindings(local: Option<&str>, sent: &str) -> String {
+    let parse = |text: &str| -> serde_json::Map<String, Value> {
+        match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        }
+    };
+    let mine = local.map(parse).unwrap_or_default();
+    let mut merged = parse(sent);
+    for key in LOCAL_BINDINGS {
+        match mine.get(*key) {
+            Some(value) => merged.insert((*key).to_string(), value.clone()),
+            None => merged.remove(*key),
         };
-        if store
-            .channel_put(&h.name, &ring.to_bytes(), &h.bindings_json)
-            .is_ok()
-        {
-            let _ = store.node_channel_add(self_id, &h.name);
-            n += 1;
+    }
+    Value::Object(merged).to_string()
+}
+
+fn store_handoff(store: &Store, self_id: &str, h: &ChannelHandoff) -> bool {
+    let existing = store.channel_get(&h.name).ok().flatten();
+    let ring = match &existing {
+        Some(existing) => match Keyring::from_bytes(&existing.keyring) {
+            Ok(mine) => Keyring::merge(&mine, &h.keyring),
+            Err(_) => h.keyring.clone(),
+        },
+        None => h.keyring.clone(),
+    };
+    let bindings = merged_bindings(
+        existing.as_ref().map(|row| row.bindings_json.as_str()),
+        &h.bindings_json,
+    );
+    if store
+        .channel_put(&h.name, &ring.to_bytes(), &bindings)
+        .is_ok()
+    {
+        let _ = store.node_channel_add(self_id, &h.name);
+        true
+    } else {
+        false
+    }
+}
+
+/// Merge handed-off keyrings into the channel table while enrolling, before
+/// this node has any record of who is in which channel; returns how many
+/// channels this node now holds keys for from this handoff. The bindings
+/// this node keeps for itself are not taken from it ([`merged_bindings`]).
+pub fn apply_key_handoff(store: &Store, self_id: &str, channels: &[ChannelHandoff]) -> usize {
+    channels
+        .iter()
+        .filter(|h| store_handoff(store, self_id, h))
+        .count()
+}
+
+/// What a peer's handoff came to.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct HandoffOutcome {
+    /// Channels whose keys and shared bindings were taken.
+    pub applied: Vec<String>,
+    /// Channels the sender is not a member of by this node's records, left
+    /// as they were.
+    pub refused: Vec<String>,
+}
+
+/// Merge a running peer's handoff: only for channels `sender` (the frame's
+/// verified sender) is a member of by this node's own record of the mesh.
+/// A key from anyone else could add an epoch this node would then seal the
+/// channel's frames under, and bindings from anyone else could rewrite the
+/// channel's shared settings here. The bindings this node keeps for itself
+/// are never taken from a handoff ([`merged_bindings`]).
+pub fn apply_peer_key_handoff(
+    store: &Store,
+    self_id: &str,
+    sender: &str,
+    channels: &[ChannelHandoff],
+) -> HandoffOutcome {
+    let mut outcome = HandoffOutcome::default();
+    for h in channels {
+        let member = store
+            .nodes_in_channel(&h.name)
+            .is_ok_and(|members| members.iter().any(|m| m == sender));
+        if !member {
+            outcome.refused.push(h.name.clone());
+        } else if store_handoff(store, self_id, h) {
+            outcome.applied.push(h.name.clone());
         }
     }
-    n
+    outcome
 }
 
 /// What `tracon enroll` reports as it goes.

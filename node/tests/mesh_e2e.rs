@@ -1207,3 +1207,91 @@ async fn an_offer_to_an_older_build_says_so() {
         "{result:?}"
     );
 }
+
+/// A key handoff over the hub from a peer that is not in the channel is
+/// refused, even after the receiver has asked the hub who is, and said so;
+/// one from a member changes the channel's shared bindings and never the
+/// ones the receiver keeps for itself.
+#[tokio::test]
+async fn a_key_handoff_is_taken_from_a_member_and_never_changes_local_bindings() {
+    state::isolate();
+    let (a, b) = pair_with(&["private"], None).await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    // B stops external harnesses on `personal`, which only B decides.
+    let row = b.store.channel_get("personal").unwrap().unwrap();
+    b.store
+        .channel_put(
+            "personal",
+            &row.keyring,
+            &json!({ "external_stopped": true, "notify": { "enabled": false } }).to_string(),
+        )
+        .unwrap();
+    let private_before = b.store.channel_get("private").unwrap().unwrap();
+
+    // A is not in `private`: its own key for it must not land on B, where
+    // B would seal the channel's frames under it.
+    let forged = Keyring::genesis(&a.id.x25519_public(), &DataKey::generate());
+    let handoff = proto::frame::Payload::KeyHandoff {
+        channels: vec![proto::frame::ChannelHandoff {
+            name: "private".into(),
+            keyring: forged.wrap_for(&a.id, &b.id.x25519_public()).unwrap(),
+            bindings_json: json!({ "model": "m/forged" }).to_string(),
+        }],
+    };
+    a.client
+        .enqueue_direct(MESH_CHANNEL, &bi, &handoff)
+        .unwrap();
+    wait_for("B to refuse the handoff", || {
+        b.client
+            .snapshot()
+            .last_refusal
+            .is_some_and(|r| r.contains("key handoff") && r.contains(&ai))
+    })
+    .await;
+    let private_after = b.store.channel_get("private").unwrap().unwrap();
+    assert_eq!(private_after.keyring, private_before.keyring);
+    assert_eq!(private_after.bindings_json, private_before.bindings_json);
+
+    // A is in `personal`: the shared binding lands, the local ones stay.
+    let ring = Keyring::from_bytes(&a.store.channel_get("personal").unwrap().unwrap().keyring)
+        .unwrap();
+    let handoff = proto::frame::Payload::KeyHandoff {
+        channels: vec![proto::frame::ChannelHandoff {
+            name: "personal".into(),
+            keyring: ring.wrap_for(&a.id, &b.id.x25519_public()).unwrap(),
+            bindings_json: json!({
+                "model": "m/shared",
+                "external_stopped": false,
+                "notify": { "enabled": true },
+            })
+            .to_string(),
+        }],
+    };
+    a.client
+        .enqueue_direct(MESH_CHANNEL, &bi, &handoff)
+        .unwrap();
+    wait_for("B to take the shared binding", || {
+        b.store
+            .channel_get("personal")
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.bindings_json.contains("m/shared"))
+    })
+    .await;
+    let bindings: serde_json::Value = serde_json::from_str(
+        &b.store
+            .channel_get("personal")
+            .unwrap()
+            .unwrap()
+            .bindings_json,
+    )
+    .unwrap();
+    assert_eq!(
+        bindings,
+        json!({
+            "model": "m/shared",
+            "external_stopped": true,
+            "notify": { "enabled": false },
+        })
+    );
+}
