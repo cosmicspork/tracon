@@ -99,45 +99,54 @@ impl ImageBuilder for Unusable {
     async fn remove(&self, _image: &str) {}
 }
 
+/// Why `[runtime.kubernetes.builder]` cannot describe a builder, if it
+/// cannot, without touching anything it names; else the registry prefix
+/// images are pushed under. An edit of the table is held to this before it
+/// is written (`config::edit`).
+pub fn validate_settings(settings: &KubeBuilder) -> Result<String, String> {
+    let addr = settings.addr.trim();
+    if !addr.starts_with("tcp://") {
+        return Err(format!(
+            "addr must be tcp://host:port, the daemon's mTLS listener (got {addr:?})"
+        ));
+    }
+    if settings.tls_dir.as_os_str().is_empty() {
+        return Err("tls_dir must name the client certificate's directory".into());
+    }
+    if settings.docker_config.as_os_str().is_empty() {
+        return Err("docker_config must name a directory holding config.json".into());
+    }
+    let prefix = settings.registry.trim().trim_end_matches('/').to_string();
+    let namespaced = prefix
+        .split_once('/')
+        .is_some_and(|(_, namespace)| !namespace.is_empty());
+    let probe = Reference::parse(&format!("{prefix}/probe:t")).ok();
+    let qualified = probe.as_ref().is_some_and(|probe| {
+        prefix.starts_with(&format!("{}/", probe.host)) || prefix == probe.host
+    });
+    if prefix.is_empty()
+        || prefix.contains("://")
+        || prefix.starts_with(LOCAL)
+        || !qualified
+        || !namespaced
+        || !prefix
+            .split('/')
+            .next()
+            .is_some_and(|host| host.contains(['.', ':']))
+    {
+        return Err(format!(
+                "registry must be host/namespace, such as registry.digitalocean.com/<registry> (got {:?})",
+                settings.registry
+            ));
+    }
+    Ok(prefix)
+}
+
 impl BuildKitBuilder {
     /// The builder `[runtime.kubernetes.builder]` describes, staging under
     /// `scratch`, or why it cannot be one.
     pub fn new(settings: &KubeBuilder, scratch: PathBuf) -> Result<Self, String> {
-        let addr = settings.addr.trim();
-        if !addr.starts_with("tcp://") {
-            return Err(format!(
-                "addr must be tcp://host:port, the daemon's mTLS listener (got {addr:?})"
-            ));
-        }
-        if settings.tls_dir.as_os_str().is_empty() {
-            return Err("tls_dir must name the client certificate's directory".into());
-        }
-        if settings.docker_config.as_os_str().is_empty() {
-            return Err("docker_config must name a directory holding config.json".into());
-        }
-        let prefix = settings.registry.trim().trim_end_matches('/').to_string();
-        let namespaced = prefix
-            .split_once('/')
-            .is_some_and(|(_, namespace)| !namespace.is_empty());
-        let probe = Reference::parse(&format!("{prefix}/probe:t")).ok();
-        let qualified = probe.as_ref().is_some_and(|probe| {
-            prefix.starts_with(&format!("{}/", probe.host)) || prefix == probe.host
-        });
-        if prefix.is_empty()
-            || prefix.contains("://")
-            || prefix.starts_with(LOCAL)
-            || !qualified
-            || !namespaced
-            || !prefix
-                .split('/')
-                .next()
-                .is_some_and(|host| host.contains(['.', ':']))
-        {
-            return Err(format!(
-                "registry must be host/namespace, such as registry.digitalocean.com/<registry> (got {:?})",
-                settings.registry
-            ));
-        }
+        let prefix = validate_settings(settings)?;
         let registry = Registry::new(Some(settings.docker_config.clone()))
             .with_digitalocean_token(settings.do_token_file.clone());
         Ok(Self {

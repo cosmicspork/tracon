@@ -1,8 +1,8 @@
 //! What each `node.toml` key is, for the one path that edits the file
 //! (`config::edit`): whether a change applies to the running node or waits
 //! for a restart, whether writing it is an administrative act, whether it
-//! names an executable the node runs, and whether its value is a secret the
-//! audit log and any reader must not see.
+//! names an executable the node runs or a host path it reads or writes, and
+//! whether its value is a secret the audit log and any reader must not see.
 //!
 //! One line per key, written as the file spells it: tables by their dotted
 //! path, a map's entries as `*`, an array of tables' fields under the array's
@@ -33,6 +33,11 @@ pub struct KeySpec {
     /// It names an executable the node runs on its host, so a writer that
     /// could choose it could choose what the node executes.
     pub exec_path: bool,
+    /// It names a file or directory on the host that the node reads or
+    /// writes (a credential file, a certificate directory, an export
+    /// target), so a writer that could choose it could choose what the node
+    /// reads, sends on or overwrites. The value is a path, not a secret.
+    pub fs_path: bool,
     /// Its value is never shown: the audit log records that it changed, not
     /// what to.
     pub secret: bool,
@@ -44,6 +49,7 @@ const fn restart(key: &'static str) -> KeySpec {
         apply: Apply::Restart,
         admin: true,
         exec_path: false,
+        fs_path: false,
         secret: false,
     }
 }
@@ -59,6 +65,13 @@ impl KeySpec {
     const fn exec(self) -> Self {
         KeySpec {
             exec_path: true,
+            ..self
+        }
+    }
+
+    const fn path(self) -> Self {
+        KeySpec {
+            fs_path: true,
             ..self
         }
     }
@@ -105,7 +118,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("session.default_channel"),
     restart("session.claim_grace_secs"),
     restart("session.suspend_published_after_secs"),
-    restart("session.worktree_root"),
+    restart("session.worktree_root").path(),
     restart("session.pty_buffer_frames"),
     restart("session.pty_capture_output"),
     // [consulta]
@@ -149,6 +162,15 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.gateway_host"),
     restart("runtime.kubernetes.start_timeout_secs"),
     restart("runtime.kubernetes.image_pull_secrets"),
+    restart("runtime.kubernetes.internal_cidrs"),
+    // [runtime.kubernetes.builder]
+    restart("runtime.kubernetes.builder.addr"),
+    restart("runtime.kubernetes.builder.tls_dir").path(),
+    restart("runtime.kubernetes.builder.registry"),
+    restart("runtime.kubernetes.builder.docker_config").path(),
+    restart("runtime.kubernetes.builder.timeout_secs"),
+    restart("runtime.kubernetes.builder.do_token_file").path(),
+    restart("runtime.kubernetes.builder.buildctl").exec(),
     restart("runtime.kubernetes.shm_size"),
     restart("runtime.kubernetes.resources.session.cpu_request"),
     restart("runtime.kubernetes.resources.session.cpu_limit"),
@@ -213,7 +235,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("embed.base_url"),
     restart("embed.model"),
     restart("embed.dim"),
-    restart("embed.api_key_file"),
+    restart("embed.api_key_file").path(),
     restart("embed.provider"),
     restart("embed.batch"),
     restart("embed.timeout_secs"),
@@ -221,9 +243,9 @@ pub const KEYS: &[KeySpec] = &[
     // [external]
     restart("external.enabled"),
     restart("external.idle_timeout_secs"),
-    restart("external.repo_roots"),
+    restart("external.repo_roots").path(),
     // [docs]
-    restart("docs.export_dir"),
+    restart("docs.export_dir").path(),
     restart("docs.export_channel"),
     restart("docs.export_every_secs"),
     restart("docs.preview_listen"),
@@ -233,7 +255,9 @@ pub const KEYS: &[KeySpec] = &[
     // [ui]
     restart("ui.opencode_listen"),
     restart("ui.opencode_url"),
-    restart("ui.opencode_bundle_dir"),
+    restart("ui.opencode_bundle_dir").path(),
+    // [auth]
+    restart("auth.public_origin"),
 ];
 
 /// What is assumed of a key the schema does not know: one the node ignores
@@ -244,6 +268,7 @@ const UNKNOWN: KeySpec = KeySpec {
     apply: Apply::Restart,
     admin: true,
     exec_path: false,
+    fs_path: false,
     secret: true,
 };
 
@@ -282,6 +307,7 @@ pub fn lookup(key: &[&str]) -> KeySpec {
         },
         admin: under.iter().any(|spec| spec.admin),
         exec_path: under.iter().any(|spec| spec.exec_path),
+        fs_path: under.iter().any(|spec| spec.fs_path),
         secret: under.iter().any(|spec| spec.secret),
     }
 }
@@ -325,6 +351,13 @@ mod tests {
         assert_eq!(lookup(&["harness", "id"]).apply, Apply::Restart);
         assert!(lookup(&["publish", "gh"]).exec_path);
         assert!(!lookup(&["publish", "forge_timeout_secs"]).exec_path);
+        let builder = |key: &str| lookup(&["runtime", "kubernetes", "builder", key]);
+        assert!(builder("buildctl").exec_path);
+        for key in ["tls_dir", "docker_config", "do_token_file"] {
+            let spec = builder(key);
+            assert!(spec.fs_path && !spec.secret && !spec.exec_path, "{key}");
+        }
+        assert!(lookup(&["embed", "api_key_file"]).fs_path);
         assert_eq!(
             lookup(&["providers", "openrouter", "models", "id"]).key,
             "providers.*.models.id"

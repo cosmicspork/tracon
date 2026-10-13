@@ -534,6 +534,17 @@ pub fn edit_at(
     }
     .map_err(EditError::Invalid)?;
     let changes = diff(&text, &next);
+    // A builder the node cannot use is reported at start rather than fatal
+    // there, so a node keeps running with one; but an edit that writes the
+    // table is held to it.
+    let builder = KeyPath::keys(&["runtime", "kubernetes", "builder"]);
+    if changes.iter().any(|c| c.key.0.starts_with(&builder.0)) {
+        if let Some(settings) = &config.runtime.kubernetes.builder {
+            crate::boundary::kubernetes::build::validate_settings(settings).map_err(|why| {
+                EditError::Invalid(format!("[runtime.kubernetes.builder]: {why}"))
+            })?;
+        }
+    }
     if changes.is_empty() {
         return Ok(EditOutcome {
             new_hash: old_hash.clone(),
@@ -2170,6 +2181,40 @@ path = "/srv/notes"
         assert!(outcome.wrote());
         assert_eq!(outcome.changed(), ["github.dispatch"]);
         assert!(read(&path).contains("[github.dispatch]"), "{}", read(&path));
+    }
+
+    /// A builder the node could not use is refused when an edit writes the
+    /// table; one already in the file does not block an unrelated edit.
+    #[test]
+    fn an_edit_of_the_builder_is_held_to_what_a_builder_needs() {
+        let (_dir, path) = file(COMMENTED);
+        let store = store();
+        let err = edit_at(
+            &path,
+            &store,
+            &[set("runtime.kubernetes.builder.registry", "not-a-registry")],
+            None,
+            "test",
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("registry must be"), "{err}");
+        assert_eq!(read(&path), COMMENTED);
+        edit_at(
+            &path,
+            &store,
+            &[set(
+                "runtime.kubernetes.builder.registry",
+                "registry.example.com/team",
+            )],
+            None,
+            "test",
+        )
+        .unwrap();
+
+        let broken = format!("{COMMENTED}\n[runtime.kubernetes.builder]\nregistry = \"nope\"\n");
+        let (_dir, path) = file(&broken);
+        edit_at(&path, &store, &[set("node_name", "other")], None, "test").unwrap();
     }
 
     #[test]
