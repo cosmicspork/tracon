@@ -161,9 +161,10 @@ async fn a_window_without_passkeys_signs_in_and_confirms_an_admin_action_through
         "the flow stopped part way:\n{ctx}"
     );
     assert_eq!(saw["enrolled"], true, "{ctx}");
-    // Both screens showed the same code, and the link was the public
-    // origin's with the approval in its fragment.
-    assert_eq!(saw["sign_in_code"], saw["approval_code"], "{ctx}");
+    // The phone was not shown the code (the operator typed the desktop's),
+    // and the link was the public origin's with the approval in its
+    // fragment.
+    assert_eq!(saw["code_shown_to_phone"], false, "{ctx}");
     let url = saw["sign_in_url"].as_str().unwrap_or_default();
     assert!(url.starts_with(&format!("{origin}/#approve=")), "{ctx}");
     assert_eq!(saw["approval_headline"], "Sign in another window?", "{ctx}");

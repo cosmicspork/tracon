@@ -250,8 +250,8 @@ passkey is compromised too: remove that passkey at the node.
 **No browser can approve the desktop app.** With no passkey enrolled, only the
 node can approve a device request. At the node, open the approval link from the
 app with its host changed (`http://localhost:7420/#approve=<id>`), or approve
-it with
-`curl -s -X POST http://127.0.0.1:7420/api/auth/device/approvals/<id>/approve`.
+it with the code the app shows:
+`curl -s -X POST -H 'content-type: application/json' -d '{"user_code":"BCDF-GHJK"}' http://127.0.0.1:7420/api/auth/device/approvals/<id>/approve`.
 
 ## Recovering the node itself
 

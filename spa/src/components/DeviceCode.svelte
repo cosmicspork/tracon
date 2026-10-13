@@ -22,7 +22,7 @@
     <span>Code</span>
     <b data-testid="device-user-code">{start.user_code}</b>
   </div>
-  <p class="hint">The browser that approves shows a code too. Approve only if the two match.</p>
+  <p class="hint">The browser that approves asks for this code. Type it there.</p>
   <a
     class="btn p"
     href={start.approve_url}

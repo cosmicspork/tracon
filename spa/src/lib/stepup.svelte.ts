@@ -10,7 +10,7 @@
 
 import { isTauri } from '@tauri-apps/api/core'
 
-import { api, setStepUpHandler, type StepUp } from './api'
+import { api, setStepUpHandler, StaleChallenge, type StepUp } from './api'
 import {
   confirmsElsewhere,
   DeviceCancelled,
@@ -56,7 +56,6 @@ interface Pending {
 async function askElsewhere(pending: Pending): Promise<DeviceStart> {
   try {
     return await handOver(pending.stepUp, {
-      assertOptions: (opHash) => api.passkeyAssertOptions(opHash),
       deviceStepUp: (challengeId) => api.deviceStepUp(challengeId),
     })
   } finally {
@@ -122,6 +121,13 @@ class StepUpPrompt {
     } catch (err) {
       if (err instanceof DeviceCancelled || this.pending !== pending) return
       this.device = null
+      if (err instanceof StaleChallenge) {
+        // The request is sent again for a challenge the node describes; the
+        // refusal it gets opens this prompt anew.
+        this.pending = null
+        pending.reject(err)
+        return
+      }
       this.problem = deviceProblem(err)
     } finally {
       if (this.abort === abort) this.abort = null

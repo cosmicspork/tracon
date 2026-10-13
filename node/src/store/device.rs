@@ -13,8 +13,15 @@ use serde::Serialize;
 
 use super::{AuthSessionRow, Result, Store};
 
-/// How long a decided approval is kept, as the record of who approved what.
-const RETAIN_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// How long an approval is kept once it is decided, collected or expired, as
+/// the record of who approved what. The log line each change writes, and a
+/// delegated session's own `delegated_from`, outlast it.
+const RETAIN_MS: i64 = 24 * 60 * 60 * 1000;
+/// The most step-up requests one session may have waiting: a window asks for
+/// one at a time, so older ones are abandoned and are revoked first.
+const OPEN_STEP_UPS_PER_SESSION: i64 = 3;
+/// Wrong codes an approving browser may type before the request is denied.
+pub const MAX_CODE_MISSES: i64 = 3;
 /// The longest a window is ever asked to wait between polls.
 const MAX_INTERVAL_MS: i64 = 60_000;
 /// How much sooner than its interval a poll may arrive before it is told to
@@ -62,6 +69,8 @@ pub struct DeviceApprovalRow {
     pub approver: Option<String>,
     /// What collecting it issued: the new session's short ID, or `proof`.
     pub issued: Option<String>,
+    /// Wrong codes typed so far.
+    pub code_misses: i64,
     pub created_ms: i64,
     pub expires_ms: i64,
     pub interval_ms: i64,
@@ -86,6 +95,7 @@ impl DeviceApprovalRow {
             status: r.get("status")?,
             approver: r.get("approver")?,
             issued: r.get("issued")?,
+            code_misses: r.get("code_misses")?,
             created_ms: r.get("created_ms")?,
             expires_ms: r.get("expires_ms")?,
             interval_ms: r.get("interval_ms")?,
@@ -110,6 +120,13 @@ impl DeviceApprovalRow {
     }
 }
 
+/// How many sign-in requests may wait at once: from one address, and in all.
+#[derive(Debug, Clone, Copy)]
+pub struct OpenSignIns {
+    pub per_addr: i64,
+    pub total: i64,
+}
+
 /// What one poll found.
 #[derive(Debug)]
 pub enum DevicePoll {
@@ -129,31 +146,47 @@ pub enum DevicePoll {
 }
 
 impl Store {
-    /// Record a request. Rows decided long ago are purged first. With
-    /// `max_open` set, refused (false) while that many sign-in requests are
-    /// already waiting: the route that makes them answers strangers, and must
-    /// not let them fill the table.
+    /// Record a request. Rows settled more than a day ago are purged
+    /// first. With `max_open` set, refused (false) while that many sign-in
+    /// requests are already waiting from the same address, or in all: the
+    /// route that makes them answers strangers, and must not let them fill
+    /// the table. A step-up revokes its session's oldest waiting ones beyond
+    /// [`OPEN_STEP_UPS_PER_SESSION`].
     pub fn device_approval_insert(
         &self,
         row: &DeviceApprovalRow,
-        max_open: Option<i64>,
+        max_open: Option<OpenSignIns>,
         now: i64,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM device_approval WHERE created_ms <= ?1",
+            "DELETE FROM device_approval
+              WHERE (status IN ('consumed', 'denied', 'revoked')
+                     AND COALESCE(consumed_ms, decided_ms, created_ms) <= ?1)
+                 OR (status IN ('pending', 'approved') AND expires_ms <= ?1)",
             [now - RETAIN_MS],
         )?;
         if let Some(max) = max_open {
-            let open: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM device_approval
+            let (total, from_addr): (i64, i64) = conn.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(requester_addr IS ?2), 0) FROM device_approval
                   WHERE kind='sign-in' AND status='pending' AND expires_ms > ?1",
-                [now],
-                |r| r.get(0),
+                params![now, row.requester_addr],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if open >= max {
+            if total >= max.total || from_addr >= max.per_addr {
                 return Ok(false);
             }
+        }
+        if let Some(session) = row.requester_session.as_deref() {
+            conn.execute(
+                "UPDATE device_approval SET status='revoked', decided_ms=?3
+                  WHERE id IN (
+                    SELECT id FROM device_approval
+                     WHERE kind='step-up' AND requester_session=?1 AND status='pending'
+                       AND expires_ms > ?3
+                     ORDER BY created_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+                params![session, OPEN_STEP_UPS_PER_SESSION - 1, now],
+            )?;
         }
         conn.execute(
             "INSERT INTO device_approval
@@ -255,6 +288,31 @@ impl Store {
         } else {
             DevicePoll::Pending
         })
+    }
+
+    /// Count a wrong code typed for a request still open; the
+    /// [`MAX_CODE_MISSES`]th denies it. How many tries are left, or `None`
+    /// when it was not open.
+    pub fn device_approval_miss(&self, id: &str, now: i64) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE device_approval
+                SET code_misses = code_misses + 1,
+                    status = CASE WHEN code_misses + 1 >= ?3 THEN 'denied' ELSE status END,
+                    approver = CASE WHEN code_misses + 1 >= ?3 THEN 'code-misses' ELSE approver END,
+                    decided_ms = CASE WHEN code_misses + 1 >= ?3 THEN ?2 ELSE decided_ms END
+              WHERE id=?1 AND status='pending' AND expires_ms > ?2",
+            params![id, now, MAX_CODE_MISSES],
+        )?;
+        if n != 1 {
+            return Ok(None);
+        }
+        let misses: i64 = conn.query_row(
+            "SELECT code_misses FROM device_approval WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        Ok(Some((MAX_CODE_MISSES - misses).max(0)))
     }
 
     /// Approve or deny a request still open. `approver` is `local` or the
@@ -393,6 +451,7 @@ mod tests {
             status: "pending".into(),
             approver: None,
             issued: None,
+            code_misses: 0,
             created_ms: now,
             expires_ms: now + 600_000,
             interval_ms: 5_000,
@@ -535,20 +594,93 @@ mod tests {
     }
 
     #[test]
-    fn waiting_sign_ins_are_capped() {
+    fn waiting_sign_ins_are_capped_per_address_and_in_all() {
         let store = Store::open_in_memory().unwrap();
-        for i in 0..3 {
-            assert!(store
-                .device_approval_insert(&row(&format!("r{i}"), "sign-in", 0), Some(3), 0)
-                .unwrap());
-        }
+        let cap = Some(OpenSignIns {
+            per_addr: 2,
+            total: 3,
+        });
+        let from = |id: &str, addr: &str, now: i64| {
+            let mut r = row(id, "sign-in", now);
+            r.requester_addr = Some(addr.into());
+            r
+        };
+        assert!(store
+            .device_approval_insert(&from("a1", "10.0.0.1", 0), cap, 0)
+            .unwrap());
+        assert!(store
+            .device_approval_insert(&from("a2", "10.0.0.1", 0), cap, 0)
+            .unwrap());
         assert!(!store
-            .device_approval_insert(&row("r3", "sign-in", 0), Some(3), 0)
+            .device_approval_insert(&from("a3", "10.0.0.1", 0), cap, 0)
+            .unwrap());
+        assert!(store
+            .device_approval_insert(&from("b1", "10.0.0.2", 0), cap, 0)
+            .unwrap());
+        assert!(!store
+            .device_approval_insert(&from("c1", "10.0.0.3", 0), cap, 0)
             .unwrap());
         // Expired ones no longer count.
         assert!(store
-            .device_approval_insert(&row("r4", "sign-in", 600_000), Some(3), 600_000)
+            .device_approval_insert(&from("c2", "10.0.0.3", 600_000), cap, 600_000)
             .unwrap());
+    }
+
+    #[test]
+    fn a_session_keeps_only_its_newest_step_ups_waiting() {
+        let store = Store::open_in_memory().unwrap();
+        for i in 0..5 {
+            let mut r = row(&format!("s{i}"), "step-up", i);
+            r.device_code_hash = format!("code-s{i}");
+            store.device_approval_insert(&r, None, i).unwrap();
+        }
+        let status = |id: &str| store.device_approval_get(id).unwrap().unwrap().status;
+        assert_eq!(status("s0"), "revoked");
+        assert_eq!(status("s1"), "revoked");
+        for id in ["s2", "s3", "s4"] {
+            assert_eq!(status(id), "pending", "{id}");
+        }
+    }
+
+    #[test]
+    fn the_third_wrong_code_denies_the_request() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .device_approval_insert(&row("a", "sign-in", 0), None, 0)
+            .unwrap();
+        assert_eq!(store.device_approval_miss("a", 1).unwrap(), Some(2));
+        assert_eq!(store.device_approval_miss("a", 2).unwrap(), Some(1));
+        assert_eq!(store.device_approval_miss("a", 3).unwrap(), Some(0));
+        let a = store.device_approval_get("a").unwrap().unwrap();
+        assert_eq!(a.status, "denied");
+        assert_eq!(a.approver.as_deref(), Some("code-misses"));
+        assert_eq!(store.device_approval_miss("a", 4).unwrap(), None);
+        assert!(!store.device_approval_decide("a", true, "local", 5).unwrap());
+    }
+
+    #[test]
+    fn settled_rows_are_purged_a_day_on() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .device_approval_insert(&row("a", "sign-in", 0), None, 0)
+            .unwrap();
+        store
+            .device_approval_insert(&row("b", "sign-in", 0), None, 0)
+            .unwrap();
+        assert!(store
+            .device_approval_decide("a", false, "local", 10)
+            .unwrap());
+        let day = 24 * 60 * 60 * 1000;
+        store
+            .device_approval_insert(&row("c", "sign-in", day + 11), None, day + 11)
+            .unwrap();
+        assert!(store.device_approval_get("a").unwrap().is_none());
+        // Expired a day ago only at 600_000 + day.
+        assert!(store.device_approval_get("b").unwrap().is_some());
+        store
+            .device_approval_insert(&row("d", "sign-in", day + 600_000), None, day + 600_000)
+            .unwrap();
+        assert!(store.device_approval_get("b").unwrap().is_none());
     }
 
     #[test]

@@ -129,6 +129,20 @@ export interface StepUp {
   summary?: string
 }
 
+/** Thrown by a step-up handler whose challenge can no longer be used for a
+    device approval (expired, spent, or not on record as a refused request):
+    `call` sends the request again, unconfirmed, for a fresh refusal whose
+    challenge the node has described, and asks the handler once more. */
+export class StaleChallenge extends Error {
+  constructor() {
+    super('That confirmation is no longer usable; asking again.')
+    this.name = 'StaleChallenge'
+  }
+}
+
+/** How many times `call` re-sends a request for a fresh challenge. */
+const MAX_STALE_RESENDS = 2
+
 /** The header a retried admin request carries its proof in. */
 export const STEP_UP_HEADER = 'x-tracon-step-up'
 
@@ -173,6 +187,7 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
   // bytes the confirmation was bound to.
   const payload = body !== undefined ? JSON.stringify(body) : undefined
   let proof: string | undefined
+  let resent = 0
   for (let attempt = 0; ; attempt++) {
     const headers: Record<string, string> = {}
     if (payload !== undefined) headers['content-type'] = 'application/json'
@@ -193,15 +208,23 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
     if (res.ok) return json as T
     const message = json?.error?.message ?? (text || `${res.status} ${res.statusText}`)
     // An admin action off the node's machine: confirm it, then send the same
-    // request once more. A second refusal is reported, not prompted again.
+    // request once more. A refusal of a confirmed request is reported, not
+    // prompted again; only a request re-sent for a fresh challenge is.
     if (
       res.status === 403 &&
       json?.error?.kind === 'step_up_required' &&
       json.step_up &&
-      attempt === 0 &&
+      proof === undefined &&
+      (attempt === 0 || resent > 0) &&
       stepUpHandler
     ) {
-      proof = await stepUpHandler(json.step_up, message)
+      try {
+        proof = await stepUpHandler(json.step_up, message)
+      } catch (err) {
+        if (!(err instanceof StaleChallenge) || resent >= MAX_STALE_RESENDS) throw err
+        resent++
+        proof = undefined
+      }
       continue
     }
     const fields = Array.isArray(json?.error?.fields) ? json.error.fields : undefined
@@ -697,9 +720,12 @@ export const api = {
     call<T>('POST', '/api/auth/device/token', { device_code: deviceCode }),
   deviceApproval: (id: string) =>
     call<DeviceApprovalView>('GET', `/api/auth/device/approvals/${encodeURIComponent(id)}`),
-  /** Approve: off the node, the step-up prompt asks for the passkey first. */
-  deviceApprove: (id: string) =>
-    call<{ id: string; status: string }>('POST', `/api/auth/device/approvals/${encodeURIComponent(id)}/approve`),
+  /** Approve, with the code the asking window shows typed in: off the node,
+      the step-up prompt then asks for the passkey. */
+  deviceApprove: (id: string, userCode: string) =>
+    call<{ id: string; status: string }>('POST', `/api/auth/device/approvals/${encodeURIComponent(id)}/approve`, {
+      user_code: userCode,
+    }),
   deviceDeny: (id: string) =>
     call<{ id: string; status: string }>('POST', `/api/auth/device/approvals/${encodeURIComponent(id)}/deny`),
   meshInit: (hubUrl: string) =>

@@ -196,20 +196,22 @@ browser with no token to hand) → the login screen's "Sign in from another
 browser" → the window shows a code (`BCDF-GHJK`), an "Open in browser" link and
 the same address as a QR, and waits → a browser already signed in to the node
 (the system browser, or the phone by scanning) opens it → "Sign in another
-window?" with the same code, the asking browser's user agent and address, and how
-long ago it asked, above the warning to approve only if the two codes match and
-the operator just asked → Approve opens the passkey sheet (nothing at the node)
-→ "Approved. Return to the window that asked." → the window signs in on its own
-within a few seconds. Deny ends it on both screens. The phone is told of every
-sign-in made this way.
+window?" with what the asker claims to be, its address and how long ago it
+asked, a warning to deny if no window of theirs is asking, and a field for the
+code: the operator types the code the window shows (three wrong ones deny it) →
+Approve opens the passkey sheet (nothing at the node) → "Approved. Return to the
+window that asked." → the window signs in on its own within a few seconds. Deny
+ends it on both screens. The phone is told of every sign-in made this way.
 
 **Confirm an admin action from another browser.** The desktop app saves → the
 node refuses it with `step_up_required` → the same sheet, which for a window
 without passkeys asks the node at once and shows the code, link and QR instead of
 Confirm → the approving browser shows "Confirm for another window: Remove a
-passkey" with the request beneath and the code → Approve, passkey → the window's
-sheet closes and the save goes through. Cancel refuses the request, so the other
-browser stops offering it.
+passkey" with the request beneath and which session asked → type the window's
+code, Approve, passkey → the window's sheet closes and the save goes through.
+Cancel refuses the request, so the other browser stops offering it. A request
+left waiting so long its confirmation expired is sent again for a fresh one,
+without a sheet in between.
 
 **Degraded.** Hub gone: banner everywhere, local sessions continue, auto-allowed
 actions continue, approvals queue and deliver on return, recall falls back to the

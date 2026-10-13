@@ -42,9 +42,18 @@ use super::api::{ApiError, AppState};
 pub const COOKIE: &str = "tracon_session";
 /// How long a cookie lives without being used.
 pub(crate) const SESSION_TTL_MS: i64 = 90 * 24 * 60 * 60 * 1000;
-/// Renew when more than a third of the life has been consumed, so an active
-/// client is extended about monthly rather than on every request.
-const RENEW_AFTER_MS: i64 = SESSION_TTL_MS / 3;
+/// How long a session another browser approved (`http::device`) lives
+/// without being used: shorter, since no token was spent for it.
+pub(crate) const DELEGATED_SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// How long `row` lives without being used.
+pub(crate) fn session_ttl(row: &AuthSessionRow) -> i64 {
+    if row.delegated_from.is_some() {
+        DELEGATED_SESSION_TTL_MS
+    } else {
+        SESSION_TTL_MS
+    }
+}
 /// Failed logins tolerated per window, per address and in total. Behind an
 /// ingress every caller shares one address, so the global cap is the real
 /// limit; a 256-bit token is not reachable at this rate either way.
@@ -104,13 +113,24 @@ impl<K: std::hash::Hash + Eq> Limiter<K> {
         }
     }
 
-    /// Whether another attempt is allowed, counting it if so.
-    fn allow(&mut self, ip: Option<K>, now: i64) -> bool {
+    fn turn(&mut self, now: i64) {
         if now - self.window_start_ms >= LOGIN_WINDOW_MS {
             self.window_start_ms = now;
             self.global = 0;
             self.per_ip.clear();
         }
+    }
+
+    /// Whether the budget is spent, without counting anything.
+    fn exhausted(&mut self, ip: Option<K>, now: i64) -> bool {
+        self.turn(now);
+        self.global >= self.global_cap
+            || ip.is_some_and(|ip| self.per_ip.get(&ip).is_some_and(|n| *n >= self.per_ip_cap))
+    }
+
+    /// Whether another attempt is allowed, counting it if so.
+    fn allow(&mut self, ip: Option<K>, now: i64) -> bool {
+        self.turn(now);
         if self.global >= self.global_cap {
             return false;
         }
@@ -190,9 +210,17 @@ impl AuthState {
         self.device_starts.lock().unwrap().allow(ip, now)
     }
 
-    /// Whether a caller at `ip` may poll for a device approval now.
-    pub(crate) fn allow_device_poll(&self, ip: Option<IpAddr>, now: i64) -> bool {
-        self.device_polls.lock().unwrap().allow(ip, now)
+    /// Whether a caller at `ip` may poll for a device approval now: only
+    /// polls with a code that answers to nothing count against it
+    /// ([`Self::device_poll_missed`]), so a stranger cannot spend the budget
+    /// of a window that holds a real one, which `slow_down` bounds per code.
+    pub(crate) fn device_poll_blocked(&self, ip: Option<IpAddr>, now: i64) -> bool {
+        self.device_polls.lock().unwrap().exhausted(ip, now)
+    }
+
+    /// Count a poll whose code answered to nothing.
+    pub(crate) fn device_poll_missed(&self, ip: Option<IpAddr>, now: i64) {
+        self.device_polls.lock().unwrap().allow(ip, now);
     }
 }
 
@@ -405,6 +433,46 @@ pub(crate) fn parts_are_local(parts: &axum::http::request::Parts) -> bool {
     is_local(parts_peer(parts), &parts.uri, &parts.headers)
 }
 
+/// Who a request is from, for telling callers apart (rate limits, and what a
+/// device-approval page shows), never for trusting one: the TCP peer, unless
+/// that is a proxy the node believes (loopback, or `[auth] trusted_proxies`),
+/// in which case the rightmost `X-Forwarded-For` entry that is not itself
+/// such a proxy. Entries further left are the client's own say and are not
+/// read. A malformed entry stops the walk at the last address believed.
+pub(crate) fn client_addr(
+    parts: &axum::http::request::Parts,
+    trusted: &[crate::gateway::proxy::Cidr],
+) -> Option<IpAddr> {
+    let peer = parts_peer(parts)?.to_canonical();
+    let believed = |ip: &IpAddr| ip.is_loopback() || trusted.iter().any(|c| c.contains(ip));
+    if !believed(&peer) {
+        return Some(peer);
+    }
+    let chain: Vec<String> = parts
+        .headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|v| v.trim().to_string())
+        .collect();
+    let mut client = peer;
+    for entry in chain.iter().rev() {
+        let Ok(ip) = entry
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+        else {
+            break;
+        };
+        client = ip.to_canonical();
+        if !believed(&client) {
+            break;
+        }
+    }
+    Some(client)
+}
+
 /// The TCP peer of a request, as an extractor sees it.
 pub(crate) fn parts_peer(parts: &axum::http::request::Parts) -> Option<IpAddr> {
     parts
@@ -576,14 +644,18 @@ pub async fn guard(
     // 3. A cookie, or the token itself for non-browser clients.
     let now = now_ms();
     let store = state.store().clone();
-    let mut renew: Option<String> = None;
+    let mut renew: Option<(String, i64)> = None;
     let authenticated = if let Some(secret) = cookie_value(&headers, COOKIE) {
         let h = hash(secret);
         match store.auth_session_live(&h, now) {
             Ok(Some(row)) => {
-                if now - (row.expires_ms - SESSION_TTL_MS) > RENEW_AFTER_MS {
-                    let _ = store.auth_session_touch(&h, now, now + SESSION_TTL_MS);
-                    renew = Some(secret.to_string());
+                // Renew when more than a third of the life has been
+                // consumed, so an active client is extended about monthly
+                // (or every ten days, delegated) rather than on every request.
+                let ttl = session_ttl(&row);
+                if now - (row.expires_ms - ttl) > ttl / 3 {
+                    let _ = store.auth_session_touch(&h, now, now + ttl);
+                    renew = Some((secret.to_string(), ttl));
                 }
                 true
             }
@@ -619,8 +691,8 @@ pub async fn guard(
     }
 
     let mut response = next.run(req).await;
-    if let Some(secret) = renew {
-        set_cookie(&mut response, &secret, !local, SESSION_TTL_MS / 1000);
+    if let Some((secret, ttl)) = renew {
+        set_cookie(&mut response, &secret, !local, ttl / 1000);
     }
     Ok(response)
 }
@@ -1165,6 +1237,65 @@ mod tests {
         assert!(l.allow(Some("10.0.0.2".parse().unwrap()), 1_000));
         // The window turning clears both.
         assert!(l.allow(Some(ip), 1_000 + LOGIN_WINDOW_MS));
+    }
+
+    #[test]
+    fn a_forwarded_address_is_believed_only_from_a_trusted_proxy() {
+        use crate::gateway::proxy::Cidr;
+        let parts = |peer: &str, xff: &[&str]| {
+            let mut b = Request::builder().uri("/api/auth/device");
+            for v in xff {
+                b = b.header("x-forwarded-for", *v);
+            }
+            let (mut parts, _) = b.body(()).unwrap().into_parts();
+            parts
+                .extensions
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            parts
+        };
+        let ingress: Vec<Cidr> = vec!["10.244.0.0/16".parse().unwrap()];
+        let addr =
+            |p: &axum::http::request::Parts, t: &[Cidr]| client_addr(p, t).unwrap().to_string();
+        // A stranger's own header is not read.
+        assert_eq!(
+            addr(&parts("203.0.113.7:1", &["1.2.3.4"]), &ingress),
+            "203.0.113.7"
+        );
+        // Through the trusted ingress: the rightmost entry it did not add.
+        assert_eq!(
+            addr(&parts("10.244.1.5:1", &["1.2.3.4, 198.51.100.9"]), &ingress),
+            "198.51.100.9"
+        );
+        // A chain of trusted hops is walked; the forged left end is not.
+        assert_eq!(
+            addr(
+                &parts("127.0.0.1:1", &["6.6.6.6", "198.51.100.9, 10.244.2.2"]),
+                &ingress
+            ),
+            "198.51.100.9"
+        );
+        // Untrusted ingress: its own address, whatever it forwards.
+        assert_eq!(
+            addr(&parts("10.244.1.5:1", &["198.51.100.9"]), &[]),
+            "10.244.1.5"
+        );
+        // Malformed: the last address believed.
+        assert_eq!(addr(&parts("127.0.0.1:1", &["junk"]), &[]), "127.0.0.1");
+        // No header: the peer.
+        assert_eq!(addr(&parts("127.0.0.1:1", &[]), &[]), "127.0.0.1");
+    }
+
+    #[test]
+    fn a_limiter_can_be_read_without_counting() {
+        let mut l = Limiter::new(2, 10);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(!l.exhausted(Some(ip), 0));
+        assert!(l.allow(Some(ip), 0));
+        assert!(!l.exhausted(Some(ip), 0));
+        assert!(l.allow(Some(ip), 0));
+        assert!(l.exhausted(Some(ip), 0));
+        assert!(!l.exhausted(Some("10.0.0.2".parse().unwrap()), 0));
+        assert!(!l.exhausted(Some(ip), LOGIN_WINDOW_MS));
     }
 
     #[test]

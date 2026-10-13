@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { api, ApiError, call, setStepUpHandler, STEP_UP_HEADER, type StepUp } from './api'
+import { api, ApiError, call, setStepUpHandler, StaleChallenge, STEP_UP_HEADER, type StepUp } from './api'
 import {
   approvalFromHash,
   approvalHeadline,
   cannotApprove,
+  codeComplete,
   confirmsElsewhere,
   DeviceCancelled,
   DeviceDenied,
@@ -179,9 +180,6 @@ describe('handing a challenge to a device approval', () => {
     const out = await handOver(
       stepUp,
       {
-        assertOptions: async () => {
-          throw new Error('not needed')
-        },
         deviceStepUp: async (c) => {
           asked.push(c)
           return start
@@ -193,34 +191,34 @@ describe('handing a challenge to a device approval', () => {
     expect(asked).toEqual(['c1'])
   })
 
-  test('asks for a fresh challenge for the same operation when it expired or is gone', async () => {
-    const fresh: string[] = []
+  test('never mints a fresh challenge itself: an expired or spent one is stale', async () => {
+    // Only the node's refusal of the real request describes the operation;
+    // a challenge asked for by hash alone would not, and the node refuses it.
     const asked: string[] = []
     const calls = {
-      assertOptions: async (op: string) => {
-        fresh.push(op)
-        return { challenge_id: `fresh-${fresh.length}`, expires_ms: 999_999 }
-      },
       deviceStepUp: async (c: string) => {
         asked.push(c)
-        if (c === 'c1') throw new ApiError(410, 'this confirmation expired or was already used')
-        return start
+        throw new ApiError(410, 'this confirmation expired or was already used')
       },
     }
-    // Near its expiry: replaced before it is used.
-    await handOver(stepUp, calls, 195_000)
-    expect(fresh).toEqual([stepUp.op_hash])
-    expect(asked).toEqual(['fresh-1'])
-    // The node says it is gone: replaced once.
-    await handOver(stepUp, calls, 100_000)
-    expect(asked).toEqual(['fresh-1', 'c1', 'fresh-2'])
+    expect(await handOver(stepUp, calls, 195_000).catch((e) => e)).toBeInstanceOf(StaleChallenge)
+    expect(asked).toEqual([])
+    expect(await handOver(stepUp, calls, 100_000).catch((e) => e)).toBeInstanceOf(StaleChallenge)
+    expect(asked).toEqual(['c1'])
     // Anything else is the error it is.
-    const err = await handOver(
-      stepUp,
-      { ...calls, deviceStepUp: async () => Promise.reject(new ApiError(409, 'at the node')) },
-      100_000,
-    ).catch((e) => e)
+    const err = await handOver(stepUp, { deviceStepUp: async () => Promise.reject(new ApiError(409, 'at the node')) }, 100_000).catch(
+      (e) => e,
+    )
     expect((err as ApiError).status).toBe(409)
+  })
+})
+
+describe('a typed code', () => {
+  test('is complete at eight letters, however it is spaced', () => {
+    expect(codeComplete('BCDF-GHJK')).toBe(true)
+    expect(codeComplete('bcdf ghjk')).toBe(true)
+    expect(codeComplete('BCDF-GHJ')).toBe(false)
+    expect(codeComplete('')).toBe(false)
   })
 })
 
@@ -256,10 +254,7 @@ describe('an admin action from the desktop app', () => {
 
     // What the prompt does when this window cannot make a passkey.
     setStepUpHandler(async (s) => {
-      const started = await handOver(s, {
-        assertOptions: (op) => api.passkeyAssertOptions(op),
-        deviceStepUp: (c) => api.deviceStepUp(c),
-      })
+      const started = await handOver(s, { deviceStepUp: (c) => api.deviceStepUp(c) })
       const collected = await pollForApproval(started, (code) => api.deviceToken<DeviceProof>(code), {
         sleep: async () => undefined,
       })
@@ -312,5 +307,63 @@ describe('the approving browser', () => {
     expect(settled('denied')).toContain('Denied')
     expect(settled('expired')).toContain('expired')
     expect(settled('revoked')).toContain('cancelled')
+  })
+})
+
+describe('a stale challenge', () => {
+  const realFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = realFetch
+    setStepUpHandler(null)
+  })
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
+  const refusal = (challenge: string) =>
+    json(
+      {
+        error: { code: 403, kind: 'step_up_required', message: 'confirm' },
+        step_up: {
+          op_hash: 'd'.repeat(64),
+          challenge_id: challenge,
+          options: { publicKey: { challenge: 'AQID' } },
+          expires_ms: 1,
+          action: 'POST /api/authority/grants',
+        },
+      },
+      403,
+    )
+
+  test('has the request sent again for a refusal the node describes', async () => {
+    const responses = [refusal('old'), refusal('new'), json({ id: 'g1' })]
+    const seen: { headers: Record<string, string>; body?: string }[] = []
+    globalThis.fetch = (async (_path: string, init?: RequestInit) => {
+      seen.push({ headers: (init?.headers as Record<string, string>) ?? {}, body: init?.body as string })
+      return responses.shift()!
+    }) as typeof fetch
+    const given: string[] = []
+    setStepUpHandler(async (s) => {
+      given.push(s.challenge_id)
+      if (s.challenge_id === 'old') throw new StaleChallenge()
+      return 'the-proof'
+    })
+    const out = await call<{ id: string }>('POST', '/api/authority/grants', { a: 1 })
+    expect(out.id).toBe('g1')
+    expect(given).toEqual(['old', 'new'])
+    // The re-sent request is the same bytes, unconfirmed; the last carries
+    // the proof.
+    expect(seen[1].headers[STEP_UP_HEADER]).toBeUndefined()
+    expect(seen[2].headers[STEP_UP_HEADER]).toBe('the-proof')
+    expect(new Set(seen.map((x) => x.body)).size).toBe(1)
+  })
+
+  test('is not chased for ever', async () => {
+    globalThis.fetch = (async () => refusal('again')) as unknown as typeof fetch
+    let asked = 0
+    setStepUpHandler(async () => {
+      asked++
+      throw new StaleChallenge()
+    })
+    const err = await call('POST', '/api/authority/grants', {}).catch((e) => e)
+    expect(err).toBeInstanceOf(StaleChallenge)
+    expect(asked).toBe(3)
   })
 })

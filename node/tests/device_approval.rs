@@ -291,17 +291,30 @@ async fn poll(n: &Node, cookie: Option<&str>, device_code: &Value) -> Reply {
     .await
 }
 
-/// The phone approves `approval_id`: refused for want of a passkey, then
-/// confirmed with `key`, then approved. Returns the refusal's step-up.
-async fn approve_with(n: &Node, cookie: &str, key: &mut SoftPasskey, approval_id: &str) -> Value {
+/// The code typed into the approving page.
+fn typed(code: &str) -> Value {
+    json!({ "user_code": code })
+}
+
+/// The phone approves `approval_id`, typing `user_code`: refused for want of
+/// a passkey, then confirmed with `key`, then approved. Returns the
+/// refusal's step-up.
+async fn approve_with(
+    n: &Node,
+    cookie: &str,
+    key: &mut SoftPasskey,
+    approval_id: &str,
+    user_code: &Value,
+) -> Value {
     let path = format!("/api/auth/device/approvals/{approval_id}/approve");
-    let refused = phone(n, cookie, "POST", &path, None, None).await;
+    let body = typed(user_code.as_str().unwrap());
+    let refused = phone(n, cookie, "POST", &path, Some(&body), None).await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
     assert_eq!(refused.kind(), "step_up_required", "{}", refused.body);
     let finished = assert_with(n, cookie, key, &refused.body["step_up"]).await;
     assert_eq!(finished.status, StatusCode::OK, "{}", finished.body);
     let proof = finished.body["proof"].as_str().unwrap();
-    let r = phone(n, cookie, "POST", &path, None, Some(proof)).await;
+    let r = phone(n, cookie, "POST", &path, Some(&body), Some(proof)).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert_eq!(r.body["status"], "approved");
     refused.body["step_up"].clone()
@@ -346,7 +359,7 @@ async fn a_window_is_signed_in_once_a_browser_approves_it_with_a_passkey() {
     assert_eq!(r.kind(), "authorization_pending");
     assert!(r.session_cookie().is_none());
 
-    // The phone sees what it is approving: the same code, and who asked.
+    // The phone sees who asked, but not the code: that it must type.
     let view = phone(
         &n,
         &phone_cookie,
@@ -357,7 +370,8 @@ async fn a_window_is_signed_in_once_a_browser_approves_it_with_a_passkey() {
     )
     .await;
     assert_eq!(view.status, StatusCode::OK, "{}", view.body);
-    assert_eq!(view.body["user_code"], user_code);
+    assert!(view.body.get("user_code").is_none(), "{}", view.body);
+    assert_eq!(view.body["code_tries_left"], 3);
     assert_eq!(view.body["kind"], "sign-in");
     assert_eq!(view.body["status"], "pending");
     assert_eq!(view.body["requester_agent"], DESKTOP_AGENT);
@@ -365,9 +379,11 @@ async fn a_window_is_signed_in_once_a_browser_approves_it_with_a_passkey() {
     assert!(view.body.get("device_code").is_none());
 
     // Approving is confirmed with the passkey, for this request.
-    let step_up = approve_with(&n, &phone_cookie, &mut key, id).await;
+    let step_up = approve_with(&n, &phone_cookie, &mut key, id, &asked["user_code"]).await;
     assert_eq!(step_up["summary"], "Sign in another window");
-    assert_eq!(step_up["action"], format!("code {user_code}"));
+    // The prompt never repeats the code.
+    assert!(!step_up.to_string().contains(&user_code.replace('-', "")));
+    assert!(!step_up.to_string().contains(user_code));
 
     // The window collects its session (after waiting its interval).
     tokio::time::sleep(std::time::Duration::from_millis(4_100)).await;
@@ -380,7 +396,18 @@ async fn a_window_is_signed_in_once_a_browser_approves_it_with_a_passkey() {
         .find(|c| c.starts_with("tracon_session="))
         .expect("a cookie");
     assert!(raw.contains("HttpOnly") && raw.contains("Secure") && raw.contains("SameSite=Lax"));
+    // Thirty days, not a paired session's ninety.
+    assert!(raw.contains("Max-Age=2592000"), "{raw}");
     let desktop = r.session_cookie().unwrap();
+    let row = n
+        .store
+        .auth_session_live(
+            &auth::hash(desktop.trim_start_matches("tracon_session=")),
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(row.expires_ms - row.created_ms <= 30 * 24 * 60 * 60 * 1000);
 
     // The cookie works like any other.
     let r = at(
@@ -418,7 +445,7 @@ async fn a_window_is_signed_in_once_a_browser_approves_it_with_a_passkey() {
         &phone_cookie,
         "POST",
         &format!("/api/auth/device/approvals/{id}/approve"),
-        None,
+        Some(&typed(user_code)),
         None,
     )
     .await;
@@ -447,9 +474,16 @@ async fn a_denied_request_says_so_and_cannot_be_approved_after() {
     assert_eq!(r.kind(), "access_denied", "{}", r.body);
     assert!(r.session_cookie().is_none());
     let path = format!("/api/auth/device/approvals/{id}/approve");
-    let r = phone(&n, &phone_cookie, "POST", &path, None, None).await;
+    let r = phone(
+        &n,
+        &phone_cookie,
+        "POST",
+        &path,
+        Some(&typed(asked["user_code"].as_str().unwrap())),
+        None,
+    )
+    .await;
     assert_eq!(r.status, StatusCode::GONE, "{}", r.body);
-    // Not even with a passkey.
     let _ = &mut key;
     let view = phone(
         &n,
@@ -481,6 +515,7 @@ async fn an_expired_request_cannot_be_approved_or_collected() {
         status: "pending".into(),
         approver: None,
         issued: None,
+        code_misses: 0,
         created_ms: now - 11 * 60 * 1000,
         expires_ms: now - 60 * 1000,
         interval_ms: 5_000,
@@ -496,7 +531,7 @@ async fn an_expired_request_cannot_be_approved_or_collected() {
         &phone_cookie,
         "POST",
         "/api/auth/device/approvals/old/approve",
-        None,
+        Some(&typed("BCDF-GHJK")),
         None,
     )
     .await;
@@ -510,7 +545,13 @@ async fn an_expired_request_cannot_be_approved_or_collected() {
         r.body
     );
     // Even at the node, where approving needs no passkey.
-    let r = local(&n, "POST", "/api/auth/device/approvals/old/approve", None).await;
+    let r = local(
+        &n,
+        "POST",
+        "/api/auth/device/approvals/old/approve",
+        Some(&typed("BCDF-GHJK")),
+    )
+    .await;
     assert_eq!(r.status, StatusCode::GONE, "{}", r.body);
 }
 
@@ -534,12 +575,21 @@ async fn a_cookie_alone_never_approves_and_a_bearer_token_never_decides() {
     let asked = ask_sign_in(&n).await;
     let id = asked["approval_id"].as_str().unwrap();
     let path = format!("/api/auth/device/approvals/{id}/approve");
+    let code = typed(asked["user_code"].as_str().unwrap());
     // A replayed or foreign proof is no proof.
-    let r = phone(&n, &phone_cookie, "POST", &path, None, Some("made-up")).await;
+    let r = phone(
+        &n,
+        &phone_cookie,
+        "POST",
+        &path,
+        Some(&code),
+        Some("made-up"),
+    )
+    .await;
     assert_eq!(r.kind(), "step_up_required", "{}", r.body);
     // A second paired browser without the passkey gets only the challenge.
     let other = pair(&n).await;
-    let r = phone(&n, &other, "POST", &path, None, None).await;
+    let r = phone(&n, &other, "POST", &path, Some(&code), None).await;
     assert_eq!(r.kind(), "step_up_required", "{}", r.body);
     // A bearer token can neither look nor decide.
     let bearer = format!("Bearer {TOKEN}");
@@ -548,7 +598,8 @@ async fn a_cookie_alone_never_approves_and_a_bearer_token_never_decides() {
         ("POST", path.clone()),
         ("POST", format!("/api/auth/device/approvals/{id}/deny")),
     ] {
-        let r = send(&n, method, &p, PHONE, &[("authorization", &bearer)], None).await;
+        let body = (method == "POST").then_some(&code);
+        let r = send(&n, method, &p, PHONE, &[("authorization", &bearer)], body).await;
         assert_eq!(r.kind(), "step_up_unavailable", "{p}: {}", r.body);
         assert_eq!(r.body["error"]["reason"], "no_session", "{p}");
     }
@@ -630,7 +681,7 @@ async fn a_windows_admin_action_is_confirmed_by_a_browser_for_that_operation_onl
         Some(&desktop),
         "POST",
         &format!("/api/auth/device/approvals/{id}/approve"),
-        None,
+        Some(&typed(asked.body["user_code"].as_str().unwrap())),
         None,
     )
     .await;
@@ -648,11 +699,16 @@ async fn a_windows_admin_action_is_confirmed_by_a_browser_for_that_operation_onl
     .await;
     assert_eq!(view.body["summary"], "Create an authority grant");
     assert_eq!(view.body["action"], "POST /api/authority/grants");
-    let step_up = approve_with(&n, &phone_cookie, &mut key, &id).await;
+    // Which session asked, so the operator can tell it is theirs.
+    let desktop_id = &auth::hash(desktop.trim_start_matches("tracon_session="))[..12];
+    assert_eq!(view.body["requester_session"], desktop_id);
+    assert!(view.body["requester_delegated_from"].is_null());
+    let step_up = approve_with(&n, &phone_cookie, &mut key, &id, &asked.body["user_code"]).await;
     assert_eq!(
         step_up["summary"],
         "Confirm for another window: Create an authority grant"
     );
+    assert_eq!(step_up["action"], "POST /api/authority/grants");
 
     // Only the window's own session collects it.
     let r = poll(&n, None, &device_code).await;
@@ -728,12 +784,12 @@ async fn a_delegated_session_has_no_window_to_enroll_the_first_passkey() {
     issue_token(&n).await;
     let asked = ask_sign_in(&n).await;
     let id = asked["approval_id"].as_str().unwrap();
-    // At the node, approving needs no passkey.
+    // At the node, approving needs no passkey (but still the code).
     let r = local(
         &n,
         "POST",
         &format!("/api/auth/device/approvals/{id}/approve"),
-        None,
+        Some(&typed(asked["user_code"].as_str().unwrap())),
     )
     .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
@@ -824,29 +880,45 @@ async fn asking_is_bounded_and_needs_a_token_a_public_origin_and_this_origin() {
         assert_eq!(r.status, StatusCode::FORBIDDEN, "{path}: {}", r.body);
     }
 
-    // Per address: ten in a window.
-    for i in 0..10 {
-        let r = at(&n, DESKTOP, None, "POST", "/api/auth/device", None, None).await;
+    // Per address: four waiting at once.
+    let ask = |peer: String| {
+        let n = &n;
+        async move { at(n, &peer, None, "POST", "/api/auth/device", None, None).await }
+    };
+    for i in 0..4 {
+        let r = ask(DESKTOP.into()).await;
         assert_eq!(r.status, StatusCode::OK, "{i}: {}", r.body);
     }
-    let r = at(&n, DESKTOP, None, "POST", "/api/auth/device", None, None).await;
+    let r = ask(DESKTOP.into()).await;
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.body);
-    // And no more than sixteen waiting at once, from anywhere.
-    for i in 0..6 {
-        let peer = format!("198.51.100.{}:6000", 100 + i);
-        let r = at(&n, &peer, None, "POST", "/api/auth/device", None, None).await;
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("waiting"),
+        "{}",
+        r.body
+    );
+    // And ten asks in a window, refused or not.
+    for _ in 0..5 {
+        ask(DESKTOP.into()).await;
+    }
+    let r = ask(DESKTOP.into()).await;
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("wait a few minutes"),
+        "{}",
+        r.body
+    );
+    // No more than sixteen waiting at once, from anywhere.
+    for i in 0..12 {
+        let peer = format!("198.51.100.{}:6000", 100 + i / 4);
+        let r = ask(peer).await;
         assert_eq!(r.status, StatusCode::OK, "{i}: {}", r.body);
     }
-    let r = at(
-        &n,
-        "198.51.100.200:6000",
-        None,
-        "POST",
-        "/api/auth/device",
-        None,
-        None,
-    )
-    .await;
+    let r = ask("198.51.100.200:6000".into()).await;
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.body);
     assert!(
         r.body["error"]["message"]
@@ -858,12 +930,258 @@ async fn asking_is_bounded_and_needs_a_token_a_public_origin_and_this_origin() {
     );
 }
 
+/// The PoC that blocked the first version: a session with no passkey asks for
+/// a challenge for an operation hash it computed itself, with no request
+/// behind it, and hands it to a device approval. The phone would have been
+/// asked to approve "an admin action", and the proof would have replaced the
+/// operator token. A challenge that does not say what it is for cannot
+/// become an approval.
+#[tokio::test]
+async fn a_computed_operation_without_a_refused_request_is_never_approvable() {
+    let (n, _phone, _key) = with_phone().await;
+    let desktop = pair(&n).await;
+    let body = json!({ "token_hash": auth::hash("trc1.attacker") });
+    let op = tracon::http::passkey::op_hash(
+        &axum::http::Method::POST,
+        "/api/auth/token",
+        None,
+        body.to_string().as_bytes(),
+    );
+    let opened = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/passkeys/assert/options",
+        Some(&json!({ "op_hash": op })),
+        None,
+    )
+    .await;
+    assert_eq!(opened.status, StatusCode::OK, "{}", opened.body);
+    assert!(opened.body.get("action").is_none(), "{}", opened.body);
+    let r = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/auth/device/stepup",
+        Some(&json!({ "challenge_id": opened.body["challenge_id"] })),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::GONE, "{}", r.body);
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("make the change again"),
+        "{}",
+        r.body
+    );
+    assert!(n.store.device_approvals(10).unwrap().is_empty());
+}
+
+/// The honest refresh: a window whose challenge expired asks for a fresh one
+/// for the same operation, and the node, having seen the request, carries
+/// its description over, so the approval still says what it is for.
+#[tokio::test]
+async fn a_fresh_challenge_for_a_refused_request_keeps_its_description() {
+    let (n, _phone, _key) = with_phone().await;
+    let desktop = pair(&n).await;
+    let refused = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/authority/grants",
+        Some(&grant()),
+        None,
+    )
+    .await;
+    assert_eq!(refused.kind(), "step_up_required", "{}", refused.body);
+    let fresh = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/passkeys/assert/options",
+        Some(&json!({ "op_hash": refused.body["step_up"]["op_hash"] })),
+        None,
+    )
+    .await;
+    assert_eq!(fresh.body["summary"], "Create an authority grant");
+    assert_eq!(fresh.body["action"], "POST /api/authority/grants");
+    let asked = at(
+        &n,
+        DESKTOP,
+        Some(&desktop),
+        "POST",
+        "/api/auth/device/stepup",
+        Some(&json!({ "challenge_id": fresh.body["challenge_id"] })),
+        None,
+    )
+    .await;
+    assert_eq!(asked.status, StatusCode::OK, "{}", asked.body);
+    assert_eq!(asked.body["summary"], "Create an authority grant");
+    assert_eq!(asked.body["action"], "POST /api/authority/grants");
+}
+
+#[tokio::test]
+async fn the_approver_types_the_code_and_three_wrong_ones_deny_the_request() {
+    let (n, phone_cookie, mut key) = with_phone().await;
+    let asked = ask_sign_in(&n).await;
+    let id = asked["approval_id"].as_str().unwrap();
+    let path = format!("/api/auth/device/approvals/{id}/approve");
+    // No code at all is not an approval.
+    let r = phone(&n, &phone_cookie, "POST", &path, None, None).await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+    // A wrong code is refused before any passkey is asked for.
+    let r = phone(
+        &n,
+        &phone_cookie,
+        "POST",
+        &path,
+        Some(&typed("ZZZZ-ZZZZ")),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    assert_ne!(r.kind(), "step_up_required", "{}", r.body);
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("2 tries left"),
+        "{}",
+        r.body
+    );
+    // Typed as people type it, the right one goes on to the passkey.
+    let lower = asked["user_code"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .replace('-', " ");
+    let r = phone(&n, &phone_cookie, "POST", &path, Some(&typed(&lower)), None).await;
+    assert_eq!(r.kind(), "step_up_required", "{}", r.body);
+    // Two more wrong ones, and it is denied, even with a passkey after.
+    for _ in 0..2 {
+        phone(
+            &n,
+            &phone_cookie,
+            "POST",
+            &path,
+            Some(&typed("ZZZZ-ZZZZ")),
+            None,
+        )
+        .await;
+    }
+    let row = n.store.device_approval_get(id).unwrap().unwrap();
+    assert_eq!(row.status, "denied");
+    assert_eq!(row.code_misses, 3);
+    let r = phone(
+        &n,
+        &phone_cookie,
+        "POST",
+        &path,
+        Some(&typed(asked["user_code"].as_str().unwrap())),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::GONE, "{}", r.body);
+    let _ = &mut key;
+    let r = poll(&n, None, &asked["device_code"]).await;
+    assert_eq!(r.kind(), "access_denied", "{}", r.body);
+}
+
+/// Only polls with a code that answers to nothing count against an address,
+/// so a stranger cannot stop a real window collecting.
+#[tokio::test]
+async fn guessing_polls_are_limited_and_real_ones_are_not() {
+    let (n, _phone, _key) = with_phone().await;
+    let asked = ask_sign_in(&n).await;
+    for i in 0..600 {
+        let r = poll(&n, None, &json!(format!("guess-{i}"))).await;
+        assert_eq!(r.kind(), "invalid_grant", "{i}: {}", r.body);
+    }
+    let r = poll(&n, None, &json!("guess-more")).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.body);
+    // The guesser's address is spent; a window elsewhere is not, however
+    // often it polls its real code (it is only told to slow down).
+    for _ in 0..650 {
+        let r = at(
+            &n,
+            "198.51.100.77:7000",
+            None,
+            "POST",
+            "/api/auth/device/token",
+            Some(&json!({ "device_code": asked["device_code"] })),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(r.kind(), "authorization_pending" | "slow_down"),
+            "{}",
+            r.body
+        );
+    }
+}
+
+/// Behind a proxy the node believes (loopback here), the address shown is
+/// the forwarded one; a stranger's own `X-Forwarded-For` is not read.
+#[tokio::test]
+async fn the_address_shown_is_the_one_a_trusted_proxy_reports() {
+    let (n, phone_cookie, _key) = with_phone().await;
+    let view_of = |r: Reply| {
+        let n = &n;
+        let phone_cookie = phone_cookie.clone();
+        async move {
+            let id = r.body["approval_id"].as_str().unwrap().to_string();
+            phone(
+                n,
+                &phone_cookie,
+                "GET",
+                &format!("/api/auth/device/approvals/{id}"),
+                None,
+                None,
+            )
+            .await
+        }
+    };
+    let proxied = send(
+        &n,
+        "POST",
+        "/api/auth/device",
+        LOCAL,
+        &[("x-forwarded-for", "6.6.6.6, 198.51.100.44")],
+        None,
+    )
+    .await;
+    assert_eq!(proxied.status, StatusCode::OK, "{}", proxied.body);
+    assert_eq!(
+        view_of(proxied).await.body["requester_addr"],
+        "198.51.100.44"
+    );
+    let direct = send(
+        &n,
+        "POST",
+        "/api/auth/device",
+        DESKTOP,
+        &[("x-forwarded-for", "198.51.100.44")],
+        None,
+    )
+    .await;
+    assert_eq!(
+        view_of(direct).await.body["requester_addr"],
+        "198.51.100.20"
+    );
+}
+
 #[tokio::test]
 async fn rotating_the_token_revokes_an_approval_not_yet_collected() {
     let (n, phone_cookie, mut key) = with_phone().await;
     let asked = ask_sign_in(&n).await;
     let id = asked["approval_id"].as_str().unwrap();
-    approve_with(&n, &phone_cookie, &mut key, id).await;
+    approve_with(&n, &phone_cookie, &mut key, id, &asked["user_code"]).await;
     issue_token(&n).await;
     let r = poll(&n, None, &asked["device_code"]).await;
     assert_eq!(r.kind(), "invalid_grant", "{}", r.body);

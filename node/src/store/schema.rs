@@ -1454,8 +1454,9 @@ const MIGRATIONS: &[&str] = &[
     // `device_approval` is one request: the hash of the secret the window
     // polls with (never the secret), the short code both screens show, who
     // asked, and for a step-up the operation and the session it is bound
-    // to. Rows stay after they are decided, as the record of what was
-    // approved by whom, and are purged a month on.
+    // to. `code_misses` counts wrong codes typed by an approving browser;
+    // the third denies the request. Rows stay a day after they are decided
+    // or expire, as the record of what was approved by whom.
     r#"
     ALTER TABLE auth_session ADD COLUMN delegated_from TEXT;
     ALTER TABLE webauthn_challenge ADD COLUMN action TEXT;
@@ -1475,6 +1476,7 @@ const MIGRATIONS: &[&str] = &[
                           CHECK (status IN ('pending', 'approved', 'denied', 'consumed', 'revoked')),
         approver          TEXT,
         issued            TEXT,
+        code_misses       INTEGER NOT NULL DEFAULT 0,
         created_ms        INTEGER NOT NULL,
         expires_ms        INTEGER NOT NULL,
         interval_ms       INTEGER NOT NULL,

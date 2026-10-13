@@ -258,6 +258,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("ui.opencode_bundle_dir").path(),
     // [auth]
     restart("auth.public_origin"),
+    restart("auth.trusted_proxies"),
 ];
 
 /// What is assumed of a key the schema does not know: one the node ignores

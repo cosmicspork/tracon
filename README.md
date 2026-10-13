@@ -232,12 +232,14 @@ Linux has no WebAuthn, and neither does an unsigned macOS build), so it borrows 
 browser that can. On the login screen choose **Sign in from another browser**: the
 window shows a short code, a link that opens in your system browser, and the same
 link as a QR. Open it in a browser already signed in to the node (or scan it with
-the paired phone), check that the code matches, and approve with your passkey; the
-window signs in by itself, and your devices are told. An admin action in that
+the paired phone), type the code the window shows, and approve with your passkey;
+the window signs in by itself, and your devices are told. An admin action in that
 window works the same way: its confirmation sheet shows a code and link instead of
 a passkey prompt, and the browser approves that one save. A session made this way
-cannot enroll the node's first passkey. Against a node on the same machine the app
-needs none of this.
+lasts 30 days and cannot enroll the node's first passkey. Against a node on the
+same machine the app needs none of this. Behind an ingress, list its addresses in
+`[auth] trusted_proxies` so the approval page shows the asker's address rather
+than the ingress's.
 
 Add the page to the Home Screen — iOS only delivers push to an
 installed web app — then open **Nodes** and switch on **Push to this device**. The

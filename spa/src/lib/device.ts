@@ -4,7 +4,7 @@
 // this module only reads the approval address, polls for the outcome the way
 // RFC 8628 says to, and words what each side shows.
 
-import { ApiError, type StepUp } from './api'
+import { ApiError, StaleChallenge, type StepUp } from './api'
 import { EXPIRY_MARGIN_MS } from './passkey'
 
 /** What the node hands a window that asked. `device_code` is the secret the
@@ -36,11 +36,17 @@ export interface DeviceProof {
   expires_ms: number
 }
 
-/** What the approving browser is shown. */
+/** What the approving browser is shown. Never the code: the operator types
+    the one the asking window shows. */
 export interface DeviceApprovalView {
   id: string
   kind: 'sign-in' | 'step-up'
-  user_code: string
+  /** Wrong codes left before the request is denied. */
+  code_tries_left: number
+  /** For a step-up, the asking session's short ID, and what approved that
+      session when another browser did. */
+  requester_session: string | null
+  requester_delegated_from: string | null
   /** `pending`, `approved`, `denied`, `consumed`, `revoked` or `expired`. */
   status: string
   created_ms: number
@@ -169,27 +175,29 @@ export async function pollForApproval<T>(
 
 /** What handing a step-up to a device approval needs from the node. */
 export interface HandOverCalls {
-  /** A fresh challenge for the same operation (`/api/passkeys/assert/options`). */
-  assertOptions: (opHash: string) => Promise<Pick<StepUp, 'challenge_id' | 'expires_ms'>>
   /** The device approval for a challenge (`/api/auth/device/stepup`). */
   deviceStepUp: (challengeId: string) => Promise<DeviceStart>
 }
 
 /** Hand an admin action's challenge to a device approval, which spends it.
-    A challenge that has expired, or that the node says is gone, is replaced
-    with a fresh one for the same operation first; the node records what the
-    operation is, so the approving browser sees the node's words for it. */
+    Only a challenge the node opened when it refused the request carries the
+    node's description of it, so one that has expired or is gone is not
+    replaced here: {@link StaleChallenge} has `call` send the request again
+    for a fresh refusal. */
 export async function handOver(stepUp: StepUp, calls: HandOverCalls, now = Date.now()): Promise<DeviceStart> {
-  let challenge = stepUp.challenge_id
-  if (now > stepUp.expires_ms - EXPIRY_MARGIN_MS) {
-    challenge = (await calls.assertOptions(stepUp.op_hash)).challenge_id
-  }
+  if (now > stepUp.expires_ms - EXPIRY_MARGIN_MS) throw new StaleChallenge()
   try {
-    return await calls.deviceStepUp(challenge)
+    return await calls.deviceStepUp(stepUp.challenge_id)
   } catch (err) {
-    if (!(err instanceof ApiError && err.status === 410)) throw err
-    return calls.deviceStepUp((await calls.assertOptions(stepUp.op_hash)).challenge_id)
+    if (err instanceof ApiError && err.status === 410) throw new StaleChallenge()
+    throw err
   }
+}
+
+/** The code as the approving browser sends it: as typed, the node reads
+    case, spaces and dashes loosely. Eight letters, at most a separator. */
+export function codeComplete(typed: string): boolean {
+  return typed.replace(/[^A-Za-z0-9]/g, '').length === 8
 }
 
 /** What the approving browser says about the request, to compare before

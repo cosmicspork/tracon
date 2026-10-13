@@ -12,20 +12,26 @@
 //!    it opens in the system browser or shows as a QR for a phone. The
 //!    approval's ID rides in the fragment, so it never reaches a server log;
 //!    the secret is never in a URL at all.
-//! 2. A browser signed in to the node opens the URL, shows the code, who
-//!    asked and when, and the operator compares the code with the window's
-//!    and approves or denies. Approving is an admin action bound to this
-//!    approval and no other ([`approval_op_hash`]): off the node's machine it
-//!    needs a passkey assertion made for it (`http::passkey`), so a cookie
-//!    alone, including the asking window's own, never approves anything.
+//! 2. A browser signed in to the node opens the URL and shows who asked and
+//!    when, and for a step-up which session and what for. It does not show
+//!    the code: the operator types the one the asking window shows (three
+//!    wrong ones deny the request), which is what ties the approval to the
+//!    window in front of them rather than to a link someone sent. Approving
+//!    is then an admin action bound to this approval and no other
+//!    ([`approval_op_hash`]): off the node's machine it needs a passkey
+//!    assertion made for it (`http::passkey`), so a cookie alone, including
+//!    the asking window's own, never approves anything. A step-up is made
+//!    only from a challenge the node opened for a request it refused, so
+//!    what is approved is always described in the node's words.
 //! 3. The window polls `POST /api/auth/device/token` with its secret and
 //!    gets `authorization_pending`, `slow_down`, `access_denied` or
 //!    `expired_token`, until the approval is there to collect: then, once, a
 //!    new session cookie (sign-in) or a single-use step-up proof bound to the
 //!    original operation and to the session that asked (step-up).
 //!
-//! A session made this way records what approved it (`delegated_from`) and
-//! never has a pairing window, so it cannot enroll the node's first passkey.
+//! A session made this way records what approved it (`delegated_from`),
+//! lives 30 days rather than 90, and never has a pairing window, so it
+//! cannot enroll the node's first passkey.
 //! Its sign-in is pushed to the operator's devices. No bearer token takes
 //! part anywhere: a bearer caller can neither approve nor ask for a step-up.
 
@@ -43,14 +49,16 @@ use sha2::{Digest, Sha256};
 
 use super::{
     api::{ApiError, AppState},
-    auth::{self, set_cookie, SESSION_TTL_MS},
+    auth::{self, set_cookie, DELEGATED_SESSION_TTL_MS},
     hostname,
     passkey::{
         self, authorize_op, caller, internal, limited, random_secret, relying_party, Caller,
         Refusal, PROOF_TTL_MS,
     },
 };
-use crate::store::{now_ms, AuthSessionRow, CeremonyPurpose, DeviceApprovalRow, DevicePoll};
+use crate::store::{
+    now_ms, AuthSessionRow, CeremonyPurpose, DeviceApprovalRow, DevicePoll, OpenSignIns,
+};
 
 /// How long a request waits to be approved.
 pub const EXPIRES_MS: i64 = 10 * 60 * 1000;
@@ -61,10 +69,13 @@ pub const INTERVAL_MS: i64 = 5_000;
 /// bits, which only the approving browser ever compares, never guesses.
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_LEN: usize = 8;
-/// The most sign-in requests that may wait at once: the route answers
-/// strangers, so they must not be able to fill the table or the approval
-/// screen.
-const MAX_OPEN_SIGN_INS: i64 = 16;
+/// The most sign-in requests that may wait at once, from one address and in
+/// all: the route answers strangers, so they must not be able to fill the
+/// table, and one address must not be able to take every slot.
+const MAX_OPEN_SIGN_INS: OpenSignIns = OpenSignIns {
+    per_addr: 4,
+    total: 16,
+};
 /// The longest secret the poll route reads; the node issues 43 characters.
 const MAX_DEVICE_CODE: usize = 128;
 
@@ -104,6 +115,44 @@ pub fn approval_op_hash(row: &DeviceApprovalRow) -> String {
     hex::encode(h.finalize())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveBody {
+    user_code: String,
+}
+
+/// A typed code, read the way people type one: case, spaces and dashes do
+/// not matter.
+fn normalise_code(typed: &str) -> String {
+    typed
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .take(64)
+        .collect()
+}
+
+/// Whether `typed` is `code`, compared without stopping at the first
+/// difference.
+fn code_matches(typed: &str, code: &str) -> bool {
+    let typed = normalise_code(typed);
+    let (a, b) = (typed.as_bytes(), code.as_bytes());
+    let mut diff = u8::from(a.len() != b.len());
+    for (i, want) in b.iter().enumerate() {
+        diff |= a.get(i).copied().unwrap_or(0) ^ want;
+    }
+    diff == 0
+}
+
+/// The line beneath the summary in the approving browser's passkey prompt:
+/// the request a step-up guards, never the code.
+fn approval_detail(row: &DeviceApprovalRow) -> String {
+    match row.action.as_deref() {
+        Some(action) if row.kind == "step-up" => action.to_string(),
+        _ => "a new session for that window".to_string(),
+    }
+}
+
 /// What the passkey prompt in the approving browser says it is confirming.
 fn approval_summary(row: &DeviceApprovalRow) -> String {
     let text = if row.kind == "sign-in" {
@@ -135,25 +184,13 @@ fn agent(headers: &HeaderMap) -> Option<String> {
         .map(|v| printable(v, 200))
 }
 
-/// Where the asking window is, as reported: the first `X-Forwarded-For`
-/// entry when a proxy sent one (behind an ingress the peer is the ingress),
-/// else the connection's address. Shown for comparison, never trusted.
-fn address(parts: &Parts) -> Option<String> {
-    let forwarded = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .and_then(|v| {
-            v.trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<std::net::IpAddr>()
-                .ok()
-        });
-    forwarded
-        .or_else(|| auth::parts_peer(parts))
-        .map(|ip| ip.to_canonical().to_string())
+/// Where the asking window is, as far as the node can tell
+/// ([`auth::client_addr`]): the connection's address, or what a trusted
+/// proxy reports. Shown for comparison and used to tell callers apart, never
+/// trusted.
+fn address(s: &AppState, parts: &Parts) -> Option<std::net::IpAddr> {
+    let trusted = s.cfg.auth.trusted_proxies().unwrap_or_default();
+    auth::client_addr(parts, &trusted)
 }
 
 /// The public routes are reached without the guard's same-origin check,
@@ -214,7 +251,13 @@ fn started(row: &DeviceApprovalRow, device_code: &str, url: String) -> Value {
     out
 }
 
-fn new_row(kind: &str, parts: &Parts, device_code: &str, now: i64) -> DeviceApprovalRow {
+fn new_row(
+    kind: &str,
+    parts: &Parts,
+    addr: Option<std::net::IpAddr>,
+    device_code: &str,
+    now: i64,
+) -> DeviceApprovalRow {
     DeviceApprovalRow {
         id: passkey::b64(&rand::random::<[u8; 16]>()),
         kind: kind.into(),
@@ -222,13 +265,14 @@ fn new_row(kind: &str, parts: &Parts, device_code: &str, now: i64) -> DeviceAppr
         user_code: user_code(),
         requester_session: None,
         requester_agent: agent(&parts.headers),
-        requester_addr: address(parts),
+        requester_addr: addr.map(|ip| ip.to_string()),
         op_hash: None,
         action: None,
         summary: None,
         status: "pending".into(),
         approver: None,
         issued: None,
+        code_misses: 0,
         created_ms: now,
         expires_ms: now + EXPIRES_MS,
         interval_ms: INTERVAL_MS,
@@ -249,11 +293,12 @@ pub async fn start(State(s): State<AppState>, parts: Parts) -> Result<Json<Value
         )));
     }
     let now = now_ms();
-    if !s.auth.allow_device_start(auth::parts_peer(&parts), now) {
+    let addr = address(&s, &parts);
+    if !s.auth.allow_device_start(addr, now) {
         return Err(too_many("too many sign-in requests; wait a few minutes"));
     }
     let device_code = random_secret();
-    let row = new_row("sign-in", &parts, &device_code, now);
+    let row = new_row("sign-in", &parts, addr, &device_code, now);
     let url = approve_url(&s, &row.id)?;
     if !s
         .store()
@@ -314,11 +359,22 @@ pub async fn step_up(
     let Some(op_hash) = challenge.op_hash else {
         return Err(internal("an assertion without an operation"));
     };
+    // Only a challenge the node opened for a request it refused carries
+    // what that request is. One opened for an operation hash alone
+    // (`/api/passkeys/assert/options` with nothing on record) does not, and
+    // another browser would be asked to approve a hash it cannot read: the
+    // window must make the request again for a challenge that says.
+    let Some(action) = challenge.action else {
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::GONE,
+            "this confirmation does not say what it is for; make the change again",
+        )));
+    };
     let device_code = random_secret();
-    let mut row = new_row("step-up", &parts, &device_code, now);
+    let mut row = new_row("step-up", &parts, address(&s, &parts), &device_code, now);
     row.requester_session = Some(session.clone());
     row.op_hash = Some(op_hash);
-    row.action = challenge.action;
+    row.action = Some(action);
     row.summary = challenge.summary;
     let url = approve_url(&s, &row.id)?;
     s.store().device_approval_insert(&row, None, now)?;
@@ -368,18 +424,26 @@ pub async fn token(
         return e.into_response();
     }
     let now = now_ms();
-    if !s.auth.allow_device_poll(auth::parts_peer(&parts), now) {
+    let addr = address(&s, &parts);
+    // Only polls with a code that answers to nothing are counted against an
+    // address: a real code is bounded by its own `slow_down`, and a stranger
+    // guessing must not be able to stop every window polling.
+    if s.auth.device_poll_blocked(addr, now) {
         return too_many("too many polls; wait a few minutes").into_response();
     }
+    let missed = || {
+        s.auth.device_poll_missed(addr, now);
+        invalid_grant()
+    };
     let code = body.device_code.trim();
     if code.is_empty() || code.len() > MAX_DEVICE_CODE {
-        return invalid_grant();
+        return missed();
     }
     let code_hash = auth::hash(code);
     let store = s.store();
     let row = match store.device_approval_by_code(&code_hash) {
         Ok(Some(row)) => row,
-        Ok(None) => return invalid_grant(),
+        Ok(None) => return missed(),
         Err(e) => return Refusal::from(e).into_response(),
     };
     // A step-up's secret is good only with the session that asked: checked
@@ -389,7 +453,7 @@ pub async fn token(
         _ => None,
     };
     if row.kind == "step-up" && session.as_deref() != row.requester_session.as_deref() {
-        return invalid_grant();
+        return missed();
     }
     let poll = match store.device_approval_poll(&code_hash, now) {
         Ok(poll) => poll,
@@ -450,7 +514,8 @@ fn collect_sign_in(
         token_hash: auth::hash(&secret),
         created_ms: now,
         last_seen_ms: now,
-        expires_ms: now + SESSION_TTL_MS,
+        // Shorter than a paired session's: no token was spent for it.
+        expires_ms: now + DELEGATED_SESSION_TTL_MS,
         user_agent: agent(&parts.headers),
         // Never a pairing: a session approved from elsewhere may not enroll
         // the node's first passkey.
@@ -476,7 +541,7 @@ fn collect_sign_in(
         &mut response,
         &secret,
         !auth::parts_are_local(parts),
-        SESSION_TTL_MS / 1000,
+        DELEGATED_SESSION_TTL_MS / 1000,
     );
     Ok(response)
 }
@@ -518,20 +583,22 @@ fn collect_step_up(
 /// they did not approve is the sign of a stolen session approving, or of an
 /// approval they were talked into. Detached, so a slow push service never
 /// holds the sign-in up.
+/// What the window claims to be is left out: it is the asker's own words,
+/// and a notification is no place to repeat them.
 fn announce_sign_in(s: &AppState, row: &DeviceApprovalRow, delegated_from: &str) {
     let (store, cfg) = (s.store().clone(), s.cfg.clone());
-    let what = row
-        .requester_agent
-        .as_deref()
-        .map(|a| printable(a, 80))
-        .unwrap_or_else(|| "a window".into());
     let by = if delegated_from == "local" {
         "at the node".to_string()
     } else {
         format!("by session {delegated_from}")
     };
+    let from = row
+        .requester_addr
+        .as_deref()
+        .map(|a| format!(" from {a}"))
+        .unwrap_or_default();
     let body = format!(
-        "{what} was signed in, approved {by}. If that was not you, sign it out in Settings and rotate the token."
+        "A window{from} was signed in, approved {by}. If that was not you, sign it out in Settings and rotate the token."
     );
     let id = format!("device-{}", row.id);
     tokio::spawn(async move {
@@ -590,11 +657,26 @@ pub async fn view(
     let row = find(&s, &id)?;
     let now = now_ms();
     let local = me == "local";
+    // For a step-up, which session asked, and what that session is: one
+    // approved from elsewhere says by whom.
+    let (asker, asker_delegated_from) = match row.requester_session.as_deref() {
+        Some(h) => (
+            Some(h[..12.min(h.len())].to_string()),
+            s.store()
+                .auth_session_live(h, now)?
+                .and_then(|r| r.delegated_from),
+        ),
+        None => (None, None),
+    };
+    // The code is not shown: the operator types the one the asking window
+    // shows, which is what ties this page to that window.
     Ok(Json(json!({
         "id": row.id,
         "kind": row.kind,
-        "user_code": show_code(&row.user_code),
         "status": row.shown_status(now),
+        "code_tries_left": (crate::store::MAX_CODE_MISSES - row.code_misses).max(0),
+        "requester_session": asker,
+        "requester_delegated_from": asker_delegated_from,
         "created_ms": row.created_ms,
         "expires_ms": row.expires_ms,
         "requester_agent": row.requester_agent,
@@ -623,16 +705,42 @@ pub async fn approve(
     body: Bytes,
 ) -> Result<Json<Value>, Refusal> {
     passkey::json_or_empty(&parts.headers, &body)?;
+    let typed: ApproveBody = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "type the code the asking window shows (`{\"user_code\": \"BCDF-GHJK\"}`)",
+        )
+    })?;
     let approver = decider(&s, &parts)?;
     let row = find(&s, &id)?;
     if !row.open(now_ms()) {
         return Err(closed(&row, now_ms()));
     }
+    // The code first, before any passkey prompt: it is what proves the
+    // operator is looking at the window that asked, and not at a link
+    // someone else sent them.
+    if !code_matches(&typed.user_code, &row.user_code) {
+        let left = s.store().device_approval_miss(&row.id, now_ms())?;
+        tracing::warn!(approval = %row.id, tries_left = ?left, "device approval: wrong code typed");
+        return Err(Refusal::Api(ApiError::new(
+            StatusCode::FORBIDDEN,
+            match left {
+                Some(0) | None => {
+                    "that is not the code the asking window shows; the request is now denied"
+                        .to_string()
+                }
+                Some(n) => format!(
+                    "that is not the code the asking window shows; {n} {} left",
+                    if n == 1 { "try" } else { "tries" }
+                ),
+            },
+        )));
+    }
     authorize_op(
         &s,
         &parts,
         || approval_op_hash(&row),
-        &format!("code {}", show_code(&row.user_code)),
+        &approval_detail(&row),
         Some(&approval_summary(&row)),
     )?;
     let now = now_ms();
@@ -682,7 +790,7 @@ mod tests {
 
     fn row(kind: &str, op: Option<&str>) -> DeviceApprovalRow {
         let parts = axum::http::Request::new(()).into_parts().0;
-        let mut row = new_row(kind, &parts, "secret", 0);
+        let mut row = new_row(kind, &parts, None, "secret", 0);
         row.id = "a1".into();
         row.user_code = "BCDFGHJK".into();
         row.op_hash = op.map(str::to_string);
@@ -750,15 +858,12 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_address_is_an_address_or_nothing() {
-        let (mut parts, _) = axum::http::Request::new(()).into_parts();
-        parts
-            .headers
-            .insert("x-forwarded-for", "198.51.100.4, 10.0.0.1".parse().unwrap());
-        assert_eq!(address(&parts).as_deref(), Some("198.51.100.4"));
-        parts
-            .headers
-            .insert("x-forwarded-for", "198.51.100.4<script>".parse().unwrap());
-        assert_eq!(address(&parts), None);
+    fn a_typed_code_is_read_as_people_type_it_and_compared_whole() {
+        assert!(code_matches("BCDF-GHJK", "BCDFGHJK"));
+        assert!(code_matches(" bcdf ghjk ", "BCDFGHJK"));
+        assert!(!code_matches("BCDF-GHJL", "BCDFGHJK"));
+        assert!(!code_matches("BCDFGHJ", "BCDFGHJK"));
+        assert!(!code_matches("BCDFGHJKB", "BCDFGHJK"));
+        assert!(!code_matches("", "BCDFGHJK"));
     }
 }

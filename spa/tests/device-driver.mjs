@@ -21,7 +21,7 @@ const seen = {
   enrolled: false,
   sign_in_code: null,
   sign_in_url: null,
-  approval_code: null,
+  code_shown_to_phone: null,
   approval_headline: null,
   phone_prompt_summary: null,
   desktop_signed_in: false,
@@ -97,8 +97,10 @@ try {
   await phone.goto('about:blank')
   await phone.goto(seen.sign_in_url)
   await phone.getByTestId('device-approval').waitFor({ timeout })
-  seen.approval_code = (await phone.getByTestId('device-approval-code').textContent())?.trim() ?? null
   seen.approval_headline = (await phone.getByTestId('device-approval-headline').textContent())?.trim() ?? null
+  // The phone does not show the code: the operator types the desktop's.
+  seen.code_shown_to_phone = (await phone.getByTestId('device-approval').textContent())?.includes(seen.sign_in_code) ?? null
+  await phone.getByTestId('device-approval-code').fill(seen.sign_in_code.toLowerCase())
   await phone.getByTestId('device-approve').click()
   const prompt = phone.getByTestId('step-up')
   await prompt.waitFor({ timeout })
@@ -131,9 +133,7 @@ try {
   await phone.goto(seen.step_up_url)
   await phone.getByTestId('device-approval').waitFor({ timeout })
   seen.step_up_headline = (await phone.getByTestId('device-approval-headline').textContent())?.trim() ?? null
-  if ((await phone.getByTestId('device-approval-code').textContent())?.trim() !== seen.step_up_code) {
-    throw new Error('the codes differ')
-  }
+  await phone.getByTestId('device-approval-code').fill(seen.step_up_code)
   await phone.getByTestId('device-approve').click()
   await prompt.waitFor({ timeout })
   await phone.getByTestId('step-up-confirm').click()
