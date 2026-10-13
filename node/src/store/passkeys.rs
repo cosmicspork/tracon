@@ -439,6 +439,32 @@ mod tests {
     }
 
     #[test]
+    fn one_session_flooding_ceremonies_evicts_only_its_own() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .ceremony_insert(
+                &ceremony("mine", CeremonyPurpose::Assert, "operator", 1_000),
+                1_000,
+            )
+            .unwrap();
+        store.ceremony_prove("mine", "p1", 9_000).unwrap();
+        for i in 0..50 {
+            store
+                .ceremony_insert(
+                    &ceremony(
+                        &format!("x{i}"),
+                        CeremonyPurpose::Assert,
+                        "attacker",
+                        1_001 + i,
+                    ),
+                    1_001 + i,
+                )
+                .unwrap();
+        }
+        assert!(store.proof_spend("p1", "op-a", "operator", 1_500).unwrap());
+    }
+
+    #[test]
     fn rotating_the_token_keeps_passkeys_and_drops_ceremonies() {
         let store = Store::open_in_memory().unwrap();
         store.passkey_insert(&passkey("a"), true).unwrap();

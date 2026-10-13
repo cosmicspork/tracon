@@ -1065,3 +1065,70 @@ async fn a_mangled_answer_is_refused_without_a_server_error() {
     assert_eq!(n.store.passkey_count().unwrap(), 1);
     assert_eq!(grants(&n).await, 0);
 }
+
+/// What is confirmed is the bytes. A body that is not JSON would be read by an
+/// optional extractor as no body at all (`POST /api/providers/{name}/connect`
+/// takes `Option<Json<_>>`), so the request run would not be the one
+/// confirmed: it is refused before any confirmation is asked for or spent.
+#[tokio::test]
+async fn an_admin_body_that_is_not_json_is_refused() {
+    let (n, cookie, mut key) = paired_with_passkey().await;
+    let body = json!({ "channels": ["personal"] });
+    let proof = confirm(
+        &n,
+        &cookie,
+        &mut key,
+        "POST",
+        "/api/providers/anthropic/connect",
+        Some(&body),
+    )
+    .await;
+    for ct in ["text/plain", "application/x-www-form-urlencoded"] {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/providers/anthropic/connect")
+            .header("host", HOST)
+            .header("cookie", &cookie)
+            .header("origin", ORIGIN)
+            .header(STEP_UP_HEADER, &proof)
+            .header("content-type", ct)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(REMOTE.parse::<SocketAddr>().unwrap()));
+        let res = n.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE, "{ct}");
+    }
+    // An empty body is the optional extractor's default, confirmed as such.
+    let empty = confirm(
+        &n,
+        &cookie,
+        &mut key,
+        "POST",
+        "/api/providers/anthropic/connect",
+        None,
+    )
+    .await;
+    let r = remote(
+        &n,
+        &cookie,
+        "POST",
+        "/api/providers/anthropic/connect",
+        None,
+        Some(&empty),
+    )
+    .await;
+    assert_ne!(r.kind(), "step_up_required", "{}", r.body);
+    assert_ne!(r.status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{}", r.body);
+    // The proof for the JSON body was not spent by the refusals above.
+    let r = remote(
+        &n,
+        &cookie,
+        "POST",
+        "/api/providers/anthropic/connect",
+        Some(&body),
+        Some(&proof),
+    )
+    .await;
+    assert_ne!(r.kind(), "step_up_required", "{}", r.body);
+}

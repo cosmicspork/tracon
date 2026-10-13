@@ -249,8 +249,8 @@ fn internal(e: impl std::fmt::Display) -> Refusal {
     ))
 }
 
-fn limited(s: &AppState, parts: &Parts) -> Result<(), Refusal> {
-    if s.auth.allow_ceremony(auth::parts_peer(parts), now_ms()) {
+fn limited(s: &AppState, session: &str) -> Result<(), Refusal> {
+    if s.auth.allow_ceremony(session, now_ms()) {
         Ok(())
     } else {
         Err(Refusal::Api(ApiError::new(
@@ -350,16 +350,47 @@ pub async fn authorize(s: &AppState, parts: &Parts, body: &[u8]) -> Result<(), R
         if s.store()
             .proof_spend(&auth::hash(proof.trim()), &op, &session, now_ms())?
         {
+            tracing::info!(
+                action = %format!("{} {}", parts.method, parts.uri.path()),
+                session = %&session[..12.min(session.len())],
+                op_hash = %op,
+                "admin action confirmed with a passkey"
+            );
             return Ok(());
         }
         message = "that confirmation was for another action, has expired, or was already used; \
                    confirm this one with your passkey"
             .into();
     }
-    limited(s, parts)?;
+    limited(s, &session)?;
     let mut step_up = open_assertion(s, &rp, &session, &op)?;
     step_up["action"] = json!(format!("{} {}", parts.method, parts.uri.path()));
     Err(Refusal::Required { message, step_up })
+}
+
+/// An admin body is JSON or nothing. What is confirmed is the bytes, and a
+/// non-JSON body would be read by an optional extractor as no body at all,
+/// so the request run would not be the request confirmed.
+pub fn json_or_empty(headers: &HeaderMap, body: &[u8]) -> Result<(), ApiError> {
+    if body.is_empty() {
+        return Ok(());
+    }
+    let json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(|m| m.trim().to_ascii_lowercase())
+        .is_some_and(|m| {
+            m == "application/json" || (m.starts_with("application/") && m.ends_with("+json"))
+        });
+    if json {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "an admin request's body must be JSON (Content-Type: application/json)",
+        ))
+    }
 }
 
 /// A request that changes who may use the node or what it holds for them.
@@ -386,6 +417,7 @@ where
                 ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
                     .into_response()
             })?;
+        json_or_empty(&parts.headers, &bytes).map_err(IntoResponse::into_response)?;
         authorize(state, &parts, &bytes)
             .await
             .map_err(IntoResponse::into_response)?;
@@ -410,6 +442,27 @@ fn enrollment_closes(s: &AppState, session: &str, now: i64) -> Result<Option<i64
         .paired_ms
         .map(|paired| paired + ENROLL_WINDOW_MS)
         .filter(|closes| *closes > now))
+}
+
+/// Tell the operator's devices that the set of passkeys changed: an
+/// enrollment they did not make is the one sign of a raced pairing window or
+/// a confirmed action they did not intend. Detached, so a slow push service
+/// never holds the answer up.
+fn announce(s: &AppState, title: &str, body: String) {
+    let (store, cfg, title) = (s.store().clone(), s.cfg.clone(), title.to_string());
+    let id = format!("passkey-{}", Uuid::now_v7());
+    tokio::spawn(async move {
+        crate::notify::send_operator(
+            &store,
+            &cfg,
+            &id,
+            title,
+            body,
+            "/settings#access".into(),
+            &[],
+        )
+        .await;
+    });
 }
 
 /// A stable WebAuthn user handle for this node's operator. Not a secret:
@@ -485,7 +538,7 @@ pub async fn register_options(
             ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("bad body: {e}"))
         })?
     };
-    limited(&s, &parts)?;
+    limited(&s, &session)?;
     let exclude: Vec<_> = enrolled(&s)?
         .iter()
         .map(|(_, p)| p.cred_id().clone())
@@ -566,7 +619,7 @@ pub async fn register_finish(
         }
     };
     let rp = relying_party(&s.cfg)?;
-    limited(&s, &parts)?;
+    limited(&s, &session)?;
     let now = now_ms();
     let Some(row) =
         s.store()
@@ -622,6 +675,18 @@ pub async fn register_finish(
         )));
     }
     tracing::info!(passkey = %id, %label, granted_by = ?row.granted_by, "passkey enrolled");
+    announce(
+        &s,
+        "Passkey added",
+        format!(
+            "\"{label}\" can now confirm admin actions on this node{}",
+            match row.granted_by.as_deref() {
+                Some("window") => " (added right after pairing)",
+                Some("local") => " (added at the node)",
+                _ => "",
+            }
+        ),
+    );
     Ok(Json(json!({ "id": id, "label": label })))
 }
 
@@ -652,7 +717,7 @@ pub async fn assert_options(
         )));
     }
     let rp = relying_party(&s.cfg)?;
-    limited(&s, &parts)?;
+    limited(&s, &session)?;
     Ok(Json(open_assertion(&s, &rp, &session, &op)?))
 }
 
@@ -676,7 +741,7 @@ pub async fn assert_finish(
         ));
     };
     let rp = relying_party(&s.cfg)?;
-    limited(&s, &parts)?;
+    limited(&s, &session)?;
     let now = now_ms();
     let Some(row) =
         s.store()
@@ -775,6 +840,14 @@ pub async fn delete(
         )));
     }
     tracing::info!(passkey = %id, "passkey removed");
+    announce(
+        &s,
+        "Passkey removed",
+        format!(
+            "passkey {}… no longer confirms admin actions on this node",
+            &id[..8.min(id.len())]
+        ),
+    );
     Ok(Json(json!({ "removed": id })))
 }
 

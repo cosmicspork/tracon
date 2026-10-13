@@ -100,6 +100,14 @@ async fn answer(h: &Harness, id: &str, body: Value) -> (StatusCode, Value) {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap();
+    // At the node: some answers are admin actions, which only a local caller
+    // makes without a passkey.
+    let mut req = req;
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
     let res = h.operator.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)

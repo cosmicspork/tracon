@@ -51,13 +51,16 @@ const RENEW_AFTER_MS: i64 = SESSION_TTL_MS / 3;
 const LOGIN_WINDOW_MS: i64 = 5 * 60 * 1000;
 const LOGIN_PER_IP: u32 = 10;
 const LOGIN_GLOBAL: u32 = 50;
-/// Passkey ceremonies opened or finished per window, per address and in
-/// total. Each admin action off this machine costs two (the challenge and
-/// its answer), so this is a few dozen confirmations in five minutes: far
-/// more than an operator makes, and a bound on what a stolen cookie can make
-/// the node verify and store.
-const CEREMONY_PER_IP: u32 = 60;
-const CEREMONY_GLOBAL: u32 = 120;
+/// Passkey ceremonies opened or finished per window, per cookie session and
+/// in total. Each admin action off this machine costs two (the challenge and
+/// its answer), so a session gets a few dozen confirmations in five minutes:
+/// far more than an operator makes, and a bound on what a stolen cookie can
+/// make the node verify and store. Keyed by session rather than address:
+/// behind an ingress every caller shares one address, and one cookie must
+/// not be able to spend the operator's budget. The total is generous for the
+/// same reason, and still bounds what many cookies together can do.
+const CEREMONY_PER_SESSION: u32 = 60;
+const CEREMONY_GLOBAL: u32 = 600;
 
 pub fn hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -65,10 +68,12 @@ pub fn hash(token: &str) -> String {
 
 /// A fixed window of attempts. Cleared wholesale when the window turns, so
 /// it cannot grow without bound.
-struct Limiter {
+/// Keyed by whatever separates one caller from another: the peer address
+/// for login, the cookie session for passkey ceremonies.
+struct Limiter<K = IpAddr> {
     window_start_ms: i64,
     global: u32,
-    per_ip: HashMap<IpAddr, u32>,
+    per_ip: HashMap<K, u32>,
     per_ip_cap: u32,
     global_cap: u32,
 }
@@ -79,7 +84,7 @@ impl Default for Limiter {
     }
 }
 
-impl Limiter {
+impl<K: std::hash::Hash + Eq> Limiter<K> {
     fn new(per_ip_cap: u32, global_cap: u32) -> Self {
         Self {
             window_start_ms: 0,
@@ -91,7 +96,7 @@ impl Limiter {
     }
 
     /// Whether another attempt is allowed, counting it if so.
-    fn allow(&mut self, ip: Option<IpAddr>, now: i64) -> bool {
+    fn allow(&mut self, ip: Option<K>, now: i64) -> bool {
         if now - self.window_start_ms >= LOGIN_WINDOW_MS {
             self.window_start_ms = now;
             self.global = 0;
@@ -118,7 +123,7 @@ impl Limiter {
 pub struct AuthState {
     token_hash: Mutex<Option<String>>,
     limiter: Mutex<Limiter>,
-    ceremonies: Mutex<Limiter>,
+    ceremonies: Mutex<Limiter<String>>,
 }
 
 impl AuthState {
@@ -136,7 +141,7 @@ impl AuthState {
         Self {
             token_hash: Mutex::new(token_hash),
             limiter: Mutex::new(Limiter::default()),
-            ceremonies: Mutex::new(Limiter::new(CEREMONY_PER_IP, CEREMONY_GLOBAL)),
+            ceremonies: Mutex::new(Limiter::new(CEREMONY_PER_SESSION, CEREMONY_GLOBAL)),
         }
     }
 
@@ -158,10 +163,13 @@ impl AuthState {
         *self.token_hash.lock().unwrap() = hash;
     }
 
-    /// Whether another passkey ceremony may be opened or finished now,
+    /// Whether `session` may open or finish another passkey ceremony now,
     /// counting it if so.
-    pub(crate) fn allow_ceremony(&self, ip: Option<IpAddr>, now: i64) -> bool {
-        self.ceremonies.lock().unwrap().allow(ip, now)
+    pub(crate) fn allow_ceremony(&self, session: &str, now: i64) -> bool {
+        self.ceremonies
+            .lock()
+            .unwrap()
+            .allow(Some(session.to_string()), now)
     }
 }
 
@@ -1097,6 +1105,17 @@ mod tests {
         assert!(l.allow(Some("10.0.0.2".parse().unwrap()), 1_000));
         // The window turning clears both.
         assert!(l.allow(Some(ip), 1_000 + LOGIN_WINDOW_MS));
+    }
+
+    #[test]
+    fn ceremonies_are_limited_per_session_not_per_address() {
+        let auth = AuthState::new("127.0.0.1".into(), None);
+        for _ in 0..CEREMONY_PER_SESSION {
+            assert!(auth.allow_ceremony("attacker", 0));
+        }
+        assert!(!auth.allow_ceremony("attacker", 0));
+        // Another cookie behind the same ingress still has its own budget.
+        assert!(auth.allow_ceremony("operator", 0));
     }
 
     #[test]

@@ -2061,11 +2061,81 @@ pub struct AnswerBody {
 
 /// An answer the node cannot act on as sent is a 422 that names each field,
 /// so the operator can fix their edit and answer again; nothing was decided.
+/// Whether answering approval `id` with `option_id` changes the node rather
+/// than letting one call run, and if so, what it changes. Allowing a
+/// repository setup proposal writes its `[[repo]]` entry (checks, preparation,
+/// egress, image) into `node.toml`; allowing a Dockerfile trial builds that
+/// Dockerfile with the network, outside the boundary; allowing an egress ask
+/// for the repository saves the host to the repository's egress for every
+/// session after this one. Each is a config write or networked work outside
+/// the boundary, so each is an admin action. Refusing, or asking for
+/// changes, never is.
+pub(crate) fn admin_answer(
+    s: &AppState,
+    id: &str,
+    option_id: &str,
+) -> ApiResult<Option<&'static str>> {
+    let Some(approval) = s.store().get_approval(id)? else {
+        return Ok(None);
+    };
+    let allow = option_id == crate::adapter::types::OPTION_ALLOW_ONCE;
+    Ok(match approval.tool.as_str() {
+        crate::mcp::setup::PROPOSE if allow => {
+            Some("allowing a repository setup proposal writes node.toml")
+        }
+        crate::mcp::setup::TRY if allow => {
+            Some("allowing a Dockerfile trial builds it with the network, outside the boundary")
+        }
+        crate::mcp::egress::REQUEST if option_id == crate::store::approvals::OPTION_ALLOW_REPO => {
+            Some("allowing a host for the repository saves it to the repository's egress")
+        }
+        _ => None,
+    })
+}
+
 pub async fn answer_permission(
     State(s): State<AppState>,
     Path(id): Path<String>,
-    Json(b): Json<AnswerBody>,
+    parts: axum::http::request::Parts,
+    body: axum::body::Bytes,
 ) -> Response {
+    if let Err(e) = super::passkey::json_or_empty(&parts.headers, &body) {
+        return e.into_response();
+    }
+    let b: AnswerBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("bad answer: {e}"))
+                .into_response()
+        }
+    };
+    // An answer that writes config or runs networked work outside the
+    // boundary is an admin action: away from the node it needs a passkey,
+    // bound to this answer (option and any edited arguments included).
+    match admin_answer(&s, &id, &b.option_id) {
+        Ok(Some(what)) => {
+            let held_elsewhere = s
+                .store()
+                .get_approval(&id)
+                .ok()
+                .flatten()
+                .is_some_and(|a| a.node_id != s.node_id);
+            if held_elsewhere {
+                return ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{what}, so it is answered on the node that holds it: a peer cannot                          confirm an admin action for another node yet"
+                    ),
+                )
+                .into_response();
+            }
+            if let Err(refusal) = super::passkey::authorize(&s, &parts, &body).await {
+                return refusal.into_response();
+            }
+        }
+        Ok(None) => {}
+        Err(e) => return e.into_response(),
+    }
     let answer = crate::session::OperatorAnswer {
         option_id: b.option_id,
         arguments: b.arguments,
@@ -3430,9 +3500,13 @@ pub async fn external_stop(
 
 /// `POST /api/external/{channel}/start` (and, as before, `DELETE .../stop`):
 /// allow external harnesses on the channel again.
+/// Reopen a channel to external harnesses. Stopping is ordinary; reopening
+/// hands the node's tools back to a harness outside the boundary, so it is an
+/// admin action.
 pub async fn external_start(
     State(s): State<AppState>,
     Path(channel): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
 ) -> ApiResult<Json<serde_json::Value>> {
     s.manager.set_external_stopped(&channel, false).await?;
     Ok(Json(json!({ "channel": channel, "stopped": false })))
@@ -5778,7 +5852,23 @@ fn authorise_forwarded(
         | C::Kill { session_id }
         | C::Pause { session_id, .. }
         | C::Resume { session_id, .. } => forwarded_session(s, sender, session_id),
-        C::Answer { permission_id, .. } => {
+        C::Answer {
+            permission_id,
+            option_id,
+            ..
+        } => {
+            // A passkey confirms an admin action on the node it is enrolled
+            // with; a peer's answer carries none, so these are refused until
+            // the mesh has a signed admin path of its own.
+            if let Some(what) = admin_answer(s, permission_id, option_id)? {
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{what}, an admin action this node confirms only with its own \
+                         passkey or at the node; a peer's answer cannot confirm it yet"
+                    ),
+                ));
+            }
             if let Some(approval) = s.store().get_approval(permission_id)? {
                 owned_here(s, &approval.node_id, "approval")?;
                 return sender_in_channel(s, sender, &approval.channel, "approval");
