@@ -85,6 +85,11 @@ impl OpenCodeAdapter {
     /// keeps the two from drifting apart.
     pub const PINNED_VERSION: &'static str = "1.18.30";
 
+    /// Where the harness image installs the binary, and where the layer over
+    /// a repository's image copies it. Launched by this path: a repository's
+    /// image may put an `opencode` of its own earlier on `PATH`.
+    pub const BINARY: &'static str = "/usr/local/bin/opencode";
+
     /// OpenCode's server API carries no protocol version of its own, so the
     /// pinned release's major.minor API *is* the protocol identity and 1 is
     /// the name given to that revision here. What the server reports at
@@ -194,6 +199,12 @@ impl OpenCodeAdapter {
             ("OPENCODE_DISABLE_LSP_DOWNLOAD", "true".into()),
             ("OPENCODE_DISABLE_AUTOUPDATE", "true".into()),
             ("OPENCODE_DISABLE_SHARE", "true".into()),
+            // The binary is Bun, and `BUN_BE_BUN=1` makes it Bun again: one
+            // inherited from anywhere turns `opencode serve` into running a
+            // `serve` script from the worktree's package.json, with this
+            // launch's password in its environment. Stated off, so no other
+            // value reaches it.
+            ("BUN_BE_BUN", "0".into()),
             // The store is supplied inline and holds nothing; the file next to
             // it says the same thing for the paths that read a file instead.
             ("OPENCODE_AUTH_CONTENT", empty_auth_store()),
@@ -225,7 +236,7 @@ impl OpenCodeAdapter {
         secret_env.extend(password);
         RunnerCommand {
             argv: vec![
-                "opencode".into(),
+                Self::BINARY.into(),
                 "serve".into(),
                 "--pure".into(),
                 // Every interface of the runner, not its loopback: the node
@@ -831,7 +842,7 @@ impl HarnessAdapter for OpenCodeAdapter {
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
         let out = runner
             .run_capture(RunnerCommand {
-                argv: vec!["opencode".into(), "--version".into()],
+                argv: vec![Self::BINARY.into(), "--version".into()],
                 name: "opencode-version".into(),
                 ..Default::default()
             })
@@ -2079,6 +2090,7 @@ mod tests {
             assert_eq!(env[flag], "true", "{flag} is not set");
         }
         assert_eq!(env["OPENCODE_PURE"], "1");
+        assert_eq!(env["BUN_BE_BUN"], "0", "the binary must stay OpenCode");
         assert_eq!(env["OPENCODE_SERVER_PASSWORD"], "secret-password");
         assert_eq!(env["OPENCODE_SERVER_USERNAME"], "opencode");
         // Per-session state is never the volume every session shares.
@@ -2181,7 +2193,7 @@ mod tests {
         assert_eq!(
             cmd.argv,
             [
-                "opencode",
+                "/usr/local/bin/opencode",
                 "serve",
                 "--pure",
                 "--hostname",

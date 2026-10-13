@@ -2,8 +2,9 @@
 //!
 //! `repo_image` layers the harness onto the repository's image with a
 //! profile for pods (the harness uid, its home, an init) and the session runs
-//! there: the pod names the layered image, runs it under that init and not
-//! under the harness image's entrypoint, as the harness uid and never root,
+//! there: the pod names the layered image, runs it under that init (and, for
+//! OpenCode, the harness entrypoint the layer copied in), as the harness uid
+//! and never root,
 //! with the session's cache at `/cache`. The repository's preparation runs on
 //! the workspace first, in the repository's image, through an egress grant
 //! of its own.
@@ -15,11 +16,14 @@ use support::kube_api::{KubeApi, Script};
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Pod;
+use serde_json::json;
+use tracon::adapter::HarnessAdapter;
 use tracon::boundary::kubernetes::KubeBackend;
 use tracon::boundary::Backend;
 use tracon::config::{Config, KubeBuilder, RuntimeKind};
 use tracon::environment::{PrepareOutcome, RepoEnvironment};
 use tracon::runner::kube::{PodEnv, SESSION_INIT};
+use tracon::runner::toolchain::IMAGE_ENTRYPOINT;
 use tracon::runner::{Mount, RunnerCommand};
 
 const NAMESPACE: &str = "tracon-test";
@@ -69,9 +73,10 @@ async fn start(runner: &dyn tracon::runner::Runner, name: &str, env: Vec<(String
 }
 
 /// `runner_in` puts a session in the image it is given: the pod names that
-/// image, runs the init the layer copied in front of the harness, and never
-/// the OpenCode harness image's entrypoint, which only that image has. It is
-/// the harness uid's, never root's, and sized as a session.
+/// image and runs the init the layer copied in front of the harness, then
+/// the harness's entrypoint where it has one: OpenCode's layer copies it to
+/// the path its own image has it. It is the harness uid's, never root's, and
+/// sized as a session.
 #[tokio::test(start_paused = true)]
 async fn a_session_runs_in_the_layered_image_under_its_init() {
     support::state::isolate();
@@ -88,10 +93,14 @@ async fn a_session_runs_in_the_layered_image_under_its_init() {
         let spec = pod.spec.unwrap();
         let container = &spec.containers[0];
         assert_eq!(container.image.as_deref(), Some(SESSION_IMAGE), "{harness}");
+        let mut command = vec![SESSION_INIT, "--"];
+        if harness == "opencode" {
+            command.push(IMAGE_ENTRYPOINT);
+        }
         assert_eq!(
             container.command.clone().unwrap(),
-            [SESSION_INIT, "--"],
-            "{harness}: the init, and no harness entrypoint"
+            command,
+            "{harness}: the init, then the harness's own entrypoint"
         );
         assert_eq!(
             container.args.clone().unwrap(),
@@ -115,6 +124,22 @@ async fn a_session_runs_in_the_layered_image_under_its_init() {
             .find(|var| var.name == "HOME")
             .and_then(|var| var.value.clone());
         assert_eq!(home.as_deref(), Some("/home/harness"));
+
+        // A command the session's runner runs in another image (the
+        // repository's own, for a check) gets neither the init nor the
+        // entrypoint: that image has neither file.
+        let _ = runner
+            .spawn(RunnerCommand {
+                argv: vec!["true".into()],
+                image: Some(BASE_IMAGE.into()),
+                name: format!("tracon-c-{harness}"),
+                ..Default::default()
+            })
+            .await;
+        let pod = created(&api, &format!("tracon-c-{harness}"));
+        let container = &pod.spec.unwrap().containers[0];
+        assert_eq!(container.command.clone().unwrap(), ["true"], "{harness}");
+        assert!(container.args.is_none(), "{harness}");
     }
 
     // The harness's own image keeps what it has: OpenCode's entrypoint, and
@@ -144,6 +169,127 @@ async fn a_session_runs_in_the_layered_image_under_its_init() {
         Some(command),
         "the harness image keeps its entrypoint"
     );
+}
+
+/// An OpenCode session launched in its layered image, as the session manager
+/// launches it, against the fake API: the pod runs the layered image under
+/// the init and the harness entrypoint, starts the binary by the path the
+/// layer put it at, exposes the server's port, and carries every secret the
+/// session has (the gateway token, the per-launch server password) as a
+/// `secretKeyRef`, never as a value.
+#[tokio::test(start_paused = true)]
+async fn an_opencode_session_pod_runs_the_layered_image_with_its_secrets_hidden() {
+    const TOKEN: &str = "session-token-0123456789abcdef";
+    const OPENCODE_IMAGE: &str = "registry.digitalocean.com/cosmicspork/tracon-repo-app-0123456789-opencode@sha256:3333333333333333333333333333333333333333333333333333333333333333";
+    support::state::isolate();
+    let api =
+        KubeApi::new(NAMESPACE).default_script(Script::exits(0).running(Duration::from_secs(60)));
+    let state = tempfile::tempdir().unwrap();
+    let cfg = config(state.path());
+    let backend = backend(&api, &cfg);
+    let home = backend.harness_home();
+
+    let mut wiring = tracon::gateway::model::harness_wiring(&cfg, "tracon-gw", TOKEN, |_, _| true);
+    wiring.mcp_servers = vec![json!({
+        "type": "http",
+        "name": "tracon",
+        "url": "http://tracon-gw:7421/mcp/s1",
+        "headers": [{ "name": "Authorization", "value": format!("Bearer {TOKEN}") }],
+    })];
+    let (env, secret_env) = tracon::session::harness_environment(&wiring, None, &home);
+    let (runner, cache_env) = tracon::session::session_runner(
+        &backend,
+        "opencode",
+        Some(OPENCODE_IMAGE),
+        Some("tracon-cache-app".into()),
+        Vec::new(),
+    );
+    let mut env = env;
+    env.extend(cache_env);
+    let opencode = tracon::adapter::opencode::OpenCodeAdapter::new("1.18.30");
+    // It goes no further than attaching (the fake API has no attach), but
+    // its pod is created as it would be.
+    let launched = opencode
+        .launch(
+            runner.as_ref(),
+            tracon::adapter::LaunchSpec {
+                cwd_in_runner: "/work".into(),
+                model: "anthropic/claude-x".into(),
+                container_name: "tracon-h-oc".into(),
+                harness_home: home.clone(),
+                mcp_servers: wiring.mcp_servers.clone(),
+                tools: Vec::new(),
+                env,
+                secret_env,
+                system_prompt_file: None,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(launched.is_err());
+
+    let pod = created(&api, "tracon-h-oc");
+    let rendered = serde_json::to_string(&pod).unwrap();
+    assert!(!rendered.contains(TOKEN), "the token is in the pod spec");
+    let spec = pod.spec.unwrap();
+    let container = &spec.containers[0];
+    assert_eq!(container.image.as_deref(), Some(OPENCODE_IMAGE));
+    assert_eq!(
+        container.command.clone().unwrap(),
+        [SESSION_INIT, "--", IMAGE_ENTRYPOINT]
+    );
+    let args = container.args.clone().unwrap();
+    assert_eq!(
+        args[..2],
+        [tracon::adapter::opencode::OpenCodeAdapter::BINARY, "serve"]
+    );
+    let port: i32 = args[args.iter().position(|a| a == "--port").unwrap() + 1]
+        .parse()
+        .unwrap();
+    assert!(container
+        .ports
+        .iter()
+        .flatten()
+        .any(|p| p.container_port == port));
+    assert_eq!(spec.security_context.unwrap().run_as_user, Some(65532));
+
+    let var = |name: &str| {
+        container
+            .env
+            .iter()
+            .flatten()
+            .find(|var| var.name == name)
+            .cloned()
+    };
+    for name in [
+        tracon::adapter::opencode::SERVER_PASSWORD_ENV,
+        "TRACON_PROVIDER_KEY_ANTHROPIC",
+    ] {
+        let hidden = var(name).unwrap_or_else(|| panic!("no {name}"));
+        assert!(hidden.value.is_none(), "{name} has a value in the pod spec");
+        assert!(
+            hidden
+                .value_from
+                .and_then(|from| from.secret_key_ref)
+                .is_some(),
+            "{name} is not from the Secret"
+        );
+    }
+    // The launch's own environment, unchanged by the image it runs in: the
+    // per-session home and XDG tree under the harness's home, and the cache.
+    assert!(var("XDG_CACHE_HOME")
+        .and_then(|v| v.value)
+        .unwrap()
+        .starts_with(&format!("{home}/.opencode/")));
+    assert_eq!(
+        var("OPENCODE_DISABLE_PROJECT_CONFIG").and_then(|v| v.value),
+        Some("true".into())
+    );
+    assert!(container
+        .volume_mounts
+        .iter()
+        .flatten()
+        .any(|mount| mount.mount_path == "/cache"));
 }
 
 /// A session in its repository's image gets its session cache at `/cache`

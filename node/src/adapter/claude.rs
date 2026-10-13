@@ -153,9 +153,16 @@ impl ClaudeAdapter {
             argv.push("--allowedTools".into());
             argv.push(spec.tools.join(","));
         }
+        // The binary is Bun, and `BUN_OPTIONS` is read by it: a `--preload`
+        // there runs a script inside the harness before it starts (observed
+        // against the pinned release). A repository image that sets one is
+        // refused at its layer; the launch states it empty as well, so no
+        // other value reaches the harness from anywhere.
+        let mut env = spec.env.clone();
+        env.push(("BUN_OPTIONS".into(), String::new()));
         RunnerCommand {
             argv,
-            env: spec.env.clone(),
+            env,
             secret_env: spec.secret_env.clone(),
             workdir: Some(spec.cwd_in_runner.clone()),
             name: name.into(),
@@ -1002,6 +1009,12 @@ mod tests {
         assert!(!argv.contains("bypassPermissions"), "{argv}");
         assert!(!argv.contains("dontAsk"), "{argv}");
         assert!(argv.contains("--strict-mcp-config"), "{argv}");
+        assert!(
+            cmd.env
+                .iter()
+                .any(|(name, value)| name == "BUN_OPTIONS" && value.is_empty()),
+            "BUN_OPTIONS is not stated empty"
+        );
         assert!(argv.contains("--input-format stream-json"), "{argv}");
         assert!(argv.contains("--output-format stream-json"), "{argv}");
         assert!(argv.contains("--session-id sid"), "{argv}");

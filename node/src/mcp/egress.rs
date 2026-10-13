@@ -14,8 +14,9 @@
 //! host to the session's own grant — for a few minutes, for the rest of the
 //! session, or for the rest of the session and every later one through the
 //! repository's `egress` — and runs nothing. Wherever the runtime issues
-//! grants: a Claude Code session on Podman, or on Kubernetes once the policies
-//! open the egress port and the node may keep the grant in a Secret.
+//! grants, for a Claude Code or an OpenCode session: on Podman, or on
+//! Kubernetes once the policies open the egress port and the node may keep the
+//! grant in a Secret.
 
 use std::time::{Duration, Instant};
 
@@ -237,10 +238,9 @@ pub async fn call(
         .egress_grants()
         .filter(|grants| grants.holds_session(session_id))
         .ok_or(
-            "this session holds no egress grant of its own to open: a Claude Code session \
-             holds one where the runtime issues them (Podman, or Kubernetes once its policies \
-             open the egress port and the node may manage Secrets), and an OpenCode session \
-             keeps the harness proxy",
+            "this session holds no egress grant of its own to open: a session holds one \
+             where the runtime issues them (Podman, or Kubernetes once its policies open the \
+             egress port and the node may manage Secrets)",
         )?;
     if grants.session_allows(session_id, &host) {
         return Ok(json!({ "host": host, "state": "reachable" }));

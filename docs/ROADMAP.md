@@ -354,11 +354,12 @@ servers reaching the v2 session runner.
   run that way. Claude Code is the working managed harness until one has.
 - Required checks run in the image, and after the preparation, the operator named for the
   repository (`[[repo]]`), and in the harness image — which has no project toolchain —
-  when they named none. A Claude Code session runs in that same image with the harness
-  layered on, so it has its checks' tools, and reaches the registries its repository
-  opens to sessions (`session_egress`). On Kubernetes that takes a builder, and the image
-  runs as uid 65532, so its tools must be readable by any uid. An OpenCode session stays
-  in the harness image and reaches no registry. An image the node
+  when they named none. A session of either harness runs in that same image with the
+  harness layered on, so it has its checks' tools, and reaches the registries its
+  repository opens to sessions (`session_egress`). On Kubernetes that takes a builder, and the
+  image runs as uid 65532, so its tools must be readable by any uid. OpenCode's language
+  servers need glibc and `libstdc++` in the repository's image, and are reported
+  unavailable where it has neither. An image the node
   builds from a repository's Dockerfile is built by Podman, or on Kubernetes by a
   BuildKit daemon the deployment runs (`[runtime.kubernetes.builder]`) and pushed to a
   registry. A superseded one is removed only when nothing still runs from it under

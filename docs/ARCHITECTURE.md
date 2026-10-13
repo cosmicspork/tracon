@@ -666,8 +666,38 @@ copied from the release's harness image in its registry, and the layer also copi
 image's static `tini` to `/usr/libexec/tracon/tini`, which the session's pod runs as
 `tini --` in front of the harness: a pod's first process is PID 1, which ignores
 signals it does not handle and inherits orphans, and Kubernetes has nothing like
-Podman's `--init`. The probe runs in a pod as the harness uid. Only a Claude Code
-session is layered; OpenCode stays in its own image. Checks stay on the repository's image, so a harness
+Podman's `--init`. The probe runs in a pod as the harness uid. Both harnesses are
+layered. Claude Code is one binary and the environment its image sets. OpenCode is its
+binary and the whole of `/opt/tracon`: the entrypoint that seeds its package caches (now
+the layered image's `ENTRYPOINT`, and named in front of the harness in a pod), the
+language servers and formatters its configuration names, a statically linked `rg` that
+the entrypoint links into OpenCode's cache so it never downloads one, and its own Node at
+`/opt/tracon/bin/node`. That Node is on no `PATH`: the toolchain profile names it in front
+of each JavaScript tool, so the agent's shell keeps the repository's `node` and the tools
+keep theirs, and a tool whose interpreter does not run on the image is reported
+`unavailable` in the session's launch status rather than failing the session. Claude Code's layer now begins the same way OpenCode's does (`repo_image::layer_guard`).
+It removes `/etc/claude-code`, the managed-settings directory Claude Code reads on Linux
+whatever its environment says, whose policy outranks the node's flags, and any `.claude` or
+`.claude.json` in the harness's home. It refuses `CLAUDE_*` and `ANTHROPIC_*` variables
+other than the three every session sets for itself, as well as `NODE_OPTIONS` and the
+loader and `BUN_*` variables below. The launch states `BUN_OPTIONS` empty, because Claude
+Code's binary is Bun and a `--preload` there runs a script inside it. Its probe checks that
+the binary, and a pod's init, resolve to themselves. The OpenCode layer
+also removes what a repository's image could use to configure OpenCode under the node:
+`/etc/opencode`, which OpenCode reads whatever its environment says, and anything already
+at `/opt/tracon`, whose seed the entrypoint copies into the configuration directory. It
+refuses, naming what it found, an image whose environment sets an `OPENCODE_*` or `BUN_*`
+variable, `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH` (each would reach the harness
+wherever the launch sets no value of its own), one with a non-empty `/etc/ld.so.preload`,
+and one where `/opt`, `/usr`, `/usr/local`, `/usr/local/bin`, `/usr/libexec` or
+`/usr/libexec/tracon` is a symbolic link that would send the copied files somewhere the image chose, such as the
+workspace. The probe then checks that the entrypoint, the binary and the baked node each
+resolve to themselves. The launch sets `BUN_BE_BUN=0`, because the binary is Bun and that
+variable would make it run a `serve` script from the worktree with the server password in
+its environment. The trust model is that the operator's image is trusted as its Dockerfile
+is: it builds with the network and supplies every command the agent runs. So these checks
+catch accidental configuration, not a hostile image; the boundary is the runtime around the
+session. OpenCode is launched as `/usr/local/bin/opencode`, never by a `PATH` lookup. Checks stay on the repository's image, so a harness
 upgrade rebuilds only the layer and no evidence moves. The session's start event
 records the image it ran in, the repository image under it, and the reason when it ran
 in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`
@@ -739,16 +769,19 @@ presents the token it was issued as proxy credentials, and each is filtered
 by its own host set — so nothing one may reach is reachable by another, none waits for
 another, and a refusal is known to be that client's. Because that proxy dials from the
 node's process, a granted name that resolves to the machine itself or to its link-local
-range is refused whatever the grant says. A Claude Code session holds a grant for its
-whole life: the hosts every harness may reach, plus its repository's `egress` where the
+range is refused whatever the grant says. A session, Claude Code or OpenCode, holds a
+grant for its whole life: the hosts every harness may reach, plus its repository's `egress` where the
 entry sets `session_egress`. A refusal under it is an ask, not an end: the node raises
 an approval (`request_egress`, one per session and host) and answers the CONNECT with a
 reason naming it, since a connection cannot be held open while the operator decides; the
 refusal is recorded on the session once per host, and the orientation says the same
 before the first tool call. The operator's answer widens that session's live grant — for
 ten minutes, for its life, or for its life and the repository's `[[repo]]` entry — and
-runs nothing; a declined host is not asked again by a retried connection. OpenCode keeps the gateway's static proxy: it installs
-plugins on its own, and what its image baked is the rule for those. A check's evidence is keyed on source
+runs nothing; a declined host is not asked again by a retried connection. The grant
+replaces the harness proxy in the harness's environment, which OpenCode's shell and
+terminals inherit; the model and the MCP server are on the gateway host, which `NO_PROXY`
+keeps off any proxy. What OpenCode fetches on its own (plugins, `rg`, language servers) is
+still closed by its launch flags and its image's seeds, not by the proxy. A check's evidence is keyed on source
 revision, check definition, execution image, dependency inputs, and the preparation and
 egress it was given, and is reused rather than rerun only when every one of those is
 unchanged — a resubmission that edits only the title,

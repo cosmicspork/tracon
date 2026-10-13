@@ -28,9 +28,11 @@ function digest(file) {
 
 const binaries = []
 for (const tool of [...manifest.lsp, ...manifest.formatter]) {
-  const file = tool.command[0]
-  const entry = digest(file)
-  binaries.push({ id: tool.id, version: tool.version, ...entry })
+  binaries.push({ id: tool.id, version: tool.version, ...digest(tool.command[0]) })
+  // A JavaScript tool names the baked node that runs it; that is what runs too.
+  if (tool.interpreter) {
+    binaries.push({ id: `${tool.id}:interpreter`, version: tool.version, ...digest(tool.interpreter) })
+  }
 }
 // The tsserver bundle is not spawned, but it is named in `initialization` and
 // a missing one makes the TypeScript server useless, so it is recorded too.

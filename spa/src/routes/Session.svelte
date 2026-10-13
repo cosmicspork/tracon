@@ -97,7 +97,10 @@
       text,
       warn: missing.length > 0,
       title: named
-        .map((t) => `${t.kind} ${t.id} ${t.version} ${t.state} (${t.path})`)
+        .map(
+          (t) =>
+            `${t.kind} ${t.id} ${t.version} ${t.state} (${t.interpreter ? `${t.interpreter} ` : ''}${t.path})`,
+        )
         .concat(
           toolchain.image_revision === toolchain.revision
             ? []
