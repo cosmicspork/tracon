@@ -21,6 +21,16 @@ jobs:
   # named tag is treated as the release to attach artefacts to.
   release-please:
     runs-on: ubuntu-24.04
+    # Two merges landing seconds apart each saw no open release PR and opened
+    # one, then raced to push the lockfile commit (#476/#477). Pushes to main
+    # take this job one at a time. The workflow itself still has no group: it
+    # would let a later merge drop a queued release's artefact jobs. Here a
+    # dropped pending run costs nothing, because the run that replaces it reads
+    # the same history and still tags a merged release PR. A manual re-run gets
+    # a group of its own so a push never displaces it.
+    concurrency:
+      group: ${{ github.event_name == 'push' && 'release-please' || format('release-please-dispatch-{0}', github.run_id) }}
+      cancel-in-progress: false
     outputs:
       release_created: ${{ steps.out.outputs.release_created }}
       version: ${{ steps.out.outputs.version }}
