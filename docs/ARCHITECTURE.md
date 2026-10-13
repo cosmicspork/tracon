@@ -324,7 +324,15 @@ route, the node serving the allowlist proxy itself). Both answer the same checks
 behind the same seam. The harness reaches exactly two things: allowlisted provider
 hosts through the proxy, and the node through the forward. On Podman a second forward
 carries the node's per-client egress proxy, which opens nothing to a caller that
-presents no grant.
+presents no grant; on Kubernetes a harness pod reaches the same proxy at the node's pod,
+on `[gateway] egress_port`, which both policies must open before the node issues a
+grant. The proxy never dials this machine or its link for a grant. In a cluster it sits
+beside the API server and every service, so there it, and the allowlist proxy the node
+serves there, also refuse private and carrier-grade NAT addresses,
+`[runtime.kubernetes] internal_cidrs`, and cluster names (`.svc`, `.cluster.local`,
+`.internal`, or no dot), before any lookup. Each looks a name up once, as absolute so no
+search domain completes it, and dials only the addresses it checked, so a name that
+answers differently a second time is never asked again.
 
 Three things collapse the boundary and must be verified per environment:
 
@@ -465,7 +473,8 @@ serve stale policy but not new policy.
 **Administration is an explicit operator capability, not a loopback exemption.**
 Mesh admission, removal, and hub-key sharing accept authenticated administrators
 from the remote UI. Policy signing/install and host service actions additionally
-require loopback. Service actions name only the supported fixed supervisor,
+require a local request (see [Reaching a node](#reaching-a-node)), which a proxy on
+the node's own host does not make. Service actions name only the supported fixed supervisor,
 refuse active work or ambiguous process identity, and report scheduling rather
 than pretending a restart has already succeeded.
 
@@ -636,7 +645,11 @@ pod that never restarts never reads it again. A run that ends before it starts (
 failure, a kill, a dropped caller) deletes it on the way out, and the boundary check and
 `reconcile` sweep any a dead node left. The Secrets rights are optional in the `runtime`
 check. A node without them refuses a run carrying secret environment and never
-downgrades it to a plaintext value. A private package therefore reaches candidates and
+downgrades it to a plaintext value. A session is such a run everywhere: its token at the
+gateway and the MCP server, OpenCode's per-launch server password and its egress grant
+are secret environment, and Claude Code reads its MCP server, whose header carries the
+token, from a staged file rather than its argv. A Kubernetes node without the rights
+refuses every session up front, and issues no egress grant. A private package therefore reaches candidates and
 sessions as cached bytes, never as a token, and a candidate that needs one the cache
 does not hold fails its preparation rather than being lent the credential.
 A preparation that fails runs no check: it is reported once, with the failing command,
@@ -1461,9 +1474,39 @@ Three surfaces, three answers, and the differences are the point.
 
 - **The harness** gets a separate listener with a per-session bearer token and no
   operator API: a harness that finds the forward cannot drive sessions.
-- **The operator on the node's own machine** is the operator by definition:
-  loopback is answered with no credential, guarded only against DNS rebinding
-  (Origin and Host must be local).
+- **The operator on the node's own machine** is the operator by definition: a
+  local request is answered with no credential. Local is one test
+  (`http::auth::is_local`) behind the guard, the `Loopback` gate and every
+  `local` flag the interface reads, and it asks more than the peer address. A
+  reverse proxy on the same host (`tailscale serve`, cloudflared, a pod's
+  sidecar) connects from `127.0.0.1` too, and a peer-only test made every caller
+  behind it the operator, cookie or not, on the routes that rewrite `node.toml`.
+  So a request is local only when the TCP peer is loopback, it carries no
+  forwarding header (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, and the
+  CDN, Envoy and Tailscale client headers), its `Host` and any absolute target
+  name `localhost`, `127.0.0.0/8` or `::1`, and its `Origin`, if any, is an
+  HTTP(S) loopback origin with the same host and port as that `Host`. A page on
+  another loopback origin (the OpenCode UI listener, a dev server on another
+  port) is another site: it can send a simple cross-origin POST without a
+  preflight, so it must not count as the operator. The Host and Origin checks
+  are also the DNS-rebinding defence. The `Host` port is not compared with the
+  bound port, so `kubectl port-forward` to another local port and the Vite dev
+  server stay local; a proxy that rewrites `Host` presents the bound port
+  anyway. There is no list of trusted proxies. What the test cannot see is a
+  same-host relay that strips forwarding headers and rewrites `Host` to its
+  upstream, which is by construction a request from the machine; proxies in
+  front of a node must send `X-Forwarded-For`. Nor can it see a layer-4 relay
+  of the operator port (`tailscale serve --tcp`, `socat`, `ssh -R`, `kubectl
+  port-forward --address 0.0.0.0`): it adds no header and a non-browser client
+  behind it chooses its own `Host`, so it is local. Don't relay the operator
+  port that way.
+- **`[auth] public_origin`** is the name the node answers to from elsewhere:
+  an `https:` origin on a domain name (plain `http:` only for `localhost`),
+  normalised at load. An IP address is refused, loopback included, because a
+  passkey's relying-party ID must be a domain and browsers refuse WebAuthn on
+  an IP-literal origin. It is not a credential and does not widen what is local. The push
+  subject falls back to it when `[notify] contact` is unset, and it is what a
+  passkey's origin and relying-party ID will be pinned to.
 - **The operator from anywhere else** needs the token, exchanged for an HttpOnly,
   Secure, SameSite=Lax cookie — a cookie because `EventSource` cannot set headers,
   Lax because a push notification's deep link is a top-level cross-site navigation.

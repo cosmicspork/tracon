@@ -1,5 +1,5 @@
-# The node accepts only its harnesses, and only on the forward and proxy
-# ports. The operator reaches the interface through a port-forward, which
+# The node accepts only its harnesses, and only on the forward, proxy and
+# egress ports. The operator reaches the interface through a port-forward, which
 # enters via the kubelet and is not subject to this.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -20,3 +20,5 @@ spec:
           port: 7421
         - protocol: TCP
           port: 8888
+        - protocol: TCP
+          port: 7424

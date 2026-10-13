@@ -184,6 +184,29 @@ tailscale serve --bg 7420                                # HTTPS at https://<mac
 tracon auth issue --url https://<machine>.<tailnet>.ts.net
 ```
 
+Tell the node the name it now answers to, in `node.toml`:
+
+```toml
+[auth]
+public_origin = "https://<machine>.<tailnet>.ts.net"   # an https: origin on a domain name; no path, no IP address
+```
+
+A proxy on the node's own machine connects to it from `127.0.0.1`, but what it relays
+is not you at the machine. The node treats a request as local only when it comes
+from loopback directly: no `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`
+header, a `Host` of `localhost`, `127.x.x.x` or `[::1]`, and, if there is an
+`Origin`, the same host and port as that `Host` (a page on another local port, such
+as a dev server, is another site and not you). Tailscale Serve sends `X-Forwarded-For`, so the phone behind it signs
+in with its cookie like any other remote client, and the controls that only work at
+the node (Settings that rewrite `node.toml`, providers, policy, mesh setup) stay
+disabled there. Any other proxy you put in front of a node must send
+`X-Forwarded-For` too (Caddy, cloudflared and Traefik do by default; nginx needs
+`proxy_set_header X-Forwarded-For $remote_addr;`): one that strips it and rewrites
+`Host` to `127.0.0.1` looks exactly like a client on the machine. Never relay the
+operator port at layer 4 (`tailscale serve --tcp`, `socat`, `ssh -R`, `kubectl
+port-forward --address 0.0.0.0`): a TCP relay adds no header, and a non-browser
+client at the far end chooses its own `Host`, so it would be local.
+
 `auth issue` prints the operator token once — and, given `--url`, a QR code. Scan it
 with the phone's camera: the token rides the URL fragment (never sent to any server,
 stripped from the address bar before login), the browser exchanges it for a cookie,
@@ -199,8 +222,9 @@ one it cannot write to, so set it in `node.toml` before expecting the phone to b
 contact = "mailto:you@example.com"   # or an https: URL you answer at
 ```
 
-Without one the node sends nothing and says so: in Settings, under Notifications,
-and in `tracon push ls`. A contact that is not a `mailto:` address on a real domain
+With no contact, the node signs with `[auth] public_origin` when that is a public
+`https:` origin. Without either the node sends nothing and says so: in Settings,
+under Notifications, and in `tracon push ls`. A contact that is not a `mailto:` address on a real domain
 or a public `https:` URL stops `tracon serve` at load. When a push service does
 refuse a push, what it said (Apple's `{"reason":"BadJwtToken"}`, for instance) is
 kept on the device, with the count of failures in a row, in the same two places; a
@@ -497,7 +521,8 @@ session's own grant and no other. An agent that knows what it needs asks first w
 **`request_egress`**, which waits up to 45 seconds for your answer; once you decline, a
 retried connection is told so and does not ask again. The session's log shows each
 refusal, and the orientation it starts with says all of this before its first command.
-Podman only, as the grants are.
+It works wherever grants are issued: on Podman, and on Kubernetes once the egress port
+is open and the node may manage Secrets (see [As a Kubernetes pod](#as-a-kubernetes-pod)).
 
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
@@ -525,7 +550,8 @@ same egress grant, so `node_modules` and the like are there when the agent arriv
 bounded by the entry's `timeout_secs` and stopped with the session; a failure is recorded
 in the session's log and told to the agent in its orientation, and the session starts
 anyway. A session in the harness's own image has no cache to prepare against and is told
-the commands were not run.
+the commands were not run, and why: on Kubernetes, which cannot build images yet, that is
+every session.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -919,7 +945,8 @@ forward_port = 7421
                                     # proxy: preparation and sessions. Each presents its own
                                     # credentials; the name is from the retired QA browser
 # egress_port = 7424                # where the node serves that proxy when harness_listen is a
-                                    # TCP address; with a socket path it is a socket beside it
+                                    # TCP address; with a socket path it is a socket beside it.
+                                    # A pod-hosted node's harnesses reach it here directly
 
 [session]
 budget_tokens = 2000000             # per session
@@ -947,6 +974,13 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # memory_request = "1Gi"            # renders its requests and memory limit, so a LimitRange
 # memory_limit = "4Gi"              # never fills them in; no CPU limit unless one is set
 # cpu_limit = "2"                   # (cpu_limit). A limit below its request is refused at load
+# internal_cidrs = []               # (under [runtime.kubernetes]) address blocks the per-client
+                                    # egress proxy refuses besides the private ones (RFC 1918,
+                                    # 100.64.0.0/10, fc00::/7), which it always refuses in a
+                                    # cluster: name a pod, service or node range that is public
+                                    # (on a cloud, the nodes' and load balancers' public IPs),
+                                    # and any NAT64 (64:ff9b::/96) or 6to4 (2002::/16) range the
+                                    # cluster uses, since an IPv4 address inside one is not decoded
 # [runtime.kubernetes.builder]      # build repository images on a cluster ("Images on Kubernetes");
                                     # left out, a pod-hosted node builds nothing
 # addr = "tcp://buildkitd.tracon-build.svc:1234"  # BuildKit's mutual-TLS listener
@@ -1066,7 +1100,10 @@ max_diff_lines = 10000              # added plus removed lines; a bigger submiss
 max_files = 200
 
 [notify]
-# contact = "mailto:you@example.com"    # what a push service may write to about this sender; no pushes without it
+# contact = "mailto:you@example.com"    # what a push service may write to about this sender; falls back to [auth] public_origin
+
+[auth]
+# public_origin = "https://tracon.example.org"  # where remote browsers reach this node; https: on a domain name (http: for localhost)
 
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false
@@ -1261,6 +1298,30 @@ written into a pod spec instead. The rights make the node able to read every Sec
 its namespace, so keep nothing else there that a harness should not reach through a
 compromised node.
 
+A session carries secrets too: its token at the node's gateway and MCP server, OpenCode's
+per-launch server password, and its egress grant. They travel the same way, so a session
+on a node without the Secrets rule is refused with the rule to add rather than started
+with them in its pod spec.
+
+Per-client egress, the proxy credentials a preparation and a session present to reach the
+hosts their repository names, is served by the node on `[gateway] egress_port` (7424),
+which a harness pod reaches at the node's pod address. The shipped policies open it:
+`tracon-harness` lets harness pods out to it and `tracon-node` lets them in. A node is
+issued no grants until the `network` check finds both policies open the port and the
+`runtime` check finds the Secrets rule, and it says which is missing; it runs either way,
+so a release and the policy change that opens the port can roll out in either order.
+`--deep` asks the port with no credentials from a harness pod and expects a 407.
+
+In a cluster both of the node's proxies, the allowlist proxy on `proxy_port` and the
+per-client one, refuse to dial a private address (RFC 1918, `100.64.0.0/10`,
+`fc00::/7`), this machine, the link, any block in `[runtime.kubernetes] internal_cidrs`,
+and names ending `.svc`, `.cluster.local` or `.internal` or with no dot, whatever a grant
+or `allow_hosts` names. Each looks a name up once, as absolute, and dials only the
+addresses it checked. On a cloud, list the nodes' and load balancers' public addresses
+in `internal_cidrs` too: they reach the cluster from outside it, and nothing private
+about them says so. An entry that is not an address block is refused when `node.toml`
+loads.
+
 #### Images on Kubernetes
 
 A pod-hosted node builds a `[[repo]]` entry's `dockerfile` only when
@@ -1296,7 +1357,10 @@ What the node pod needs:
   or pushes to *and to their token services*, because the client fetches the tokens:
   `auth.docker.io` and `registry-1.docker.io` for a `FROM` on Docker Hub, `ghcr.io` for
   the harness images, `registry.digitalocean.com` and `api.digitalocean.com` for
-  DigitalOcean's registry.
+  DigitalOcean's registry. This is the node pod's own traffic, not a harness's: it
+  does not go through either of the node's proxies, so their refusal of private
+  addresses and `internal_cidrs` does not apply to it, and the node pod's own egress
+  policy has to allow it.
 - **Room for a build context.** A build stages the default branch's tree and its
   Containerfile under `<state_mount>/tmp` on the state volume, and runs `buildctl`
   with `TMPDIR` there, so a large repository does not fill the node container's
@@ -1312,7 +1376,8 @@ only pull fails it. The whole check is bounded at 15 seconds. A table that canno
 builder, or a builder that fails either probe, is a warning there and never refuses
 the node: sessions and checks still run. A build attempted anyway fails with the same
 reason the check gave, and that failure is not held against the repository's recipe:
-the next session or check tries again without `tracon repo build`. A registry that
+the next check or preparation tries again without `tracon repo build` (on
+Kubernetes a session never builds: it runs in its harness's own image). A registry that
 cannot be asked whether an image is still there leaves the standing image in use and
 triggers no rebuild.
 

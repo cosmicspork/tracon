@@ -360,10 +360,12 @@ servers reaching the v2 session runner.
   (three minutes for tracon's own test build, 2026-10-01). Sessions keep theirs, but only
   Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives and goes
   with the workspace.
-- Per-client egress — a session's, a preparation's — is the Podman
-  backend's. The Kubernetes backend issues no grants, so a `[[repo]]` entry that names
-  `egress` cannot prepare there. A grant filters by host, not by method: a registry that
-  accepts uploads accepts them from the client that was granted it.
+- Per-client egress (a session's, a preparation's) on Kubernetes needs the egress port
+  open in both shipped policies and the Secrets rule in the node's Role. A node missing
+  either runs and issues no grants, so a `[[repo]]` entry that names `egress` cannot
+  prepare there, and the checks say which is missing. A grant filters by host, not by
+  method: a registry that accepts uploads accepts them from the client that was granted
+  it.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
   authenticated by GitHub build provenance instead, so Gatekeeper asks once on first open
   (right-click Open, or System Settings > Privacy & Security > Open Anyway).
@@ -373,7 +375,8 @@ servers reaching the v2 session runner.
   can express it is configured, a harness pod's protection against the hang is the download
   flag and the explicitly disabled server list alone — which cover OpenCode but not a future
   harness with its own timeout-free fetch. `check-boundary --deep` measures the same bound
-  on both backends and fails the Kubernetes one if it drops.
+  on both backends. It fails Podman if it drops, and on Kubernetes records the drop as the
+  runtime's limitation rather than failing.
 - Mesh transfers are capped at 2 MB, and an imported transfer is the carried tree under a
   fresh `git init` with no history, so a candidate moved between nodes cannot be submitted
   or published from the destination. Handoff is a portable file carried by hand today.
@@ -421,9 +424,8 @@ Kept as intent, off the plan until the supported configuration has earned them.
   its egress presets — and never the image digest: a locally built image has a different
   one on every node, so each node builds and pins its own. Waits on mesh-wide
   configuration sync; a node already builds the image itself.
-- **Kubernetes parity.** Per-client egress grants, for sessions and for preparation —
-  the node already serves the proxy there; it needs the grants — a refuse-not-drop
-  egress policy, the egress ask, and service sidecars as pods of their own. What earns it:
+- **Kubernetes parity.** A refuse-not-drop egress policy, and service sidecars as pods
+  of their own. Per-client egress grants and the egress ask work there now. What earns it:
   work left running unattended belongs on an always-on node, which is the homelab
   cluster, not a laptop that sleeps. Deferred until the laptop node is good.
 - **Post-publication follow-through and product metrics.** Recording merge, deployment,

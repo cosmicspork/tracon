@@ -144,7 +144,10 @@ impl Rig {
         let mut b = Request::builder()
             .method(method)
             .uri(format!("/api/opencode/{TRACON_SESSION}/{tail}"))
-            .header("host", "127.0.0.1:7420");
+            // Addressed to the listener the page was served from, as a
+            // browser's would be: the guard holds a credential-free Origin to
+            // the Host it was sent to.
+            .header("host", self.addr.to_string());
         for (k, v) in headers {
             b = b.header(*k, *v);
         }
@@ -248,10 +251,27 @@ impl Rig {
         >,
         tungstenite::Error,
     > {
+        self.connect_at(&self.addr.to_string(), pty, ticket, origin)
+            .await
+    }
+
+    /// [`Self::connect`], addressed to `authority` (the `Host` it sends) on
+    /// this rig's port.
+    async fn connect_at(
+        &self,
+        authority: &str,
+        pty: &str,
+        ticket: &str,
+        origin: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tungstenite::Error,
+    > {
         use tungstenite::client::IntoClientRequest;
         let url = format!(
-            "ws://{}/api/opencode/{TRACON_SESSION}/pty/{pty}/connect?ticket={ticket}",
-            self.addr
+            "ws://{authority}/api/opencode/{TRACON_SESSION}/pty/{pty}/connect?ticket={ticket}"
         );
         let mut request = url.into_client_request().unwrap();
         request
@@ -604,9 +624,12 @@ async fn a_ticket_is_single_use_and_bound_to_its_pty_and_origin() {
     // not, because it is bound to the exact origin it was minted from.
     let (_, body) = rig.ticket(PTY, &origin).await;
     let ticket = body["ticket"].as_str().unwrap().to_string();
-    let elsewhere = format!("http://localhost:{}", rig.addr.port());
+    // A page on that other origin, talking to the node it was served from:
+    // the guard lets it through as local, and the ticket's binding refuses it.
+    let elsewhere_host = format!("localhost:{}", rig.addr.port());
+    let elsewhere = format!("http://{elsewhere_host}");
     let refused = rig
-        .connect(PTY, &ticket, &elsewhere)
+        .connect_at(&elsewhere_host, PTY, &ticket, &elsewhere)
         .await
         .expect_err("a ticket presented from another origin must be refused");
     assert_eq!(status_of(&refused), Some(StatusCode::FORBIDDEN));
@@ -1124,7 +1147,7 @@ mod live {
             let mut b = Request::builder()
                 .method(method)
                 .uri(format!("/api/opencode/{}/{tail}", self.session_id))
-                .header("host", "127.0.0.1:7420");
+                .header("host", self.addr.to_string());
             for (k, v) in headers {
                 b = b.header(*k, *v);
             }

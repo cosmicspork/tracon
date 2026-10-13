@@ -4,6 +4,13 @@
 //! Everything the node needs to exist (the claim, the policies, its own
 //! labels and RBAC) is the deployment's, in `deploy/kubernetes/base`, and is
 //! verified rather than created here.
+//!
+//! The node also serves the per-client egress proxy (`gateway::proxy::
+//! serve_granted`), on `[gateway] egress_port`, which a harness pod reaches at
+//! the node's pod address under `gateway_host`. A grant is issued only when
+//! both halves are known to hold: the policies let a harness pod reach that
+//! port, and the node may keep the grant's credentials in a Secret of the
+//! run's own rather than in its pod spec.
 
 pub mod build;
 pub mod checks;
@@ -13,8 +20,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rust_embed::Embed;
 
-use super::{Backend, BoundaryError, BoundaryReport};
+use super::{Backend, BoundaryError, BoundaryReport, EgressGrant};
 use crate::config::Config;
+use crate::gateway::proxy::{GrantSpec, Grants, Refusal};
 use crate::runner::kube::{KubeRunner, KubeSpec, PodEnv, SecretRights};
 use crate::runner::{Mount, Runner};
 
@@ -37,6 +45,15 @@ pub struct KubeBackend {
     /// `[runtime.kubernetes.builder]`, or why it is not a builder. `None`
     /// where none is configured.
     builder: Option<Result<build::BuildKitBuilder, build::Unusable>>,
+    /// Every live per-client grant, served on the egress port.
+    grants: Grants,
+    /// Whether the policies let a harness pod reach the egress port, as the
+    /// network check last found. Unchecked is closed.
+    egress_port: EgressPort,
+    /// What the egress proxy never dials here; an error for an
+    /// `internal_cidrs` entry that is not an address block, which turns
+    /// per-client egress off and fails the runtime check.
+    refusal: Result<Refusal, String>,
 }
 
 /// The builder `[runtime.kubernetes.builder]` configures, if any, staging on
@@ -53,26 +70,65 @@ fn builder_for(cfg: &Config) -> Option<Result<build::BuildKitBuilder, build::Unu
     )
 }
 
+/// Whether a harness pod can reach the node's egress port: the harness
+/// policy's egress and the node's own ingress both allow it. Shared, like
+/// `SecretRights`, so a re-check that finds it opened (or closed) applies to
+/// the grants issued after it.
+#[derive(Clone, Debug, Default)]
+pub struct EgressPort(std::sync::Arc<parking_lot::RwLock<Option<Result<(), String>>>>);
+
+impl EgressPort {
+    /// Open, as if a check had found it so. For tests.
+    pub fn open() -> Self {
+        let port = Self::default();
+        port.set(Ok(()));
+        port
+    }
+
+    pub fn set(&self, verdict: Result<(), String>) {
+        *self.0.write() = Some(verdict);
+    }
+
+    pub fn verdict(&self) -> Option<Result<(), String>> {
+        self.0.read().clone()
+    }
+
+    pub fn is_open(&self) -> bool {
+        matches!(self.verdict(), Some(Ok(())))
+    }
+}
+
 impl KubeBackend {
     pub fn new(cfg: &Config) -> Self {
-        Self {
-            cfg: cfg.clone(),
-            env: PodEnv::detect(cfg),
-            client: tokio::sync::OnceCell::new(),
-            secret_rights: SecretRights::default(),
-            builder: builder_for(cfg),
-        }
+        Self::built(cfg, PodEnv::detect(cfg), tokio::sync::OnceCell::new())
     }
 
     /// A backend for a pod whose facts and client are given rather than
     /// detected: a test's fake API.
     #[doc(hidden)]
     pub fn with_client(cfg: &Config, env: PodEnv, client: kube::Client) -> Self {
+        Self::built(
+            cfg,
+            Ok(env),
+            tokio::sync::OnceCell::new_with(Some(Ok(client))),
+        )
+    }
+
+    fn built(
+        cfg: &Config,
+        env: Result<PodEnv, String>,
+        client: tokio::sync::OnceCell<Result<kube::Client, String>>,
+    ) -> Self {
+        let refusal = Refusal::cluster(&cfg.runtime.kubernetes.internal_cidrs)
+            .map_err(|error| format!("[runtime.kubernetes] internal_cidrs: {error}"));
         Self {
             cfg: cfg.clone(),
-            env: Ok(env),
-            client: tokio::sync::OnceCell::new_with(Some(Ok(client))),
+            env,
+            client,
             secret_rights: SecretRights::default(),
+            grants: Grants::default(),
+            egress_port: EgressPort::default(),
+            refusal,
             builder: builder_for(cfg),
         }
     }
@@ -96,6 +152,45 @@ impl KubeBackend {
 
     pub fn secret_rights(&self) -> &SecretRights {
         &self.secret_rights
+    }
+
+    pub fn egress_port(&self) -> &EgressPort {
+        &self.egress_port
+    }
+
+    /// The `internal_cidrs` entry that is not an address block, if one is.
+    pub fn refusal_error(&self) -> Option<&str> {
+        self.refusal.as_ref().err().map(String::as_str)
+    }
+
+    /// Why no grant can be issued right now, naming what to change; `None`
+    /// when one can.
+    pub fn egress_unavailable(&self) -> Option<String> {
+        if let Err(error) = &self.refusal {
+            return Some(format!("per-client egress is off on this node: {error}"));
+        }
+        let secrets = match self.secret_rights.verdict() {
+            Some(Ok(())) => None,
+            Some(Err(why)) => Some(why),
+            None => Some("the boundary check has not yet confirmed them".to_string()),
+        };
+        if let Some(why) = secrets {
+            return Some(format!(
+                "per-client egress is off on this node: a grant's credentials travel in a \
+                 Secret of the run's own, and this node may not manage Secrets ({why}). Grant \
+                 the node's Role create, list, patch and delete on secrets \
+                 (deploy/kubernetes/base/role.yaml) and check the boundary again"
+            ));
+        }
+        match self.egress_port.verdict() {
+            Some(Ok(())) => None,
+            Some(Err(why)) => Some(format!("per-client egress is off on this node: {why}")),
+            None => Some(
+                "per-client egress is off on this node: the boundary check has not yet \
+                 confirmed a harness pod can reach the egress port"
+                    .into(),
+            ),
+        }
     }
 
     pub async fn client(&self) -> Result<kube::Client, String> {
@@ -344,6 +439,63 @@ impl Backend for KubeBackend {
 
     fn proxy_port(&self) -> Option<u16> {
         Some(self.cfg.gateway.proxy_port)
+    }
+
+    /// Always served, so a release whose policies open the port later needs
+    /// no restart to use it: a grant is what opens anything, and none is
+    /// issued until the checks say a harness pod can reach the port.
+    fn egress_grants(&self) -> Option<&Grants> {
+        Some(&self.grants)
+    }
+
+    /// As Podman's, with the node's own pod address as the proxy: a harness
+    /// pod reaches it directly under `gateway_host`, with no gateway
+    /// container between. The grant's URL carries its password, so it goes
+    /// in the run's `secret_env` and from there in a Secret of the run's own
+    /// (`runner::kube::secret`); a node that may not do that issues none.
+    fn egress_grant(&self, spec: GrantSpec) -> Result<EgressGrant, BoundaryError> {
+        if let Some(why) = self.egress_unavailable() {
+            return Err(BoundaryError::Other(why));
+        }
+        let username = spec.client.clone();
+        let token = self
+            .grants
+            .issue(spec)
+            .map_err(|error| BoundaryError::Other(format!("egress grant: {error}")))?;
+        let grants = self.grants.clone();
+        let revoked = token.clone();
+        Ok(EgressGrant::new(
+            format!(
+                "http://{}:{}",
+                self.cfg.runtime.kubernetes.gateway_host, self.cfg.gateway.egress_port
+            ),
+            username,
+            token,
+            move || grants.revoke(&revoked),
+        ))
+    }
+
+    fn egress_refusal(&self) -> Refusal {
+        // An unusable `internal_cidrs` issues no grants at all; the listener
+        // still refuses at least what it always would.
+        self.refusal
+            .clone()
+            .unwrap_or_else(|_| Refusal::cluster(&[]).expect("the private blocks parse"))
+    }
+
+    fn secret_env_refusal(&self) -> Option<String> {
+        let why = match self.secret_rights.verdict() {
+            Some(Ok(())) => return None,
+            Some(Err(why)) => why,
+            None => "the boundary check has not yet confirmed them".into(),
+        };
+        Some(format!(
+            "refusing to start a session on Kubernetes: its gateway token and egress grant \
+             travel in a Secret of its own, and this node may not manage Secrets ({why}). \
+             Grant the node's Role create, list, patch and delete on secrets \
+             (deploy/kubernetes/base/role.yaml) and check the boundary again; they are never \
+             put in the pod spec instead"
+        ))
     }
 
     /// Remove the named harnesses, and with them any run Secret a node that

@@ -5,10 +5,8 @@
 //! login takes its devices with it. A browser on this machine has no cookie —
 //! loopback never logs in — and registers as belonging to the machine.
 
-use std::net::SocketAddr;
-
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -31,12 +29,13 @@ fn bad(msg: impl Into<String>) -> ApiError {
 }
 
 /// Who is registering: a logged-in browser, this machine, or nobody we can
-/// tie a device to.
-fn owner(headers: &HeaderMap, peer: Option<SocketAddr>) -> ApiResult<Option<String>> {
+/// tie a device to. "This machine" is [`auth::is_local`], not a loopback
+/// peer, so a browser behind a proxy on the node's host needs its cookie.
+fn owner(headers: &HeaderMap, local: bool) -> ApiResult<Option<String>> {
     if let Some(h) = auth::session_hash(headers) {
         return Ok(Some(h));
     }
-    if peer.is_some_and(|a| a.ip().is_loopback()) {
+    if local {
         return Ok(None);
     }
     Err(ApiError::new(
@@ -98,10 +97,10 @@ pub struct Keys {
 pub async fn subscribe(
     State(s): State<AppState>,
     headers: HeaderMap,
-    peer: Result<ConnectInfo<SocketAddr>, axum::extract::rejection::ExtensionRejection>,
+    auth::Local(local): auth::Local,
     Json(sub): Json<Subscription>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let session_hash = owner(&headers, peer.ok().map(|p| p.0))?;
+    let session_hash = owner(&headers, local)?;
     webpush::audience(&sub.endpoint).map_err(|e| bad(e.to_string()))?;
     webpush::decode_keys(&sub.keys.p256dh, &sub.keys.auth).map_err(|e| bad(e.to_string()))?;
     let user_agent = headers

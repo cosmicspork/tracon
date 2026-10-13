@@ -1,12 +1,14 @@
 //! Operator authentication.
 //!
-//! Loopback callers are the operator by definition — the node's state is their
-//! state, and a shell on the machine already has it. That is the whole story
-//! until a token is issued. Issuing one (`tracon auth issue`) opens a second
-//! door: a client that presents the token gets a cookie, and the cookie is what
-//! reaches the node from anywhere else. Nothing else changes; loopback keeps
-//! working credential-less so the CLI, `just dev`, and `kubectl port-forward`
-//! are untouched.
+//! Local callers are the operator by definition — the node's state is their
+//! state, and a shell on the machine already has it. "Local" means a direct
+//! request from this machine addressed to this machine ([`is_local`]), not
+//! merely a loopback peer: a reverse proxy on the same host connects from
+//! loopback too. That is the whole story until a token is issued. Issuing one
+//! (`tracon auth issue`) opens a second door: a client that presents the token
+//! gets a cookie, and the cookie is what reaches the node from anywhere else.
+//! Nothing else changes; a local request keeps working credential-less so the
+//! CLI, `just dev`, and `kubectl port-forward` are untouched.
 //!
 //! What is stored is only ever a SHA-256: of the token, and of each cookie. A
 //! read of the database cannot mint either one.
@@ -19,7 +21,7 @@ use std::{
 
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -30,7 +32,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use super::{host_is_local, hostname};
+use super::hostname;
 use crate::store::{now_ms, AuthSessionRow, Store, OPERATOR_TOKEN_KEY};
 
 use super::api::{ApiError, AppState};
@@ -85,19 +87,27 @@ impl Limiter {
     }
 }
 
-/// What the guard needs on every request: the address the node was told to
-/// bind, whether a token is configured (cached so the common path does not
-/// touch the database), and the login limiter.
+/// What the guard needs on every request: whether a token is configured
+/// (cached so the common path does not touch the database), and the login
+/// limiter.
 pub struct AuthState {
-    bind: String,
     token_hash: Mutex<Option<String>>,
     limiter: Mutex<Limiter>,
 }
 
 impl AuthState {
-    pub fn new(bind: String, token_hash: Option<String>) -> Self {
+    /// `_bind` is the address the operator listener is bound to. It is no
+    /// longer consulted: whether a caller is local is a property of the
+    /// request ([`is_local`]), which accepts only loopback names in `Host`.
+    /// A `Host` naming the bind address is refused even where it is honest,
+    /// as with `curl http://0.0.0.0:7420` on a node bound to `0.0.0.0`
+    /// (which connects from `127.0.0.1`): failing closed costs that caller
+    /// nothing but typing `localhost`, while a specific non-loopback bind
+    /// address arrives with a loopback peer only through a relay. The
+    /// parameter stays so the many callers that build an `AppState` do not
+    /// all change at once.
+    pub fn new(_bind: String, token_hash: Option<String>) -> Self {
         Self {
-            bind,
             token_hash: Mutex::new(token_hash),
             limiter: Mutex::new(Limiter::default()),
         }
@@ -161,16 +171,190 @@ fn is_public(req: &Request) -> bool {
     req.method() == axum::http::Method::GET && !path.starts_with("/api/")
 }
 
-/// Whether the caller is on this machine. A request with no peer address is
-/// treated as remote: the guard fails closed.
-fn peer_is_loopback(req: &Request) -> bool {
-    extensions_are_loopback(req.extensions())
+/// Headers a proxy adds to say whom it is forwarding for. A client on this
+/// machine talking to the node directly sends none of them, so any one of
+/// them means the loopback peer is a relay for someone else: `tailscale
+/// serve`, `cloudflared`, Caddy, nginx, Envoy or Istio, a CDN, a pod's
+/// sidecar, a forward proxy the CLI was pointed at. Every one makes the
+/// request remote; there is no list of trusted proxies, because a proxy the
+/// node trusted would make every caller behind it the operator.
+const FORWARDING_HEADERS: &[&str] = &[
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-port",
+    "x-forwarded-server",
+    "x-real-ip",
+    "x-client-ip",
+    "true-client-ip",
+    "x-forwarded-scheme",
+    "x-forwarded-ssl",
+    "x-forwarded-client-cert",
+    "x-original-forwarded-for",
+    "x-envoy-external-address",
+    "x-cluster-client-ip",
+    "cf-connecting-ip",
+    "fastly-client-ip",
+    "tailscale-user-login",
+    "via",
+];
+
+/// Whether a host is a loopback name: `localhost`, an address in
+/// `127.0.0.0/8`, or `::1`. Exact, not a suffix: `localhost.example` is a DNS
+/// name anyone can point at `127.0.0.1`, and a page served from it still
+/// sends its own name.
+fn loopback_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
 }
 
-/// The same question, asked of the parts an extractor sees.
-pub(crate) fn extensions_are_loopback(ext: &axum::http::Extensions) -> bool {
-    ext.get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|ci| ci.0.ip().is_loopback())
+/// Whether a `Host` header (or an HTTP/2 `:authority`) names this machine's
+/// loopback. Anything that is not a bare `host[:port]` is not.
+fn host_is_loopback(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(&format!("http://{value}")) else {
+        return false;
+    };
+    url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.host().is_some_and(|host| loopback_host(&host))
+}
+
+/// An `Origin` that is an HTTP(S) origin on this machine's loopback, parsed.
+/// `null`, and any other scheme, is not one.
+fn loopback_origin(value: &str) -> Option<url::Url> {
+    let url = url::Url::parse(value.trim()).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(url.path(), "" | "/")
+        && url.host().is_some_and(|host| loopback_host(&host)))
+    .then_some(url)
+}
+
+/// Whether `origin` is the origin the request was addressed to: the same host
+/// and the same port as `authority` (a `Host` value), reading a port-less
+/// `Host` with the origin's own scheme's default.
+fn origin_matches(origin: &url::Url, authority: &str) -> bool {
+    let Ok(addressed) = url::Url::parse(&format!("{}://{authority}", origin.scheme())) else {
+        return false;
+    };
+    addressed.host() == origin.host()
+        && addressed.port_or_known_default() == origin.port_or_known_default()
+}
+
+/// The single answer to "is this the operator at the node's own machine":
+/// the one test behind the guard's credential-less branch, [`Loopback`], and
+/// every `local`/`loopback` flag the interface is told.
+///
+/// All of these must hold:
+/// - the TCP peer is a loopback address (a request with no peer address is
+///   remote: this fails closed);
+/// - no proxy forwarding header is present ([`FORWARDING_HEADERS`]);
+/// - the `Host`, and the request target's authority when it has one, name
+///   loopback (`localhost`, `127.0.0.0/8`, `[::1]`), which is also the
+///   DNS-rebinding defence: a page on `evil.example` that resolves to
+///   `127.0.0.1` still sends `Host: evil.example`;
+/// - an `Origin`, when the caller sends one, is an HTTP(S) loopback origin
+///   with the same host and port the request was addressed to (its `Host`).
+///   A page on another loopback origin, such as the OpenCode UI listener or
+///   any dev server on another port, is another site and is not the operator.
+///
+/// The `Host` port is not compared with the port the node is bound to.
+/// `kubectl port-forward 8080:7420` and the Vite dev server (`just dev`,
+/// which proxies `/api` with the browser's own `Host` and `Origin`) both
+/// reach the node with a loopback `Host` on another port, and both are the
+/// operator at the machine. A proxy that rewrites `Host` to its upstream
+/// would present the bound port anyway, so checking it would stop nothing.
+/// What is compared is the `Origin` against that `Host`: the page must be the
+/// one the request was addressed to.
+///
+/// A missing `Host` is allowed: browsers always send one, so it is not a
+/// rebinding vector, and a bare local client may omit it. A duplicated
+/// `Host` or `Origin` is not something a direct client sends, and is remote.
+///
+/// What this cannot see is a same-host relay that strips forwarding headers
+/// and rewrites `Host` to its upstream: by construction that request is
+/// indistinguishable from one made on the machine. Proxies put in front of a
+/// node must set `X-Forwarded-For` (tailscale serve, Caddy, cloudflared and
+/// Traefik do by default; nginx needs `proxy_set_header X-Forwarded-For`).
+pub(crate) fn is_local(peer: Option<IpAddr>, uri: &Uri, headers: &HeaderMap) -> bool {
+    if !peer.is_some_and(|ip| ip.to_canonical().is_loopback()) {
+        return false;
+    }
+    if FORWARDING_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name))
+    {
+        return false;
+    }
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let host = match (hosts.next(), hosts.next()) {
+        (None, _) => None,
+        (Some(host), None) => match host.to_str() {
+            Ok(host) if host_is_loopback(host) => Some(host),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    let authority = uri.authority().map(|authority| authority.as_str());
+    if authority.is_some_and(|authority| !host_is_loopback(authority)) {
+        return false;
+    }
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    match (origins.next(), origins.next()) {
+        (None, _) => true,
+        (Some(origin), None) => {
+            let Some(origin) = origin.to_str().ok().and_then(loopback_origin) else {
+                return false;
+            };
+            // Another loopback origin is another site: the OpenCode UI
+            // listener, a dev server on some other port. Its page can send a
+            // simple cross-origin POST with no preflight, so a loopback
+            // Origin alone would let it drive the node credential-free.
+            host.or(authority)
+                .is_some_and(|addressed| origin_matches(&origin, addressed))
+        }
+        _ => false,
+    }
+}
+
+/// [`is_local`] of a whole request, as the guard sees it.
+fn request_is_local(req: &Request) -> bool {
+    is_local(peer_ip(req), req.uri(), req.headers())
+}
+
+/// [`is_local`] of the parts an extractor or a handler sees.
+pub(crate) fn parts_are_local(parts: &axum::http::request::Parts) -> bool {
+    is_local(
+        parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip()),
+        &parts.uri,
+        &parts.headers,
+    )
+}
+
+/// Whether the request is [local](is_local), for a handler that also takes a
+/// body. Never rejects.
+pub struct Local(pub bool);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Local {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Local(parts_are_local(parts)))
+    }
 }
 
 /// A handler that runs only for a caller on the node's own machine.
@@ -180,7 +364,8 @@ pub(crate) fn extensions_are_loopback(ext: &axum::http::Extensions) -> bool {
 /// separates these routes is that they rewrite what the node *is* — the
 /// binaries it executes, the file it reads its configuration from, the hub it
 /// trusts — where a stolen cookie would otherwise be remote code execution.
-/// Standing a node up is done at the node.
+/// Standing a node up is done at the node, and "at the node" is [`is_local`],
+/// so a cookie relayed through a proxy on the node's own host does not count.
 pub struct Loopback;
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Loopback {
@@ -190,7 +375,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Loopback {
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
-        if extensions_are_loopback(&parts.extensions) {
+        if parts_are_local(parts) {
             return Ok(Loopback);
         }
         Err(ApiError::new(
@@ -268,6 +453,7 @@ pub async fn guard(
     let headers = req.headers().clone();
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    let local = request_is_local(&req);
 
     // `Origin: null` is what a browser sends from an opaque origin: a
     // sandboxed iframe, a `file://` page, a cross-origin redirect. It is not
@@ -287,10 +473,9 @@ pub async fn guard(
         ));
     }
 
-    // 1. On this machine, with a local Host and Origin: the operator.
-    let local_host = host_is_local(host, &auth.bind)
-        && origin.is_none_or(|o| host_is_local(Some(o), &auth.bind));
-    if peer_is_loopback(&req) && local_host {
+    // 1. On this machine, directly, with a local Host and Origin: the
+    //    operator.
+    if local {
         return Ok(next.run(req).await);
     }
 
@@ -362,7 +547,6 @@ pub async fn guard(
         }
     }
 
-    let local = peer_is_loopback(&req) && local_host;
     let mut response = next.run(req).await;
     if let Some(secret) = renew {
         set_cookie(&mut response, &secret, !local, SESSION_TTL_MS / 1000);
@@ -403,7 +587,7 @@ pub struct LoginBody {
 /// Exchange the operator token for a cookie.
 pub async fn login(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Local(local): Local,
     headers: HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<Response, ApiError> {
@@ -441,11 +625,6 @@ pub async fn login(
         })
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-    let local = peer.ip().is_loopback()
-        && host_is_local(host, &auth.bind)
-        && origin.is_none_or(|o| host_is_local(Some(o), &auth.bind));
     let mut response = Json(json!({ "ok": true })).into_response();
     set_cookie(&mut response, &secret, !local, SESSION_TTL_MS / 1000);
     Ok(response)
@@ -454,7 +633,7 @@ pub async fn login(
 /// Drop this client's cookie. Other devices keep theirs.
 pub async fn logout(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Local(local): Local,
     headers: HeaderMap,
 ) -> Response {
     if let Some(secret) = cookie_value(&headers, COOKIE) {
@@ -463,11 +642,6 @@ pub async fn logout(
         // but a listed device that can never be reached is a lie.
         let _ = state.store().auth_sessions_purge(now_ms());
     }
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
-    let local = peer.ip().is_loopback()
-        && host_is_local(host, &state.auth.bind)
-        && origin.is_none_or(|o| host_is_local(Some(o), &state.auth.bind));
     let mut response = Json(json!({ "ok": true })).into_response();
     set_cookie(&mut response, "", !local, 0);
     response
@@ -611,6 +785,254 @@ mod tests {
         assert!(administrator_authenticated(&auth, &store, &headers));
         let wrong = headers_with(header::AUTHORIZATION, "Bearer another-token");
         assert!(!administrator_authenticated(&auth, &store, &wrong));
+    }
+
+    fn local(peer: &str, uri: &str, headers: &[(&str, &str)]) -> bool {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            map.append(
+                header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        is_local(
+            Some(peer.parse().unwrap()),
+            &uri.parse::<Uri>().unwrap(),
+            &map,
+        )
+    }
+
+    #[test]
+    fn a_direct_loopback_request_is_local() {
+        // The CLI: reqwest sends a Host and no Origin.
+        assert!(local(
+            "127.0.0.1",
+            "/api/node",
+            &[("host", "127.0.0.1:7420")]
+        ));
+        // The desktop wrapper's webview, at the node's own origin.
+        assert!(local(
+            "127.0.0.1",
+            "/api/config",
+            &[
+                ("host", "127.0.0.1:7420"),
+                ("origin", "http://127.0.0.1:7420")
+            ]
+        ));
+        assert!(local(
+            "::1",
+            "/api/node",
+            &[("host", "[::1]:7420"), ("origin", "http://[::1]:7420")]
+        ));
+        assert!(local(
+            "127.0.0.1",
+            "/api/node",
+            &[
+                ("host", "LOCALHOST:7420"),
+                ("origin", "http://localhost:7420")
+            ]
+        ));
+        // All of 127.0.0.0/8 is this machine.
+        assert!(local(
+            "127.0.0.2",
+            "/api/node",
+            &[("host", "127.0.0.2:7420")]
+        ));
+        // A dual-stack listener sees IPv4 loopback as mapped IPv6.
+        assert!(local(
+            "::ffff:127.0.0.1",
+            "/api/node",
+            &[("host", "127.0.0.1:7420")]
+        ));
+        // `kubectl port-forward 8080:7420`, and `just dev`'s Vite proxy, which
+        // passes the browser's own Host and Origin through.
+        assert!(local(
+            "127.0.0.1",
+            "/api/node",
+            &[("host", "localhost:8080")]
+        ));
+        assert!(local(
+            "127.0.0.1",
+            "/api/config",
+            &[
+                ("host", "localhost:5173"),
+                ("origin", "http://localhost:5173")
+            ]
+        ));
+        // No Host at all is not a browser.
+        assert!(local("127.0.0.1", "/api/node", &[]));
+        // HTTP/2 carries the authority in the target rather than in Host.
+        assert!(local("127.0.0.1", "http://127.0.0.1:7420/api/node", &[]));
+    }
+
+    /// Another loopback origin is another site. The OpenCode UI listener
+    /// (`127.0.0.1:7423`) must never drive the node, and a dev server on some
+    /// other port is somebody else's page: either can send a simple
+    /// cross-origin POST with no preflight, so neither may be credential-free.
+    #[test]
+    fn a_page_on_another_loopback_origin_is_not_local() {
+        for origin in [
+            "http://127.0.0.1:7423",
+            "http://127.0.0.1:7422",
+            "http://localhost:3000",
+            "http://localhost:7420",
+            "http://[::1]:7420",
+        ] {
+            assert!(
+                !local(
+                    "127.0.0.1",
+                    "/api/sessions/s1/kill",
+                    &[("host", "127.0.0.1:7420"), ("origin", origin)]
+                ),
+                "{origin}"
+            );
+        }
+        // An Origin with nothing to compare it with is not trusted either.
+        assert!(!local(
+            "127.0.0.1",
+            "/api/node",
+            &[("origin", "http://127.0.0.1:7420")]
+        ));
+        // The same origin, spelled with or without its default port.
+        assert!(local(
+            "127.0.0.1",
+            "/api/node",
+            &[("host", "localhost"), ("origin", "http://localhost:80")]
+        ));
+        assert!(local(
+            "127.0.0.1",
+            "/api/node",
+            &[("host", "localhost:80"), ("origin", "http://localhost")]
+        ));
+        // HTTP/2: the authority is what the page was addressed to.
+        assert!(local(
+            "127.0.0.1",
+            "http://127.0.0.1:7420/api/node",
+            &[("origin", "http://127.0.0.1:7420")]
+        ));
+        assert!(!local(
+            "127.0.0.1",
+            "http://127.0.0.1:7420/api/node",
+            &[("origin", "http://127.0.0.1:7423")]
+        ));
+    }
+
+    #[test]
+    fn a_remote_peer_is_never_local() {
+        assert!(!local(
+            "203.0.113.7",
+            "/api/node",
+            &[("host", "127.0.0.1:7420")]
+        ));
+        assert!(!local(
+            "10.0.0.5",
+            "/api/node",
+            &[("host", "localhost:7420")]
+        ));
+        let no_peer = is_local(None, &"/api/node".parse().unwrap(), &HeaderMap::new());
+        assert!(!no_peer, "a request with no peer address fails closed");
+    }
+
+    /// `tailscale serve`, `cloudflared` or a pod's sidecar connect from
+    /// loopback. Each of these is what one of them sends for a caller
+    /// somewhere else, and none of them is the operator at the machine.
+    #[test]
+    fn a_same_host_proxy_is_not_local() {
+        for name in FORWARDING_HEADERS {
+            assert!(
+                !local(
+                    "127.0.0.1",
+                    "/api/config",
+                    &[("host", "127.0.0.1:7420"), (name, "100.101.102.103")]
+                ),
+                "{name}"
+            );
+        }
+        // tailscale serve: the tailnet name in Host, the caller in
+        // X-Forwarded-For.
+        assert!(!local(
+            "127.0.0.1",
+            "/api/config",
+            &[
+                ("host", "laptop.tail1234.ts.net"),
+                ("x-forwarded-for", "100.101.102.103"),
+                ("x-forwarded-host", "laptop.tail1234.ts.net"),
+                ("x-forwarded-proto", "https"),
+            ]
+        ));
+        // A proxy that keeps the client's Host and adds nothing.
+        assert!(!local(
+            "127.0.0.1",
+            "/api/config",
+            &[("host", "tracon-node.example.org")]
+        ));
+        // One that rewrites Host but carries the browser's Origin through.
+        assert!(!local(
+            "127.0.0.1",
+            "/api/config",
+            &[
+                ("host", "127.0.0.1:7420"),
+                ("origin", "https://tracon-node.example.org")
+            ]
+        ));
+        // An absolute-form target naming somewhere else.
+        assert!(!local(
+            "127.0.0.1",
+            "http://tracon-node.example.org/api/config",
+            &[("host", "127.0.0.1:7420")]
+        ));
+    }
+
+    #[test]
+    fn a_host_or_origin_that_only_looks_local_is_not() {
+        for host in [
+            "evil.example",
+            "evil.example:7420",
+            "localhost.evil.example:7420",
+            "127.0.0.1.evil.example",
+            "127.0.0.1@evil.example",
+            "127.0.0.1:7420/path",
+            // The bind address of a node listening widely is not loopback.
+            "10.0.0.5:7420",
+            "0.0.0.0:7420",
+        ] {
+            assert!(
+                !local("127.0.0.1", "/api/node", &[("host", host)]),
+                "{host}"
+            );
+        }
+        for origin in [
+            "null",
+            "http://evil.example",
+            "http://localhost.evil.example:7420",
+            "tauri://localhost",
+            "file:///index.html",
+            "http://10.0.0.5:7420",
+        ] {
+            assert!(
+                !local(
+                    "127.0.0.1",
+                    "/api/node",
+                    &[("host", "127.0.0.1:7420"), ("origin", origin)]
+                ),
+                "{origin}"
+            );
+        }
+        // A duplicated Host or Origin is not what a direct client sends.
+        assert!(!local(
+            "127.0.0.1",
+            "/api/node",
+            &[("host", "127.0.0.1:7420"), ("host", "evil.example")]
+        ));
+        assert!(!local(
+            "127.0.0.1",
+            "/api/node",
+            &[
+                ("host", "127.0.0.1:7420"),
+                ("origin", "http://127.0.0.1:7420"),
+                ("origin", "https://evil.example")
+            ]
+        ));
     }
 
     #[test]
