@@ -39,6 +39,12 @@ pub struct ClaudeAdapter {
 impl ClaudeAdapter {
     pub const ID: &'static str = "claude";
 
+    /// Where the harness image installs the binary, and where a repository's
+    /// image layered with it (`repo_image`) has it too. Named by path, so a
+    /// repository image whose `PATH` holds another `claude` cannot stand in
+    /// for the one the node pinned.
+    pub const BINARY: &'static str = "/usr/local/bin/claude";
+
     /// The version this node's harness image installs.
     /// `containers/harness-claude/Containerfile` fetches exactly this release
     /// at exactly one digest; `the_image_installs_the_pinned_claude` keeps the
@@ -93,7 +99,7 @@ impl ClaudeAdapter {
     /// reachable, whatever the container happens to contain.
     fn cmd(name: &str, spec: &LaunchSpec, session_id: &str) -> RunnerCommand {
         let mut argv: Vec<String> = vec![
-            "claude".into(),
+            Self::BINARY.into(),
             "--print".into(),
             "--input-format".into(),
             "stream-json".into(),
@@ -828,7 +834,7 @@ impl HarnessAdapter for ClaudeAdapter {
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
         let out = runner
             .run_capture(RunnerCommand {
-                argv: vec!["claude".into(), "--version".into()],
+                argv: vec![Self::BINARY.into(), "--version".into()],
                 name: "claude-version".into(),
                 ..Default::default()
             })

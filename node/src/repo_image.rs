@@ -148,6 +148,17 @@ fn cool(repo: &Path, key: &str, error: &str) -> String {
     retry_note(error, until)
 }
 
+/// What `tracon repo build` clears besides the repository's own recipe:
+/// every session layer that failed, and every builder outage still cooling
+/// for the repository, so its next session tries again at once.
+fn forget_session_failures(store: &Store, repo: &Path) {
+    let _ = store.forget_failed_session_layers(&repo.to_string_lossy());
+    cooldowns()
+        .lock()
+        .unwrap()
+        .retain(|(cooling, _), _| cooling != repo);
+}
+
 fn warm(repo: &Path, key: &str) {
     cooldowns()
         .lock()
@@ -318,7 +329,9 @@ impl RunAs {
 ///
 /// A pod is never root: it runs as the configured uid, which owns `/work`,
 /// `/cache` and the harness's home here, and the image says so with its last
-/// `USER`. What the repository installed has to be readable and executable
+/// `USER`. The uid is given a name where the image has none for it, because
+/// Git, SSH and some package managers refuse to run as a uid with no passwd
+/// entry. What the repository installed has to be readable and executable
 /// by that uid, which nothing here can arrange after the fact (see
 /// ARCHITECTURE, "the recipe is configuration").
 fn normalised(source: &str, run_as: &RunAs) -> String {
@@ -335,7 +348,12 @@ fn normalised(source: &str, run_as: &RunAs) -> String {
         RunAs::Pod { uid, home } => format!(
             "FROM {source}\n\
              USER 0:0\n\
-             RUN mkdir -p /work /cache {home} && chown {uid}:{uid} /work /cache {home} \
+             RUN mkdir -p /work /cache {home} && chown {uid}:{uid} /work /cache \
+             && chown -R {uid}:{uid} {home} \
+             && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/passwd 2>/dev/null; then \
+             echo 'harness:x:{uid}:{uid}::{home}:/bin/sh' >> /etc/passwd; fi \
+             && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/group 2>/dev/null; then \
+             echo 'harness:x:{uid}:' >> /etc/group; fi \
              && if [ -d /etc/profile.d ]; then \
              printf 'export PATH=\"%s\"\\n' \"$PATH\" > /etc/profile.d/zz-tracon-path.sh; fi\n\
              ENV HOME={home}\n\
@@ -359,15 +377,18 @@ struct HarnessLayer {
 fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
     match harness_id {
         crate::adapter::claude::ClaudeAdapter::ID => {
-            let probe = "claude --version && git --version";
+            // By path, as the session launches it: a `claude` the
+            // repository's image put earlier on `PATH` proves nothing.
+            let binary = crate::adapter::claude::ClaudeAdapter::BINARY;
+            let probe = format!("{binary} --version && git --version");
             Some(HarnessLayer {
                 lines: format!(
-                    "COPY --from=harness /usr/local/bin/claude /usr/local/bin/claude\n\
+                    "COPY --from=harness {binary} {binary}\n\
                      ENV CLAUDE_CONFIG_DIR={}/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n",
                     run_as.home()
                 ),
                 probe: match run_as {
-                    RunAs::Root => probe.to_string(),
+                    RunAs::Root => probe,
                     RunAs::Pod { .. } => format!("{probe} && {} --version", POD_INIT),
                 },
             })
@@ -714,6 +735,9 @@ pub async fn ensure_base(
     repo: &Path,
     force: bool,
 ) -> Ensured {
+    if force {
+        forget_session_failures(store, repo);
+    }
     let Some(entry) = building_entry(cfg, repo) else {
         return Ensured::Unconfigured;
     };
@@ -2260,7 +2284,10 @@ ENTRYPOINT []
         let lines = "COPY --from=harness /usr/local/bin/claude /usr/local/bin/claude\n\
                      ENV CLAUDE_CONFIG_DIR=/root/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n";
         assert_eq!(layer.lines, lines);
-        assert_eq!(layer.probe, "claude --version && git --version");
+        assert_eq!(
+            layer.probe,
+            "/usr/local/bin/claude --version && git --version"
+        );
         assert_eq!(
             layered(source, "localhost/h@sha256:def", &layer, &RunAs::Root),
             format!("FROM localhost/h@sha256:def AS harness\n{normalised_text}{lines}")
@@ -2316,7 +2343,7 @@ ENTRYPOINT []
             normalised(source, &pod()),
             r#"FROM localhost/tracon-repo-app-src@sha256:abc
 USER 0:0
-RUN mkdir -p /work /cache /home/harness && chown 65532:65532 /work /cache /home/harness && if [ -d /etc/profile.d ]; then printf 'export PATH="%s"\n' "$PATH" > /etc/profile.d/zz-tracon-path.sh; fi
+RUN mkdir -p /work /cache /home/harness && chown 65532:65532 /work /cache && chown -R 65532:65532 /home/harness && if ! grep -q '^[^:]*:[^:]*:65532:' /etc/passwd 2>/dev/null; then echo 'harness:x:65532:65532::/home/harness:/bin/sh' >> /etc/passwd; fi && if ! grep -q '^[^:]*:[^:]*:65532:' /etc/group 2>/dev/null; then echo 'harness:x:65532:' >> /etc/group; fi && if [ -d /etc/profile.d ]; then printf 'export PATH="%s"\n' "$PATH" > /etc/profile.d/zz-tracon-path.sh; fi
 ENV HOME=/home/harness
 WORKDIR /work
 USER 65532:65532
@@ -2329,7 +2356,7 @@ ENTRYPOINT []
             .contains("ENV CLAUDE_CONFIG_DIR=/home/harness/.claude "));
         assert_eq!(
             layer.probe,
-            "claude --version && git --version && /usr/libexec/tracon/tini --version"
+            "/usr/local/bin/claude --version && git --version && /usr/libexec/tracon/tini --version"
         );
         let text = layered(source, "ghcr.io/h@sha256:def", &layer, &pod());
         assert!(text.starts_with("FROM ghcr.io/h@sha256:def AS harness\n"));
@@ -2348,7 +2375,8 @@ ENTRYPOINT []
         cfg.runtime.kubernetes.uid = 1000;
         cfg.runtime.kubernetes.harness_home = "/home/agent".into();
         let other = normalised(source, &RunAs::of(&cfg));
-        assert!(other.contains("chown 1000:1000 /work /cache /home/agent"));
+        assert!(other.contains("chown 1000:1000 /work /cache && chown -R 1000:1000 /home/agent"));
+        assert!(other.contains("'harness:x:1000:1000::/home/agent:/bin/sh'"));
         assert!(other.contains("ENV HOME=/home/agent\n") && other.contains("USER 1000:1000\n"));
 
         let tmp = checkout();
@@ -2499,5 +2527,55 @@ ENTRYPOINT []
         *builder.down.lock().unwrap() = Some("buildkitd refused the connection".into());
         assert_eq!(ask(pod()).await, "buildkitd refused the connection");
         assert!(builder.builds.lock().unwrap().is_empty());
+    }
+
+    /// A session layer that failed stands against its key, and a builder
+    /// that could not fetch what it starts from cools down without being
+    /// held against it; `tracon repo build` (a forced `ensure_base`) clears
+    /// both for the repository, so its next session tries again at once.
+    #[tokio::test]
+    async fn repo_build_lets_a_failed_session_layer_try_again() {
+        let repo = Path::new("/src/retry-app");
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder::default();
+        let harness = claude_as("ghcr.io/cosmicspork/tracon-harness-claude:9", pod());
+
+        // A registry that could not be reached: nothing recorded, cooling.
+        *builder.broken.lock().unwrap() = true;
+        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
+        let got = ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(got.note.unwrap().contains("buildkitd did not answer"));
+        assert!(store
+            .latest_repo_image("/src/retry-app", "session:claude")
+            .unwrap()
+            .is_none());
+        *builder.broken.lock().unwrap() = false;
+        let cooling =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(cooling.note.unwrap().contains("tried again in"));
+
+        // A layer whose probe failed: recorded, and not retried unasked.
+        forget_session_failures(&store, repo);
+        let failing = ProbeRunner::saying("sh: claude: not found", 127);
+        let failed =
+            ensure_session_with(&builder, &failing, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(failed.note.unwrap().contains("does not run"));
+        let builds = builder.builds.lock().unwrap().len();
+        let again =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(again.image.is_none());
+        assert_eq!(builder.builds.lock().unwrap().len(), builds);
+
+        // `tracon repo build` clears it, even for an entry with nothing of
+        // its own to build.
+        let backend = crate::runner::local::LocalBackend;
+        assert_eq!(
+            ensure_base(&backend, &Config::default(), &store, repo, true).await,
+            Ensured::Unconfigured
+        );
+        let retried =
+            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
+        assert!(retried.image.is_some(), "{retried:?}");
+        assert_eq!(builder.builds.lock().unwrap().len(), builds + 1);
     }
 }

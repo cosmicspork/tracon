@@ -1251,8 +1251,37 @@ impl Kubernetes {
                 .parse::<crate::gateway::proxy::Cidr>()
                 .map_err(|error| format!("runtime.kubernetes.internal_cidrs: {error}"))?;
         }
+        // Both go into the layer the node builds over a repository's image
+        // (`repo_image::RunAs`), in a shell command and a passwd entry, and
+        // the pod refuses root.
+        if self.uid <= 0 {
+            return Err(format!(
+                "runtime.kubernetes.uid: {} is not a non-root uid",
+                self.uid
+            ));
+        }
+        if !safe_home(&self.harness_home) {
+            return Err(format!(
+                "runtime.kubernetes.harness_home: {:?} must be an absolute path of letters, \
+                 digits, '.', '_', '-' and '/', other than /",
+                self.harness_home
+            ));
+        }
         Ok(())
     }
+}
+
+/// An absolute directory that can go unquoted into a shell command, a
+/// Dockerfile `ENV` and a passwd entry: no spaces, quotes, colons or `..`.
+fn safe_home(home: &str) -> bool {
+    home.starts_with('/')
+        && home.len() > 1
+        && !home.ends_with('/')
+        && home
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+        && !home.split('/').any(|part| part == "." || part == "..")
+        && !home.contains("//")
 }
 
 impl Default for Kubernetes {
@@ -3168,6 +3197,29 @@ models = [{ id = "gpt-6" }]
             "[runtime.kubernetes]\nimage_pull_secrets = [\"Registry_Creds\"]\n",
             "\"Registry_Creds\" is not a Secret name",
         );
+        refused(
+            "[runtime.kubernetes]\nuid = 0\n",
+            "uid: 0 is not a non-root uid",
+        );
+        refused("[runtime.kubernetes]\nuid = -1\n", "not a non-root uid");
+        for home in [
+            "home/harness",
+            "/",
+            "/home/harness/",
+            "/home/my harness",
+            "/home/$(id)",
+            "/home/../root",
+            "/home:x",
+        ] {
+            refused(
+                &format!("[runtime.kubernetes]\nharness_home = {home:?}\n"),
+                "runtime.kubernetes.harness_home",
+            );
+        }
+        let mut k = Config::default().runtime.kubernetes;
+        k.harness_home = "/var/lib/agent_home-2.d".into();
+        k.uid = 1000;
+        k.validate().unwrap();
         // Equal is allowed: a Guaranteed pod is a limit that meets its request.
         let mut k = Config::default().runtime.kubernetes;
         k.resources.command.memory_limit = Some("2048Mi".into());
