@@ -2,7 +2,8 @@
 // entries it stands for. Kept apart from the component so the round trip —
 // which is where an entry would silently change meaning — is tested.
 
-import type { RepoEntry, RepoImageBuild } from './types'
+import { arrayOps } from './config-form'
+import type { ConfigOp, RepoEntry, RepoImageBuild } from './types'
 
 export interface RepoForm {
   path: string
@@ -22,9 +23,12 @@ export interface RepoForm {
   egress: string
   sessionEgress: boolean
   /** What the entry says that this form does not edit (`commits`, `style`),
-   *  carried back as it came: the table is saved whole, so a key left out
-   *  here is a key removed from node.toml. */
+   *  carried back as it came, so comparing the entry with what was loaded
+   *  finds no change in them. */
   kept: Partial<RepoEntry>
+  /** The index the entry had in the table this form was seeded from; null
+   *  for one added here. A save edits each entry where it is. */
+  origin?: number | null
 }
 
 export function lines(text: string): string[] {
@@ -52,6 +56,7 @@ export function blankForm(): RepoForm {
     egress: '',
     sessionEgress: false,
     kept: {},
+    origin: null,
   }
 }
 
@@ -143,3 +148,19 @@ export function buildLine(build: RepoImageBuild): string {
   if (build.status === 'failed') return `${what}${from} · failed: ${build.error}`
   return `${what}${from} · ready`
 }
+
+/// The operations a save sends (`PATCH /api/config`): entries removed,
+/// fields of a kept entry set or removed where it is, entries added, then
+/// the order. Each side goes through the form's round trip first, so an
+/// entry nobody touched sends nothing.
+export function repoOps(seeded: RepoEntry[], forms: RepoForm[]): ConfigOp[] {
+  const original = seeded.map((entry) => toEntry(toForm(entry)) as unknown as Record<string, unknown>)
+  return arrayOps(
+    ['repo'],
+    original,
+    forms.map((form) => ({ origin: form.origin ?? null, entry: toEntry(form) as unknown as Record<string, unknown> })),
+  )
+}
+
+/// The fields of entry `index` as a refusal may name them.
+export const REPO_FIELDS = ['path', 'image', 'dockerfile', 'context', 'checks', 'timeout_secs', 'prepare', 'egress', 'session_egress']

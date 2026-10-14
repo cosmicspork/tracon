@@ -1,5 +1,5 @@
-// Pure helpers for the settings pane: minting an operator token, and working
-// out what a config form actually changed.
+// Pure helpers for the settings pane: minting an operator token and the
+// address that carries it. What a config form changed is `config-form.ts`.
 
 /**
  * Mint an operator token the way `tracon auth issue` does — 32 random bytes,
@@ -22,33 +22,4 @@ export async function hashToken(token: string): Promise<string> {
 /** The login URL a QR encodes: the token rides the fragment, never the path. */
 export function loginUrl(base: string, token: string): string {
   return `${base.replace(/\/+$/, '')}/#token=${token}`
-}
-
-type Json = string | number | boolean | null | Json[] | { [k: string]: Json }
-
-/**
- * The subset of `edited` that differs from `original`, shaped as the node's
- * patch: only what changed, nested sections included only when something
- * inside them did. Sending the whole form back would report a restart owed
- * for settings nobody touched.
- */
-export function changedSubset(
-  original: Record<string, Json>,
-  edited: Record<string, Json>,
-): Record<string, Json> {
-  const patch: Record<string, Json> = {}
-  for (const [key, next] of Object.entries(edited)) {
-    const before = original[key]
-    if (isObject(next) && isObject(before)) {
-      const inner = changedSubset(before, next)
-      if (Object.keys(inner).length > 0) patch[key] = inner
-    } else if (JSON.stringify(before) !== JSON.stringify(next)) {
-      patch[key] = next
-    }
-  }
-  return patch
-}
-
-function isObject(v: unknown): v is Record<string, Json> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
 }

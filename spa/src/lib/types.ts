@@ -1614,6 +1614,8 @@ export interface NodeConfig {
   running: { harness_id: string; harness_version: string; node_name: string }
   /** The file's version: what a `PATCH /api/config` is decided against. */
   hash: string
+  /** The version the running node's live keys came from. */
+  running_hash?: string
   /** node.toml as written, secrets (and keys the node does not read) as `redacted`. */
   document: Record<string, unknown>
   /** node.toml as it loads, every default filled in, redacted the same way. */
@@ -1642,7 +1644,24 @@ export interface ConfigKeySpec {
   secret: boolean
   /** False for a key only the host's own node.toml may change. */
   editable: boolean
+  /** Whether an edit made at the node itself may change it (all but the
+      state mount). */
+  editable_at_node?: boolean
   why_not?: string
+  /** What the key holds, traced from the structs that read it. */
+  shape?: ConfigShape
+  /** The array of tables the key is a field of (`service`, `repo`,
+      `providers.*.models`), whose entries are edited whole. */
+  array?: string
+}
+
+/** What a key holds (`config_schema::Shape`). */
+export interface ConfigShape {
+  kind: 'bool' | 'integer' | 'float' | 'string' | 'list' | 'enum' | 'map' | 'table' | 'any'
+  item?: string
+  choices?: string[]
+  /** Left out, it means none (or "work it out"), not a default value. */
+  optional: boolean
 }
 
 /** One typed edit of node.toml (`PATCH /api/config`). Keys are dotted

@@ -1,0 +1,2504 @@
+{
+  "//": "GET /api/config as a node with this node.toml would answer it. `keys` is config_schema's own description (node/src/http/config_api.rs checks it and rewrites it under TRACON_WRITE_FIXTURES=1); `effective` holds Config::default() with this document over it; `providers` and `repo` are filled in by fixtures/states/settings.mjs.",
+  "keys": [
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "node_name",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "harness.id",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "harness.tools",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "harness.version",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "boundary.podman",
+      "path": "executable",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.network",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.subnet",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.gateway_ip",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.gateway_container",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": false,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.gateway_image",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not": "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": false,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.harness_image",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not": "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.selinux_label_disable",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.start_machine",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.stop_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gateway.allow_hosts",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gateway.proxy_port",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gateway.qa_proxy_port",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gateway.forward_port",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gateway.egress_port",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": false,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gateway.harness_listen",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "any",
+        "optional": false
+      },
+      "why_not": "is the harness socket's path, whose directory the node creates and mounts writable into the gateway container, so it is changed at the node, not from elsewhere"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.budget_tokens",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.permission_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.approval_expiry_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.harness_api_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.default_channel",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.claim_grace_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.suspend_published_after_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "session.worktree_root",
+      "path": "root",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.pty_buffer_frames",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.pty_capture_output",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "consulta.command",
+      "path": "executable",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "consulta.args",
+      "path": "exec_args",
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "consulta.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "publish.gh",
+      "path": "executable",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "publish.glab",
+      "path": "executable",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "publish.git",
+      "path": "executable",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.forge_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.commits",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "choices": [
+          "squash",
+          "keep"
+        ],
+        "kind": "enum",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.style.conventional",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.style.types",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.style.imperative",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.style.max_subject",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.style.kebab_branch",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "publish.style.no_ticket_keys",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "github.dispatch.*",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.hub_url",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.heartbeat_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.poll_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.command_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.stream_open_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.stream_idle_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.stream_max_body_bytes",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.stream_max_response_bytes",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.stream_max_concurrent",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.renew_credentials",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kind",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "choices": [
+          "podman",
+          "kubernetes"
+        ],
+        "kind": "enum",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.approved_images",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.namespace",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": false,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.harness_image",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not": "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.state_claim",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": false,
+      "editable_at_node": false,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "runtime.kubernetes.state_mount",
+      "path": "mount",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not": "decides where agents can write, so it is changed in node.toml on the host, not by an edit"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.harness_home",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.uid",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.gateway_host",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.start_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.image_pull_secrets",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.internal_cidrs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.builder.addr",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "runtime.kubernetes.builder.tls_dir",
+      "path": "secret_dir",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.builder.registry",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "runtime.kubernetes.builder.docker_config",
+      "path": "secret_dir",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.builder.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "runtime.kubernetes.builder.do_token_file",
+      "path": "secret_file",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "runtime.kubernetes.builder.buildctl",
+      "path": "executable",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.shm_size",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.session.cpu_request",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.session.cpu_limit",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.session.memory_request",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.session.memory_limit",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.command.cpu_request",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.command.cpu_limit",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.command.memory_request",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.command.memory_limit",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.path",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.image",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.dockerfile",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.context",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.checks",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.prepare",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.egress",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.session_egress",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.prepare_credentials",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.commits",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "choices": [
+          "squash",
+          "keep"
+        ],
+        "kind": "enum",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.style.conventional",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.style.types",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.style.imperative",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.style.max_subject",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.style.kebab_branch",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.style.no_ticket_keys",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.name",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.image",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.command",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.port",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.ready",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.credential",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.upstream",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.shape",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.login",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.price.input_per_mtok",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "float",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.price.output_per_mtok",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "float",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "providers.*.models",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.models.id",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "providers.*.models",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.models.name",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "providers.*.models",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.models.context",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "providers.*.models",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.models.output",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "providers.*.models",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.models.reasoning",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "providers.*.models",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "providers.*.models.attachment",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "memory.promote_at",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "supervision.checks",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "supervision.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "supervision.dependency_inputs.*",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "supervision.max_snapshot_bytes",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "review.max_diff_lines",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "review.max_files",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "notify.contact",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.enabled",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.base_url",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.model",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.dim",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "embed.api_key_file",
+      "path": "secret_file",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.provider",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.batch",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.min_similarity",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "float",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "external.enabled",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "external.idle_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "external.repo_roots",
+      "path": "root",
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "docs.export_dir",
+      "path": "write_dir",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.export_channel",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.export_every_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.preview_listen",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.preview_url",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "launch.plugins",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "ui.opencode_listen",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "ui.opencode_url",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": true,
+      "key": "ui.opencode_bundle_dir",
+      "path": "managed_dir",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "auth.public_origin",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "auth.trusted_proxies",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    }
+  ],
+  "document": {
+    "node_name": "laptop",
+    "harness": {
+      "id": "claude",
+      "version": "2.5.0"
+    },
+    "session": {
+      "budget_tokens": 2000000,
+      "default_channel": "personal"
+    },
+    "review": {
+      "max_diff_lines": 4000,
+      "max_files": 120
+    },
+    "publish": {
+      "gh": "/usr/bin/gh"
+    },
+    "github": {
+      "dispatch": {
+        "op/homelab": [
+          "renovate.yaml"
+        ]
+      }
+    },
+    "mesh": {
+      "hub_url": "https://hub.example.net"
+    },
+    "notify": {
+      "contact": "mailto:op@example.com"
+    },
+    "service": [
+      {
+        "name": "browser",
+        "image": "ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a",
+        "port": 9222,
+        "ready": "/json/version"
+      }
+    ]
+  },
+  "effective": {
+    "auth": {
+      "trusted_proxies": []
+    },
+    "boundary": {
+      "gateway_container": "tracon-gw",
+      "gateway_image": "localhost/tracon-gateway",
+      "gateway_ip": "10.89.0.2",
+      "harness_image": "localhost/tracon-harness-opencode",
+      "network": "tracon-int",
+      "podman": "",
+      "start_machine": true,
+      "stop_timeout_secs": 10,
+      "subnet": "10.89.0.0/24"
+    },
+    "consulta": {
+      "args": [
+        "run",
+        "--project",
+        "/home/op/src/consulta",
+        "consulta"
+      ],
+      "command": "uv",
+      "timeout_secs": 60
+    },
+    "docs": {
+      "export_channel": "",
+      "export_every_secs": 1800,
+      "preview_listen": "127.0.0.1:7422"
+    },
+    "embed": {
+      "base_url": "http://127.0.0.1:8080",
+      "batch": 16,
+      "dim": 1024,
+      "enabled": false,
+      "min_similarity": 0.45,
+      "model": "bge-m3",
+      "timeout_secs": 60
+    },
+    "external": {
+      "enabled": false,
+      "idle_timeout_secs": 3600,
+      "repo_roots": [
+        "~/src"
+      ]
+    },
+    "gateway": {
+      "allow_hosts": [
+        "^api\\.anthropic\\.com$",
+        "^api\\.openai\\.com$",
+        "^chatgpt\\.com$",
+        "^auth\\.openai\\.com$"
+      ],
+      "egress_port": 7424,
+      "forward_port": 7421,
+      "harness_listen": "/run/user/1000/tracon/harness.sock",
+      "proxy_port": 8888,
+      "qa_proxy_port": 8890
+    },
+    "github": {
+      "dispatch": {
+        "op/homelab": [
+          "renovate.yaml"
+        ]
+      }
+    },
+    "harness": {
+      "id": "claude",
+      "tools": [],
+      "version": "2.5.0"
+    },
+    "launch": {
+      "plugins": []
+    },
+    "memory": {
+      "promote_at": "02:00"
+    },
+    "mesh": {
+      "command_timeout_secs": 15,
+      "heartbeat_secs": 60,
+      "poll_secs": 30,
+      "renew_credentials": false,
+      "stream_idle_secs": 120,
+      "stream_max_body_bytes": 8388608,
+      "stream_max_concurrent": 16,
+      "stream_max_response_bytes": 268435456,
+      "stream_open_timeout_secs": 30,
+      "hub_url": "https://hub.example.net"
+    },
+    "node_name": "laptop",
+    "notify": {
+      "contact": "mailto:op@example.com"
+    },
+    "publish": {
+      "commits": "squash",
+      "forge_timeout_secs": 15,
+      "gh": "/usr/bin/gh",
+      "git": "git",
+      "glab": "glab",
+      "style": {}
+    },
+    "review": {
+      "max_diff_lines": 4000,
+      "max_files": 120
+    },
+    "runtime": {
+      "approved_images": [],
+      "kind": "podman",
+      "kubernetes": {
+        "gateway_host": "tracon-gw",
+        "harness_home": "/home/harness",
+        "harness_image": "ghcr.io/cosmicspork/tracon-harness-opencode:0.32.0",
+        "image_pull_secrets": [],
+        "internal_cidrs": [],
+        "namespace": "",
+        "resources": {
+          "command": {},
+          "session": {}
+        },
+        "shm_size": "1Gi",
+        "start_timeout_secs": 900,
+        "state_claim": "tracon-state",
+        "state_mount": "/state",
+        "uid": 65532
+      }
+    },
+    "service": [
+      {
+        "name": "browser",
+        "image": "ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a",
+        "port": 9222,
+        "ready": "/json/version"
+      }
+    ],
+    "session": {
+      "approval_expiry_secs": 86400,
+      "budget_tokens": 2000000,
+      "claim_grace_secs": 60,
+      "default_channel": "personal",
+      "harness_api_timeout_secs": 30,
+      "permission_timeout_secs": 900,
+      "pty_buffer_frames": 256,
+      "pty_capture_output": false,
+      "suspend_published_after_secs": 1800,
+      "worktree_root": "/home/op/.local/state/tracon/worktrees"
+    },
+    "supervision": {
+      "checks": [
+        "just check"
+      ],
+      "dependency_inputs": {},
+      "max_snapshot_bytes": 536870912,
+      "timeout_secs": 900
+    },
+    "ui": {
+      "opencode_listen": "127.0.0.1:7423"
+    }
+  },
+  "toml": "node_name = \"laptop\"\n\n[harness]\nid = \"claude\"\nversion = \"2.5.0\"\n\n[session]\nbudget_tokens = 2000000\ndefault_channel = \"personal\"\n\n[review]\nmax_diff_lines = 4000\nmax_files = 120\n\n[publish]\ngh = \"/usr/bin/gh\"\n\n[github.dispatch]\n\"op/homelab\" = [\"renovate.yaml\"]\n\n[mesh]\nhub_url = \"https://hub.example.net\"\n\n[notify]\ncontact = \"mailto:op@example.com\"\n\n[[service]]\nname = \"browser\"\nimage = \"ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a\"\nport = 9222\nready = \"/json/version\"\n",
+  "hash": "28d011898668fb6ed96ed2222530ced994a44a4301b921d2078dfe011e8dab24",
+  "redacted": "<redacted>"
+}

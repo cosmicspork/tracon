@@ -135,7 +135,7 @@
             {#if item.digest}<span class="mono dim">{item.digest.slice(0, 8)}</span>{/if}
             <button
               class="btn"
-              disabled={!local || busy !== ''}
+              disabled={busy !== ''}
               onclick={() => remove(item.kind, item.name)}>Remove</button
             >
             {#each item.warnings as w (w)}<small class="warn">{w}</small>{/each}
@@ -160,10 +160,10 @@
       {#each notes as n (n.name)}
         <div class="note-row">
           <span class="name">{n.name}</span>
-          <button class="btn" disabled={!local || busy !== ''} onclick={() => editNote(n.name, n.body)}
+          <button class="btn" disabled={busy !== ''} onclick={() => editNote(n.name, n.body)}
             >Edit</button
           >
-          <button class="btn" disabled={!local || busy !== ''} onclick={() => remove(n.kind, n.name)}
+          <button class="btn" disabled={busy !== ''} onclick={() => remove(n.kind, n.name)}
             >Remove</button
           >
           <p class="body">{n.body}</p>
@@ -171,13 +171,12 @@
       {/each}
       <label>
         <span>Name</span>
-        <input bind:value={noteName} disabled={!local} spellcheck="false" placeholder="house-style" />
+        <input bind:value={noteName} spellcheck="false" placeholder="house-style" />
       </label>
       <label>
         <span>Note</span>
         <textarea
           bind:value={noteBody}
-          disabled={!local}
           rows="4"
           placeholder="Prefer small commits. Ask before adding a dependency."
         ></textarea>
@@ -185,7 +184,7 @@
       <div class="acts">
         <button
           class="btn p"
-          disabled={!local || busy !== '' || noteName.trim() === '' || noteBody.trim() === ''}
+          disabled={busy !== '' || noteName.trim() === '' || noteBody.trim() === ''}
           onclick={saveNote}>{busy === 'note' ? 'Saving…' : 'Save note'}</button
         >
       </div>
@@ -200,7 +199,7 @@
         placeholder="/path/to/skill-package, or /path#git-rev"
       />
       <small>
-        A directory on this machine holding a SKILL.md. A URL is refused: the node stages bytes it
+        A directory on the node's own machine holding a SKILL.md, so this is done there. A URL is refused: the node stages bytes it
         has read, never a fetch the harness makes. Skill content is code — its scripts run in the
         runner and its body is also a slash command.
       </small>

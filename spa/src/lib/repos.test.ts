@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { acceptsUploads, blankForm, buildLine, canonical, lines, problems, toEntry, toForm, words } from './repos'
+import { acceptsUploads, blankForm, buildLine, canonical, lines, problems, repoOps, toEntry, toForm, words } from './repos'
 import type { RepoEntry, RepoImageBuild } from './types'
 
 const presets: [string, string[]][] = [
@@ -132,4 +132,43 @@ test('a build reads as what it is and how it stands', () => {
     'session image (claude) · ready',
   )
   expect(buildLine({ ...build, kind: 'trial' })).toBe('image tried by a session from origin/main 5a2bcd4d15b3 · ready')
+})
+
+test('a repository save is per-entry operations, and an untouched table sends none', () => {
+  const seeded: RepoEntry[] = [
+    { path: '/src/a', dockerfile: '.devcontainer/Dockerfile', prepare: ['cargo fetch'], egress: ['crates'], commits: 'keep', style: { conventional: true } },
+    { path: '/src/b', prepare: [], egress: [] },
+    // Written with what the form does not say (a zero timeout is the default).
+    { path: '/src/c', prepare: [], egress: [], timeout_secs: 0 },
+  ]
+  const forms = () => seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
+  expect(repoOps(seeded, forms())).toEqual([])
+
+  // One field: one set, at its index; what the form does not edit is untouched.
+  const egress = forms()
+  egress[0].egress = 'crates npm'
+  egress[1].sessionEgress = false
+  expect(repoOps(seeded, egress)).toEqual([{ op: 'set', key: 'repo[0].egress', value: ['crates', 'npm'] }])
+
+  // Switching a source takes the old key out and writes the new one.
+  const pinned = forms()
+  pinned[0].source = 'image'
+  pinned[0].image = 'localhost/tc@sha256:abc'
+  expect(repoOps(seeded, pinned)).toEqual([
+    { op: 'remove', key: 'repo[0].dockerfile' },
+    { op: 'set', key: 'repo[0].image', value: 'localhost/tc@sha256:abc' },
+  ])
+
+  // Remove b, add d first, keep a and c: removal, insert, then the order.
+  const all = forms()
+  const fresh = { ...blankForm(), path: '/src/d', source: 'harness' as const }
+  expect(repoOps(seeded, [fresh, all[2], all[0]])).toEqual([
+    { op: 'remove', key: 'repo[1]' },
+    { op: 'insert', array: 'repo', entry: { path: '/src/d', prepare: [], egress: [] } },
+    { op: 'reorder', array: 'repo', order: [2, 1, 0] },
+  ])
+
+  // Moving an entry is a reorder alone.
+  const swapped = forms()
+  expect(repoOps(seeded, [swapped[1], swapped[0], swapped[2]])).toEqual([{ op: 'reorder', array: 'repo', order: [1, 0, 2] }])
 })
