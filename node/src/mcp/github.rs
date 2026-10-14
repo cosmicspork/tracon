@@ -464,10 +464,6 @@ pub async fn call(
                 .and_then(Value::as_str)
                 .filter(|s| s.len() >= 7)
                 .ok_or("head_sha is required")?;
-            let pr = gh.get(&format!("{base}/pulls/{n}")).await?;
-            if pr["head"]["sha"].as_str() != Some(head_sha) {
-                return Err("pull request head changed since the authorized revision".into());
-            }
             let method = args
                 .get("method")
                 .and_then(Value::as_str)
@@ -475,17 +471,41 @@ pub async fn call(
             if !matches!(method, "merge" | "squash" | "rebase") {
                 return Err("method must be merge, squash, or rebase".into());
             }
-            if let Some(recheck) = before_mutation {
-                recheck()?;
+            // Merges into one repository run one at a time, so a batch of
+            // approvals does not race itself into GitHub's "Base branch was
+            // modified". A merge from elsewhere can still land in between;
+            // that answer means nothing was merged, so it is retried while
+            // the head is still the authorized one.
+            let lock = merge_lock(&base);
+            let _held = lock.lock().await;
+            let mut attempt = 0;
+            loop {
+                let pr = gh.get(&format!("{base}/pulls/{n}")).await?;
+                if pr["head"]["sha"].as_str() != Some(head_sha) {
+                    return Err("pull request head changed since the authorized revision".into());
+                }
+                if let Some(recheck) = before_mutation {
+                    recheck()?;
+                }
+                match gh
+                    .put(
+                        &format!("{base}/pulls/{n}/merge"),
+                        &json!({ "sha": head_sha, "merge_method": method }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        return Ok(
+                            json!({ "merged": v["merged"], "sha": v["sha"], "message": v["message"] }),
+                        )
+                    }
+                    Err(e) if base_moved(&e) && attempt < MERGE_RETRIES => {
+                        attempt += 1;
+                        tokio::time::sleep(MERGE_RETRY_AFTER * attempt).await;
+                    }
+                    Err(e) => return Err(mutation_outcome_error(e)),
+                }
             }
-            let v = gh
-                .put(
-                    &format!("{base}/pulls/{n}/merge"),
-                    &json!({ "sha": head_sha, "merge_method": method }),
-                )
-                .await
-                .map_err(mutation_outcome_error)?;
-            Ok(json!({ "merged": v["merged"], "sha": v["sha"], "message": v["message"] }))
         }
         RUN_STATUS if args.get("run_id").is_some() => {
             let run = positive(args, "run_id")?;
@@ -632,6 +652,31 @@ pub async fn call(
         }
         other => Err(format!("no github tool named {other}")),
     }
+}
+
+/// How many times `pr_merge` tries again after GitHub answers that the base
+/// branch moved under it, and how long it waits before the first retry (each
+/// later one waits that much longer).
+const MERGE_RETRIES: u32 = 3;
+const MERGE_RETRY_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// One merge at a time per repository, keyed by its API base.
+fn merge_lock(base: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    type Locks =
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: std::sync::LazyLock<Locks> = std::sync::LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap()
+        .entry(base.to_string())
+        .or_default()
+        .clone()
+}
+
+/// GitHub's answer when another merge moved the base during this one: nothing
+/// was merged, so the same request may be sent again.
+fn base_moved(error: &str) -> bool {
+    error.starts_with("github answered 405") && error.contains("Base branch was modified")
 }
 
 /// How often `run_wait` reads the run while it holds.
@@ -1099,6 +1144,19 @@ fn mutation_outcome_error(error: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_moved_base_is_retried() {
+        assert!(base_moved(
+            "github answered 405 Method Not Allowed: \"Base branch was modified. Review and try the merge again.\""
+        ));
+        assert!(!base_moved(
+            "github answered 405 Method Not Allowed: \"Pull Request is not mergeable\""
+        ));
+        assert!(!base_moved(
+            "github answered 409 Conflict: \"Head branch was modified\""
+        ));
+    }
 
     #[test]
     fn a_repo_is_owner_and_name_and_nothing_else() {
