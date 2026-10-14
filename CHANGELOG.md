@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.33.0](https://github.com/cosmicspork/tracon/compare/v0.32.0...v0.33.0) (2026-10-14)
+
+
+### Features
+
+* **api:** edit every node.toml key remotely ([#496](https://github.com/cosmicspork/tracon/issues/496)) ([90b028a](https://github.com/cosmicspork/tracon/commit/90b028ac9bb285c460b490670d57c6372db3a264))
+* **auth:** approve a sign-in or admin action from another browser ([#493](https://github.com/cosmicspork/tracon/issues/493)) ([ef1414b](https://github.com/cosmicspork/tracon/commit/ef1414bcd1427ef7d582c5138cf8b5dc3ff1e675))
+* **auth:** enroll passkeys at pairing and confirm admin actions with one ([#488](https://github.com/cosmicspork/tracon/issues/488)) ([684f41b](https://github.com/cosmicspork/tracon/commit/684f41b142a7f5ec9ea6fcebbda6b1d841c9875e))
+* **config:** refuse executable and file paths an agent could write ([#494](https://github.com/cosmicspork/tracon/issues/494)) ([b239d40](https://github.com/cosmicspork/tracon/commit/b239d402ad0c9bf294ba4eea67b034a580ca50dd))
+* **kube:** build repository images with BuildKit and push them to a registry ([#485](https://github.com/cosmicspork/tracon/issues/485)) ([587a963](https://github.com/cosmicspork/tracon/commit/587a96356bb63f21597aa17fdfee1342bc882ecf))
+* **kube:** carry lent credentials in a per-run Secret ([#481](https://github.com/cosmicspork/tracon/issues/481)) ([16a32a6](https://github.com/cosmicspork/tracon/commit/16a32a6e1e71a590ec49320157b9b91c73c11e77))
+* **kube:** per-client egress grants for harness pods ([#486](https://github.com/cosmicspork/tracon/issues/486)) ([1a7d6fc](https://github.com/cosmicspork/tracon/commit/1a7d6fcb4f2be066b0d88042c7ddc3314a68a0d6))
+* **kube:** size harness pods, name pull secrets, and give browsers shared memory ([#482](https://github.com/cosmicspork/tracon/issues/482)) ([683d3f5](https://github.com/cosmicspork/tracon/commit/683d3f5dd0dd066ed846fd031ebe1758869bc260))
+* **mesh:** offer repository recipes to peers for confirmation ([#491](https://github.com/cosmicspork/tracon/issues/491)) ([af7a25e](https://github.com/cosmicspork/tracon/commit/af7a25e1c8eb2ea7a716f7f08d5f646b59566ece))
+* **mesh:** read and patch a peer's configuration from an admin node ([#498](https://github.com/cosmicspork/tracon/issues/498)) ([083721e](https://github.com/cosmicspork/tracon/commit/083721ef07edc2a28190ec5f680f228c0a3958a9))
+* **node:** reload what can be reloaded and restart safely, including on Kubernetes ([#495](https://github.com/cosmicspork/tracon/issues/495)) ([562b99d](https://github.com/cosmicspork/tracon/commit/562b99d803f3bb514ec98b55e88a3c8a23feaee6))
+* **session:** layer OpenCode onto repository images ([#490](https://github.com/cosmicspork/tracon/issues/490)) ([32b8cd9](https://github.com/cosmicspork/tracon/commit/32b8cd9f0ebfc69d9c75387596b26d9e79735199))
+* **session:** run Kubernetes sessions in the repository's image ([#489](https://github.com/cosmicspork/tracon/issues/489)) ([6e9a3b5](https://github.com/cosmicspork/tracon/commit/6e9a3b562406cfd6ae6c53b3975298cefe10a13a))
+* **spa:** settings forms for every section, generated from the key schema ([#497](https://github.com/cosmicspork/tracon/issues/497)) ([a4ce87f](https://github.com/cosmicspork/tracon/commit/a4ce87f512bad879b3059cd6a0214ad80bdb5d1c))
+
+
+### Bug Fixes
+
+* **auth:** treat only a direct, loopback-addressed request as loopback ([#484](https://github.com/cosmicspork/tracon/issues/484)) ([023f376](https://github.com/cosmicspork/tracon/commit/023f3765f65a4301fddf804c43e34d05877ead62))
+* **github:** serialise pr_merge per repository and retry a moved base ([#480](https://github.com/cosmicspork/tracon/issues/480)) ([ad206c3](https://github.com/cosmicspork/tracon/commit/ad206c320578fb311692ed070e9c66d0cc678508))
+* **kube:** keep file modes and symlinks when moving workspaces ([#474](https://github.com/cosmicspork/tracon/issues/474)) ([2343d22](https://github.com/cosmicspork/tracon/commit/2343d222991a76fe2c4e3cd32c4f32a77f8d6d39))
+* **kube:** report real exit codes, deadlines and image pins for captured runs ([#471](https://github.com/cosmicspork/tracon/issues/471)) ([949d4de](https://github.com/cosmicspork/tracon/commit/949d4de54671016cfcdc0a57ef5d9fc64f8c69f9))
+* **mesh:** authorise the sender of every forwarded command and expire stale ones ([#473](https://github.com/cosmicspork/tracon/issues/473)) ([94e221c](https://github.com/cosmicspork/tracon/commit/94e221c7191944404849963ccd23ae83e24e56a5))
+* **notify:** get pushes past Apple and say why when they are refused ([#472](https://github.com/cosmicspork/tracon/issues/472)) ([f25cc12](https://github.com/cosmicspork/tracon/commit/f25cc124b6cc5c53021d427d92ebebff0169b61f))
+* **review:** keep a worktree branch that only looks like the node's placeholder ([#483](https://github.com/cosmicspork/tracon/issues/483)) ([bdf2358](https://github.com/cosmicspork/tracon/commit/bdf23587def42d4fa3db7dcaccc4e8d380ebcebf))
+* **session:** keep a repository image from configuring the Claude harness ([#492](https://github.com/cosmicspork/tracon/issues/492)) ([85c3d66](https://github.com/cosmicspork/tracon/commit/85c3d66ddcc81dab70a86078722d8847eca45dbc))
+
 ## [0.32.0](https://github.com/cosmicspork/tracon/compare/v0.31.2...v0.32.0) (2026-10-13)
 
 
