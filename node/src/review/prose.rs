@@ -297,10 +297,14 @@ pub fn ref_name(name: &str) -> bool {
         })
 }
 
-/// The node's placeholder for a session that named no branch. Never a name
-/// worth shipping.
+/// The node's placeholder for a session that named no branch: `feat/tracon-`
+/// and the last 12 hex digits of the session's id. Never a name worth
+/// shipping. Only that exact shape counts, so a branch someone named
+/// `feat/tracon-node-secrets` keeps its name.
 pub fn placeholder_branch(branch: &str) -> bool {
-    branch.starts_with("feat/tracon-")
+    branch.strip_prefix("feat/tracon-").is_some_and(|slug| {
+        slug.len() == 12 && slug.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// The commit message a squash carries when nobody wrote one: the change's
@@ -410,6 +414,22 @@ mod tests {
             "", "a b", "a..b", "-x", "a/.b", "a.lock", "a/", "x~1", "a//b",
         ] {
             assert!(!ref_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_the_nodes_own_branch_is_a_placeholder() {
+        let id = uuid::Uuid::now_v7().to_string();
+        let slug = id.split('-').next_back().unwrap();
+        assert!(placeholder_branch(&format!("feat/tracon-{slug}")));
+        for named in [
+            "feat/tracon-node-secrets-storage",
+            "feat/tracon-",
+            "feat/tracon-0123456789abc",
+            "feat/tracon-0123456789AB",
+            "fix/tracon-0123456789ab",
+        ] {
+            assert!(!placeholder_branch(named), "{named}");
         }
     }
 
