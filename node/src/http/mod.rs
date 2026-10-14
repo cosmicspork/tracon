@@ -1386,10 +1386,21 @@ mod tests {
         assert!(tokio::net::UnixStream::connect(&path).await.is_ok());
 
         // Nothing answers once the first listener is gone: the stale path is
-        // replaced.
+        // replaced. A child another test thread is forking holds a copy of the
+        // listener until it execs (commands with their own `PATH` are forked
+        // rather than spawned, and fork is slow on macOS), so allow it that.
         drop(first);
         assert!(path.exists());
-        let _second = bind_unix_exclusive(&path).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let _second = loop {
+            match bind_unix_exclusive(&path) {
+                Ok(listener) => break listener,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("{e:#}"),
+            }
+        };
         assert!(tokio::net::UnixStream::connect(&path).await.is_ok());
     }
 
