@@ -260,6 +260,36 @@ path, whether it exists) is not answered to a cookie alone; its refusals come ba
 `422` with each refused key and its reason. An edit that touches `[[repo]]` moves the
 live table with the file, as the repository editor does.
 
+**A peer's `node.toml`.** `GET` and `PATCH /api/nodes/{id}/config` are the same two
+routes for another node, over the mesh (`ConfigRead`, `ConfigPatch`). The peer answers
+only if its own `[mesh] admin_peers` names the asking node: a peer's settings are
+visible and editable only from nodes it names there. Otherwise the refusal says so
+(`not_admin_peer`) and the interface shows why, and nothing of the file. A read returns exactly what the peer's own `GET /api/config`
+would. An edit is decided first on the asking node against the file as the peer shows
+it: the version it names, the characters it holds (none a prompt could not show), keys
+a peer may change, and the prompt, worked out from that file by the same code and
+prefixed `On <peer name> (<first 8 of its id>…): ` within the same 600 characters (the
+name is the peer's own word; the id is not). A peer may change everything a remote edit
+with the node's own passkey may, except who may reach or administer the node and where
+it sends its credentials (`config_schema::NOT_BY_PEER`): all of `[auth]` and `[mesh]`
+(`admin_peers` and the hub among them), a provider's `upstream`, `credential` and
+`login`, and the embedding `base_url` and `api_key_file`. Those, and the host-only
+keys, are changed at the node, or remotely with its own passkey; a peer that could
+change them could strand the node's own operator, keep its grant past its removal, or
+send a credential to a host of its choosing. Then it is confirmed there (a passkey off that node's machine),
+and the asking node signs an admin statement for exactly that edit on exactly that
+peer (see [Mesh frames](#mesh-frames)). The peer checks the statement, then runs the
+edit as its own `PATCH` would, as an editor held to the same exceptions: the
+version, the operations, the keys, the path guard against its own host, the audit row
+(actor `peer <id> for <operator session>`, or `for local`), the push, and the live keys
+applied at once. An edit is never queued: a peer that is away is refused at once, and
+one that arrives after its two minutes is refused there. A peer's refusal is relayed
+as the peer's, never as the asking node's own answer: `peer_refused`, the peer's message
+cleaned and capped beneath the asking node's line, its kind and fields as data, a
+conflict's hash only if it is one, and a status other than `404`, `409`, `412`, `422`
+or `428` turned into `403` or `502`, so a peer cannot have the interface ask for a
+passkey or a sign-in by answering `step_up_required` or `401`.
+
 The routes that wrote `node.toml` (or what a harness runs) at the machine only are admin
 actions now, confirmed the same way, each with a prompt the node words from its body.
 The Settings save (`PUT /api/config`) and the repository table each require the `hash`
@@ -1214,7 +1244,9 @@ before the policy is consulted for the same reason.
 their runner/owner and ordinary channel. Mesh handlers authenticate both channel
 memberships, verify the candidate's actual channel and owner, refuse third-node
 relays, and bound responses. Peer UI detail is read-only; it never turns a remote
-ID into a local action.
+ID into a local action. A peer's settings (its `node.toml` and its provider sign-ins)
+are visible and editable only from nodes it names in its `[mesh] admin_peers`; each
+change is confirmed on your node and checked again on the peer.
 
 **What is reviewed is the tree; the commits and the branch are prose.** The
 candidate is a tree hash recorded at capture, and every check, verdict and grant
@@ -1410,13 +1442,40 @@ Invariants on top of the wire:
   answer, kill, pause or resume runs, the owner checks that the session (or the
   permission's or approval's session or channel) is its own and that the sender and
   the owner are both members of that channel, by the owner's own record. It never
-  relays a command on to a third node under its own identity. A provider sign-in
-  needs the sender in every channel it would bind and in every channel served by the
-  credential it would replace (one bound to no channel is the owner's alone and never
-  replaced by a peer); a pasted code or a cancel is held to the
-  channels of the sign-in the sender started. Create, verdict, notification, evidence
+  relays a command on to a third node under its own identity. A provider sign-in,
+  a pasted code and a sign-out are admin commands: the owner runs one only for a
+  peer its own `[mesh] admin_peers` names, carrying an admin statement its
+  operator confirmed for exactly that command on the owner (below). The pasted
+  code that finishes a sign-in the sender started with a confirmed connect rides on
+  that connect's statement (only that sign-in, from that sender, while it waits and
+  for at most 15 minutes); a code for any other sign-in needs its own. Then the
+  sign-in still needs the sender in every channel it would bind and in every
+  channel served by the credential it would replace (one bound to no channel is the
+  owner's alone and never replaced by a peer); a pasted code or a cancel is held to
+  the channels of the sign-in the sender started. Create, verdict, notification, evidence
   and review-detail commands check their own channel as they run. A refusal is acked
   to the sender with its reason, logged, and shown as the mesh's last refusal.
+- **A peer administers a node only with the operator's confirmation, made where
+  the operator is.** An admin command from a peer (a provider sign-in, a read or
+  edit of `node.toml`) runs only if the owner's `[mesh] admin_peers` names the
+  sender. Every one but a read also carries an admin statement
+  (`spec/README.md`): the sending node's operator confirmed exactly that command on
+  exactly that owner with the sender's passkey (at the sender's own machine, by
+  being there), and the sender signed what was confirmed, the line its prompt
+  showed included, with its node key. The owner checks the signature against the
+  sender's node id, that the statement names it and the command it is about to run,
+  that it is no older than two minutes, and spends it once. The owner never sees the
+  passkey and never trusts the sender's description of the command: the statement
+  binds the command's own bytes. No peer changes who may reach or administer a node
+  or where it sends its credentials (`[auth]`, `[mesh]` with `admin_peers`, a
+  provider's upstream, credential and sign-in, the embedding endpoint and key).
+- **A key handoff is taken only from a member.** A peer's `key_handoff` lands only
+  for a channel the sender is a member of by the receiver's record (asked of the
+  hub once more if the record lacks it, at most once a minute per sender), since a
+  key from anyone else would add an epoch the receiver then seals the channel's
+  frames under. It carries the channel's shared bindings; the ones a node keeps
+  for itself (`external_stopped`, `external_paused`, `notify`) are never taken
+  from it.
 - **A command expires when its sender stops waiting.** A command sent with a
   timeout carries `not_after_ms`; past it (with 30 seconds' leeway for clock skew)
   the owner refuses it unrun, so a command the operator was told failed never runs
@@ -1979,8 +2038,11 @@ Three surfaces, three answers, and the differences are the point.
   allowing a repository setup proposal (it writes the `[[repo]]` entry),
   allowing a Dockerfile trial (a networked build outside the boundary), and
   allowing an egress host for the repository. A peer cannot answer one of
-  those over the mesh; the gate is per node, and peer commands are still
-  authorised by channel membership. Each handler takes an `AdminAction` extractor, which
+  those over the mesh; the gate is per node. Most peer commands are authorised
+  by channel membership; the admin ones (a peer's provider sign-ins and its
+  `node.toml`) need the peer to name the sender in its `[mesh] admin_peers`
+  and a statement the sender's operator confirmed with the sender's passkey
+  (see [Mesh frames](#mesh-frames)). Each handler takes an `AdminAction` extractor, which
   reads the body once and hashes the request it is about to run:
   `op_hash = sha256("tracon-admin-op/1" | method | path and query | If-Match |
   sha256(body))`. Without a proof for exactly that hash the request is refused

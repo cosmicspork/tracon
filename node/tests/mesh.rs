@@ -546,6 +546,8 @@ async fn a_frame_that_precedes_its_key_is_held_and_applied_when_the_key_lands() 
     )
     .await
     .unwrap();
+    // B takes a key only from a member of the channel by its own record.
+    b.client.refresh_members().await.unwrap();
     assert!(b.client.pull_once().await.unwrap() >= 1);
     let mirrored = b.store.get_session("s1").unwrap().unwrap();
     assert_eq!(mirrored.node_id, a.id.node_id());

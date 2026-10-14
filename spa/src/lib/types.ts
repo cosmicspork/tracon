@@ -1648,11 +1648,21 @@ export interface ConfigKeySpec {
       state mount). */
   editable_at_node?: boolean
   why_not?: string
+  /** False for a key no peer changes, even one the node lets administer it
+      (`[auth]`, `[mesh]`, where credentials go, and host-only keys), with why. */
+  editable_by_peer?: boolean
+  why_not_by_peer?: string
   /** What the key holds, traced from the structs that read it. */
   shape?: ConfigShape
   /** The array of tables the key is a field of (`service`, `repo`,
       `providers.*.models`), whose entries are edited whole. */
   array?: string
+}
+
+/** A node's `node.toml` read through `GET /api/nodes/{id}/config`: what that
+    node's own `GET /api/config` shows, and which node it is. */
+export interface PeerNodeConfig extends NodeConfig {
+  node: { id: string; name: string; is_self: boolean }
 }
 
 /** What a key holds (`config_schema::Shape`). */

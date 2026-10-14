@@ -1524,6 +1524,21 @@ const MIGRATIONS: &[&str] = &[
         created_ms   INTEGER NOT NULL
     );
     "#,
+    // 65: admin statements a peer spent here (`mesh::admin`): a peer this
+    // node's `[mesh] admin_peers` names sends, with a config edit or a
+    // provider sign-in, a statement its operator confirmed with a passkey,
+    // and each is run once. A row is kept until its statement lapses, which
+    // is all a replay needs. Node-local, never synced.
+    r#"
+    CREATE TABLE mesh_admin_statement (
+        nonce      TEXT PRIMARY KEY,
+        issuer     TEXT NOT NULL,
+        op_hash    TEXT NOT NULL,
+        spent_ms   INTEGER NOT NULL,
+        expires_ms INTEGER NOT NULL
+    );
+    CREATE INDEX mesh_admin_statement_expires ON mesh_admin_statement(expires_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

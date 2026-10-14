@@ -17,7 +17,7 @@
 //! runs the path guard, audits and announces it.
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -152,7 +152,11 @@ fn spec_json(spec: &config_schema::KeySpec) -> Value {
         "secret": spec.secret,
         "editable": !spec.host_only,
         "editable_at_node": !spec.host_only || config_schema::editable_at_node(spec.key),
+        "editable_by_peer": refused_to(&spec.key.split('.').collect::<Vec<_>>(), Editor::Peer).is_none(),
     });
+    if let Some(why) = config_schema::peer_refusal(&spec.key.split('.').collect::<Vec<_>>()) {
+        v["why_not_by_peer"] = json!(why);
+    }
     if spec.host_only {
         v["why_not"] = json!(config_schema::host_only_reason(spec.key));
     }
@@ -173,6 +177,13 @@ fn spec_json(spec: &config_schema::KeySpec) -> Value {
 /// them. `toml` is rendered from the redacted document rather than sent as
 /// written: a comment can hold anything, a commented-out key among it.
 pub async fn get_config(State(s): State<AppState>) -> Result<Json<Value>, Refused> {
+    view(&s).map(Json)
+}
+
+/// What `GET /api/config` answers. An admin peer's `ConfigRead` is answered
+/// with exactly this, so a peer sees no more of the file than this node's
+/// own Settings pane does.
+pub(crate) fn view(s: &AppState) -> Result<Value, Refused> {
     let path = Config::config_path();
     let (text, hash) = edit::read_text(&path).map_err(edit_refusal)?;
     let snapshot = edit::snapshot_at(&path).map_err(edit_refusal)?;
@@ -217,7 +228,7 @@ pub async fn get_config(State(s): State<AppState>) -> Result<Json<Value>, Refuse
     v["toml"] = json!(rendered);
     v["redacted"] = json!(REDACTED);
     v["keys"] = KEYS.iter().map(spec_json).collect();
-    Ok(Json(v))
+    Ok(v)
 }
 
 #[derive(Deserialize)]
@@ -227,7 +238,57 @@ struct PatchBody {
     /// instead; one of the two is required.
     #[serde(default)]
     expected_hash: Option<String>,
-    ops: Vec<PatchOp>,
+    /// [`PatchOp`]s, read by [`parse_ops`]. Kept as sent, because an edit
+    /// of a peer is confirmed (and its statement bound) to these very values.
+    ops: Vec<Value>,
+}
+
+/// A request's operations as `config::edit` takes them: at least one, at
+/// most [`MAX_OPS`], each reading as a [`PatchOp`]; or what is wrong.
+fn parse_ops(raw: &[Value]) -> Result<Vec<Op>, Refused> {
+    if raw.is_empty() {
+        return Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "no operations".into(),
+            &[],
+        ));
+    }
+    if raw.len() > MAX_OPS {
+        return Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            format!("at most {MAX_OPS} operations in one edit"),
+            &[],
+        ));
+    }
+    let mut typed = Vec::with_capacity(raw.len());
+    let mut errors = Vec::new();
+    for (i, op) in raw.iter().enumerate() {
+        match serde_json::from_value::<PatchOp>(op.clone()) {
+            Ok(op) => typed.push(op),
+            Err(e) => errors.push(KeyError {
+                key: format!("ops[{i}]"),
+                message: e.to_string(),
+            }),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "an operation does not read".into(),
+            &errors,
+        ));
+    }
+    ops_of(&typed).map_err(|errors| {
+        refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "an operation does not read".into(),
+            &errors,
+        )
+    })
 }
 
 /// One operation, as the API spells it. Keys are written as `node.toml`'s
@@ -375,13 +436,40 @@ fn names_a_secret(ops: &[Op]) -> bool {
     })
 }
 
-/// Whether `key` (an exact schema key) may not be changed by this caller,
+/// Who is making an edit, which decides the keys it may change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Editor {
+    /// The operator at the node's own machine.
+    Local,
+    /// The operator elsewhere, confirmed with this node's passkey.
+    Remote,
+    /// An admin peer, its operator confirmed with that peer's passkey
+    /// (`mesh::admin`): everything a remote edit may change, but who may
+    /// administer this node.
+    Peer,
+}
+
+impl Editor {
+    fn of(req: &AdminRequest) -> Self {
+        match req.is_local() {
+            true => Editor::Local,
+            false => Editor::Remote,
+        }
+    }
+}
+
+/// Whether `key` (an exact schema key) may not be changed by this editor,
 /// and why.
-fn host_only(segs: &[&str], local: bool) -> Option<&'static str> {
+fn refused_to(segs: &[&str], editor: Editor) -> Option<&'static str> {
+    if editor == Editor::Peer {
+        if let Some(why) = config_schema::peer_refusal(segs) {
+            return Some(why);
+        }
+    }
     let spec = config_schema::lookup(segs);
     (spec.host_only && !spec.key.is_empty())
         .then_some(spec.key)
-        .filter(|key| !local || !config_schema::editable_at_node(key))
+        .filter(|key| editor != Editor::Local || !config_schema::editable_at_node(key))
         .map(config_schema::host_only_reason)
 }
 
@@ -389,7 +477,7 @@ fn host_only(segs: &[&str], local: bool) -> Option<&'static str> {
 /// the file is read: a key the node does not read, a secret's placeholder
 /// sent back as its value, a key only the host may change. The answer is
 /// the same whatever the file holds, so it tells a caller nothing about it.
-fn check_named(ops: &[Op], local: bool) -> Vec<KeyError> {
+fn check_named(ops: &[Op], editor: Editor) -> Vec<KeyError> {
     let mut errors = Vec::new();
     for (key, value) in named(ops) {
         let segs: Vec<&str> = key.iter().map(String::as_str).collect();
@@ -411,7 +499,7 @@ fn check_named(ops: &[Op], local: bool) -> Vec<KeyError> {
                 ),
             });
         }
-        if let Some(why) = host_only(&segs, local) {
+        if let Some(why) = refused_to(&segs, editor) {
             errors.push(KeyError {
                 key: shown.clone(),
                 message: format!("{shown} {why}"),
@@ -425,7 +513,7 @@ fn check_named(ops: &[Op], local: bool) -> Vec<KeyError> {
 /// does not read, or touch a host-only key, under a table the request set
 /// whole. Only what is new is looked at: an entry of an array of tables the
 /// edit leaves as it was is not the edit's doing.
-fn check_changes(changes: &[Change], local: bool) -> Vec<KeyError> {
+fn check_changes(changes: &[Change], editor: Editor) -> Vec<KeyError> {
     let mut errors = Vec::new();
     for change in changes {
         let at: Vec<String> = change
@@ -463,7 +551,7 @@ fn check_changes(changes: &[Change], local: bool) -> Vec<KeyError> {
         touched.push(at);
         for key in touched {
             let segs: Vec<&str> = key.iter().map(String::as_str).collect();
-            if let Some(why) = host_only(&segs, local) {
+            if let Some(why) = refused_to(&segs, editor) {
                 errors.push(KeyError {
                     key: change.key.to_string(),
                     message: format!("{} {why}", segs.join(".")),
@@ -593,19 +681,35 @@ pub(crate) fn read_expected(expected: &str) -> Result<(String, Config), Refused>
 /// for it (`config_prompt`). An edit whose sensitive keys do not all fit
 /// that line is refused, to be split.
 pub(crate) fn prompt(text: &str, ops: &[Op]) -> Result<(Vec<Change>, String), Refused> {
+    prompt_with(text, ops, super::config_prompt::summarize)
+}
+
+/// [`prompt`], in `budget` characters of the prompt's line: what is left of
+/// one once a peer's `On <peer>: ` has taken its share.
+fn prompt_within(text: &str, ops: &[Op], budget: usize) -> Result<(Vec<Change>, String), Refused> {
+    prompt_with(text, ops, |before, after, effective, changes| {
+        super::config_prompt::summarize_within(before, after, effective, changes, budget)
+    })
+}
+
+fn prompt_with(
+    text: &str,
+    ops: &[Op],
+    summarize: impl FnOnce(
+        &toml::Table,
+        &toml::Table,
+        &toml::Table,
+        &[Change],
+    ) -> Result<String, String>,
+) -> Result<(Vec<Change>, String), Refused> {
     let seen = edit::preview(text, ops).map_err(edit_refusal)?;
     let parse = |t: &str| toml::from_str::<toml::Table>(t).unwrap_or_default();
     let effective = edit::preview(text, &[])
         .ok()
         .and_then(|now| toml::Table::try_from(&now.config).ok())
         .unwrap_or_default();
-    let summary = super::config_prompt::summarize(
-        &parse(text),
-        &parse(&seen.text),
-        &effective,
-        &seen.changes,
-    )
-    .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
+    let summary = summarize(&parse(text), &parse(&seen.text), &effective, &seen.changes)
+        .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
     Ok((seen.changes, summary))
 }
 
@@ -669,39 +773,16 @@ pub async fn patch_config(
         )
     })?;
     let expected = expected_version(body.expected_hash.as_deref(), &req)?;
-    if body.ops.is_empty() {
-        return Err(refusal(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid",
-            "no operations".into(),
-            &[],
-        ));
-    }
-    if body.ops.len() > MAX_OPS {
-        return Err(refusal(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid",
-            format!("at most {MAX_OPS} operations in one edit"),
-            &[],
-        ));
-    }
-    let ops = ops_of(&body.ops).map_err(|errors| {
-        refusal(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid",
-            "an operation does not read".into(),
-            &errors,
-        )
-    })?;
-    let local = req.is_local();
-    let errors = check_named(&ops, local);
+    let ops = parse_ops(&body.ops)?;
+    let editor = Editor::of(&req);
+    let errors = check_named(&ops, editor);
     if !errors.is_empty() {
         return Err(refused_keys(&errors));
     }
 
     let (text, _) = read_expected(&expected)?;
     let (changes, summary) = prompt(&text, &ops)?;
-    let errors = check_changes(&changes, local);
+    let errors = check_changes(&changes, editor);
     if !errors.is_empty() {
         return Err(refused_keys(&errors));
     }
@@ -745,6 +826,330 @@ pub(crate) async fn restart_owed(s: &AppState, outcome: &edit::EditOutcome) -> (
         ),
         None => (outcome.restart_required, Value::Null),
     }
+}
+
+// ---------------------------------------------------------------------------
+// A peer's node.toml.
+//
+// The admin peer (A) reads and edits another node's (B's) file over the
+// mesh. B answers a read with exactly `view`, and runs an edit exactly as
+// `patch_config` does, as an editor that may not change `[mesh]
+// admin_peers`, once `mesh::admin` has admitted the statement A's operator
+// confirmed for it. Both answer `{status, body}`: the status and body the
+// same request made at B would have had, which A relays as its own answer.
+// ---------------------------------------------------------------------------
+
+/// A refusal as the `{status, body}` a peer relays.
+async fn relayed(refused: Refused) -> Value {
+    let response = refused.into_response();
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or(Value::Null);
+    json!({ "status": status, "body": body })
+}
+
+/// B: an admin peer's `ConfigRead`, admitted.
+pub(crate) async fn peer_read(s: &AppState) -> Value {
+    match view(s) {
+        Ok(body) => json!({ "status": 200, "body": body }),
+        Err(refused) => relayed(refused).await,
+    }
+}
+
+/// B: an admin peer's `ConfigPatch`, admitted (`mesh::admin::admit` checked
+/// and spent its statement), audited as `admitted` and announced as every
+/// save is.
+pub(crate) async fn peer_patch(
+    s: &AppState,
+    expected: &str,
+    raw: &[Value],
+    admitted: &crate::mesh::admin::Admitted,
+) -> Value {
+    match peer_patch_here(s, expected, raw, admitted).await {
+        Ok(body) => json!({ "status": 200, "body": body }),
+        Err(refused) => relayed(refused).await,
+    }
+}
+
+async fn peer_patch_here(
+    s: &AppState,
+    expected: &str,
+    raw: &[Value],
+    admitted: &crate::mesh::admin::Admitted,
+) -> Result<Value, Refused> {
+    // As a local PATCH: nothing a prompt could not show, decided before
+    // anything else, here as on the node that confirmed it.
+    refuse_hidden(&json!({ "expected_hash": expected, "ops": raw }))?;
+    let ops = parse_ops(raw)?;
+    let errors = check_named(&ops, Editor::Peer);
+    if !errors.is_empty() {
+        return Err(refused_keys(&errors));
+    }
+    let (text, _) = read_expected(expected)?;
+    let (changes, _) = prompt(&text, &ops)?;
+    let errors = check_changes(&changes, Editor::Peer);
+    if !errors.is_empty() {
+        return Err(refused_keys(&errors));
+    }
+    if changes.is_empty() && !names_a_secret(&ops) {
+        return Ok(json!({ "changed": [], "hash": expected, "restart_required": false }));
+    }
+    let outcome = edit::edit_live(&s.cfg, s.store(), &ops, Some(expected), &admitted.actor())
+        .map_err(edit_refusal)?;
+    tracing::info!(actor = %admitted.actor(), summary = %admitted.summary, "node.toml edited by an admin peer");
+    let (restart_required, pending) = restart_owed(s, &outcome).await;
+    Ok(json!({
+        "changed": outcome.changed(),
+        "old_hash": outcome.old_hash,
+        "hash": outcome.new_hash,
+        "restart_required": restart_required,
+        "pending_restart": pending,
+        "audit_id": outcome.audit_id,
+    }))
+}
+
+/// A refusal of a peer request in the shape every refusal has, with `kind`
+/// for a client to act on.
+fn peer_refusal(status: StatusCode, kind: &str, message: String) -> Refused {
+    refusal(status, kind, message, &[])
+}
+
+/// A: send `command` to peer `node_id` and relay what it answered. Never
+/// queued: a config command for a peer that is away is refused here, and one
+/// that reaches it late is refused there (`not_after_ms`).
+async fn on_peer(
+    s: &AppState,
+    node_id: &str,
+    command: proto::frame::Command,
+) -> Result<Value, Refused> {
+    use crate::mesh::forward::CommandError;
+    let mesh = s.mesh.as_ref().ok_or_else(|| {
+        peer_refusal(
+            StatusCode::CONFLICT,
+            "no_hub",
+            "no hub configured; this node cannot reach peers".into(),
+        )
+    })?;
+    let known = s
+        .store()
+        .get_node(node_id)
+        .ok()
+        .flatten()
+        .is_some_and(|row| row.is_self == 0);
+    if !known {
+        return Err(peer_refusal(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such peer".into(),
+        ));
+    }
+    if !mesh.peer_reachable(node_id) {
+        return Err(peer_refusal(
+            StatusCode::GATEWAY_TIMEOUT,
+            "unreachable",
+            "that node is unreachable; its configuration is read and changed only while it is \
+             connected, never queued, so try again when it returns"
+                .into(),
+        ));
+    }
+    let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+    let answer = mesh
+        .command(node_id, command, timeout)
+        .await
+        .map_err(|e| match e {
+            CommandError::OlderPeer { .. } => {
+                peer_refusal(StatusCode::CONFLICT, "older_build", e.to_string())
+            }
+            CommandError::Timeout => {
+                peer_refusal(StatusCode::GATEWAY_TIMEOUT, "timeout", e.to_string())
+            }
+            CommandError::Refused(m) if m.contains("admin_peers") => {
+                peer_refusal(StatusCode::FORBIDDEN, "not_admin_peer", m)
+            }
+            CommandError::Refused(m) if m.contains("older build") => {
+                peer_refusal(StatusCode::CONFLICT, "older_build", m)
+            }
+            CommandError::Refused(m) => peer_refusal(StatusCode::FORBIDDEN, "refused", m),
+            CommandError::Local(m) => {
+                peer_refusal(StatusCode::INTERNAL_SERVER_ERROR, "internal", m)
+            }
+        })?;
+    let status = answer["status"]
+        .as_u64()
+        .and_then(|n| u16::try_from(n).ok())
+        .and_then(|n| StatusCode::from_u16(n).ok());
+    match status {
+        Some(StatusCode::OK) => Ok(answer["body"].clone()),
+        Some(status) => Err(relay_refusal(
+            status,
+            &answer["body"],
+            &super::peer_admin::peer_label(s, node_id),
+        )),
+        None => Err(peer_refusal(
+            StatusCode::BAD_GATEWAY,
+            "peer_error",
+            "the peer's answer does not read".into(),
+        )),
+    }
+}
+
+/// The longest a peer's own words are relayed.
+const MAX_PEER_MESSAGE: usize = 600;
+
+/// A peer's refusal, as this node answers it: never its body as sent. A
+/// peer is not this node, and what it says must not pass for this node's
+/// own answer: a `401` or a `step_up_required` relayed whole would have this
+/// node's interface open a passkey prompt the peer worded. So it is always
+/// `peer_refused`, with the peer's message cleaned and capped beneath this
+/// node's own line, the peer's kind and fields as data, and, for a
+/// conflict, the peer's version (a hash, or nothing). Statuses an edit's
+/// refusal has (`404`, `409`, `412`, `422`, `428`) are kept so a form can
+/// act on them; any other becomes `403` (a refusal) or `502` (an error).
+fn relay_refusal(status: StatusCode, body: &Value, peer: &str) -> Refused {
+    let clean = |v: &Value, max: usize| {
+        v.as_str()
+            .map(|t| super::passkey::clean_text(t, max))
+            .unwrap_or_default()
+    };
+    let error = &body["error"];
+    let said = clean(&error["message"], MAX_PEER_MESSAGE);
+    let status = match status.as_u16() {
+        404 | 409 | 412 | 422 | 428 => status,
+        400..=499 => StatusCode::FORBIDDEN,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    let message = match said.is_empty() {
+        true => format!("{peer} refused the request"),
+        false => format!("{peer} refused: {said}"),
+    };
+    let mut out = json!({
+        "code": status.as_u16(),
+        "kind": "peer_refused",
+        "message": message,
+        "peer_kind": clean(&error["kind"], 64),
+    });
+    if let Some(fields) = error["fields"].as_array() {
+        out["fields"] = fields
+            .iter()
+            .take(MAX_OPS)
+            .map(|f| {
+                json!({
+                    "field": clean(&f["field"], 160),
+                    "message": clean(&f["message"], 300),
+                })
+            })
+            .collect();
+    }
+    let mut v = json!({ "error": out });
+    if let Some(hash) = body["hash"]
+        .as_str()
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        v["hash"] = json!(hash);
+    }
+    (status, Json(v)).into_response().into()
+}
+
+fn with_node(mut v: Value, s: &AppState, node_id: &str) -> Value {
+    v["node"] = json!({
+        "id": node_id,
+        "name": super::peer_admin::peer_label(s, node_id),
+        "is_self": node_id == s.node_id,
+    });
+    v
+}
+
+/// `GET /api/nodes/{id}/config`: that node's `node.toml`, as its own `GET
+/// /api/config` shows it, read over the mesh. A peer answers only if its
+/// `[mesh] admin_peers` names this node; otherwise the refusal says so
+/// (`not_admin_peer`).
+pub async fn get_node_config(
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<Value>, Refused> {
+    let v = match node_id == s.node_id {
+        true => view(&s)?,
+        false => on_peer(&s, &node_id, proto::frame::Command::ConfigRead).await?,
+    };
+    Ok(Json(with_node(v, &s, &node_id)))
+}
+
+/// `PATCH /api/nodes/{id}/config`: edit that node's `node.toml`, the body
+/// as `PATCH /api/config` takes it.
+///
+/// For a peer, decided here first, against the file as the peer shows it
+/// (`ConfigRead`): the request must read, the file must still be the version
+/// it names, and it must change only keys a peer may (not `[mesh]
+/// admin_peers`, nor a host-only key). The prompt lists what it changes there,
+/// worked out here from that file, as `On <peer>: ...` within one prompt's
+/// length. Then it is confirmed here (a passkey off this machine), this node
+/// signs what was confirmed, and the peer runs it only if it names this node
+/// in its `[mesh] admin_peers` and the statement holds for exactly this edit
+/// on it (`mesh::admin`). The peer checks everything again, against its own
+/// file and its own host.
+pub async fn patch_node_config(
+    State(s): State<AppState>,
+    Path(node_id): Path<String>,
+    req: AdminRequest,
+) -> Result<Json<Value>, Refused> {
+    if node_id == s.node_id {
+        return patch_config(State(s), req).await;
+    }
+    let raw: Value = req.json()?;
+    refuse_hidden(&raw)?;
+    let body: PatchBody = serde_json::from_value(raw).map_err(|e| {
+        refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            format!("the request body does not read: {e}"),
+            &[],
+        )
+    })?;
+    let expected = expected_version(body.expected_hash.as_deref(), &req)?;
+    let ops = parse_ops(&body.ops)?;
+    let errors = check_named(&ops, Editor::Peer);
+    if !errors.is_empty() {
+        return Err(refused_keys(&errors));
+    }
+    let current = on_peer(&s, &node_id, proto::frame::Command::ConfigRead).await?;
+    let hash = current["hash"].as_str().unwrap_or_default();
+    if hash != expected {
+        return Err(conflict(hash));
+    }
+    let text = current["toml"].as_str().unwrap_or_default();
+    let prefix = super::peer_admin::prefix(&s, &node_id);
+    let budget = super::passkey::MAX_SUMMARY.saturating_sub(prefix.chars().count());
+    let (changes, line) = prompt_within(text, &ops, budget)?;
+    let errors = check_changes(&changes, Editor::Peer);
+    if !errors.is_empty() {
+        return Err(refused_keys(&errors));
+    }
+    if changes.is_empty() && !names_a_secret(&ops) {
+        return Ok(Json(json!({
+            "changed": [],
+            "hash": expected,
+            "restart_required": false,
+        })));
+    }
+    let summary = format!("{prefix}{line}");
+    let op_hash = crate::mesh::admin::config_patch_op_hash(&node_id, &expected, &body.ops);
+    let statement = super::peer_admin::confirm(&s, req.parts(), &node_id, &op_hash, &summary)?;
+    let not_after_ms = statement.not_after_ms;
+    let answer = on_peer(
+        &s,
+        &node_id,
+        proto::frame::Command::ConfigPatch {
+            expected_hash: expected,
+            ops: body.ops,
+            statement,
+            not_after_ms,
+        },
+    )
+    .await?;
+    Ok(Json(with_node(answer, &s, &node_id)))
 }
 
 #[cfg(test)]
@@ -808,8 +1213,8 @@ mod tests {
     #[test]
     fn what_an_operation_names_is_checked_before_the_file_is_read() {
         let s = |v: &str| toml::Value::String(v.into());
-        assert!(check_named(&[op_set("publish.gh", s("/usr/bin/gh"))], false).is_empty());
-        let errors = check_named(&[op_set("publish.ghh", s("x"))], false);
+        assert!(check_named(&[op_set("publish.gh", s("/usr/bin/gh"))], Editor::Remote).is_empty());
+        let errors = check_named(&[op_set("publish.ghh", s("x"))], Editor::Remote);
         assert!(
             errors[0].message.contains("not a node.toml key"),
             "{}",
@@ -817,16 +1222,21 @@ mod tests {
         );
         // Inside a table set whole, and an entry inserted, too.
         let table = toml::Value::Table(toml::from_str("gh = \"gh\"\ntypo = 1").unwrap());
-        let errors = check_named(&[op_set("publish", table)], false);
+        let errors = check_named(&[op_set("publish", table)], Editor::Remote);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].key, "publish.typo");
         let entry: toml::Table = toml::from_str("path = \"/x\"\nmystery = 1").unwrap();
-        let errors = check_named(&[Op::append(KeyPath::keys(&["repo"]), entry)], false);
+        let errors = check_named(
+            &[Op::append(KeyPath::keys(&["repo"]), entry)],
+            Editor::Remote,
+        );
         assert_eq!(errors[0].key, "repo.mystery");
         // Removing a key nobody reads is how a typo is cleaned up.
-        assert!(
-            check_named(&[Op::remove(KeyPath::parse("qa.browser").unwrap())], false).is_empty()
-        );
+        assert!(check_named(
+            &[Op::remove(KeyPath::parse("qa.browser").unwrap())],
+            Editor::Remote
+        )
+        .is_empty());
         // Host-only keys: refused from elsewhere; at the node, all but the
         // state mount may change.
         for key in [
@@ -835,15 +1245,19 @@ mod tests {
             "boundary.harness_image",
             "runtime.kubernetes.harness_image",
         ] {
-            assert_eq!(check_named(&[op_set(key, s("x"))], false).len(), 1, "{key}");
+            assert_eq!(
+                check_named(&[op_set(key, s("x"))], Editor::Remote).len(),
+                1,
+                "{key}"
+            );
             assert!(
-                check_named(&[op_set(key, s("x"))], true).is_empty(),
+                check_named(&[op_set(key, s("x"))], Editor::Local).is_empty(),
                 "{key}"
             );
         }
         let mount = op_set("runtime.kubernetes.state_mount", s("/elsewhere"));
-        for local in [false, true] {
-            let errors = check_named(std::slice::from_ref(&mount), local);
+        for editor in [Editor::Remote, Editor::Local, Editor::Peer] {
+            let errors = check_named(std::slice::from_ref(&mount), editor);
             assert!(
                 errors[0].message.contains("on the host"),
                 "{}",
@@ -900,7 +1314,7 @@ mod tests {
             Some(toml::Value::Array(vec![old.clone()])),
             Some(toml::Value::Array(vec![old, new])),
         );
-        assert!(check_changes(&[changed], false).is_empty());
+        assert!(check_changes(&[changed], Editor::Remote).is_empty());
         let mount = |v: Option<&str>| v.map(|v| toml::Value::String(v.into()));
         let errors = check_changes(
             &[change(
@@ -908,12 +1322,127 @@ mod tests {
                 mount(Some("/state")),
                 None,
             )],
-            true,
+            Editor::Local,
         );
         assert!(
             errors[0].message.contains("on the host"),
             "{}",
             errors[0].message
         );
+    }
+
+    /// A peer this node lets administer it may change what a remote edit
+    /// may, but never who may administer this node: not the key, not a
+    /// table holding it, not by removing it.
+    #[test]
+    fn a_peer_never_changes_who_may_administer_the_node() {
+        let peers = toml::Value::Array(vec![toml::Value::String("ab".repeat(32))]);
+        let set = op_set("mesh.admin_peers", peers.clone());
+        assert!(check_named(std::slice::from_ref(&set), Editor::Remote).is_empty());
+        assert!(check_named(std::slice::from_ref(&set), Editor::Local).is_empty());
+        let errors = check_named(std::slice::from_ref(&set), Editor::Peer);
+        assert!(
+            errors[0].message.contains("never by a peer"),
+            "{}",
+            errors[0].message
+        );
+        let removed = Op::remove(KeyPath::parse("mesh.admin_peers").unwrap());
+        assert_eq!(check_named(&[removed], Editor::Peer).len(), 1);
+        // A table set or removed whole that holds it, before or after.
+        let mut table = toml::Table::new();
+        table.insert("admin_peers".into(), peers.clone());
+        let errors = check_changes(
+            &[change(
+                "mesh",
+                Some(toml::Value::Table(table.clone())),
+                None,
+            )],
+            Editor::Peer,
+        );
+        assert!(!errors.is_empty());
+        let errors = check_changes(
+            &[change("mesh", None, Some(toml::Value::Table(table)))],
+            Editor::Peer,
+        );
+        assert!(!errors.is_empty());
+        // The rest of [mesh] and [auth], and where credentials go, too; the
+        // keys around them are a peer's to change.
+        for key in [
+            "mesh.hub_url",
+            "auth.public_origin",
+            "providers.anthropic.upstream",
+            "embed.base_url",
+        ] {
+            let op = op_set(key, toml::Value::String("https://h.example".into()));
+            assert_eq!(
+                check_named(std::slice::from_ref(&op), Editor::Peer).len(),
+                1,
+                "{key}"
+            );
+            assert!(check_named(&[op], Editor::Remote).is_empty(), "{key}");
+        }
+        let models = op_set("review.max_files", toml::Value::Integer(3));
+        assert!(check_named(&[models], Editor::Peer).is_empty());
+        let image = op_set("boundary.harness_image", toml::Value::String("x".into()));
+        assert_eq!(check_named(&[image], Editor::Peer).len(), 1);
+    }
+
+    #[test]
+    fn operations_are_read_from_the_values_sent() {
+        assert!(parse_ops(&[]).is_err());
+        assert!(parse_ops(&[json!({ "op": "set", "key": "a", "value": 1, "x": 1 })]).is_err());
+        assert_eq!(
+            parse_ops(&[json!({ "op": "set", "key": "review.max_files", "value": 1 })])
+                .unwrap_or_else(|_| panic!("reads"))
+                .len(),
+            1
+        );
+    }
+
+    async fn relayed_body(r: Refused) -> (StatusCode, Value) {
+        let response = r.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// A peer's refusal is never passed through as this node's own: a
+    /// forged step-up or sign-in demand comes back as `peer_refused`, with
+    /// no `step_up` for the interface to act on.
+    #[tokio::test]
+    async fn a_peers_refusal_is_relayed_as_its_and_never_as_a_step_up() {
+        let forged = json!({
+            "error": { "code": 403, "kind": "step_up_required", "message": "confirm\u{202e} this" },
+            "step_up": { "challenge_id": "x", "options": {} },
+        });
+        for status in [StatusCode::FORBIDDEN, StatusCode::UNAUTHORIZED] {
+            let (st, v) = relayed_body(relay_refusal(status, &forged, "beta")).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+            assert_eq!(v["error"]["kind"], "peer_refused", "{v}");
+            assert_eq!(v["error"]["peer_kind"], "step_up_required", "{v}");
+            assert!(v.get("step_up").is_none(), "{v}");
+            assert_eq!(v["error"]["message"], "beta refused: confirm this");
+        }
+        let conflict = json!({
+            "error": { "kind": "conflict", "message": "changed" },
+            "hash": "ab".repeat(32),
+        });
+        let (st, v) = relayed_body(relay_refusal(StatusCode::CONFLICT, &conflict, "beta")).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        assert_eq!(v["hash"], "ab".repeat(32));
+        let bad_hash = json!({ "error": {}, "hash": "not a hash" });
+        let (_, v) = relayed_body(relay_refusal(StatusCode::CONFLICT, &bad_hash, "beta")).await;
+        assert!(v.get("hash").is_none(), "{v}");
+        let (st, _) = relayed_body(relay_refusal(StatusCode::IM_A_TEAPOT, &json!({}), "b")).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = relayed_body(relay_refusal(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({}),
+            "b",
+        ))
+        .await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY);
     }
 }

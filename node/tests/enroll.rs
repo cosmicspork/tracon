@@ -211,6 +211,115 @@ async fn key_handoff_merges_epochs() {
     assert!(!merged.newest().is_genesis());
 }
 
+/// A running peer's handoff is taken only for a channel the sender is a
+/// member of by this node's record: a key from anyone else would add an
+/// epoch this node then seals the channel's frames under. And no handoff
+/// changes what this node keeps for itself: its external-harness stop and
+/// its notifications, which only it (with its passkey, off its machine)
+/// decides. The channel's shared bindings still travel.
+#[tokio::test]
+async fn a_peers_handoff_needs_a_member_and_keeps_this_nodes_own_bindings() {
+    state::isolate();
+    let a = Identity::from_seed(&[1u8; 32]);
+    let b = Identity::from_seed(&[2u8; 32]);
+    let c = Identity::from_seed(&[3u8; 32]);
+    let store = Store::open_in_memory().unwrap();
+    let mine = Keyring::genesis(&b.x25519_public(), &DataKey::generate());
+    store
+        .channel_put(
+            "personal",
+            &mine.to_bytes(),
+            &json!({
+                "external_stopped": true,
+                "notify": { "enabled": false },
+                "model": "m/old",
+            })
+            .to_string(),
+        )
+        .unwrap();
+    store
+        .node_channels_set(&a.node_id(), &[MESH_CHANNEL.into(), "personal".into()])
+        .unwrap();
+    store
+        .node_channels_set(&b.node_id(), &[MESH_CHANNEL.into(), "personal".into()])
+        .unwrap();
+    let theirs = Keyring::genesis(&c.x25519_public(), &DataKey::generate());
+    let handoff = |from: &Identity, ring: &Keyring, name: &str| proto::frame::ChannelHandoff {
+        name: name.into(),
+        keyring: ring.wrap_for(from, &b.x25519_public()).unwrap(),
+        bindings_json: json!({
+            "notify": { "enabled": true },
+            "external_paused": true,
+            "model": "m/new",
+        })
+        .to_string(),
+    };
+
+    // C is in no channel here: neither the key nor the bindings land.
+    let before = store.channel_get("personal").unwrap().unwrap();
+    let outcome = enroll::apply_peer_key_handoff(
+        &store,
+        &b.node_id(),
+        &c.node_id(),
+        &[
+            handoff(&c, &theirs, "personal"),
+            handoff(&c, &theirs, "work"),
+        ],
+    );
+    assert!(outcome.applied.is_empty());
+    assert_eq!(outcome.refused, ["personal", "work"]);
+    let after = store.channel_get("personal").unwrap().unwrap();
+    assert_eq!(after.keyring, before.keyring);
+    assert_eq!(after.bindings_json, before.bindings_json);
+    assert!(store.channel_get("work").unwrap().is_none());
+
+    // A is a member: its key merges and the shared binding changes, but the
+    // stop, the pause and the notifications stay as this node had them.
+    let (a_ring, _) =
+        Keyring::genesis(&a.x25519_public(), &DataKey::generate()).rotate(&a.x25519_public(), 1000);
+    let outcome = enroll::apply_peer_key_handoff(
+        &store,
+        &b.node_id(),
+        &a.node_id(),
+        &[handoff(&a, &a_ring, "personal")],
+    );
+    assert_eq!(outcome.applied, ["personal"]);
+    let row = store.channel_get("personal").unwrap().unwrap();
+    assert_ne!(row.keyring, before.keyring);
+    assert!(!Keyring::from_bytes(&row.keyring)
+        .unwrap()
+        .newest()
+        .is_genesis());
+    let bindings: serde_json::Value = serde_json::from_str(&row.bindings_json).unwrap();
+    assert_eq!(
+        bindings,
+        json!({
+            "external_stopped": true,
+            "notify": { "enabled": false },
+            "model": "m/new",
+        })
+    );
+
+    // A channel new to this node takes none of the sender's local bindings.
+    store
+        .node_channels_set(&a.node_id(), &[MESH_CHANNEL.into(), "client".into()])
+        .unwrap();
+    let outcome = enroll::apply_peer_key_handoff(
+        &store,
+        &b.node_id(),
+        &a.node_id(),
+        &[handoff(&a, &a_ring, "client")],
+    );
+    assert_eq!(outcome.applied, ["client"]);
+    let bindings: serde_json::Value =
+        serde_json::from_str(&store.channel_get("client").unwrap().unwrap().bindings_json).unwrap();
+    assert_eq!(bindings, json!({ "model": "m/new" }));
+    assert!(store
+        .nodes_in_channel("client")
+        .unwrap()
+        .contains(&b.node_id()));
+}
+
 /// A mesh that has been running for a while has a long `@mesh` history, and a
 /// fresh node starts reading it at seq 0 while the handoff it is waiting for
 /// sits at the head. Catching up must not cost a poll interval per page, or

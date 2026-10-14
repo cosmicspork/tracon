@@ -8,6 +8,7 @@ pub mod environments;
 pub mod evidence;
 mod mcp;
 pub mod passkey;
+mod peer_admin;
 mod policy_admin;
 pub mod preview;
 pub mod push;
@@ -275,6 +276,13 @@ pub fn router(state: AppState) -> Router {
             post(api::disconnect_provider),
         )
         .route("/api/nodes", get(api::list_nodes))
+        // A node's node.toml, this one's or an admin peer's over the mesh: a
+        // peer answers only if its `[mesh] admin_peers` names this node, and
+        // an edit is confirmed here and signed for it (`peer_admin`).
+        .route(
+            "/api/nodes/{id}/config",
+            get(config_api::get_node_config).patch(config_api::patch_node_config),
+        )
         .route("/api/awake", get(api::awake))
         .route(
             "/api/nodes/{id}/providers/{name}/connect",

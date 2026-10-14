@@ -138,11 +138,47 @@ control, format or separator character. It is staged for the receiver's operator
 applied on receipt, and acks `{ offer_id, state, expires_ms, superseded }`. The op is
 additive and the contract version is unmoved: a node that predates it answers that it
 runs an older build.
+A peer administers another node only through `[mesh] admin_peers` on the owner and
+an admin statement (below). `provider_connect`, `provider_code` and
+`provider_disconnect` gain an optional `statement`; an owner on this build refuses one
+without it from a peer, and an older owner ignores the field. `config_read` (no fields)
+reads the owner's `node.toml` as its own `GET /api/config` shows it, for an admin peer
+only. `config_patch { expected_hash, ops, statement, not_after_ms }` edits it, `ops`
+in `PATCH /api/config`'s shape; the owner runs it only for an admin peer, with a
+statement for exactly this command on itself, and never past `not_after_ms`. Both ops
+are additive and the contract version is unmoved: a node that predates them answers
+that it runs an older build.
 Version 4 lets a review row and a queued card name no session: a harness the operator
 runs themselves calls with none. `session_id` on a `reviews` row and on a `queue` card
 may be `null`, a review row gains an optional `lane` (the caller's display label), and
 a session-less card is grouped by its `intent.channel`. A version 3 node fails to
 deserialize the null, so the two cannot share a mesh.
+
+## Admin statements (`admin.rs`)
+
+```json
+{ "issuer": "<node id>", "target": "<node id>", "op_hash": "<hex sha256>",
+  "summary": "On beta: ...", "asserted_at_ms": 0, "not_after_ms": 0,
+  "session": "<hex12>" | "local", "nonce": "<hex16 bytes>", "sig": "<hex ed25519>" }
+```
+
+What one node's operator confirmed (with that node's passkey, or at its machine) for
+an admin command on another node, signed by the confirming node's key.
+
+- `op_hash = SHA256("tracon/v0/admin-op" ‖ len+target ‖ len+canonical(command))`,
+  where `command` is the command as it serializes (`op` included) without its
+  top-level `statement` and `not_after_ms`, and `canonical` is JSON with every
+  object's keys in byte order and no whitespace.
+- `sig = Ed25519(issuer, "tracon/v0/admin-statement" ‖ len+issuer ‖ len+target ‖
+  len+op_hash ‖ len+summary ‖ i64_be(asserted_at_ms) ‖ i64_be(not_after_ms) ‖
+  len+session ‖ len+nonce)`.
+- `not_after_ms - asserted_at_ms` is at most two minutes; `summary` at most 1024
+  characters.
+
+The receiver checks that the issuer is the frame's sender and is named in its `[mesh]
+admin_peers`, that the signature verifies, that `target` is itself and `op_hash` the
+command it is about to run, that the statement is fresh (30 seconds' leeway for clock
+skew), and spends `nonce` once.
 
 ## Owner streams (`stream.rs`)
 
@@ -301,3 +337,4 @@ See `hub/` and `docs/ARCHITECTURE.md` (Mesh frames). Summary:
 | `auth.json` | descriptor bytes and signatures |
 | `keyring.json` | container bytes for genesis + one rotation, and a handoff |
 | `frame.json` | canonical bytes and ids for channel and direct headers |
+| `admin-statement.json` | op hash, signed bytes and signature of a fixed statement |

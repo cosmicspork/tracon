@@ -36,9 +36,12 @@
   import { store } from '../../lib/store.svelte'
   import type { ConfigOp, NodeConfig } from '../../lib/types'
 
-  let { onsaved }: { onsaved?: () => void } = $props()
+  // `nodeId` names a peer to edit instead of the serving node: read and
+  // saved over the mesh, confirmed here, and only the keys that peer lets an
+  // admin peer change are offered (`editable_by_peer`).
+  let { onsaved, nodeId = '' }: { onsaved?: () => void; nodeId?: string } = $props()
 
-  const local = $derived(store.node?.loopback ?? false)
+  const local = $derived(nodeId ? false : (store.node?.loopback ?? false))
   const channels = $derived(store.channels.filter((c) => !c.archived).map((c) => c.name))
 
   let cfg = $state<NodeConfig | null>(null)
@@ -79,9 +82,22 @@
     )
   }
 
+  // A peer's keys as this form decides them: editable only where the peer
+  // lets an admin peer change them, with the peer's reason where not.
+  function asPeer(c: NodeConfig): NodeConfig {
+    return {
+      ...c,
+      keys: c.keys.map((k) => ({
+        ...k,
+        editable: k.editable_by_peer === true,
+        why_not: k.why_not_by_peer ?? k.why_not,
+      })),
+    }
+  }
+
   async function load(): Promise<NodeConfig | null> {
     try {
-      cfg = await api.config()
+      cfg = nodeId ? asPeer(await api.nodeConfig(nodeId)) : await api.config()
       loadError = ''
       return cfg
     } catch (e) {
@@ -188,7 +204,7 @@
     if (!ops.length) return
     busy = sec.id
     delete notes[sec.id]
-    const outcome = await saveOps((hash, o) => api.patchConfig(hash, o), cfg.hash, ops, fieldKeys(sec), screen)
+    const outcome = await saveOps((hash, o) => (nodeId ? api.patchNodeConfig(nodeId, hash, o) : api.patchConfig(hash, o)), cfg.hash, ops, fieldKeys(sec), screen)
     try {
       if (outcome.kind === 'saved') {
         const { result } = outcome
@@ -197,7 +213,7 @@
         // so the next save, decided against the new version, writes only
         // what was typed there.
         await reload(sec.id)
-        void store.refreshRestart()
+        if (!nodeId) void store.refreshRestart()
         onsaved?.()
         notes[sec.id] = {
           tone: 'ok',
@@ -324,9 +340,10 @@
 
 <div class="config" data-testid="config-form">
   <p class="lede">
-    Every key of node.toml the node reads, as {store.node?.name ?? 'the node'} describes it. A table saves on its
+    Every key of node.toml the node reads, as {nodeId ? 'that peer' : (store.node?.name ?? 'the node')} describes it. A table saves on its
     own; <b class="live">live</b> keys apply to the running node at once, the rest when it restarts.
-    {#if !local}Off this machine each save is confirmed with your passkey, and the prompt names the keys it changes.{/if}
+    {#if nodeId}Each save is confirmed here, with a prompt naming the peer and the keys, and checked again there.
+    {:else if !local}Off this machine each save is confirmed with your passkey, and the prompt names the keys it changes.{/if}
     Repositories are under <a href="#channels">{BESPOKE.repo.split(' › ')[0]}</a> and providers under
     <a href="#connections">{BESPOKE.providers.split(' › ')[0]}</a>.
   </p>

@@ -329,6 +329,31 @@ impl Store {
         )?;
         Ok(n == 1)
     }
+
+    /// Spend a peer's admin statement (`mesh::admin`): true only the first
+    /// time its nonce is presented. Kept until `expires_ms`, past which the
+    /// statement is refused as stale anyway; lapsed rows go as each new one
+    /// is spent.
+    pub fn admin_statement_spend(
+        &self,
+        nonce: &str,
+        issuer: &str,
+        op_hash: &str,
+        now: i64,
+        expires_ms: i64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM mesh_admin_statement WHERE expires_ms < ?1",
+            [now],
+        )?;
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO mesh_admin_statement (nonce, issuer, op_hash, spent_ms, expires_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![nonce, issuer, op_hash, now, expires_ms],
+        )?;
+        Ok(n == 1)
+    }
 }
 
 #[cfg(test)]
@@ -512,5 +537,26 @@ mod tests {
         assert!(!store.proof_spend("p1", "op-a", "s1", 1_500).unwrap());
         store.set_operator_token(None).unwrap();
         assert_eq!(store.passkey_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_peers_admin_statement_is_spent_once() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store
+            .admin_statement_spend("n1", "a", "op", 1_000, 2_000)
+            .unwrap());
+        assert!(!store
+            .admin_statement_spend("n1", "a", "op", 1_500, 2_000)
+            .unwrap());
+        assert!(store
+            .admin_statement_spend("n2", "a", "op", 1_500, 2_000)
+            .unwrap());
+        // A lapsed row goes; its statement is refused as stale by then.
+        assert!(store
+            .admin_statement_spend("n3", "a", "op", 2_001, 3_000)
+            .unwrap());
+        assert!(store
+            .admin_statement_spend("n1", "a", "op", 2_001, 3_000)
+            .unwrap());
     }
 }

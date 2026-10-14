@@ -235,6 +235,15 @@ builds and pins its own image once accepted (the recipe is shared, the digest ne
       accepted the same recipe may pull that image from a shared registry instead of
       building it, holding it to the signed digest. Kubernetes nodes already pull from a
       registry; this extends the registry client to Podman and adds the signed statement.
+- [ ] Hold the rest of the key path to channel membership: the invitee's first handoff
+      during `tracon enroll` is taken from whoever answers on the hub (the new node has no
+      records yet; pin it to the inviter the operator compared fingerprints with), and the
+      hub replica takes a `key_handoff` without checking the sender is in that channel
+      (the hub holds the member records to check it). Channel-wide bindings stay writable
+      by any member's handoff by design; a signed binding change would let a node tell a
+      member's edit from a forged one. Who is in a channel is itself the hub's word (a
+      node's record of other members is the hub's member list), so a hub that lies about
+      membership can still steer a handoff; signed membership would close that.
 
 **Diff reading.** Borrow interaction patterns from
 [cosmicspork/review](https://github.com/cosmicspork/review), especially its

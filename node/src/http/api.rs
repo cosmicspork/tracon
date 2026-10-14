@@ -5653,72 +5653,168 @@ async fn peer_command(
         })
 }
 
+/// Run an admin command on peer `node_id`, confirmed here first: the
+/// operator confirms exactly `command` on that peer (`peer_admin::confirm`),
+/// and the statement this node signs for it goes with it.
+async fn admin_on_peer(
+    s: &AppState,
+    parts: &axum::http::request::Parts,
+    node_id: &str,
+    line: &str,
+    command: impl Fn(Option<proto::admin::AdminStatement>) -> proto::frame::Command,
+    timeout: std::time::Duration,
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
+    let op_hash = crate::mesh::admin::op_hash(node_id, &command(None));
+    let summary =
+        super::peer_admin::summary_for(s, node_id, line).map_err(super::peer_admin::refused)?;
+    let statement = super::peer_admin::confirm(s, parts, node_id, &op_hash, &summary)
+        .map_err(super::peer_admin::refused)?;
+    peer_command(s, node_id, command(Some(statement)), timeout)
+        .await
+        .map(Json)
+        .map_err(super::peer_admin::refused)
+}
+
+/// An admin request's body, read as `T` once it is known to be JSON or
+/// nothing; an empty body reads as `T`'s default.
+fn admin_body<T: serde::de::DeserializeOwned + Default>(
+    parts: &axum::http::request::Parts,
+    body: &[u8],
+) -> Result<T, super::config_api::Refused> {
+    super::passkey::json_or_empty(&parts.headers, body).map_err(super::peer_admin::refused)?;
+    if body.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(body).map_err(|e| {
+        super::peer_admin::refused(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the request body does not read: {e}"),
+        ))
+    })
+}
+
+/// `POST /api/nodes/{id}/providers/{name}/connect`. Here, an admin action
+/// as on the direct route. On a peer, confirmed here for that peer and run
+/// there only if it names this node in its `[mesh] admin_peers`.
 pub async fn node_connect_provider(
     State(s): State<AppState>,
     super::auth::Local(local): super::auth::Local,
     Path((node_id, name)): Path<(String, String)>,
-    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<ConnectBody>>>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let body = body.map(|Json(body)| body).unwrap_or_default();
+    parts: axum::http::request::Parts,
+    bytes: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
+    let body: ConnectBody = admin_body(&parts, &bytes)?;
     if node_id == s.node_id {
+        super::passkey::authorize(&s, &parts, &bytes)
+            .await
+            .map_err(super::peer_admin::refused)?;
         let local_callback = callback_allowed(&s, local, body.local_callback);
         return connect_local(&s, &name, body.channels, body.share, local_callback)
             .await
-            .map(Json);
+            .map(Json)
+            .map_err(super::peer_admin::refused);
     }
-    peer_command(
+    admin_on_peer(
         &s,
+        &parts,
         &node_id,
-        proto::frame::Command::ProviderConnect {
-            name,
-            channels: body.channels,
+        &format!("Sign in to {name}"),
+        |statement| proto::frame::Command::ProviderConnect {
+            name: name.clone(),
+            channels: body.channels.clone(),
             share: body.share,
+            statement,
         },
         PROVIDER_CONNECT_TIMEOUT,
     )
     .await
-    .map(Json)
 }
 
+/// `POST /api/nodes/{id}/providers/{name}/code`: finish a paste-back sign-in.
+/// Here it needs nothing more than the sign-in it finishes did; on a peer it
+/// is confirmed here like the connect, since the peer takes no provider
+/// command from another node without a confirmation of its own.
 pub async fn node_provider_code(
     State(s): State<AppState>,
     Path((node_id, name)): Path<(String, String)>,
-    Json(body): Json<CodeBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+    parts: axum::http::request::Parts,
+    bytes: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
+    let body: CodeBody = serde_json::from_slice(&bytes).map_err(|e| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the request body does not read: {e}"),
+        )
+        .into_response()
+    })?;
     if node_id == s.node_id {
-        return code_local(&s, &name, &body.code).await.map(Json);
+        return code_local(&s, &name, &body.code)
+            .await
+            .map(Json)
+            .map_err(super::peer_admin::refused);
     }
     let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
-    peer_command(
+    // The code for a sign-in this node started on the peer with a confirmed
+    // connect rides on that confirmation, so it is sent as it is first. Only
+    // if the peer wants a confirmation of its own (the sign-in is another's,
+    // or too old) is it confirmed here; a retry carrying the proof goes
+    // straight there.
+    if !parts.headers.contains_key(super::passkey::STEP_UP_HEADER) {
+        let unconfirmed = proto::frame::Command::ProviderCode {
+            name: name.clone(),
+            code: body.code.clone(),
+            statement: None,
+        };
+        match peer_command(&s, &node_id, unconfirmed, timeout).await {
+            Err(ApiError(_, message)) if message.contains("carry the statement") => {}
+            other => return other.map(Json).map_err(super::peer_admin::refused),
+        }
+    }
+    admin_on_peer(
         &s,
+        &parts,
         &node_id,
-        proto::frame::Command::ProviderCode {
-            name,
-            code: body.code,
+        &format!("Finish signing in to {name}"),
+        |statement| proto::frame::Command::ProviderCode {
+            name: name.clone(),
+            code: body.code.clone(),
+            statement,
         },
         timeout,
     )
     .await
-    .map(Json)
 }
 
 pub async fn node_disconnect_provider(
     State(s): State<AppState>,
     Path((node_id, name)): Path<(String, String)>,
-    super::auth::AdminAction(()): super::auth::AdminAction,
-) -> ApiResult<Json<serde_json::Value>> {
+    parts: axum::http::request::Parts,
+    bytes: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
     if node_id == s.node_id {
-        return disconnect_local(&s, &name).await.map(Json);
+        super::passkey::json_or_empty(&parts.headers, &bytes)
+            .map_err(super::peer_admin::refused)?;
+        super::passkey::authorize(&s, &parts, &bytes)
+            .await
+            .map_err(super::peer_admin::refused)?;
+        return disconnect_local(&s, &name)
+            .await
+            .map(Json)
+            .map_err(super::peer_admin::refused);
     }
     let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
-    peer_command(
+    admin_on_peer(
         &s,
+        &parts,
         &node_id,
-        proto::frame::Command::ProviderDisconnect { name },
+        &format!("Sign out of {name}"),
+        |statement| proto::frame::Command::ProviderDisconnect {
+            name: name.clone(),
+            statement,
+        },
         timeout,
     )
     .await
-    .map(Json)
 }
 
 /// Each configured provider and whether a credential for it is usable here.
@@ -5915,11 +6011,23 @@ fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: 
 /// node's identity. A provider command needs the sender in every channel the
 /// sign-in binds and in every one the credential it would replace serves. The
 /// commands not named here check their own scope as they run.
+///
+/// An admin command (a provider sign-in, a read or edit of `node.toml`) is
+/// decided first, and needs more than a channel: the sender named in this
+/// node's `[mesh] admin_peers`, with a statement its operator confirmed for
+/// exactly that command here ([`admin_peer`]). What that admits is returned,
+/// for the audit log.
 fn authorise_forwarded(
     s: &AppState,
     sender: &str,
     command: &proto::frame::Command,
-) -> ApiResult<()> {
+) -> ApiResult<Option<crate::mesh::admin::Admitted>> {
+    let admitted = admin_peer(s, sender, command)?;
+    forwarded_scope(s, sender, command)?;
+    Ok(admitted)
+}
+
+fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) -> ApiResult<()> {
     use proto::frame::Command as C;
     match command {
         C::Prompt { session_id, .. }
@@ -5983,7 +6091,7 @@ fn authorise_forwarded(
                 _ => Ok(()),
             }
         }
-        C::ProviderCode { name, .. } | C::ProviderDisconnect { name } => {
+        C::ProviderCode { name, .. } | C::ProviderDisconnect { name, .. } => {
             // Only a sign-in the sender started is reachable from a peer (the
             // provider refuses another owner's, and a stored credential is
             // never disconnected remotely); this holds it to the channels it
@@ -6007,6 +6115,34 @@ fn authorise_forwarded(
         }
         _ => Ok(()),
     }
+}
+
+/// Whether `sender` may run the admin command `command` here: named in
+/// this node's `[mesh] admin_peers`, and (for anything but a read) carrying
+/// a statement its operator confirmed for exactly this command on this node,
+/// which this spends (`mesh::admin`).
+fn admin_peer(
+    s: &AppState,
+    sender: &str,
+    command: &proto::frame::Command,
+) -> ApiResult<Option<crate::mesh::admin::Admitted>> {
+    let now = crate::store::now_ms();
+    let owner = crate::providers::LoginOwner::Peer(sender.to_string());
+    let login_confirmed = |name: &str| {
+        s.manager
+            .providers()
+            .is_some_and(|p| p.confirmed_login(name, &owner, now).is_some())
+    };
+    crate::mesh::admin::admit(
+        s.store(),
+        &s.cfg,
+        &s.node_id,
+        sender,
+        command,
+        now,
+        &login_confirmed,
+    )
+    .map_err(|refusal| ApiError(StatusCode::FORBIDDEN, refusal))
 }
 
 fn forwarded_session(s: &AppState, sender: &str, session_id: &str) -> ApiResult<()> {
@@ -6056,12 +6192,18 @@ impl crate::mesh::forward::CommandExecutor for AppState {
         command: proto::frame::Command,
     ) -> Result<serde_json::Value, String> {
         use proto::frame::Command as C;
-        if let Err(ApiError(_, refusal)) = authorise_forwarded(self, sender, &command) {
-            tracing::warn!(from = %sender, error = %refusal, "mesh command refused");
-            if let Some(mesh) = &self.mesh {
-                mesh.note_refusal(format!("command from {sender}: {refusal}"));
+        let admitted = match authorise_forwarded(self, sender, &command) {
+            Ok(admitted) => admitted,
+            Err(ApiError(_, refusal)) => {
+                tracing::warn!(from = %sender, error = %refusal, "mesh command refused");
+                if let Some(mesh) = &self.mesh {
+                    mesh.note_refusal(format!("command from {sender}: {refusal}"));
+                }
+                return Err(refusal);
             }
-            return Err(refusal);
+        };
+        if let Some(admitted) = &admitted {
+            tracing::info!(from = %sender, actor = %admitted.actor(), summary = %admitted.summary, "admin command from a peer admitted");
         }
         let r: Result<serde_json::Value, ApiError> = match command {
             C::EvidenceCandidate { request } => {
@@ -6241,6 +6383,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 name,
                 channels,
                 share,
+                ..
             } => match chosen_channels(self.store(), channels, false)
                 .and_then(|channels| Ok((providers_of(self)?, channels)))
             {
@@ -6253,6 +6396,17 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         false,
                     )
                     .await
+                    .inspect(|_| {
+                        // The code that finishes this sign-in rides on this
+                        // confirmation (`mesh::admin::admit`).
+                        if let Some(admitted) = &admitted {
+                            providers.confirm_login(
+                                &name,
+                                &crate::providers::LoginOwner::Peer(sender.to_string()),
+                                &admitted.actor(),
+                            );
+                        }
+                    })
                     .and_then(|result| {
                         serde_json::to_value(result).map_err(|error| {
                             crate::providers::ProviderError::Failed(error.to_string())
@@ -6261,7 +6415,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     .map_err(provider_err),
                 Err(error) => Err(error),
             },
-            C::ProviderCode { name, code } => match providers_of(self) {
+            C::ProviderCode { name, code, .. } => match providers_of(self) {
                 Ok(providers) => providers
                     .code(
                         &name,
@@ -6273,7 +6427,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     .map_err(provider_err),
                 Err(error) => Err(error),
             },
-            C::ProviderDisconnect { name } => match providers_of(self) {
+            C::ProviderDisconnect { name, .. } => match providers_of(self) {
                 Ok(providers) => providers
                     .disconnect(
                         &name,
@@ -6283,6 +6437,20 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     .map(|_| json!({ "ok": true }))
                     .map_err(provider_err),
                 Err(error) => Err(error),
+            },
+            // `authorise_forwarded` admitted the sender as an admin peer,
+            // and for an edit spent the statement it carries.
+            C::ConfigRead => Ok(super::config_api::peer_read(self).await),
+            C::ConfigPatch {
+                expected_hash, ops, ..
+            } => match &admitted {
+                Some(admitted) => {
+                    Ok(super::config_api::peer_patch(self, &expected_hash, &ops, admitted).await)
+                }
+                None => Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    "an edit from a peer must carry its operator's statement".into(),
+                )),
             },
             C::OperatorNotify {
                 channel,

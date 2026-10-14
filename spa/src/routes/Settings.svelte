@@ -24,6 +24,7 @@
   import Repositories from '../components/settings/Repositories.svelte'
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
   import NodeList from '../components/settings/NodeList.svelte'
+  import PeerConfig from '../components/settings/PeerConfig.svelte'
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
   import Card from '../components/settings/Card.svelte'
@@ -901,6 +902,7 @@
   <ChannelMeters />
   <LaunchManifest />
   <Repositories />
+  {#if store.nodes.some((node) => !node.is_self)}<PeerConfig only="repo" />{/if}
 {/if}
 
 {#if activeSection === 'access'}
@@ -1120,6 +1122,7 @@
 
 {#if activeSection === 'config'}
   <ConfigForm onsaved={loadConfig} />
+  {#if store.nodes.some((node) => !node.is_self)}<PeerConfig />{/if}
 {/if}
 
 {#if activeSection === 'system'}

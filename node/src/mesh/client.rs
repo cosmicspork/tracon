@@ -97,7 +97,16 @@ pub struct MeshClient {
     on_handoff: std::sync::OnceLock<OnHandoff>,
     /// The non-durable half: bounded owner streams relayed by the hub.
     pub(super) streams: Arc<super::stream::StreamRouter>,
+    /// When the member list was last read again for a sender's refused key
+    /// handoff, by sender: at most once a minute each, so a peer sending
+    /// handoffs for channels it is not in cannot make this node ask the hub
+    /// on every frame.
+    handoff_refresh: Mutex<HashMap<String, i64>>,
 }
+
+/// How often a refused handoff from one sender may have the member list read
+/// again.
+const HANDOFF_REFRESH_MS: i64 = 60_000;
 
 impl MeshClient {
     pub fn new(
@@ -146,6 +155,7 @@ impl MeshClient {
             broker: std::sync::OnceLock::new(),
             on_handoff: std::sync::OnceLock::new(),
             streams: Arc::new(super::stream::StreamRouter::new(weak.clone())),
+            handoff_refresh: Mutex::new(HashMap::new()),
         })
     }
 
@@ -622,21 +632,20 @@ impl MeshClient {
         // can read and decide; they never go through the mirror.
         match &payload {
             Payload::KeyHandoff { channels } if env.is_direct() => {
-                let n = enroll::apply_key_handoff(&self.store, &self.node_id(), channels);
-                tracing::info!(from = %sender, channels = n, "channel keys received");
-                // A channel this node can now read: ask every site on it for
-                // the records written before this node could listen.
-                for c in channels {
-                    self.request_changes_backfill_all(&c.name);
+                let outcome =
+                    enroll::apply_peer_key_handoff(&self.store, &self.node_id(), sender, channels);
+                if !outcome.refused.is_empty() {
+                    // This node's record of who is in which channel may
+                    // predate a channel the sender made since: ask the hub
+                    // once, then decide those channels again.
+                    let refused: Vec<_> = channels
+                        .iter()
+                        .filter(|c| outcome.refused.contains(&c.name))
+                        .cloned()
+                        .collect();
+                    self.retry_handoff(sender, refused);
                 }
-                self.pull_wake.notify_one();
-                // Frames for those channels that were parked unreadable can
-                // be opened now.
-                let mut applied = n;
-                for c in channels {
-                    applied += self.apply_held(&c.name);
-                }
-                return Opened::from(applied > 0);
+                return Opened::from(self.after_handoff(sender, &outcome.applied) > 0);
             }
             Payload::CandidateTransfer { transfer } if env.is_direct() => {
                 match crate::transfers::receive_mesh(
@@ -894,6 +903,67 @@ impl MeshClient {
             }
         }
         Opened::Held
+    }
+
+    /// What follows taking a handoff's keys for `applied`: every site on
+    /// those channels is asked for the records written before this node could
+    /// listen, and frames parked unreadable are opened. Returns how many
+    /// channels and frames that came to.
+    fn after_handoff(&self, sender: &str, applied: &[String]) -> usize {
+        if applied.is_empty() {
+            return 0;
+        }
+        tracing::info!(from = %sender, channels = applied.len(), "channel keys received");
+        for c in applied {
+            self.request_changes_backfill_all(c);
+        }
+        self.pull_wake.notify_one();
+        let mut n = applied.len();
+        for c in applied {
+            n += self.apply_held(c);
+        }
+        n
+    }
+
+    /// Decide a handoff's refused channels again once the member list has
+    /// been read from the hub (at most once a minute per sender,
+    /// [`HANDOFF_REFRESH_MS`]). A channel the sender is still not a member of
+    /// is refused for good, and said so.
+    fn retry_handoff(&self, sender: &str, channels: Vec<proto::frame::ChannelHandoff>) {
+        let Some(this) = self.weak.upgrade() else {
+            return;
+        };
+        let sender = sender.to_string();
+        let refresh = {
+            let now = now_ms();
+            let mut last = self.handoff_refresh.lock().unwrap();
+            last.retain(|_, at| now - *at < HANDOFF_REFRESH_MS);
+            match last.contains_key(&sender) {
+                true => false,
+                false => {
+                    last.insert(sender.clone(), now);
+                    true
+                }
+            }
+        };
+        tokio::spawn(async move {
+            if refresh {
+                if let Err(error) = this.refresh_members().await {
+                    tracing::debug!(%error, "member list not refreshed for a key handoff");
+                }
+            }
+            let outcome =
+                enroll::apply_peer_key_handoff(&this.store, &this.node_id(), &sender, &channels);
+            this.after_handoff(&sender, &outcome.applied);
+            if !outcome.refused.is_empty() {
+                let names = outcome.refused.join(", ");
+                tracing::warn!(from = %sender, channels = %names, "key handoff from a non-member refused");
+                this.note_refusal(format!(
+                    "key handoff from {sender} refused for {names}: the sender is not a member of \
+                     that channel by this node's record"
+                ));
+            }
+        });
     }
 
     // ------------------------------------------------------------ presence

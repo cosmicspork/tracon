@@ -207,6 +207,18 @@ changed on both sides is named with both values for the operator to choose. A
 refusal is shown next to the key it is about. Advanced shows the file as the node
 reads it, secrets redacted, with its version.
 
+**Administer a peer.** Settings → Configuration → "A peer's node.toml" (or a peer's
+repositories under Channels & repositories, read-only) → choose the node → the same
+Configuration form, read from that peer, secrets and comments left out. A peer's
+settings are visible and editable only from nodes it names in its `[mesh]
+admin_peers`; one that does not name this node shows nothing but why, and how to add
+it (at that node, or in its own Settings with its passkey). Otherwise: edit a table →
+Save → the same confirmation sheet, its line starting with the peer's name and the
+start of its id ("On beta (217a7211…): Change node.toml: review.max_files") → passkey
+→ the peer checks it again and writes it; its own phone is told. `[auth]`, `[mesh]`,
+where credentials go and host-only keys are shown disabled with the reason. A peer that
+is away refuses at once; nothing waits to run when it returns.
+
 **Sign in from another browser.** The desktop app against a remote node (or any
 browser with no token to hand) → the login screen's "Sign in from another
 browser" → the window shows a code (`BCDF-GHJK`), an "Open in browser" link and

@@ -35,6 +35,7 @@ import type {
   RecipeOfferResult,
   RecipeOfferView,
   ConfigOp,
+  PeerNodeConfig,
   ConfigPatchResult,
   NodeInfo,
   OperatorIssue,
@@ -667,6 +668,20 @@ export const api = {
       the hash now). Off the node's machine a passkey confirms it. */
   patchConfig: (expectedHash: string, ops: ConfigOp[]) =>
     call<ConfigPatchResult>('PATCH', '/api/config', { expected_hash: expectedHash, ops }),
+  /** A node's node.toml, this one's or a peer's over the mesh. A peer
+      answers only if its `[mesh] admin_peers` names the serving node; its
+      refusal (`kind: not_admin_peer`) says so. */
+  nodeConfig: (nodeId: string) =>
+    call<PeerNodeConfig>('GET', `/api/nodes/${encodeURIComponent(nodeId)}/config`),
+  /** Typed edits of a node's node.toml. For a peer, confirmed here (a
+      passkey off this machine, with a prompt naming the peer and the keys)
+      and run there only if that peer names this node in `[mesh]
+      admin_peers`; never queued for a peer that is away. */
+  patchNodeConfig: (nodeId: string, expectedHash: string, ops: ConfigOp[]) =>
+    call<ConfigPatchResult>('PATCH', `/api/nodes/${encodeURIComponent(nodeId)}/config`, {
+      expected_hash: expectedHash,
+      ops,
+    }),
   repoEnvironments: () => call<RepoEnvironments>('GET', '/api/repos/environments'),
   buildRepoEnvironment: (repo: string) =>
     call<{ repo: string; since_ms: number }>('POST', '/api/repos/environments/build', { repo }),
@@ -780,8 +795,9 @@ export const api = {
   providers: () => call<ProviderInfo[]>('GET', '/api/providers'),
   /** Register a new provider naming an already-sealed credential (seal it
       first with `importCredentials`). An admin action: a passkey off the
-      node's machine. The serving node always, since a peer's node.toml is
-      not this browser's to write. */
+      node's machine. The serving node always: a peer's node.toml is edited
+      through `patchNodeConfig`, and only where that peer names this node in
+      its `[mesh] admin_peers`. */
   createProvider: (body: { name: string; upstream: string; shape: string; credential: string; login?: string | null }) =>
     call<{ created: string; restart_required: boolean }>('POST', '/api/providers', body),
   connectProvider: (name: string, channels: string[], localCallback = false, share = true) =>
@@ -804,8 +820,12 @@ export const api = {
       serving node — a peer's catalogue is refreshed by that peer. */
   refreshModels: () => call<ModelOption[]>('POST', '/api/node/refresh-models'),
   // Node-scoped provider actions: the serving node runs them itself or seals
-  // the command to the owner. Automatic callback capture is accepted only
-  // when this is the serving node and the request itself arrived on loopback.
+  // the command to the owner. On a peer each one is an admin action confirmed
+  // here, which the peer runs only if it names this node in its `[mesh]
+  // admin_peers`; the pasted code that finishes a confirmed sign-in rides on
+  // the connect's confirmation and asks for no second passkey. Automatic callback capture is accepted
+  // only when this is the serving node and the request itself arrived on
+  // loopback.
   nodeConnectProvider: (
     nodeId: string,
     name: string,

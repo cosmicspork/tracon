@@ -1408,6 +1408,37 @@ pub struct Mesh {
     /// Renew shared subscription credentials first. Set it on a node that is
     /// always on; every other holder steps in only if this one has not.
     pub renew_credentials: bool,
+    /// The peers (node ids) this node lets administer it over the mesh:
+    /// read and edit its `node.toml`, and sign its providers in and out,
+    /// each confirmed by the operator's passkey on that peer. Empty, the
+    /// default, means none. An admin key itself: it is changed at this node,
+    /// or remotely with this node's own passkey, never over the mesh.
+    pub admin_peers: Vec<String>,
+}
+
+impl Mesh {
+    /// Whether `node_id` is one of [`Mesh::admin_peers`].
+    pub fn is_admin_peer(&self, node_id: &str) -> bool {
+        self.admin_peers.iter().any(|peer| peer == node_id)
+    }
+}
+
+/// `[mesh] admin_peers` names nodes by id: 64 lowercase hex digits, the
+/// form every node id takes, so a comparison is never fooled by case or a
+/// prefix.
+pub fn validate_admin_peers(peers: &[String]) -> Result<(), String> {
+    for peer in peers {
+        let ok = peer.len() == 64
+            && peer
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !ok {
+            return Err(format!(
+                "[mesh] admin_peers: {peer:?} is not a node id (64 lowercase hex digits, as `tracon mesh id` prints it)"
+            ));
+        }
+    }
+    Ok(())
 }
 impl Default for Mesh {
     fn default() -> Self {
@@ -1422,6 +1453,7 @@ impl Default for Mesh {
             stream_max_response_bytes: 256 * 1024 * 1024,
             stream_max_concurrent: 16,
             renew_credentials: false,
+            admin_peers: Vec::new(),
         }
     }
 }
@@ -2297,6 +2329,8 @@ impl Config {
         validate_repos(&config.repo).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_admin_peers(&config.mesh.admin_peers)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         config
             .runtime
             .kubernetes
@@ -2360,6 +2394,31 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn admin_peers_name_nodes_by_their_full_id() {
+        let id = "ab".repeat(32);
+        assert!(validate_admin_peers(std::slice::from_ref(&id)).is_ok());
+        for bad in [
+            "AB".repeat(32),
+            "ab".repeat(8),
+            format!("{id} "),
+            "zz".repeat(32),
+        ] {
+            assert!(
+                validate_admin_peers(std::slice::from_ref(&bad)).is_err(),
+                "{bad}"
+            );
+        }
+        let text = format!("[mesh]\nadmin_peers = [\"{}\"]\n", "AB".repeat(32));
+        assert!(Config::from_toml(&text, Path::new("node.toml"))
+            .unwrap_err()
+            .contains("admin_peers"));
+        let text = format!("[mesh]\nadmin_peers = [\"{id}\"]\n");
+        let cfg = Config::from_toml(&text, Path::new("node.toml")).unwrap();
+        assert!(cfg.mesh.is_admin_peer(&id));
+        assert!(!cfg.mesh.is_admin_peer(&"cd".repeat(32)));
+    }
 
     /// The guard that stands between `cargo test` and the operator's sealed
     /// credential store, and the override integration tests use because they

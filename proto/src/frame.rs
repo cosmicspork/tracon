@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::PublicKey;
 
+use crate::admin::AdminStatement;
 use crate::envelope::{seal_to, EnvelopeError, Sealed, SealedBox};
 use crate::keyring::{channel_aad, Keyring, EPOCH_ID_LEN};
 use crate::keys::{key32, Identity};
@@ -352,6 +353,11 @@ pub enum Command {
     /// The paste-back flow is request/response shaped — start the login and
     /// get the sign-in URL back, send the pasted code, disconnect — so it
     /// rides the command path; the login subprocess stays on the owner.
+    ///
+    /// Each carries the sender's [`AdminStatement`]: the operator confirmed
+    /// this very command on the sender, which the owner requires of a peer
+    /// it lets administer it (`[mesh] admin_peers`). Additive: an older
+    /// owner ignores it, and an older sender names none and is refused.
     ProviderConnect {
         name: String,
         #[serde(default)]
@@ -360,13 +366,19 @@ pub enum Command {
         /// signed in. A peer on an older build names nothing, which shares.
         #[serde(default = "shares")]
         share: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        statement: Option<AdminStatement>,
     },
     ProviderCode {
         name: String,
         code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        statement: Option<AdminStatement>,
     },
     ProviderDisconnect {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        statement: Option<AdminStatement>,
     },
     /// An intentional notification that the destination node delivers only to
     /// its own subscribed devices. The sender waits for this node's attempt
@@ -412,6 +424,22 @@ pub enum Command {
         from_channel: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        not_after_ms: i64,
+    },
+    /// Read the owner's `node.toml` as its own `GET /api/config` shows it:
+    /// no secret, no value of a key it does not know, no comment. Answered
+    /// only for a peer the owner's `[mesh] admin_peers` names. An older peer
+    /// cannot read this op and answers that it runs an older build.
+    ConfigRead,
+    /// Edit the owner's `node.toml`: `ops` in `PATCH /api/config`'s own
+    /// shape, decided against `expected_hash`. Run only for a peer the
+    /// owner's `[mesh] admin_peers` names, with the [`AdminStatement`] its
+    /// operator confirmed for exactly this edit on exactly this owner, and
+    /// never after `not_after_ms`. Never queued for later.
+    ConfigPatch {
+        expected_hash: String,
+        ops: Vec<Value>,
+        statement: AdminStatement,
         not_after_ms: i64,
     },
 }
@@ -1102,6 +1130,7 @@ mod tests {
             name: "anthropic".into(),
             channels: vec!["personal".into()],
             share: false,
+            statement: None,
         })
         .unwrap();
         assert_eq!(v["op"], "provider_connect");
@@ -1114,19 +1143,47 @@ mod tests {
                 name: "a".into(),
                 channels: vec![],
                 share: true,
+                statement: None,
             }
         );
         let v = serde_json::to_value(Command::ProviderCode {
             name: "anthropic".into(),
             code: "c".into(),
+            statement: None,
         })
         .unwrap();
         assert_eq!(v["op"], "provider_code");
+        assert!(v.get("statement").is_none(), "{v}");
         let v = serde_json::to_value(Command::ProviderDisconnect {
             name: "anthropic".into(),
+            statement: None,
         })
         .unwrap();
         assert_eq!(v["op"], "provider_disconnect");
+    }
+
+    /// The peer config ops name themselves on the wire, so a build without
+    /// them refuses them by name; a read carries nothing else.
+    #[test]
+    fn config_command_wire_names_are_stable() {
+        let v = serde_json::to_value(Command::ConfigRead).unwrap();
+        assert_eq!(v, serde_json::json!({ "op": "config_read" }));
+        assert_eq!(
+            serde_json::from_value::<Command>(v).unwrap(),
+            Command::ConfigRead
+        );
+        let (a, b, _) = ids();
+        let statement = AdminStatement::sign(&a, &b.node_id(), &"00".repeat(32), "s", "local", 1);
+        let patch = Command::ConfigPatch {
+            expected_hash: "h".into(),
+            ops: vec![serde_json::json!({ "op": "remove", "key": "x" })],
+            statement,
+            not_after_ms: 9,
+        };
+        let v = serde_json::to_value(&patch).unwrap();
+        assert_eq!(v["op"], "config_patch");
+        assert_eq!(v["statement"]["issuer"], a.node_id());
+        assert_eq!(serde_json::from_value::<Command>(v).unwrap(), patch);
     }
 
     #[derive(serde::Deserialize)]
