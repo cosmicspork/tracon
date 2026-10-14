@@ -573,7 +573,12 @@ mod tests {
     #[test]
     fn a_line_is_fitted_to_the_budget_a_prefix_leaves() {
         let mut ops: Vec<Op> = (0..30)
-            .map(|i| set(&format!("providers.\"p{i:02}\".models"), toml::Value::Array(vec![])))
+            .map(|i| {
+                set(
+                    &format!("providers.\"p{i:02}\".models"),
+                    toml::Value::Array(vec![]),
+                )
+            })
             .collect();
         ops.push(set("publish.gh", "/opt/evil/gh"));
         let seen = preview("", &ops).unwrap();

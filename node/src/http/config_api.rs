@@ -675,33 +675,35 @@ pub(crate) fn read_expected(expected: &str) -> Result<(String, Config), Refused>
 /// for it (`config_prompt`). An edit whose sensitive keys do not all fit
 /// that line is refused, to be split.
 pub(crate) fn prompt(text: &str, ops: &[Op]) -> Result<(Vec<Change>, String), Refused> {
+    prompt_with(text, ops, super::config_prompt::summarize)
+}
+
+/// [`prompt`], in `budget` characters of the prompt's line: what is left of
+/// one once a peer's `On <peer>: ` has taken its share.
+fn prompt_within(text: &str, ops: &[Op], budget: usize) -> Result<(Vec<Change>, String), Refused> {
+    prompt_with(text, ops, |before, after, effective, changes| {
+        super::config_prompt::summarize_within(before, after, effective, changes, budget)
+    })
+}
+
+fn prompt_with(
+    text: &str,
+    ops: &[Op],
+    summarize: impl FnOnce(
+        &toml::Table,
+        &toml::Table,
+        &toml::Table,
+        &[Change],
+    ) -> Result<String, String>,
+) -> Result<(Vec<Change>, String), Refused> {
     let seen = edit::preview(text, ops).map_err(edit_refusal)?;
     let parse = |t: &str| toml::from_str::<toml::Table>(t).unwrap_or_default();
     let effective = edit::preview(text, &[])
         .ok()
         .and_then(|now| toml::Table::try_from(&now.config).ok())
         .unwrap_or_default();
-    let summary = super::config_prompt::summarize(
-        &parse(text),
-        &parse(&seen.text),
-        &effective,
-        &seen.changes,
-    )
-    .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
-    Ok((seen.changes, summary))
-}
-
-/// [`prompt`], in `budget` characters of the prompt's line.
-fn prompt_within(text: &str, ops: &[Op], budget: usize) -> Result<(Vec<Change>, String), Refused> {
-    let seen = edit::preview(text, ops).map_err(edit_refusal)?;
-    let parse = |t: &str| toml::from_str::<toml::Table>(t).unwrap_or_default();
-    let summary = super::config_prompt::summarize_within(
-        &parse(text),
-        &parse(&seen.text),
-        &seen.changes,
-        budget,
-    )
-    .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
+    let summary = summarize(&parse(text), &parse(&seen.text), &effective, &seen.changes)
+        .map_err(|why| refusal(StatusCode::UNPROCESSABLE_ENTITY, "too_large", why, &[]))?;
     Ok((seen.changes, summary))
 }
 
@@ -872,6 +874,9 @@ async fn peer_patch_here(
     raw: &[Value],
     admitted: &crate::mesh::admin::Admitted,
 ) -> Result<Value, Refused> {
+    // As a local PATCH: nothing a prompt could not show, decided before
+    // anything else, here as on the node that confirmed it.
+    refuse_hidden(&json!({ "expected_hash": expected, "ops": raw }))?;
     let ops = parse_ops(raw)?;
     let errors = check_named(&ops, Editor::Peer);
     if !errors.is_empty() {
@@ -1033,7 +1038,16 @@ pub async fn patch_node_config(
     if node_id == s.node_id {
         return patch_config(State(s), req).await;
     }
-    let body: PatchBody = req.json()?;
+    let raw: Value = req.json()?;
+    refuse_hidden(&raw)?;
+    let body: PatchBody = serde_json::from_value(raw).map_err(|e| {
+        refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            format!("the request body does not read: {e}"),
+            &[],
+        )
+    })?;
     let expected = expected_version(body.expected_hash.as_deref(), &req)?;
     let ops = parse_ops(&body.ops)?;
     let errors = check_named(&ops, Editor::Peer);

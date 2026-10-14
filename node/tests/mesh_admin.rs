@@ -713,6 +713,38 @@ async fn admin_peers_and_host_only_keys_are_not_changed_over_the_mesh() {
         assert_eq!(answer["status"], 422, "{op}: {answer}");
         assert_eq!(answer["body"]["error"]["kind"], "refused", "{op}: {answer}");
     }
+    // A character a prompt could not show, in a value or a key: refused on
+    // A before anything is confirmed, and on B even with a statement.
+    for op in [
+        set("publish.gh", json!("/usr/bin/gh\u{202e}")),
+        set("review.max_files\u{200b}", json!(1)),
+    ] {
+        let r = local(
+            &a,
+            "PATCH",
+            &format!("/api/nodes/{bi}/config"),
+            Some(&patch(&hash, vec![op.clone()])),
+        )
+        .await;
+        assert_eq!(
+            r.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{op}: {}",
+            r.body
+        );
+        assert_eq!(r.kind(), "hidden_character", "{op}: {}", r.body);
+        let direct = signed_patch(&a.id, &bi, &hash, vec![op.clone()], tracon::store::now_ms());
+        let answer = a
+            .client
+            .command(&bi, direct, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(answer["status"], 422, "{op}: {answer}");
+        assert_eq!(
+            answer["body"]["error"]["kind"], "hidden_character",
+            "{op}: {answer}"
+        );
+    }
     assert_eq!(file(), before);
     assert!(b.store.config_audit_recent(10).unwrap().is_empty());
     // A stale version is a conflict carrying B's version now.
