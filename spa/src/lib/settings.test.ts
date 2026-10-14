@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { changedSubset, hashToken, loginUrl, mintToken } from './settings'
+import { hashToken, loginUrl, mintToken } from './settings'
 
 test('a minted token is the shape the node and the CLI both expect', () => {
   const token = mintToken(new Uint8Array(32).fill(0))
@@ -25,25 +25,4 @@ test('the login url carries the token in the fragment', () => {
   expect(url).toBe('https://node.example.com/#token=trc1.abc')
   // A fragment is never sent to a server, which is the whole point.
   expect(new URL(url).search).toBe('')
-})
-
-test('a patch carries only what changed', () => {
-  const original = {
-    node_name: 'nodeA',
-    harness: { id: 'omp', version: '18.0.4' },
-    gateway: { allow_hosts: ['^a$'] },
-  }
-  expect(changedSubset(original, structuredClone(original))).toEqual({})
-
-  expect(
-    changedSubset(original, {
-      ...structuredClone(original),
-      harness: { id: 'claude', version: '18.0.4' },
-    }),
-  ).toEqual({ harness: { id: 'claude' } })
-
-  // A list is replaced wholesale, not merged.
-  expect(
-    changedSubset(original, { ...structuredClone(original), gateway: { allow_hosts: ['^b$'] } }),
-  ).toEqual({ gateway: { allow_hosts: ['^b$'] } })
 })

@@ -4,24 +4,62 @@
   import { api } from '../../lib/api'
   import { store } from '../../lib/store.svelte'
   import { forgeIdentity, offerResultLine, offerTargets } from '../../lib/recipes'
-  import { acceptsUploads, blankForm, buildLine, canonical, problems, toEntry, toForm, words, type RepoForm } from '../../lib/repos'
-  import type { RecipeOfferResult, RepoEnvironments, RepoImageBuild } from '../../lib/types'
-
-  const local = $derived(store.node?.loopback ?? false)
+  import {
+    acceptsUploads,
+    blankForm,
+    buildLine,
+    canonical,
+    problems,
+    REPO_FIELDS,
+    repoEdit,
+    replayRepos,
+    toForm,
+    words,
+    writtenRepos,
+    type RepoForm,
+  } from '../../lib/repos'
+  import { saveOps } from '../../lib/config-form'
+  import type { RecipeOfferResult, RepoEntry, RepoEnvironments, RepoImageBuild } from '../../lib/types'
 
   let loaded = $state<RepoEnvironments | null>(null)
   let forms = $state<RepoForm[]>([])
-  // The file's version the forms were seeded from: a save replaces the
-  // table whole, so it names this one, never a later poll's.
+  // The table the forms were seeded from, and its file's version: a save
+  // edits entries where they were in it and names this version, never a
+  // later poll's. Both come from one read of node.toml (`GET /api/config`),
+  // so the indices the save names are that version's; the repository list
+  // (`/api/repos/environments`) is read only for builds and holds.
+  let seeded = $state<RepoEntry[]>([])
   let seededHash = ''
+  /** The table as the node has it now, after a save met a newer version. */
+  let current: { entries: RepoEntry[]; hash: string } | null = null
 
   let busy = $state('')
   let error = $state('')
   let note = $state('')
+  /** The table changed on the node while it was being edited here. */
+  let moved = $state(false)
+  let fieldErrors = $state<Record<string, string[]>>({})
 
-  const saved = $derived(canonical(loaded?.entries.map((item) => item.entry) ?? []))
-  const dirty = $derived(JSON.stringify(forms.map(toEntry)) !== saved)
+  const edit = $derived(repoEdit(seeded, forms))
+  const ops = $derived(edit.ops)
+  const dirty = $derived(ops.length > 0)
   const invalid = $derived(problems(forms))
+
+  async function seed() {
+    const cfg = await api.config()
+    seeded = writtenRepos(cfg.document)
+    seededHash = cfg.hash
+    forms = seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
+    moved = false
+    current = null
+    fieldErrors = {}
+  }
+
+  function entryErrors(index: number): string[] {
+    return Object.entries(fieldErrors)
+      .filter(([key]) => key === `repo[${index}]` || key.startsWith(`repo[${index}].`))
+      .flatMap(([, messages]) => messages)
+  }
   const presets = $derived(loaded?.presets ?? [])
   const building = $derived(
     loaded?.entries.some((item) => item.builds.some((build) => build.status === 'building')) ?? false,
@@ -31,11 +69,8 @@
   // poll for build progress must never overwrite what is being typed.
   async function load(reseed: boolean) {
     try {
-      loaded = await api.repoEnvironments()
-      if (reseed) {
-        forms = loaded.entries.map((item) => toForm(item.entry))
-        seededHash = loaded.hash
-      }
+      const [environments] = await Promise.all([api.repoEnvironments(), reseed ? seed() : null])
+      loaded = environments
       error = ''
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause)
@@ -72,19 +107,73 @@
     }
   }
 
+  // Each change is its own operation on `[[repo]]`: an entry removed,
+  // added or moved, a field of one set or taken out. Off the node's machine
+  // the node confirms the save with a passkey that names the keys.
   async function save() {
-    if (busy || invalid.length) return
+    if (busy || invalid.length || !ops.length) return
     busy = 'save'
     note = ''
+    error = ''
+    fieldErrors = {}
+    // `repo` itself: an entry being added has no index the node can name.
+    const keys = ['repo', ...forms.flatMap((_, i) => [`repo[${i}]`, ...REPO_FIELDS.map((name) => `repo[${i}].${name}`)])]
+    const outcome = await saveOps((hash, o) => api.patchConfig(hash, o), seededHash, ops, keys, edit.screen)
     try {
-      await api.saveRepoEnvironments(forms.map(toEntry), seededHash)
-      await load(true)
-      note = 'Saved to node.toml. It applies to the next session and the next check; no restart.'
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause)
+      if (outcome.kind === 'saved') {
+        await load(true)
+        void store.refreshRestart()
+        note = 'Saved to node.toml. It applies to the next session and the next check; no restart.'
+      } else if (outcome.kind === 'conflict') {
+        await reread()
+      } else if (outcome.kind === 'refused') {
+        const { repo: added = [], ...placed } = outcome.fields
+        fieldErrors = placed
+        error = [...added, ...outcome.general].join(' ') || 'Refused: the entries it is about are marked.'
+      } else {
+        error = outcome.message
+      }
     } finally {
       busy = ''
     }
+  }
+
+  // node.toml moved under the forms. If the table itself did not, the edits
+  // apply as they are to the version now; if it did, the operator decides.
+  async function reread() {
+    const cfg = await api.config()
+    const now = writtenRepos(cfg.document)
+    if (canonical(now) === canonical(seeded)) {
+      seededHash = cfg.hash
+      note = 'node.toml changed elsewhere since this was read; the repository table did not. Save again to apply your edits.'
+      return
+    }
+    current = { entries: now, hash: cfg.hash }
+    moved = true
+  }
+
+  /** Carry these edits onto the table as the node has it now: only the
+      fields changed here are replayed, so nobody else's change is undone,
+      an entry the node added stays, and one it removed is named. */
+  function keepMine() {
+    if (!current) return
+    const out = replayRepos(seeded, forms, current.entries)
+    seeded = current.entries
+    seededHash = current.hash
+    forms = out.forms
+    current = null
+    moved = false
+    const said = ['Your edits now apply to the table as the node has it. Review and save.']
+    if (out.removed.length) said.push(`Removed on the node, so your edits to them were dropped: ${out.removed.join(', ')}.`)
+    if (out.clashes.length) said.push(`Changed on the node too; saving writes yours: ${out.clashes.join('; ')}.`)
+    note = said.join(' ')
+  }
+
+  function move(from: number, to: number) {
+    const next = [...forms]
+    const [entry] = next.splice(from, 1)
+    next.splice(to, 0, entry)
+    forms = next
   }
 
   async function build(repo: string) {
@@ -161,8 +250,14 @@
   title="Repository environments"
   note="What the node does for one repository: the image its sessions and checks run in, the checks themselves, and how its dependencies get there. These are yours and live in node.toml, never in the repository — a candidate that could edit them could choose its own checks."
 >
-  {#if !local}
-    <p class="blocked">Repository environments are changed on the node itself.</p>
+  {#if moved}
+    <div class="held" role="alert">
+      <p>The repository table changed on the node while you were editing it here.</p>
+      <div class="acts">
+        <button class="btn" type="button" onclick={keepMine} disabled={busy !== ''}>Keep my edits</button>
+        <button class="lnk" type="button" onclick={() => void load(true)} disabled={busy !== ''}>Discard them and reload</button>
+      </div>
+    </div>
   {/if}
 
   <RecipeOffers onaccepted={() => void load(true)} />
@@ -185,13 +280,13 @@
         <div class="grid">
           <label class="wide">
             <span>Repository</span>
-            <input bind:value={form.path} disabled={!local} spellcheck="false" placeholder="github.com/owner/name, or /an/absolute/checkout" />
+            <input bind:value={form.path} spellcheck="false" placeholder="github.com/owner/name, or /an/absolute/checkout" />
             <small>An absolute path is that repository's root. A relative one matches the end of a path, so a clone the node manages is named without the clone root. The first matching entry wins.</small>
           </label>
 
           <label>
             <span>Image</span>
-            <select bind:value={form.source} disabled={!local}>
+            <select bind:value={form.source} >
               <option value="dockerfile">Built from its Dockerfile</option>
               <option value="image">Pinned by hand</option>
               <option value="harness">The harness image</option>
@@ -205,24 +300,24 @@
           {#if form.source === 'dockerfile'}
             <label>
               <span>Dockerfile</span>
-              <input bind:value={form.dockerfile} disabled={!local} spellcheck="false" placeholder=".devcontainer/Dockerfile" />
+              <input bind:value={form.dockerfile} spellcheck="false" placeholder=".devcontainer/Dockerfile" />
             </label>
             <label>
               <span>Build context</span>
-              <input bind:value={form.context} disabled={!local} spellcheck="false" placeholder="the Dockerfile's directory" />
+              <input bind:value={form.context} spellcheck="false" placeholder="the Dockerfile's directory" />
             </label>
           {:else if form.source === 'image'}
             <label class="wide">
               <span>Image</span>
-              <input bind:value={form.image} disabled={!local} spellcheck="false" placeholder="localhost/toolchain@sha256:…" />
+              <input bind:value={form.image} spellcheck="false" placeholder="localhost/toolchain@sha256:…" />
             </label>
           {/if}
 
           <div class="wide sessions">
             <span class="heading">Required checks</span>
-            <label class="toggle"><input type="checkbox" bind:checked={form.ownChecks} disabled={!local} /> This repository has its own</label>
+            <label class="toggle"><input type="checkbox" bind:checked={form.ownChecks} /> This repository has its own</label>
             {#if form.ownChecks}
-              <textarea bind:value={form.checks} disabled={!local} rows="2" spellcheck="false" placeholder="just check" aria-label="Required checks, one per line"></textarea>
+              <textarea bind:value={form.checks} rows="2" spellcheck="false" placeholder="just check" aria-label="Required checks, one per line"></textarea>
               <small>One command per line. Left empty, this repository has no required checks.</small>
             {:else}
               <small>The node-wide checks run.</small>
@@ -231,29 +326,31 @@
 
           <label class="wide">
             <span>Preparation</span>
-            <textarea bind:value={form.prepare} disabled={!local} rows="2" spellcheck="false" placeholder="cargo fetch --locked"></textarea>
+            <textarea bind:value={form.prepare} rows="2" spellcheck="false" placeholder="cargo fetch --locked"></textarea>
             <small>One command per line, run once before a run's checks with the registries below reachable. The checks that follow have no network.</small>
           </label>
 
           <label>
             <span>Registries</span>
-            <input bind:value={form.egress} disabled={!local} spellcheck="false" placeholder={presets.map(([name]) => name).join(' ')} />
+            <input bind:value={form.egress} spellcheck="false" placeholder={presets.map(([name]) => name).join(' ')} />
             <small>A preset ({presets.map(([name]) => name).join(', ')}) or a host name. Empty reaches nothing.</small>
           </label>
           <label>
             <span>Time limit (seconds)</span>
-            <input type="number" min="1" bind:value={form.timeout} disabled={!local} placeholder="node-wide" />
+            <input type="number" min="1" bind:value={form.timeout} placeholder="node-wide" />
             <small>For preparation, and for each check.</small>
           </label>
 
           <div class="wide sessions">
-            <label class="toggle"><input type="checkbox" bind:checked={form.sessionEgress} disabled={!local} /> Open these registries to this repository's sessions</label>
+            <label class="toggle"><input type="checkbox" bind:checked={form.sessionEgress} /> Open these registries to this repository's sessions</label>
             <small>So an agent can add a dependency and run what it installed. A session is long-lived and runs what a model decides: anything it can reach that accepts uploads, it can upload to.</small>
             {#if form.sessionEgress && uploads.length}
               <p class="caution">{uploads.join(', ')} reach{uploads.length === 1 ? 'es' : ''} GitHub, which accepts uploads from anyone holding a token.</p>
             {/if}
           </div>
         </div>
+
+        {#each entryErrors(index) as message (message)}<p class="error" role="alert">{message}</p>{/each}
 
         {#if hold}
           <div class="held" role="status">
@@ -278,7 +375,7 @@
                   <details><summary>Build output</summary><pre>{item.log_tail}</pre></details>
                 {/if}
                 {#if item.kind === 'base' && loaded.can_build}
-                  <button class="lnk" type="button" onclick={() => void build(item.repo_path)} disabled={!local || busy !== '' || item.status === 'building'}>
+                  <button class="lnk" type="button" onclick={() => void build(item.repo_path)} disabled={busy !== '' || item.status === 'building'}>
                     {busy === `build:${item.repo_path}` ? 'Starting…' : 'Build again'}
                   </button>
                 {/if}
@@ -289,7 +386,7 @@
           <p class="dim">
             Not built yet: the first session or check on it builds it, and waits.
             {#if loaded.can_build}
-              <button class="lnk" type="button" onclick={() => void build(form.path)} disabled={!local || busy !== '' || dirty}>
+              <button class="lnk" type="button" onclick={() => void build(form.path)} disabled={busy !== '' || dirty}>
                 {busy === `build:${form.path}` ? 'Starting…' : 'Build now'}
               </button>{#if dirty}<small> Save first.</small>{/if}
             {:else}
@@ -351,15 +448,19 @@
               {offering === form.path ? 'Do not offer' : 'Offer to…'}
             </button>
           {/if}
-          <button class="lnk d" type="button" onclick={() => remove(index)} disabled={!local || busy !== ''}>Remove this entry</button>
+          {#if forms.length > 1}
+            <button class="lnk" type="button" onclick={() => move(index, index - 1)} disabled={index === 0 || busy !== ''} aria-label="Move {form.path || 'this entry'} up">Move up</button>
+            <button class="lnk" type="button" onclick={() => move(index, index + 1)} disabled={index === forms.length - 1 || busy !== ''} aria-label="Move {form.path || 'this entry'} down">Move down</button>
+          {/if}
+          <button class="lnk d" type="button" onclick={() => remove(index)} disabled={busy !== ''}>Remove this entry</button>
         </div>
       </details>
     {/each}
 
     <div class="acts">
-      <button class="lnk" type="button" onclick={add} disabled={!local || busy !== ''}>+ Add a repository</button>
+      <button class="lnk" type="button" onclick={add} disabled={busy !== ''}>+ Add a repository</button>
       {#if dirty}
-        <button class="btn p" type="button" onclick={() => void save()} disabled={!local || busy !== '' || invalid.length > 0}>
+        <button class="btn p" type="button" onclick={() => void save()} disabled={busy !== '' || invalid.length > 0 || moved}>
           {busy === 'save' ? 'Saving…' : 'Save repositories'}
         </button>
       {/if}
@@ -409,9 +510,8 @@
   .held { display: grid; gap: 8px; justify-items: start; margin-top: 12px; background: var(--s1); border-left: 3px solid var(--wait); padding: 8px 10px; }
   .held p { margin: 0; font-size: 12.5px; }
   .caution { margin: 0; color: var(--wait); font-size: 12.5px; }
-  .bad, .error, .blocked { color: var(--crit); }
+  .bad, .error { color: var(--crit); }
   .dim, .note, .error { margin: 0; font-size: 12.5px; }
   .dim { color: var(--dim); }
   .note { color: var(--ok); }
-  .blocked { margin: 0; background: var(--wash-crit); border-left: 3px solid var(--crit); padding: 8px 10px; }
 </style>

@@ -85,6 +85,7 @@ cannot act.
 | Browse work; follow `discovered-from` | yes | no | yes |
 | Read and edit documents | yes | no | read |
 | See cost per channel against the ceiling | yes | no | yes |
+| Administer a node: change any `node.toml` key, a passkey confirming each save away from it | yes | no | yes |
 
 The tray is the queue plus a kill switch, one level down because it is destructive.
 It does not stream output.
@@ -192,6 +193,19 @@ save and nothing changes. At the node itself, and in the desktop app on the node
 machine, nothing is refused this way and the sheet never appears. A window that
 cannot make passkeys confirms in another browser instead (below); one that can is
 offered "Use another device" beside Confirm.
+
+**Administer a node.** Settings → Configuration lists every table of `node.toml`
+the bespoke screens do not own (repositories and providers keep theirs), each key
+with the control its shape asks for, the key as the file spells it, and whether a
+change is live or waits for a restart. A key only the host may change is shown
+disabled with the reason; a secret shows whether it is set and offers a field to
+replace it, never its value. Edit a table → Save → one request of per-key
+operations decided against the version read → the passkey sheet naming the keys
+(away from the node) → "Saved", and the restart banner if a restart is now owed. A
+version that moved underneath is read again with the edits kept, and a key that
+changed on both sides is named with both values for the operator to choose. A
+refusal is shown next to the key it is about. Advanced shows the file as the node
+reads it, secrets redacted, with its version.
 
 **Sign in from another browser.** The desktop app against a remote node (or any
 browser with no token to hand) → the login screen's "Sign in from another

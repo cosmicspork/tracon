@@ -663,24 +663,11 @@ export const api = {
     call<{ name: string; created: boolean; note: string | null }>('POST', '/api/channels', { name }),
   runSetup: (rebuild = false) => call<BoundaryResult>('POST', '/api/boundary/setup', { rebuild }),
   config: () => call<NodeConfig>('GET', '/api/config'),
-  /** Save Settings fields, decided against the `hash` the config was read
-      with (a 409 carries the hash now). Off the node's machine a passkey
-      confirms it. */
-  putConfig: (patch: Record<string, unknown>, expectedHash: string) =>
-    call<{ changed: string[]; restart_required: boolean; hash: string }>('PUT', '/api/config', {
-      ...patch,
-      expected_hash: expectedHash,
-    }),
   /** Typed edits of node.toml, decided against `expectedHash` (a 409 carries
       the hash now). Off the node's machine a passkey confirms it. */
   patchConfig: (expectedHash: string, ops: ConfigOp[]) =>
     call<ConfigPatchResult>('PATCH', '/api/config', { expected_hash: expectedHash, ops }),
   repoEnvironments: () => call<RepoEnvironments>('GET', '/api/repos/environments'),
-  saveRepoEnvironments: (entries: RepoEntry[], expectedHash: string) =>
-    call<{ changed: boolean; restart_required: boolean; hash: string }>('PUT', '/api/repos/environments', {
-      entries,
-      expected_hash: expectedHash,
-    }),
   buildRepoEnvironment: (repo: string) =>
     call<{ repo: string; since_ms: number }>('POST', '/api/repos/environments/build', { repo }),
   offerRecipe: (body: { path?: string; repo?: string; channel: string; to_nodes?: string[]; note?: string }) =>
