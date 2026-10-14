@@ -833,9 +833,10 @@ export const api = {
       serving node — a peer's catalogue is refreshed by that peer. */
   refreshModels: () => call<ModelOption[]>('POST', '/api/node/refresh-models'),
   // Node-scoped provider actions: the serving node runs them itself or seals
-  // the command to the owner. On a peer each one (the pasted code too) is an
-  // admin action confirmed here, which the peer runs only if it names this
-  // node in its `[mesh] admin_peers`. Automatic callback capture is accepted
+  // the command to the owner. On a peer each one is an admin action confirmed
+  // here, which the peer runs only if it names this node in its `[mesh]
+  // admin_peers`; the pasted code that finishes a confirmed sign-in rides on
+  // the connect's confirmation and asks for no second passkey. Automatic callback capture is accepted
   // only when this is the serving node and the request itself arrived on
   // loopback.
   nodeConnectProvider: (

@@ -101,8 +101,9 @@
     {:else if refusal}
       <div class="empty" class:bad={refusalKind !== 'not_admin_peer'}>
         {#if refusalKind === 'not_admin_peer'}
-          Read-only and unread: that node does not name this one in its <code>[mesh] admin_peers</code>.
-          Add this node's id there, at that node or in its own Settings with its passkey.
+          A peer's settings are visible and editable only from nodes it names in its
+          <code>[mesh] admin_peers</code>, and that node does not name this one. Add this node's
+          id there, at that node or in its own Settings with its passkey.
         {/if}
         <small>{refusal}</small>
       </div>

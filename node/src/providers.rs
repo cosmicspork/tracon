@@ -75,7 +75,15 @@ struct Inflight {
     started_ms: i64,
     cancel: CancellationToken,
     state: InflightState,
+    /// For a sign-in a peer started: the admin statement its operator
+    /// confirmed the connect with (`mesh::admin`), which the pasted code
+    /// that finishes this sign-in rides on ([`Providers::confirmed_login`]).
+    confirmed: Option<String>,
 }
+
+/// How long a peer's confirmed connect also covers the code that finishes
+/// it. Past it, the code needs a confirmation of its own.
+pub const CONFIRMED_LOGIN_MS: i64 = 15 * 60 * 1000;
 
 enum InflightState {
     Starting,
@@ -433,6 +441,7 @@ impl Providers {
                     started_ms: now_ms(),
                     cancel: cancel.clone(),
                     state: InflightState::Starting,
+                    confirmed: None,
                 },
             );
         }
@@ -1078,6 +1087,30 @@ impl Providers {
             .unwrap()
             .get(&credential_name)
             .map(|credential| credential.channels.clone()))
+    }
+
+    /// Record that the sign-in for `name` that `owner` has in progress was
+    /// started on the strength of the admin statement `confirmation`.
+    pub fn confirm_login(&self, name: &str, owner: &LoginOwner, confirmation: &str) {
+        if let Some(slot) = self.inflight.lock().get_mut(name) {
+            if &slot.owner == owner && matches!(slot.state, InflightState::Pending(_)) {
+                slot.confirmed = Some(confirmation.to_string());
+            }
+        }
+    }
+
+    /// The statement the sign-in for `name` in progress was confirmed with,
+    /// if `owner` started it, it waits for its code, and it is younger than
+    /// [`CONFIRMED_LOGIN_MS`]: what lets that sign-in's own code through
+    /// without a second confirmation. Any other sign-in has none.
+    pub fn confirmed_login(&self, name: &str, owner: &LoginOwner, now: i64) -> Option<String> {
+        let inflight = self.inflight.lock();
+        let slot = inflight.get(name)?;
+        (&slot.owner == owner
+            && matches!(slot.state, InflightState::Pending(_))
+            && now.saturating_sub(slot.started_ms) <= CONFIRMED_LOGIN_MS)
+            .then(|| slot.confirmed.clone())
+            .flatten()
     }
 
     /// The channels a sign-in in progress for `name` will bind its

@@ -5754,6 +5754,22 @@ pub async fn node_provider_code(
             .map_err(super::peer_admin::refused);
     }
     let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+    // The code for a sign-in this node started on the peer with a confirmed
+    // connect rides on that confirmation, so it is sent as it is first. Only
+    // if the peer wants a confirmation of its own (the sign-in is another's,
+    // or too old) is it confirmed here; a retry carrying the proof goes
+    // straight there.
+    if !parts.headers.contains_key(super::passkey::STEP_UP_HEADER) {
+        let unconfirmed = proto::frame::Command::ProviderCode {
+            name: name.clone(),
+            code: body.code.clone(),
+            statement: None,
+        };
+        match peer_command(&s, &node_id, unconfirmed, timeout).await {
+            Err(ApiError(_, message)) if message.contains("carry the statement") => {}
+            other => return other.map(Json).map_err(super::peer_admin::refused),
+        }
+    }
     admin_on_peer(
         &s,
         &parts,
@@ -6110,13 +6126,21 @@ fn admin_peer(
     sender: &str,
     command: &proto::frame::Command,
 ) -> ApiResult<Option<crate::mesh::admin::Admitted>> {
+    let now = crate::store::now_ms();
+    let owner = crate::providers::LoginOwner::Peer(sender.to_string());
+    let login_confirmed = |name: &str| {
+        s.manager
+            .providers()
+            .is_some_and(|p| p.confirmed_login(name, &owner, now).is_some())
+    };
     crate::mesh::admin::admit(
         s.store(),
         &s.cfg,
         &s.node_id,
         sender,
         command,
-        crate::store::now_ms(),
+        now,
+        &login_confirmed,
     )
     .map_err(|refusal| ApiError(StatusCode::FORBIDDEN, refusal))
 }
@@ -6372,6 +6396,17 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         false,
                     )
                     .await
+                    .inspect(|_| {
+                        // The code that finishes this sign-in rides on this
+                        // confirmation (`mesh::admin::admit`).
+                        if let Some(admitted) = &admitted {
+                            providers.confirm_login(
+                                &name,
+                                &crate::providers::LoginOwner::Peer(sender.to_string()),
+                                &admitted.actor(),
+                            );
+                        }
+                    })
                     .and_then(|result| {
                         serde_json::to_value(result).map_err(|error| {
                             crate::providers::ProviderError::Failed(error.to_string())

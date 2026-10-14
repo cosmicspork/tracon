@@ -262,9 +262,9 @@ live table with the file, as the repository editor does.
 
 **A peer's `node.toml`.** `GET` and `PATCH /api/nodes/{id}/config` are the same two
 routes for another node, over the mesh (`ConfigRead`, `ConfigPatch`). The peer answers
-only if its own `[mesh] admin_peers` names the asking node; otherwise the refusal says
-so (`not_admin_peer`) and the interface shows that node's configuration unread and
-read-only, with why. A read returns exactly what the peer's own `GET /api/config`
+only if its own `[mesh] admin_peers` names the asking node: a peer's settings are
+visible and editable only from nodes it names there. Otherwise the refusal says so
+(`not_admin_peer`) and the interface shows why, and nothing of the file. A read returns exactly what the peer's own `GET /api/config`
 would. An edit is decided first on the asking node against the file as the peer shows
 it: the version it names, keys a peer may change (everything a remote edit may, except
 `[mesh] admin_peers`, which only the node itself or its own passkey changes), and the
@@ -1233,9 +1233,9 @@ before the policy is consulted for the same reason.
 their runner/owner and ordinary channel. Mesh handlers authenticate both channel
 memberships, verify the candidate's actual channel and owner, refuse third-node
 relays, and bound responses. Peer UI detail is read-only; it never turns a remote
-ID into a local action. A peer's configuration and provider sign-ins are read-only
-unless the peer names you in its `[mesh] admin_peers`; then each change is confirmed
-on your node and checked again on the peer.
+ID into a local action. A peer's settings (its `node.toml` and its provider sign-ins)
+are visible and editable only from nodes it names in its `[mesh] admin_peers`; each
+change is confirmed on your node and checked again on the peer.
 
 **What is reviewed is the tree; the commits and the branch are prose.** The
 candidate is a tree hash recorded at capture, and every check, verdict and grant
@@ -1434,7 +1434,10 @@ Invariants on top of the wire:
   relays a command on to a third node under its own identity. A provider sign-in,
   a pasted code and a sign-out are admin commands: the owner runs one only for a
   peer its own `[mesh] admin_peers` names, carrying an admin statement its
-  operator confirmed for exactly that command on the owner (below). Then the
+  operator confirmed for exactly that command on the owner (below). The pasted
+  code that finishes a sign-in the sender started with a confirmed connect rides on
+  that connect's statement (only that sign-in, from that sender, while it waits and
+  for at most 15 minutes); a code for any other sign-in needs its own. Then the
   sign-in still needs the sender in every channel it would bind and in every
   channel served by the credential it would replace (one bound to no channel is the
   owner's alone and never replaced by a peer); a pasted code or a cancel is held to

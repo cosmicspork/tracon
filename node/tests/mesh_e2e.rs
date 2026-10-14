@@ -1481,6 +1481,52 @@ async fn a_peers_provider_sign_in_needs_an_admin_peer_and_a_confirmation() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["completion"], "paste", "{v}");
+
+    // The code that finishes that confirmed sign-in rides on its connect: B
+    // admits it without a statement and the provider itself answers (here,
+    // that the pasted code is another sign-in's). From A's interface off the
+    // machine, no passkey is asked for it either.
+    let code = |name: &str| Command::ProviderCode {
+        name: name.into(),
+        code: "abc#not-this-sign-in".into(),
+        statement: None,
+    };
+    let result = a.client.command(&bi, code("anthropic"), t).await;
+    assert!(refused_with(&result, "different sign-in"), "{result:?}");
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/anthropic/code"),
+        Some(json!({ "code": "abc#not-this-sign-in" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("different sign-in"),
+        "{v}"
+    );
+    // A code for any other sign-in (none was confirmed for openai) still
+    // needs a statement of its own, and off the machine, a passkey.
+    let result = a.client.command(&bi, code("openai-codex"), t).await;
+    assert!(refused_with(&result, "carry the statement"), "{result:?}");
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/nodes/{bi}/providers/openai-codex/code"),
+        Some(json!({ "code": "abc" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert!(
+        v["error"]["kind"]
+            .as_str()
+            .is_some_and(|k| k.starts_with("step_up")),
+        "{v}"
+    );
+
     let (st, v) = call(
         &a.app,
         "POST",

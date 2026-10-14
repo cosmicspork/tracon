@@ -88,8 +88,12 @@ impl Admitted {
 /// Whether `sender` may run the admin command `command` here now. A read
 /// needs only that this node's `[mesh] admin_peers` names the sender;
 /// everything else also needs the statement it carries to hold for exactly
-/// this command on this node, which is then spent. `Ok(None)` for a command
-/// that is not an admin command, or a read.
+/// this command on this node, which is then spent. The one exception is the
+/// code that finishes a sign-in: one the sender started with a confirmed
+/// connect, still waiting and young enough (`login_confirmed(name)`, from
+/// `Providers::confirmed_login`), rides on that connect's statement; a code
+/// for any other sign-in needs its own. `Ok(None)` for a command that is not
+/// an admin command, a read, or such a code.
 pub fn admit(
     store: &Store,
     cfg: &Config,
@@ -97,6 +101,7 @@ pub fn admit(
     sender: &str,
     command: &Command,
     now: i64,
+    login_confirmed: &dyn Fn(&str) -> bool,
 ) -> Result<Option<Admitted>, String> {
     if !is_admin_command(command) {
         return Ok(None);
@@ -128,6 +133,16 @@ pub fn admit(
     if let Command::ConfigPatch { not_after_ms, .. } = command {
         if now > not_after_ms.saturating_add(DEADLINE_SKEW_MS) {
             return Err("this edit expired before it arrived; it was not run".into());
+        }
+    }
+    if let Command::ProviderCode {
+        name,
+        statement: None,
+        ..
+    } = command
+    {
+        if login_confirmed(name) {
+            return Ok(None);
         }
     }
     let Some(statement) = statement_of(command) else {
@@ -260,24 +275,54 @@ mod tests {
         let bi = b.node_id();
         let now = 1_000_000;
         let bare = disconnect(None);
+        let none = |_: &str| false;
 
         // Not an admin command: nothing to decide here.
         let kill = Command::Kill {
             session_id: "s".into(),
         };
-        assert_eq!(admit(&store, &cfg, &bi, &c.node_id(), &kill, now), Ok(None));
+        assert_eq!(
+            admit(&store, &cfg, &bi, &c.node_id(), &kill, now, &none),
+            Ok(None)
+        );
         // C is not an admin peer, statement or not.
         let s = signed(&c, &bi, &bare, now);
-        let e = admit(&store, &cfg, &bi, &c.node_id(), &disconnect(Some(s)), now).unwrap_err();
+        let e = admit(
+            &store,
+            &cfg,
+            &bi,
+            &c.node_id(),
+            &disconnect(Some(s)),
+            now,
+            &none,
+        )
+        .unwrap_err();
         assert!(e.contains("admin_peers"), "{e}");
-        let e = admit(&store, &cfg, &bi, &c.node_id(), &Command::ConfigRead, now).unwrap_err();
+        let e = admit(
+            &store,
+            &cfg,
+            &bi,
+            &c.node_id(),
+            &Command::ConfigRead,
+            now,
+            &none,
+        )
+        .unwrap_err();
         assert!(e.contains("admin_peers"), "{e}");
         // A may read with no statement, and must carry one for anything else.
         assert_eq!(
-            admit(&store, &cfg, &bi, &a.node_id(), &Command::ConfigRead, now),
+            admit(
+                &store,
+                &cfg,
+                &bi,
+                &a.node_id(),
+                &Command::ConfigRead,
+                now,
+                &none
+            ),
             Ok(None)
         );
-        let e = admit(&store, &cfg, &bi, &a.node_id(), &bare, now).unwrap_err();
+        let e = admit(&store, &cfg, &bi, &a.node_id(), &bare, now, &none).unwrap_err();
         assert!(e.contains("carry the statement"), "{e}");
 
         // A statement for exactly this: admitted once, audited as A.
@@ -289,6 +334,7 @@ mod tests {
             &a.node_id(),
             &disconnect(Some(s.clone())),
             now,
+            &none,
         )
         .unwrap()
         .unwrap();
@@ -299,7 +345,16 @@ mod tests {
             admitted.actor()
         );
         // Replayed: refused.
-        let e = admit(&store, &cfg, &bi, &a.node_id(), &disconnect(Some(s)), now).unwrap_err();
+        let e = admit(
+            &store,
+            &cfg,
+            &bi,
+            &a.node_id(),
+            &disconnect(Some(s)),
+            now,
+            &none,
+        )
+        .unwrap_err();
         assert!(e.contains("already used"), "{e}");
 
         // For another operation, another node, from another issuer, stale,
@@ -324,7 +379,16 @@ mod tests {
             ("future", signed(&a, &bi, &bare, now + DEADLINE_SKEW_MS + 1)),
         ];
         for (words, s) in cases {
-            let e = admit(&store, &cfg, &bi, &a.node_id(), &disconnect(Some(s)), now).unwrap_err();
+            let e = admit(
+                &store,
+                &cfg,
+                &bi,
+                &a.node_id(),
+                &disconnect(Some(s)),
+                now,
+                &none,
+            )
+            .unwrap_err();
             assert!(e.contains(words), "{words}: {e}");
         }
         let mut long = signed(&a, &bi, &bare, now);
@@ -336,6 +400,7 @@ mod tests {
             &a.node_id(),
             &disconnect(Some(long)),
             now,
+            &none,
         )
         .unwrap_err();
         assert!(e.contains("signature"), "{e}");
@@ -343,8 +408,67 @@ mod tests {
         // A removed member is not admitted, even while still listed.
         store.node_channels_set(&a.node_id(), &[]).unwrap();
         let s = signed(&a, &bi, &bare, now);
-        let e = admit(&store, &cfg, &bi, &a.node_id(), &disconnect(Some(s)), now).unwrap_err();
+        let e = admit(
+            &store,
+            &cfg,
+            &bi,
+            &a.node_id(),
+            &disconnect(Some(s)),
+            now,
+            &none,
+        )
+        .unwrap_err();
         assert!(e.contains("not a member of the mesh"), "{e}");
+    }
+
+    /// The code that finishes a sign-in the sender started with a confirmed
+    /// connect needs no statement of its own; a code for any other sign-in
+    /// does, and a peer not named is refused either way.
+    #[test]
+    fn a_code_rides_only_on_its_own_confirmed_sign_in() {
+        let (a, b, c) = ids();
+        let (store, cfg) = setup(&[&a]);
+        let bi = b.node_id();
+        let code = |name: &str| Command::ProviderCode {
+            name: name.into(),
+            code: "c".into(),
+            statement: None,
+        };
+        let confirmed = |name: &str| name == "anthropic";
+        assert_eq!(
+            admit(
+                &store,
+                &cfg,
+                &bi,
+                &a.node_id(),
+                &code("anthropic"),
+                1,
+                &confirmed
+            ),
+            Ok(None)
+        );
+        let e = admit(
+            &store,
+            &cfg,
+            &bi,
+            &a.node_id(),
+            &code("openai"),
+            1,
+            &confirmed,
+        )
+        .unwrap_err();
+        assert!(e.contains("carry the statement"), "{e}");
+        let e = admit(
+            &store,
+            &cfg,
+            &bi,
+            &c.node_id(),
+            &code("anthropic"),
+            1,
+            &confirmed,
+        )
+        .unwrap_err();
+        assert!(e.contains("admin_peers"), "{e}");
     }
 
     #[test]

@@ -195,9 +195,10 @@ offered "Use another device" beside Confirm.
 
 **Administer a peer.** Settings → Mesh → "A peer's node.toml" (or a peer's
 repositories under Channels & repositories) → choose the node → its file, as its
-own Settings shows it, secrets and comments left out. A node that does not name this
-one in its `[mesh] admin_peers` shows nothing but why, and how to add it (at that
-node, or in its own Settings with its passkey). Otherwise: a key and a value → Set →
+own Settings shows it, secrets and comments left out. A peer's settings are visible
+and editable only from nodes it names in its `[mesh] admin_peers`; one that does not
+name this node shows nothing but why, and how to add it (at that node, or in its own
+Settings with its passkey). Otherwise: a key and a value → Set →
 the same confirmation sheet, its line starting with the peer's name ("On beta: Change
 node.toml: review.max_files") → passkey → the peer checks it again and writes it; its
 own phone is told. `admin_peers` itself is never offered for a peer's editing. A peer
