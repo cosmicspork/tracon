@@ -469,6 +469,363 @@ pub fn editable_at_node(key: &str) -> bool {
     key != "runtime.kubernetes.state_mount"
 }
 
+/// What kind of value a key holds, as the `Config` structs read it: what a
+/// form needs to offer the right control for a key, and nothing a reader of
+/// the file could not see in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Shape {
+    /// `bool`, `integer`, `float`, `string`, `list`, `enum`, `map`,
+    /// `table`, or `any` for a value read in its own way (an address that
+    /// is either a socket or a path).
+    pub kind: &'static str,
+    /// For a `list`, what each element is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<&'static str>,
+    /// For an `enum`, the values it takes, as the file spells them.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub choices: &'static [&'static str],
+    /// The key may be left out with a meaning of its own (none, or "work
+    /// it out"), rather than standing for a default value.
+    pub optional: bool,
+}
+
+/// The shape of a key, or of a table or an array of tables holding some, by
+/// its schema spelling (`KeySpec::key`, `repo`, `providers.*.models`). Traced once
+/// from the `Config` structs' own `Deserialize`, so it cannot drift from
+/// what the node reads.
+pub fn shape(key: &str) -> Option<&'static Shape> {
+    static SHAPES: std::sync::OnceLock<std::collections::BTreeMap<String, Shape>> =
+        std::sync::OnceLock::new();
+    SHAPES
+        .get_or_init(|| {
+            trace::walk::<crate::config::Config>()
+                .map(|traced| traced.shapes)
+                .unwrap_or_default()
+        })
+        .get(key)
+}
+
+/// The array of tables a key is a field of, if it is one (`service` for
+/// `service.port`, `providers.*.models` for `providers.*.models.id`): an
+/// entry of it is added, removed or moved whole, and its fields are written
+/// as `service[2].port`.
+pub fn array_of(key: &str) -> Option<String> {
+    let segs: Vec<&str> = key.split('.').collect();
+    (1..segs.len())
+        .rev()
+        .map(|n| segs[..n].join("."))
+        .find(|prefix| shape(prefix).is_some_and(|s| s.kind == "list" && s.item == Some("table")))
+}
+
+/// Records the key paths a type reads, and what each one holds, by
+/// deserializing it from a deserializer that offers every field it asks for.
+mod trace {
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use serde::de::{self, DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor};
+
+    use super::Shape;
+
+    #[derive(Default)]
+    struct Seen {
+        keys: BTreeSet<String>,
+        tables: BTreeSet<String>,
+        shapes: BTreeMap<String, Shape>,
+    }
+
+    pub struct Traced {
+        /// The leaf keys: every field path, less those that are themselves
+        /// tables. A map's entries are `*`; an array's elements share the
+        /// array's path.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub keys: BTreeSet<String>,
+        /// What each key holds, tables and arrays of tables among them.
+        pub shapes: BTreeMap<String, Shape>,
+    }
+
+    pub fn walk<T: de::DeserializeOwned>() -> Result<Traced, String> {
+        let seen = RefCell::new(Seen::default());
+        T::deserialize(Tracer {
+            path: String::new(),
+            seen: &seen,
+            element: false,
+        })
+        .map_err(|e| e.to_string())?;
+        let seen = seen.into_inner();
+        let keys: BTreeSet<String> = seen.keys.difference(&seen.tables).cloned().collect();
+        Ok(Traced {
+            keys,
+            shapes: seen.shapes,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn keys<T: de::DeserializeOwned>() -> BTreeSet<String> {
+        walk::<T>()
+            .unwrap_or_else(|e| panic!("tracing Config failed: {e}"))
+            .keys
+    }
+
+    #[derive(Debug)]
+    struct Error(String);
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+    impl std::error::Error for Error {}
+    impl de::Error for Error {
+        fn custom<T: std::fmt::Display>(msg: T) -> Self {
+            Error(msg.to_string())
+        }
+    }
+
+    struct Tracer<'a> {
+        path: String,
+        seen: &'a RefCell<Seen>,
+        /// An element of the sequence at `path`, whose kind is the list's
+        /// `item` rather than the key's own.
+        element: bool,
+    }
+
+    impl Tracer<'_> {
+        fn note(&self, kind: &'static str, choices: &'static [&'static str]) {
+            let mut seen = self.seen.borrow_mut();
+            let shape = seen.shapes.entry(self.path.clone()).or_default();
+            if self.element {
+                shape.item.get_or_insert(kind);
+            } else if shape.kind.is_empty() {
+                shape.kind = kind;
+                shape.choices = choices;
+            }
+        }
+    }
+
+    /// A string every string-shaped field accepts: a socket address
+    /// parses from it, and a path or a name takes it as it is.
+    const TEXT: &str = "127.0.0.1:1";
+
+    impl<'de> de::Deserializer<'de> for Tracer<'_> {
+        type Error = Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("any", &[]);
+            v.visit_str(TEXT)
+        }
+        fn deserialize_bool<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("bool", &[]);
+            v.visit_bool(false)
+        }
+        fn deserialize_i8<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_i64(0)
+        }
+        fn deserialize_i16<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_i64(0)
+        }
+        fn deserialize_i32<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_i64(0)
+        }
+        fn deserialize_i64<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_i64(0)
+        }
+        fn deserialize_u8<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_u64(0)
+        }
+        fn deserialize_u16<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_u64(0)
+        }
+        fn deserialize_u32<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_u64(0)
+        }
+        fn deserialize_u64<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("integer", &[]);
+            v.visit_u64(0)
+        }
+        fn deserialize_f32<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("float", &[]);
+            v.visit_f64(0.0)
+        }
+        fn deserialize_f64<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("float", &[]);
+            v.visit_f64(0.0)
+        }
+        fn deserialize_char<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("string", &[]);
+            v.visit_char('x')
+        }
+        fn deserialize_str<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("string", &[]);
+            v.visit_str(TEXT)
+        }
+        fn deserialize_string<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("string", &[]);
+            v.visit_str(TEXT)
+        }
+        fn deserialize_bytes<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("string", &[]);
+            v.visit_bytes(b"")
+        }
+        fn deserialize_byte_buf<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("string", &[]);
+            v.visit_bytes(b"")
+        }
+        fn deserialize_option<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            if !self.element {
+                let mut seen = self.seen.borrow_mut();
+                seen.shapes.entry(self.path.clone()).or_default().optional = true;
+            }
+            v.visit_some(self)
+        }
+        fn deserialize_unit<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            v.visit_unit()
+        }
+        fn deserialize_unit_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            v: V,
+        ) -> Result<V::Value, Error> {
+            v.visit_unit()
+        }
+        fn deserialize_newtype_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            v: V,
+        ) -> Result<V::Value, Error> {
+            v.visit_newtype_struct(self)
+        }
+        fn deserialize_seq<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("list", &[]);
+            v.visit_seq(One(Some(self.into_element())))
+        }
+        fn deserialize_tuple<V: Visitor<'de>>(self, _: usize, v: V) -> Result<V::Value, Error> {
+            self.note("list", &[]);
+            v.visit_seq(One(Some(self.into_element())))
+        }
+        fn deserialize_tuple_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            _: usize,
+            v: V,
+        ) -> Result<V::Value, Error> {
+            self.note("list", &[]);
+            v.visit_seq(One(Some(self.into_element())))
+        }
+        fn deserialize_map<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            self.note("map", &[]);
+            self.seen.borrow_mut().tables.insert(self.path.clone());
+            v.visit_map(Fields::new(self, &["*"]))
+        }
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            v: V,
+        ) -> Result<V::Value, Error> {
+            self.note("table", &[]);
+            self.seen.borrow_mut().tables.insert(self.path.clone());
+            v.visit_map(Fields::new(self, fields))
+        }
+        fn deserialize_enum<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            variants: &'static [&'static str],
+            v: V,
+        ) -> Result<V::Value, Error> {
+            self.note("enum", variants);
+            v.visit_enum(IntoDeserializer::<Error>::into_deserializer(variants[0]))
+        }
+        fn deserialize_identifier<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            v.visit_str(TEXT)
+        }
+        fn deserialize_ignored_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
+            v.visit_unit()
+        }
+    }
+
+    impl<'a> Tracer<'a> {
+        fn into_element(self) -> Tracer<'a> {
+            Tracer {
+                element: true,
+                ..self
+            }
+        }
+    }
+
+    /// A sequence of one element, at the sequence's own path.
+    struct One<'a>(Option<Tracer<'a>>);
+
+    impl<'de> SeqAccess<'de> for One<'_> {
+        type Error = Error;
+        fn next_element_seed<T: DeserializeSeed<'de>>(
+            &mut self,
+            seed: T,
+        ) -> Result<Option<T::Value>, Error> {
+            self.0
+                .take()
+                .map(|tracer| seed.deserialize(tracer))
+                .transpose()
+        }
+    }
+
+    /// A table offering each of `fields`, and recording each one's path.
+    struct Fields<'a> {
+        path: String,
+        seen: &'a RefCell<Seen>,
+        fields: std::slice::Iter<'static, &'static str>,
+        current: &'static str,
+    }
+
+    impl<'a> Fields<'a> {
+        fn new(tracer: Tracer<'a>, fields: &'static [&'static str]) -> Self {
+            Fields {
+                path: tracer.path,
+                seen: tracer.seen,
+                fields: fields.iter(),
+                current: "",
+            }
+        }
+
+        fn child(&self) -> String {
+            match self.path.is_empty() {
+                true => self.current.to_string(),
+                false => format!("{}.{}", self.path, self.current),
+            }
+        }
+    }
+
+    impl<'de> MapAccess<'de> for Fields<'_> {
+        type Error = Error;
+        fn next_key_seed<K: DeserializeSeed<'de>>(
+            &mut self,
+            seed: K,
+        ) -> Result<Option<K::Value>, Error> {
+            let Some(field) = self.fields.next() else {
+                return Ok(None);
+            };
+            self.current = field;
+            self.seen.borrow_mut().keys.insert(self.child());
+            seed.deserialize(IntoDeserializer::<Error>::into_deserializer(*field))
+                .map(Some)
+        }
+        fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, Error> {
+            seed.deserialize(Tracer {
+                path: self.child(),
+                seen: self.seen,
+                element: false,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -595,6 +952,44 @@ mod tests {
         }
     }
 
+    /// Every key says what it holds, traced from the structs that read it.
+    #[test]
+    fn every_key_has_a_shape_a_form_can_offer() {
+        for spec in KEYS {
+            let shape = shape(spec.key).unwrap_or_else(|| panic!("{} has no shape", spec.key));
+            assert!(!shape.kind.is_empty(), "{}", spec.key);
+            if shape.kind == "list" {
+                assert!(shape.item.is_some(), "{}", spec.key);
+            }
+        }
+        let of = |key: &str| shape(key).unwrap().clone();
+        assert_eq!(of("review.max_files").kind, "integer");
+        assert!(!of("review.max_files").optional);
+        assert_eq!(of("external.enabled").kind, "bool");
+        assert_eq!(of("embed.min_similarity").kind, "float");
+        let kind = of("runtime.kind");
+        assert_eq!(kind.kind, "enum");
+        assert!(kind.choices.contains(&"podman") && kind.choices.contains(&"kubernetes"));
+        let checks = of("repo.checks");
+        assert_eq!(
+            (checks.kind, checks.item, checks.optional),
+            ("list", Some("string"), true)
+        );
+        assert_eq!(of("github.dispatch.*").item, Some("string"));
+        assert_eq!(of("supervision.dependency_inputs.*").kind, "string");
+        assert_eq!(of("providers.*.models.context").kind, "integer");
+        assert!(of("mesh.hub_url").optional);
+        assert_eq!(of("gateway.harness_listen").kind, "any");
+        assert_eq!(array_of("service.port").as_deref(), Some("service"));
+        assert_eq!(array_of("repo.style.types").as_deref(), Some("repo"));
+        assert_eq!(
+            array_of("providers.*.models.id").as_deref(),
+            Some("providers.*.models")
+        );
+        assert_eq!(array_of("providers.*.upstream"), None);
+        assert_eq!(array_of("session.budget_tokens"), None);
+    }
+
     #[test]
     fn who_may_reach_a_node_and_where_its_credentials_go_are_not_a_peers_to_change() {
         for key in [
@@ -630,242 +1025,5 @@ mod tests {
     #[test]
     fn every_write_is_an_admin_action() {
         assert!(KEYS.iter().all(|spec| spec.admin));
-    }
-
-    /// Records the key paths a type reads by deserializing it from a
-    /// deserializer that offers every field it asks for.
-    mod trace {
-        use std::cell::RefCell;
-        use std::collections::BTreeSet;
-
-        use serde::de::{self, DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor};
-
-        #[derive(Default)]
-        struct Seen {
-            keys: BTreeSet<String>,
-            tables: BTreeSet<String>,
-        }
-
-        /// The leaf keys `T` reads: every field path, less those that are
-        /// themselves tables. A map's entries are `*`; an array's elements
-        /// share the array's path.
-        pub fn keys<T: de::DeserializeOwned>() -> BTreeSet<String> {
-            let seen = RefCell::new(Seen::default());
-            T::deserialize(Tracer {
-                path: String::new(),
-                seen: &seen,
-            })
-            .unwrap_or_else(|e| panic!("tracing Config failed: {e}"));
-            let seen = seen.into_inner();
-            seen.keys.difference(&seen.tables).cloned().collect()
-        }
-
-        #[derive(Debug)]
-        struct Error(String);
-
-        impl std::fmt::Display for Error {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(&self.0)
-            }
-        }
-        impl std::error::Error for Error {}
-        impl de::Error for Error {
-            fn custom<T: std::fmt::Display>(msg: T) -> Self {
-                Error(msg.to_string())
-            }
-        }
-
-        struct Tracer<'a> {
-            path: String,
-            seen: &'a RefCell<Seen>,
-        }
-
-        /// A string every string-shaped field accepts: a socket address
-        /// parses from it, and a path or a name takes it as it is.
-        const TEXT: &str = "127.0.0.1:1";
-
-        impl<'de> de::Deserializer<'de> for Tracer<'_> {
-            type Error = Error;
-
-            fn deserialize_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_str(TEXT)
-            }
-            fn deserialize_bool<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_bool(false)
-            }
-            fn deserialize_i8<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_i64(0)
-            }
-            fn deserialize_i16<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_i64(0)
-            }
-            fn deserialize_i32<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_i64(0)
-            }
-            fn deserialize_i64<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_i64(0)
-            }
-            fn deserialize_u8<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_u64(0)
-            }
-            fn deserialize_u16<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_u64(0)
-            }
-            fn deserialize_u32<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_u64(0)
-            }
-            fn deserialize_u64<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_u64(0)
-            }
-            fn deserialize_f32<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_f64(0.0)
-            }
-            fn deserialize_f64<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_f64(0.0)
-            }
-            fn deserialize_char<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_char('x')
-            }
-            fn deserialize_str<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_str(TEXT)
-            }
-            fn deserialize_string<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_str(TEXT)
-            }
-            fn deserialize_bytes<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_bytes(b"")
-            }
-            fn deserialize_byte_buf<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_bytes(b"")
-            }
-            fn deserialize_option<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_some(self)
-            }
-            fn deserialize_unit<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_unit()
-            }
-            fn deserialize_unit_struct<V: Visitor<'de>>(
-                self,
-                _: &'static str,
-                v: V,
-            ) -> Result<V::Value, Error> {
-                v.visit_unit()
-            }
-            fn deserialize_newtype_struct<V: Visitor<'de>>(
-                self,
-                _: &'static str,
-                v: V,
-            ) -> Result<V::Value, Error> {
-                v.visit_newtype_struct(self)
-            }
-            fn deserialize_seq<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_seq(One(Some(self)))
-            }
-            fn deserialize_tuple<V: Visitor<'de>>(self, _: usize, v: V) -> Result<V::Value, Error> {
-                v.visit_seq(One(Some(self)))
-            }
-            fn deserialize_tuple_struct<V: Visitor<'de>>(
-                self,
-                _: &'static str,
-                _: usize,
-                v: V,
-            ) -> Result<V::Value, Error> {
-                v.visit_seq(One(Some(self)))
-            }
-            fn deserialize_map<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                self.seen.borrow_mut().tables.insert(self.path.clone());
-                v.visit_map(Fields::new(self, &["*"]))
-            }
-            fn deserialize_struct<V: Visitor<'de>>(
-                self,
-                _: &'static str,
-                fields: &'static [&'static str],
-                v: V,
-            ) -> Result<V::Value, Error> {
-                self.seen.borrow_mut().tables.insert(self.path.clone());
-                v.visit_map(Fields::new(self, fields))
-            }
-            fn deserialize_enum<V: Visitor<'de>>(
-                self,
-                _: &'static str,
-                variants: &'static [&'static str],
-                v: V,
-            ) -> Result<V::Value, Error> {
-                v.visit_enum(IntoDeserializer::<Error>::into_deserializer(variants[0]))
-            }
-            fn deserialize_identifier<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_str(TEXT)
-            }
-            fn deserialize_ignored_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, Error> {
-                v.visit_unit()
-            }
-        }
-
-        /// A sequence of one element, at the sequence's own path.
-        struct One<'a>(Option<Tracer<'a>>);
-
-        impl<'de> SeqAccess<'de> for One<'_> {
-            type Error = Error;
-            fn next_element_seed<T: DeserializeSeed<'de>>(
-                &mut self,
-                seed: T,
-            ) -> Result<Option<T::Value>, Error> {
-                self.0
-                    .take()
-                    .map(|tracer| seed.deserialize(tracer))
-                    .transpose()
-            }
-        }
-
-        /// A table offering each of `fields`, and recording each one's path.
-        struct Fields<'a> {
-            path: String,
-            seen: &'a RefCell<Seen>,
-            fields: std::slice::Iter<'static, &'static str>,
-            current: &'static str,
-        }
-
-        impl<'a> Fields<'a> {
-            fn new(tracer: Tracer<'a>, fields: &'static [&'static str]) -> Self {
-                Fields {
-                    path: tracer.path,
-                    seen: tracer.seen,
-                    fields: fields.iter(),
-                    current: "",
-                }
-            }
-
-            fn child(&self) -> String {
-                match self.path.is_empty() {
-                    true => self.current.to_string(),
-                    false => format!("{}.{}", self.path, self.current),
-                }
-            }
-        }
-
-        impl<'de> MapAccess<'de> for Fields<'_> {
-            type Error = Error;
-            fn next_key_seed<K: DeserializeSeed<'de>>(
-                &mut self,
-                seed: K,
-            ) -> Result<Option<K::Value>, Error> {
-                let Some(field) = self.fields.next() else {
-                    return Ok(None);
-                };
-                self.current = field;
-                self.seen.borrow_mut().keys.insert(self.child());
-                seed.deserialize(IntoDeserializer::<Error>::into_deserializer(*field))
-                    .map(Some)
-            }
-            fn next_value_seed<V: DeserializeSeed<'de>>(
-                &mut self,
-                seed: V,
-            ) -> Result<V::Value, Error> {
-                seed.deserialize(Tracer {
-                    path: self.child(),
-                    seen: self.seen,
-                })
-            }
-        }
     }
 }

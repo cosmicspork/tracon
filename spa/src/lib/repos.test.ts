@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { acceptsUploads, blankForm, buildLine, canonical, lines, problems, toEntry, toForm, words } from './repos'
+import { acceptsUploads, blankForm, buildLine, canonical, lines, problems, replayRepos, repoEdit, repoOps, toEntry, toForm, words, writtenRepos } from './repos'
 import type { RepoEntry, RepoImageBuild } from './types'
 
 const presets: [string, string[]][] = [
@@ -132,4 +132,102 @@ test('a build reads as what it is and how it stands', () => {
     'session image (claude) · ready',
   )
   expect(buildLine({ ...build, kind: 'trial' })).toBe('image tried by a session from origin/main 5a2bcd4d15b3 · ready')
+})
+
+test('a repository save is per-entry operations, and an untouched table sends none', () => {
+  const seeded: RepoEntry[] = [
+    { path: '/src/a', dockerfile: '.devcontainer/Dockerfile', prepare: ['cargo fetch'], egress: ['crates'], commits: 'keep', style: { conventional: true } },
+    { path: '/src/b', prepare: [], egress: [] },
+    // Written with what the form does not say (a zero timeout is the default).
+    { path: '/src/c', prepare: [], egress: [], timeout_secs: 0 },
+  ]
+  const forms = () => seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
+  expect(repoOps(seeded, forms())).toEqual([])
+
+  // One field: one set, at its index; what the form does not edit is untouched.
+  const egress = forms()
+  egress[0].egress = 'crates npm'
+  egress[1].sessionEgress = false
+  expect(repoOps(seeded, egress)).toEqual([{ op: 'set', key: 'repo[0].egress', value: ['crates', 'npm'] }])
+
+  // Switching a source takes the old key out and writes the new one.
+  const pinned = forms()
+  pinned[0].source = 'image'
+  pinned[0].image = 'localhost/tc@sha256:abc'
+  expect(repoOps(seeded, pinned)).toEqual([
+    { op: 'remove', key: 'repo[0].dockerfile' },
+    { op: 'set', key: 'repo[0].image', value: 'localhost/tc@sha256:abc' },
+  ])
+
+  // Remove b, add d first, keep a and c: removal, insert, then the order.
+  const all = forms()
+  const fresh = { ...blankForm(), path: '/src/d', source: 'harness' as const }
+  expect(repoOps(seeded, [fresh, all[2], all[0]])).toEqual([
+    { op: 'remove', key: 'repo[1]' },
+    { op: 'insert', array: 'repo', entry: { path: '/src/d', prepare: [], egress: [] } },
+    { op: 'reorder', array: 'repo', order: [2, 1, 0] },
+  ])
+
+  // Moving an entry is a reorder alone.
+  const swapped = forms()
+  expect(repoOps(seeded, [swapped[1], swapped[0], swapped[2]])).toEqual([{ op: 'reorder', array: 'repo', order: [1, 0, 2] }])
+})
+
+test('the table is read as node.toml writes it, with the lists it may leave out empty', () => {
+  expect(writtenRepos({})).toEqual([])
+  expect(writtenRepos({ repo: [{ path: '/src/a', egress: ['crates'] }] })).toEqual([{ path: '/src/a', prepare: [], egress: ['crates'] }])
+})
+
+test('keeping my edits after the table moved replays only my changes over what the node has now', () => {
+  const seeded: RepoEntry[] = [
+    { path: '/src/a', prepare: ['cargo fetch'], egress: ['crates'] },
+    { path: '/src/b', prepare: [], egress: [] },
+    { path: '/src/c', prepare: [], egress: [] },
+  ]
+  const forms = seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
+  // Mine: a's preparation, c removed, a new d.
+  forms[0].prepare = 'cargo fetch --locked'
+  const mine = [forms[0], forms[1], { ...blankForm(), path: '/src/d', source: 'harness' as const }]
+  // Theirs: a's egress widened, b removed, e added first.
+  const now: RepoEntry[] = [
+    { path: '/src/e', prepare: [], egress: ['npm'] },
+    { path: '/src/a', prepare: ['cargo fetch'], egress: ['crates', 'npm'] },
+    { path: '/src/c', prepare: [], egress: [] },
+  ]
+  const out = replayRepos(seeded, mine, now)
+  expect(out.removed).toEqual(['/src/b'])
+  expect(out.clashes).toEqual([])
+  expect(out.forms.map((f) => [f.path, f.origin])).toEqual([
+    ['/src/e', 0],
+    ['/src/a', 1],
+    ['/src/d', null],
+  ])
+  const a = toEntry(out.forms[1])
+  expect(a.prepare).toEqual(['cargo fetch --locked'])
+  expect(a.egress).toEqual(['crates', 'npm'])
+  // Saving that: c (which I removed) goes, e and a's new egress stay, d is added.
+  expect(repoOps(now, out.forms)).toEqual([
+    { op: 'remove', key: 'repo[2]' },
+    { op: 'set', key: 'repo[1].prepare', value: ['cargo fetch --locked'] },
+    { op: 'insert', array: 'repo', entry: { path: '/src/d', prepare: [], egress: [] } },
+  ])
+  // A field both changed is named; mine is what saving writes.
+  const both = replayRepos(seeded, [forms[0]], [{ path: '/src/a', prepare: ['make deps'], egress: ['crates'] }])
+  expect(both.clashes).toEqual(['/src/a: prepare'])
+  expect(toEntry(both.forms[0]).prepare).toEqual(['cargo fetch --locked'])
+})
+
+test('a refusal of a repository field lands on the form it came from', () => {
+  const seeded: RepoEntry[] = [
+    { path: '/src/a', prepare: [], egress: [] },
+    { path: '/src/b', prepare: [], egress: [] },
+  ]
+  const forms = seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
+  forms[1].egress = 'npm'
+  const { ops, screen } = repoEdit(seeded, [forms[1]])
+  expect(ops).toEqual([
+    { op: 'remove', key: 'repo[0]' },
+    { op: 'set', key: 'repo[0].egress', value: ['npm'] },
+  ])
+  expect(screen).toEqual([undefined, 'repo[0].egress'])
 })

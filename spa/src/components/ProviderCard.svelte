@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import ChannelChoice from './ChannelChoice.svelte'
   import { api } from '../lib/api'
   import { providerChannelSeed } from '../lib/channel'
@@ -13,14 +13,29 @@
   import { formatDuration } from '../lib/format'
   import { completionInstruction, providerLabel } from '../lib/providers'
   import { store } from '../lib/store.svelte'
-  import type { ModelDecl, ProviderConfig, ProviderConnectResult, ProviderInfo } from '../lib/types'
+  import {
+    declareOps,
+    fieldFor,
+    modelOps,
+    rebase,
+    sectionOps,
+    shown,
+    type Clash,
+    type Draft,
+    type Field,
+    type FieldContext,
+    type SaveOutcome,
+  } from '../lib/config-form'
+  import ConfigField from './settings/ConfigField.svelte'
+  import type { ConfigOp, ModelDecl, ProviderConfig, ProviderConnectResult, ProviderInfo } from '../lib/types'
 
   let {
     p,
     nodeId,
     config = null,
     editable = false,
-    saveModels,
+    context = null,
+    save,
   }: {
     p: ProviderInfo
     nodeId: string
@@ -30,7 +45,10 @@
         show no meta line and no declared-models section. */
     config?: ProviderConfig | null
     editable?: boolean
-    saveModels?: (name: string, models: ModelDecl[]) => Promise<unknown>
+    /** node.toml as the page read it, for this provider's keys. */
+    context?: FieldContext | null
+    /** Send per-key operations on node.toml (`PATCH /api/config`). */
+    save?: (ops: ConfigOp[], keys: string[]) => Promise<SaveOutcome>
   } = $props()
 
   let code = $state('')
@@ -49,40 +67,110 @@
   // request. Re-seeded whenever the node's own config changes under it
   // (a fresh load elsewhere on the page, or this card's own save landing).
   // `config` is the page's `$state`, so its models are a proxy that
-  // `structuredClone` refuses; a snapshot is the plain copy.
+  // `structuredClone` refuses; a snapshot is the plain copy. Each row keeps
+  // the index it was loaded at, so a save edits that model where it is.
   let models = $state<ModelDecl[]>([])
+  let origins = $state<(number | null)[]>([])
   let modelsBusy = $state(false)
   let modelsError = $state('')
-  let modelsSaved = $state(false)
+  let modelsSaved = $state('')
   $effect(() => {
-    models = config ? $state.snapshot(config.models) : []
-    modelsSaved = false
+    const loaded = config ? $state.snapshot(config.models) : []
+    models = loaded
+    origins = loaded.map((_, i) => i)
+    modelsSaved = ''
   })
   const modelsValid = $derived.by(() => {
     const ids = models.map((m) => m.id.trim())
     if (ids.some((id) => !id)) return false
     return new Set(ids).size === ids.length
   })
-  const modelsDirty = $derived(config ? JSON.stringify(config.models) !== JSON.stringify(models) : false)
+  const modelRows = $derived(models.map((model, i) => ({ origin: origins[i] ?? null, model: { ...model } })))
+  const modelEdits = $derived(context ? modelOps(context, p.name, modelRows) : [])
+  const modelsDirty = $derived(modelEdits.length > 0)
 
   function addModel() {
     models.push({ id: '', name: '', reasoning: true })
+    origins.push(null)
   }
   function removeModel(index: number) {
     models.splice(index, 1)
+    origins.splice(index, 1)
   }
+
+  function said(outcome: SaveOutcome): string {
+    if (outcome.kind === 'saved') return ''
+    if (outcome.kind === 'conflict') return 'node.toml changed on the node since this page read it; it has been read again. Check and save again.'
+    if (outcome.kind === 'refused') return [...outcome.general, ...Object.values(outcome.fields).flat()].join(' ') || outcome.message
+    return outcome.message
+  }
+
   async function saveDeclaredModels() {
-    if (!saveModels || !modelsValid || modelsBusy) return
+    if (!save || !modelsValid || modelsBusy || !modelsDirty) return
     modelsBusy = true
     modelsError = ''
-    modelsSaved = false
-    try {
-      await saveModels(p.name, models)
-      modelsSaved = true
-    } catch (e) {
-      modelsError = e instanceof Error ? e.message : String(e)
-    } finally {
-      modelsBusy = false
+    modelsSaved = ''
+    const outcome = await save(modelEdits, [])
+    modelsBusy = false
+    if (outcome.kind === 'saved') {
+      modelsSaved = outcome.result.restart_required ? 'Saved to node.toml; new sessions see it once the node restarts.' : 'Saved to node.toml.'
+    } else {
+      modelsError = said(outcome)
+    }
+  }
+
+  // The provider's own keys: where it is reached and with what.
+  const ENDPOINT = ['upstream', 'shape', 'credential', 'login', 'price.input_per_mtok', 'price.output_per_mtok']
+  const endpoint = $derived(
+    context ? ENDPOINT.map((name) => fieldFor(context, ['providers', p.name, ...name.split('.')])).filter((f): f is Field => f !== null) : [],
+  )
+  let endpointDrafts = $state<Record<string, Draft>>({})
+  let endpointErrors = $state<Record<string, string[]>>({})
+  let endpointNote = $state('')
+  let endpointSaved = $state(false)
+  let endpointBusy = $state(false)
+  let endpointClashes = $state<Clash[]>([])
+  // node.toml read again (this card's save, another card's, a conflict):
+  // the drafts are carried onto it key by key, and a key the node changed
+  // under one is named before it can be saved over.
+  let endpointSeen: Field[] = []
+  $effect(() => {
+    const now = endpoint
+    untrack(() => {
+      if (endpointSeen.length && Object.keys(endpointDrafts).length) {
+        const carried = rebase(endpointSeen, now, endpointDrafts)
+        endpointDrafts = carried.drafts
+        const kept = endpointClashes.filter((c) => !carried.clashes.some((n) => n.key === c.key))
+        endpointClashes = [...kept, ...carried.clashes]
+      }
+      endpointSeen = now
+    })
+  })
+  function endpointTheirs() {
+    for (const clash of endpointClashes) delete endpointDrafts[clash.key]
+    endpointClashes = []
+  }
+  const endpointPlan = $derived(sectionOps(endpoint, endpointDrafts))
+  const endpointDirty = $derived(endpointPlan.ops.length + Object.keys(endpointPlan.errors).length > 0)
+
+  async function saveEndpoint() {
+    if (!save || !context || endpointBusy || endpointClashes.length || !endpointPlan.ops.length || Object.keys(endpointPlan.errors).length) return
+    endpointBusy = true
+    endpointNote = ''
+    endpointErrors = {}
+    const keys = endpoint.map((f) => f.key)
+    const ops = [...declareOps(context, p.name, endpointPlan.ops.map((o) => ('key' in o ? o.key : ''))), ...endpointPlan.ops]
+    const outcome = await save(ops, keys)
+    endpointBusy = false
+    endpointSaved = outcome.kind === 'saved'
+    if (outcome.kind === 'saved') {
+      endpointDrafts = {}
+      endpointNote = outcome.result.restart_required ? 'Saved; the node uses it once it restarts.' : 'Saved.'
+    } else if (outcome.kind === 'refused') {
+      endpointErrors = outcome.fields
+      endpointNote = outcome.general.join(' ') || 'Refused: see the keys marked.'
+    } else {
+      endpointNote = said(outcome)
     }
   }
 
@@ -283,7 +371,7 @@
             {:else}
               <div class="empty">No models declared: nothing is offered under {p.name}.</div>
             {/if}
-            {#if editable}
+            {#if editable && save}
               <div class="model-acts">
                 <button class="lnk" type="button" onclick={addModel} disabled={modelsBusy}>+ Add model</button>
                 {#if modelsDirty}
@@ -292,12 +380,52 @@
                   </button>
                 {/if}
                 {#if modelsDirty && !modelsValid}<small class="bad">Every model needs an id, and each id once.</small>
-                {:else if modelsSaved}<small class="ok">Saved to node.toml; restart the node for new sessions to see it.</small>
+                {:else if modelsSaved}<small class="ok">{modelsSaved}</small>
                 {:else if modelsError}<small class="bad">{modelsError}</small>{/if}
               </div>
             {/if}
           </div>
         </details>
+        {#if endpoint.length && editable && save}
+          <details class="declared" open={endpointDirty || !!endpointNote}>
+            <summary>Endpoint · <code>[providers.{p.name}]</code></summary>
+            {#if endpointClashes.length}
+              <div class="clash" role="alert">
+                <b>Changed on the node too</b>
+                {#each endpointClashes as clash (clash.key)}
+                  <small><code>{clash.key}</code>: now {shown(clash.theirs)} on the node; saving writes {shown(clash.yours.reset ? undefined : clash.yours.v)}.</small>
+                {/each}
+                <span class="model-acts">
+                  <button class="btn" type="button" onclick={() => (endpointClashes = [])}>Keep mine</button>
+                  <button class="lnk" type="button" onclick={endpointTheirs}>Use theirs</button>
+                </span>
+              </div>
+            {/if}
+            <div class="endpoint">
+              {#each endpoint as field (field.key)}
+                <ConfigField
+                  {field}
+                  draft={endpointDrafts[field.key]}
+                  errors={endpointErrors[field.key] ?? []}
+                  disabled={endpointBusy}
+                  onchange={(d) => {
+                    if (d) endpointDrafts[field.key] = d
+                    else delete endpointDrafts[field.key]
+                  }}
+                />
+              {/each}
+            </div>
+            <div class="model-acts">
+              {#if endpointDirty}
+                <button class="btn p" type="button" onclick={saveEndpoint} disabled={endpointBusy || endpointClashes.length > 0 || Object.keys(endpointPlan.errors).length > 0}>
+                  {endpointBusy ? 'Saving…' : 'Save endpoint'}
+                </button>
+                <button class="lnk" type="button" onclick={() => ((endpointDrafts = {}), (endpointClashes = []))} disabled={endpointBusy}>Discard</button>
+              {/if}
+              {#if endpointNote}<small class={endpointSaved ? 'ok' : 'bad'} role="status">{endpointNote}</small>{/if}
+            </div>
+          </details>
+        {/if}
       {/if}
     {:else if shownState === 'pending'}
       {#if shownUrl}
@@ -542,6 +670,21 @@
   }
   .mrow input[type='checkbox'] {
     justify-self: start;
+  }
+  .clash {
+    display: grid;
+    gap: 4px;
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: var(--wash-wait);
+    border-left: 3px solid var(--wait);
+    overflow-wrap: anywhere;
+  }
+  .endpoint {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+    margin-top: 6px;
   }
   .model-acts {
     display: flex;

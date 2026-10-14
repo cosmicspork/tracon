@@ -4,6 +4,8 @@
 // the repository table, the data inventory) and its /api/mesh and /api/nodes
 // rows are older shapes, so every state here starts from BASE below.
 
+import CONFIG_FILE from '../config.json' with { type: 'json' }
+
 const SELF = '9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6'
 const PEER = '4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1'
 const GONE = 'c27d90e1b4a6f3582d0c9e7b1a4f6d3c8e2b5a9f0d7c4e1b6a3f8d2c5e9b0a7d'
@@ -225,6 +227,36 @@ const CONFIG = {
   readonly: { hub_url: 'https://hub.example.net', runtime: 'podman', config_path: '/home/op/.config/tracon/node.toml' },
   running: { harness_id: 'claude', harness_version: '2.5.0', node_name: 'laptop' },
 }
+// The whole file beside the fields above (`GET /api/config`): the schema and
+// the defaults from fixtures/config.json, this node's providers over them.
+CONFIG.keys = CONFIG_FILE.keys
+CONFIG.document = { ...CONFIG_FILE.document, providers: { openrouter: CONFIG.providers.openrouter, openai: CONFIG.providers.openai } }
+CONFIG.effective = { ...CONFIG_FILE.effective, providers: CONFIG.providers }
+CONFIG.toml = CONFIG_FILE.toml
+CONFIG.hash = CONFIG_FILE.hash
+CONFIG.running_hash = CONFIG_FILE.hash
+CONFIG.redacted = CONFIG_FILE.redacted
+
+// The same file after someone else changed it: what a reload after a 409 reads.
+const MOVED = {
+  ...CONFIG,
+  hash: 'e1f0c2b7d9a84f36a5c1e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2',
+  document: { ...CONFIG.document, session: { ...CONFIG.document.session, budget_tokens: 1500000 } },
+  effective: { ...CONFIG.effective, session: { ...CONFIG.effective.session, budget_tokens: 1500000 } },
+}
+// After a save, a read of node.toml asks for the moved file: per page, so
+// every size and scheme of a state sees the same sequence.
+const afterSave = `(() => {
+  const real = window.fetch.bind(window)
+  let saved = false
+  window.fetch = (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url
+    const method = (init.method || 'GET').toUpperCase()
+    if (url === '/api/config' && method === 'PATCH') saved = true
+    else if (url === '/api/config' && method === 'GET' && saved) return real('/api/config?moved=1', init)
+    return real(input, init)
+  }
+})()`
 
 const CREDENTIALS = {
   credentials: [
@@ -517,6 +549,14 @@ const REPO_ENV = {
   ],
 }
 
+// The repository screen reads its entries from node.toml (`/api/config`
+// `document.repo`) and their builds from `/api/repos/environments`: both
+// say the same table.
+const withRepos = (env) => ({
+  '/api/repos/environments': env,
+  '/api/config': { ...CONFIG, document: { ...CONFIG.document, repo: env.entries.map((item) => item.entry) } },
+})
+
 const MANIFEST = {
   channel: 'personal',
   items: [
@@ -567,7 +607,6 @@ const BASE = {
   '/api/channels': CHANNELS,
   '/api/providers': PROVIDERS,
   '/api/credentials': CREDENTIALS,
-  '/api/config': CONFIG,
   '/api/authority/grants': AUTHORITY,
   '/api/admin/access': ACCESS,
   '/api/admin/mesh': ADMIN_MESH,
@@ -575,11 +614,19 @@ const BASE = {
   '/api/admin/policy': POLICY,
   '/api/admin/maintenance': MAINTENANCE,
   '/api/maintenance/data': DATA,
-  '/api/repos/environments': REPO_ENV,
+  ...withRepos(REPO_ENV),
   '/api/manifest': MANIFEST,
   '/api/transfers': TRANSFERS,
   '/api/push/subscriptions': PUSH_DEVICES,
   '/api/external': EXTERNAL,
+  '/api/restart': {
+    config: { boot_hash: CONFIG_FILE.hash, hash: CONFIG_FILE.hash, keys: [], unparseable: false },
+    restart: { available: true, mechanism: 'systemd', reason: null },
+    plan: null,
+    busy: { turns: [], checks: 0, reviews: 0 },
+    closing: [],
+    last_error: null,
+  },
 }
 const api = (over = {}) => ({ ...BASE, ...over })
 const fail = (status, message) => ({ status, body: { error: { code: status, message } } })
@@ -851,7 +898,7 @@ export default [
   S('repositories-builds', '/settings#channels', 'Repositories: failed, building and warning builds', {
     note: 'Three entries (collapsed by default) — expanded here: failed build with output open, a building one, missing-tool warnings, the github upload caution.',
     over: {
-      '/api/repos/environments': {
+      ...withRepos({
         ...REPO_ENV,
         entries: [
           {
@@ -869,7 +916,7 @@ export default [
             builds: [build({ id: 'b-4', repo_path: '/home/op/src/consulta', warnings: ['just', 'psql'] })],
           },
         ],
-      },
+      }),
     },
     act: async (page) => {
       for (const d of await page.locator('details.entry').all()) await d.evaluate((el) => (el.open = true))
@@ -877,7 +924,7 @@ export default [
     },
   }),
   S('repositories-empty', '/settings#channels', 'Repositories: no entries', {
-    over: { '/api/repos/environments': { ...REPO_ENV, entries: [] } },
+    over: withRepos({ ...REPO_ENV, entries: [] }),
   }),
   S('repositories-new-invalid', '/settings#channels', 'Repositories: a new entry with problems', {
     note: 'Added a third entry: the two saved ones collapse, the new one is open with no repository named and a pinned image left empty; the first problem shows beside the disabled Save.',
@@ -1117,15 +1164,71 @@ export default [
       await click(page, 'Restart this serving node…')
     },
   }),
-  S('maintenance-config-dirty', '/settings#system', 'System: configuration edited, not yet saved', {
-    note: 'Long node name typed, review cap changed: Save configuration enabled.',
+  // --- Configuration ---------------------------------------------------------
+  S('config', '/settings#config', 'Configuration: every node.toml table', {
+    since: 'PR 17',
+    note: 'Collapsed tables in schema order; [[repo]] and providers are left to their own screens.',
+  }),
+  S('config-session', '/settings#config', 'Configuration: a table open, two keys edited', {
+    since: 'PR 17',
+    note: 'Live and restart badges, units and magnitudes, "Was …" on an edited key, the unsaved count, Save named for the table.',
     act: async (page) => {
-      await page.locator('label').filter({ hasText: 'Node name' }).locator('input').fill('laptop-orbit-and-consulta-development-workstation')
-      await page.locator('label').filter({ hasText: 'Review cap (lines)' }).locator('input').fill('6000')
+      await page.locator('[data-section="session"] > summary').click()
+      await page.locator('[data-section="session"] input[id$="budget_tokens"]').fill('3500000')
+      await page.locator('[data-section="session"] input[id$="permission_timeout_secs"]').fill('1800')
+      await scrollTo(page, '[session]')
     },
   }),
-  S('maintenance-config-error', '/settings#system', 'System: node.toml unreadable', {
-    note: 'Node configuration says why; Your own harness says it cannot tell whether it is on, rather than loading forever.',
+  S('config-refused', '/settings#config', 'Configuration: a save refused, key by key', {
+    since: 'PR 17',
+    note: 'The path guard refuses publish.gh: the reason sits under the key, and the table says why the save did not go.',
+    over: {
+      'PATCH /api/config': {
+        status: 422,
+        body: { error: { code: 422, kind: 'refused', message: 'publish.gh: refused', fields: [{ field: 'publish.gh', message: '"/home/op/bin/gh": its directory is writable by the node\'s own user, so an agent could replace what it runs' }] } },
+      },
+    },
+    act: async (page) => {
+      await page.getByLabel('Find a key').fill('publish')
+      await page.locator('input[id="cfg-publish-gh"]').fill('/home/op/bin/gh')
+      await click(page, 'Save [publish]')
+      await page.getByRole('alert').first().waitFor()
+    },
+  }),
+  S('config-conflict', '/settings#config', 'Configuration: node.toml changed underneath', {
+    since: 'PR 17',
+    note: 'The save meets a 409; the file is read again with the edit kept, and the key changed on both sides is named with both values.',
+    init: afterSave,
+    over: {
+      '/api/config': (req) => (req.query.moved ? MOVED : CONFIG),
+      'PATCH /api/config': fail(409, 'node.toml changed since it was read; read it again and decide against what it is now'),
+    },
+    act: async (page) => {
+      await page.locator('[data-section="session"] > summary').click()
+      await page.locator('[data-section="session"] input[id$="budget_tokens"]').fill('3500000')
+      await click(page, 'Save [session]')
+      await page.getByText('Changed on the node too').waitFor()
+      await scrollTo(page, '[session]')
+    },
+  }),
+  S('config-remote', '/settings#config', 'Configuration: reached remotely', {
+    since: 'PR 17',
+    note: 'Not loopback: keys only the host changes are disabled with "Edit at the node" and the reason; the rest edit, confirmed with a passkey.',
+    over: { '/api/nodes': [selfNode({ loopback: false }), peerNode(), goneNode()] },
+    act: async (page) => {
+      await page.getByLabel('Find a key').fill('image')
+      await scrollTo(page, '[boundary]')
+    },
+  }),
+  S('config-advanced', '/settings#config', 'Configuration: Advanced, the file as the node reads it', {
+    since: 'PR 17',
+    act: async (page) => {
+      await page.getByTestId('config-advanced').locator('summary').click()
+      await scrollTo(page, 'node.toml as the node reads it')
+    },
+  }),
+  S('maintenance-config-error', '/settings#config', 'Configuration: node.toml unreadable', {
+    note: 'The form says why; Your own harness (under Access) says it cannot tell whether it is on, rather than loading forever.',
     over: { '/api/config': fail(500, 'TOML parse error at line 48, column 1\n   |\n48 | path = "github.com/op/orbit"\n   | ^\nduplicate key `path` in table `repo`') },
   }),
   S('maintenance-token-confirm', '/settings#access', 'Access: create or rotate operator access', {
@@ -1170,7 +1273,7 @@ export default [
 
   // --- Cross-cutting ---------------------------------------------------------
   S('remote', '/settings#system', 'Reached remotely: banners and disabled controls', {
-    note: 'Not loopback: the remote banner, disabled configuration, "blocked" notes, remote-admin note.',
+    note: 'Not loopback: the remote banner (changes confirmed with a passkey), the controls that stay at the node, the remote-admin note.',
     over: {
       '/api/nodes': [selfNode({ loopback: false }), peerNode(), goneNode()],
       '/api/admin/access': { authenticated: true, token_configured: true, local: false },

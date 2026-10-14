@@ -28,6 +28,7 @@
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
   import Card from '../components/settings/Card.svelte'
+  import ConfigForm from '../components/settings/ConfigForm.svelte'
   import { preferences as desktopPreferences, setPreferences as setDesktopPreferences, type DesktopPrefs } from '../lib/desktop-prefs'
   import { setTheme, storedTheme, themes, type Theme } from '../lib/theme'
   import {
@@ -53,11 +54,12 @@
   import type { HarnessState } from '../lib/types'
   import { exhaustionDefaults, exhaustionPatch, modelPatch, phaseDefaults } from '../lib/bindings'
   import { modelSummary, recentModelValues } from '../lib/models'
-  import { changedSubset, hashToken, loginUrl, mintToken } from '../lib/settings'
+  import { hashToken, loginUrl, mintToken } from '../lib/settings'
+  import { contextOf, saveOps, type SaveOutcome } from '../lib/config-form'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
-  import type { AuthorityGrant, BoundaryCheck, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule } from '../lib/types'
+  import type { AuthorityGrant, BoundaryCheck, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
@@ -71,6 +73,7 @@
     ['access', 'Access & devices'],
     ['policies', 'Permissions & policies'],
     ['mesh', 'Mesh'],
+    ['config', 'Configuration'],
     ['system', 'System'],
   ] as const
   const activeSection = $derived(
@@ -169,56 +172,34 @@
   }
 
   // --- configuration ----------------------------------------------------
+  // What the cards outside the configuration form read from node.toml (a
+  // provider's endpoint and models, whether external harnesses are on).
+  // The form under Configuration reads and saves its own copy.
   let cfg = $state<NodeConfig | null>(null)
-  let form = $state<NodeConfig | null>(null)
-  let changed = $state<string[]>([])
-
   let configError = $state('')
   // A one-shot read at mount, not an effect: nothing reactive decides when
   // node.toml should be re-read, and saving reloads it explicitly.
   async function loadConfig() {
     try {
-      const c = await api.config()
-      cfg = c
-      form = structuredClone(c)
+      cfg = await api.config()
       configError = ''
     } catch (e) {
       configError = e instanceof Error ? e.message : String(e)
     }
   }
   void loadConfig()
+  const configContext = $derived(cfg ? contextOf(cfg, local) : null)
 
-  const dirty = $derived(
-    cfg && form
-      ? Object.keys(changedSubset(cfg as never, form as never)).length > 0
-      : false,
-  )
-
-  function saveConfig() {
-    if (!cfg || !form) return
-    const read = cfg.hash
-    return act('config', async () => {
-      const patch = changedSubset(cfg as never, form as never)
-      const res = await api.putConfig(patch, read)
-      changed = res.changed
-      void store.refreshRestart()
-      await loadConfig()
-    })
-  }
-
-
-  // --- the declared catalogue -------------------------------------------
-  // Per provider, the models this node declares: what the picker offers and
-  // what a declaring harness is told. Each provider's consolidated card in
-  // the Connections tab owns its own editable copy and its own save; this is
-  // just the one call a card's save reaches, so it PUTs the same shape
-  // `put_config` already validates (`providers.<name>.models`) and reloads
-  // the canonical config afterward, the same way `saveConfig` does.
-  async function saveProviderModels(name: string, models: NodeConfig['providers'][string]['models']) {
-    if (!cfg) return
-    await api.putConfig({ providers: { [name]: { models } } }, cfg.hash)
-    void store.refreshRestart()
-    await loadConfig()
+  // --- a provider's keys ------------------------------------------------
+  // Each provider's card in Connections edits its own endpoint and declared
+  // models and saves them here: per-key operations decided against the
+  // version this page read, confirmed with a passkey off the node.
+  async function saveProvider(ops: ConfigOp[], keys: string[]): Promise<SaveOutcome> {
+    if (!cfg) return { kind: 'failed', message: 'node.toml has not been read yet.' }
+    const outcome = await saveOps((hash, o) => api.patchConfig(hash, o), cfg.hash, ops, keys)
+    if (outcome.kind === 'saved') void store.refreshRestart()
+    if (outcome.kind === 'saved' || outcome.kind === 'conflict') await loadConfig()
+    return outcome
   }
 
   // --- adding a provider --------------------------------------------------
@@ -639,7 +620,7 @@
 {#if error}<div class="banner crit">{error}</div>{/if}
 {#if !local && activeSection !== 'general'}
   <div class="banner dim">
-    You reached the serving node remotely. Settings that rewrite its host configuration remain clearly marked; selecting a peer below only changes which connection you manage.
+    You reached the serving node remotely. Changes to it are confirmed with your passkey; the few that read or run files on its own machine stay at the node and say so.
   </div>
 {/if}
 
@@ -783,8 +764,9 @@
             p={provider}
             nodeId={selectedNode.id}
             config={selectedNodeIsServing ? (cfg?.providers?.[provider.name] ?? null) : null}
-            editable={local}
-            saveModels={selectedNodeIsServing ? saveProviderModels : undefined}
+            editable={selectedNodeIsServing}
+            context={selectedNodeIsServing ? configContext : null}
+            save={selectedNodeIsServing ? saveProvider : undefined}
           />
         {/each}
       </div>
@@ -949,7 +931,7 @@
     {:else if !cfg}
       <small>Loading…</small>
     {:else if !cfg.external.enabled}
-      <small>Off. Set <code>[external] enabled = true</code> in serving-node <code>node.toml</code> and restart.</small>
+      <small>Off. Turn on <code>enabled</code> under <a href="#config">Configuration</a> › <code>[external]</code>, then restart the node.</small>
     {:else if externalChannels.length === 0}
       <small>Create a shared channel first.</small>
     {:else}
@@ -1001,9 +983,7 @@
           {#if m.last_refusal}<span class="l bad">refused: {m.last_refusal}</span>{/if}
         </span>
         <div class="end">
-          {#if !local}
-            <small>Unpair from the serving node.</small>
-          {:else if unpaired}
+          {#if unpaired}
             <small>Restart the serving node to disconnect.</small>
           {:else if unpairing}
             <span class="note crit">Forget this hub on restart? Channels and keys stay; joining again requires a new invitation.</span>
@@ -1015,7 +995,7 @@
         </div>
       </div>
     {/if}
-    {#if local && !paired}
+    {#if !paired}
       <div class="pairing">
         <label class="field">
           <span>Join an existing hub</span>
@@ -1062,12 +1042,9 @@
           </div>
         </details>
       </div>
-    {:else if !local && !paired}
-      <small>Which hub a node belongs to is decided on the serving node itself.</small>
     {/if}
   </Card>
   <NodeList />
-  <PeerConfig />
   <MeshAdministration />
   <HubRollups />
 {/if}
@@ -1092,9 +1069,9 @@
               {#if item.revoked_ms !== null}
                 <small>revoked</small>
               {:else if revoking === item.id}
-                <div class="acts"><small>Revoke this local grant immediately? Future actions will be evaluated again.</small><button class="btn d" onclick={() => revokeGrant(item.id)} disabled={!local || busy !== ''}>Confirm revoke</button><button class="lnk" onclick={() => (revoking = '')} disabled={busy !== ''}>Keep grant</button></div>
+                <div class="acts"><small>Revoke this local grant immediately? Future actions will be evaluated again.</small><button class="btn d" onclick={() => revokeGrant(item.id)} disabled={busy !== ''}>Confirm revoke</button><button class="lnk" onclick={() => (revoking = '')} disabled={busy !== ''}>Keep grant</button></div>
               {:else}
-                <div class="acts"><button class="lnk d" onclick={() => (revoking = item.id)} disabled={!local || busy !== ''}>Revoke</button></div>
+                <div class="acts"><button class="lnk d" onclick={() => (revoking = item.id)} disabled={busy !== ''}>Revoke</button></div>
               {/if}
             </div>
           {/each}
@@ -1113,61 +1090,48 @@
           <span>{grantConfirmation.verdict} {grantConfirmation.action} · {grantConfirmation.target} · channel {grantConfirmation.channel}{grantConfirmation.session_id ? ` · session ${grantConfirmation.session_id}` : ''}{grantConfirmation.revision ? ` · immutable revision ${grantConfirmation.revision}` : ''}{grantConfirmation.expires_ms ? ` · expires ${new Date(grantConfirmation.expires_ms).toLocaleString()}` : ''}</span>
           <small>{grantConfirmation.reason}</small>
           <div class="acts">
-            <button class="btn p" onclick={saveGrant} disabled={!local || busy !== ''}>{busy === 'authority' ? 'Saving…' : 'Confirm local grant'}</button>
+            <button class="btn p" onclick={saveGrant} disabled={busy !== ''}>{busy === 'authority' ? 'Saving…' : 'Confirm local grant'}</button>
             <button class="lnk" onclick={() => (grantConfirmation = null)} disabled={busy !== ''}>Edit grant</button>
           </div>
         </div>
       {:else}
         <div class="grid">
-          <label><span>Action</span><select bind:value={grant.action} disabled={!local}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
-          <label><span>Decision</span><select bind:value={grant.verdict} disabled={!local}><option value="ask">ask · safe default</option><option value="allow">allow</option><option value="deny">deny</option></select></label>
-          <label><span>Resource type</span><select bind:value={grantResource} disabled={!local}><option value="repository">pull or merge request</option><option value="deployment">GitLab deployment</option><option value="ticket">ticket transition</option><option value="advanced">advanced canonical target</option></select></label>
-          <label><span>Channel scope</span><input bind:value={grant.channel} disabled={!local} placeholder={store.node?.default_channel ?? 'personal'} /></label>
-          <label class="wide"><span>Exact target</span><input bind:value={grant.target} disabled={!local} placeholder={grantTargetHint} spellcheck="false" /><small>One canonical identifier, no spaces. This is the only target the grant can match.</small></label>
-          <label class="wide"><span>Reason</span><input bind:value={grant.reason} disabled={!local} placeholder="why this exact scoped action is needed" /></label>
+          <label><span>Action</span><select bind:value={grant.action}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
+          <label><span>Decision</span><select bind:value={grant.verdict}><option value="ask">ask · safe default</option><option value="allow">allow</option><option value="deny">deny</option></select></label>
+          <label><span>Resource type</span><select bind:value={grantResource}><option value="repository">pull or merge request</option><option value="deployment">GitLab deployment</option><option value="ticket">ticket transition</option><option value="advanced">advanced canonical target</option></select></label>
+          <label><span>Channel scope</span><input bind:value={grant.channel} placeholder={store.node?.default_channel ?? 'personal'} /></label>
+          <label class="wide"><span>Exact target</span><input bind:value={grant.target} placeholder={grantTargetHint} spellcheck="false" /><small>One canonical identifier, no spaces. This is the only target the grant can match.</small></label>
+          <label class="wide"><span>Reason</span><input bind:value={grant.reason} placeholder="why this exact scoped action is needed" /></label>
         </div>
         <details class="advanced-grant">
           <summary>Advanced scope and expiry</summary>
           <div class="grid">
-            <label><span>Session (optional)</span><input bind:value={grant.session_id} disabled={!local} placeholder="limit to one session id" /></label>
-            <label><span>Immutable revision (optional)</span><input bind:value={grant.revision} disabled={!local} placeholder="commit SHA" /><small>Required for allow grants to merge, publish, or deploy.</small></label>
-            <label><span>Expires at (optional)</span><input type="datetime-local" value={grant.expires_ms ? new Date(grant.expires_ms).toISOString().slice(0, 16) : ''} onchange={(event) => grant.expires_ms = event.currentTarget.value ? Date.parse(event.currentTarget.value) : null} disabled={!local} /></label>
+            <label><span>Session (optional)</span><input bind:value={grant.session_id} placeholder="limit to one session id" /></label>
+            <label><span>Immutable revision (optional)</span><input bind:value={grant.revision} placeholder="commit SHA" /><small>Required for allow grants to merge, publish, or deploy.</small></label>
+            <label><span>Expires at (optional)</span><input type="datetime-local" value={grant.expires_ms ? new Date(grant.expires_ms).toISOString().slice(0, 16) : ''} onchange={(event) => grant.expires_ms = event.currentTarget.value ? Date.parse(event.currentTarget.value) : null} /></label>
           </div>
         </details>
         {#if grant.action === 'terminal'}
           <p class="why">A terminal grant opens an interactive shell inside one session's workspace. Target is <code>terminal:&lt;session id&gt;:&lt;workspace path&gt;</code> and the session field is required, because the grant is of a terminal in that directory. It is not a per-command ledger: everything typed at the prompt afterwards runs without a further decision and raises no tool call. The node records that a terminal was opened, with what shell and where, and how much traffic crossed it — not what was run in it.</p>
         {/if}
-        <div class="acts"><button class="btn p" onclick={reviewGrant} disabled={!local || busy !== ''}>Review grant</button><small>An empty channel uses the serving node default. Ask keeps an explicit operator decision.</small></div>
+        <div class="acts"><button class="btn p" onclick={reviewGrant} disabled={busy !== ''}>Review grant</button><small>An empty channel uses the serving node default. Ask keeps an explicit operator decision.</small></div>
       {/if}
     </Card>
   {/if}
 {/if}
 
-{#if activeSection === 'system'}
-  <Card title="Node configuration" note="Host settings in the serving node's node.toml. Some apply at once; the banner at the top names any that wait for a restart.">
-    {#if form && cfg}
-      <div class="grid">
-        <label><span>Node name</span><input bind:value={form.node_name} disabled={!local} spellcheck="false" /></label>
-        <label><span>Harness</span><select bind:value={form.harness.id} disabled={!local}><option value="opencode">opencode</option><option value="claude">claude</option></select><small>Running: {cfg.running.harness_id} {cfg.running.harness_version}</small></label>
-        <label><span>Harness version</span><input bind:value={form.harness.version} disabled={!local} spellcheck="false" /></label>
-        <label><span>Session budget (tokens)</span><input type="number" bind:value={form.session.budget_tokens} disabled={!local} /></label>
-        <label><span>Review cap (lines)</span><input type="number" min="1" bind:value={form.review.max_diff_lines} disabled={!local} /><small>Added plus removed; a bigger submission is refused.</small></label>
-        <label><span>Review cap (files)</span><input type="number" min="1" bind:value={form.review.max_files} disabled={!local} /></label>
-        <label><span>Default channel</span><select bind:value={form.session.default_channel} disabled={!local}><option value="">none</option>{#each open_channels as c (c.name)}<option value={c.name}>{c.name}</option>{/each}</select><small>Where the composer starts until a browser picks another.</small></label>
-        <label><span>Podman binary</span><input bind:value={form.boundary.podman} disabled={!local} placeholder="found on PATH" spellcheck="false" /><small>Empty resolves from PATH, then usual install locations.</small></label>
-      </div>
-      <div class="acts"><button class="btn p" onclick={saveConfig} disabled={!local || !dirty || busy !== ''}>{busy === 'config' ? 'Saving…' : 'Save configuration'}</button>{#if changed.length}<small>wrote {changed.join(', ')}</small>{/if}</div>
-    {:else if configError}
-      <p class="why"><b>node.toml could not be read</b><i>{configError}</i></p>
-    {:else}<div class="empty">Reading serving-node configuration…</div>{/if}
-  </Card>
+{#if activeSection === 'config'}
+  <ConfigForm onsaved={loadConfig} />
+  {#if store.nodes.some((node) => !node.is_self)}<PeerConfig />{/if}
+{/if}
 
+{#if activeSection === 'system'}
   <Maintenance>
     {#snippet boundary()}
       <div class="acts">
         <span class="chip" class:bad={refused}>{store.node?.state ?? '…'}</span>
-        <button class="btn p" onclick={() => setup(false)} disabled={!local || busy !== ''} title="Create the network, gateway and images this node needs">{busy === 'setup' ? 'Running setup…' : 'Prepare isolated runtime'}</button>
-        <button class="btn" onclick={() => setup(true)} disabled={!local || busy !== ''} title="Rebuild the serving node gateway and harness images from scratch">Rebuild runtime images</button>
+        <button class="btn p" onclick={() => setup(false)} disabled={busy !== ''} title="Create the network, gateway and images this node needs">{busy === 'setup' ? 'Running setup…' : 'Prepare isolated runtime'}</button>
+        <button class="btn" onclick={() => setup(true)} disabled={busy !== ''} title="Rebuild the serving node gateway and harness images from scratch">Rebuild runtime images</button>
       </div>
       {#if refused && store.node}
         <p class="why"><b>{store.node.failed_check}: {store.node.failed_detail}</b><i>{remedy(store.node.failed_check)}</i></p>

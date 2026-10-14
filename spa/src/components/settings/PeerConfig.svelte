@@ -2,14 +2,16 @@
   // Another node's node.toml, read and edited from here over the mesh. A
   // peer answers only if its `[mesh] admin_peers` names the serving node, so
   // a peer that does not is shown with its refusal, which says why, and
-  // nothing to edit. An edit is one key at a time, confirmed here (a passkey
-  // off this machine) with a prompt naming the peer and what changes; the
-  // full forms are Settings' own. `only` narrows the view to one table, as
-  // Repositories shows `[[repo]]`.
+  // nothing to edit. Otherwise the Configuration form edits it, offering
+  // only the keys the peer lets an admin peer change; each save is confirmed
+  // here (a passkey off this machine) with a prompt naming the peer and what
+  // changes. `only` shows one table read-only, as Repositories shows
+  // `[[repo]]`.
   import Card from './Card.svelte'
+  import ConfigForm from './ConfigForm.svelte'
   import { api, ApiError } from '../../lib/api'
   import { store } from '../../lib/store.svelte'
-  import type { ConfigOp, PeerNodeConfig } from '../../lib/types'
+  import type { PeerNodeConfig } from '../../lib/types'
 
   let { only = '' }: { only?: string } = $props()
 
@@ -19,25 +21,15 @@
   let refusal = $state('')
   let refusalKind = $state('')
   let busy = $state('')
-  let error = $state('')
-  let note = $state('')
-  let key = $state('')
-  let value = $state('')
 
   const shown = $derived(
-    cfg === null ? '' : only ? JSON.stringify(cfg.document[only] ?? [], null, 2) : cfg.toml,
+    cfg === null || !only ? '' : JSON.stringify(cfg.document[only] ?? [], null, 2),
   )
-  const keptFromPeers = $derived(
-    cfg?.keys.filter((spec) => spec.editable_by_peer === false) ?? [],
-  )
-
   async function load(id: string) {
     selected = id
     cfg = null
     refusal = ''
     refusalKind = ''
-    error = ''
-    note = ''
     if (!id) return
     busy = 'load'
     try {
@@ -50,34 +42,6 @@
     }
   }
 
-  // A value is read as JSON where it is JSON (numbers, booleans, lists),
-  // else kept as the text typed.
-  function parsed(text: string): unknown {
-    try {
-      return JSON.parse(text)
-    } catch {
-      return text
-    }
-  }
-
-  async function edit(op: ConfigOp) {
-    if (!cfg) return
-    busy = 'save'
-    error = ''
-    note = ''
-    try {
-      const res = await api.patchNodeConfig(selected, cfg.hash, [op])
-      const said = res.changed.length
-        ? `Changed ${res.changed.join(', ')}${res.restart_required ? '; a restart of that node applies it' : ''}.`
-        : 'Nothing changed.'
-      await load(selected)
-      note = said
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause)
-    } finally {
-      busy = ''
-    }
-  }
 </script>
 
 <Card
@@ -108,33 +72,11 @@
         <small>{refusal}</small>
       </div>
     {:else if cfg}
-      <pre class="toml">{shown}</pre>
-      {#if !only}
-        <div class="edit">
-          <label class="field">
-            <span>Key</span>
-            <input bind:value={key} placeholder="review.max_files" spellcheck="false" />
-          </label>
-          <label class="field">
-            <span>Value</span>
-            <input bind:value={value} placeholder="40, true, [&quot;a&quot;], or text" spellcheck="false" />
-          </label>
-          <div class="acts">
-            <button class="btn" disabled={!key.trim() || busy !== ''} onclick={() => edit({ op: 'set', key: key.trim(), value: parsed(value) })}>
-              {busy === 'save' ? 'Saving…' : 'Set'}
-            </button>
-            <button class="lnk d" disabled={!key.trim() || busy !== ''} onclick={() => edit({ op: 'remove', key: key.trim() })}>Remove</button>
-          </div>
-        </div>
-        {#if keptFromPeers.length}
-          <small>
-            Not changed from here: {keptFromPeers.map((spec) => spec.key).join(', ')}.
-            {[...new Set(keptFromPeers.map((spec) => spec.why_not_by_peer ?? spec.why_not ?? ''))].join(' ')}
-          </small>
-        {/if}
+      {#if only}
+        <pre class="toml">{shown}</pre>
+      {:else}
+        {#key selected}<ConfigForm nodeId={selected} />{/key}
       {/if}
-      {#if note}<small class="good">{note}</small>{/if}
-      {#if error}<small class="bad">{error}</small>{/if}
     {/if}
   {/if}
 </Card>
@@ -149,20 +91,5 @@
     font-size: 12px;
     white-space: pre-wrap;
     word-break: break-word;
-  }
-  .edit {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-    gap: 8px;
-    align-items: end;
-  }
-  @media (max-width: 640px) {
-    .edit {
-      grid-template-columns: minmax(0, 1fr);
-    }
-  }
-  .acts {
-    display: flex;
-    gap: 8px;
   }
 </style>

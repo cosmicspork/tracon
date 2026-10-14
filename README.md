@@ -897,7 +897,7 @@ a browser into an existing node does not enroll another machine or grant it keys
 **A reachable node can be configured remotely, if it lets you.** On the node to be
 administered, list the administering node's id (`tracon mesh id` on it) in `[mesh]
 admin_peers`. Then, from the administering node, **Settings → Connections** signs
-that node's providers in and out, and **Settings → Mesh → A peer's node.toml** reads
+that node's providers in and out, and **Settings → Configuration → A peer's node.toml** reads
 and edits its configuration. Each change is confirmed with your passkey on the node
 you are using, with a prompt naming the peer and the start of its id, and the peer
 checks it again before it runs it. A peer may change any key a remote edit may, except

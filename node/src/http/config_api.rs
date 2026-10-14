@@ -160,6 +160,12 @@ fn spec_json(spec: &config_schema::KeySpec) -> Value {
     if spec.host_only {
         v["why_not"] = json!(config_schema::host_only_reason(spec.key));
     }
+    if let Some(shape) = config_schema::shape(spec.key) {
+        v["shape"] = json!(shape);
+    }
+    if let Some(array) = config_schema::array_of(spec.key) {
+        v["array"] = json!(array);
+    }
     v
 }
 
@@ -1258,6 +1264,30 @@ mod tests {
                 errors[0].message
             );
         }
+    }
+
+    /// The SPA's screenshots and UI audit render the settings form from
+    /// `spa/fixtures/config.json`; its schema is this one, so the form they
+    /// show is the form a node serves. `TRACON_WRITE_FIXTURES=1` rewrites it.
+    #[test]
+    fn the_spa_fixture_describes_every_key_as_the_node_does() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../spa/fixtures/config.json");
+        let text = std::fs::read_to_string(&path).expect("spa/fixtures/config.json");
+        let mut fixture: Value = serde_json::from_str(&text).unwrap();
+        let keys: Vec<Value> = KEYS.iter().map(spec_json).collect();
+        if std::env::var_os("TRACON_WRITE_FIXTURES").is_some() {
+            fixture["keys"] = json!(keys);
+            let mut out = serde_json::to_string_pretty(&fixture).unwrap();
+            out.push('\n');
+            std::fs::write(&path, out).unwrap();
+            return;
+        }
+        assert!(
+            fixture["keys"] == json!(keys),
+            "spa/fixtures/config.json describes the keys differently from config_schema; \
+             rewrite it with TRACON_WRITE_FIXTURES=1 cargo test -p tracon --lib the_spa_fixture"
+        );
     }
 
     #[test]
