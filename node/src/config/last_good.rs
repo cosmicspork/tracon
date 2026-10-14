@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(second.kind(), std::io::ErrorKind::WouldBlock);
         assert!(second.to_string().contains("another node owns"), "{second}");
         drop(held);
-        claim(&p).unwrap();
+        claim_once_released(&p);
     }
 
     #[test]
@@ -686,7 +686,26 @@ mod tests {
         assert_eq!(refused.kind(), std::io::ErrorKind::WouldBlock);
         assert!(refused.to_string().contains("node.toml"), "{refused}");
         drop(held);
-        claim(&other).unwrap();
+        claim_once_released(&other);
+    }
+
+    /// A child another test thread is forking holds a copy of every fd, the
+    /// dropped lock's included, until it execs. Commands with their own `PATH`
+    /// are forked rather than spawned, and fork is slow on macOS.
+    fn claim_once_released(p: &Paths) -> StateLock {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match claim(p) {
+                Ok(lock) => return lock,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
     }
 
     #[cfg(unix)]
