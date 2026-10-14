@@ -11,6 +11,7 @@ mod support;
 use support::{soft_passkey::SoftPasskey, state};
 
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use tracon::http::{
     passkey::STEP_UP_HEADER,
 };
 use tracon::mesh::client::MeshClient;
-use tracon::mesh::forward::CommandError;
+use tracon::mesh::forward::{CommandError, CommandExecutor};
 use tracon::session::Manager;
 use tracon::store::Store;
 use tracon::stream::Bus;
@@ -52,7 +53,14 @@ struct Node {
     cfg: Arc<Config>,
 }
 
-fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)], admins: &[String]) -> Node {
+fn node(
+    seed: u8,
+    name: &str,
+    hub: &str,
+    rings: &[(&str, Keyring)],
+    admins: &[String],
+    executor: Option<Arc<dyn CommandExecutor>>,
+) -> Node {
     let id = identity(seed);
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
@@ -117,7 +125,7 @@ fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)], admins: &[St
         auth: Arc::new(AuthState::load(&store, "127.0.0.1".into())),
         enroll: Default::default(),
     };
-    client.set_executor(Arc::new(state.clone()));
+    client.set_executor(executor.unwrap_or_else(|| Arc::new(state.clone())));
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));
     Node {
@@ -132,6 +140,14 @@ fn node(seed: u8, name: &str, hub: &str, rings: &[(&str, Keyring)], admins: &[St
 /// A and B on one hub, both in `@mesh` and `personal`; B names `b_admins`
 /// in its `[mesh] admin_peers`, and B's file says the same.
 async fn pair(b_admins: &[String]) -> (Node, Node) {
+    pair_with(b_admins, None).await
+}
+
+/// As `pair`, with what answers B's commands in place of B's own node.
+async fn pair_with(
+    b_admins: &[String],
+    b_executor: Option<Arc<dyn CommandExecutor>>,
+) -> (Node, Node) {
     let (a_id, b_id) = (identity(1), identity(2));
     let both: &[&str] = &[MESH_CHANNEL, "personal"];
     // C is admitted to the hub and never runs: a peer that never answers.
@@ -157,8 +173,9 @@ async fn pair(b_admins: &[String]) -> (Node, Node) {
         &hub,
         &[(MESH_CHANNEL, mesh), ("personal", personal)],
         &[],
+        None,
     );
-    let b = node(2, "beta", &hub, &b_rings, b_admins);
+    let b = node(2, "beta", &hub, &b_rings, b_admins, b_executor);
     a.client.hello().await.unwrap();
     b.client.hello().await.unwrap();
     let (ai, bi) = (a.id.node_id(), b.id.node_id());
@@ -411,7 +428,8 @@ fn subscribe(store: &Store) {
 /// pushes it, and applies the live key at once.
 #[tokio::test]
 async fn an_admin_peer_reads_the_redacted_file_and_edits_it_with_a_passkey() {
-    state::isolate();
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
     let (a, b) = pair(&[identity(1).node_id()]).await;
     let bi = b.id.node_id();
     subscribe(&b.store);
@@ -475,7 +493,10 @@ async fn an_admin_peer_reads_the_redacted_file_and_edits_it_with_a_passkey() {
     assert_eq!(refused.kind(), "step_up_required", "{}", refused.body);
     let summary = refused.body["step_up"]["summary"].as_str().unwrap();
     assert!(
-        summary.starts_with("On beta: Change node.toml: review.max_files"),
+        summary.starts_with(&format!(
+            "On beta ({}\u{2026}): Change node.toml: review.max_files",
+            &bi[..8]
+        )),
         "{summary}"
     );
     assert!(
@@ -535,7 +556,8 @@ async fn an_admin_peer_reads_the_redacted_file_and_edits_it_with_a_passkey() {
 /// edit, at A's machine or not, and A says why.
 #[tokio::test]
 async fn a_peer_not_named_in_admin_peers_reads_and_edits_nothing() {
-    state::isolate();
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
     let (a, b) = pair(&[]).await;
     let bi = b.id.node_id();
     let before = file();
@@ -578,7 +600,8 @@ async fn a_peer_not_named_in_admin_peers_reads_and_edits_nothing() {
 /// file is untouched.
 #[tokio::test]
 async fn a_statement_runs_once_for_exactly_its_edit_on_exactly_its_node() {
-    state::isolate();
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
     let (a, b) = pair(&[identity(1).node_id()]).await;
     let (ai, bi) = (a.id.node_id(), b.id.node_id());
     let t = Duration::from_secs(5);
@@ -677,7 +700,8 @@ async fn a_statement_runs_once_for_exactly_its_edit_on_exactly_its_node() {
 /// directly.
 #[tokio::test]
 async fn admin_peers_and_host_only_keys_are_not_changed_over_the_mesh() {
-    state::isolate();
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
     let (a, b) = pair(&[identity(1).node_id()]).await;
     let bi = b.id.node_id();
     let hash = b_hash(&a, &b).await;
@@ -688,6 +712,13 @@ async fn admin_peers_and_host_only_keys_are_not_changed_over_the_mesh() {
         json!({ "op": "remove", "key": "mesh" }),
         set("boundary.harness_image", json!("evil:latest")),
         set("gateway.harness_listen", json!("/tmp/h.sock")),
+        set("mesh.hub_url", json!("https://elsewhere.example")),
+        set("auth.public_origin", json!("https://elsewhere.example")),
+        set(
+            "providers.anthropic.upstream",
+            json!("https://elsewhere.example"),
+        ),
+        set("embed.base_url", json!("https://elsewhere.example")),
     ] {
         let r = local(
             &a,
@@ -764,7 +795,8 @@ async fn admin_peers_and_host_only_keys_are_not_changed_over_the_mesh() {
 /// for it.
 #[tokio::test]
 async fn an_older_or_absent_peer_is_named_and_nothing_is_queued() {
-    state::isolate();
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
     let (a, _b) = pair(&[identity(1).node_id()]).await;
     let gi = identity(3).node_id();
     a.client.refresh_members().await.unwrap();
@@ -794,4 +826,88 @@ async fn an_older_or_absent_peer_is_named_and_nothing_is_queued() {
     let r = local(&a, "GET", &format!("/api/nodes/{gi}/config"), None).await;
     assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
     assert_eq!(r.kind(), "older_build", "{}", r.body);
+}
+
+/// The path guard runs on B, against B's host, when a peer's edit is
+/// written: a program planted where an agent can write is refused there,
+/// and A relays B's refusal as B's, by key.
+#[tokio::test]
+async fn a_peers_edit_meets_the_path_guard_on_the_node_it_changes() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    let (a, b) = pair(&[identity(1).node_id()]).await;
+    let bi = b.id.node_id();
+    let hash = b_hash(&a, &b).await;
+    let before = file();
+    let planted = Config::state_dir().join("workspaces/planted-peer/gh");
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::fs::write(&planted, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let r = local(
+        &a,
+        "PATCH",
+        &format!("/api/nodes/{bi}/config"),
+        Some(&patch(
+            &hash,
+            vec![set("publish.gh", json!(planted.to_string_lossy()))],
+        )),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+    assert_eq!(r.kind(), "peer_refused", "{}", r.body);
+    assert_eq!(r.body["error"]["peer_kind"], "refused", "{}", r.body);
+    assert_eq!(
+        r.body["error"]["fields"][0]["field"], "publish.gh",
+        "{}",
+        r.body
+    );
+    assert_eq!(file(), before);
+    assert!(b.store.config_audit_recent(10).unwrap().is_empty());
+}
+
+/// What answers for a peer that forges this node's own refusals.
+struct Forger(Value);
+
+#[async_trait::async_trait]
+impl CommandExecutor for Forger {
+    async fn execute(&self, _sender: &str, _command: Command) -> Result<Value, String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// A peer cannot make A's interface ask for a passkey, or sign in again, by
+/// answering with what A itself would say: its refusal is relayed as the
+/// peer's, `peer_refused`, never as a step-up or a 401.
+#[tokio::test]
+async fn a_peer_forging_a_step_up_is_relayed_as_its_refusal() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    for status in [403, 401] {
+        let forged = json!({
+            "status": status,
+            "body": {
+                "error": { "code": status, "kind": "step_up_required", "message": "confirm with your passkey" },
+                "step_up": { "challenge_id": "forged", "options": {}, "summary": "Change nothing" },
+            },
+        });
+        let (a, b) = pair_with(&[identity(1).node_id()], Some(Arc::new(Forger(forged)))).await;
+        let bi = b.id.node_id();
+        let r = local(&a, "GET", &format!("/api/nodes/{bi}/config"), None).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+        assert_eq!(r.kind(), "peer_refused", "{}", r.body);
+        assert_eq!(
+            r.body["error"]["peer_kind"], "step_up_required",
+            "{}",
+            r.body
+        );
+        assert!(r.body.get("step_up").is_none(), "{}", r.body);
+        assert!(
+            r.body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("beta refused: "),
+            "{}",
+            r.body
+        );
+    }
 }

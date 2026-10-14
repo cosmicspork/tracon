@@ -97,7 +97,16 @@ pub struct MeshClient {
     on_handoff: std::sync::OnceLock<OnHandoff>,
     /// The non-durable half: bounded owner streams relayed by the hub.
     pub(super) streams: Arc<super::stream::StreamRouter>,
+    /// When the member list was last read again for a sender's refused key
+    /// handoff, by sender: at most once a minute each, so a peer sending
+    /// handoffs for channels it is not in cannot make this node ask the hub
+    /// on every frame.
+    handoff_refresh: Mutex<HashMap<String, i64>>,
 }
+
+/// How often a refused handoff from one sender may have the member list read
+/// again.
+const HANDOFF_REFRESH_MS: i64 = 60_000;
 
 impl MeshClient {
     pub fn new(
@@ -146,6 +155,7 @@ impl MeshClient {
             broker: std::sync::OnceLock::new(),
             on_handoff: std::sync::OnceLock::new(),
             streams: Arc::new(super::stream::StreamRouter::new(weak.clone())),
+            handoff_refresh: Mutex::new(HashMap::new()),
         })
     }
 
@@ -916,16 +926,31 @@ impl MeshClient {
     }
 
     /// Decide a handoff's refused channels again once the member list has
-    /// been read from the hub. A channel the sender is still not a member of
+    /// been read from the hub (at most once a minute per sender,
+    /// [`HANDOFF_REFRESH_MS`]). A channel the sender is still not a member of
     /// is refused for good, and said so.
     fn retry_handoff(&self, sender: &str, channels: Vec<proto::frame::ChannelHandoff>) {
         let Some(this) = self.weak.upgrade() else {
             return;
         };
         let sender = sender.to_string();
+        let refresh = {
+            let now = now_ms();
+            let mut last = self.handoff_refresh.lock().unwrap();
+            last.retain(|_, at| now - *at < HANDOFF_REFRESH_MS);
+            match last.contains_key(&sender) {
+                true => false,
+                false => {
+                    last.insert(sender.clone(), now);
+                    true
+                }
+            }
+        };
         tokio::spawn(async move {
-            if let Err(error) = this.refresh_members().await {
-                tracing::debug!(%error, "member list not refreshed for a key handoff");
+            if refresh {
+                if let Err(error) = this.refresh_members().await {
+                    tracing::debug!(%error, "member list not refreshed for a key handoff");
+                }
             }
             let outcome =
                 enroll::apply_peer_key_handoff(&this.store, &this.node_id(), &sender, &channels);

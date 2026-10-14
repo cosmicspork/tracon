@@ -424,21 +424,43 @@ pub fn host_only_reason(key: &str) -> &'static str {
     }
 }
 
-/// Keys no peer changes, even one this node lets administer it: which peers
-/// may administer it. Granting that is this node's operator's own act, at the
-/// node or with this node's passkey, so a peer that holds the grant can never
-/// widen it, pass it on, or keep it past its removal.
-pub const NOT_BY_PEER: &[&str] = &["mesh.admin_peers"];
+/// Keys no peer changes, even one this node lets administer it, each a key
+/// or a table (`*` a map entry) covering everything under it, and why:
+/// who may reach or administer this node (`[auth]`, `[mesh]`, `admin_peers`
+/// and the hub among it), and where it sends its credentials (a provider's
+/// upstream, credential and sign-in, the embedding endpoint and key). A peer
+/// that could change these could strand this node's own operator, keep its
+/// grant past its removal, or redirect a credential to a host of its choosing.
+/// They are changed at the node, or remotely with this node's own passkey.
+pub const NOT_BY_PEER: &[(&str, &str)] = &[
+    ("auth", WHO_REACHES),
+    ("mesh", WHO_REACHES),
+    ("providers.*.upstream", WHERE_CREDENTIALS_GO),
+    ("providers.*.credential", WHERE_CREDENTIALS_GO),
+    ("providers.*.login", WHERE_CREDENTIALS_GO),
+    ("embed.base_url", WHERE_CREDENTIALS_GO),
+    ("embed.api_key_file", WHERE_CREDENTIALS_GO),
+];
+
+const WHO_REACHES: &str = "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer";
+const WHERE_CREDENTIALS_GO: &str = "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer";
 
 /// Why `key` (table segments, any index left out) is not changed by an edit
-/// from a peer, if it is not.
+/// from a peer, if it is not: it is one of [`NOT_BY_PEER`] or lies under one.
+/// A table that only holds one (`providers.x`, `embed`) is decided by the
+/// keys an edit of it writes or removes, which are checked one by one.
 pub fn peer_refusal(key: &[&str]) -> Option<&'static str> {
     NOT_BY_PEER
         .iter()
-        .any(|pattern| pattern.split('.').count() == key.len() && matches(pattern, key))
-        .then_some(
-            "decides which peers may administer this node, so it is changed at the node or with its own passkey, never by a peer",
-        )
+        .find(|(pattern, _)| {
+            let parts: Vec<&str> = pattern.split('.').collect();
+            parts.len() <= key.len()
+                && parts
+                    .iter()
+                    .zip(key)
+                    .all(|(p, k)| *p == "*" || *k == "*" || p == k)
+        })
+        .map(|(_, why)| *why)
 }
 
 /// Whether a host-only key may still be changed by an edit made at the
@@ -574,10 +596,34 @@ mod tests {
     }
 
     #[test]
-    fn who_may_administer_a_node_is_not_a_peers_to_change() {
-        assert!(peer_refusal(&["mesh", "admin_peers"]).is_some());
-        assert!(peer_refusal(&["mesh", "hub_url"]).is_none());
-        assert!(peer_refusal(&["mesh"]).is_none());
+    fn who_may_reach_a_node_and_where_its_credentials_go_are_not_a_peers_to_change() {
+        for key in [
+            &["mesh", "admin_peers"][..],
+            &["mesh", "hub_url"],
+            &["mesh"],
+            &["auth"],
+            &["auth", "public_origin"],
+            &["auth", "trusted_proxies"],
+            &["providers", "anthropic", "upstream"],
+            &["providers", "mine", "credential"],
+            &["providers", "*", "login"],
+            &["embed", "base_url"],
+            &["embed", "api_key_file"],
+        ] {
+            assert!(peer_refusal(key).is_some(), "{key:?}");
+        }
+        for key in [
+            &["providers", "anthropic", "models"][..],
+            &["providers", "anthropic"],
+            &["embed", "enabled"],
+            &["review", "max_files"],
+            &["session", "budget_tokens"],
+        ] {
+            assert!(peer_refusal(key).is_none(), "{key:?}");
+        }
+        assert!(peer_refusal(&["embed", "base_url"])
+            .unwrap()
+            .contains("credential"));
         assert_eq!(lookup(&["mesh", "admin_peers"]).apply, Apply::Live);
     }
 

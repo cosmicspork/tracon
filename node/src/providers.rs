@@ -1340,3 +1340,89 @@ fn stop_capture(slot: &Inflight) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn providers() -> Arc<Providers> {
+        Providers::new(
+            Arc::new(Config::default()),
+            crate::broker::Broker::default().shared(),
+            DataKey::from_bytes([7u8; 32]),
+            "n".into(),
+            Bus::new(),
+        )
+    }
+
+    fn slot(owner: LoginOwner, started_ms: i64, pending: bool) -> Inflight {
+        Inflight {
+            generation: 1,
+            owner,
+            channels: vec![],
+            share: true,
+            started_ms,
+            cancel: CancellationToken::new(),
+            state: match pending {
+                true => InflightState::Pending(PendingLogin {
+                    result: ConnectResult {
+                        url: "https://example.invalid".into(),
+                        completion: LoginCompletion::Paste,
+                        completion_note: None,
+                        device_code: None,
+                    },
+                    grant: Grant::Device,
+                    capture: None,
+                    completion: Arc::new(Mutex::new(CompletionState::Open)),
+                }),
+                false => InflightState::Starting,
+            },
+            confirmed: None,
+        }
+    }
+
+    /// A peer's confirmed connect covers the code for that sign-in only:
+    /// the same owner, still waiting for its code, and young enough.
+    #[test]
+    fn a_confirmed_login_covers_only_its_own_waiting_sign_in() {
+        let p = providers();
+        let a = LoginOwner::Peer("a".into());
+        let b = LoginOwner::Peer("b".into());
+        let now = 10 * CONFIRMED_LOGIN_MS;
+        p.inflight
+            .lock()
+            .insert("anthropic".into(), slot(a.clone(), now - 1_000, true));
+        assert_eq!(
+            p.confirmed_login("anthropic", &a, now),
+            None,
+            "not confirmed yet"
+        );
+        // Another owner cannot mark it, nor is it covered for one.
+        p.confirm_login("anthropic", &b, "peer b");
+        assert_eq!(p.confirmed_login("anthropic", &a, now), None);
+        p.confirm_login("anthropic", &a, "peer a");
+        assert_eq!(
+            p.confirmed_login("anthropic", &a, now).as_deref(),
+            Some("peer a")
+        );
+        assert_eq!(p.confirmed_login("anthropic", &b, now), None);
+        assert_eq!(
+            p.confirmed_login("anthropic", &LoginOwner::Local, now),
+            None
+        );
+        assert_eq!(p.confirmed_login("openai-codex", &a, now), None);
+        // Past its lifetime.
+        assert_eq!(
+            p.confirmed_login("anthropic", &a, now + CONFIRMED_LOGIN_MS),
+            None
+        );
+        // A sign-in not yet waiting for its code is neither marked nor covered.
+        p.inflight
+            .lock()
+            .insert("openai-codex".into(), slot(a.clone(), now, false));
+        p.confirm_login("openai-codex", &a, "peer a");
+        assert_eq!(p.confirmed_login("openai-codex", &a, now), None);
+        p.inflight.lock().get_mut("openai-codex").unwrap().confirmed = Some("peer a".into());
+        assert_eq!(p.confirmed_login("openai-codex", &a, now), None);
+    }
+}

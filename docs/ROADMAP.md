@@ -241,7 +241,9 @@ builds and pins its own image once accepted (the recipe is shared, the digest ne
       hub replica takes a `key_handoff` without checking the sender is in that channel
       (the hub holds the member records to check it). Channel-wide bindings stay writable
       by any member's handoff by design; a signed binding change would let a node tell a
-      member's edit from a forged one.
+      member's edit from a forged one. Who is in a channel is itself the hub's word (a
+      node's record of other members is the hub's member list), so a hub that lies about
+      membership can still steer a handoff; signed membership would close that.
 
 **Diff reading.** Borrow interaction patterns from
 [cosmicspork/review](https://github.com/cosmicspork/review), especially its

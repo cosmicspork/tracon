@@ -199,9 +199,10 @@ own Settings shows it, secrets and comments left out. A peer's settings are visi
 and editable only from nodes it names in its `[mesh] admin_peers`; one that does not
 name this node shows nothing but why, and how to add it (at that node, or in its own
 Settings with its passkey). Otherwise: a key and a value → Set →
-the same confirmation sheet, its line starting with the peer's name ("On beta: Change
-node.toml: review.max_files") → passkey → the peer checks it again and writes it; its
-own phone is told. `admin_peers` itself is never offered for a peer's editing. A peer
+the same confirmation sheet, its line starting with the peer's name and the start of
+its id ("On beta (217a7211…): Change node.toml: review.max_files") → passkey → the peer
+checks it again and writes it; its own phone is told. `[auth]`, `[mesh]` and where
+credentials go are never offered for a peer's editing, and the card says so. A peer
 that is away refuses at once; nothing waits to run when it returns.
 
 **Sign in from another browser.** The desktop app against a remote node (or any

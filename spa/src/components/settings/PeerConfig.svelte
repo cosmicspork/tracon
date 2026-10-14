@@ -129,7 +129,7 @@
         {#if keptFromPeers.length}
           <small>
             Not changed from here: {keptFromPeers.map((spec) => spec.key).join(', ')}.
-            {keptFromPeers[0].why_not_by_peer ?? ''}
+            {[...new Set(keptFromPeers.map((spec) => spec.why_not_by_peer ?? spec.why_not ?? ''))].join(' ')}
           </small>
         {/if}
       {/if}

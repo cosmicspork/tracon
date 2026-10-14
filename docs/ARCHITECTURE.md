@@ -266,18 +266,29 @@ only if its own `[mesh] admin_peers` names the asking node: a peer's settings ar
 visible and editable only from nodes it names there. Otherwise the refusal says so
 (`not_admin_peer`) and the interface shows why, and nothing of the file. A read returns exactly what the peer's own `GET /api/config`
 would. An edit is decided first on the asking node against the file as the peer shows
-it: the version it names, keys a peer may change (everything a remote edit may, except
-`[mesh] admin_peers`, which only the node itself or its own passkey changes), and the
-prompt, worked out from that file by the same code and prefixed `On <peer>: ` within
-the same 600 characters. Then it is confirmed there (a passkey off that node's machine),
+it: the version it names, the characters it holds (none a prompt could not show), keys
+a peer may change, and the prompt, worked out from that file by the same code and
+prefixed `On <peer name> (<first 8 of its id>…): ` within the same 600 characters (the
+name is the peer's own word; the id is not). A peer may change everything a remote edit
+with the node's own passkey may, except who may reach or administer the node and where
+it sends its credentials (`config_schema::NOT_BY_PEER`): all of `[auth]` and `[mesh]`
+(`admin_peers` and the hub among them), a provider's `upstream`, `credential` and
+`login`, and the embedding `base_url` and `api_key_file`. Those, and the host-only
+keys, are changed at the node, or remotely with its own passkey; a peer that could
+change them could strand the node's own operator, keep its grant past its removal, or
+send a credential to a host of its choosing. Then it is confirmed there (a passkey off that node's machine),
 and the asking node signs an admin statement for exactly that edit on exactly that
 peer (see [Mesh frames](#mesh-frames)). The peer checks the statement, then runs the
-edit as its own `PATCH` would, as an editor that may not change `admin_peers`: the
+edit as its own `PATCH` would, as an editor held to the same exceptions: the
 version, the operations, the keys, the path guard against its own host, the audit row
 (actor `peer <id> for <operator session>`, or `for local`), the push, and the live keys
 applied at once. An edit is never queued: a peer that is away is refused at once, and
-one that arrives after its two minutes is refused there. A peer's answer (a conflict
-with its hash now, a refusal by key) is relayed as it gave it.
+one that arrives after its two minutes is refused there. A peer's refusal is relayed
+as the peer's, never as the asking node's own answer: `peer_refused`, the peer's message
+cleaned and capped beneath the asking node's line, its kind and fields as data, a
+conflict's hash only if it is one, and a status other than `404`, `409`, `412`, `422`
+or `428` turned into `403` or `502`, so a peer cannot have the interface ask for a
+passkey or a sign-in by answering `step_up_required` or `401`.
 
 The routes that wrote `node.toml` (or what a harness runs) at the machine only are admin
 actions now, confirmed the same way, each with a prompt the node words from its body.
@@ -1455,14 +1466,16 @@ Invariants on top of the wire:
   sender's node id, that the statement names it and the command it is about to run,
   that it is no older than two minutes, and spends it once. The owner never sees the
   passkey and never trusts the sender's description of the command: the statement
-  binds the command's own bytes. `admin_peers` is itself an admin key no peer can
-  change.
+  binds the command's own bytes. No peer changes who may reach or administer a node
+  or where it sends its credentials (`[auth]`, `[mesh]` with `admin_peers`, a
+  provider's upstream, credential and sign-in, the embedding endpoint and key).
 - **A key handoff is taken only from a member.** A peer's `key_handoff` lands only
   for a channel the sender is a member of by the receiver's record (asked of the
-  hub once more if the record lacks it), since a key from anyone else would add an
-  epoch the receiver then seals the channel's frames under. It carries the
-  channel's shared bindings; the ones a node keeps for itself (`external_stopped`,
-  `external_paused`, `notify`) are never taken from it.
+  hub once more if the record lacks it, at most once a minute per sender), since a
+  key from anyone else would add an epoch the receiver then seals the channel's
+  frames under. It carries the channel's shared bindings; the ones a node keeps
+  for itself (`external_stopped`, `external_paused`, `notify`) are never taken
+  from it.
 - **A command expires when its sender stops waiting.** A command sent with a
   timeout carries `not_after_ms`; past it (with 30 seconds' leeway for clock skew)
   the owner refuses it unrun, so a command the operator was told failed never runs

@@ -899,8 +899,12 @@ administered, list the administering node's id (`tracon mesh id` on it) in `[mes
 admin_peers`. Then, from the administering node, **Settings → Connections** signs
 that node's providers in and out, and **Settings → Mesh → A peer's node.toml** reads
 and edits its configuration. Each change is confirmed with your passkey on the node
-you are using, with a prompt naming the peer, and the peer checks it again before it
-runs it; `admin_peers` itself is changed only at the node or with its own passkey.
+you are using, with a prompt naming the peer and the start of its id, and the peer
+checks it again before it runs it. A peer may change any key a remote edit may, except
+who may reach or administer the node and where its credentials go: all of `[auth]` and
+`[mesh]` (`admin_peers` and the hub among them), a provider's `upstream`, `credential`
+and `login`, and `[embed] base_url` and `api_key_file`. Those, like the host-only keys,
+are changed at the node or with its own passkey.
 Provider login stays on the selected node; credential listings show names and
 bindings, never secret values. Sessions can be started, prompted, reviewed, and
 stopped from another channel member.

@@ -47,9 +47,13 @@ pub(crate) fn peer_label(s: &AppState, node_id: &str) -> String {
     }
 }
 
-/// What a prompt for an action on `node_id` starts with: `On <peer>: `.
+/// What a prompt for an action on `node_id` starts with: `On <peer> (<id>…): `.
+/// The name is whatever the peer announced, so the start of its node id,
+/// which no peer can choose, comes with it: a peer calling itself another's
+/// name is still told apart.
 pub(crate) fn prefix(s: &AppState, node_id: &str) -> String {
-    format!("On {}: ", peer_label(s, node_id))
+    let id: String = node_id.chars().take(8).collect();
+    format!("On {} ({id}\u{2026}): ", peer_label(s, node_id))
 }
 
 /// The line a prompt shows for `line` done on `node_id`: the [`prefix`],

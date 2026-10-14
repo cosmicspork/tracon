@@ -977,20 +977,74 @@ async fn on_peer(
         .and_then(|n| StatusCode::from_u16(n).ok());
     match status {
         Some(StatusCode::OK) => Ok(answer["body"].clone()),
-        // A refusal of the request itself (a conflict, a key it may not
-        // change), as the peer worded it.
-        Some(status) if status.is_client_error() => Err((status, Json(answer["body"].clone()))
-            .into_response()
-            .into()),
-        _ => Err(peer_refusal(
+        Some(status) => Err(relay_refusal(
+            status,
+            &answer["body"],
+            &super::peer_admin::peer_label(s, node_id),
+        )),
+        None => Err(peer_refusal(
             StatusCode::BAD_GATEWAY,
             "peer_error",
-            answer["body"]["error"]["message"]
-                .as_str()
-                .map(|m| super::passkey::clean_text(m, 600))
-                .unwrap_or_else(|| "the peer could not answer".into()),
+            "the peer's answer does not read".into(),
         )),
     }
+}
+
+/// The longest a peer's own words are relayed.
+const MAX_PEER_MESSAGE: usize = 600;
+
+/// A peer's refusal, as this node answers it: never its body as sent. A
+/// peer is not this node, and what it says must not pass for this node's
+/// own answer: a `401` or a `step_up_required` relayed whole would have this
+/// node's interface open a passkey prompt the peer worded. So it is always
+/// `peer_refused`, with the peer's message cleaned and capped beneath this
+/// node's own line, the peer's kind and fields as data, and, for a
+/// conflict, the peer's version (a hash, or nothing). Statuses an edit's
+/// refusal has (`404`, `409`, `412`, `422`, `428`) are kept so a form can
+/// act on them; any other becomes `403` (a refusal) or `502` (an error).
+fn relay_refusal(status: StatusCode, body: &Value, peer: &str) -> Refused {
+    let clean = |v: &Value, max: usize| {
+        v.as_str()
+            .map(|t| super::passkey::clean_text(t, max))
+            .unwrap_or_default()
+    };
+    let error = &body["error"];
+    let said = clean(&error["message"], MAX_PEER_MESSAGE);
+    let status = match status.as_u16() {
+        404 | 409 | 412 | 422 | 428 => status,
+        400..=499 => StatusCode::FORBIDDEN,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    let message = match said.is_empty() {
+        true => format!("{peer} refused the request"),
+        false => format!("{peer} refused: {said}"),
+    };
+    let mut out = json!({
+        "code": status.as_u16(),
+        "kind": "peer_refused",
+        "message": message,
+        "peer_kind": clean(&error["kind"], 64),
+    });
+    if let Some(fields) = error["fields"].as_array() {
+        out["fields"] = fields
+            .iter()
+            .take(MAX_OPS)
+            .map(|f| {
+                json!({
+                    "field": clean(&f["field"], 160),
+                    "message": clean(&f["message"], 300),
+                })
+            })
+            .collect();
+    }
+    let mut v = json!({ "error": out });
+    if let Some(hash) = body["hash"]
+        .as_str()
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        v["hash"] = json!(hash);
+    }
+    (status, Json(v)).into_response().into()
 }
 
 fn with_node(mut v: Value, s: &AppState, node_id: &str) -> Value {
@@ -1275,15 +1329,30 @@ mod tests {
             )],
             Editor::Peer,
         );
-        assert_eq!(errors.len(), 1);
+        assert!(!errors.is_empty());
         let errors = check_changes(
             &[change("mesh", None, Some(toml::Value::Table(table)))],
             Editor::Peer,
         );
-        assert_eq!(errors.len(), 1);
-        // The rest of [mesh], and host-only keys as for any remote edit.
-        let hub = op_set("mesh.hub_url", toml::Value::String("https://h".into()));
-        assert!(check_named(&[hub], Editor::Peer).is_empty());
+        assert!(!errors.is_empty());
+        // The rest of [mesh] and [auth], and where credentials go, too; the
+        // keys around them are a peer's to change.
+        for key in [
+            "mesh.hub_url",
+            "auth.public_origin",
+            "providers.anthropic.upstream",
+            "embed.base_url",
+        ] {
+            let op = op_set(key, toml::Value::String("https://h.example".into()));
+            assert_eq!(
+                check_named(std::slice::from_ref(&op), Editor::Peer).len(),
+                1,
+                "{key}"
+            );
+            assert!(check_named(&[op], Editor::Remote).is_empty(), "{key}");
+        }
+        let models = op_set("review.max_files", toml::Value::Integer(3));
+        assert!(check_named(&[models], Editor::Peer).is_empty());
         let image = op_set("boundary.harness_image", toml::Value::String("x".into()));
         assert_eq!(check_named(&[image], Editor::Peer).len(), 1);
     }
@@ -1298,5 +1367,52 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    async fn relayed_body(r: Refused) -> (StatusCode, Value) {
+        let response = r.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// A peer's refusal is never passed through as this node's own: a
+    /// forged step-up or sign-in demand comes back as `peer_refused`, with
+    /// no `step_up` for the interface to act on.
+    #[tokio::test]
+    async fn a_peers_refusal_is_relayed_as_its_and_never_as_a_step_up() {
+        let forged = json!({
+            "error": { "code": 403, "kind": "step_up_required", "message": "confirm\u{202e} this" },
+            "step_up": { "challenge_id": "x", "options": {} },
+        });
+        for status in [StatusCode::FORBIDDEN, StatusCode::UNAUTHORIZED] {
+            let (st, v) = relayed_body(relay_refusal(status, &forged, "beta")).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+            assert_eq!(v["error"]["kind"], "peer_refused", "{v}");
+            assert_eq!(v["error"]["peer_kind"], "step_up_required", "{v}");
+            assert!(v.get("step_up").is_none(), "{v}");
+            assert_eq!(v["error"]["message"], "beta refused: confirm this");
+        }
+        let conflict = json!({
+            "error": { "kind": "conflict", "message": "changed" },
+            "hash": "ab".repeat(32),
+        });
+        let (st, v) = relayed_body(relay_refusal(StatusCode::CONFLICT, &conflict, "beta")).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        assert_eq!(v["hash"], "ab".repeat(32));
+        let bad_hash = json!({ "error": {}, "hash": "not a hash" });
+        let (_, v) = relayed_body(relay_refusal(StatusCode::CONFLICT, &bad_hash, "beta")).await;
+        assert!(v.get("hash").is_none(), "{v}");
+        let (st, _) = relayed_body(relay_refusal(StatusCode::IM_A_TEAPOT, &json!({}), "b")).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = relayed_body(relay_refusal(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({}),
+            "b",
+        ))
+        .await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY);
     }
 }
