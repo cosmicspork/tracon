@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import ChannelChoice from './ChannelChoice.svelte'
   import { api } from '../lib/api'
   import { providerChannelSeed } from '../lib/channel'
@@ -17,7 +17,10 @@
     declareOps,
     fieldFor,
     modelOps,
+    rebase,
     sectionOps,
+    shown,
+    type Clash,
     type Draft,
     type Field,
     type FieldContext,
@@ -126,11 +129,32 @@
   let endpointNote = $state('')
   let endpointSaved = $state(false)
   let endpointBusy = $state(false)
+  let endpointClashes = $state<Clash[]>([])
+  // node.toml read again (this card's save, another card's, a conflict):
+  // the drafts are carried onto it key by key, and a key the node changed
+  // under one is named before it can be saved over.
+  let endpointSeen: Field[] = []
+  $effect(() => {
+    const now = endpoint
+    untrack(() => {
+      if (endpointSeen.length && Object.keys(endpointDrafts).length) {
+        const carried = rebase(endpointSeen, now, endpointDrafts)
+        endpointDrafts = carried.drafts
+        const kept = endpointClashes.filter((c) => !carried.clashes.some((n) => n.key === c.key))
+        endpointClashes = [...kept, ...carried.clashes]
+      }
+      endpointSeen = now
+    })
+  })
+  function endpointTheirs() {
+    for (const clash of endpointClashes) delete endpointDrafts[clash.key]
+    endpointClashes = []
+  }
   const endpointPlan = $derived(sectionOps(endpoint, endpointDrafts))
   const endpointDirty = $derived(endpointPlan.ops.length + Object.keys(endpointPlan.errors).length > 0)
 
   async function saveEndpoint() {
-    if (!save || !context || endpointBusy || !endpointPlan.ops.length || Object.keys(endpointPlan.errors).length) return
+    if (!save || !context || endpointBusy || endpointClashes.length || !endpointPlan.ops.length || Object.keys(endpointPlan.errors).length) return
     endpointBusy = true
     endpointNote = ''
     endpointErrors = {}
@@ -365,6 +389,18 @@
         {#if endpoint.length && editable && save}
           <details class="declared" open={endpointDirty || !!endpointNote}>
             <summary>Endpoint · <code>[providers.{p.name}]</code></summary>
+            {#if endpointClashes.length}
+              <div class="clash" role="alert">
+                <b>Changed on the node too</b>
+                {#each endpointClashes as clash (clash.key)}
+                  <small><code>{clash.key}</code>: now {shown(clash.theirs)} on the node; saving writes {shown(clash.yours.reset ? undefined : clash.yours.v)}.</small>
+                {/each}
+                <span class="model-acts">
+                  <button class="btn" type="button" onclick={() => (endpointClashes = [])}>Keep mine</button>
+                  <button class="lnk" type="button" onclick={endpointTheirs}>Use theirs</button>
+                </span>
+              </div>
+            {/if}
             <div class="endpoint">
               {#each endpoint as field (field.key)}
                 <ConfigField
@@ -381,10 +417,10 @@
             </div>
             <div class="model-acts">
               {#if endpointDirty}
-                <button class="btn p" type="button" onclick={saveEndpoint} disabled={endpointBusy || Object.keys(endpointPlan.errors).length > 0}>
+                <button class="btn p" type="button" onclick={saveEndpoint} disabled={endpointBusy || endpointClashes.length > 0 || Object.keys(endpointPlan.errors).length > 0}>
                   {endpointBusy ? 'Saving…' : 'Save endpoint'}
                 </button>
-                <button class="lnk" type="button" onclick={() => (endpointDrafts = {})} disabled={endpointBusy}>Discard</button>
+                <button class="lnk" type="button" onclick={() => ((endpointDrafts = {}), (endpointClashes = []))} disabled={endpointBusy}>Discard</button>
               {/if}
               {#if endpointNote}<small class={endpointSaved ? 'ok' : 'bad'} role="status">{endpointNote}</small>{/if}
             </div>
@@ -634,6 +670,15 @@
   }
   .mrow input[type='checkbox'] {
     justify-self: start;
+  }
+  .clash {
+    display: grid;
+    gap: 4px;
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: var(--wash-wait);
+    border-left: 3px solid var(--wait);
+    overflow-wrap: anywhere;
   }
   .endpoint {
     display: grid;

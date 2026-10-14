@@ -7,6 +7,9 @@ import {
   declareOps,
   entriesOps,
   entryStates,
+  rebaseEntries,
+  rebaseMap,
+  arrayEdit,
   modelOps,
   editability,
   errorsByField,
@@ -436,6 +439,7 @@ test('an array of tables in the generic form edits its entries one field at a ti
       { op: 'set', key: 'service[0].port', value: 9333 },
       { op: 'insert', array: 'service', entry: { name: 'postgres', port: 5432 } },
     ],
+    screen: ['service[0].port', 'service[1]'],
     errors: {},
   })
   const bad = [{ ...before[0], drafts: { port: { v: 'ninety' } } }]
@@ -507,4 +511,98 @@ test('a key with no value, in a table the file leaves out, writes nothing until 
   expect(opFor(types, { v: '' })).toBeNull()
   expect(opFor(max, { v: '72' })).toEqual({ op: 'set', key: 'publish.style.max_subject', value: 72 })
   expect(opFor(imperative, { v: true })).toEqual({ op: 'set', key: 'publish.style.imperative', value: true })
+})
+
+function serviceCtx(entries: Record<string, unknown>[]): FieldContext {
+  return { ...ctx(), document: { ...DOCUMENT, service: entries }, effective: { ...EFFECTIVE, service: entries } }
+}
+function serviceArray(c: FieldContext) {
+  return sections(c).find((s) => s.id === 'service')!.arrays[0]
+}
+
+test('after another save, the drafts of an array land on the same entries, and no entry added elsewhere is removed', () => {
+  const browser = { name: 'browser', port: 9222 }
+  const mail = { name: 'mail', port: 1025 }
+  const cache = { name: 'cache', port: 6379 }
+  const before = serviceCtx([browser, mail])
+  const loaded = serviceArray(before)
+  const states = entryStates(before, loaded)
+  // The operator changes mail's port and removes browser.
+  const edited: EntryState[] = [{ ...states[1], drafts: { port: { v: '1026' } } }]
+  // Meanwhile (or by a save of another table here) the node gains cache, first.
+  const after = serviceCtx([cache, browser, mail])
+  const now = serviceArray(after)
+  const carried = rebaseEntries(after, now, loaded.entries, edited)
+  expect(carried.clashes).toEqual([])
+  const { ops } = entriesOps(now, entryStates(after, now), carried.states)
+  expect(ops).toEqual([
+    { op: 'remove', key: 'service[1]' },
+    { op: 'set', key: 'service[1].port', value: 1026 },
+  ])
+  // Before the fix the same drafts, sent against the new file, removed mail.
+  const stale = entriesOps(now, entryStates(after, now), edited).ops
+  expect(stale).toContainEqual({ op: 'remove', key: 'service[2]' })
+})
+
+test('an array that did not change keeps its drafts as they are, even with the first field edited', () => {
+  const c = serviceCtx([{ name: 'browser', port: 9222 }])
+  const array = serviceArray(c)
+  const states: EntryState[] = [{ ...entryStates(c, array)[0], drafts: { name: { v: 'chromium' } } }]
+  expect(rebaseEntries(c, array, array.entries, states)).toEqual({ states, clashes: [] })
+})
+
+test('an entry changed on both sides is named; one removed on the node is named with what saving does', () => {
+  const before = serviceCtx([{ name: 'browser', port: 9222 }, { name: 'mail', port: 1025 }])
+  const loaded = serviceArray(before)
+  const states = entryStates(before, loaded)
+  const edited: EntryState[] = [
+    { ...states[0], drafts: { port: { v: '9333' } } },
+    { ...states[1], drafts: { port: { v: '1026' } } },
+  ]
+  const after = serviceCtx([{ name: 'browser', port: 9444 }])
+  const out = rebaseEntries(after, serviceArray(after), loaded.entries, edited)
+  expect(out.clashes.map((c) => c.key)).toEqual(['service[0].port', 'service[1]'])
+  expect(out.clashes[1].says).toBe('mail was removed on the node; saving adds it back with your edits.')
+  expect(out.states.map((s) => s.origin)).toEqual([0, null])
+})
+
+test('a map keeps names others added and values others changed; a name both changed is named', () => {
+  const map = sections(ctx()).find((s) => s.id === 'github')!.maps[0]
+  const was = map.entries
+  const rows = [{ name: 'op/homelab', v: 'renovate.yaml\nci.yml' }, { name: 'op/new', v: 'deploy.yml' }]
+  const theirs = { ...map, entries: [['op/homelab', ['renovate.yaml']], ['op/site', ['pages.yml']]] as [string, unknown][] }
+  const out = rebaseMap(theirs, was, rows)
+  expect(out.clashes).toEqual([])
+  expect(mapOps(theirs, out.rows)).toEqual([
+    { op: 'set', key: 'github.dispatch."op/homelab"', value: ['renovate.yaml', 'ci.yml'] },
+    { op: 'set', key: 'github.dispatch."op/new"', value: ['deploy.yml'] },
+  ])
+  const both = { ...map, entries: [['op/homelab', ['other.yml']]] as [string, unknown][] }
+  const clash = rebaseMap(both, was, rows)
+  expect(clash.clashes.map((c) => c.says)).toEqual(['op/homelab is now other.yml on the node; saving sets renovate.yaml, ci.yml.'])
+})
+
+test('after a save, a draft the node now holds is dropped rather than named', () => {
+  const before = sections(ctx()).find((s) => s.id === 'session')!.fields
+  const saved = { ...EFFECTIVE, session: { ...EFFECTIVE.session, budget_tokens: 3000000 } }
+  const after = sections({ ...ctx(), effective: saved }).find((s) => s.id === 'session')!.fields
+  expect(rebase(before, after, { 'session.budget_tokens': { v: '3000000' } })).toEqual({ drafts: {}, clashes: [] })
+})
+
+test('a refusal of a field set lands on the entry shown, after removals and a reorder', () => {
+  const original = [{ name: 'a', port: 1 }, { name: 'b', port: 2 }, { name: 'c', port: 3 }]
+  // Remove a; show c first with a new port, then b.
+  const { ops, screen } = arrayEdit(['service'], original, [
+    { origin: 2, entry: { name: 'c', port: 30 } },
+    { origin: 1, entry: original[1] },
+  ])
+  expect(ops).toEqual([
+    { op: 'remove', key: 'service[0]' },
+    { op: 'set', key: 'service[1].port', value: 30 },
+    { op: 'reorder', array: 'service', order: [1, 0] },
+  ])
+  const keys = ['service[0].name', 'service[0].port', 'service[1].name', 'service[1].port']
+  expect(errorsByField([{ field: 'ops[1].value', message: 'too low' }], ops, keys, screen).fields).toEqual({ 'service[0].port': ['too low'] })
+  // Named by the operation's own key, as the node may: the same field.
+  expect(errorsByField([{ field: 'service[1].port', message: 'taken' }], ops, keys, screen).fields).toEqual({ 'service[0].port': ['taken'] })
 })

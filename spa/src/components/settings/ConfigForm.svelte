@@ -17,7 +17,8 @@
     mapOps,
     mapRows,
     rebase,
-    rematch,
+    rebaseEntries,
+    rebaseMap,
     saveOps,
     sectionOps,
     sections,
@@ -97,19 +98,27 @@
     return mapDrafts[map.key] ?? mapRows(map)
   }
 
-  /** What saving a section would send, and what is not fit to send yet. */
-  function pending(sec: Section): { ops: ConfigOp[]; errors: Record<string, string> } {
+  /** What saving a section would send, where each operation's subject is
+      on screen, and what is not fit to send yet. */
+  function pending(sec: Section): { ops: ConfigOp[]; screen: (string | undefined)[]; errors: Record<string, string> } {
     const out = sectionOps(sec.fields, drafts)
     const ops = [...out.ops]
+    const screen: (string | undefined)[] = ops.map(() => undefined)
     const errors = { ...out.errors }
-    for (const map of sec.maps) if (mapDrafts[map.key]) ops.push(...mapOps(map, mapDrafts[map.key]))
+    for (const map of sec.maps) {
+      if (!mapDrafts[map.key]) continue
+      const made = mapOps(map, mapDrafts[map.key])
+      ops.push(...made)
+      screen.push(...made.map(() => map.key))
+    }
     for (const array of sec.arrays) {
       if (!entryDrafts[array.key] || !ctx) continue
       const made = entriesOps(array, entryStates(ctx, array), entryDrafts[array.key])
       ops.push(...made.ops)
+      screen.push(...made.screen)
       Object.assign(errors, made.errors)
     }
-    return { ops, errors }
+    return { ops, screen, errors }
   }
 
   function setDraft(key: string, draft: Draft | undefined) {
@@ -168,14 +177,9 @@
     return keys
   }
 
-  function identity(array: ArrayField) {
-    const first = array.fields[0]
-    return (entry: Record<string, unknown>) => String(entry[first] ?? '')
-  }
-
   async function save(sec: Section) {
     if (!cfg || !ctx || busy) return
-    const { ops, errors } = pending(sec)
+    const { ops, screen, errors } = pending(sec)
     if (Object.keys(errors).length) {
       for (const [key, message] of Object.entries(errors)) fieldErrors[key] = [message]
       notes[sec.id] = { tone: 'crit', text: 'Some values do not read yet; they are marked below.' }
@@ -184,12 +188,15 @@
     if (!ops.length) return
     busy = sec.id
     delete notes[sec.id]
-    const outcome = await saveOps((hash, o) => api.patchConfig(hash, o), cfg.hash, ops, fieldKeys(sec))
+    const outcome = await saveOps((hash, o) => api.patchConfig(hash, o), cfg.hash, ops, fieldKeys(sec), screen)
     try {
       if (outcome.kind === 'saved') {
         const { result } = outcome
         discard(sec)
-        await load()
+        // Every other table's edits are carried onto the file as it is now,
+        // so the next save, decided against the new version, writes only
+        // what was typed there.
+        await reload(sec.id)
         void store.refreshRestart()
         onsaved?.()
         notes[sec.id] = {
@@ -201,7 +208,7 @@
               : `Saved ${result.changed.join(', ')}. The running node uses it from now on.`,
         }
       } else if (outcome.kind === 'conflict') {
-        await reread()
+        await reload()
         notes[sec.id] = {
           tone: 'dim',
           text: 'node.toml changed on the node while you were editing. It has been read again; your edits are kept. Check them and save again.',
@@ -217,13 +224,23 @@
     }
   }
 
-  /** Read node.toml again after a conflict and carry every edit over: a
-      draft whose key also changed on the node is named for the operator to
-      decide. An entry is found again by its first field (a service's name). */
-  async function reread() {
-    if (!ctx) return
+  /**
+   * Read node.toml again and carry every edit onto it: after a conflict,
+   * and after any save, so a draft is always decided against the version
+   * the next save names. A key's draft stays as typed; an array's entries
+   * and a map's names keep only what the operator changed, over what the
+   * node holds now (`rebaseEntries`, `rebaseMap`). Where the node changed
+   * what was edited here too, the clash is named and Save waits for a
+   * choice. `saved` is the table just saved, whose own drafts are gone.
+   */
+  async function reload(saved?: string) {
+    if (!ctx) {
+      await load()
+      return
+    }
     const before = all.flatMap((s) => s.fields)
-    const was = all
+    const wasArrays = new Map(all.flatMap((s) => s.arrays).map((a) => [a.key, a.entries]))
+    const wasMaps = new Map(all.flatMap((s) => s.maps).map((m) => [m.key, m.entries]))
     const next = await load()
     if (!next || !ctx) return
     const now = sections(ctx)
@@ -236,42 +253,59 @@
     }
     for (const sec of now) {
       for (const array of sec.arrays) {
-        const edited = entryDrafts[array.key]
-        if (!edited) continue
-        const old = was.flatMap((s) => s.arrays).find((a) => a.key === array.key)
-        const fresh = entryStates(ctx, array)
-        const kept = rematch(
-          edited.map((st) => ({ origin: st.origin, entry: entryValue(st).entry })),
-          array.entries,
-          identity(array),
-        )
-        entryDrafts[array.key] = edited.map((st, i) => ({
-          ...st,
-          origin: kept[i].origin,
-          fields: kept[i].origin === null ? st.fields : fresh[kept[i].origin!].fields,
-        }))
-        if (old && JSON.stringify(old.entries) !== JSON.stringify(array.entries)) {
-          ;(grouped[sec.id] ??= []).push({ key: array.key, theirs: array.entries.map(identity(array)), yours: { v: 'your entries' } })
-        }
+        if (!entryDrafts[array.key]) continue
+        const out = rebaseEntries(ctx, array, wasArrays.get(array.key) ?? [], entryDrafts[array.key])
+        entryDrafts[array.key] = out.states
+        if (out.clashes.length) (grouped[sec.id] ??= []).push(...out.clashes)
       }
       for (const map of sec.maps) {
-        const old = was.flatMap((s) => s.maps).find((m) => m.key === map.key)
-        if (mapDrafts[map.key] && old && JSON.stringify(old.entries) !== JSON.stringify(map.entries)) {
-          ;(grouped[sec.id] ??= []).push({ key: map.key, theirs: map.entries.map(([k]) => k), yours: { v: 'your entries' } })
-        }
+        if (!mapDrafts[map.key]) continue
+        const out = rebaseMap(map, wasMaps.get(map.key) ?? [], mapDrafts[map.key])
+        mapDrafts[map.key] = out.rows
+        if (out.clashes.length) (grouped[sec.id] ??= []).push(...out.clashes)
       }
+    }
+    // A clash not yet decided stays, unless its table was just saved.
+    for (const [id, list] of Object.entries(clashes)) {
+      if (id === saved) continue
+      for (const clash of list) if (!grouped[id]?.some((c) => c.key === clash.key)) (grouped[id] ??= []).push(clash)
     }
     clashes = grouped
   }
 
+  /** Take the node's side of every clash in a table; the other edits stay. */
   function takeTheirs(sec: Section) {
+    const gone: Record<string, number[]> = {}
     for (const clash of clashes[sec.id] ?? []) {
-      delete drafts[clash.key]
-      delete mapDrafts[clash.key]
-      delete entryDrafts[clash.key]
+      const array = sec.arrays.find((a) => clash.key.startsWith(`${a.key}[`))
+      const map = sec.maps.find((m) => clash.key.startsWith(`${m.key}.`))
+      if (array) {
+        const at = clash.key.slice(array.key.length).match(/^\[(\d+)\](?:\.(.+))?$/)
+        if (!at) continue
+        if (at[2]) {
+          const states = entries(array)
+          const i = Number(at[1])
+          if (states[i]) setEntryDraft(array, i, at[2], undefined)
+        } else {
+          ;(gone[array.key] ??= []).push(Number(at[1]))
+        }
+      } else if (map) {
+        const name = clash.key.slice(map.key.length + 1)
+        const theirs = mapRows(map).find((r) => r.name === name)
+        editRows(map, (r) => {
+          const rest = r.filter((row) => row.name.trim() !== name)
+          return theirs ? [...rest, theirs] : rest
+        })
+      } else {
+        delete drafts[clash.key]
+      }
+    }
+    for (const array of sec.arrays) {
+      const drop = new Set(gone[array.key] ?? [])
+      if (drop.size) editEntries(array, (states) => states.filter((_, i) => !drop.has(i)))
     }
     delete clashes[sec.id]
-    notes[sec.id] = { tone: 'dim', text: 'Their values are kept; your other edits are still here.' }
+    notes[sec.id] = { tone: 'dim', text: 'The node’s values are kept; your other edits are still here.' }
   }
 
   function title(sec: Section): string {
@@ -329,7 +363,10 @@
               <b>Changed on the node too</b>
               <ul>
                 {#each clashes[sec.id] as clash (clash.key)}
-                  <li><code>{clash.key}</code> is now {shown(clash.theirs)}{#if typeof clash.yours.v === 'string' && clash.yours.v !== 'your entries'}; you have {shown(clash.yours.v)}{/if}.</li>
+                  <li>
+                    <code>{clash.key}</code>:
+                    {clash.says ?? `now ${shown(clash.theirs)} on the node; saving writes ${shown(clash.yours.reset ? undefined : clash.yours.v)}.`}
+                  </li>
                 {/each}
               </ul>
               <div class="acts">

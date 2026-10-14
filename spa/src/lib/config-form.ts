@@ -472,35 +472,55 @@ export interface EntryDraft {
  * the editor would write it, so an entry nobody touched yields nothing.
  */
 export function arrayOps(arraySegs: (string | number)[], original: Record<string, unknown>[], drafts: EntryDraft[]): ConfigOp[] {
+  return arrayEdit(arraySegs, original, drafts).ops
+}
+
+/** `arrayOps`, with where each operation's subject is on screen: a field's
+    set names the entry where it sits at that point of the request (after
+    the removals, before the reorder), which is not where the form shows it
+    once entries move. `screen[i]` is operation i's key as the form spells
+    it (`service[2].port` for the third entry shown), so a refusal of the
+    operation lands on the field the operator typed into. */
+export function arrayEdit(
+  arraySegs: (string | number)[],
+  original: Record<string, unknown>[],
+  drafts: EntryDraft[],
+): { ops: ConfigOp[]; screen: (string | undefined)[] } {
   const array = keyPath(arraySegs)
   const ops: ConfigOp[] = []
+  const screen: (string | undefined)[] = []
+  const push = (op: ConfigOp, shown?: string) => {
+    ops.push(op)
+    screen.push(shown)
+  }
   const kept = new Set(drafts.map((d) => d.origin).filter((o): o is number => o !== null))
   for (let i = original.length - 1; i >= 0; i--) {
-    if (!kept.has(i)) ops.push({ op: 'remove', key: `${array}[${i}]` })
+    if (!kept.has(i)) push({ op: 'remove', key: `${array}[${i}]` })
   }
   const survivors = original.map((_, i) => i).filter((i) => kept.has(i))
-  for (const draft of drafts) {
-    if (draft.origin === null) continue
+  drafts.forEach((draft, pos) => {
+    if (draft.origin === null) return
     const at = survivors.indexOf(draft.origin)
     const before = original[draft.origin] ?? {}
     const names = new Set([...Object.keys(before), ...Object.keys(draft.entry)])
     for (const name of names) {
       const was = before[name]
       const now = draft.entry[name]
+      const shown = `${array}[${pos}].${keyPath([name])}`
       if (now === undefined && was !== undefined) {
-        ops.push({ op: 'remove', key: `${array}[${at}].${keyPath([name])}` })
+        push({ op: 'remove', key: `${array}[${at}].${keyPath([name])}` }, shown)
       } else if (now !== undefined && !same(was, now)) {
-        ops.push({ op: 'set', key: `${array}[${at}].${keyPath([name])}`, value: now })
+        push({ op: 'set', key: `${array}[${at}].${keyPath([name])}`, value: now }, shown)
       }
     }
-  }
+  })
   const fresh = drafts.filter((d) => d.origin === null)
-  for (const draft of fresh) ops.push({ op: 'insert', array, entry: draft.entry })
+  for (const draft of fresh) push({ op: 'insert', array, entry: draft.entry }, `${array}[${drafts.indexOf(draft)}]`)
   // Where each entry sits once the removals and appends are done.
   const current: EntryDraft[] = [...survivors.map((i) => drafts.find((d) => d.origin === i)!), ...fresh]
   const order = drafts.map((d) => current.indexOf(d))
-  if (order.some((from, to) => from !== to)) ops.push({ op: 'reorder', array, order })
-  return ops
+  if (order.some((from, to) => from !== to)) push({ op: 'reorder', array, order })
+  return { ops, screen }
 }
 
 /** Re-anchor drafts on a table read again: each entry's origin becomes the
@@ -532,12 +552,17 @@ export type SaveOutcome =
     names; an entry being added has no index yet, so its array is named.
     Anything else is a key path, indices kept where the form's keys have
     them. */
-export function refusedKey(field: string, ops: ConfigOp[]): string {
+export function refusedKey(field: string, ops: ConfigOp[], screen: (string | undefined)[] = []): string {
   const op = field.match(/^ops\[(\d+)\](?:[.[]|$)/)
   if (op) {
-    const named = ops[Number(op[1])]
-    if (named) return 'key' in named ? named.key : named.array
+    const i = Number(op[1])
+    const named = ops[i]
+    if (named) return screen[i] ?? ('key' in named ? named.key : named.array)
   }
+  // A key exactly as an operation wrote it (`repo[1].dockerfile` after a
+  // removal before it): where that operation's subject is on screen.
+  const i = ops.findIndex((o) => ('key' in o ? o.key : o.array) === field)
+  if (i !== -1 && screen[i]) return screen[i]!
   return field
 }
 
@@ -555,11 +580,12 @@ export function errorsByField(
   problems: { field?: string; path?: string; message: string }[],
   ops: ConfigOp[],
   fieldKeys: string[],
+  screen: (string | undefined)[] = [],
 ): { fields: Record<string, string[]>; general: string[] } {
   const fields: Record<string, string[]> = {}
   const general: string[] = []
   for (const p of problems) {
-    const raw = refusedKey(p.field ?? p.path ?? '', ops)
+    const raw = refusedKey(p.field ?? p.path ?? '', ops, screen)
     const exact = fieldKeys.find((k) => k === raw)
     const segs = keySegs(raw).join('.')
     const target =
@@ -583,6 +609,7 @@ export async function saveOps(
   hash: string,
   ops: ConfigOp[],
   fieldKeys: string[],
+  screen: (string | undefined)[] = [],
 ): Promise<SaveOutcome> {
   try {
     return { kind: 'saved', result: await patch(hash, ops) }
@@ -595,7 +622,7 @@ export async function saveOps(
           // The node names the code point; say what it means where it shows.
           reason === 'hidden_character' ? { ...p, message: `${p.message[0]?.toUpperCase() ?? ''}${p.message.slice(1)}: an invisible or control character. Retype the value.` } : p,
         )
-        const { fields, general } = errorsByField(problems, ops, fieldKeys)
+        const { fields, general } = errorsByField(problems, ops, fieldKeys, screen)
         if (!problems.length) general.push(e.message)
         const remedy = REMEDY[reason]
         if (remedy && (!problems.length || general.length)) general.push(remedy)
@@ -613,6 +640,9 @@ export interface Clash {
   theirs: unknown
   /** What this form would write. */
   yours: Draft
+  /** The line to show, where "now X, yours Y" is not the whole story (an
+      entry removed on the node, a name saving would take out). */
+  says?: string
 }
 
 /**
@@ -630,6 +660,9 @@ export function rebase(before: Field[], after: Field[], drafts: Record<string, D
     if (!draft) continue
     const old = was.get(field.key)
     if (!old || !changed(old, draft)) continue
+    // The node holds it already (this very save, or someone else's same
+    // change): nothing left to write.
+    if (field.control !== 'secret' && !changed(field, draft)) continue
     out[field.key] = draft
     const moved = field.control === 'secret' ? old.secretSet !== field.secretSet : !same(old.value, field.value) || old.written !== field.written
     if (moved) clashes.push({ key: field.key, theirs: field.value, yours: draft })
@@ -743,7 +776,11 @@ export function entryValue(state: EntryState): { entry: Record<string, unknown>;
 }
 
 /** The operations that make the array hold what its entries now say. */
-export function entriesOps(array: ArrayField, before: EntryState[], now: EntryState[]): { ops: ConfigOp[]; errors: Record<string, string> } {
+export function entriesOps(
+  array: ArrayField,
+  before: EntryState[],
+  now: EntryState[],
+): { ops: ConfigOp[]; screen: (string | undefined)[]; errors: Record<string, string> } {
   const errors: Record<string, string> = {}
   const original = before.map((s) => entryValue({ ...s, drafts: {} }).entry)
   const drafts: EntryDraft[] = now.map((s, i) => {
@@ -751,7 +788,97 @@ export function entriesOps(array: ArrayField, before: EntryState[], now: EntrySt
     for (const [name, message] of Object.entries(e)) errors[`${array.key}[${i}].${name}`] = message
     return { origin: s.origin, entry }
   })
-  return { ops: arrayOps(keySegs(array.key), original, drafts), errors }
+  return { ...arrayEdit(keySegs(array.key), original, drafts), errors }
+}
+
+/**
+ * An array's entries as edited, carried onto the array as node.toml has it
+ * now. The array unchanged, nothing moves. Otherwise each entry the form
+ * started from is found again (the same entry, else the same first field as
+ * it was loaded, never as edited), takes the fields the node has now and
+ * keeps only the drafts typed into it; an entry the node added that the
+ * form never saw is kept, at its place; one the node removed that the form
+ * still holds is named, with what saving would do. Nobody else's change is
+ * undone by saving what comes out, unless a clash says so.
+ */
+export function rebaseEntries(
+  ctx: FieldContext,
+  array: ArrayField,
+  was: Record<string, unknown>[],
+  states: EntryState[],
+): { states: EntryState[]; clashes: Clash[] } {
+  const now = array.entries
+  if (same(was, now)) return { states, clashes: [] }
+  const first = array.fields[0]
+  const taken = new Set<number>()
+  // Where each entry loaded before is now.
+  const moved = was.map((entry) => {
+    let at = now.findIndex((e, i) => !taken.has(i) && same(e, entry))
+    if (at === -1) at = now.findIndex((e, i) => !taken.has(i) && first !== undefined && entry[first] !== undefined && same(e[first], entry[first]))
+    if (at !== -1) taken.add(at)
+    return at
+  })
+  const fresh = entryStates(ctx, array)
+  const clashes: Clash[] = []
+  const out: EntryState[] = []
+  for (const st of states) {
+    if (st.origin === null) {
+      out.push(st)
+      continue
+    }
+    const at = moved[st.origin]
+    const label = String(was[st.origin]?.[first] ?? `entry ${st.origin + 1}`)
+    if (at === -1) {
+      // Removed on the node. Kept as a new entry, and named.
+      out.push({ ...st, origin: null, drafts: { ...Object.fromEntries(st.fields.map((f, j) => [array.fields[j], st.drafts[array.fields[j]] ?? initialDraft(f)])) } })
+      clashes.push({ key: `${array.key}[${out.length - 1}]`, theirs: undefined, yours: { v: '' }, says: `${label} was removed on the node; saving adds it back with your edits.` })
+      continue
+    }
+    const base = fresh[at]
+    for (const [name, draft] of Object.entries(st.drafts)) {
+      const j = array.fields.indexOf(name)
+      const before = st.fields[j]
+      const after = base.fields[j]
+      if (before && after && changed(before, draft) && !same(before.value, after.value)) {
+        clashes.push({ key: `${array.key}[${out.length}].${name}`, theirs: after.value, yours: draft })
+      }
+    }
+    out.push({ origin: at, fields: base.fields, drafts: st.drafts })
+  }
+  // Entries the node added: kept where they are.
+  now.forEach((_, j) => {
+    if (taken.has(j)) return
+    out.splice(Math.min(j, out.length), 0, fresh[j])
+  })
+  return { states: out, clashes }
+}
+
+/**
+ * A map's rows as edited, carried onto the map as node.toml has it now:
+ * only the names the operator set, changed or removed are applied, over
+ * what the node holds, so a name someone else added stays and a value
+ * someone else changed is not put back. A name both changed is named.
+ */
+export function rebaseMap(map: MapField, was: [string, unknown][], rows: MapRow[]): { rows: MapRow[]; clashes: Clash[] } {
+  const before = new Map(was)
+  const now = new Map(map.entries)
+  if (same(was, map.entries)) return { rows, clashes: [] }
+  const loaded: MapField = { ...map, entries: was }
+  const edits = mapOps(loaded, rows)
+  const out = new Map(mapRows(map).map((r) => [r.name, r.v]))
+  const clashes: Clash[] = []
+  for (const op of edits) {
+    const name = keySegs(op.op === 'set' || op.op === 'remove' ? op.key : '').at(-1) ?? ''
+    const moved = !same(before.get(name), now.get(name))
+    if (op.op === 'remove') {
+      if (moved && now.has(name)) clashes.push({ key: `${map.key}.${name}`, theirs: now.get(name), yours: { v: '' }, says: `${name} changed on the node to ${shown(now.get(name))}; saving removes it.` })
+      out.delete(name)
+    } else if (op.op === 'set') {
+      if (moved) clashes.push({ key: `${map.key}.${name}`, theirs: now.get(name), yours: { v: shown(op.value) }, says: now.has(name) ? `${name} is now ${shown(now.get(name))} on the node; saving sets ${shown(op.value)}.` : `${name} was removed on the node; saving sets it again.` })
+      out.set(name, rows.find((r) => r.name.trim() === name)?.v ?? '')
+    }
+  }
+  return { rows: [...out].map(([name, v]) => ({ name, v })), clashes }
 }
 
 /** A provider's table as node.toml must hold it before one key of it is

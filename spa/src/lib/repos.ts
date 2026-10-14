@@ -2,7 +2,7 @@
 // entries it stands for. Kept apart from the component so the round trip —
 // which is where an entry would silently change meaning — is tested.
 
-import { arrayOps } from './config-form'
+import { arrayEdit } from './config-form'
 import type { ConfigOp, RepoEntry, RepoImageBuild } from './types'
 
 export interface RepoForm {
@@ -152,14 +152,82 @@ export function buildLine(build: RepoImageBuild): string {
 /// The operations a save sends (`PATCH /api/config`): entries removed,
 /// fields of a kept entry set or removed where it is, entries added, then
 /// the order. Each side goes through the form's round trip first, so an
-/// entry nobody touched sends nothing.
-export function repoOps(seeded: RepoEntry[], forms: RepoForm[]): ConfigOp[] {
+/// entry nobody touched sends nothing. `screen[i]` is where operation i's
+/// subject is on screen (`repo[2].egress` for the third form), for placing
+/// a refusal.
+export function repoEdit(seeded: RepoEntry[], forms: RepoForm[]): { ops: ConfigOp[]; screen: (string | undefined)[] } {
   const original = seeded.map((entry) => toEntry(toForm(entry)) as unknown as Record<string, unknown>)
-  return arrayOps(
+  return arrayEdit(
     ['repo'],
     original,
     forms.map((form) => ({ origin: form.origin ?? null, entry: toEntry(form) as unknown as Record<string, unknown> })),
   )
+}
+
+export function repoOps(seeded: RepoEntry[], forms: RepoForm[]): ConfigOp[] {
+  return repoEdit(seeded, forms).ops
+}
+
+/// `[[repo]]` as node.toml writes it (`GET /api/config` `document`), in the
+/// shape the form reads: the lists an entry may leave out, empty.
+export function writtenRepos(document: Record<string, unknown>): RepoEntry[] {
+  const table = document.repo
+  if (!Array.isArray(table)) return []
+  return table.map((entry) => ({ prepare: [], egress: [], ...(entry as Partial<RepoEntry>) }) as RepoEntry)
+}
+
+/// What the form says, one field at a time.
+const FORM_FIELDS = ['path', 'source', 'image', 'dockerfile', 'context', 'ownChecks', 'checks', 'timeout', 'prepare', 'egress', 'sessionEgress', 'kept'] as const
+
+/// The forms, carried onto the table as the node has it now (`now`), when
+/// they were edited against `seeded`. Only what the operator changed in a
+/// form is replayed, over the entry as it is now, so another writer's change
+/// to a field nobody touched here stays. An entry the node added is kept at
+/// its place; one the operator removed stays removed; one the node removed
+/// is dropped from the forms and named. A field both changed differently is
+/// named too: saving writes the form's.
+export function replayRepos(
+  seeded: RepoEntry[],
+  forms: RepoForm[],
+  now: RepoEntry[],
+): { forms: RepoForm[]; removed: string[]; clashes: string[] } {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+  const taken = new Set<number>()
+  const moved = seeded.map((entry) => {
+    let at = now.findIndex((e, i) => !taken.has(i) && same(e, entry))
+    if (at === -1) at = now.findIndex((e, i) => !taken.has(i) && e.path === entry.path)
+    if (at !== -1) taken.add(at)
+    return at
+  })
+  const out: RepoForm[] = []
+  const removed: string[] = []
+  const clashes: string[] = []
+  for (const form of forms) {
+    if (form.origin === null || form.origin === undefined) {
+      out.push(form)
+      continue
+    }
+    const was = seeded[form.origin]
+    const at = moved[form.origin]
+    if (!was) continue
+    if (at === -1) {
+      removed.push(was.path)
+      continue
+    }
+    const base = toForm(was)
+    const theirs = toForm(now[at])
+    const next: RepoForm = { ...theirs, origin: at }
+    for (const field of FORM_FIELDS) {
+      if (same(form[field], base[field])) continue
+      ;(next as unknown as Record<string, unknown>)[field] = form[field]
+      if (!same(theirs[field], base[field]) && !same(theirs[field], form[field])) clashes.push(`${was.path}: ${field}`)
+    }
+    out.push(next)
+  }
+  now.forEach((entry, j) => {
+    if (!taken.has(j)) out.splice(Math.min(j, out.length), 0, { ...toForm(entry), origin: j })
+  })
+  return { forms: out, removed, clashes }
 }
 
 /// The fields of entry `index` as a refusal may name them.

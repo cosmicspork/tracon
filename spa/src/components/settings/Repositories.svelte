@@ -4,17 +4,34 @@
   import { api } from '../../lib/api'
   import { store } from '../../lib/store.svelte'
   import { forgeIdentity, offerResultLine, offerTargets } from '../../lib/recipes'
-  import { acceptsUploads, blankForm, buildLine, canonical, problems, REPO_FIELDS, repoOps, toForm, words, type RepoForm } from '../../lib/repos'
-  import { rematch, saveOps } from '../../lib/config-form'
+  import {
+    acceptsUploads,
+    blankForm,
+    buildLine,
+    canonical,
+    problems,
+    REPO_FIELDS,
+    repoEdit,
+    replayRepos,
+    toForm,
+    words,
+    writtenRepos,
+    type RepoForm,
+  } from '../../lib/repos'
+  import { saveOps } from '../../lib/config-form'
   import type { RecipeOfferResult, RepoEntry, RepoEnvironments, RepoImageBuild } from '../../lib/types'
 
   let loaded = $state<RepoEnvironments | null>(null)
   let forms = $state<RepoForm[]>([])
   // The table the forms were seeded from, and its file's version: a save
   // edits entries where they were in it and names this version, never a
-  // later poll's.
+  // later poll's. Both come from one read of node.toml (`GET /api/config`),
+  // so the indices the save names are that version's; the repository list
+  // (`/api/repos/environments`) is read only for builds and holds.
   let seeded = $state<RepoEntry[]>([])
   let seededHash = ''
+  /** The table as the node has it now, after a save met a newer version. */
+  let current: { entries: RepoEntry[]; hash: string } | null = null
 
   let busy = $state('')
   let error = $state('')
@@ -23,15 +40,18 @@
   let moved = $state(false)
   let fieldErrors = $state<Record<string, string[]>>({})
 
-  const ops = $derived(repoOps(seeded, forms))
+  const edit = $derived(repoEdit(seeded, forms))
+  const ops = $derived(edit.ops)
   const dirty = $derived(ops.length > 0)
   const invalid = $derived(problems(forms))
 
-  function seed(from: RepoEnvironments) {
-    seeded = from.entries.map((item) => item.entry)
-    seededHash = from.hash
+  async function seed() {
+    const cfg = await api.config()
+    seeded = writtenRepos(cfg.document)
+    seededHash = cfg.hash
     forms = seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
     moved = false
+    current = null
     fieldErrors = {}
   }
 
@@ -49,8 +69,8 @@
   // poll for build progress must never overwrite what is being typed.
   async function load(reseed: boolean) {
     try {
-      loaded = await api.repoEnvironments()
-      if (reseed) seed(loaded)
+      const [environments] = await Promise.all([api.repoEnvironments(), reseed ? seed() : null])
+      loaded = environments
       error = ''
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause)
@@ -98,7 +118,7 @@
     fieldErrors = {}
     // `repo` itself: an entry being added has no index the node can name.
     const keys = ['repo', ...forms.flatMap((_, i) => [`repo[${i}]`, ...REPO_FIELDS.map((name) => `repo[${i}].${name}`)])]
-    const outcome = await saveOps((hash, o) => api.patchConfig(hash, o), seededHash, ops, keys)
+    const outcome = await saveOps((hash, o) => api.patchConfig(hash, o), seededHash, ops, keys, edit.screen)
     try {
       if (outcome.kind === 'saved') {
         await load(true)
@@ -121,32 +141,32 @@
   // node.toml moved under the forms. If the table itself did not, the edits
   // apply as they are to the version now; if it did, the operator decides.
   async function reread() {
-    const fresh = await api.repoEnvironments()
-    loaded = fresh
-    const now = fresh.entries.map((item) => item.entry)
+    const cfg = await api.config()
+    const now = writtenRepos(cfg.document)
     if (canonical(now) === canonical(seeded)) {
-      seededHash = fresh.hash
+      seededHash = cfg.hash
       note = 'node.toml changed elsewhere since this was read; the repository table did not. Save again to apply your edits.'
       return
     }
+    current = { entries: now, hash: cfg.hash }
     moved = true
   }
 
-  /** Apply these edits to the table as it is now: an entry is found again
-      by its repository, and one no longer there is added back. */
+  /** Carry these edits onto the table as the node has it now: only the
+      fields changed here are replayed, so nobody else's change is undone,
+      an entry the node added stays, and one it removed is named. */
   function keepMine() {
-    if (!loaded) return
-    const now = loaded.entries.map((item) => item.entry)
-    const anchored = rematch(
-      forms.map((form) => ({ origin: form.origin ?? null, entry: { path: form.path.trim() } })),
-      now as unknown as Record<string, unknown>[],
-      (entry) => String(entry.path ?? ''),
-    )
-    seeded = now
-    seededHash = loaded.hash
-    forms = forms.map((form, i) => ({ ...form, origin: anchored[i].origin }))
+    if (!current) return
+    const out = replayRepos(seeded, forms, current.entries)
+    seeded = current.entries
+    seededHash = current.hash
+    forms = out.forms
+    current = null
     moved = false
-    note = 'Your edits now apply to the table as the node has it. Review and save.'
+    const said = ['Your edits now apply to the table as the node has it. Review and save.']
+    if (out.removed.length) said.push(`Removed on the node, so your edits to them were dropped: ${out.removed.join(', ')}.`)
+    if (out.clashes.length) said.push(`Changed on the node too; saving writes yours: ${out.clashes.join('; ')}.`)
+    note = said.join(' ')
   }
 
   function move(from: number, to: number) {

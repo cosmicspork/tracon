@@ -549,6 +549,14 @@ const REPO_ENV = {
   ],
 }
 
+// The repository screen reads its entries from node.toml (`/api/config`
+// `document.repo`) and their builds from `/api/repos/environments`: both
+// say the same table.
+const withRepos = (env) => ({
+  '/api/repos/environments': env,
+  '/api/config': { ...CONFIG, document: { ...CONFIG.document, repo: env.entries.map((item) => item.entry) } },
+})
+
 const MANIFEST = {
   channel: 'personal',
   items: [
@@ -599,7 +607,6 @@ const BASE = {
   '/api/channels': CHANNELS,
   '/api/providers': PROVIDERS,
   '/api/credentials': CREDENTIALS,
-  '/api/config': CONFIG,
   '/api/authority/grants': AUTHORITY,
   '/api/admin/access': ACCESS,
   '/api/admin/mesh': ADMIN_MESH,
@@ -607,7 +614,7 @@ const BASE = {
   '/api/admin/policy': POLICY,
   '/api/admin/maintenance': MAINTENANCE,
   '/api/maintenance/data': DATA,
-  '/api/repos/environments': REPO_ENV,
+  ...withRepos(REPO_ENV),
   '/api/manifest': MANIFEST,
   '/api/transfers': TRANSFERS,
   '/api/push/subscriptions': PUSH_DEVICES,
@@ -891,7 +898,7 @@ export default [
   S('repositories-builds', '/settings#channels', 'Repositories: failed, building and warning builds', {
     note: 'Three entries (collapsed by default) — expanded here: failed build with output open, a building one, missing-tool warnings, the github upload caution.',
     over: {
-      '/api/repos/environments': {
+      ...withRepos({
         ...REPO_ENV,
         entries: [
           {
@@ -909,7 +916,7 @@ export default [
             builds: [build({ id: 'b-4', repo_path: '/home/op/src/consulta', warnings: ['just', 'psql'] })],
           },
         ],
-      },
+      }),
     },
     act: async (page) => {
       for (const d of await page.locator('details.entry').all()) await d.evaluate((el) => (el.open = true))
@@ -917,7 +924,7 @@ export default [
     },
   }),
   S('repositories-empty', '/settings#channels', 'Repositories: no entries', {
-    over: { '/api/repos/environments': { ...REPO_ENV, entries: [] } },
+    over: withRepos({ ...REPO_ENV, entries: [] }),
   }),
   S('repositories-new-invalid', '/settings#channels', 'Repositories: a new entry with problems', {
     note: 'Added a third entry: the two saved ones collapse, the new one is open with no repository named and a pinned image left empty; the first problem shows beside the disabled Save.',
