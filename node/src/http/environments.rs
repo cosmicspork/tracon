@@ -9,14 +9,15 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api::{ApiError, ApiResult, AppState};
-use super::auth::Loopback;
+use super::passkey::AdminRequest;
 use crate::config::Config;
 use crate::repo_image;
 
 /// Every entry, with the newest build of each repository it answers for. A
 /// relative `path` can match several clones, so an entry may carry more than
-/// one build.
+/// one build. `hash` is `node.toml`'s version, which a save names.
 pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
+    let hash = crate::config::edit::file_hash(&Config::config_path())?;
     let builds = s.store().repo_images()?;
     let repos = s.cfg.repos();
     let entries: Vec<Value> = repos
@@ -43,37 +44,67 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
         "can_build": s.manager.backend().image_builder().is_some(),
         "presets": crate::config::egress_presets(),
         "entries": entries,
+        "hash": hash,
     })))
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SaveBody {
     entries: Vec<crate::config::Repo>,
+    /// `node.toml`'s `hash` as the list gave it. Required: the table is
+    /// saved whole, so a save decided against an older file would undo
+    /// whatever changed since.
+    #[serde(default)]
+    expected_hash: Option<String>,
 }
 
 /// Replace the table: refused whole if any entry is one the node could not
 /// honour, written to `node.toml`, and in effect for the next session and
 /// the next check without a restart. A session already running keeps the
-/// image and the egress it started with.
+/// image and the egress it started with. An admin action: off this machine
+/// a passkey confirms it, and the prompt lists the keys it changes.
 pub async fn save(
-    _: Loopback,
     State(s): State<AppState>,
-    Json(body): Json<SaveBody>,
-) -> ApiResult<Json<Value>> {
+    req: AdminRequest,
+) -> Result<Json<Value>, super::config_api::Refused> {
+    let raw: Value = req.json()?;
+    super::config_api::refuse_hidden(&raw)?;
+    let body: SaveBody = serde_json::from_value(raw).map_err(|e| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the request body does not read: {e}"),
+        )
+    })?;
+    let expected = super::config_api::expected_version(body.expected_hash.as_deref(), &req)?;
     crate::config::validate_repos(&body.entries)
         .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error))?;
-    let ((), outcome) = crate::config::edit::update_repos(
+    let (text, now) = super::config_api::read_expected(&expected)?;
+    let ops = crate::config::Op::replace_repos(&now.repo, &body.entries)
+        .map_err(super::config_api::edit_refusal)?;
+    let (changes, summary) = super::config_api::prompt(&text, &ops)?;
+    if changes.is_empty() {
+        return Ok(Json(json!({
+            "changed": false,
+            "restart_required": false,
+            "hash": expected,
+        })));
+    }
+    req.confirm(&s, &summary).await?;
+    let outcome = crate::config::edit::replace_repos_expecting(
         &s.cfg,
         s.store(),
+        &expected,
+        &body.entries,
         "Settings (repositories)",
-        |entries| {
-            *entries = body.entries;
-            Ok::<_, ApiError>(())
-        },
-    )?;
+    )
+    .map_err(super::config_api::edit_refusal)?;
+    let (restart_required, pending) = super::config_api::restart_owed(&s, &outcome).await;
     Ok(Json(json!({
         "changed": outcome.wrote(),
-        "restart_required": outcome.restart_required,
+        "restart_required": restart_required,
+        "pending_restart": pending,
+        "hash": outcome.new_hash,
     })))
 }
 
@@ -85,12 +116,34 @@ pub struct BuildBody {
 /// Build a repository's image now, whether or not its recipe changed. The
 /// recipe is resolved before answering, so a Dockerfile the default branch
 /// does not hold is refused here rather than discovered by polling; the build
-/// itself runs on after the response and is read back from the list.
+/// itself runs on after the response and is read back from the list. An
+/// admin action: a build runs the repository's Dockerfile with the node's
+/// builder and registry credentials.
 pub async fn build(
-    _: Loopback,
     State(s): State<AppState>,
-    Json(body): Json<BuildBody>,
-) -> ApiResult<Json<Value>> {
+    req: AdminRequest,
+) -> Result<Json<Value>, super::passkey::Refusal> {
+    let body: BuildBody = req.json()?;
+    if let Some(c) = super::config_api::hidden_char(&body.repo, &[]) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "repo holds U+{:04X}, a character a confirmation could not show",
+                c as u32
+            ),
+        )
+        .into());
+    }
+    // Confirmed before the name is resolved: resolving it looks at the
+    // host's directories, which is not for a caller who has not confirmed.
+    req.confirm(
+        &s,
+        &format!(
+            "Build the image for the repository {}",
+            super::config_prompt::quote(body.repo.trim())
+        ),
+    )
+    .await?;
     let unprocessable = |message: String| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message);
     let repo = repo_root(&body.repo).map_err(unprocessable)?;
     let entry = repo_image::building_entry(&s.cfg, &repo).ok_or_else(|| {
@@ -106,13 +159,15 @@ pub async fn build(
                 "{}; start it with the held entry's Start the build, which says what it lends",
                 crate::mesh::recipe::held_reason(&hold)
             ),
-        ));
+        )
+        .into());
     }
     if s.manager.backend().image_builder().is_none() {
         return Err(unprocessable(format!(
             "the {} runtime cannot build images",
             s.manager.backend().kind()
-        )));
+        ))
+        .into());
     }
     let recipe = repo_image::recipe(&repo, &entry, &repo_image::RunAs::of(&s.cfg))
         .await

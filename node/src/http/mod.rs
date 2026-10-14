@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
+pub mod config_api;
+mod config_prompt;
 pub mod device;
 pub mod environments;
 pub mod evidence;
@@ -94,12 +96,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/node/refresh-models", post(api::refresh_models))
         .route("/api/boundary/check", post(api::recheck_boundary))
         .route("/api/boundary/setup", post(api::run_setup))
-        .route("/api/config", get(api::get_config).put(api::put_config))
+        // All of node.toml: read with secrets redacted, edited as typed
+        // operations against the hash read. Every write is an admin action
+        // (`passkey::AdminRequest`): a passkey off this machine.
+        .route(
+            "/api/config",
+            get(config_api::get_config)
+                .put(api::put_config)
+                .patch(config_api::patch_config),
+        )
         .route("/api/model-catalogue", get(api::get_model_catalogue))
         // The launch manifest: what an operator customizes a channel's
         // sessions with. Reading it is an ordinary operator read; every write
-        // is loopback-only at the handler, because all three put code where a
-        // harness will run it.
+        // puts code where a harness will run it, so each is an admin action,
+        // and importing a skill package, which reads a directory on the
+        // node's own machine, is done at the node.
         .route("/api/manifest", get(api::get_manifest))
         .route("/api/manifest/skills", post(api::post_skill))
         .route("/api/manifest/text", put(api::put_manifest_text))

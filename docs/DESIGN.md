@@ -179,8 +179,10 @@ Settings → Access → Passkeys to do it later, within the same window. Everyda
 asks for nothing more: the cookie is the sign-in.
 
 **Confirm an admin action.** Save (a token, a credential, a grant, a provider key, a
-mesh admission, a passkey) → the node refuses it with `step_up_required` → a sheet
-names the action (`POST /api/authority/grants`) and offers Confirm and Cancel →
+mesh admission, a passkey, any change to the node's configuration) → the node
+refuses it with `step_up_required` → a sheet names the action
+(`POST /api/authority/grants`), and for a configuration save the keys it changes
+("Change node.toml: publish.gh, session.budget_tokens"), and offers Confirm and Cancel →
 Confirm opens the passkey sheet → the same save is sent once more with the proof,
 and goes through. One sheet per save, however much the save changes. The button is
 not decoration: iOS shows the passkey sheet only from a tap. A sheet the system
@@ -295,7 +297,8 @@ operator's information, not the model's.
     is how it signs in, so a lost phone is revoked like any client, and nobody is
     shown a passkey sheet to read their queue. What a passkey guards is what a
     stolen cookie could use to keep its access or reach further: tokens,
-    credentials, grants, providers, mesh membership, and the passkeys. Losing every passkey is recovered at the node
+    credentials, grants, providers, mesh membership, the node's configuration,
+    and the passkeys. Losing every passkey is recovered at the node
     (`docs/RECOVERY.md`), never by a weaker path from afar. A window that cannot
     make one borrows a browser's (device approval) rather than getting a path
     around it: that browser asserts for the exact request, and a session it

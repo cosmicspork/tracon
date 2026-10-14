@@ -191,11 +191,13 @@ async fn live_keys_apply_to_the_running_node_without_a_restart() {
     let _file = state::config_lock().await;
     let n = node();
     let before = n.state.cfg.live().session.budget_tokens;
+    let (_, read) = call(&n, "GET", "/api/config", None).await;
     let (s, v) = call(
         &n,
         "PUT",
         "/api/config",
         Some(json!({
+            "expected_hash": read["hash"],
             "session": { "budget_tokens": before + 1 },
             "review": { "max_diff_lines": 1234 },
             "supervision": { "checks": ["just live"] },

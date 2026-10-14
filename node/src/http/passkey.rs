@@ -59,6 +59,13 @@ use crate::{
 
 /// The header a retried admin request carries its step-up proof in.
 pub const STEP_UP_HEADER: &str = "x-tracon-step-up";
+/// The longest summary a confirmation prompt shows. A `node.toml` save's
+/// lists every sensitive key it changes with its new value
+/// (`config_prompt`), so it is longer than a route's one line.
+pub const MAX_SUMMARY: usize = 600;
+/// The longest line a device-approval prompt shows: a summary with what
+/// it is for in front ("Confirm for another window: "), whole.
+pub const MAX_APPROVAL_LINE: usize = MAX_SUMMARY + 40;
 /// How long a challenge may be answered.
 pub const CHALLENGE_TTL_MS: i64 = 2 * 60 * 1000;
 /// How long a proof may be spent once its assertion verified.
@@ -89,8 +96,25 @@ pub(crate) fn clean_text(value: &str, max: usize) -> String {
     kept.trim().chars().take(max).collect()
 }
 
+/// [`clean_text`] for a line a prompt shows whole: cut only if it is
+/// longer than `max`, and then visibly, ending in an ellipsis, so nothing is
+/// ever dropped from a prompt without its saying so.
+pub(crate) fn fit_text(value: &str, max: usize) -> String {
+    let clean = clean_text(value, usize::MAX);
+    match clean.chars().count() > max {
+        true => format!(
+            "{}\u{2026}",
+            clean
+                .chars()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+        ),
+        false => clean,
+    }
+}
+
 /// Unicode general categories Cc, Cf, Zl and Zp.
-fn hidden(c: char) -> bool {
+pub(crate) fn hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c as u32,
@@ -249,6 +273,12 @@ impl From<ApiError> for Refusal {
     }
 }
 
+impl From<crate::config::EditError> for Refusal {
+    fn from(e: crate::config::EditError) -> Self {
+        Refusal::Api(ApiError::from(e))
+    }
+}
+
 impl From<crate::store::StoreError> for Refusal {
     fn from(e: crate::store::StoreError) -> Self {
         Refusal::Api(ApiError::from(e))
@@ -339,7 +369,7 @@ fn open_assertion(
     delegable: bool,
 ) -> Result<Value, Refusal> {
     let action = action.map(|a| clean_text(a, 160));
-    let summary = summary.map(|a| clean_text(a, 160));
+    let summary = summary.map(|a| fit_text(a, MAX_SUMMARY));
     let (action, summary) = (action.as_deref(), summary.as_deref());
     let passkeys: Vec<Passkey> = enrolled(s)?.into_iter().map(|(_, p)| p).collect();
     if passkeys.is_empty() {
@@ -452,6 +482,7 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
         ("POST", ["api", "admin", "restart"]) => "Restart the node".to_string(),
         ("DELETE", ["api", "admin", "restart"]) => "Withdraw the node's restart".to_string(),
         ("POST", ["api", "passkeys", "register", "options"]) => "Add a passkey".to_string(),
+        ("POST", ["api", "mesh", "unpair"]) => "Leave the mesh (forget the hub)".to_string(),
         ("DELETE", ["api", "passkeys", _]) => "Remove a passkey".to_string(),
         _ => return None,
     };
@@ -589,6 +620,72 @@ where
             .await
             .map(AdminAction)
             .map_err(IntoResponse::into_response)
+    }
+}
+
+/// An admin request whose body is read before it is confirmed, so the
+/// prompt can say what this body does rather than what the route is: the
+/// keys a `node.toml` edit changes, the hub a mesh is started with. The
+/// summary is the node's, computed from the very bytes the confirmation is
+/// bound to (`op_hash`), never a description the client sent.
+///
+/// Nothing may act on the request before [`AdminRequest::confirm`] has
+/// passed. What may come before it is only what the node can answer without
+/// looking past its own state: parsing, a stale version, a value that would
+/// not load.
+pub struct AdminRequest {
+    parts: Parts,
+    body: Bytes,
+}
+
+impl FromRequest<AppState> for AdminRequest {
+    type Rejection = Response;
+
+    async fn from_request(req: Request, _state: &AppState) -> Result<Self, Self::Rejection> {
+        let (parts, body) = req.into_parts();
+        let body = axum::body::to_bytes(body, MAX_ADMIN_BODY)
+            .await
+            .map_err(|_| {
+                ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+                    .into_response()
+            })?;
+        json_or_empty(&parts.headers, &body).map_err(IntoResponse::into_response)?;
+        Ok(AdminRequest { parts, body })
+    }
+}
+
+impl AdminRequest {
+    /// The body, read as `T`. An empty body reads as JSON `null`.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, ApiError> {
+        let bytes: &[u8] = match self.body.is_empty() {
+            true => b"null",
+            false => &self.body,
+        };
+        serde_json::from_slice(bytes).map_err(|e| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("the request body does not read: {e}"),
+            )
+        })
+    }
+
+    /// The version the request expects to change, from `If-Match`, with any
+    /// quotes an entity tag carries taken off.
+    pub fn if_match(&self) -> Option<&str> {
+        expected(&self.parts.headers).map(|v| v.trim().trim_matches('"'))
+    }
+
+    /// Whether this is the operator at the node's own machine, who confirms
+    /// nothing.
+    pub fn is_local(&self) -> bool {
+        auth::parts_are_local(&self.parts)
+    }
+
+    /// Go ahead only if this request is local, or confirmed with a passkey
+    /// for exactly these bytes; otherwise the refusal opens the challenge,
+    /// with `summary` as the line the prompt shows.
+    pub async fn confirm(&self, s: &AppState, summary: &str) -> Result<(), Refusal> {
+        authorize_as(s, &self.parts, &self.body, Some(summary.to_string())).await
     }
 }
 
@@ -1030,6 +1127,16 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_line_is_cut_only_visibly() {
+        assert_eq!(fit_text("short\u{202e}", 10), "short");
+        let cut = fit_text(&"x".repeat(20), 10);
+        assert_eq!(cut, format!("{}\u{2026}", "x".repeat(9)));
+        // What a summary may hold fits the line a device approval shows.
+        let line = format!("Confirm for another window: {}", "y".repeat(MAX_SUMMARY));
+        assert!(!fit_text(&line, MAX_APPROVAL_LINE).ends_with('\u{2026}'));
+    }
 
     #[test]
     fn the_op_hash_binds_every_part_of_the_request() {

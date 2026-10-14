@@ -117,6 +117,23 @@ async fn call(
     )
 }
 
+/// `node.toml`'s version as `GET /api/config` gives it, which a save names.
+async fn config_hash(n: &Node) -> String {
+    let (s, v) = call(n, "GET", "/api/config", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["hash"].as_str().unwrap().to_string()
+}
+
+/// `node.toml`'s version as the repository list gives it, which a save names.
+async fn repos_hash(n: &Node) -> String {
+    let (s, v) = call(n, "GET", "/api/repos/environments", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["hash"]
+        .as_str()
+        .expect("the list carries the file's hash")
+        .to_string()
+}
+
 #[tokio::test]
 async fn a_channel_is_created_named_and_idempotent() {
     let n = node();
@@ -394,18 +411,26 @@ async fn the_config_is_readable_and_carries_no_secrets() {
         keys,
         [
             "boundary",
+            "document",
+            "effective",
             "external",
             "gateway",
             "harness",
+            "hash",
+            "keys",
             "launch",
             "node_name",
+            "pending_restart",
             "providers",
             "publish",
             "readonly",
+            "redacted",
             "review",
             "running",
+            "running_hash",
             "session",
             "supervision",
+            "toml",
         ]
     );
     // A provider entry is its catalogue and its context, never a value: the
@@ -416,10 +441,11 @@ async fn the_config_is_readable_and_carries_no_secrets() {
     assert!(anthropic.get("key").is_none() && anthropic.get("token").is_none());
 }
 
-/// The line this feature draws: a phone may run the node, but what the node
-/// *is* — the binaries it executes, the hub it trusts — is set at the node.
+/// A node with no token answers only its own machine, so a write from
+/// elsewhere never reaches the handler. With a token, a write is an admin
+/// action confirmed with a passkey (`tests/remote_config.rs`).
 #[tokio::test]
-async fn writing_the_config_is_refused_off_the_machine() {
+async fn without_a_token_writing_the_config_is_refused_off_the_machine() {
     let n = node();
     let patch = json!({ "session": { "budget_tokens": 5_000_000 } });
 
@@ -588,11 +614,10 @@ env = { API_KEY = "sk-or-not-a-real-key" }
     assert_eq!(openai_entries, 1, "{allow_hosts:?}");
 }
 
-/// The same line `writing_the_config_is_refused_off_the_machine` draws, for
-/// the sibling endpoint: adding a provider decides what the gateway forwards
-/// to and dials, so it is set at the node too.
+/// The same for the sibling endpoint: adding a provider decides what the
+/// gateway forwards to and dials.
 #[tokio::test]
-async fn provider_creation_is_refused_off_the_machine() {
+async fn without_a_token_provider_creation_is_refused_off_the_machine() {
     let n = node();
     let body = json!({
         "name": "openrouter",
@@ -616,18 +641,12 @@ async fn provider_creation_is_refused_off_the_machine() {
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
 
-/// The model catalogue is loopback-only too, the same as `PUT /api/config`:
-/// it is this node's own fetch/cache state, not something a remote peer's
-/// operator reads off it. A fresh, isolated node has never fetched, so the
-/// shape comes back empty rather than erroring.
+/// The model catalogue is an ordinary operator read (a provider is set up
+/// from wherever the operator is). A fresh, isolated node has never
+/// fetched, so the shape comes back empty rather than erroring.
 #[tokio::test]
-async fn the_model_catalogue_is_loopback_only_and_starts_empty() {
+async fn the_model_catalogue_starts_empty() {
     let n = node();
-
-    let (s, v) = call(&n, "GET", "/api/model-catalogue", Some(REMOTE), None).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
-    let (s, _) = call(&n, "GET", "/api/model-catalogue", None, None).await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
 
     let (s, v) = call(&n, "GET", "/api/model-catalogue", Some(LOCAL), None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
@@ -635,8 +654,10 @@ async fn the_model_catalogue_is_loopback_only_and_starts_empty() {
     assert_eq!(v["providers"], json!({}));
 }
 
+/// Without a token the mesh routes answer only the machine; with one, the
+/// writes are admin actions (`tests/remote_config.rs`).
 #[tokio::test]
-async fn mesh_init_and_enroll_are_loopback_only_too() {
+async fn without_a_token_the_mesh_routes_answer_only_the_machine() {
     let n = node();
     for (method, uri, body) in [
         (
@@ -723,9 +744,21 @@ async fn a_settings_save_is_audited_and_a_repeat_writes_nothing() {
     let n = node();
     let current = Config::try_load().unwrap().review.max_files;
     let next = if current == 41 { 42 } else { 41 };
-    let patch = json!({ "review": { "max_files": next } });
+    // A save names the version it was decided against.
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/config",
+        Some(LOCAL),
+        Some(json!({ "review": { "max_files": next } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_REQUIRED, "{v}");
+    let read = config_hash(&n).await;
+    let patch = json!({ "review": { "max_files": next }, "expected_hash": read });
     let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch.clone())).await;
     assert_eq!(s, StatusCode::OK, "{v}");
+    assert_ne!(v["hash"], json!(read));
     assert_eq!(v["changed"], json!(["review.max_files"]));
     // A review limit applies to the running node at once.
     assert_eq!(v["restart_required"], false);
@@ -736,6 +769,11 @@ async fn a_settings_save_is_audited_and_a_repeat_writes_nothing() {
     assert_eq!(rows[0].changes[0]["after"], next);
     assert_eq!(Config::try_load().unwrap().review.max_files, next);
 
+    // The same save from the same read is now stale: it is not applied
+    // over a version it was not decided against.
+    let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch)).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let patch = json!({ "review": { "max_files": next }, "expected_hash": config_hash(&n).await });
     let (s, v) = call(&n, "PUT", "/api/config", Some(LOCAL), Some(patch)).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["changed"], json!([]));
@@ -751,7 +789,10 @@ async fn an_unknown_setting_is_refused_rather_than_dropped() {
         "PUT",
         "/api/config",
         Some(LOCAL),
-        Some(json!({ "mesh": { "hub_url": "https://elsewhere.example.com" } })),
+        Some(json!({
+            "mesh": { "hub_url": "https://elsewhere.example.com" },
+            "expected_hash": config_hash(&n).await,
+        })),
     )
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
@@ -1295,6 +1336,35 @@ async fn the_repository_table_is_saved_whole_and_applies_without_a_restart() {
     .await;
     assert_ne!(s, StatusCode::OK);
 
+    // A save names the version it was read from: without one it is
+    // refused, and with a stale one it is a conflict that says what is
+    // there now.
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(LOCAL),
+        Some(entries.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_REQUIRED, "{v}");
+    let hash = repos_hash(&n).await;
+    let mut stale = entries.clone();
+    stale["expected_hash"] = json!("0".repeat(64));
+    let (s, v) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(LOCAL),
+        Some(stale),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["hash"], json!(hash), "{v}");
+    assert_eq!(repos_hash(&n).await, hash, "a refused save writes nothing");
+
+    let mut entries = entries;
+    entries["expected_hash"] = json!(hash);
     let (s, v) = call(
         &n,
         "PUT",
@@ -1304,7 +1374,20 @@ async fn the_repository_table_is_saved_whole_and_applies_without_a_restart() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v, json!({ "changed": true, "restart_required": false }));
+    assert_eq!(v["changed"], json!(true), "{v}");
+    assert_eq!(v["restart_required"], json!(false), "{v}");
+    assert_ne!(v["hash"], json!(hash), "{v}");
+    // A second save from the same read is now stale.
+    let (s, _) = call(
+        &n,
+        "PUT",
+        "/api/repos/environments",
+        Some(LOCAL),
+        Some(entries.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    entries["expected_hash"] = json!(repos_hash(&n).await);
 
     // The running node resolves against it already, and the file agrees.
     let (_, v) = call(&n, "GET", "/api/repos/environments", Some(LOCAL), None).await;
@@ -1352,7 +1435,7 @@ async fn the_repository_table_is_saved_whole_and_applies_without_a_restart() {
             "PUT",
             "/api/repos/environments",
             Some(LOCAL),
-            Some(json!({ "entries": [bad] })),
+            Some(json!({ "entries": [bad], "expected_hash": repos_hash(&n).await })),
         )
         .await;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
@@ -1374,6 +1457,8 @@ async fn saving_the_repository_table_keeps_commits_and_style() {
           "style": { "conventional": true, "max_subject": 72 } },
         { "path": "/src/plain", "prepare": [], "egress": [] },
     ]});
+    let mut entries = entries;
+    entries["expected_hash"] = json!(repos_hash(&n).await);
     let (s, v) = call(
         &n,
         "PUT",
@@ -1421,7 +1506,7 @@ async fn saving_the_repository_table_keeps_commits_and_style() {
         "PUT",
         "/api/repos/environments",
         Some(LOCAL),
-        Some(json!({ "entries": listed })),
+        Some(json!({ "entries": listed, "expected_hash": repos_hash(&n).await })),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");

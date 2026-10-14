@@ -352,6 +352,10 @@ pub enum EditError {
     /// The result would not load.
     #[error("{0}")]
     Invalid(String),
+    /// The result would make a key name a program or path the path guard
+    /// refuses, or move a key only the host may change.
+    #[error("{}", super::path_guard::describe(.0))]
+    Refused(Vec<super::path_guard::Refusal>),
     #[error("the change could not be audited, so it was not written: {0}")]
     Audit(String),
     #[error("node.toml could not be written: {0}")]
@@ -539,17 +543,7 @@ pub fn edit_at(
     }
     .map_err(EditError::Invalid)?;
     let changes = diff(&text, &next);
-    // A builder the node cannot use is reported at start rather than fatal
-    // there, so a node keeps running with one; but an edit that writes the
-    // table is held to it.
-    let builder = KeyPath::keys(&["runtime", "kubernetes", "builder"]);
-    if changes.iter().any(|c| c.key.0.starts_with(&builder.0)) {
-        if let Some(settings) = &config.runtime.kubernetes.builder {
-            crate::boundary::kubernetes::build::validate_settings(settings).map_err(|why| {
-                EditError::Invalid(format!("[runtime.kubernetes.builder]: {why}"))
-            })?;
-        }
-    }
+    check_builder(&config, &changes)?;
     if changes.is_empty() {
         return Ok(EditOutcome {
             new_hash: old_hash.clone(),
@@ -569,7 +563,10 @@ pub fn edit_at(
         None => Config::from_toml(&text, path),
     }
     .ok();
-    super::path_guard::refuse_new(before.as_ref(), &config).map_err(EditError::Invalid)?;
+    let refused = super::path_guard::new_refusals(before.as_ref(), &config);
+    if !refused.is_empty() {
+        return Err(EditError::Refused(refused));
+    }
 
     let new_hash = hash(next.as_bytes());
     let row = ConfigAuditRow {
@@ -610,6 +607,182 @@ pub fn edit_at(
         audit_id: Some(row.id),
         notified,
     })
+}
+
+/// What an edit would make of the file, decided before it is confirmed:
+/// the text it would write, what that loads as, and the keys it changes.
+/// Neither the path guard nor anything else that looks at the host has run:
+/// `edit` runs them, under its lock, when it writes.
+pub struct Preview {
+    pub config: Config,
+    pub changes: Vec<Change>,
+    /// The text the edit would write.
+    pub text: String,
+}
+
+/// Apply `ops` to `text` and load the result with every check a load makes,
+/// without writing anything.
+pub fn preview(text: &str, ops: &[Op]) -> Result<Preview, EditError> {
+    let next = apply_to_text(text, ops)?;
+    let config = match crate::legacy::migrate_config(&next) {
+        Some(migration) => Config::from_toml(&migration.text, &Config::config_path()),
+        None => Config::from_toml(&next, &Config::config_path()),
+    }
+    .map_err(EditError::Invalid)?;
+    let changes = diff(text, &next);
+    check_builder(&config, &changes)?;
+    Ok(Preview {
+        config,
+        changes,
+        text: next,
+    })
+}
+
+/// The file's text, and its hash.
+pub fn read_text(path: &Path) -> Result<(String, String), EditError> {
+    let bytes = read(path)?;
+    let hash = hash(&bytes);
+    let text = String::from_utf8(bytes).map_err(|_| unparseable(path, "not UTF-8"))?;
+    Ok((text, hash))
+}
+
+/// [`edit`], for a node that is running on `cfg`: every key the schema
+/// calls live applies at once through `cfg`'s `ConfigHandle`
+/// (`Config::apply_edit`), the `[[repo]]` table among them, and the rest
+/// is owed a restart. Taken under the table's lock, so it cannot
+/// interleave with a `[[repo]]` writer.
+pub fn edit_live(
+    cfg: &Config,
+    store: &Arc<Store>,
+    ops: &[Op],
+    expected_hash: Option<&str>,
+    actor: &str,
+) -> Result<EditOutcome, EditError> {
+    edit_live_at(
+        &Config::config_path(),
+        cfg,
+        store,
+        ops,
+        expected_hash,
+        actor,
+    )
+}
+
+pub fn edit_live_at(
+    path: &Path,
+    cfg: &Config,
+    store: &Arc<Store>,
+    ops: &[Op],
+    expected_hash: Option<&str>,
+    actor: &str,
+) -> Result<EditOutcome, EditError> {
+    let _repos = repo_lock();
+    let outcome = edit_at(path, store, ops, expected_hash, actor)?;
+    // The live keys (the `[[repo]]` table among them) apply now; the
+    // others wait for a restart (`Config::apply_edit`).
+    cfg.apply_edit_at(path, &outcome);
+    Ok(outcome)
+}
+
+/// Make the `[[repo]]` table read `entries`, if the file is still the
+/// version `expected_hash` names: a client that read the table and saves it
+/// whole replaces exactly what it read, never an edit it did not see.
+pub fn replace_repos_expecting(
+    cfg: &Config,
+    store: &Arc<Store>,
+    expected_hash: &str,
+    entries: &[super::Repo],
+    actor: &str,
+) -> Result<EditOutcome, EditError> {
+    replace_repos_expecting_at(
+        &Config::config_path(),
+        cfg,
+        store,
+        expected_hash,
+        entries,
+        actor,
+    )
+}
+
+pub fn replace_repos_expecting_at(
+    path: &Path,
+    cfg: &Config,
+    store: &Arc<Store>,
+    expected_hash: &str,
+    entries: &[super::Repo],
+    actor: &str,
+) -> Result<EditOutcome, EditError> {
+    let _repos = repo_lock();
+    let snapshot = snapshot_at(path)?;
+    if snapshot.hash != expected_hash {
+        return Err(EditError::Conflict {
+            current: snapshot.hash,
+        });
+    }
+    let ops = Op::replace_repos(&snapshot.config.repo, entries)?;
+    let outcome = edit_at(path, store, &ops, Some(expected_hash), actor)?;
+    cfg.apply_edit_at(path, &outcome);
+    Ok(outcome)
+}
+
+/// An error about the file, as said to a caller who is not at the node: the
+/// TOML parser quotes the offending line of the file, which can hold any
+/// value or comment written beside the one in question, so the quoted lines
+/// are dropped and the line number and the reason are kept.
+pub fn without_excerpt(message: &str) -> String {
+    message
+        .lines()
+        .filter(|line| {
+            let rest = line
+                .trim_start()
+                .trim_start_matches(|c: char| c.is_ascii_digit());
+            !rest.trim_start().starts_with('|')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `value`, found at `at` (table keys, indexes left out), as a reader may
+/// see it: down to each value, a secret key's replaced with [`REDACTED`],
+/// and so is a key the schema does not know (`config_schema::lookup`).
+pub fn redact(at: &[String], value: &toml::Value) -> toml::Value {
+    match value {
+        toml::Value::Table(table) => toml::Value::Table(
+            table
+                .iter()
+                .map(|(key, value)| {
+                    let mut below = at.to_vec();
+                    below.push(key.clone());
+                    (key.clone(), redact(&below, value))
+                })
+                .collect(),
+        ),
+        toml::Value::Array(values) if tables_of(values).is_some() => {
+            toml::Value::Array(values.iter().map(|v| redact(at, v)).collect())
+        }
+        _ => {
+            let key: Vec<&str> = at.iter().map(String::as_str).collect();
+            match config_schema::lookup(&key).secret {
+                true => toml::Value::String(REDACTED.into()),
+                false => value.clone(),
+            }
+        }
+    }
+}
+
+/// A builder the node cannot use is reported at start rather than fatal
+/// there, so a node keeps running with one; but an edit that writes the
+/// table is held to it.
+fn check_builder(config: &Config, changes: &[Change]) -> Result<(), EditError> {
+    let builder = KeyPath::keys(&["runtime", "kubernetes", "builder"]);
+    if changes.iter().any(|c| c.key.0.starts_with(&builder.0)) {
+        if let Some(settings) = &config.runtime.kubernetes.builder {
+            crate::boundary::kubernetes::build::validate_settings(settings).map_err(|why| {
+                EditError::Invalid(format!("[runtime.kubernetes.builder]: {why}"))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// What `ops` make of `text`, without writing or checking it.
@@ -2272,7 +2445,7 @@ path = "/srv/notes"
                 _ => set(key, value.as_str()),
             };
             let err = edit_at(&path, &store, &[op], None, "test").err().unwrap();
-            assert!(matches!(err, EditError::Invalid(_)), "{key}: {err}");
+            assert!(matches!(err, EditError::Refused(_)), "{key}: {err}");
             assert!(err.to_string().contains("path guard"), "{key}: {err}");
             assert_eq!(read(&path), COMMENTED);
         }
@@ -2413,5 +2586,117 @@ path = "/srv/notes"
         for bad in ["", "a..b", "a.", "a[x]", "a b", "\"open"] {
             assert!(KeyPath::parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// A parse error said off the machine names where, never what: the
+    /// line the TOML parser quotes could be any line of the file.
+    #[test]
+    fn a_load_error_said_elsewhere_quotes_no_line_of_the_file() {
+        let text = "[review]\nmax_files = { a = 1, token = \"sk-secret\" }\n";
+        let err = Config::from_toml(text, Path::new("/x/node.toml")).unwrap_err();
+        assert!(err.contains("sk-secret"), "{err}");
+        let shown = without_excerpt(&err);
+        assert!(!shown.contains("sk-secret"), "{shown}");
+        assert!(shown.contains("line 2"), "{shown}");
+        assert!(shown.contains("invalid type"), "{shown}");
+    }
+
+    /// A preview is the edit without the write: the keys it would change,
+    /// what the result loads as, and the same refusal a load would make.
+    #[test]
+    fn a_preview_says_what_an_edit_would_change_and_writes_nothing() {
+        let (_dir, path) = file(COMMENTED);
+        let seen = preview(
+            COMMENTED,
+            &[
+                set("session.budget_tokens", 9),
+                set(
+                    "repo[1].checks",
+                    toml::Value::Array(vec!["just check".into()]),
+                ),
+            ],
+        )
+        .unwrap();
+        let keys: Vec<String> = seen.changes.iter().map(|c| c.key.to_string()).collect();
+        assert_eq!(keys, ["repo[1].checks", "session.budget_tokens"]);
+        assert_eq!(seen.config.session.budget_tokens, 9);
+        assert_eq!(read(&path), COMMENTED);
+        let err = preview(COMMENTED, &[set("harness.id", "nonesuch")])
+            .err()
+            .unwrap();
+        assert!(matches!(err, EditError::Invalid(_)), "{err}");
+    }
+
+    /// A reader sees every secret, and every key the node does not know, as
+    /// the placeholder; the rest as written.
+    #[test]
+    fn a_reader_never_sees_a_secret_or_an_unknown_value() {
+        let table: toml::Table = toml::from_str(
+            "node_name = \"n\"\n[qa]\nbrowser = \"sk-live\"\n[publish]\ngh = \"gh\"\n[[repo]]\npath = \"/x\"\nmystery = \"m\"\n",
+        )
+        .unwrap();
+        let shown = redact(&[], &toml::Value::Table(table));
+        assert_eq!(shown["node_name"].as_str(), Some("n"));
+        assert_eq!(shown["publish"]["gh"].as_str(), Some("gh"));
+        assert_eq!(shown["qa"]["browser"].as_str(), Some(REDACTED));
+        assert_eq!(shown["repo"][0]["path"].as_str(), Some("/x"));
+        assert_eq!(shown["repo"][0]["mystery"].as_str(), Some(REDACTED));
+    }
+
+    /// An edit that changes `[[repo]]` through `edit_live` is in effect for
+    /// the running node at once, as a `[[repo]]` writer's is.
+    #[test]
+    fn a_live_edit_moves_the_live_repo_table_with_the_file() {
+        let (_dir, path) = file(COMMENTED);
+        let store = store();
+        let cfg = snapshot_at(&path).unwrap().config;
+        assert_eq!(cfg.repos().len(), 2);
+        let outcome = edit_live_at(
+            &path,
+            &cfg,
+            &store,
+            &[Op::remove(KeyPath::parse("repo[1]").unwrap())],
+            None,
+            "test",
+        )
+        .unwrap();
+        assert!(!outcome.restart_required);
+        assert_eq!(cfg.repos().len(), 1);
+        // A key elsewhere leaves the live table alone.
+        edit_live_at(&path, &cfg, &store, &[set("node_name", "x")], None, "test").unwrap();
+        assert_eq!(cfg.repos().len(), 1);
+    }
+
+    /// A table saved whole replaces exactly the version it was read from.
+    #[test]
+    fn a_whole_repo_table_is_saved_only_over_the_version_it_was_read_from() {
+        let (_dir, path) = file(COMMENTED);
+        let store = store();
+        let read_at = snapshot_at(&path).unwrap();
+        let mut entries = read_at.config.repo.clone();
+        entries.pop();
+        // Someone else edits first.
+        edit_at(&path, &store, &[set("node_name", "other")], None, "test").unwrap();
+        let err = replace_repos_expecting_at(
+            &path,
+            &read_at.config,
+            &store,
+            &read_at.hash,
+            &entries,
+            "test",
+        )
+        .err()
+        .unwrap();
+        let EditError::Conflict { current } = err else {
+            panic!("{err}")
+        };
+        assert_eq!(current, file_hash(&path).unwrap());
+        let outcome =
+            replace_repos_expecting_at(&path, &read_at.config, &store, &current, &entries, "test")
+                .unwrap();
+        assert!(outcome.wrote());
+        assert_eq!(snapshot_at(&path).unwrap().config.repo.len(), 1);
+        assert_eq!(read_at.config.repos().len(), 1);
+        assert!(read(&path).contains("node_name = \"other\""));
     }
 }

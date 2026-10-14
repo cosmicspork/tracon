@@ -86,8 +86,16 @@ pub struct KeySpec {
     /// is `exec_path` or `fs_path`.
     pub path: Option<PathKind>,
     /// Its value is never shown: the audit log records that it changed, not
-    /// what to.
+    /// what to, and `GET /api/config` sends a placeholder in its place. It
+    /// can be written, never read back.
     pub secret: bool,
+    /// Changed at the node only, never by an edit from elsewhere: the state
+    /// mount (which decides what the path guard counts as a place an agent
+    /// can write, so no edit changes it at all, `config::path_guard`), the
+    /// gateway's harness socket path and the images the node runs with its
+    /// own sockets, which the guard does not check (`host_only_reason`).
+    /// Shown, not offered for editing remotely.
+    pub host_only: bool,
 }
 
 const fn restart(key: &'static str) -> KeySpec {
@@ -99,6 +107,7 @@ const fn restart(key: &'static str) -> KeySpec {
         fs_path: false,
         path: None,
         secret: false,
+        host_only: false,
     }
 }
 
@@ -142,6 +151,13 @@ impl KeySpec {
             ..self
         }
     }
+
+    const fn host_only(self) -> Self {
+        KeySpec {
+            host_only: true,
+            ..self
+        }
+    }
 }
 
 /// Every key `node.toml` may hold.
@@ -157,8 +173,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("boundary.subnet"),
     restart("boundary.gateway_ip"),
     restart("boundary.gateway_container"),
-    restart("boundary.gateway_image"),
-    restart("boundary.harness_image"),
+    restart("boundary.gateway_image").host_only(),
+    restart("boundary.harness_image").host_only(),
     restart("boundary.selinux_label_disable"),
     restart("boundary.start_machine"),
     restart("boundary.stop_timeout_secs"),
@@ -168,7 +184,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("gateway.qa_proxy_port"),
     restart("gateway.forward_port"),
     restart("gateway.egress_port"),
-    restart("gateway.harness_listen"),
+    restart("gateway.harness_listen").host_only(),
     // [session]
     live("session.budget_tokens"),
     live("session.permission_timeout_secs"),
@@ -213,9 +229,11 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kind"),
     live("runtime.approved_images"),
     restart("runtime.kubernetes.namespace"),
-    restart("runtime.kubernetes.harness_image"),
+    restart("runtime.kubernetes.harness_image").host_only(),
     restart("runtime.kubernetes.state_claim"),
-    restart("runtime.kubernetes.state_mount").path(PathKind::Mount),
+    restart("runtime.kubernetes.state_mount")
+        .path(PathKind::Mount)
+        .host_only(),
     restart("runtime.kubernetes.harness_home"),
     restart("runtime.kubernetes.uid"),
     restart("runtime.kubernetes.gateway_host"),
@@ -331,6 +349,7 @@ const UNKNOWN: KeySpec = KeySpec {
     fs_path: false,
     path: None,
     secret: true,
+    host_only: false,
 };
 
 fn matches(pattern: &str, key: &[&str]) -> bool {
@@ -371,7 +390,43 @@ pub fn lookup(key: &[&str]) -> KeySpec {
         fs_path: under.iter().any(|spec| spec.fs_path),
         path: None,
         secret: under.iter().any(|spec| spec.secret),
+        host_only: under.iter().any(|spec| spec.host_only),
     }
+}
+
+/// Whether `key` (table segments, any index left out) is one the node reads,
+/// or a table holding some: what an edit may set. A key nobody reads is
+/// only ever removed.
+pub fn known(key: &[&str]) -> bool {
+    !key.is_empty()
+        && KEYS
+            .iter()
+            .any(|spec| spec.key.split('.').count() >= key.len() && matches(spec.key, key))
+}
+
+/// Why the state mount is not changed by an edit at all, in words for the
+/// operator: the path guard refuses it everywhere.
+pub const HOST_ONLY_REASON: &str =
+    "decides where agents can write, so it is changed in node.toml on the host, not by an edit";
+
+/// Why a host-only key is not edited from elsewhere, in words for the
+/// operator. `key` is the schema's spelling (`KeySpec::key`).
+pub fn host_only_reason(key: &str) -> &'static str {
+    match key {
+        "runtime.kubernetes.state_mount" => HOST_ONLY_REASON,
+        "gateway.harness_listen" => {
+            "is the harness socket's path, whose directory the node creates and mounts writable into the gateway container, so it is changed at the node, not from elsewhere"
+        }
+        _ => {
+            "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
+        }
+    }
+}
+
+/// Whether a host-only key may still be changed by an edit made at the
+/// node. The state mount may not: the path guard refuses any edit of it.
+pub fn editable_at_node(key: &str) -> bool {
+    key != "runtime.kubernetes.state_mount"
 }
 
 #[cfg(test)]
@@ -451,6 +506,52 @@ mod tests {
                 Some(_) => assert!(spec.fs_path && !spec.exec_path, "{}", spec.key),
                 None => assert!(!spec.exec_path && !spec.fs_path, "{}", spec.key),
             }
+        }
+    }
+
+    #[test]
+    fn the_state_mount_sockets_and_gateway_images_are_left_to_the_host() {
+        let mut host_only: Vec<&str> = KEYS
+            .iter()
+            .filter(|spec| spec.host_only)
+            .map(|spec| spec.key)
+            .collect();
+        host_only.sort_unstable();
+        assert_eq!(
+            host_only,
+            [
+                "boundary.gateway_image",
+                "boundary.harness_image",
+                "gateway.harness_listen",
+                "runtime.kubernetes.harness_image",
+                "runtime.kubernetes.state_mount",
+            ]
+        );
+        assert!(lookup(&["runtime", "kubernetes"]).host_only);
+        assert!(!lookup(&["runtime", "kubernetes", "namespace"]).host_only);
+    }
+
+    #[test]
+    fn a_key_is_known_if_the_node_reads_it_or_a_table_holding_one() {
+        for key in [
+            &["publish", "gh"][..],
+            &["publish"],
+            &["repo"],
+            &["repo", "egress"],
+            &["providers", "anything", "models", "id"],
+            &["providers", "anything"],
+            &["github", "dispatch", "owner/name"],
+        ] {
+            assert!(known(key), "{key:?}");
+        }
+        for key in [
+            &[][..],
+            &["qa"],
+            &["publish", "ghh"],
+            &["publish", "gh", "deeper"],
+            &["repo", "mystery"],
+        ] {
+            assert!(!known(key), "{key:?}");
         }
     }
 

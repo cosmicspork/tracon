@@ -1,10 +1,10 @@
-//! The configuration the interface may read and write.
+//! The settings the Settings pane reads and writes (`PUT /api/config`).
 //!
-//! An allowlist rather than the whole of `node.toml`: the file carries things
-//! that are not settings (the mesh's hub, the runtime kind), and what is here
-//! is what an operator sets while standing a node up. A patch becomes typed
+//! An allowlist rather than the whole of `node.toml`: what is here is what an
+//! operator sets while standing a node up. The whole file is
+//! `http::config_api` (`GET` and `PATCH /api/config`). A patch becomes typed
 //! operations on the file (`config::edit`), which writes them in place and
-//! audits them.
+//! audits them; off the node's machine it is confirmed with a passkey.
 
 use serde_json::{json, Value};
 

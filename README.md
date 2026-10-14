@@ -214,9 +214,13 @@ and you are in.
 
 The app then offers to add a passkey. Take it: from off the node, every admin
 action (the operator token, credentials, forge and provider keys, authority grants,
-channel bindings, mesh invitations and members, repository recipe offers, passkeys
-themselves) is confirmed with a passkey, one prompt per save, and the cookie alone
-cannot make them. A
+channel bindings, mesh invitations and members, repository recipe offers, any change
+to `node.toml`, passkeys themselves) is confirmed with a passkey, one prompt per save, and the cookie alone
+cannot make them. A configuration save's prompt lists the keys it changes. Every
+`node.toml` key can be changed this way except a few changed at the node only: the
+state mount, the gateway's socket path, and the gateway and harness images. A
+secret's value can be set but is never shown back. Importing a skill from a host directory, policy signing and the service
+lifecycle stay at the node. A
 freshly paired browser may add the node's first passkey without one for 15 minutes;
 after that, adding another is itself confirmed with an existing passkey, so a token
 that leaks later buys a sign-in but not admin. Passkeys are bound to

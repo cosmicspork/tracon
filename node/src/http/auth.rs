@@ -500,12 +500,18 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Local {
 /// A handler that runs only for a caller on the node's own machine.
 ///
 /// The operator token is one credential for one operator, so it is not the
-/// thing to hang this on: a phone holding it is the operator too. What
-/// separates these routes is that they rewrite what the node *is* — the
-/// binaries it executes, the file it reads its configuration from, the hub it
-/// trusts — where a stolen cookie would otherwise be remote code execution.
-/// Standing a node up is done at the node, and "at the node" is [`is_local`],
-/// so a cookie relayed through a proxy on the node's own host does not count.
+/// thing to hang this on: a phone holding it is the operator too. Rewriting
+/// what the node *is* (the binaries it executes, its `node.toml`, the hub it
+/// trusts) is not gated here any more: it is an admin action
+/// ([`AdminAction`], `passkey::AdminRequest`), confirmed from afar with a
+/// passkey bound to the exact request, with the path guard
+/// (`config::path_guard`) keeping any key from naming a program or file an
+/// agent could write. What stays here acts on the host itself rather than on
+/// configuration: reading a host directory the caller names into a skill
+/// package, the policy signing key and bundle installation, the service
+/// lifecycle, the storage sweep, the boundary re-check. "At the node" is
+/// [`is_local`], so a cookie relayed through a proxy on the node's own host
+/// does not count.
 pub struct Loopback;
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Loopback {

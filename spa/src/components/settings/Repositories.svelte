@@ -11,6 +11,10 @@
 
   let loaded = $state<RepoEnvironments | null>(null)
   let forms = $state<RepoForm[]>([])
+  // The file's version the forms were seeded from: a save replaces the
+  // table whole, so it names this one, never a later poll's.
+  let seededHash = ''
+
   let busy = $state('')
   let error = $state('')
   let note = $state('')
@@ -28,7 +32,10 @@
   async function load(reseed: boolean) {
     try {
       loaded = await api.repoEnvironments()
-      if (reseed) forms = loaded.entries.map((item) => toForm(item.entry))
+      if (reseed) {
+        forms = loaded.entries.map((item) => toForm(item.entry))
+        seededHash = loaded.hash
+      }
       error = ''
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause)
@@ -70,7 +77,7 @@
     busy = 'save'
     note = ''
     try {
-      await api.saveRepoEnvironments(forms.map(toEntry))
+      await api.saveRepoEnvironments(forms.map(toEntry), seededHash)
       await load(true)
       note = 'Saved to node.toml. It applies to the next session and the next check; no restart.'
     } catch (cause) {

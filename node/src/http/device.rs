@@ -165,7 +165,7 @@ fn approval_summary(row: &DeviceApprovalRow) -> String {
             .unwrap_or("an admin action");
         format!("Confirm for another window: {what}")
     };
-    clean_text(&text, 160)
+    super::passkey::fit_text(&text, super::passkey::MAX_APPROVAL_LINE)
 }
 
 /// What the asking window says it is.
@@ -686,7 +686,10 @@ pub async fn view(
         "requester_agent": row.requester_agent.as_deref().map(|a| clean_text(a, 160)),
         "requester_addr": row.requester_addr,
         "action": row.action.as_deref().map(|a| clean_text(a, 160)),
-        "summary": row.summary.as_deref().map(|a| clean_text(a, 160)),
+        "summary": row
+            .summary
+            .as_deref()
+            .map(|a| super::passkey::fit_text(a, super::passkey::MAX_SUMMARY)),
         "prompt": approval_summary(&row),
         "local": local,
         "passkeys": s.store().passkey_count()?,
