@@ -70,6 +70,17 @@ RUN set -eu; \
 # release, so without this every release recompiled every dependency. The
 # recipe masks the workspace's own version, so a release-please bump keeps it.
 FROM docker.io/library/rust@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS chef
+# webauthn-rs links a vendored OpenSSL, whose Configure needs the full perl
+# (the image has only perl-base) and make. Debian's live suite is mutable; this
+# official snapshot fixes every apt dependency selected below.
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends perl make \
+    && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /build
 
