@@ -405,16 +405,46 @@ pub fn schedule(action: LifecycleAction) -> Result<()> {
                 tracing::warn!(action = action.label(), %error, "scheduled user-service action refused after target changed");
                 return;
             }
-            let result = match action {
-                LifecycleAction::Install => install(),
-                LifecycleAction::Uninstall => uninstall(),
-                LifecycleAction::Restart => restart(),
+            let result = match helper_args(action, cfg!(target_os = "macos")) {
+                Some(args) => run_detached(&args),
+                None => match action {
+                    LifecycleAction::Install => install(),
+                    LifecycleAction::Uninstall => uninstall(),
+                    LifecycleAction::Restart => restart(),
+                },
             };
             if let Err(error) = result {
                 tracing::error!(action = action.label(), %error, "scheduled user-service action failed");
             }
         })
         .context("scheduling fixed user-service action")?;
+    Ok(())
+}
+
+/// The `tracon` arguments a scheduled action is handed to, when this process
+/// cannot run it itself. Every action on macOS boots the LaunchAgent out
+/// first, and launchd then kills the job's whole process group, this thread
+/// included, before the bootstrap that would bring it back. systemd instead
+/// queues `restart` and `enable --now` as jobs of its own that finish
+/// whatever happens to the caller.
+fn helper_args(action: LifecycleAction, macos: bool) -> Option<[&'static str; 2]> {
+    macos.then_some(["service", action.label()])
+}
+
+/// Run this binary with `args` in a process group of its own, which launchd
+/// leaves alone when it stops the node, and wait for it while the node lasts.
+fn run_detached(args: &[&str]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().context("finding this node binary")?;
+    let status = Command::new(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .process_group(0)
+        .status()
+        .with_context(|| format!("running tracon {}", args.join(" ")))?;
+    if !status.success() {
+        bail!("tracon {} exited with {status}", args.join(" "));
+    }
     Ok(())
 }
 
@@ -820,6 +850,18 @@ mod tests {
         );
         assert_eq!(parse_launchd_main_pid("state = waiting\n").unwrap(), None);
         assert!(parse_launchd_main_pid("state = running\n").is_err());
+    }
+
+    #[test]
+    fn launchd_actions_are_handed_to_a_detached_cli() {
+        for (action, label) in [
+            (LifecycleAction::Install, "install"),
+            (LifecycleAction::Uninstall, "uninstall"),
+            (LifecycleAction::Restart, "restart"),
+        ] {
+            assert_eq!(helper_args(action, true), Some(["service", label]));
+            assert_eq!(helper_args(action, false), None);
+        }
     }
 
     #[test]
