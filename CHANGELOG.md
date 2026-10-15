@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.33.1](https://github.com/cosmicspork/tracon/compare/v0.33.0...v0.33.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **build:** install perl and make for the node image's vendored OpenSSL ([#501](https://github.com/cosmicspork/tracon/issues/501)) ([0ae2345](https://github.com/cosmicspork/tracon/commit/0ae23455ef3e98ca8d58d5575d5d7d423f319ccc))
+* **mcp:** run consulta from a node-owned directory ([#503](https://github.com/cosmicspork/tracon/issues/503)) ([11e4b71](https://github.com/cosmicspork/tracon/commit/11e4b71f439b1ab3d1445a30cc2979bfe7c468cc))
+* **service:** hand in-node launchd actions to a detached helper ([#504](https://github.com/cosmicspork/tracon/issues/504)) ([70dc414](https://github.com/cosmicspork/tracon/commit/70dc414f5477462940e19cfab0f06d812ab3c734))
+* **spa:** default Home's repository only to a managed clone ([#506](https://github.com/cosmicspork/tracon/issues/506)) ([f15d837](https://github.com/cosmicspork/tracon/commit/f15d8375eb1074e644e23d14da8c5388c953a794))
+
 ## [0.33.0](https://github.com/cosmicspork/tracon/compare/v0.32.0...v0.33.0) (2026-10-14)
 
 
