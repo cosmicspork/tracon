@@ -208,16 +208,7 @@ async fn run_sidecar(
 ) -> Result<Value, String> {
     let program = crate::config::path_guard::consulta(&cfg.consulta)
         .map_err(|e| format!("could not run the query tool: {e}"))?;
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(&cfg.consulta.args)
-        .args(&argv)
-        // A clean environment: the sidecar gets the credential and nothing
-        // inherited that might contain another one.
-        .env_clear()
-        .env("PATH", crate::config::path_guard::child_path())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .envs(env)
-        .kill_on_drop(true);
+    let mut cmd = sidecar_command(program, cfg, env, argv);
 
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(cfg.consulta.timeout_secs),
@@ -246,4 +237,49 @@ async fn run_sidecar(
             stdout.trim()
         )
     })
+}
+
+fn sidecar_command(
+    program: std::path::PathBuf,
+    cfg: &Config,
+    env: std::collections::BTreeMap<String, String>,
+    argv: Vec<String>,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(&cfg.consulta.args)
+        .args(&argv)
+        // consulta reads the first `.env` it finds walking up from its working
+        // directory, and that file fills any setting the credential leaves
+        // unset. Run it from the node's own directory, not wherever the node
+        // happened to be started.
+        .current_dir(Config::state_dir())
+        // A clean environment: the sidecar gets the credential and nothing
+        // inherited that might contain another one.
+        .env_clear()
+        .env("PATH", crate::config::path_guard::child_path())
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .envs(env)
+        .kill_on_drop(true);
+    cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_runs_from_the_state_dir() {
+        let cfg = Config::default();
+        let cmd = sidecar_command(
+            "/usr/bin/true".into(),
+            &cfg,
+            Default::default(),
+            vec!["--sql".into(), "select 1".into()],
+        );
+        let dir = Config::state_dir();
+        assert_eq!(cmd.as_std().get_current_dir(), Some(dir.as_path()));
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(args.len(), cfg.consulta.args.len() + 2);
+        assert_eq!(args.last().unwrap().to_str(), Some("select 1"));
+    }
 }

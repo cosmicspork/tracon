@@ -1022,7 +1022,11 @@ point one at something an agent wrote or at a secret. In short:
   package manager's prefix (Homebrew, `~/.local/bin`, `~/.cargo/bin`), where your own
   user may;
 - `[consulta] args` reads `run --project <consulta's checkout> consulta` (a few plain
-  `uv` flags allowed), with nothing after `consulta`;
+  `uv` flags allowed), with nothing after `consulta`. The node runs consulta from its
+  own state directory, so a stray `.env` wherever you started the node is never read.
+  If your `args` still end in `--env-file <empty file>` from an older setup, please drop
+  it: the node refuses any argument after `consulta`, and the query tools fail until
+  it is gone;
 - a secret file lives in `~/.config/tracon/secrets/` (on macOS, `secrets/` beside
   `node.toml`) or `/etc/tracon/`;
 - documents export into the node's own export area (`~/.local/share/tracon/exports` on
