@@ -13,10 +13,10 @@
   import { preparationBlock } from '../lib/preparation'
   import { cannotWork } from '../lib/readiness'
   import { eligibleNodes, harnessChoice, modelsForChannel, nodeHarnesses, nodeReadiness } from '../lib/nodes'
-  import { repoLabel } from '../lib/repo'
+  import { defaultRepo, repoLabel } from '../lib/repo'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { NodeInfo, PreparationPreview as Preparation, RepoReadiness, WorkView } from '../lib/types'
+  import type { ManagedRepo, NodeInfo, PreparationPreview as Preparation, RepoReadiness, WorkView } from '../lib/types'
 
   let {
     item = null,
@@ -180,12 +180,18 @@
   })
   // The repository this channel worked in last is a local convenience only.
   // A peer has its own filesystem, so it must receive an explicit path.
+  let managedRepos = $state<ManagedRepo[] | null>(null)
   $effect(() => {
-    if (!node?.is_self || repo !== '' || workspaceId !== null || !channel) return
-    const last = [...store.sessions.values()]
-      .sort((a, b) => b.created_ms - a.created_ms)
-      .find((s) => s.node_id === node.id && s.channel === channel && s.repo_path && !s.repo_path.startsWith('workspace://'))
-    if (last) repo = last.repo_path
+    if (!node?.is_self || managedRepos !== null) return
+    api
+      .recentRepos()
+      .then((d) => (managedRepos = d.managed))
+      .catch(() => (managedRepos = []))
+  })
+  $effect(() => {
+    if (!node?.is_self || repo !== '' || workspaceId !== null || !channel || managedRepos === null) return
+    const last = defaultRepo(store.sessions.values(), node.id, channel, managedRepos)
+    if (last) repo = last
   })
   $effect(() => {
     if (bound.budget_tokens && !budget) budget = String(bound.budget_tokens)
