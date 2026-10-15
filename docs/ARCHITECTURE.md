@@ -361,7 +361,9 @@ runs. `config::path_guard` holds each such key to rules for what it names
   of the places an agent can write, owned as a secret file is (the node's own user may
   write it: the node image's `/opt/consulta` is the node's), and must hold a
   `pyproject.toml` naming the project `consulta`. With `consulta` itself as the command,
-  `args` must be empty.
+  `args` must be empty. The node runs consulta from its state directory, since consulta
+  reads the first `.env` it finds walking up from its working directory and would
+  otherwise take settings from wherever the node was started.
 - **Secret files and directories** (`embed.api_key_file`,
   `runtime.kubernetes.builder.do_token_file`, `.tls_dir`, `.docker_config`): only inside
   a directory set aside for the node's secrets, `<config dir>/secrets` (on macOS inside
