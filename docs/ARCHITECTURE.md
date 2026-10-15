@@ -152,7 +152,9 @@ and every review submission whose checks have not all run (they run one after an
 so a review between two checks is still in flight), then restarts; if they have not finished it gives up, takes work again and
 pushes why. `now` answers with the live sessions it would end until the body confirms
 them. What restarts the node is its supervisor: the fixed user service where it runs
-under one; where the deployment declares that the container is restarted on exit
+under one (on macOS the node hands the unload and reload to a `tracon service restart`
+in a process group of its own, since launchd stops the job's whole group when it unloads
+it); where the deployment declares that the container is restarted on exit
 (`TRACON_RESTART_BY_EXIT=1`, which the Kubernetes manifests set) the node drains, shuts
 down as SIGTERM would and exits 0 for the kubelet to start it again on the same volume
 and pod IP. Anywhere else the request is refused, because nothing would bring the node
