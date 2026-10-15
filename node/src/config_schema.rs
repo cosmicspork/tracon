@@ -258,6 +258,10 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.resources.command.cpu_limit"),
     restart("runtime.kubernetes.resources.command.memory_request"),
     restart("runtime.kubernetes.resources.command.memory_limit"),
+    restart("runtime.kubernetes.resources.probe.cpu_request"),
+    restart("runtime.kubernetes.resources.probe.cpu_limit"),
+    restart("runtime.kubernetes.resources.probe.memory_request"),
+    restart("runtime.kubernetes.resources.probe.memory_limit"),
     // [[repo]]: replaced whole when saved (`Config::repos`).
     live("repo.path"),
     live("repo.image"),

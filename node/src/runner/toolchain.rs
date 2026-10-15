@@ -369,7 +369,7 @@ pub async fn probe(runner: &dyn Runner) -> ToolchainStatus {
     interpreters.sort();
     interpreters.dedup();
     let out = runner
-        .run_capture(RunnerCommand {
+        .run_probe(RunnerCommand {
             argv: vec![
                 "sh".into(),
                 "-c".into(),

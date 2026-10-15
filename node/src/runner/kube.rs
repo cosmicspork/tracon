@@ -305,6 +305,25 @@ impl KubeSpec {
         Ok(pod)
     }
 
+    /// The pod for a probe (`Runner::run_probe`): a capture sized as a probe,
+    /// and without the memory-backed `/dev/shm`, which only a browser needs
+    /// and which would count against the probe's small limit.
+    pub fn probe_pod(&self, name: &str, cmd: &RunnerCommand) -> Result<Pod, RunnerError> {
+        let mut pod = self.capture_pod(name, cmd)?;
+        if let Some(spec) = pod.spec.as_mut() {
+            if let Some(volumes) = spec.volumes.as_mut() {
+                volumes.retain(|v| v.name != SHM_VOLUME);
+            }
+            if let Some(c) = spec.containers.first_mut() {
+                c.resources = Some(Self::requirements(&self.resources.probe()));
+                if let Some(mounts) = c.volume_mounts.as_mut() {
+                    mounts.retain(|m| m.name != SHM_VOLUME);
+                }
+            }
+        }
+        Ok(pod)
+    }
+
     /// Render the pod. `gated` adds a scheduling gate so the pod is admitted
     /// (and therefore mutated by whatever admission the cluster runs) but never
     /// scheduled: the boundary checks read the result and delete it.
@@ -670,6 +689,46 @@ impl KubeRunner {
         self.spec.ensure_mount_roots(cmd).await
     }
 
+    /// One capture, start to end, in the pod `render` makes of it.
+    async fn capture(
+        &self,
+        cmd: RunnerCommand,
+        render: fn(&KubeSpec, &str, &RunnerCommand) -> Result<Pod, RunnerError>,
+    ) -> Result<std::process::Output, RunnerError> {
+        self.ensure_mount_roots(&cmd).await?;
+        let name = self.capture_name(&Self::name_for(&cmd, "tracon-x"));
+        let asked = cmd.image.clone().unwrap_or_else(|| self.spec.image.clone());
+        let pod = render(&self.spec, &name, &cmd)?;
+        let pods = self.pods();
+        self.remove(&name).await;
+        // Dropped with this future before it is released, the guard deletes
+        // the Secret as `removal` deletes the pod.
+        let mut env = self.create_pod(&name, &pod, &cmd).await?;
+        let mut removal = PodRemoval {
+            pods: pods.clone(),
+            name: name.clone(),
+            armed: true,
+        };
+        let started = self.wait_started(&name).await;
+        secret::release(&mut env).await;
+        let result = match started {
+            Ok(()) => match self.wait_finished(&name).await {
+                Ok(finished) => self.captured(&name, finished).await,
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        };
+        self.remove(&name).await;
+        removal.armed = false;
+        let end = result?;
+        *self.last_image.lock().await = end.image_id.map(|id| (asked, id));
+        Ok(std::process::Output {
+            status: exit_status(end.code),
+            stdout: end.stdout,
+            stderr: end.stderr,
+        })
+    }
+
     /// What a finished capture pod reports: the container's own exit code,
     /// its combined output, and the image the kubelet actually ran.
     async fn captured(&self, name: &str, pod: Pod) -> Result<CaptureEnd, RunnerError> {
@@ -886,38 +945,11 @@ impl Runner for KubeRunner {
     /// pod log, in which the cluster has already merged stdout and stderr, so
     /// it is all in `stdout`; see `captured`.
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
-        self.ensure_mount_roots(&cmd).await?;
-        let name = self.capture_name(&Self::name_for(&cmd, "tracon-x"));
-        let asked = cmd.image.clone().unwrap_or_else(|| self.spec.image.clone());
-        let pod = self.spec.capture_pod(&name, &cmd)?;
-        let pods = self.pods();
-        self.remove(&name).await;
-        // Dropped with this future before it is released, the guard deletes
-        // the Secret as `removal` deletes the pod.
-        let mut env = self.create_pod(&name, &pod, &cmd).await?;
-        let mut removal = PodRemoval {
-            pods: pods.clone(),
-            name: name.clone(),
-            armed: true,
-        };
-        let started = self.wait_started(&name).await;
-        secret::release(&mut env).await;
-        let result = match started {
-            Ok(()) => match self.wait_finished(&name).await {
-                Ok(finished) => self.captured(&name, finished).await,
-                Err(e) => Err(e),
-            },
-            Err(e) => Err(e),
-        };
-        self.remove(&name).await;
-        removal.armed = false;
-        let end = result?;
-        *self.last_image.lock().await = end.image_id.map(|id| (asked, id));
-        Ok(std::process::Output {
-            status: exit_status(end.code),
-            stdout: end.stdout,
-            stderr: end.stderr,
-        })
+        self.capture(cmd, KubeSpec::capture_pod).await
+    }
+
+    async fn run_probe(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
+        self.capture(cmd, KubeSpec::probe_pod).await
     }
 
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
@@ -1240,6 +1272,42 @@ mod tests {
         assert_eq!(
             quantities(&r.limits),
             [("cpu".into(), "2".into()), ("memory".into(), "6Gi".into())]
+        );
+    }
+
+    /// A probe runs nothing a repository brings: it asks for little, so a
+    /// node with room for a session has room for it, and it has no browser to
+    /// give shared memory to.
+    #[test]
+    fn a_probe_is_sized_small_and_has_no_shared_memory() {
+        let mut spec = spec();
+        let pod = spec.probe_pod("tracon-p-1", &cmd()).unwrap();
+        let s = pod.spec.unwrap();
+        let c = &s.containers[0];
+        let r = c.resources.as_ref().unwrap();
+        assert_eq!(
+            quantities(&r.requests),
+            [
+                ("cpu".into(), "100m".into()),
+                ("memory".into(), "128Mi".into())
+            ]
+        );
+        assert_eq!(quantities(&r.limits), [("memory".into(), "512Mi".into())]);
+        assert_eq!(c.stdin, None);
+        assert!(s.volumes.unwrap().iter().all(|v| v.name != SHM_VOLUME));
+        let mounts = c.volume_mounts.as_ref().unwrap();
+        assert!(mounts.iter().all(|m| m.name != SHM_VOLUME));
+        assert!(mounts.iter().any(|m| m.mount_path == SCRATCH_MOUNT));
+
+        spec.resources.probe.memory_request = Some("256Mi".into());
+        let pod = spec.probe_pod("tracon-p-2", &cmd()).unwrap();
+        let r = pod.spec.unwrap().containers[0].resources.clone().unwrap();
+        assert_eq!(
+            quantities(&r.requests),
+            [
+                ("cpu".into(), "100m".into()),
+                ("memory".into(), "256Mi".into())
+            ]
         );
     }
 

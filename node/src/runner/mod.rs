@@ -241,8 +241,14 @@ impl Spawned {
 pub trait Runner: Send + Sync {
     /// Spawn a long-lived process with stdin/stdout piped.
     async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError>;
-    /// Run to completion and capture output (e.g. `opencode --version`).
+    /// Run to completion and capture output: a check, a preparation.
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError>;
+    /// `run_capture` for a probe (e.g. `opencode --version`): it runs nothing
+    /// a repository brings, so a runtime that sizes what it starts may size
+    /// it small. The rest run it as any other capture.
+    async fn run_probe(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
+        self.run_capture(cmd).await
+    }
     /// Force-remove a named process/container.
     async fn kill(&self, name: &str) -> Result<(), RunnerError>;
     /// The name `run_capture` gives a command, which is not always the name
