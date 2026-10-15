@@ -920,7 +920,7 @@ async fn build_session(
             failure
         })?;
     let probe = runner
-        .run_capture(RunnerCommand {
+        .run_probe(RunnerCommand {
             argv: ["sh", "-c", &harness.layer.probe]
                 .map(String::from)
                 .to_vec(),
@@ -1557,7 +1557,7 @@ async fn missing_tools(runner: &dyn Runner, image: &str, commands: &[String]) ->
     .to_vec();
     argv.extend(tools.iter().map(|tool| tool.to_string()));
     let out = runner
-        .run_capture(RunnerCommand {
+        .run_probe(RunnerCommand {
             argv,
             image: Some(image.to_string()),
             name: format!("tracon-probe-{}", uuid::Uuid::now_v7().simple()),

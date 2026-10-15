@@ -840,7 +840,7 @@ impl HarnessAdapter for ClaudeAdapter {
 
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
         let out = runner
-            .run_capture(RunnerCommand {
+            .run_probe(RunnerCommand {
                 argv: vec![Self::BINARY.into(), "--version".into()],
                 name: "claude-version".into(),
                 ..Default::default()

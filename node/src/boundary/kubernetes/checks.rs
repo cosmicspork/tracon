@@ -780,7 +780,7 @@ async fn check_egress(
         name: "tracon-egress-probe".into(),
         ..Default::default()
     };
-    match runner.run_capture(cmd).await {
+    match runner.run_probe(cmd).await {
         // A NetworkPolicy drops; it has no reject verb, and no portable
         // CNI option turns one into an RST or an ICMP unreachable. The
         // measurement is still taken and still reported — it is the

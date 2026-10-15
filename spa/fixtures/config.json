@@ -1380,6 +1380,70 @@
     },
     {
       "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.probe.cpu_request",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.probe.cpu_limit",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.probe.memory_request",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.resources.probe.memory_limit",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
       "apply": "live",
       "array": "repo",
       "editable": true,

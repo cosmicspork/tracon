@@ -1128,11 +1128,12 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # leaves them to the namespace's default service account
 # shm_size = "1Gi"                  # (under [runtime.kubernetes]) memory-backed /dev/shm for browsers;
                                     # counts against the memory limit, so it must fit within it
-# [runtime.kubernetes.resources.session]   # a session's pod; [...resources.command] is a check's,
-# cpu_request = "250m"              # a preparation's or a probe's (500m, 2Gi, 4Gi). Every pod
-# memory_request = "1Gi"            # renders its requests and memory limit, so a LimitRange
-# memory_limit = "4Gi"              # never fills them in; no CPU limit unless one is set
-# cpu_limit = "2"                   # (cpu_limit). A limit below its request is refused at load
+# [runtime.kubernetes.resources.session]   # a session's pod; [...resources.command] is a check's
+# cpu_request = "250m"              # or a preparation's (500m, 2Gi, 4Gi), [...resources.probe] a
+# memory_request = "1Gi"            # version or tool probe's (100m, 128Mi, 512Mi, no /dev/shm).
+# memory_limit = "4Gi"              # Every pod renders its requests and memory limit, so a
+# cpu_limit = "2"                   # LimitRange never fills them in; no CPU limit unless one is
+                                    # set (cpu_limit). A limit below its request is refused at load
 # internal_cidrs = []               # (under [runtime.kubernetes]) address blocks the per-client
                                     # egress proxy refuses besides the private ones (RFC 1918,
                                     # 100.64.0.0/10, fc00::/7), which it always refuses in a

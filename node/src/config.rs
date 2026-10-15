@@ -1072,10 +1072,11 @@ pub struct Kubernetes {
     pub internal_cidrs: Vec<String>,
 }
 
-/// What a harness pod asks the scheduler for. Two kinds: a session (the
-/// harness and whatever it runs while the operator works), and a command run
-/// to completion (a check, a preparation, a probe), which is where a test
-/// suite with a bundler and a browser lands.
+/// What a harness pod asks the scheduler for. Three kinds: a session (the
+/// harness and whatever it runs while the operator works), a command run to
+/// completion (a check, a preparation), which is where a test suite with a
+/// bundler and a browser lands, and a probe (a version, a `command -v`, a
+/// reachability check), which runs nothing a repository brings.
 ///
 /// Every pod renders explicit requests and a memory limit. A namespace's
 /// LimitRange otherwise fills in its own, and a request above its default
@@ -1085,12 +1086,13 @@ pub struct Kubernetes {
 pub struct KubeResources {
     pub session: PodResources,
     pub command: PodResources,
+    pub probe: PodResources,
 }
 
 /// One kind of harness pod's requests and limits, as Kubernetes quantities
 /// (`500m`, `2Gi`). An unset key takes the default for its kind
-/// (`KubeResources::session`, `KubeResources::command`), so a table that
-/// changes one value keeps the rest.
+/// (`KubeResources::session`, `KubeResources::command`,
+/// `KubeResources::probe`), so a table that changes one value keeps the rest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct PodResources {
@@ -1147,6 +1149,19 @@ impl KubeResources {
             cpu_request: "500m".into(),
             memory_request: "2Gi".into(),
             memory_limit: "4Gi".into(),
+            cpu_limit: None,
+        })
+    }
+
+    /// A probe's pod. Captured pods are pinned to the node's own Kubernetes
+    /// node, so one the node cannot fit is refused outright rather than left
+    /// pending; a `--version` sized as a test suite was refused on a node
+    /// that still had room for a session.
+    pub fn probe(&self) -> PodSizing {
+        self.probe.over(PodSizing {
+            cpu_request: "100m".into(),
+            memory_request: "128Mi".into(),
+            memory_limit: "512Mi".into(),
             cpu_limit: None,
         })
     }
@@ -1214,9 +1229,10 @@ impl Kubernetes {
     /// API, and found at load it points at the line rather than at a
     /// session that will not start.
     pub fn validate(&self) -> Result<(), String> {
-        for (kind, sizing) in [
-            ("session", self.resources.session()),
-            ("command", self.resources.command()),
+        for (kind, sizing, browser) in [
+            ("session", self.resources.session(), true),
+            ("command", self.resources.command(), true),
+            ("probe", self.resources.probe(), false),
         ] {
             let key = |name: &str| format!("runtime.kubernetes.resources.{kind}.{name}");
             let parse = |name: &str, value: &str| {
@@ -1251,7 +1267,8 @@ impl Kubernetes {
                         self.shm_size
                     )
                 })?;
-            if shm > memory_limit {
+            // A probe's pod has no shared memory to hold.
+            if browser && shm > memory_limit {
                 return Err(format!(
                     "runtime.kubernetes.shm_size ({}) is larger than {} ({}): shared memory \
                      counts against the pod's memory limit",
@@ -3222,6 +3239,11 @@ models = [{ id = "gpt-6" }]
         assert_eq!(command.memory_request, "2Gi");
         assert_eq!(command.memory_limit, "4Gi");
         assert_eq!(command.cpu_limit, None);
+        let probe = k.resources.probe();
+        assert_eq!(probe.cpu_request, "100m");
+        assert_eq!(probe.memory_request, "128Mi");
+        assert_eq!(probe.memory_limit, "512Mi");
+        assert_eq!(probe.cpu_limit, None);
         assert!(k.image_pull_secrets.is_empty());
         assert_eq!(k.shm_size, "1Gi");
     }
