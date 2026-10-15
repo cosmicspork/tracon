@@ -28,3 +28,21 @@ export function repoMatches(query: string, ...fields: (string | null | undefined
 export function isManagedPath(path: string, managed: { repo_path: string }[]): boolean {
   return managed.some((m) => m.repo_path === path)
 }
+
+/**
+ * The repository a new session here starts in by default: the newest one this
+ * node and channel ran in that is still one of the node's own clones. A path
+ * typed for an earlier session may be gone since, and the picker would not
+ * offer it, so it is never chosen for the operator.
+ */
+export function defaultRepo(
+  sessions: Iterable<{ node_id: string; channel: string; repo_path: string; created_ms: number }>,
+  nodeId: string,
+  channel: string,
+  managed: { repo_path: string }[],
+): string | null {
+  const last = [...sessions]
+    .filter((s) => s.node_id === nodeId && s.channel === channel && isManagedPath(s.repo_path, managed))
+    .sort((a, b) => b.created_ms - a.created_ms)[0]
+  return last?.repo_path ?? null
+}

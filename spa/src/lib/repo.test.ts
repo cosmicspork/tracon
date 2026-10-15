@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { isManagedPath, repoLabel, repoMatches } from './repo'
+import { defaultRepo, isManagedPath, repoLabel, repoMatches } from './repo'
 
 test('the last segment names an ordinary checkout', () => {
   expect(repoLabel('/Users/you/src/project')).toBe('project')
@@ -35,4 +35,20 @@ test('a managed path is one the node cloned; anything else was typed', () => {
   const managed = [{ repo_path: '/state/repos/gitlab.example/g/p' }]
   expect(isManagedPath('/state/repos/gitlab.example/g/p', managed)).toBe(true)
   expect(isManagedPath('/home/op/src/p', managed)).toBe(false)
+})
+
+test('the default repository is the newest managed clone this node and channel used', () => {
+  const managed = [{ repo_path: '/state/repos/github.com/o/a/repo' }, { repo_path: '/state/repos/github.com/o/b/repo' }]
+  const s = (repo_path: string, created_ms: number, node_id = 'n1', channel = 'personal') => ({ node_id, channel, repo_path, created_ms })
+  const sessions = [
+    s('/state/repos/github.com/o/a/repo', 1),
+    s('/state/repos/github.com/o/b/repo', 2),
+    s('/private/tmp/validation/repo', 3),
+    s('workspace://abc', 4),
+    s('/state/repos/github.com/o/a/repo', 5, 'n2'),
+    s('/state/repos/github.com/o/a/repo', 6, 'n1', 'work'),
+  ]
+  expect(defaultRepo(sessions, 'n1', 'personal', managed)).toBe('/state/repos/github.com/o/b/repo')
+  expect(defaultRepo([s('/private/tmp/validation/repo', 3)], 'n1', 'personal', managed)).toBeNull()
+  expect(defaultRepo(sessions, 'n1', 'personal', [])).toBeNull()
 })
