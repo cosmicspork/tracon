@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.2](https://github.com/cosmicspork/tracon/compare/v0.33.1...v0.33.2) (2026-10-15)
+
+
+### Bug Fixes
+
+* **kube:** size probe pods apart from checks and preparations ([#508](https://github.com/cosmicspork/tracon/issues/508)) ([727e891](https://github.com/cosmicspork/tracon/commit/727e8916de4f9961ff134cbb4c826e94947a258a))
+
 ## [0.33.1](https://github.com/cosmicspork/tracon/compare/v0.33.0...v0.33.1) (2026-10-15)
 
 
