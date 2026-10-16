@@ -5,8 +5,9 @@
 //! credential or a product brief would refuse work that never touches either.
 //! Verification adds what the node needs to vouch for a result: required
 //! checks, and an image those checks can be pinned to. Publication adds what
-//! the forge needs: a remote the node can name and a credential this channel
-//! may use. Each gap is said before a session is spent finding it.
+//! the forge needs: a remote the node can name, a credential this channel
+//! may use, and the forge's CLI on the node's PATH to open the change with.
+//! Each gap is said before a session is spent finding it.
 //!
 //! This only reads. Nothing here builds an image, contacts a forge or starts a
 //! session, so asking costs a git read and nothing else.
@@ -67,6 +68,9 @@ pub struct Facts {
     /// Why the forge credential cannot be used from this channel; `None` when
     /// it can, or when there is no forge to ask about.
     pub credential_refused: Option<String>,
+    /// Why the forge's CLI (`publish.gh` or `publish.glab`) could not be run;
+    /// `None` when it can, or when there is no forge to ask about.
+    pub cli_refused: Option<String>,
     /// Whether the work item the session would serve has a brief. `None` for
     /// a session with no item.
     pub item_has_brief: Option<bool>,
@@ -164,6 +168,21 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
                     ),
                 ));
             }
+            // Without it the branch is pushed and the change never opened:
+            // found only after approval, and after the push.
+            if let Some(reason) = &facts.cli_refused {
+                publishing.push(gap(
+                    "cli",
+                    format!(
+                        "the {} CLI cannot be run, so no {} could be opened: {reason}",
+                        forge.name(),
+                        match forge {
+                            Forge::Github => "pull request",
+                            Forge::Gitlab => "merge request",
+                        }
+                    ),
+                ));
+            }
         }
     }
     let mut publish_notes = Vec::new();
@@ -238,6 +257,15 @@ pub async fn readiness(
             .err()
             .map(|e| e.to_string())
     });
+    let cli_refused = remote.as_deref().and_then(forge_of).and_then(|forge| {
+        let (key, value) = match forge {
+            Forge::Github => ("publish.gh", &cfg.live().publish.gh),
+            Forge::Gitlab => ("publish.glab", &cfg.live().publish.glab),
+        };
+        crate::config::path_guard::resolve(key, value, &[])?
+            .err()
+            .map(|refusal| refusal.to_string())
+    });
     let item_has_brief = work_item.map(|id| {
         store
             .work_get(id)
@@ -257,6 +285,7 @@ pub async fn readiness(
             image_source: environment.image_source,
             remote,
             credential_refused,
+            cli_refused,
             item_has_brief,
         },
     )
@@ -278,6 +307,7 @@ mod tests {
             image_source: "repository toolchain",
             remote: Some("github.com/o/r".into()),
             credential_refused: None,
+            cli_refused: None,
             item_has_brief: Some(true),
         }
     }
@@ -332,6 +362,26 @@ mod tests {
             },
         );
         assert_eq!(keys(&r.publish), vec!["remote"]);
+    }
+
+    /// A bound credential is not enough: the change is opened with the forge's
+    /// CLI, and a node without it pushes the branch and stops there.
+    #[test]
+    fn publication_needs_the_forges_cli_on_the_path() {
+        let r = assess(
+            "personal",
+            "/r",
+            &Facts {
+                cli_refused: Some("publish.gh = \"gh\": gh is not on the node's PATH".into()),
+                ..ready()
+            },
+        );
+        assert!(r.verify.ready);
+        assert_eq!(keys(&r.publish), vec!["cli"]);
+        assert!(r.publish.missing[0]
+            .message
+            .contains("not on the node's PATH"));
+        assert!(r.publish.missing[0].message.contains("pull request"));
     }
 
     #[test]
