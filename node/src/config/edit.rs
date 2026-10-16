@@ -623,10 +623,16 @@ pub struct Preview {
 /// Apply `ops` to `text` and load the result with every check a load makes,
 /// without writing anything.
 pub fn preview(text: &str, ops: &[Op]) -> Result<Preview, EditError> {
+    preview_of(&Config::config_path(), text, ops)
+}
+
+/// [`preview`], for the text of a file other than this node's own: `file`
+/// is what a refusal names it, such as a peer's `node.toml`.
+pub fn preview_of(file: &Path, text: &str, ops: &[Op]) -> Result<Preview, EditError> {
     let next = apply_to_text(text, ops)?;
     let config = match crate::legacy::migrate_config(&next) {
-        Some(migration) => Config::from_toml(&migration.text, &Config::config_path()),
-        None => Config::from_toml(&next, &Config::config_path()),
+        Some(migration) => Config::from_toml(&migration.text, file),
+        None => Config::from_toml(&next, file),
     }
     .map_err(EditError::Invalid)?;
     let changes = diff(text, &next);

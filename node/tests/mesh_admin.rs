@@ -865,6 +865,46 @@ async fn a_peers_edit_meets_the_path_guard_on_the_node_it_changes() {
     assert!(b.store.config_audit_recent(10).unwrap().is_empty());
 }
 
+/// An edit A refuses before it reaches B is about B's file, and says so: the
+/// refusal names `node.toml on beta`, never A's own `node.toml`, which is
+/// not the file being edited.
+#[tokio::test]
+async fn a_peers_edit_refused_here_names_the_peers_file() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    let (a, b) = pair(&[identity(1).node_id()]).await;
+    let bi = b.id.node_id();
+    let hash = b_hash(&a, &b).await;
+    let before = file();
+    let insert = json!({
+        "op": "insert",
+        "array": "repo",
+        "entry": {
+            "path": "github.com/o/r",
+            "dockerfile": ".devcontainer/Dockerfile",
+            "session_egress": true,
+        },
+    });
+    let r = local(
+        &a,
+        "PATCH",
+        &format!("/api/nodes/{bi}/config"),
+        Some(&json!({ "expected_hash": hash, "ops": [insert] })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+    assert_eq!(r.kind(), "invalid", "{}", r.body);
+    let message = r.body["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("node.toml on beta: "), "{message}");
+    assert!(message.contains("egress is empty"), "{message}");
+    let here = Config::config_path();
+    assert!(
+        !message.contains(here.to_string_lossy().as_ref()),
+        "{message}"
+    );
+    assert_eq!(file(), before);
+}
+
 /// What answers for a peer that forges this node's own refusals.
 struct Forger(Value);
 
