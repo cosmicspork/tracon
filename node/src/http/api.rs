@@ -6240,6 +6240,21 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                             "sender and destination must belong to the task channel",
                         ));
                     }
+                    // The sender's readiness check read the sender's disk.
+                    // Refused here before anything is written: a session
+                    // that could only fail to start, and a project named
+                    // after a directory that is not there, help no one.
+                    if spec.workspace_id.is_none()
+                        && !std::path::Path::new(&spec.repo_path).is_dir()
+                    {
+                        return Err(ApiError::new(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!(
+                                "{}; clone it on this node first",
+                                crate::readiness::repo_missing(&spec.repo_path)
+                            ),
+                        ));
+                    }
                     if let Some(change) = work_item {
                         if change.table != "work_item"
                             || change.op != proto::frame::ChangeOp::Upsert
