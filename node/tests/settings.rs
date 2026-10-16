@@ -1375,6 +1375,27 @@ async fn repository_environments_are_listed_and_built_only_from_this_machine() {
     }
 }
 
+/// A command whose reader has gone (`tracon work ls | head`) ends the way
+/// other tools do, by the signal, not with a panic on stderr.
+#[cfg(unix)]
+#[test]
+fn a_command_whose_output_is_cut_off_ends_without_a_panic() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = state::scratch("a_command_whose_output_is_cut_off");
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
+        .args(["credential", "ls"])
+        .env("TRACON_STATE_DIR", &dir)
+        .env("TRACON_CONFIG_DIR", &dir)
+        .stdout(writer)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(out.status.signal(), Some(libc::SIGPIPE), "{:?}", out.status);
+}
+
 /// `tracon repo set` and `tracon repo rm` save through the same handler the
 /// settings page does, naming the version they read as the save requires.
 #[tokio::test]

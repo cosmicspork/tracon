@@ -599,7 +599,20 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    // A listing piped into `head` is cut off on purpose: end quietly, as
+    // other tools do, rather than panic in `println!`. Not for the node,
+    // which writes to its harnesses' pipes and must outlive any one of them.
+    #[cfg(unix)]
+    if !matches!(command, Command::Serve { .. }) {
+        // SAFETY: `signal` only sets the process's disposition, back to the
+        // default the Rust runtime replaced with "ignore" before `main`.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+
+    match command {
         Command::Serve { listen } => {
             http::serve(listen).await?;
             // Stopped to be started again (a restart in a pod): exit now,
