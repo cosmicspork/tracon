@@ -172,7 +172,10 @@ pub async fn build(
     let recipe = repo_image::recipe(&repo, &entry, &repo_image::RunAs::of(&s.cfg))
         .await
         .map_err(unprocessable)?;
-    let since_ms = crate::store::now_ms();
+    // A build of this recipe already running is the one this request gets
+    // (`ensure_base` joins it), so the caller follows that build's record.
+    let running = repo_image::in_flight(s.store(), &repo, &recipe.hash);
+    let since_ms = running.unwrap_or_else(crate::store::now_ms);
     let (backend, cfg, store) = (
         s.manager.backend().clone(),
         s.cfg.clone(),
@@ -187,6 +190,7 @@ pub async fn build(
         "since_ms": since_ms,
         "source_ref": recipe.source_ref,
         "source_commit": recipe.source_commit,
+        "joined": running.is_some(),
     })))
 }
 
