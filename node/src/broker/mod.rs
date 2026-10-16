@@ -541,6 +541,23 @@ impl Broker {
         node_id: &str,
         shape: &str,
     ) -> Result<Injection, BrokerError> {
+        Self::injection(self.usable_by_node(name, node_id)?, shape)
+    }
+
+    /// Environment for the node's own Git fetch of a clone it manages, which
+    /// has no channel: refreshing what is already on disk before building
+    /// from it. Same binding as the model probe: the credential must at least
+    /// be usable by some channel on this node. The process it is given to
+    /// runs no code from the repository.
+    pub fn env_for_node(
+        &self,
+        name: &str,
+        node_id: &str,
+    ) -> Result<BTreeMap<String, String>, BrokerError> {
+        Ok(self.usable_by_node(name, node_id)?.env.clone())
+    }
+
+    fn usable_by_node(&self, name: &str, node_id: &str) -> Result<&Credential, BrokerError> {
         let cred = self
             .credentials
             .get(name)
@@ -556,7 +573,7 @@ impl Broker {
                 name: name.to_string(),
             });
         }
-        Self::injection(cred, shape)
+        Ok(cred)
     }
 
     fn injection(cred: &Credential, shape: &str) -> Result<Injection, BrokerError> {
@@ -767,6 +784,23 @@ mod tests {
             .available_to("work", "node-a")
             .contains(&"warehouse"));
         assert!(!broker().available_to("work", "node-a").contains(&"orphan"));
+    }
+
+    /// The node's own fetch of a managed clone has no channel: any channel's
+    /// binding on this node will do, but an unbound or pinned-elsewhere
+    /// credential is still refused.
+    #[test]
+    fn the_nodes_own_fetch_takes_a_credential_some_channel_may_use_here() {
+        let b = broker();
+        assert!(b.env_for_node("warehouse", "node-a").is_ok());
+        assert!(matches!(
+            b.env_for_node("orphan", "node-a").unwrap_err(),
+            BrokerError::NotBound { .. }
+        ));
+        assert!(matches!(
+            b.env_for_node("pinned", "node-a").unwrap_err(),
+            BrokerError::NotOnThisNode { .. }
+        ));
     }
 
     #[test]
