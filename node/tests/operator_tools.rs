@@ -248,6 +248,25 @@ async fn notifying_records_a_delivery_and_never_a_question() {
     assert_eq!(rig.state(), "running", "a notification is not a pause");
 }
 
+/// A notification no device received says so: an empty list of attempts
+/// read as a success when no device anywhere had been tried.
+#[tokio::test]
+async fn notifying_with_no_device_to_try_says_so() {
+    state::isolate();
+    let rig = rig();
+    let out = rig
+        .call(
+            "notify_operator",
+            json!({ "title": "checks are green", "message": "ready whenever you are" }),
+        )
+        .await
+        .unwrap();
+    let attempts = out["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1, "{out}");
+    assert_eq!(attempts[0]["device_id"], "node:n1");
+    assert_eq!(attempts[0]["outcome"], "no matching live device");
+}
+
 /// The regression that keeps the separation meaningful: asking really does
 /// create a question, block the caller, and show up in the operator's queue.
 #[tokio::test]

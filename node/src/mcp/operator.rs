@@ -78,7 +78,7 @@ pub fn definitions() -> Vec<Value> {
                 },
             },
         }),
-        json!({"name": NOTIFY, "description":"Intentionally send an OS/PWA notification to configured operator devices. A push-service attempt is not evidence a human read it.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"device_ids":{"type":"array","items":{"type":"string"}},"node_ids":{"type":"array","items":{"type":"string"}}},"required":["title","message"]}}),
+        json!({"name": NOTIFY, "description":"Intentionally send an OS/PWA notification to configured operator devices. Without `node_ids`, every node of this channel delivers it to the devices subscribed there. A push-service attempt is not evidence a human read it.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"device_ids":{"type":"array","items":{"type":"string"}},"node_ids":{"type":"array","items":{"type":"string"}}},"required":["title","message"]}}),
         json!({"name": REPORT, "description":"Draft a report about tracon, its environments, tools, or harness integration. It never pauses execution or uploads repository files/transcripts. The operator inspects and authorizes publication separately.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"expected":{"type":"string"},"actual":{"type":"string"},"reproduction":{"type":"string"},"versions":{"type":"string"},"errors":{"type":"string"},"recovery":{"type":"string"},"diagnosis":{"type":"string"},"attachments":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"content":{"type":"string"}},"required":["name","content"]},"maxItems":3}},"required":["title","expected","actual"]}}),
         json!({
             "name": REPORT_STATUS,
@@ -321,6 +321,25 @@ fn answer_view(row: &OperatorQuestionRow) -> Value {
     answer
 }
 
+/// The nodes a notification goes to when the caller names none: every node
+/// of the channel, as a review's push reaches a phone subscribed at any of
+/// them, since each node delivers only to the devices that subscribed there.
+/// This node alone when there is no mesh to reach the others through.
+fn default_nodes(
+    store: &Arc<Store>,
+    channel: &str,
+    local: &str,
+    mesh: bool,
+) -> Result<Vec<String>, String> {
+    let mut nodes = vec![local.to_string()];
+    if mesh {
+        nodes.extend(store.nodes_in_channel(channel).map_err(|e| e.to_string())?);
+    }
+    nodes.sort();
+    nodes.dedup();
+    Ok(nodes)
+}
+
 async fn notify_operator(
     store: &Arc<Store>,
     manager: &crate::session::Manager,
@@ -345,7 +364,7 @@ async fn notify_operator(
     let devices = string_array(args, "device_ids", 32, 256)?;
     let mut nodes = string_array(args, "node_ids", 32, 256)?;
     if nodes.is_empty() {
-        nodes.push(ctx.node_id.clone());
+        nodes = default_nodes(store, &ctx.channel, &ctx.node_id, manager.mesh().is_some())?;
     }
     nodes.sort();
     nodes.dedup();
@@ -382,77 +401,91 @@ async fn notify_operator(
         return Err("operator notification rate limit exceeded; try again later".into());
     }
     let mesh = manager.mesh();
-    for node in &nodes {
-        if node == &ctx.node_id {
-            let _ = notify::send_operator(
-                store,
-                cfg,
-                &id,
-                title.clone(),
-                message.clone(),
-                path.to_string(),
-                &devices,
-            )
-            .await;
-            continue;
-        }
-        let Some(mesh) = mesh else {
-            let _ = store.record_notification_attempt(
-                &id,
-                &format!("node:{node}"),
-                "refused: mesh is disabled",
-            );
-            continue;
-        };
-        let command = proto::frame::Command::OperatorNotify {
-            channel: ctx.channel.clone(),
-            notification_id: id.clone(),
-            title: title.clone(),
-            body: message.clone(),
-            path: path.to_string(),
-            device_ids: devices.clone(),
-        };
-        match mesh
-            .command(
-                node,
-                command,
-                std::time::Duration::from_secs(cfg.mesh.command_timeout_secs.max(1)),
-            )
-            .await
-        {
-            Ok(reply) => {
-                let _ = store.record_notification_attempt(
-                    &id,
-                    &format!("node:{node}"),
-                    "peer acknowledged delivery request",
-                );
-                let remote = reply["attempts"].as_array().cloned().unwrap_or_default();
-                if remote.is_empty() {
+    let sends = nodes.iter().map(|node| {
+        let (title, message, devices, id) = (&title, &message, &devices, &id);
+        async move {
+            if node == &ctx.node_id {
+                let attempts = notify::send_operator(
+                    store,
+                    cfg,
+                    id,
+                    title.clone(),
+                    message.clone(),
+                    path.to_string(),
+                    devices,
+                )
+                .await;
+                // An attempt list that is empty reads as nothing having gone
+                // wrong; this node had no device to try, and says so.
+                if attempts.is_empty() {
                     let _ = store.record_notification_attempt(
-                        &id,
+                        id,
                         &format!("node:{node}"),
-                        "peer reports no matching live device",
+                        "no matching live device",
                     );
                 }
-                for attempt in remote {
-                    let device = attempt["device_id"].as_str().unwrap_or("unknown-device");
-                    let outcome = attempt["outcome"].as_str().unwrap_or("unknown");
-                    let _ = store.record_notification_attempt(
-                        &id,
-                        &format!("node:{node}/{device}"),
-                        outcome,
-                    );
-                }
+                return;
             }
-            Err(error) => {
+            let Some(mesh) = mesh else {
                 let _ = store.record_notification_attempt(
-                    &id,
+                    id,
                     &format!("node:{node}"),
-                    &format!("refused: {error}"),
+                    "refused: mesh is disabled",
                 );
+                return;
+            };
+            let command = proto::frame::Command::OperatorNotify {
+                channel: ctx.channel.clone(),
+                notification_id: id.clone(),
+                title: title.clone(),
+                body: message.clone(),
+                path: path.to_string(),
+                device_ids: devices.clone(),
+            };
+            match mesh
+                .command(
+                    node,
+                    command,
+                    std::time::Duration::from_secs(cfg.mesh.command_timeout_secs.max(1)),
+                )
+                .await
+            {
+                Ok(reply) => {
+                    let _ = store.record_notification_attempt(
+                        id,
+                        &format!("node:{node}"),
+                        "peer acknowledged delivery request",
+                    );
+                    let remote = reply["attempts"].as_array().cloned().unwrap_or_default();
+                    if remote.is_empty() {
+                        let _ = store.record_notification_attempt(
+                            id,
+                            &format!("node:{node}"),
+                            "peer reports no matching live device",
+                        );
+                    }
+                    for attempt in remote {
+                        let device = attempt["device_id"].as_str().unwrap_or("unknown-device");
+                        let outcome = attempt["outcome"].as_str().unwrap_or("unknown");
+                        let _ = store.record_notification_attempt(
+                            id,
+                            &format!("node:{node}/{device}"),
+                            outcome,
+                        );
+                    }
+                }
+                Err(error) => {
+                    let _ = store.record_notification_attempt(
+                        id,
+                        &format!("node:{node}"),
+                        &format!("refused: {error}"),
+                    );
+                }
             }
         }
-    }
+    });
+    // Together, so a member that is offline costs one timeout, not one each.
+    futures_util::future::join_all(sends).await;
     Ok(
         json!({"notification_id": id, "deduplicated": false, "attempts": store.notification_attempts(&id).map_err(|e| e.to_string())?, "receipt": "device push-service attempts and peer acknowledgements only; human receipt is unknown"}),
     )
@@ -752,4 +785,28 @@ fn contains_secret_token(line: &str) -> bool {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A phone subscribes at whichever node it reaches, so a notification
+    /// that names no node goes to every node of the channel; with no mesh
+    /// there is nothing to reach them through, and it stays here.
+    #[test]
+    fn a_notification_naming_no_node_goes_to_every_node_of_the_channel() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        store.node_channel_add("laptop", "personal").unwrap();
+        store.node_channel_add("homelab", "personal").unwrap();
+        store.node_channel_add("other", "work").unwrap();
+        assert_eq!(
+            default_nodes(&store, "personal", "laptop", true).unwrap(),
+            ["homelab", "laptop"]
+        );
+        assert_eq!(
+            default_nodes(&store, "personal", "laptop", false).unwrap(),
+            ["laptop"]
+        );
+    }
 }
