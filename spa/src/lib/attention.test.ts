@@ -7,6 +7,7 @@ import type {
   OperatorQuestion,
   Permission,
   Promotion,
+  RecipeOffer,
   Review,
 } from './types'
 
@@ -210,6 +211,39 @@ test('requests are answered before reviews, oldest first within a kind', () => {
     now: NOW,
   })
   expect(bay.decisions.map((t) => t.key)).toEqual(['permission:early', 'permission:late', 'review:r1'])
+})
+
+test('a pending recipe offer is a decision until it is decided or lapses', () => {
+  const offer = (id: string, over: Partial<RecipeOffer> = {}) =>
+    ({
+      id,
+      sender_node: 'peer',
+      sender_name: 'homelab',
+      channel: 'main',
+      repo: 'github.com/acme/hdr',
+      note: null,
+      received_ms: NOW - 1000,
+      expires_ms: NOW + 60_000,
+      state: 'pending',
+      decided_ms: null,
+      decided_path: null,
+      ...over,
+    }) as RecipeOffer
+  const bay = attention({
+    offers: [
+      offer('o1'),
+      offer('o2', { state: 'accepted', decided_ms: NOW }),
+      offer('o3', { state: 'declined', decided_ms: NOW }),
+      offer('o4', { expires_ms: NOW - 1 }),
+    ],
+    promotions: [promotion()],
+    nodes: [node()],
+    now: NOW,
+  })
+  // After the memory batch: an offer neither expires soon nor blocks an agent.
+  expect(bay.decisions.map((t) => t.key)).toEqual(['promotion:m1', 'offer:o1'])
+  expect(bay.count).toBe(2)
+  expect([...bay.agent, ...bay.external]).toEqual([])
 })
 
 test('a card says what the session was started to do, and copes when it cannot', () => {

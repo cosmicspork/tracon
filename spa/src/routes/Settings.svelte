@@ -549,7 +549,9 @@
       const panel = document.getElementById(`settings-${section}`)
       if (panel) {
         panel.focus({ preventScroll: true })
-        window.scrollTo({ top: 0 })
+        // A link naming a block inside the section scrolls there itself once
+        // that block has loaded.
+        if (!params.get('focus')) window.scrollTo({ top: 0 })
       }
     })
   })

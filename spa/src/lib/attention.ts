@@ -20,6 +20,7 @@ import type {
   OperatorQuestion,
   Permission,
   Promotion,
+  RecipeOffer,
   Review,
 } from './types'
 
@@ -48,6 +49,7 @@ export type Thread =
   | (Base & { kind: 'review'; review: Review })
   | (Base & { kind: 'issue'; issue: OperatorIssue })
   | (Base & { kind: 'promotion'; promotion: Promotion })
+  | (Base & { kind: 'offer'; offer: RecipeOffer })
 
 export interface Attention {
   /** The number the badge and the heading show: actionable human decisions. */
@@ -63,6 +65,7 @@ export interface AttentionInput {
   reviews?: Review[]
   issues?: OperatorIssue[]
   promotions?: Promotion[]
+  offers?: RecipeOffer[]
   nodes?: NodeInfo[]
   mesh?: MeshState | null
   now?: number
@@ -76,6 +79,7 @@ const RANK: Record<Thread['kind'], number> = {
   review: 2,
   issue: 3,
   promotion: 4,
+  offer: 5,
 }
 
 export interface Verdict {
@@ -187,6 +191,19 @@ export function attention(input: AttentionInput): Attention {
       kind: 'promotion',
       promotion,
       created_ms: promotion.created_ms,
+      ...YOURS,
+    })
+  }
+
+  // A recipe another node offered changes nothing until it is accepted, and
+  // only the operator can accept it. Decided and lapsed offers are done.
+  for (const offer of input.offers ?? []) {
+    if (offer.state !== 'pending' || offer.expires_ms <= now) continue
+    threads.push({
+      key: `offer:${offer.id}`,
+      kind: 'offer',
+      offer,
+      created_ms: offer.received_ms,
       ...YOURS,
     })
   }
