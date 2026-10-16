@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.33.3](https://github.com/cosmicspork/tracon/compare/v0.33.2...v0.33.3) (2026-10-16)
+
+
+### Bug Fixes
+
+* **claude:** offer a session only the built-in tools it uses ([#541](https://github.com/cosmicspork/tracon/issues/541)) ([3c443a0](https://github.com/cosmicspork/tracon/commit/3c443a09cc4adcf0d78b7d00f9ff4d04ddf10b65))
+* **cli:** end quietly when stdout's reader goes away ([#537](https://github.com/cosmicspork/tracon/issues/537)) ([3a4edce](https://github.com/cosmicspork/tracon/commit/3a4edce2567f7b264eb396d9d7636aed99c27e60))
+* **cli:** hand an imported credential to the node running here ([#539](https://github.com/cosmicspork/tracon/issues/539)) ([9548153](https://github.com/cosmicspork/tracon/commit/9548153e503c79bbc25794aca66244fc318f5b98))
+* **cli:** name the version read when repo set and repo rm save ([#536](https://github.com/cosmicspork/tracon/issues/536)) ([03f728c](https://github.com/cosmicspork/tracon/commit/03f728c7a91b3f9b1a4df5491e6466eaed91d52e))
+* **config:** name the peer's file when a peer edit is refused here ([#538](https://github.com/cosmicspork/tracon/issues/538)) ([eee32a5](https://github.com/cosmicspork/tracon/commit/eee32a50b05df7f831419b92bdf4656b235e146c))
+* **mcp:** write review prose for the repository's reviewers ([#524](https://github.com/cosmicspork/tracon/issues/524)) ([f791fe8](https://github.com/cosmicspork/tracon/commit/f791fe86fa915af7f02ba4efab82171ce24fd3a8))
+* **mesh:** refuse a forwarded session for a repository the peer does not have ([#544](https://github.com/cosmicspork/tracon/issues/544)) ([68b9522](https://github.com/cosmicspork/tracon/commit/68b9522d62aa359e23d7fcdc5afa09be8706c62a))
+* **node:** carry gh in the node image and check the forge CLI before publishing ([#547](https://github.com/cosmicspork/tracon/issues/547)) ([1644ef3](https://github.com/cosmicspork/tracon/commit/1644ef329ebac1c3343b59c426d697cfe744fbb7))
+* **node:** fetch a managed clone before building its image ([#545](https://github.com/cosmicspork/tracon/issues/545)) ([6e3b4f6](https://github.com/cosmicspork/tracon/commit/6e3b4f65c7f71a0a3d6feb25de94212ccf6785a7))
+* **node:** remove a settled publication's working repository and bundle ([#546](https://github.com/cosmicspork/tracon/issues/546)) ([6630d36](https://github.com/cosmicspork/tracon/commit/6630d367ebf5468245b63b34e3a859c053d96b05))
+* **node:** single-flight repository image builds and base-cache warm-ups ([#548](https://github.com/cosmicspork/tracon/issues/548)) ([327c846](https://github.com/cosmicspork/tracon/commit/327c8462ab55aadae6dd53fb86101fabeacdc496))
+* **notify:** reach every node of the channel when notify_operator names none ([#543](https://github.com/cosmicspork/tracon/issues/543)) ([8cb1b2a](https://github.com/cosmicspork/tracon/commit/8cb1b2a15a7f4bc569402a057c0684b51a98ff6b))
+* **orientation:** give the execute session's plan its own larger cap ([#540](https://github.com/cosmicspork/tracon/issues/540)) ([94b341d](https://github.com/cosmicspork/tracon/commit/94b341d2ff0bc0c7b0ec43f03dfe5ac7d68b9e08))
+* **show:** say a gitignored path is ignored, not missing from the workspace ([#542](https://github.com/cosmicspork/tracon/issues/542)) ([88a8d33](https://github.com/cosmicspork/tracon/commit/88a8d333eced921cbea6e5a0432566c9c33b632e))
+* **spa:** render issue drafts and review summaries as Markdown ([#534](https://github.com/cosmicspork/tracon/issues/534)) ([7034659](https://github.com/cosmicspork/tracon/commit/70346593c6002f104c9f49eb2e21b0ea5f9a7169))
+* **spa:** show pending recipe offers on Home and link to them ([#535](https://github.com/cosmicspork/tracon/issues/535)) ([4272a4d](https://github.com/cosmicspork/tracon/commit/4272a4d27732447d1b891976e0fce70eab2caf5e))
+
 ## [0.33.2](https://github.com/cosmicspork/tracon/compare/v0.33.1...v0.33.2) (2026-10-15)
 
 
