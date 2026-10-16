@@ -380,7 +380,12 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
             out.push_str(
                 "This is an **execute session**: do the work in the worktree, commit it, and \
                  call `submit_review` — you hold no forge token, so the node snapshots the \
-                 worktree and puts the change in front of the operator. Work you find but \
+                 worktree and puts the change in front of the operator. Its title and body \
+                 become the pull request's description once approved, read by the \
+                 repository's reviewers: write them for those readers, never to the \
+                 operator, and do not name tracon or say where evidence is attached. A \
+                 screenshot, or what you want the operator to check, goes to `show_work`. \
+                 Work you find but \
                  should not do now: `work_discover` records it against this item instead of \
                  losing it. `work_close` closes the item this session holds, and ends the \
                  session with it. Submitting is not closing: a change can be under review, \
@@ -1608,6 +1613,12 @@ mod tests {
         // Closing is not what submitting does, and the roadmap moves work
         // further away from closing merely because a change was published.
         assert!(text.contains("Submitting is not closing"), "{text}");
+
+        // The review's prose is the pull request's description: the agent is
+        // told who reads it, and where a note for the operator goes instead.
+        assert!(text.contains("never to the operator"), "{text}");
+        assert!(text.contains("do not name tracon"), "{text}");
+        assert!(text.contains("goes to `show_work`"), "{text}");
     }
 
     /// The documents the operator selected for the item are reserved, the

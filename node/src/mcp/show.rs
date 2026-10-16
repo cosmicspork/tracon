@@ -48,7 +48,9 @@ pub fn definitions() -> Vec<Value> {
         "description": "Show the operator what you built, beside the diff they review: a changed \
                         screen, a before and after, a short account of what you tried. It is \
                         your account to help them decide, not verification, and it stays in \
-                        tracon — the pull request gets prose only. Pass `markdown` for a written \
+                        tracon — the pull request gets prose only, written for its reviewers, \
+                        so anything meant for the operator alone belongs here and not in the \
+                        review's title or body. Pass `markdown` for a written \
                         account, `paths` for files in your workspace (relative to the repository \
                         root; a directory brings its files), and `entry` to have one of those \
                         files rendered as an HTML page with whatever it loads beside it. Pages \

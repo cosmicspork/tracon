@@ -55,19 +55,25 @@ pub fn definitions() -> Vec<Value> {
                  including after checks failed. A harness you \
                  run yourself passes `worktree`: the absolute path of a worktree whose \
                  repository is under the node's [external] repo_roots; its branch is \
-                 what gets pushed. `title` and `body` are your summary for the \
-                 operator. Without `change`, approval opens a new pull/merge request \
-                 described by `forge.description`, or by title and body when that is \
-                 absent. With `change`, approval pushes to that open change's branch \
-                 and sends only what `forge` asks for: a replacement description, a \
-                 comment, both, or neither."
+                 what gets pushed. Without `change`, approval opens a new pull/merge \
+                 request described by `forge.description`, or by `title` and `body` when \
+                 that is absent. With `change`, approval pushes to that open change's \
+                 branch and sends only what `forge` asks for: a replacement description, \
+                 a comment, both, or neither. Whatever reaches the forge is read by the \
+                 repository's own reviewers, who have never heard of this node: write it \
+                 for them (what changed, why, trade-offs, follow-ups, how it was \
+                 verified), do not address the operator in it, and do not name tracon, \
+                 the node, its tools, or where screenshots and other evidence are \
+                 attached. What is for the operator alone (a screenshot, what you tried, \
+                 what to look at after it deploys) goes to `show_work`, which never \
+                 reaches the forge."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "worktree": { "type": "string", "description": "Absolute path of the worktree to review. Only for a harness you run yourself." },
                     "title": { "type": "string", "description": "The change's title, as it should appear." },
-                    "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups." },
+                    "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups, verification. The pull/merge request's description unless `forge.description` gives one, so written for the repository's reviewers, not the operator." },
                     "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "In a session on a GitHub or GitLab repository, defaults to that repository's forge; required outside a session." },
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab. In a session on a GitHub or GitLab repository, defaults to that repository; required outside a session. Give both or neither when publishing somewhere else." },
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, and on a resubmission to the base it was last submitted with. A resubmission may name another base until its change is opened; after that the base is moved on the forge. Resubmitting a commit still waiting for a verdict with another base is such a resubmission, not a retry." },
@@ -2232,5 +2238,34 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(&cap));
+    }
+
+    /// The title and body become the forge's description by default, so the
+    /// tool says who reads them: the repository's reviewers, not the operator,
+    /// with notes for the operator sent to `show_work` instead.
+    #[test]
+    fn submit_says_who_reads_what_reaches_the_forge() {
+        let def = definitions()
+            .into_iter()
+            .find(|d| d["name"] == SUBMIT)
+            .expect("submit_review is defined");
+        let description = def["description"].as_str().unwrap();
+        assert!(
+            !description.contains("summary for the operator"),
+            "{description}"
+        );
+        assert!(
+            description.contains("do not address the operator"),
+            "{description}"
+        );
+        assert!(description.contains("do not name tracon"), "{description}");
+        assert!(
+            description.contains(crate::mcp::show::SHOW),
+            "{description}"
+        );
+        let body = def["inputSchema"]["properties"]["body"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(body.contains("not the operator"), "{body}");
     }
 }
