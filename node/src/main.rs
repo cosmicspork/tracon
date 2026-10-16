@@ -1294,7 +1294,11 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             let repo = started["repo"].as_str().unwrap_or_default().to_string();
             let since = started["since_ms"].as_i64().unwrap_or(0);
             println!(
-                "building {repo} from {} ({:.12}); a first build can take several minutes",
+                "{} {repo} from {} ({:.12}); a first build can take several minutes",
+                match started["joined"].as_bool() {
+                    Some(true) => "joining the build already running for",
+                    _ => "building",
+                },
                 started["source_ref"].as_str().unwrap_or(""),
                 started["source_commit"].as_str().unwrap_or("")
             );
