@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { renderMessage } from '../lib/markdown'
   import type { OperatorIssue } from '../lib/types'
   let { issue, done }: { issue: OperatorIssue; done?: () => void } = $props()
   let busy = $state(false)
@@ -34,7 +35,8 @@
   <div class="label"><em>Issue draft</em> · {issue.state}{#if issue.session_id}{' · '}<a href="/sessions/{issue.session_id}">session</a>{/if}</div>
   <h3>{issue.title}</h3>
   <details><summary>Exact outgoing issue body</summary><pre>{outgoingBody}</pre></details>
-  <pre>{issue.body}</pre>
+  <!-- The agent's Markdown, read as prose; the section above keeps the literal text publication sends. -->
+  <div class="body md">{@html renderMessage(issue.body)}</div>
   {#if attachments.length}<details><summary>{attachments.length} inspectable attachment{attachments.length === 1 ? '' : 's'}</summary>{#each attachments as attachment}<h4>{attachment.name}</h4><pre>{attachment.content}</pre>{/each}</details>{/if}
   {#if issue.published_url}<a href={issue.published_url} target="_blank" rel="noreferrer">Published issue{#if issue.published_number} #{issue.published_number}{/if}</a>{:else if issue.state === 'draft'}<button class="btn p" onclick={publish} disabled={busy}>Authorize publication to cosmicspork/tracon</button>{:else if issue.state === 'uncertain'}<button class="btn" onclick={reconcile} disabled={busy}>I confirmed the draft marker is absent; retry</button>{/if}
   {#if issue.state === 'discarded'}<div class="label">Discarded{#if issue.discard_reason}: {issue.discard_reason}{/if}</div>{:else if issue.state === 'draft' || issue.state === 'uncertain'}
@@ -64,6 +66,20 @@
   summary { cursor: pointer; font: 12px var(--mono); color: var(--ink2); }
   h4 { margin: .4rem 0 .2rem; font: 12px var(--mono); color: var(--ink2); }
   pre { align-self: stretch; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--s2); color: var(--ink); padding: 8px; border-radius: 3px; font: 12.5px/1.45 var(--mono); }
+  .body { align-self: stretch; overflow-wrap: anywhere; }
+  .md > :global(:first-child) { margin-top: 0; }
+  .md > :global(:last-child) { margin-bottom: 0; }
+  .md :global(p), .md :global(ul), .md :global(ol), .md :global(pre), .md :global(blockquote), .md :global(table) { margin: 4px 0; }
+  .md :global(ul), .md :global(ol) { padding-left: 2.5ch; }
+  .md :global(h1), .md :global(h2), .md :global(h3), .md :global(h4) { margin: .7em 0 .2em; font: 600 1em var(--sans); }
+  .md :global(code) { background: var(--s2); border-radius: 3px; padding: 0 3px; font: 12.5px var(--mono); }
+  .md :global(pre) { background: var(--s2); border-radius: 4px; padding: 8px 10px; overflow-x: auto; white-space: pre; }
+  .md :global(pre code) { background: none; padding: 0; overflow-wrap: normal; }
+  .md :global(table) { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+  .md :global(th), .md :global(td) { border: 1px solid var(--rule); padding: 2px 8px; text-align: left; }
+  .md :global(blockquote) { border-left: 2px solid var(--rule); padding-left: 1.5ch; color: var(--ink2); }
+  .md :global(a) { color: var(--acc); }
+  .md :global(.no-fetch) { color: var(--dim); }
   .error { color: var(--crit); margin-top: .4rem; font-size: 12.5px; }
   .discard { align-self: stretch; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: .4rem; }
   .discard input { flex: 1 1 12rem; min-width: 0; background: var(--s2); color: var(--ink); border: 1px solid transparent; border-radius: 4px; padding: 6px 9px; }
