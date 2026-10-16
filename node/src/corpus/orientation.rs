@@ -56,6 +56,12 @@ const DIFF_CHARS: usize = 60_000;
 /// Each reserved piece is bounded too, so that nothing inside the reserved
 /// tier can starve anything else inside it.
 const BODY_CHARS: usize = 8_000;
+/// The plan, for an execute session. Larger than any other reserved piece:
+/// it is the session's contract, the plan session was told to write it in
+/// full, and its last section — what the planner was unsure of — is the one
+/// a cut would take. A plan cut by a few hundred characters cost the session
+/// a `doc_read` of the whole thing, held in context twice from then on.
+const PLAN_CHARS: usize = 24_000;
 /// The proposed change's own description, for a review session.
 const REQUIREMENTS_CHARS: usize = 4_000;
 /// Directives and recalled facts.
@@ -397,7 +403,7 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
                 push_capped(
                     out,
                     plan,
-                    BODY_CHARS,
+                    PLAN_CHARS,
                     "the plan",
                     Some(&format!(
                         "call `doc_read` for `{}`",
@@ -1619,6 +1625,55 @@ mod tests {
         assert!(text.contains("never to the operator"), "{text}");
         assert!(text.contains("do not name tracon"), "{text}");
         assert!(text.contains("goes to `show_work`"), "{text}");
+    }
+
+    /// The plan is the execute session's contract. One a little longer than
+    /// an item description is carried whole, its last section included; only
+    /// one past its own, larger allowance is cut, and the cut names
+    /// `doc_read`.
+    #[test]
+    fn an_execute_orientation_carries_a_plan_longer_than_an_item_description_whole() {
+        let store = Store::open_in_memory().unwrap();
+        let item = item("Group the work menu", "Group it.");
+        let manifest = crate::manifest::LaunchManifest::default();
+        let told = |plan: &str| {
+            let facts = Facts {
+                node_name: "n",
+                node_id: "id",
+                backend: "local",
+                harness: "fake",
+                harness_version: "1",
+                channel: "personal",
+                project_id: None,
+                project_name: None,
+                tools: &[],
+                worktree: "/work",
+                phase: "execute",
+                item: Some(&item),
+                plan_body: Some(plan),
+                ready: &[],
+                review: None,
+                manifest: &manifest,
+                context: None,
+                egress: None,
+                forge_repo: None,
+                prepared: None,
+            };
+            assemble(&store, &Policy::shipped(), &facts)
+        };
+
+        let plan = format!(
+            "{}\n\n## Risks / unsure\n\nThe menu cache.",
+            "x".repeat(9_000)
+        );
+        let (text, missing) = told(&plan);
+        assert!(text.contains("The menu cache."), "{text}");
+        assert!(!missing.iter().any(|m| m.what == "the plan"), "{missing:?}");
+
+        let (_, missing) = told(&"x".repeat(PLAN_CHARS + 10));
+        let cut = missing.iter().find(|m| m.what == "the plan").unwrap();
+        assert_eq!(cut.chars, 10);
+        assert!(cut.fetch.as_deref().unwrap().contains("doc_read"));
     }
 
     /// The documents the operator selected for the item are reserved, the
