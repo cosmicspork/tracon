@@ -99,6 +99,7 @@
       reviews: store.queue.reviews,
       issues: store.issues,
       promotions: store.queue.promotions,
+      offers: store.offers,
       nodes: store.nodes,
       mesh: store.mesh,
       now: clock.now,

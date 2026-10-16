@@ -283,7 +283,9 @@ pub(super) async fn receive(
             &tag,
             "Repository recipe offered".into(),
             body,
-            "/settings".into(),
+            // The offers block in Settings, which Home's card links to as well
+            // (spa/src/lib/recipes.ts, OFFERS_LINK).
+            "/settings?focus=recipe-offers#channels".into(),
             &[],
         )
         .await;

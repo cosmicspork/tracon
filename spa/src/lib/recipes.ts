@@ -1,5 +1,13 @@
 import type { ChannelInfo, NodeInfo, RecipeOffer, RecipeOfferView } from './types'
 
+/**
+ * Where the offers waiting on this node are read and decided: Settings ›
+ * Channels & repositories, scrolled to the offers block. Home's card and the
+ * push sent when an offer is staged (node/src/http/recipes.rs) both link here.
+ */
+export const OFFERS_ANCHOR = 'recipe-offers'
+export const OFFERS_LINK = `/settings?focus=${OFFERS_ANCHOR}#channels`
+
 export interface OfferTarget {
   channel: string
   peers: { id: string; name: string }[]

@@ -12,6 +12,7 @@
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
   import PromotionCard from '../components/PromotionCard.svelte'
+  import RecipeOfferCard from '../components/RecipeOfferCard.svelte'
   import ReviewCard from '../components/ReviewCard.svelte'
   import SessionRow from '../components/SessionRow.svelte'
   import SetupCard from '../components/SetupCard.svelte'
@@ -37,6 +38,7 @@
       reviews: store.queue.reviews,
       issues: store.issues,
       promotions: store.queue.promotions,
+      offers: store.offers,
       nodes: store.nodes,
       mesh: store.mesh,
       now: clock.now,
@@ -195,6 +197,8 @@
     <ReviewCard review={thread.review} />
   {:else if thread.kind === 'issue'}
     <OperatorIssueCard issue={thread.issue} done={refreshInterventions} />
+  {:else if thread.kind === 'offer'}
+    <RecipeOfferCard offer={thread.offer} />
   {:else}
     <PromotionCard promotion={thread.promotion} />
   {/if}
