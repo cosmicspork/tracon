@@ -429,16 +429,27 @@ pub async fn publish(
     cfg: &Config,
     publication: &Publication<'_>,
 ) -> Result<String, PublishError> {
-    match attempt(broker, cfg, publication).await {
-        Ok(url) => Ok(url),
-        Err(error) => {
-            if error.is_unknown() {
-                publication.journal.uncertain(&error.to_string());
-            } else {
-                publication.journal.failed(&error.to_string());
-            }
-            Err(error)
+    let attempted = attempt(broker, cfg, publication).await;
+    match &attempted {
+        Err(error) if error.is_unknown() => {
+            publication.journal.uncertain(&error.to_string());
+            // Kept while the outcome is unknown, for whoever reconciles it.
+            return attempted;
         }
+        Err(error) => publication.journal.failed(&error.to_string()),
+        Ok(_) => {}
+    }
+    // Settled: a retry makes both again from the candidate, so they would
+    // otherwise only take a repository's worth of disk per publication.
+    remove_publisher(publication.id);
+    attempted
+}
+
+/// Remove a publication's working repository and its bundle.
+fn remove_publisher(id: &str) {
+    if let Ok(publisher) = publisher_dir(id) {
+        let _ = std::fs::remove_dir_all(&publisher);
+        let _ = std::fs::remove_file(publisher.with_extension("bundle"));
     }
 }
 

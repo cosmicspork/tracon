@@ -730,6 +730,26 @@ async fn approving_publishes_the_approved_bytes_with_the_brokered_credential() {
     assert_eq!(r.approved_title(), "feat: the thing, renamed");
 }
 
+/// The publisher repository and bundle exist for one attempt: every attempt
+/// makes them afresh from the candidate. Once the change is open they would
+/// only hold a repository's worth of disk per published review.
+#[tokio::test]
+async fn an_opened_publication_leaves_no_working_repository_behind() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(f.publication(&id).state, "opened");
+
+    let publisher = Config::state_dir()
+        .join("publishers")
+        .join(f.publication_id(&id));
+    assert!(!publisher.exists(), "{}", publisher.display());
+    assert!(!publisher.with_extension("bundle").exists());
+}
+
 #[tokio::test]
 async fn a_second_verdict_cannot_overwrite_the_first() {
     state::isolate();
