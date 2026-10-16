@@ -1311,6 +1311,27 @@ async fn repository_environments_are_listed_and_built_only_from_this_machine() {
     }
 }
 
+/// A command whose reader has gone (`tracon work ls | head`) ends the way
+/// other tools do, by the signal, not with a panic on stderr.
+#[cfg(unix)]
+#[test]
+fn a_command_whose_output_is_cut_off_ends_without_a_panic() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = state::scratch("a_command_whose_output_is_cut_off");
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
+        .args(["credential", "ls"])
+        .env("TRACON_STATE_DIR", &dir)
+        .env("TRACON_CONFIG_DIR", &dir)
+        .stdout(writer)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(out.status.signal(), Some(libc::SIGPIPE), "{:?}", out.status);
+}
+
 /// The table is saved from this machine, written to `node.toml`, and in
 /// effect at once: a restart would end every session to change one
 /// repository's environment. A table the node could not honour is refused
