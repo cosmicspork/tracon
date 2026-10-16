@@ -90,6 +90,36 @@ impl ClaudeAdapter {
     /// state directory and mounted read-only.
     const MCP_CONFIG_FILE: &'static str = "tracon-mcp.json";
 
+    /// The built-in tools a node session is offered when the operator names
+    /// none. `--allowedTools` only pre-approves, so without `--tools` every
+    /// request carried all two dozen built-in definitions — about 27 K tokens,
+    /// over half of a first request — for tools a headless, contained session
+    /// never calls: planning modes, worktrees, cron, subagents, and web tools
+    /// with no route out. `Skill` stays so the manifest's skills load.
+    /// `AskUserQuestion` is left out on purpose: nobody can answer it
+    /// headless, and `ask_operator` is the route to the operator.
+    const DEFAULT_TOOLS: &'static [&'static str] =
+        &["Bash", "Read", "Edit", "Write", "TaskStop", "Skill"];
+
+    /// The built-ins for `--tools`: the operator's own list when it names
+    /// any, by tool name (`Bash(git:*)` is `Bash`; the node's MCP tools are
+    /// not built-ins), and [`Self::DEFAULT_TOOLS`] otherwise.
+    fn builtin_tools(configured: &[String]) -> Vec<String> {
+        let mut named: Vec<String> = Vec::new();
+        for tool in configured {
+            let name = tool.split('(').next().unwrap_or(tool).trim();
+            if name.is_empty() || name.starts_with("mcp__") || named.iter().any(|n| n == name) {
+                continue;
+            }
+            named.push(name.to_string());
+        }
+        if named.is_empty() {
+            Self::DEFAULT_TOOLS.iter().map(|t| t.to_string()).collect()
+        } else {
+            named
+        }
+    }
+
     /// The argv for a headless session.
     ///
     /// `--permission-mode default` is load-bearing and must never become
@@ -149,6 +179,8 @@ impl ClaudeAdapter {
             argv.push("--append-system-prompt-file".into());
             argv.push(file.clone());
         }
+        argv.push("--tools".into());
+        argv.push(Self::builtin_tools(&spec.tools).join(","));
         if !spec.tools.is_empty() {
             argv.push("--allowedTools".into());
             argv.push(spec.tools.join(","));
@@ -1023,6 +1055,36 @@ mod tests {
             argv.contains("--append-system-prompt-file /root/.claude/orientation.md"),
             "{argv}"
         );
+    }
+
+    /// `--allowedTools` removes nothing, so the session is offered only the
+    /// built-ins a node session uses: `Skill` for the manifest's skills, and
+    /// never `AskUserQuestion`, which nobody can answer headless.
+    #[test]
+    fn the_harness_is_offered_only_the_built_in_tools_a_node_session_uses() {
+        let argv = ClaudeAdapter::cmd("c", &spec(), "sid").argv;
+        let at = argv.iter().position(|a| a == "--tools").expect("--tools");
+        let offered: Vec<&str> = argv[at + 1].split(',').collect();
+        assert_eq!(
+            offered,
+            ["Bash", "Read", "Edit", "Write", "TaskStop", "Skill"]
+        );
+        assert!(!offered.contains(&"AskUserQuestion"));
+
+        // An operator's own list decides, by tool name, without the node's
+        // MCP tools, which are not built-ins.
+        let mut configured = spec();
+        configured.tools = vec![
+            "Bash(git:*)".into(),
+            "Bash".into(),
+            "Read".into(),
+            "mcp__tracon__recall".into(),
+        ];
+        let argv = ClaudeAdapter::cmd("c", &configured, "sid").argv;
+        let at = argv.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(argv[at + 1], "Bash,Read");
+        let at = argv.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(argv[at + 1], "Bash(git:*),Bash,Read,mcp__tracon__recall");
     }
 
     /// The manifest's skills reach Claude Code as a sealed plugin the argv

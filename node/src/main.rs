@@ -472,7 +472,8 @@ enum CredentialCommand {
     /// Names, kinds, and bindings. Never values.
     Ls,
     /// Add the credentials from a plaintext TOML file (owner-only), sealing
-    /// them into the store. Existing names are replaced.
+    /// them into the store. Existing names are replaced. A node running on
+    /// this machine is handed them, and uses them at once.
     Import { file: std::path::PathBuf },
     /// Remove one credential.
     Rm { name: String },
@@ -1228,7 +1229,7 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             session_egress,
             timeout_secs,
         } => {
-            let mut entries = repo_entries().await?;
+            let (mut entries, hash) = repo_entries().await?;
             let at = entries
                 .iter()
                 .position(|entry| entry["path"].as_str() == Some(path.as_str()));
@@ -1273,18 +1274,18 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 Some(at) => entries[at] = entry,
                 None => entries.push(entry),
             }
-            save_repo_entries(entries).await?;
+            save_repo_entries(entries, &hash).await?;
             println!("saved; it applies to the next session and the next check");
             Ok(())
         }
         RepoCommand::Rm { path } => {
-            let mut entries = repo_entries().await?;
+            let (mut entries, hash) = repo_entries().await?;
             let before = entries.len();
             entries.retain(|entry| entry["path"].as_str() != Some(path.as_str()));
             if entries.len() == before {
                 anyhow::bail!("no [[repo]] entry has path {path}");
             }
-            save_repo_entries(entries).await?;
+            save_repo_entries(entries, &hash).await?;
             println!("removed");
             Ok(())
         }
@@ -1306,7 +1307,11 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             let repo = started["repo"].as_str().unwrap_or_default().to_string();
             let since = started["since_ms"].as_i64().unwrap_or(0);
             println!(
-                "building {repo} from {} ({:.12}); a first build can take several minutes",
+                "{} {repo} from {} ({:.12}); a first build can take several minutes",
+                match started["joined"].as_bool() {
+                    Some(true) => "joining the build already running for",
+                    _ => "building",
+                },
                 started["source_ref"].as_str().unwrap_or(""),
                 started["source_commit"].as_str().unwrap_or("")
             );
@@ -1346,22 +1351,26 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
     }
 }
 
-/// The table as the node holds it, for a command that changes one entry of it.
-async fn repo_entries() -> Result<Vec<serde_json::Value>> {
+/// The table as the node holds it, for a command that changes one entry of
+/// it, with `node.toml`'s hash: the version the save is decided against.
+async fn repo_entries() -> Result<(Vec<serde_json::Value>, String)> {
     let v = node_call(reqwest::Method::GET, "/api/repos/environments", None, None).await?;
-    Ok(v["entries"]
+    let entries = v["entries"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|item| item["entry"].clone())
-        .collect())
+        .collect();
+    let hash = v["hash"].as_str().unwrap_or_default().to_string();
+    Ok((entries, hash))
 }
 
-async fn save_repo_entries(entries: Vec<serde_json::Value>) -> Result<()> {
+/// The table saved whole, refused if `node.toml` changed since `hash` was read.
+async fn save_repo_entries(entries: Vec<serde_json::Value>, hash: &str) -> Result<()> {
     node_call(
         reqwest::Method::PUT,
         "/api/repos/environments",
-        Some(serde_json::json!({ "entries": entries })),
+        Some(serde_json::json!({ "entries": entries, "expected_hash": hash })),
         None,
     )
     .await?;
@@ -1392,6 +1401,31 @@ fn build_line(build: &serde_json::Value) -> String {
         text("kind"),
         text("repo_path"),
     )
+}
+
+/// The node at [`node_url`], when it is on this machine and answers: the
+/// one whose credential store a command acting on this machine also writes.
+async fn running_node() -> Option<String> {
+    let url = node_url();
+    let parsed = url::Url::parse(&url).ok()?;
+    let loopback = match parsed.host()? {
+        url::Host::Domain(name) => name == "localhost",
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    };
+    if !loopback {
+        return None;
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?;
+    client
+        .get(format!("{url}/api/awake"))
+        .send()
+        .await
+        .ok()
+        .map(|_| url)
 }
 
 fn node_url() -> String {
@@ -2631,6 +2665,24 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
         CredentialCommand::Import { file } => {
             let text = std::fs::read_to_string(&file)?;
             let incoming = Broker::parse_plain(&file, &text)?;
+            // A running node reads the store once, at start: sealing around
+            // it would leave it brokering the old copy until it restarts.
+            // Handed to it instead, it seals them itself and uses them now.
+            if let Some(url) = running_node().await {
+                let v = node_call(
+                    reqwest::Method::POST,
+                    "/api/credentials/import",
+                    Some(serde_json::json!({ "toml": text })),
+                    None,
+                )
+                .await?;
+                let n = v["imported"].as_array().map_or(0, Vec::len);
+                println!(
+                    "{n} credential{} imported into the running node at {url}",
+                    if n == 1 { "" } else { "s" }
+                );
+                return Ok(());
+            }
             let mut n = 0;
             for (name, c) in incoming.iter() {
                 broker.put(name, c.clone());
@@ -2650,6 +2702,12 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             }
             broker.save(&key)?;
             println!("removed {name}");
+            if let Some(url) = running_node().await {
+                println!(
+                    "the node running at {url} keeps its copy until it restarts \
+                     (`tracon service restart`)"
+                );
+            }
             Ok(())
         }
         CredentialCommand::Share { name, to } => {

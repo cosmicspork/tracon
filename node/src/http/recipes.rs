@@ -283,7 +283,9 @@ pub(super) async fn receive(
             &tag,
             "Repository recipe offered".into(),
             body,
-            "/settings".into(),
+            // The offers block in Settings, which Home's card links to as well
+            // (spa/src/lib/recipes.ts, OFFERS_LINK).
+            "/settings?focus=recipe-offers#channels".into(),
             &[],
         )
         .await;
@@ -956,7 +958,13 @@ fn start_build(s: &AppState, entry: &Repo) -> bool {
         s.cfg.clone(),
         s.store().clone(),
     );
+    let (broker, node_id) = (s.tools.broker.clone(), s.node_id.clone());
     tokio::spawn(async move {
+        // Built from what the forge holds now, as `tracon repo build` is. A
+        // fetch that fails leaves the clone as it was, which still builds.
+        if let Err(error) = crate::forge::refresh_for_build(&broker, &repo, &node_id).await {
+            tracing::warn!(repo = %repo.display(), %error, "managed clone not fetched before its build");
+        }
         crate::repo_image::ensure_base(backend.as_ref(), &cfg, &store, &repo, true).await;
     });
     true

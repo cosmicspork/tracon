@@ -97,6 +97,93 @@ fn build_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
         .clone()
 }
 
+/// The last build each repository's lock saw finish: a count of the builds
+/// finished so far, the recipe it built, and what came of it. A request that
+/// waited on the lock while a build of its own recipe ran takes that build's
+/// outcome rather than building the same recipe a second time.
+type Finished = HashMap<PathBuf, (u64, String, Ensured)>;
+
+fn finished() -> &'static StdMutex<Finished> {
+    static FINISHED: std::sync::LazyLock<StdMutex<Finished>> =
+        std::sync::LazyLock::new(Default::default);
+    &FINISHED
+}
+
+/// How many builds of `repo` have finished, for telling later which one
+/// finished while a request waited.
+fn finished_count(repo: &Path) -> u64 {
+    finished()
+        .lock()
+        .unwrap()
+        .get(repo)
+        .map_or(0, |(count, _, _)| *count)
+}
+
+fn record_finished(repo: &Path, recipe_hash: &str, ensured: &Ensured) {
+    let mut finished = finished().lock().unwrap();
+    let count = finished.get(repo).map_or(0, |(count, _, _)| *count) + 1;
+    finished.insert(
+        repo.to_path_buf(),
+        (count, recipe_hash.to_string(), ensured.clone()),
+    );
+}
+
+/// The outcome of a build of `recipe_hash` that finished after `seen`, as a
+/// request that waited for it takes it. Its image is `Current` to that
+/// request: the build that made it is the one that warms its cache.
+fn joined(repo: &Path, recipe_hash: &str, seen: u64) -> Option<Ensured> {
+    let finished = finished().lock().unwrap();
+    let (count, hash, ensured) = finished.get(repo)?;
+    if *count == seen || hash != recipe_hash {
+        return None;
+    }
+    Some(match ensured.clone() {
+        Ensured::Rebuilt(image) => Ensured::Current(image),
+        other => other,
+    })
+}
+
+/// One base-cache warm-up at a time per repository.
+fn warm_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
+    static LOCKS: std::sync::LazyLock<StdMutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> =
+        std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
+    LOCKS
+        .lock()
+        .unwrap()
+        .entry(repo.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// The image each repository's base cache was last warmed in by this
+/// process, and the default-branch commit it was warmed from.
+type Warmed = HashMap<PathBuf, (String, String)>;
+
+fn warmed_images() -> &'static StdMutex<Warmed> {
+    static WARMED: std::sync::LazyLock<StdMutex<Warmed>> =
+        std::sync::LazyLock::new(Default::default);
+    &WARMED
+}
+
+fn warmed_in(repo: &Path) -> Option<(String, String)> {
+    warmed_images().lock().unwrap().get(repo).cloned()
+}
+
+/// When the build of `recipe_hash` now running for `repo` started, if one
+/// is: a forced build asked for meanwhile joins it rather than starting
+/// another, and whoever asked follows that one.
+pub fn in_flight(store: &Store, repo: &Path, recipe_hash: &str) -> Option<i64> {
+    if build_lock(repo).try_lock().is_ok() {
+        return None;
+    }
+    store
+        .latest_repo_image(&repo.to_string_lossy(), BASE)
+        .ok()
+        .flatten()
+        .filter(|row| row.status == "building" && row.recipe_hash == recipe_hash)
+        .map(|row| row.started_ms)
+}
+
 /// How long a builder that could not build is left alone for one recipe.
 /// Every check run and preparation queued behind an outage would otherwise
 /// each stage a tree and run the builder's check again, minutes of work to
@@ -1035,7 +1122,13 @@ pub async fn ensure_base(
 /// from a private registry is what the others then install from the cache
 /// without the credential. A credential the broker will not lend stops the
 /// warm-up before anything runs, rather than letting the registry refuse it.
+///
+/// One warm-up at a time per repository, in the image the node pins when it
+/// starts: one asked for while another runs waits, and warms nothing if that
+/// one already warmed the same image from the same commit.
 async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, repo: &Path) {
+    let lock = warm_lock(repo);
+    let _warming = lock.lock().await;
     let environment = crate::environment::environment_for(cfg, store, Some(repo));
     if environment.prepare.is_empty() {
         return;
@@ -1049,13 +1142,24 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
         tracing::warn!(repo = %repo.display(), "base cache not warmed: the entry is held");
         return;
     }
+    let commit = match default_commit(repo).await {
+        Ok((_, commit)) => commit,
+        Err(error) => {
+            tracing::warn!(repo = %repo.display(), %error, "base dependency cache not warmed");
+            return;
+        }
+    };
+    let warming = (environment.image.clone(), commit.clone());
+    if warmed_in(repo).as_ref() == Some(&warming) {
+        tracing::info!(repo = %repo.display(), image = %environment.image, "base cache already warmed in this image");
+        return;
+    }
     let lent = entry.prepare_credentials;
     let warmed = async {
         let secrets = crate::environment::PrepareSecrets::new(
             crate::broker::preparation_env_for(repo, &lent)
                 .map_err(|error| format!("prepare_credentials: {error}"))?,
         );
-        let (_, commit) = default_commit(repo).await?;
         let tree = crate::review::snapshot_candidate(
             &repo.to_string_lossy(),
             &commit,
@@ -1086,7 +1190,13 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
         prepared.map_err(|stopped| stopped.to_string())
     };
     match warmed.await {
-        Ok(()) => tracing::info!(repo = %repo.display(), "base dependency cache warmed"),
+        Ok(()) => {
+            tracing::info!(repo = %repo.display(), image = %environment.image, "base dependency cache warmed");
+            warmed_images()
+                .lock()
+                .unwrap()
+                .insert(repo.to_path_buf(), warming);
+        }
         Err(error) => {
             tracing::warn!(repo = %repo.display(), %error, "base dependency cache not warmed")
         }
@@ -1121,6 +1231,7 @@ async fn ensure_with(
     force: bool,
 ) -> Ensured {
     let lock = build_lock(repo);
+    let seen = finished_count(repo);
     let _building = lock.lock().await;
     let repo_path = repo.to_string_lossy();
     let ready = match store.ready_repo_image(&repo_path, BASE) {
@@ -1149,6 +1260,13 @@ async fn ensure_with(
         Ok(recipe) => recipe,
         Err(error) => return fallback(error),
     };
+    // A build of this same recipe finished while this request waited for the
+    // lock: forced or not, it joins that one. Building it again would make a
+    // second image of the same recipe, which BuildKit does not reproduce
+    // byte for byte, and pin it under a cache warmed in the first.
+    if let Some(ensured) = joined(repo, &recipe.hash, seen) {
+        return ensured;
+    }
     // A trial the operator allowed may already have built this recipe.
     let mut tried = None;
     if !force {
@@ -1218,15 +1336,19 @@ async fn ensure_with(
             let _ = store.set_repo_image_parent(&id, &built.source);
             warm(repo, &recipe.hash);
             supersede(builder, store, repo, BASE).await;
-            Ensured::Rebuilt(built.image.image)
+            let ensured = Ensured::Rebuilt(built.image.image);
+            record_finished(repo, &recipe.hash, &ensured);
+            ensured
         }
         Err(failure) => {
             tracing::warn!(repo = %repo.display(), error = %failure.error, "repository image build failed");
             settle_failure(store, &id, &failure);
-            match failure.transient {
+            let ensured = match failure.transient {
                 true => fallback(cool(repo, &recipe.hash, &failure.error)),
                 false => fallback(failure.error),
-            }
+            };
+            record_finished(repo, &recipe.hash, &ensured);
+            ensured
         }
     }
 }
@@ -1610,11 +1732,17 @@ mod tests {
         fail_from: StdMutex<Option<usize>>,
         /// Find no image by tag, as a registry that holds none.
         missing: StdMutex<bool>,
+        /// Take this long over every build, as a real one does.
+        slow: StdMutex<Option<Duration>>,
     }
 
     #[async_trait]
     impl ImageBuilder for FakeBuilder {
         async fn build(&self, build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
+            let slow = *self.slow.lock().unwrap();
+            if let Some(slow) = slow {
+                tokio::time::sleep(slow).await;
+            }
             if *self.broken.lock().unwrap() {
                 return Err(BuildFailure::transient("buildkitd did not answer"));
             }
@@ -1807,6 +1935,45 @@ mod tests {
             .unwrap()
             .iter()
             .all(|(_, text, _)| !text.contains("evil") && !text.contains("RUN more")));
+    }
+
+    /// `tracon repo build` while a session's build of the same recipe runs:
+    /// the request waits for that build and takes its image, rather than
+    /// building the recipe again into an image no cache was warmed in.
+    #[tokio::test]
+    async fn a_build_asked_for_while_the_same_recipe_builds_joins_it() {
+        let tmp = checkout();
+        let repo = tmp.path();
+        let store = Store::open_in_memory().unwrap();
+        let builder = FakeBuilder {
+            slow: StdMutex::new(Some(Duration::from_millis(500))),
+            ..Default::default()
+        };
+
+        let (first, forced) = tokio::join!(ensure(&builder, &store, repo, false), async {
+            let building = loop {
+                let latest = store
+                    .latest_repo_image(&repo.to_string_lossy(), BASE)
+                    .unwrap();
+                match latest.filter(|row| row.status == "building") {
+                    Some(row) => break row,
+                    None => tokio::time::sleep(Duration::from_millis(5)).await,
+                }
+            };
+            assert!(in_flight(&store, repo, &building.recipe_hash).is_some());
+            ensure(&builder, &store, repo, true).await
+        });
+        let Ensured::Rebuilt(image) = first else {
+            panic!("the first request builds: {first:?}");
+        };
+        assert_eq!(forced, Ensured::Current(image));
+        let built = builder.builds.lock().unwrap().len();
+        assert_eq!(built, 2, "one image and its source, built once");
+
+        // Asked for once nothing is running, it builds again.
+        assert!(in_flight(&store, repo, &base_row(&store, repo).recipe_hash).is_none());
+        let again = ensure(&builder, &store, repo, true).await;
+        assert!(matches!(again, Ensured::Rebuilt(_)), "{again:?}");
     }
 
     fn base_row(store: &Store, repo: &Path) -> crate::store::RepoImageRow {

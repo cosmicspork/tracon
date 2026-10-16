@@ -310,12 +310,34 @@ async fn a_session_on_b_is_driven_from_a() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{item}");
+    // A repository B has no directory for is refused by B before it writes
+    // a session, or a project named after a directory that is not there.
+    let (st, refused) = call(
+        &a.app,
+        "POST",
+        "/api/sessions",
+        Some(
+            json!({"channel": "personal", "repo_path": "github.com/o/r", "model": "m/a",
+                    "node_id": bi, "work_item_id": item["id"], "phase": "plan"}),
+        ),
+    )
+    .await;
+    assert_ne!(st, StatusCode::CREATED, "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("github.com/o/r is not a directory on this node")),
+        "{refused}"
+    );
+    assert!(b.store.list_sessions(None).unwrap().is_empty());
+
+    let repo = state::scratch("e2e-driven-from-a");
     let (st, row) = call(
         &a.app,
         "POST",
         "/api/sessions",
         Some(
-            json!({"channel": "personal", "repo_path": "/r", "model": "m/a", "node_id": bi,
+            json!({"channel": "personal", "repo_path": repo, "model": "m/a", "node_id": bi,
                     "work_item_id": item["id"], "phase": "plan"}),
         ),
     )
@@ -323,8 +345,9 @@ async fn a_session_on_b_is_driven_from_a() {
     assert_eq!(st, StatusCode::CREATED, "{row}");
     assert_eq!(row["node_id"], bi);
     let sid = row["id"].as_str().unwrap().to_string();
-    // It runs on B (the worktree step fails against /r with the fake, so it
-    // ends failed there — what matters is where it ran and that A sees it).
+    // It runs on B (the worktree step fails against a directory that is not
+    // a repository, so it ends failed there — what matters is where it ran
+    // and that A sees it).
     wait_for("B to own the session", || {
         b.store.get_session(&sid).ok().flatten().is_some()
     })

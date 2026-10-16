@@ -17,7 +17,9 @@
 //! `tracon-cache-r-<hash>` its sessions' build cache — to nobody (it is
 //! rebuilt on demand, so it goes only when asked for). The
 //! node-wide volumes are never candidates, and neither is a name this node
-//! does not recognize.
+//! does not recognize. A publication's working repository under
+//! `publishers/`, and its bundle beside it, belong to that publication until
+//! it is settled.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -48,6 +50,8 @@ pub struct Owners {
     /// or a retryable import still uses.
     pub used_workspaces: HashSet<String>,
     pub running_checks: HashSet<String>,
+    /// Publications neither opened nor failed, whose recovery may still look.
+    pub unsettled_publications: HashSet<String>,
     pub now_ms: i64,
     /// Dependency caches are candidates too.
     pub caches: bool,
@@ -83,6 +87,7 @@ impl Owners {
             owners.used_workspaces.insert(workspace_key(&workspace));
         }
         owners.running_checks = store.running_check_run_ids()?;
+        owners.unsettled_publications = store.publications_unsettled()?;
         Ok(owners)
     }
 }
@@ -97,7 +102,7 @@ fn workspace_key(id: &str) -> String {
 /// One piece of runtime storage and what the sweep makes of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Item {
-    /// `volume` or `directory`.
+    /// `volume`, `directory`, or `file` (a publication's bundle).
     pub kind: &'static str,
     /// The volume name, or the directory relative to the node's state dir.
     pub name: String,
@@ -223,6 +228,21 @@ pub fn classify_directory(
             "its staged configuration is unused",
         )),
         "workspaces" | "workspace-staging" => Some(workspace_verdict(entry, created_ms, owners)),
+        // Every attempt makes both afresh from the candidate, so once the
+        // publication is settled they serve nothing.
+        "publishers" => {
+            let id = entry.strip_suffix(".bundle").unwrap_or(entry);
+            Some(match owners.unsettled_publications.contains(id) {
+                true => verdict(
+                    false,
+                    format!("publication {id} is not settled; its recovery may still look"),
+                ),
+                false => verdict(
+                    true,
+                    format!("publication {id} is opened, failed or gone; a retry starts afresh"),
+                ),
+            })
+        }
         _ => None,
     }
 }
@@ -255,23 +275,23 @@ fn directory_items(state_dir: &Path, owners: &Owners) -> Vec<(Item, PathBuf)> {
             items.push((item("directory", name.into(), true, reason.into()), path));
         }
     }
-    for area in ["sessions", "workspaces", "workspace-staging"] {
+    for area in ["sessions", "workspaces", "workspace-staging", "publishers"] {
         let Ok(entries) = std::fs::read_dir(state_dir.join(area)) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            // A publication's bundle is the one file a sweep looks at.
+            let bundle = area == "publishers" && path.extension().is_some_and(|e| e == "bundle");
+            if !path.is_dir() && !bundle {
                 continue;
             }
             let entry = entry.file_name().to_string_lossy().into_owned();
             if let Some((remove, reason)) =
                 classify_directory(area, &entry, created_ms(&path), owners)
             {
-                items.push((
-                    item("directory", format!("{area}/{entry}"), remove, reason),
-                    path,
-                ));
+                let kind = if bundle { "file" } else { "directory" };
+                items.push((item(kind, format!("{area}/{entry}"), remove, reason), path));
             }
         }
     }
@@ -317,7 +337,11 @@ pub async fn sweep(
     }
     for (mut item, path) in directory_items(&Config::state_dir(), &owners) {
         if apply && item.remove {
-            match std::fs::remove_dir_all(&path) {
+            let removed = match path.is_dir() {
+                true => std::fs::remove_dir_all(&path),
+                false => std::fs::remove_file(&path),
+            };
+            match removed {
                 Ok(()) => item.removed = true,
                 Err(error) => item.error = Some(error.to_string()),
             }
@@ -344,6 +368,7 @@ mod tests {
         owners.used_workspaces.insert("open".into());
         owners.used_workspaces.insert("shared".into());
         owners.running_checks.insert("live".into());
+        owners.unsettled_publications.insert("pending".into());
         owners
     }
 
@@ -435,5 +460,24 @@ mod tests {
             classify_directory("opencode-state", "archived", None, &o),
             None
         );
+    }
+
+    /// A publication's working repository and bundle are made afresh by every
+    /// attempt, so they stay only while a recovery may still look at them.
+    #[test]
+    fn a_publishers_repository_and_bundle_go_once_the_publication_is_settled() {
+        let o = owners();
+        for entry in ["pending", "pending.bundle"] {
+            assert_eq!(
+                classify_directory("publishers", entry, None, &o).map(|v| v.0),
+                Some(false)
+            );
+        }
+        for entry in ["opened", "opened.bundle"] {
+            assert_eq!(
+                classify_directory("publishers", entry, None, &o).map(|v| v.0),
+                Some(true)
+            );
+        }
     }
 }

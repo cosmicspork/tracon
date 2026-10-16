@@ -681,18 +681,30 @@ pub(crate) fn read_expected(expected: &str) -> Result<(String, Config), Refused>
 /// for it (`config_prompt`). An edit whose sensitive keys do not all fit
 /// that line is refused, to be split.
 pub(crate) fn prompt(text: &str, ops: &[Op]) -> Result<(Vec<Change>, String), Refused> {
-    prompt_with(text, ops, super::config_prompt::summarize)
+    prompt_with(
+        &Config::config_path(),
+        text,
+        ops,
+        super::config_prompt::summarize,
+    )
 }
 
 /// [`prompt`], in `budget` characters of the prompt's line: what is left of
-/// one once a peer's `On <peer>: ` has taken its share.
-fn prompt_within(text: &str, ops: &[Op], budget: usize) -> Result<(Vec<Change>, String), Refused> {
-    prompt_with(text, ops, |before, after, effective, changes| {
+/// one once a peer's `On <peer>: ` has taken its share. `file` is what a
+/// refusal names the text: the peer's file, not this node's.
+fn prompt_within(
+    file: &std::path::Path,
+    text: &str,
+    ops: &[Op],
+    budget: usize,
+) -> Result<(Vec<Change>, String), Refused> {
+    prompt_with(file, text, ops, |before, after, effective, changes| {
         super::config_prompt::summarize_within(before, after, effective, changes, budget)
     })
 }
 
 fn prompt_with(
+    file: &std::path::Path,
     text: &str,
     ops: &[Op],
     summarize: impl FnOnce(
@@ -702,9 +714,9 @@ fn prompt_with(
         &[Change],
     ) -> Result<String, String>,
 ) -> Result<(Vec<Change>, String), Refused> {
-    let seen = edit::preview(text, ops).map_err(edit_refusal)?;
+    let seen = edit::preview_of(file, text, ops).map_err(edit_refusal)?;
     let parse = |t: &str| toml::from_str::<toml::Table>(t).unwrap_or_default();
-    let effective = edit::preview(text, &[])
+    let effective = edit::preview_of(file, text, &[])
         .ok()
         .and_then(|now| toml::Table::try_from(&now.config).ok())
         .unwrap_or_default();
@@ -1122,7 +1134,13 @@ pub async fn patch_node_config(
     let text = current["toml"].as_str().unwrap_or_default();
     let prefix = super::peer_admin::prefix(&s, &node_id);
     let budget = super::passkey::MAX_SUMMARY.saturating_sub(prefix.chars().count());
-    let (changes, line) = prompt_within(text, &ops, budget)?;
+    // Checked here against the peer's text: a refusal names its file, which
+    // is not at this node's path.
+    let file = format!(
+        "node.toml on {}",
+        super::peer_admin::peer_label(&s, &node_id)
+    );
+    let (changes, line) = prompt_within(std::path::Path::new(&file), text, &ops, budget)?;
     let errors = check_changes(&changes, Editor::Peer);
     if !errors.is_empty() {
         return Err(refused_keys(&errors));

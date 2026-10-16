@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import { api } from '../../lib/api'
   import { formatAge, formatDuration } from '../../lib/format'
-  import { inboxOrder, reviewIsStale, shown } from '../../lib/recipes'
+  import { OFFERS_ANCHOR, inboxOrder, reviewIsStale, shown } from '../../lib/recipes'
+  import { router } from '../../lib/router.svelte'
   import { store } from '../../lib/store.svelte'
   import type { RecipeOffer, RecipeOfferView } from '../../lib/types'
 
@@ -35,7 +37,22 @@
       error = cause instanceof Error ? cause.message : String(cause)
     }
   }
-  void load()
+  // Read again on each arrival, so a tapped notification or Home's card that
+  // lands here while it is already open shows the offer it named; a link that
+  // names this block scrolls to it once it has something to show.
+  $effect(() => {
+    void router.revision
+    void load().then(async () => {
+      if (new URLSearchParams(router.search).get('focus') !== OFFERS_ANCHOR) return
+      await tick()
+      document.getElementById(OFFERS_ANCHOR)?.scrollIntoView({ block: 'start' })
+    })
+  })
+  // Home counts what is undecided; a decision here should leave it at once.
+  const decided = async () => {
+    await load()
+    void store.refreshInterventions()
+  }
 
   async function compare(offer: RecipeOffer) {
     busy = `view:${offer.id}`
@@ -80,7 +97,7 @@
       note = `Accepted onto ${done.path} in node.toml.${done.building ? ' This node is building its own image from it now.' : ''}`
       open = null
       view = null
-      await load()
+      await decided()
       onaccepted?.()
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause)
@@ -98,7 +115,7 @@
       await api.declineRecipeOffer(offer.id)
       open = null
       view = null
-      await load()
+      await decided()
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause)
     } finally {
@@ -108,7 +125,7 @@
 </script>
 
 {#if offers.length}
-  <section class="offers" aria-label="Recipes offered by other nodes">
+  <section class="offers" id={OFFERS_ANCHOR} aria-label="Recipes offered by other nodes">
     <h3>Offered by other nodes{#if pending}{' · '}<span class="count">{pending} waiting</span>{/if}</h3>
     <p class="dim">
       A channel co-member offered how it builds, prepares and checks a repository. Nothing changes here until you

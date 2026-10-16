@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
-import { forgeIdentity, inboxOrder, offerResultLine, offerTargets, reviewIsStale, shown } from './recipes'
+import { readFileSync } from 'node:fs'
+import { OFFERS_LINK, forgeIdentity, inboxOrder, offerResultLine, offerTargets, reviewIsStale, shown } from './recipes'
 import type { ChannelInfo, NodeInfo, RecipeOffer, RecipeOfferView } from './types'
 
 const channel = (name: string, nodes: string[], archived: number | null = null) =>
@@ -57,4 +58,9 @@ test('an accept waits for a review of exactly what it would write', () => {
   expect(reviewIsStale(view, '/srv/app', false, false)).toBe(true)
   expect(reviewIsStale(view, 'github.com/acme/app', true, false)).toBe(true)
   expect(reviewIsStale(view, 'github.com/acme/app', false, true)).toBe(true)
+})
+
+test("the push for a staged offer opens the same place as Home's card", () => {
+  const rust = readFileSync(new URL('../../../node/src/http/recipes.rs', import.meta.url), 'utf8')
+  expect(rust).toContain(`"${OFFERS_LINK}".into()`)
 })

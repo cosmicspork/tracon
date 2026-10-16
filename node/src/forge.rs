@@ -738,21 +738,56 @@ pub fn git_token_for(
     repo_path: &Path,
     node_id: &str,
 ) -> Option<(Forge, String)> {
-    let root = managed_root(state_dir);
-    let rest = repo_path.strip_prefix(&root).ok()?;
-    let host = rest.components().next()?;
-    let host = host.as_os_str().to_string_lossy();
-    let forge = if host.contains("github") {
-        Forge::Github
-    } else {
-        Forge::Gitlab
-    };
+    let forge = managed_forge(state_dir, repo_path)?;
     let env = broker
         .read()
         .unwrap()
         .env_for(forge.credential(), channel, node_id)
         .ok()?;
     forge.token(&env).map(|token| (forge, token.clone()))
+}
+
+/// The forge a managed clone came from, by the host it sits under. `None`
+/// for a path outside the managed root.
+fn managed_forge(state_dir: &Path, repo_path: &Path) -> Option<Forge> {
+    let root = managed_root(state_dir);
+    let rest = repo_path.strip_prefix(&root).ok()?;
+    let host = rest.components().next()?;
+    let host = host.as_os_str().to_string_lossy();
+    Some(match host.contains("github") {
+        true => Forge::Github,
+        false => Forge::Gitlab,
+    })
+}
+
+/// Fetch a managed clone before an image is built from its default branch,
+/// so a build the operator asks for builds what the forge holds now rather
+/// than what the last session happened to fetch. A build has no channel, so
+/// the forge credential is the node's (`Broker::env_for_node`); without one
+/// the fetch is anonymous. A host checkout is the operator's own and is left
+/// as it is: `Ok(false)`.
+pub async fn refresh_for_build(
+    broker: &SharedBroker,
+    repo_path: &Path,
+    node_id: &str,
+) -> Result<bool, String> {
+    let Some(forge) = managed_forge(&crate::config::Config::state_dir(), repo_path) else {
+        return Ok(false);
+    };
+    let token = broker
+        .read()
+        .unwrap()
+        .env_for_node(forge.credential(), node_id)
+        .ok()
+        .and_then(|env| forge.token(&env).cloned());
+    let credential = crate::git_remote::brokered(forge.git_user(), token.as_deref());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        fetch_managed(repo_path, &credential),
+    )
+    .await
+    .map_err(|_| "git fetch ran out of time".to_string())??;
+    Ok(true)
 }
 
 /// The home `$HOME` points at for forge-side Git commands.
@@ -1088,6 +1123,59 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `tracon repo build` builds what the forge's default branch holds now:
+    /// a managed clone is fetched first, so a Dockerfile change merged since
+    /// the last session is what `default_commit` reads.
+    #[tokio::test]
+    async fn a_managed_clone_is_fetched_before_a_build_and_a_host_checkout_is_not() {
+        let sh = |dir: &Path, script: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let upstream = tempfile::tempdir().unwrap();
+        sh(
+            upstream.path(),
+            "git init -q -b main && git -c user.name=t -c user.email=t@t commit -q \
+             --allow-empty -m one",
+        );
+        let owner = format!("refresh-{}", uuid::Uuid::now_v7().simple());
+        let clone = managed_root(&crate::config::Config::state_dir())
+            .join("github.com")
+            .join(&owner)
+            .join("proj");
+        std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+        sh(
+            clone.parent().unwrap(),
+            &format!("git clone -q {} proj", upstream.path().display()),
+        );
+        let merged = sh(
+            upstream.path(),
+            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m two \
+             && git rev-parse HEAD",
+        );
+        let broker = crate::broker::Broker::default().shared();
+
+        assert_eq!(refresh_for_build(&broker, &clone, "n1").await, Ok(true));
+        assert_eq!(sh(&clone, "git rev-parse origin/main"), merged);
+
+        let host = tempfile::tempdir().unwrap();
+        assert_eq!(
+            refresh_for_build(&broker, host.path(), "n1").await,
+            Ok(false)
+        );
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
     }
 
     #[test]

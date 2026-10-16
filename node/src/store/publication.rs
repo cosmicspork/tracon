@@ -258,6 +258,19 @@ impl Store {
         Ok(())
     }
 
+    /// Every publication not yet settled: in flight, or interrupted somewhere
+    /// a recovery still has to look. `opened` and `failed` are settled; a
+    /// retry of a failed one starts from the candidate again.
+    pub fn publications_unsettled(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id FROM publication WHERE state NOT IN ('opened', 'failed')")?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
+    }
+
     /// The branch was pushed and the remote was then observed to hold it.
     /// This node's opened publications: the requests the node follows on the
     /// forge until they close.

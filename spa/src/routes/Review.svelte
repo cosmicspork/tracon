@@ -10,6 +10,7 @@
   import { store } from '../lib/store.svelte'
   import { nodeLabel } from '../lib/nodes'
   import { autogrow } from '../lib/autogrow'
+  import { renderMessage } from '../lib/markdown'
   import { surface } from '../lib/surface.svelte'
   import {
     reviewChecks,
@@ -934,7 +935,8 @@
     <div class="h4">Summary <b>for you · not sent to the forge</b></div>
     <div class="summary">
       <b>{review.title}</b>
-      <p>{review.body}</p>
+      <!-- The agent's Markdown, rendered as its session messages are: nothing fetched, links open beside. -->
+      <div class="md">{@html renderMessage(review.body)}</div>
     </div>
   {:else}
     <div class="h4">
@@ -1609,10 +1611,63 @@
     padding: 9px 11px;
     font-size: 13.5px;
   }
-  .summary p {
+  .summary .md {
     margin: 5px 0 0;
-    white-space: pre-wrap;
     color: var(--ink2);
+    overflow-wrap: anywhere;
+  }
+  .summary .md > :global(:first-child) {
+    margin-top: 0;
+  }
+  .summary .md > :global(:last-child) {
+    margin-bottom: 0;
+  }
+  .summary .md :global(p),
+  .summary .md :global(ul),
+  .summary .md :global(ol),
+  .summary .md :global(pre),
+  .summary .md :global(blockquote) {
+    margin: 4px 0;
+  }
+  .summary .md :global(ul),
+  .summary .md :global(ol) {
+    padding-left: 2.5ch;
+  }
+  .summary .md :global(h1),
+  .summary .md :global(h2),
+  .summary .md :global(h3),
+  .summary .md :global(h4) {
+    margin: 0.7em 0 0.2em;
+    font-size: 1em;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .summary .md :global(code) {
+    font: 0.9em var(--mono);
+    background: var(--s2);
+    border-radius: 3px;
+    padding: 0 3px;
+  }
+  .summary .md :global(pre) {
+    background: var(--s2);
+    border-radius: 4px;
+    padding: 8px 10px;
+    overflow-x: auto;
+  }
+  .summary .md :global(pre code) {
+    background: none;
+    padding: 0;
+    overflow-wrap: normal;
+  }
+  .summary .md :global(blockquote) {
+    border-left: 2px solid var(--rule);
+    padding-left: 1.5ch;
+  }
+  .summary .md :global(a) {
+    color: var(--acc);
+  }
+  .summary .md :global(.no-fetch) {
+    color: var(--dim);
   }
   .toggle {
     display: flex;

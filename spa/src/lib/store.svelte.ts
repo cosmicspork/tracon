@@ -21,6 +21,7 @@ import type {
   OperatorQuestion,
   Permission,
   ProviderInfo,
+  RecipeOffer,
   Queue,
   Review,
   Session,
@@ -60,6 +61,8 @@ class Store {
   questions = $state<OperatorQuestion[]>([])
   /** Issue drafts awaiting authorization, publication or reconciliation. */
   issues = $state<OperatorIssue[]>([])
+  /** Repository recipes other nodes offered this one, every state. */
+  offers = $state<RecipeOffer[]>([])
   sessions = $state<Map<string, Session>>(new Map())
   /** Persisted events for the session that is open on screen. */
   events = $state<Event[]>([])
@@ -209,16 +212,22 @@ class Store {
   }
 
   /**
-   * Questions and issue drafts, which arrive by polling rather than by frame.
+   * Questions, issue drafts and recipe offers, which arrive by polling rather
+   * than by frame.
    * Settled independently: an issue endpoint that fails must not blank the
    * questions, because a blanked list reads as "nothing waiting on you".
    */
   async refreshInterventions() {
     // Nothing to poll at a door that will not open; `refetch` resumes it.
     if (this.authRequired) return
-    const [questions, issues] = await Promise.allSettled([api.operatorQuestions(), api.operatorIssues()])
+    const [questions, issues, offers] = await Promise.allSettled([
+      api.operatorQuestions(),
+      api.operatorIssues(),
+      api.recipeOffers(),
+    ])
     if (questions.status === 'fulfilled') this.questions = questions.value.questions
     if (issues.status === 'fulfilled') this.issues = issues.value.issues
+    if (offers.status === 'fulfilled') this.offers = offers.value.offers
   }
 
   /** Distinguish "log in" from "unreachable" after the stream drops. */
@@ -266,6 +275,7 @@ class Store {
     this.source = null
     this.questions = []
     this.issues = []
+    this.offers = []
     this.authRequired = true
   }
 
