@@ -52,7 +52,7 @@ pub fn definitions() -> Vec<Value> {
                         so anything meant for the operator alone belongs here and not in the \
                         review's title or body. Pass `markdown` for a written \
                         account, `paths` for files in your workspace (relative to the repository \
-                        root; a directory brings its files), and `entry` to have one of those \
+                        root; a directory brings its files; files git ignores are not read), and `entry` to have one of those \
                         files rendered as an HTML page with whatever it loads beside it. Pages \
                         render on an isolated origin with no network, so inline or bundle every \
                         asset. Without `entry`, the files are listed for the operator to open. \
@@ -319,6 +319,54 @@ fn is_git(segment: &str) -> bool {
     segment == ".git"
 }
 
+/// Why a path is not in the snapshot. The snapshot holds what Git would see,
+/// so a screenshot written under an ignored directory is on the workspace and
+/// still not here; saying only that it is "not in the workspace" sent an agent
+/// looking for a file it could see.
+fn missing(root: &Path, relative: &str) -> String {
+    if ignored(root, relative) {
+        format!(
+            "{relative} is ignored by git, and show_work reads only the files git would see \
+             (tracked, or untracked and not ignored): an ignored file never leaves your \
+             workspace. Write what you show to a path no ignore rule matches, and keep it out \
+             of your commits"
+        )
+    } else {
+        format!("{relative} is not in the workspace")
+    }
+}
+
+/// Whether the snapshot's ignore rules ignore `relative`: the `.gitignore`
+/// nearest it that decides, then the repository's `info/exclude`. The rules are
+/// read as files, as the export reads them; no Git runs on them.
+fn ignored(root: &Path, relative: &str) -> bool {
+    use ignore::gitignore::GitignoreBuilder;
+    let decided = |dir: &Path, file: &Path, path: &str| {
+        let is_file = std::fs::symlink_metadata(file).is_ok_and(|meta| meta.file_type().is_file());
+        if !is_file {
+            return None;
+        }
+        let mut builder = GitignoreBuilder::new(dir);
+        if builder.add(file).is_some() {
+            return None;
+        }
+        let rules = builder.build().ok()?;
+        let matched = rules.matched_path_or_any_parents(path, false);
+        (!matched.is_none()).then(|| matched.is_ignore())
+    };
+    let segments: Vec<&str> = relative.split('/').collect();
+    for depth in (0..segments.len()).rev() {
+        let dir = segments[..depth]
+            .iter()
+            .fold(root.to_path_buf(), |dir, segment| dir.join(segment));
+        if let Some(ignored) = decided(&dir, &dir.join(".gitignore"), &segments[depth..].join("/"))
+        {
+            return ignored;
+        }
+    }
+    decided(root, &root.join(".git/info/exclude"), relative).unwrap_or(false)
+}
+
 /// Read the named files from the workspace snapshot. A path is refused when it
 /// leaves the root, names Git's own directory, or passes through a symbolic
 /// link: the snapshot is the node's copy of the workspace, and nothing is read
@@ -338,8 +386,7 @@ fn collect(root: &Path, paths: &[String]) -> Result<Collected, String> {
         let mut metadata = None;
         for segment in relative.split('/') {
             at.push(segment);
-            let found = std::fs::symlink_metadata(&at)
-                .map_err(|_| format!("{relative} is not in the workspace"))?;
+            let found = std::fs::symlink_metadata(&at).map_err(|_| missing(root, &relative))?;
             if found.file_type().is_symlink() {
                 return Err(format!(
                     "{relative} is, or passes through, a symbolic link; show the file itself"
@@ -531,6 +578,33 @@ mod tests {
             assert!(collect(root, &[bad.into()]).is_err(), "{bad}");
         }
         assert!(collect(root, &["missing.txt".into()]).is_err());
+    }
+
+    /// The snapshot leaves ignored files behind, so a file under an ignored
+    /// directory is refused with that reason rather than as if it did not
+    /// exist; one no rule ignores is still simply not there.
+    #[test]
+    fn a_path_git_ignores_is_refused_as_ignored_not_as_missing() {
+        let dir = tree();
+        let root = &dir.0;
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::create_dir_all(root.join("storage/app")).unwrap();
+        std::fs::write(root.join("storage/app/.gitignore"), "screenshots/\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\n!keep.log\n").unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "scratch/\n").unwrap();
+
+        for ignored in [
+            "storage/app/screenshots/wm-groups.png",
+            "build.log",
+            "scratch/a.png",
+        ] {
+            let error = collect(root, &[ignored.into()]).unwrap_err();
+            assert!(error.contains("is ignored by git"), "{ignored}: {error}");
+        }
+        for absent in ["storage/app/other.png", "keep.log"] {
+            let error = collect(root, &[absent.into()]).unwrap_err();
+            assert_eq!(error, format!("{absent} is not in the workspace"));
+        }
     }
 
     #[cfg(unix)]
