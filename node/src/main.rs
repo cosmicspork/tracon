@@ -1215,7 +1215,7 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             session_egress,
             timeout_secs,
         } => {
-            let mut entries = repo_entries().await?;
+            let (mut entries, hash) = repo_entries().await?;
             let at = entries
                 .iter()
                 .position(|entry| entry["path"].as_str() == Some(path.as_str()));
@@ -1260,18 +1260,18 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 Some(at) => entries[at] = entry,
                 None => entries.push(entry),
             }
-            save_repo_entries(entries).await?;
+            save_repo_entries(entries, &hash).await?;
             println!("saved; it applies to the next session and the next check");
             Ok(())
         }
         RepoCommand::Rm { path } => {
-            let mut entries = repo_entries().await?;
+            let (mut entries, hash) = repo_entries().await?;
             let before = entries.len();
             entries.retain(|entry| entry["path"].as_str() != Some(path.as_str()));
             if entries.len() == before {
                 anyhow::bail!("no [[repo]] entry has path {path}");
             }
-            save_repo_entries(entries).await?;
+            save_repo_entries(entries, &hash).await?;
             println!("removed");
             Ok(())
         }
@@ -1333,22 +1333,26 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
     }
 }
 
-/// The table as the node holds it, for a command that changes one entry of it.
-async fn repo_entries() -> Result<Vec<serde_json::Value>> {
+/// The table as the node holds it, for a command that changes one entry of
+/// it, with `node.toml`'s hash: the version the save is decided against.
+async fn repo_entries() -> Result<(Vec<serde_json::Value>, String)> {
     let v = node_call(reqwest::Method::GET, "/api/repos/environments", None, None).await?;
-    Ok(v["entries"]
+    let entries = v["entries"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|item| item["entry"].clone())
-        .collect())
+        .collect();
+    let hash = v["hash"].as_str().unwrap_or_default().to_string();
+    Ok((entries, hash))
 }
 
-async fn save_repo_entries(entries: Vec<serde_json::Value>) -> Result<()> {
+/// The table saved whole, refused if `node.toml` changed since `hash` was read.
+async fn save_repo_entries(entries: Vec<serde_json::Value>, hash: &str) -> Result<()> {
     node_call(
         reqwest::Method::PUT,
         "/api/repos/environments",
-        Some(serde_json::json!({ "entries": entries })),
+        Some(serde_json::json!({ "entries": entries, "expected_hash": hash })),
         None,
     )
     .await?;
