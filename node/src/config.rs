@@ -1580,7 +1580,8 @@ pub struct Harness {
     /// a bare refusal (`crate::adapter::RETIRED_MESSAGE`).
     pub id: String,
     /// The tools a session may use at all, by the harness's own names. Empty
-    /// means the harness's default set, which is the default here.
+    /// means the adapter's default set, which is the default here: for Claude
+    /// Code that is the built-ins a node session uses, not all of them.
     ///
     /// Restricting is available but not on by default, and the reason is worth
     /// knowing: a tool list is a whitelist, and a harness's shell is easy to

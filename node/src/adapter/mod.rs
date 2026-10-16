@@ -383,7 +383,8 @@ pub struct LaunchSpec {
     /// MCP servers offered to the harness at session start. The node's own
     /// tools reach it this way and no other.
     pub mcp_servers: Vec<Value>,
-    /// Built-in tools the harness may use. Empty leaves its default set.
+    /// Built-in tools the harness may use. Empty leaves the adapter's default
+    /// set (for Claude Code, the few built-ins a node session uses).
     pub tools: Vec<String>,
     /// Environment for the harness process: the gateway wiring.
     pub env: Vec<(String, String)>,
