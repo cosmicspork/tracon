@@ -1311,6 +1311,61 @@ async fn repository_environments_are_listed_and_built_only_from_this_machine() {
     }
 }
 
+/// `tracon repo set` and `tracon repo rm` save through the same handler the
+/// settings page does, naming the version they read as the save requires.
+#[tokio::test]
+async fn the_repo_commands_save_against_the_version_they_read() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = n.app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let tracon = |args: &[&str]| {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
+            .args(args)
+            .env("TRACON_URL", &url)
+            .env_remove("TRACON_TOKEN")
+            .output()
+    };
+
+    let out = tracon(&[
+        "repo",
+        "set",
+        "/src/app",
+        "--dockerfile",
+        ".devcontainer/Dockerfile",
+        "--context",
+        ".",
+    ])
+    .await
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = Config::try_load().unwrap();
+    assert_eq!(file.repo.len(), 1);
+    assert_eq!(file.repo[0].context.as_deref(), Some("."));
+
+    let out = tracon(&["repo", "rm", "/src/app"]).await.unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(Config::try_load().unwrap().repo.is_empty());
+    server.abort();
+}
+
 /// The table is saved from this machine, written to `node.toml`, and in
 /// effect at once: a restart would end every session to change one
 /// repository's environment. A table the node could not honour is refused
