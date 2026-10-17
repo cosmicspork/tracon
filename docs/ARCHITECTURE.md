@@ -1061,7 +1061,8 @@ default branch, made when the repository's image is built — so a candidate's i
 which may run the candidate's own scripts, can reach its own evidence and nobody else's.
 That warm-up is also the only preparation lent a registry credential: the entry's
 `prepare_credentials` name `env` credentials in the broker, each of which must name the
-repository in its own `repos`, and their environment goes into the warm-up's commands
+repository in its own `repos` (by path, or by a `group/**` prefix matched segment by
+segment), and their environment goes into the warm-up's commands
 and is taken out of what they print. It travels as secret environment
 (`RunnerCommand::secret_env`), as every egress grant's proxy URL does, since that URL
 carries the grant's password. Neither is ever written where another reader finds it.
