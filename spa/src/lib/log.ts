@@ -463,6 +463,9 @@ export function eventLine(e: Event): EventLine | null {
       }
       const [text, tone] = said[decision] ?? [`review ${decision || 'decided'}`, 'mark']
       const waited = num(p.waiting_ms)
+      // A publication the operator finished by hand and the node verified.
+      const reconciled = str(p.reconciled)
+      if (reconciled) return line('ok', ['review recorded as published', `at ${reconciled}`, 'by the operator'])
       return line(tone, [text, 'by the operator', waited !== null ? `after ${formatDuration(waited)} waiting` : ''])
     }
     case 'provider_exhausted': {
