@@ -1429,6 +1429,12 @@ async fn the_repo_commands_save_against_the_version_they_read() {
         ".devcontainer/Dockerfile",
         "--context",
         ".",
+        "--prepare",
+        "composer install",
+        "--prepare-credential",
+        "nova",
+        "--prepare-credential",
+        "registry",
     ])
     .await
     .unwrap();
@@ -1440,6 +1446,20 @@ async fn the_repo_commands_save_against_the_version_they_read() {
     let file = Config::try_load().unwrap();
     assert_eq!(file.repo.len(), 1);
     assert_eq!(file.repo[0].context.as_deref(), Some("."));
+    assert_eq!(file.repo[0].prepare_credentials, ["nova", "registry"]);
+
+    // One empty value clears the list and leaves the rest of the entry.
+    let out = tracon(&["repo", "set", "/src/app", "--prepare-credential", ""])
+        .await
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = Config::try_load().unwrap();
+    assert!(file.repo[0].prepare_credentials.is_empty());
+    assert_eq!(file.repo[0].prepare, ["composer install"]);
 
     let out = tracon(&["repo", "rm", "/src/app"]).await.unwrap();
     assert!(
@@ -1448,6 +1468,50 @@ async fn the_repo_commands_save_against_the_version_they_read() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(Config::try_load().unwrap().repo.is_empty());
+    server.abort();
+}
+
+/// A save refused because `node.toml` changed after the command read it is
+/// reported as that, once: the change was decided against the file as it
+/// was, so the command does not quietly read again and overwrite.
+#[tokio::test]
+async fn a_repo_save_against_a_changed_file_is_reported_and_not_retried() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let puts = Arc::new(AtomicUsize::new(0));
+    let counted = puts.clone();
+    let app = axum::Router::new().route(
+        "/api/repos/environments",
+        axum::routing::get(|| async { axum::Json(json!({ "entries": [], "hash": "read" })) }).put(
+            move || async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::CONFLICT,
+                    axum::Json(json!({
+                        "error": { "code": 409, "kind": "conflict", "message": "stale" },
+                        "hash": "now",
+                    })),
+                )
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
+        .args(["repo", "set", "/src/app", "--image", "img@sha256:00"])
+        .env("TRACON_URL", &url)
+        .env_remove("TRACON_TOKEN")
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("node.toml changed since this command read it"),
+        "{stderr}"
+    );
+    assert_eq!(puts.load(Ordering::SeqCst), 1);
     server.abort();
 }
 

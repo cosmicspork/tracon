@@ -584,7 +584,8 @@ egress = ["packagist", "nova.laravel.com"]
 prepare_credentials = ["nova"]
 ```
 
-Both sides must agree: an entry naming a credential that does not name the repository
+`tracon repo set github.com/acme/shop --prepare-credential nova` sets the same list
+(repeat the flag for several; `--prepare-credential ""` clears it). Both sides must agree: an entry naming a credential that does not name the repository
 is refused at the warm-up, and the warm-up does not run. Read the secret from the
 environment (`COMPOSER_AUTH`, or an `.npmrc` line like
 `//npm.pkg.github.com/:_authToken=${NPM_TOKEN}`) and never write it to a file: the cache
