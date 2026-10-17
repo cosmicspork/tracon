@@ -35,6 +35,8 @@ const REMOTE: &str = "203.0.113.7:5000";
 struct Node {
     app: axum::Router,
     store: Arc<Store>,
+    manager: Manager,
+    broker: tracon::broker::SharedBroker,
 }
 
 /// The router with the guard layered on, as `serve` builds it.
@@ -63,6 +65,8 @@ fn node_with(cfg: Config) -> Node {
         Default::default(),
         Arc::new(tracon::runner::local::LocalBackend),
     );
+    let state_manager = manager.clone();
+    let broker = tools.broker.clone();
     let state = AppState {
         manager,
         cfg,
@@ -78,7 +82,12 @@ fn node_with(cfg: Config) -> Node {
     };
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));
-    Node { app, store }
+    Node {
+        app,
+        store,
+        manager: state_manager,
+        broker,
+    }
 }
 
 /// One request, with a peer address the guard and the extractor can read.
@@ -219,6 +228,14 @@ GH_TOKEN = "sh-not-a-real-token"
     );
 }
 
+/// A state directory of the test's own, for a CLI run with no node to reach.
+/// That CLI reads the whole sealed file and writes it back, and every test in
+/// this binary shares the one under `state::isolate`: run there, it would
+/// undo what a parallel test sealed, or have its own work undone.
+fn private_state(name: &str) -> std::path::PathBuf {
+    state::scratch(&format!("{name}-state"))
+}
+
 /// `tracon credential import` with a node running here hands the file to
 /// it, so the node brokers the new copy at once rather than the one it read
 /// at start; with none running it seals the store itself.
@@ -227,6 +244,7 @@ async fn a_cli_import_reaches_the_running_node() {
     use std::os::unix::fs::PermissionsExt;
     let n = node();
     let dir = state::scratch("a_cli_import_reaches_the_running_node");
+    let own = private_state("a_cli_import_reaches_the_running_node");
     let file = dir.join("credentials.toml");
     std::fs::write(
         &file,
@@ -238,16 +256,21 @@ async fn a_cli_import_reaches_the_running_node() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let import = || {
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
-            .args(["credential", "import"])
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"));
+        cmd.args(["credential", "import"])
             .arg(&file)
             .env("TRACON_URL", &url)
-            .env_remove("TRACON_TOKEN")
-            .output()
+            .env_remove("TRACON_TOKEN");
+        cmd
     };
 
     // Nothing answers yet: the store is sealed here.
-    let out = import().await.unwrap();
+    let out = import()
+        .env("TRACON_STATE_DIR", &own)
+        .env("TRACON_CONFIG_DIR", &own)
+        .output()
+        .await
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -267,7 +290,7 @@ async fn a_cli_import_reaches_the_running_node() {
         .await
         .unwrap();
     });
-    let out = import().await.unwrap();
+    let out = import().output().await.unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -283,13 +306,27 @@ async fn a_cli_import_reaches_the_running_node() {
     server.abort();
 }
 
+/// The sealed file as a restarted node would read it.
+fn sealed() -> Broker {
+    let key = tracon::mesh::identity::load_or_generate()
+        .unwrap()
+        .0
+        .credential_store_key();
+    Broker::load(&key).unwrap()
+}
+
 /// `tracon credential rm` with a node running here removes the credential
 /// through it, so the node stops brokering it at once rather than at its
 /// next restart; with none running it removes it from the store itself.
+/// Either way the file loses it too, so a restart cannot bring it back, and
+/// the line names the nodes still holding a copy.
 #[tokio::test]
 async fn a_cli_rm_reaches_the_running_node() {
+    use std::os::unix::fs::PermissionsExt;
     let n = node();
+    let own = private_state("a_cli_rm_reaches_the_running_node");
     let toml = "[credentials.vega]\nchannels = [\"personal\"]\n\
+                nodes = [\"n1\", \"peer-b\"]\n\
                 [credentials.vega.env]\nVEGA_KEY = \"not-a-real-key\"\n";
     let seal = || async {
         let (s, v) = call(
@@ -304,17 +341,37 @@ async fn a_cli_rm_reaches_the_running_node() {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let rm = || {
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
-            .args(["credential", "rm", "vega"])
+    let tracon = |args: &[&str]| {
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"));
+        cmd.args(args)
             .env("TRACON_URL", &url)
-            .env_remove("TRACON_TOKEN")
-            .output()
+            .env_remove("TRACON_TOKEN");
+        cmd
     };
+    let here = |args: &[&str]| {
+        let mut cmd = tracon(args);
+        cmd.env("TRACON_STATE_DIR", &own)
+            .env("TRACON_CONFIG_DIR", &own);
+        cmd
+    };
+    let rm = || tracon(&["credential", "rm", "vega"]).output();
 
     // Nothing answers yet: the store is opened here.
-    seal().await;
-    let out = rm().await.unwrap();
+    // Not `credentials.toml`: in a state directory that name is the old
+    // plaintext store, which the CLI would seal and rename from under us.
+    let file = state::scratch("a_cli_rm_reaches_the_running_node").join("vega.toml");
+    std::fs::write(&file, toml).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = here(&["credential", "import", file.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = here(&["credential", "rm", "vega"]).output().await.unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -323,6 +380,11 @@ async fn a_cli_rm_reaches_the_running_node() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("running node"), "{stdout}");
     assert!(stdout.contains("removed vega"), "{stdout}");
+    assert!(stdout.contains("removal is local"), "{stdout}");
+    assert!(stdout.contains("peer-b"), "{stdout}");
+    let out = here(&["credential", "ls"]).output().await.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && !stdout.contains("vega"), "{stdout}");
 
     seal().await;
     let app = n.app.clone();
@@ -345,8 +407,13 @@ async fn a_cli_rm_reaches_the_running_node() {
         stdout.contains("removed vega from the running node"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("removal is local, and peer-b still hold"),
+        "{stdout}"
+    );
     let (_, v) = call(&n, "GET", "/api/credentials", Some(LOCAL), None).await;
     assert!(!v.to_string().contains("vega"), "{v}");
+    assert!(sealed().get("vega").is_none());
 
     // A second removal finds nothing, and says so.
     let out = rm().await.unwrap();
@@ -354,6 +421,85 @@ async fn a_cli_rm_reaches_the_running_node() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no credential named vega"), "{stderr}");
     server.abort();
+}
+
+/// Removing the credential a provider uses goes the way a disconnect does:
+/// the providers frame says so at once, the file loses it, and the answer
+/// names the other node still holding a copy.
+#[tokio::test]
+async fn removing_a_provider_credential_publishes_the_provider_as_disconnected() {
+    let n = node();
+    let key = tracon::mesh::identity::load_or_generate()
+        .unwrap()
+        .0
+        .credential_store_key();
+    let providers = tracon::providers::Providers::new(
+        Arc::new(Config::default()),
+        n.broker.clone(),
+        key,
+        "n1".into(),
+        n.manager.bus().clone(),
+    );
+    n.manager.set_providers(providers.clone());
+    let toml = "[credentials.openai]\nkind = \"api_key\"\nprovider = \"openai\"\n\
+                channels = [\"personal\"]\nnodes = [\"n1\", \"peer-b\"]\n\
+                [credentials.openai.env]\nAPI_KEY = \"not-a-real-key\"\n";
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": toml })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let state = |p: &tracon::providers::Providers| {
+        p.list_private()
+            .into_iter()
+            .find(|value| value["name"] == "openai")
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(state(&providers), "connected");
+
+    let mut frames = n.manager.bus().subscribe();
+    let (s, v) = call(&n, "DELETE", "/api/credentials/openai", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["removed"], "openai");
+    assert_eq!(v["still_held_by"], json!(["peer-b"]));
+    let published = std::iter::from_fn(|| frames.try_recv().ok()).find_map(|frame| match frame {
+        tracon::stream::Frame::Providers { providers } => Some(providers),
+        _ => None,
+    });
+    let published = published.expect("a providers frame");
+    let openai = published.iter().find(|p| p["name"] == "openai").unwrap();
+    assert_eq!(openai["state"], "disconnected");
+    assert_eq!(state(&providers), "disconnected");
+    assert!(sealed().get("openai").is_none());
+}
+
+/// `import` is a static route beside `/api/credentials/{name}`; a
+/// credential that happens to carry the name is still removable.
+#[tokio::test]
+async fn a_credential_named_import_can_be_removed() {
+    let n = node();
+    let toml = "[credentials.import]\nchannels = [\"personal\"]\n\
+                [credentials.import.env]\nIMPORT_KEY = \"not-a-real-key\"\n";
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": toml })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = call(&n, "DELETE", "/api/credentials/import", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["removed"], "import");
+    let (s, _) = call(&n, "DELETE", "/api/credentials/import", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(sealed().get("import").is_none());
 }
 
 #[tokio::test]

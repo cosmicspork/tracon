@@ -475,8 +475,10 @@ enum CredentialCommand {
     /// them into the store. Existing names are replaced. A node running on
     /// this machine is handed them, and uses them at once.
     Import { file: std::path::PathBuf },
-    /// Remove one credential. A node running on this machine is asked to
-    /// remove it, and stops brokering it at once.
+    /// Remove one credential from this node. A node running on this machine
+    /// is asked to remove it, and stops brokering it at once. The removal is
+    /// local to this node: other nodes it was shared or handed off to keep
+    /// their copies, and are named.
     Rm { name: String },
     /// Hand a credential to another member node, direct-sealed over the hub.
     /// The credential must list that node in `nodes`, or it is refused there.
@@ -1431,20 +1433,6 @@ async fn running_node() -> Option<String> {
 
 fn node_url() -> String {
     std::env::var("TRACON_URL").unwrap_or_else(|_| "http://127.0.0.1:7420".into())
-}
-
-/// One path segment for a name the operator typed: anything outside the
-/// characters a URL path keeps as they are is percent-encoded, so a name
-/// cannot add segments or a query to the route it is sent to.
-fn path_segment(name: &str) -> String {
-    name.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 async fn node_call(
@@ -2625,6 +2613,20 @@ async fn memory_command(cmd: MemoryCommand) -> Result<()> {
     }
 }
 
+/// The tail of a `credential rm` line: the mesh has no revocation, so the
+/// other nodes a removed credential listed still hold, and broker, the copies
+/// they were handed.
+fn still_held(others: &[String]) -> String {
+    if others.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; removal is local, and {} still hold their copies",
+            others.join(", ")
+        )
+    }
+}
+
 fn urlencoding(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -2716,21 +2718,37 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             // start, and would write it back the next time it saved. Removed
             // through it, it stops brokering the credential now.
             if let Some(url) = running_node().await {
-                node_call(
+                let v = node_call(
                     reqwest::Method::DELETE,
-                    &format!("/api/credentials/{}", path_segment(&name)),
+                    &format!("/api/credentials/{}", urlencoding(&name)),
                     None,
                     None,
                 )
                 .await?;
-                println!("removed {name} from the running node at {url}");
+                let others: Vec<String> = v["still_held_by"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|node| node.as_str().map(str::to_string))
+                    .collect();
+                println!(
+                    "removed {name} from the running node at {url}{}",
+                    still_held(&others)
+                );
                 return Ok(());
             }
-            if !broker.remove(&name) {
+            let Some(removed) = broker.get(&name).cloned() else {
                 anyhow::bail!("no credential named {name}");
-            }
+            };
+            broker.remove(&name);
             broker.save(&key)?;
-            println!("removed {name}");
+            let here = id.node_id();
+            let others: Vec<String> = removed
+                .nodes
+                .into_iter()
+                .filter(|node| *node != here)
+                .collect();
+            println!("removed {name}{}", still_held(&others));
             Ok(())
         }
         CredentialCommand::Share { name, to } => {

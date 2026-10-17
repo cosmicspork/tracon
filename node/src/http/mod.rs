@@ -179,7 +179,10 @@ pub fn router(state: AppState) -> Router {
             "/api/mesh/enroll",
             get(api::enroll_status).post(api::start_enroll),
         )
-        .route("/api/credentials/import", post(api::import_credentials))
+        .route(
+            "/api/credentials/import",
+            post(api::import_credentials).delete(api::delete_credential_named_import),
+        )
         .route("/api/usage", get(api::usage))
         .route("/api/metrics", get(api::metrics))
         .route("/api/provenance/{sha}", get(api::provenance))
