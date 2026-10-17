@@ -1923,6 +1923,29 @@ mod tests {
         unsafe { libc::geteuid() == 0 }
     }
 
+    /// The stand-in, when running as root with the right to give a file
+    /// away. A node's check container is root with every capability
+    /// dropped, CAP_CHOWN included, so there it is `None` and the tree stays
+    /// root's.
+    fn stand_in() -> Option<u32> {
+        static CAN_CHOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let can = *CAN_CHOWN.get_or_init(|| {
+            as_root() && {
+                let probe = tempfile::NamedTempFile::new().unwrap();
+                std::os::unix::fs::chown(probe.path(), Some(STAND_IN), Some(STAND_IN)).is_ok()
+            }
+        });
+        can.then_some(STAND_IN)
+    }
+
+    /// Whether a test can lay out a tree the node's own user owns. Not as
+    /// root without CAP_CHOWN: everything written is root's, which the
+    /// guard rightly trusts, so a test of the node-owned rules returns
+    /// early there.
+    fn node_ownership_unrepresentable() -> bool {
+        as_root() && stand_in().is_none()
+    }
+
     /// A node laid out under one temporary directory: its state, config,
     /// data and home, a worktree root, and a "package manager prefix" the
     /// tests can put trusted programs in.
@@ -1991,10 +2014,10 @@ mod tests {
             path
         }
 
-        /// Hand `path` to the stand-in user when running as root.
+        /// Hand `path` to the stand-in user when there is one.
         fn own(path: &Path) {
-            if as_root() {
-                std::os::unix::fs::chown(path, Some(STAND_IN), Some(STAND_IN)).unwrap();
+            if let Some(uid) = stand_in() {
+                std::os::unix::fs::chown(path, Some(uid), Some(uid)).unwrap();
             }
         }
 
@@ -2030,9 +2053,9 @@ mod tests {
 
         fn guard_with(&self, layout: Layout, cfg: &Config) -> Guard {
             let guard = Guard::new(layout, &[cfg]);
-            match as_root() {
-                true => guard.running_as(STAND_IN).in_group(STAND_IN),
-                false => guard,
+            match stand_in() {
+                Some(uid) => guard.running_as(uid).in_group(uid),
+                None => guard,
             }
         }
 
@@ -2089,6 +2112,9 @@ mod tests {
 
     #[test]
     fn a_program_the_node_owns_outside_a_trusted_prefix_is_refused() {
+        if node_ownership_unrepresentable() {
+            return;
+        }
         let node = Node::new();
         let gh = node.program("elsewhere/gh");
         // Read-only does not help: its owner can make it writable again.
@@ -2198,6 +2224,9 @@ mod tests {
 
     #[test]
     fn a_world_or_group_writable_directory_is_refused() {
+        if node_ownership_unrepresentable() {
+            return;
+        }
         let node = Node::new();
         for (mode, words) in [(0o777, "every user"), (0o775, "by group")] {
             let dir = node.at(&format!("brew/shared-{mode:o}"));
@@ -2227,6 +2256,9 @@ mod tests {
 
     #[test]
     fn a_file_another_user_owns_is_refused() {
+        if node_ownership_unrepresentable() {
+            return;
+        }
         let node = Node::new();
         let gh = node.program("brew/bin/gh");
         // As a node running under another uid sees this tree.
@@ -3099,6 +3131,9 @@ mod tests {
         // as a home it is never the claim, and `/` never is.
         assert_eq!(claim(&made, std::slice::from_ref(&root)), None);
         assert_eq!(claim(Path::new("/"), &[]), None);
+        if node_ownership_unrepresentable() {
+            return;
+        }
         // And the claim counts only for a node whose file says it is a pod.
         let mut layout = node.layout();
         layout.state_volume = Some(node.at("pvc"));
