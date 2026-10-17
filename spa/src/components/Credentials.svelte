@@ -6,6 +6,7 @@
   // forge token.
   import { api } from '../lib/api'
   import { store } from '../lib/store.svelte'
+  import { credentialReach } from '../lib/credentials'
   import type { CredentialSummary } from '../lib/types'
   import Card from './settings/Card.svelte'
 
@@ -123,6 +124,10 @@
             {c.nodes.length === 0 ? 'serving node only' : `${c.nodes.length} peer cop${c.nodes.length === 1 ? 'y' : 'ies'}`} ·
             {c.env_keys.join(', ')}
           </span>
+          {#if credentialReach(c)}
+            {@const reach = credentialReach(c)}
+            <span title={reach}>{reach}</span>
+          {/if}
           {#if peers.length > 0}
             {@const target = to[c.name]}
             {@const targetName = peers.find((node) => node.id === target)?.name ?? target}

@@ -43,7 +43,10 @@ pub enum BrokerError {
     NotBound { name: String, channel: String },
     #[error("credential {name} is not bound to this node")]
     NotOnThisNode { name: String },
-    #[error("credential {name} does not name repository {repo} in its `repos`")]
+    #[error(
+        "credential {name} does not name repository {repo} in its `repos`; add the \
+         repository's path, or its group's as `group/**`"
+    )]
     NotForRepo { name: String, repo: String },
     #[error("credential {name} is a model credential, not environment")]
     NotEnv { name: String },
@@ -89,8 +92,9 @@ pub struct Credential {
     pub nodes: Vec<String>,
     /// Repositories, written as a `[[repo]]` entry's `path`, whose
     /// default-branch preparation may be lent this credential's `env` when
-    /// their entry names it in `prepare_credentials`. Empty means none: the
-    /// entry naming a credential does not release it on its own.
+    /// their entry names it in `prepare_credentials`. An entry ending in
+    /// `/**` names every repository under that group instead. Empty means
+    /// none: the entry naming a credential does not release it on its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
     /// `env` (default), `api_key`, or `oauth`.
@@ -183,6 +187,86 @@ impl Credential {
     pub fn is_model(&self) -> bool {
         self.kind == KIND_API_KEY || self.kind == KIND_OAUTH
     }
+
+    /// Whether some entry in `repos` names the repository rooted at `repo`.
+    pub fn names_repo(&self, repo: &Path) -> bool {
+        self.repos
+            .iter()
+            .any(|bound| repos_entry_names(bound, repo))
+    }
+
+    /// The `[[repo]]` entries, by `path`, whose repositories `repos` names
+    /// now, for showing what a group prefix reaches. An entry is resolved to
+    /// the `clones` it matches, or read as its own root when it matches none.
+    pub fn covers(&self, entries: &[crate::config::Repo], clones: &[PathBuf]) -> Vec<String> {
+        entries
+            .iter()
+            .filter(|entry| {
+                let mut roots = clones
+                    .iter()
+                    .filter(|clone| entry.matches(clone))
+                    .peekable();
+                match roots.peek() {
+                    Some(_) => roots.any(|root| self.names_repo(root)),
+                    None => self.names_repo(&crate::config::expand_home(&entry.path)),
+                }
+            })
+            .map(|entry| entry.path.display().to_string())
+            .collect()
+    }
+
+    /// Refuse a `repos` entry that globs anywhere but a final `/**`, so one
+    /// that looks wider or narrower than it is never reaches the store.
+    fn check_repos(&self) -> Result<(), String> {
+        for bound in &self.repos {
+            let prefix = bound.strip_suffix("/**").unwrap_or(bound);
+            if prefix.contains('*') {
+                return Err(format!(
+                    "repos entry {bound:?}: `**` is allowed only as the last segment, as in \
+                     `gitlab.com/group/**`, and no other wildcard is"
+                ));
+            }
+            let named = Path::new(prefix)
+                .components()
+                .any(|part| matches!(part, std::path::Component::Normal(_)));
+            if !named {
+                return Err(format!(
+                    "repos entry {bound:?} names no repository or group; a prefix is written \
+                     as `gitlab.com/group/**`"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `bound`, one entry in a credential's `repos`, names the
+/// repository rooted at `repo`. Without a wildcard it matches as a
+/// `[[repo]]` path does. Ending in `/**` it names every repository strictly
+/// under the prefix, matched by whole segment as the same rule matches the
+/// prefix: an absolute prefix must lead the root, a relative one must end
+/// one of its ancestors. Any other glob matches nothing.
+fn repos_entry_names(bound: &str, repo: &Path) -> bool {
+    let Some(prefix) = bound.strip_suffix("/**") else {
+        return !bound.contains('*') && crate::config::repo_path_matches(Path::new(bound), repo);
+    };
+    if prefix.contains('*') {
+        return false;
+    }
+    let prefix = crate::config::expand_home(Path::new(prefix));
+    let want: Vec<_> = prefix.components().collect();
+    let have: Vec<_> = repo.components().collect();
+    if !want
+        .iter()
+        .any(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    // Component-wise, never textual: `group/**` must not match `group2/x`.
+    if prefix.is_absolute() {
+        return have.len() > want.len() && have[..want.len()] == want[..];
+    }
+    (want.len()..have.len()).any(|end| have[end - want.len()..end] == want[..])
 }
 
 /// Headers the model gateway writes in place of the harness's placeholder.
@@ -294,7 +378,12 @@ impl Broker {
     /// to stop a secret sitting readable on disk; text handed straight to the
     /// node has no mode to check, and is never written down.
     pub fn parse_text(text: &str) -> Result<Self, BrokerError> {
-        toml::from_str(text).map_err(|e| BrokerError::Parse(e.to_string()))
+        let broker: Self = toml::from_str(text).map_err(|e| BrokerError::Parse(e.to_string()))?;
+        for (name, cred) in &broker.credentials {
+            cred.check_repos()
+                .map_err(|e| BrokerError::Parse(format!("credential {name}: {e}")))?;
+        }
+        Ok(broker)
     }
 
     fn open(bytes: &[u8], key: &DataKey) -> Result<Self, BrokerError> {
@@ -433,6 +522,10 @@ impl Broker {
                 tracing::warn!(name, "credential handoff not pinned to this node; dropped");
                 continue;
             }
+            if let Err(error) = cred.check_repos() {
+                tracing::warn!(name, %error, "credential handoff names repositories wrongly; dropped");
+                continue;
+            }
             if cred.grant_id.is_some()
                 && self
                     .credentials
@@ -507,11 +600,7 @@ impl Broker {
                 name: name.to_string(),
             });
         }
-        if !cred
-            .repos
-            .iter()
-            .any(|bound| crate::config::repo_path_matches(Path::new(bound), repo))
-        {
+        if !cred.names_repo(repo) {
             return Err(BrokerError::NotForRepo {
                 name: name.to_string(),
                 repo: repo.display().to_string(),
@@ -913,6 +1002,142 @@ mod tests {
         assert!(summaries.contains("github.com/acme/shop"));
         assert!(!summaries.contains("npm_abc") && !summaries.contains("nova-licence-key"));
         assert!(!format!("{b:?}").contains("npm_abc"));
+    }
+
+    /// One credential lent to a forge group: `group/**` names every
+    /// repository under the group, by whole segment, with the prefix matched
+    /// as a `[[repo]]` path is (absolute leads the root, relative ends an
+    /// ancestor), and never the group itself.
+    #[test]
+    fn a_group_prefix_names_every_repository_under_it_by_whole_segment() {
+        let b = Broker::parse_text(
+            r#"
+            [credentials.composer]
+            repos = ["gitlab.com/unebraska/uitao/**"]
+            [credentials.composer.env]
+            COMPOSER_AUTH = "{}"
+
+            [credentials.local]
+            repos = ["/src/uitao/**"]
+            [credentials.local.env]
+            NPM_TOKEN = "t"
+            "#,
+        )
+        .unwrap();
+        let lent =
+            |name: &str, repo: &str| b.preparation_env(name, Path::new(repo), "node-a").is_ok();
+        let clones = "/var/lib/tracon/repos/gitlab.com/unebraska/uitao";
+        assert!(lent(
+            "composer",
+            &format!("{clones}/custom-development/integrations")
+        ));
+        assert!(lent("composer", &format!("{clones}/portal")));
+        assert!(lent("composer", "gitlab.com/unebraska/uitao/portal"));
+        // Segments, never characters, and the group is not one of its repositories.
+        assert!(!lent(
+            "composer",
+            "/var/lib/tracon/repos/gitlab.com/unebraska/uitao2/portal"
+        ));
+        assert!(!lent(
+            "composer",
+            "/var/lib/tracon/repos/gitlab.com/unebraska/xuitao/portal"
+        ));
+        assert!(!lent("composer", clones));
+        assert!(!lent(
+            "composer",
+            "/var/lib/tracon/repos/gitlab.com/unebraska/portal"
+        ));
+        // An absolute prefix must lead the root; it is not found further down.
+        assert!(lent("local", "/src/uitao/portal"));
+        assert!(lent("local", "/src/uitao/group/portal"));
+        assert!(!lent("local", "/home/me/src/uitao/portal"));
+        assert!(!lent("local", "/src/uitao2/portal"));
+        assert!(!lent("local", "/src/uitao"));
+    }
+
+    /// `**` is the last segment or nothing: anywhere else, any other
+    /// wildcard, or a prefix naming no group is refused when the store is
+    /// read in, never stored to match something other than it looks.
+    #[test]
+    fn a_repos_wildcard_anywhere_but_the_last_segment_is_refused_at_import() {
+        let store = |bound: &str| {
+            Broker::parse_text(&format!(
+                "[credentials.c]\nrepos = [{bound:?}]\n[credentials.c.env]\nK = \"v\"\n"
+            ))
+        };
+        for bound in [
+            "gitlab.com/**/uitao",
+            "**/uitao",
+            "gitlab.com/uit*/**",
+            "gitlab.com/uitao/*",
+            "gitlab.com/uitao**",
+            "**",
+            "/**",
+        ] {
+            let error = store(bound).unwrap_err().to_string();
+            assert!(
+                error.contains("credential c") && error.contains("**"),
+                "{bound}: {error}"
+            );
+        }
+        for bound in [
+            "gitlab.com/uitao/**",
+            "/src/uitao/**",
+            "github.com/acme/shop",
+        ] {
+            assert!(store(bound).is_ok(), "{bound}");
+        }
+        // A copy handed over by a peer is held to the same rule.
+        let mut b = Broker::default();
+        let rows = vec![serde_json::json!({
+            "name": "c",
+            "credential": { "nodes": ["node-a"], "repos": ["a/**/b"], "env": { "K": "v" } },
+        })];
+        assert!(b.apply_handoff("node-a", &rows).is_empty());
+    }
+
+    /// A repository no entry names is refused in words that point at both
+    /// fixes: its own path, or its group's as a prefix.
+    #[test]
+    fn a_repository_no_entry_names_is_refused_naming_the_group_prefix_form() {
+        let b = Broker::parse_text(
+            "[credentials.c]\nrepos = [\"gitlab.com/other/**\"]\n[credentials.c.env]\nK = \"v\"\n",
+        )
+        .unwrap();
+        let error = b
+            .preparation_env("c", Path::new("/r/gitlab.com/uitao/portal"), "node-a")
+            .unwrap_err();
+        assert!(matches!(error, BrokerError::NotForRepo { .. }));
+        let message = error.to_string();
+        assert!(message.contains("/r/gitlab.com/uitao/portal"), "{message}");
+        assert!(message.contains("`group/**`"), "{message}");
+    }
+
+    /// Settings shows what a prefix reaches: the configured entries whose
+    /// repositories it names, resolved through the clones they match.
+    #[test]
+    fn a_credential_covers_the_configured_repositories_its_repos_name() {
+        let cred = Credential {
+            repos: vec!["gitlab.com/uitao/**".into(), "/src/shop".into()],
+            ..Default::default()
+        };
+        let entry = |path: &str| crate::config::Repo {
+            path: path.into(),
+            ..Default::default()
+        };
+        let entries = [
+            entry("uitao/portal"),
+            entry("gitlab.com/uitao/api"),
+            entry("/src/shop"),
+            entry("gitlab.com/elsewhere/api"),
+        ];
+        let clones = [PathBuf::from(
+            "/var/lib/tracon/repos/gitlab.com/uitao/portal",
+        )];
+        assert_eq!(
+            cred.covers(&entries, &clones),
+            ["uitao/portal", "gitlab.com/uitao/api", "/src/shop"]
+        );
     }
 
     #[test]
