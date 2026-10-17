@@ -874,10 +874,12 @@ mod tests {
         }
     }
 
+    /// Every forge tool is placed in one list or the other on purpose: a tool
+    /// left out is asked by default, which hid an unnamed read (#550).
     #[test]
     fn the_new_reads_run_unattended_and_every_write_is_asked() {
         let none = serde_json::json!({});
-        for name in [
+        let allowed = [
             "issue_search",
             "issue_transitions",
             "pipeline_status",
@@ -892,11 +894,11 @@ mod tests {
             "pr_for_branch",
             "mr_discussions",
             "mr_for_branch",
-        ] {
-            let d = policy().decide(&tool(name, &none, name));
-            assert_eq!(d.verdict, Verdict::Allow, "{name}");
-        }
-        for name in [
+            "mr_status",
+        ];
+        // Merges are asked here and still need an authority grant; no rule
+        // names the tools, so neither is denied.
+        let asked = [
             "pipeline_run",
             "pipeline_retry",
             "run_rerun",
@@ -908,9 +910,25 @@ mod tests {
             "issue_comment",
             "issue_update",
             "issue_create",
-        ] {
+            "pr_merge",
+            "mr_merge",
+            "job_play",
+            "deploy",
+        ];
+        for name in allowed {
+            let d = policy().decide(&tool(name, &none, name));
+            assert_eq!(d.verdict, Verdict::Allow, "{name}");
+        }
+        for name in asked {
             let d = policy().decide(&tool(name, &none, name));
             assert_eq!(d.verdict, Verdict::Ask, "{name}");
+        }
+        for name in crate::mcp::github::TOOLS
+            .iter()
+            .chain(crate::mcp::gitlab::TOOLS)
+        {
+            let placed = usize::from(allowed.contains(name)) + usize::from(asked.contains(name));
+            assert_eq!(placed, 1, "{name} must be in exactly one of the lists");
         }
     }
 
