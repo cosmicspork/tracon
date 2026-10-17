@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.34.0](https://github.com/cosmicspork/tracon/compare/v0.33.3...v0.34.0) (2026-10-17)
+
+
+### Features
+
+* **cli:** add repo set --prepare-credential and report a stale save plainly ([#572](https://github.com/cosmicspork/tracon/issues/572)) ([e348790](https://github.com/cosmicspork/tracon/commit/e34879014a2216d053ecf97ebeb18b3090d50ec2))
+
+
+### Bug Fixes
+
+* **podman:** record the requested image's digest name, not RepoDigests[0] ([#573](https://github.com/cosmicspork/tracon/issues/573)) ([06d22ee](https://github.com/cosmicspork/tracon/commit/06d22eed5fd063b3525a8d530bdf29d9680a44e1))
+* **policy:** allow pipeline_list_by_sha with the other brokered reads ([#567](https://github.com/cosmicspork/tracon/issues/567)) ([936db23](https://github.com/cosmicspork/tracon/commit/936db2304da7a59b8d3e1c974ad40845f786ea36))
+* **spa:** import credentials from the Credentials card, not Forge tokens ([#562](https://github.com/cosmicspork/tracon/issues/562)) ([5fe4876](https://github.com/cosmicspork/tracon/commit/5fe4876e1cdc18e0104e85b4d37b6e3171c311f3))
+* **spa:** render a work item's requirements as Markdown ([#561](https://github.com/cosmicspork/tracon/issues/561)) ([131f1f5](https://github.com/cosmicspork/tracon/commit/131f1f5c32daacaa149bfd3b3e5ce0af47441d93))
+
 ## [0.33.3](https://github.com/cosmicspork/tracon/compare/v0.33.2...v0.33.3) (2026-10-16)
 
 
