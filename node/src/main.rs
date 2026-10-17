@@ -163,6 +163,10 @@ enum RepoCommand {
         /// list; one empty value clears it.
         #[arg(long = "prepare")]
         prepare: Vec<String>,
+        /// A broker credential lent to the default branch's preparation;
+        /// repeat for several. Replaces the list; one empty value clears it.
+        #[arg(long = "prepare-credential")]
+        prepare_credentials: Vec<String>,
         /// A preset (crates, npm, pypi, packagist, github) or a host name;
         /// repeat for several. Replaces the list; one empty value clears it.
         #[arg(long = "egress")]
@@ -1225,6 +1229,7 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             checks,
             inherit_checks,
             prepare,
+            prepare_credentials,
             egress,
             session_egress,
             timeout_secs,
@@ -1260,6 +1265,9 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             }
             if !prepare.is_empty() {
                 fields.insert("prepare".into(), flag_list(prepare));
+            }
+            if !prepare_credentials.is_empty() {
+                fields.insert("prepare_credentials".into(), flag_list(prepare_credentials));
             }
             if !egress.is_empty() {
                 fields.insert("egress".into(), flag_list(egress));
@@ -1366,6 +1374,8 @@ async fn repo_entries() -> Result<(Vec<serde_json::Value>, String)> {
 }
 
 /// The table saved whole, refused if `node.toml` changed since `hash` was read.
+/// A refused save is reported, not retried: the change was decided against
+/// the file as it was, and another edit landed in between.
 async fn save_repo_entries(entries: Vec<serde_json::Value>, hash: &str) -> Result<()> {
     node_call(
         reqwest::Method::PUT,
@@ -1373,7 +1383,14 @@ async fn save_repo_entries(entries: Vec<serde_json::Value>, hash: &str) -> Resul
         Some(serde_json::json!({ "entries": entries, "expected_hash": hash })),
         None,
     )
-    .await?;
+    .await
+    .map_err(|error| match error.downcast_ref::<NodeRefusal>() {
+        Some(refusal) if refusal.is_stale_version() => anyhow::anyhow!(
+            "node.toml changed since this command read it, so nothing was saved; \
+             check `tracon repo show` and run the command again if it still applies"
+        ),
+        _ => error,
+    })?;
     Ok(())
 }
 
@@ -1428,6 +1445,32 @@ async fn running_node() -> Option<String> {
         .map(|_| url)
 }
 
+/// A request the node answered with an error status, and the message it gave.
+#[derive(Debug)]
+struct NodeRefusal {
+    status: reqwest::StatusCode,
+    kind: Option<String>,
+    message: String,
+}
+
+impl NodeRefusal {
+    /// The edit named a version of `node.toml` that is no longer current:
+    /// a 412 to an If-Match, or the 409 conflict an `expected_hash` gets.
+    fn is_stale_version(&self) -> bool {
+        self.status == reqwest::StatusCode::PRECONDITION_FAILED
+            || (self.status == reqwest::StatusCode::CONFLICT
+                && self.kind.as_deref() == Some("conflict"))
+    }
+}
+
+impl std::fmt::Display for NodeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status, self.message)
+    }
+}
+
+impl std::error::Error for NodeRefusal {}
+
 fn node_url() -> String {
     std::env::var("TRACON_URL").unwrap_or_else(|_| "http://127.0.0.1:7420".into())
 }
@@ -1462,8 +1505,12 @@ async fn node_call(
     let text = res.text().await.unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     if !status.is_success() {
-        let msg = v["error"]["message"].as_str().unwrap_or(&text).to_string();
-        anyhow::bail!("{status}: {msg}");
+        return Err(NodeRefusal {
+            status,
+            kind: v["error"]["kind"].as_str().map(str::to_string),
+            message: v["error"]["message"].as_str().unwrap_or(&text).to_string(),
+        }
+        .into());
     }
     Ok(v)
 }
