@@ -4735,6 +4735,231 @@ async fn a_new_change_ships_one_commit_of_the_reviewed_tree_as_approved() {
     assert_eq!(record.pushed_sha.as_deref(), Some(shipped.as_str()));
 }
 
+/// Sign the worktree's head in place and return the signed commit. No key
+/// is needed: the header is a stand-in for an SSH signature (`%G?` would not
+/// verify it), and publication never checks a signature, only whether the
+/// commit is otherwise the one it would make.
+fn sign_head(wt: &std::path::Path) -> String {
+    sh(
+        wt,
+        "signed=$(git cat-file commit HEAD | awk '{ print } /^committer / && !done { \
+         print \"gpgsig -----BEGIN SSH SIGNATURE-----\"; print \" c2lnbmVk\"; \
+         print \" -----END SSH SIGNATURE-----\"; done = 1 }' \
+         | git hash-object -t commit -w --stdin) && git reset -q --hard $signed",
+    );
+    sh_out(wt, "git rev-parse HEAD")
+}
+
+/// Whether the forge's copy of `sha` carries a signature.
+fn signed_on_forge(f: &Fixture, sha: &str) -> bool {
+    sh_out(
+        &f.dir.join("origin.git"),
+        &format!("git cat-file commit {sha}"),
+    )
+    .contains("gpgsig -----BEGIN SSH SIGNATURE-----")
+}
+
+/// What the review screen is given to say which commit ships: the message
+/// that ships the agent's head as written, and its signed commits a new
+/// commit would replace.
+async fn shipping_shown(f: &Fixture, id: &str) -> (Value, Value) {
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    (
+        body["intent"]["as_written"].clone(),
+        body["intent"]["signed"].clone(),
+    )
+}
+
+/// One signed commit whose message is the one approved is already what the
+/// squash would make, so it ships as it is and keeps its signature (#551).
+#[tokio::test]
+async fn a_signed_commit_the_squash_would_remake_ships_with_its_signature() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let signed = sign_head(std::path::Path::new(&f.worktree));
+
+    let mut args = f.submit_args();
+    args["message"] = json!("work");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    assert_eq!(
+        shipping_shown(&f, &id).await,
+        (json!("work"), json!([signed])),
+        "the screen can say the agent's own commit ships"
+    );
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shipped = f.forge_branch();
+    assert_eq!(shipped, signed, "the agent's own commit is what ships");
+    assert!(signed_on_forge(&f, &shipped), "its signature is kept");
+    let record = f.publication(&id);
+    assert_eq!(record.pushed_sha.as_deref(), Some(signed.as_str()));
+}
+
+/// The operator's edit of the message at approval needs a new commit, which
+/// carries no signature: what ships is not the agent's commit, and the
+/// screen had what it needs to say so before the approval.
+#[tokio::test]
+async fn an_edited_message_ships_a_new_commit_without_the_signature() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let signed = sign_head(std::path::Path::new(&f.worktree));
+
+    let mut args = f.submit_args();
+    args["message"] = json!("work");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    assert_eq!(
+        shipping_shown(&f, &id).await,
+        (json!("work"), json!([signed]))
+    );
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": { "commit": "work, said again" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shipped = f.forge_branch();
+    assert_ne!(shipped, signed, "a new commit ships");
+    assert!(!signed_on_forge(&f, &shipped), "and it is not signed");
+    let record = f.publication(&id);
+    assert_eq!(record.pushed_sha.as_deref(), Some(shipped.as_str()));
+}
+
+/// Two commits squash to a new one, and the screen is told no message would
+/// ship the agent's head, and which signature the squash drops.
+#[tokio::test]
+async fn two_commits_squash_to_a_new_commit_the_screen_names() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let wt = std::path::Path::new(&f.worktree);
+    let first = sh_out(wt, "git rev-parse HEAD");
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A && git commit -qm more",
+    );
+    let signed = sign_head(wt);
+
+    let mut args = f.submit_args();
+    args["message"] = json!("more");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let (as_written, dropped) = shipping_shown(&f, &id).await;
+    assert!(
+        as_written.is_null(),
+        "no message ships the agent's head as written"
+    );
+    // The first commit is signed too where git signs every commit.
+    assert!(
+        dropped.as_array().unwrap().contains(&json!(signed)),
+        "{dropped}"
+    );
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shipped = f.forge_branch();
+    assert!(shipped != signed && shipped != first, "a new commit ships");
+    assert!(!signed_on_forge(&f, &shipped));
+    let record = f.publication(&id);
+    assert_eq!(record.pushed_sha.as_deref(), Some(shipped.as_str()));
+}
+
+/// A signed commit on top of what an existing change's branch holds is the
+/// squash onto that branch, so it ships as written too.
+#[tokio::test]
+async fn a_signed_commit_on_the_change_head_ships_with_its_signature() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let wt = std::path::Path::new(&f.worktree);
+    let mut args = f.submit_args();
+    args["message"] = json!("work");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first = f.forge_branch();
+    assert_eq!(first, sh_out(wt, "git rev-parse HEAD"), "the agent's head");
+
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    let signed = sign_head(wt);
+    gh_forge(&f, pull_seven(&first));
+    let id = review_id(&f.submit_update(json!({ "message": "second" })).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    assert_eq!(intent.squash_onto.as_deref(), Some(first.as_str()));
+    assert_eq!(
+        shipping_shown(&f, &id).await,
+        (json!("second"), json!([signed])),
+        "the commit already on the branch is not replaced"
+    );
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(f.forge_branch(), signed);
+    assert!(signed_on_forge(&f, &signed));
+    let record = f.publication(&id);
+    assert_eq!(record.pushed_sha.as_deref(), Some(signed.as_str()));
+}
+
+/// An attempt interrupted after it pushed the agent's signed commit finds
+/// that commit on the forge when it resumes: the same choice, made again,
+/// names the same commit, so nothing is pushed twice.
+#[tokio::test]
+async fn a_resumed_publication_finds_the_signed_commit_it_pushed() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let signed = sign_head(std::path::Path::new(&f.worktree));
+    let mut args = f.submit_args();
+    args["message"] = json!("work");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap().id;
+    // The interrupted attempt pushed, then the node died before recording it.
+    f.forge_holds(&signed);
+    gh_that_lists(&f, "[]");
+    let publication = f.publication_id(&id);
+    f.store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: &id,
+            revision_id: Some(&revision),
+            candidate_id: &tracon::store::candidate_id(&review.head_sha, "work"),
+            channel: "work",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat/x",
+            head_sha: &review.head_sha,
+            instance: "a-process-that-is-no-longer-running",
+        })
+        .unwrap();
+    assert!(f.store.begin_publish(&id, Some(&revision)).unwrap());
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let git = f.git_log();
+    assert!(git.contains("ls-remote"), "{git}");
+    assert!(
+        !git.contains("push origin"),
+        "nothing is pushed again: {git}"
+    );
+    let record = f.publication(&id);
+    assert_eq!(record.state, "opened");
+    assert_eq!(record.pushed_sha.as_deref(), Some(signed.as_str()));
+    assert!(signed_on_forge(&f, &signed));
+}
+
 /// The next revision of a squashed change adds one more commit on top of
 /// the squash, though the agent never had that commit.
 #[tokio::test]

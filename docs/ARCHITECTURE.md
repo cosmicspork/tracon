@@ -1263,7 +1263,12 @@ default, the publisher makes one commit holding exactly the reviewed tree, on
 the commit pinned at submit — where the branch leaves its base for a new
 branch, or what the change's branch holds for an update, including an earlier
 squash the agent never had — with the candidate head's author and dates, so a
-resumed attempt makes the identical commit. `keep` pushes the agent's commits
+resumed attempt makes the identical commit. When the agent's own head already
+is that commit but for its signature (one commit whose parents are that commit
+and, for an update that merged its base, the base it merged; the message
+unchanged), its head is pushed instead, so the signature survives; a commit
+the publisher makes is never signed. The review says before approval which
+of the two ships, and which signatures a new commit drops. `keep` pushes the agent's commits
 as written, unless the operator edited a commit's message (`messages` in the
 approved outputs, by the commit's sha): then that commit and those after it are
 remade in the publisher with the same trees, authors, committers and dates and

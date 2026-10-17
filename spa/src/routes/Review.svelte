@@ -34,6 +34,7 @@
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
+  import { shipping } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
@@ -398,6 +399,8 @@
   const squashing = $derived(intent.squash_onto !== undefined)
   /** Under `keep`: the commit messages you changed, by sha. */
   const reworded = $derived.by(editedMessages)
+  /** Whether the agent's own commit ships, and which signatures a new one drops. */
+  const ships = $derived(shipping(intent, message, reworded))
   /** Whether you can change the commit messages here. */
   const rewordable = $derived(!squashing && !remoteOwner && !closed && !surface.phone)
   const outputs = $derived<ReviewOutputs>({
@@ -988,6 +991,20 @@
             : 'pushed as the agent wrote them'}</b
       >
     </div>
+    {#if review && intent.commits?.length}
+      {#if ships.own}
+        <div class="note dim">
+          Ships the agent's own commit <code>{review.head_sha.slice(0, 8)}</code
+          >{(intent.signed ?? []).includes(review.head_sha) ? ', signature kept' : ''}.
+        </div>
+      {:else}
+        <div class="note">
+          Ships a new commit, not the agent's <code>{review.head_sha.slice(0, 8)}</code>{ships.dropped.length
+            ? `. The signature on ${ships.dropped.map((sha) => sha.slice(0, 8)).join(', ')} is dropped: a commit the node makes is never signed`
+            : ''}.{squashing && intent.as_written !== undefined ? " The agent's own message would ship its commit as written." : ''}
+        </div>
+      {/if}
+    {/if}
     {#if intent.commits?.length}
       <ul class="commits">
         {#each intent.commits as c (c.sha)}
