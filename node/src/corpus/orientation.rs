@@ -454,6 +454,29 @@ fn push_criteria(out: &mut String, store: &Store, item: &WorkItem) {
     ));
 }
 
+/// What a reviewer can do besides reading the diff: run the change, where the
+/// node offers a browser, and say per criterion what that showed. Said only of
+/// the tools this session actually has.
+fn exercising(tools: &[String]) -> String {
+    let has = |name: &str| tools.iter().any(|t| t == name);
+    if !has(crate::mcp::review::FINDING) {
+        return String::new();
+    }
+    let run = if has(crate::mcp::services::START) {
+        "run it (`service_start` with `browser` gives you a headless browser beside you), "
+    } else {
+        "run it in your worktree, "
+    };
+    format!(
+        "Where a criterion is one no check settles, or the operator asks, exercise the change: \
+         {run}show what you saw with `show_work`, and record per criterion with \
+         `review_finding` whether it supported the criterion, contradicted it, or could not be \
+         shown, citing that shown work. A finding is your account, kept apart from the verdict \
+         on the diff; it never marks a criterion met. `criteria_link` proposes a check, and is \
+         asked like any session's.\n\n"
+    )
+}
+
 /// A review session: requirements and diff, nothing of how the diff came to
 /// be. A fresh reader does not rationalise what it watched.
 fn push_review(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
@@ -463,7 +486,8 @@ fn push_review(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
          not seen how it was made; judge the diff against the requirements above and the \
          plan, run the tests in your worktree if it helps, and end by calling \
          `review_verdict` (approve, or request_changes with findings). A human decides \
-         after you; your verdict informs them.\n\n### Proposed change\n\n**{}**\n\n",
+         after you; your verdict informs them.\n\n{}### Proposed change\n\n**{}**\n\n",
+        exercising(facts.tools),
         r.title
     ));
     push_capped(
@@ -1867,5 +1891,25 @@ mod tests {
         for text in [ran, failed, slow, skipped] {
             assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
         }
+    }
+
+    #[test]
+    fn a_reviewer_is_told_how_to_exercise_the_change_only_with_the_tools_it_has() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let browser = exercising(&names(&[
+            "review_verdict",
+            "review_finding",
+            "service_start",
+        ]));
+        assert!(
+            browser.contains("`service_start` with `browser`"),
+            "{browser}"
+        );
+        assert!(browser.contains("`show_work`"), "{browser}");
+        assert!(browser.contains("never marks a criterion met"), "{browser}");
+        let no_catalogue = exercising(&names(&["review_verdict", "review_finding"]));
+        assert!(!no_catalogue.contains("service_start"), "{no_catalogue}");
+        assert!(no_catalogue.contains("`review_finding`"), "{no_catalogue}");
+        assert_eq!(exercising(&names(&["review_verdict"])), "");
     }
 }

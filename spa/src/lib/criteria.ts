@@ -6,7 +6,7 @@
 // whole screen exists to keep, said in words rather than in a colour: checks
 // passing is not a person agreeing that the criterion was met.
 
-import type { Coverage, Criteria, CriterionLink, LinkKind, Standard, Verdict } from './types'
+import type { Coverage, Criteria, CriterionFinding, CriterionLink, LinkKind, Standard, Verdict } from './types'
 
 export const LINK_KINDS: LinkKind[] = ['check']
 
@@ -24,7 +24,15 @@ export const COVERAGE: Record<Coverage, { label: string; title: string }> = {
   judged_met: { label: 'judged met', title: 'a person looked at this candidate and said so' },
   judged_not_met: { label: 'judged not met', title: 'a person looked at this candidate and said so' },
   judged_unclear: { label: 'judged unclear', title: 'a person could not judge the criterion as written' },
+  contradicted_unjudged: {
+    label: 'contradicted · unjudged',
+    title: 'a review session ran this candidate and found it does not do this; nobody has judged it',
+  },
   failing: { label: 'failing', title: "an agreed check's latest run for this candidate did not pass" },
+  verified_unjudged: {
+    label: 'verified · unjudged',
+    title: 'a review session ran this candidate and found it does this; nobody has said it was met',
+  },
   no_result_yet: { label: 'no result yet', title: 'an agreed check has not produced a result for this candidate' },
   checks_pass: { label: 'checks pass · unjudged', title: 'every agreed check passed, and nobody has said it was met' },
   awaits_judgement: {
@@ -43,9 +51,16 @@ export function judged(coverage: Coverage): boolean {
 /** The state to lead with, so a screenful reads at a glance. */
 export function attention(coverage: Coverage): 'gap' | 'fail' | 'wait' | 'settled' {
   if (coverage === 'nothing_points_at_it' || coverage === 'only_proposed') return 'gap'
-  if (coverage === 'failing' || coverage === 'judged_not_met') return 'fail'
+  if (coverage === 'failing' || coverage === 'contradicted_unjudged' || coverage === 'judged_not_met') return 'fail'
   if (coverage === 'judged_met') return 'settled'
   return 'wait'
+}
+
+/** What a review finding's outcome says, in the operator's terms. */
+export const FINDING: Record<CriterionFinding['outcome'], string> = {
+  supported: 'the reviewer ran it and it does this',
+  contradicted: 'the reviewer ran it and it does not',
+  not_shown: 'the reviewer could not show it either way',
 }
 
 /** What one link says of itself: its kind, its standing, and its result or why it has none. */

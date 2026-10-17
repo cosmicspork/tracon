@@ -18,3 +18,10 @@ test('what needs attention is a gap or a failure, never a green', () => {
   expect(attention('checks_pass')).toBe('wait')
   expect(attention('awaits_judgement')).toBe('wait')
 })
+
+test("a reviewer's finding is not a judgement, and a contradiction needs attention", () => {
+  expect(judged('verified_unjudged')).toBe(false)
+  expect(judged('contradicted_unjudged')).toBe(false)
+  expect(attention('verified_unjudged')).toBe('wait')
+  expect(attention('contradicted_unjudged')).toBe('fail')
+})

@@ -60,7 +60,9 @@ pub fn definitions() -> Vec<Value> {
                         show again after a resubmission, since work shown at an older commit is \
                         marked stale. It appears on this session and on its reviews; pass \
                         `review_id` to attach it to one review only. A harness you run yourself \
-                        must pass `review_id`, and paths are read from that review's worktree.",
+                        must pass `review_id`, and paths are read from that review's worktree. \
+                        In a review session it goes on the review you are reviewing, marked with \
+                        that review's candidate, and is what review_finding cites as evidence.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -134,8 +136,36 @@ pub async fn call(
         return Err("nothing to show: pass `markdown`, `paths`, or both".into());
     }
 
-    let review = match args.get("review_id").and_then(Value::as_str) {
-        Some(id) => {
+    // A review session shows work on the one review it was started for, and
+    // nowhere else: what it ran is about that candidate, not about any review
+    // its workspace's history happens to touch.
+    let reviewing = match ctx.session_id() {
+        Some(id) => store
+            .get_session(id)
+            .map_err(|e| e.to_string())?
+            .filter(|session| session.phase == "review"),
+        None => None,
+    };
+    let named = args.get("review_id").and_then(Value::as_str);
+    let review = match (&reviewing, named) {
+        (Some(session), named) => {
+            let own = session
+                .review_id
+                .as_deref()
+                .ok_or("this review session has no review")?;
+            if named.is_some_and(|id| id != own) {
+                return Err(format!(
+                    "a review session shows work on its own review, {own}, and no other"
+                ));
+            }
+            Some(
+                store
+                    .get_review(own)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("the review is gone")?,
+            )
+        }
+        (None, Some(id)) => {
             let review = store
                 .get_review(id)
                 .map_err(|e| e.to_string())?
@@ -159,36 +189,55 @@ pub async fn call(
             }
             Some(review)
         }
-        None => None,
+        (None, None) => None,
     };
 
     // Where the files are read from, and so the commit the work is shown at:
-    // the snapshot the node exports itself, never a path the agent names.
-    let root: PathBuf = match (ctx.session_id(), &review) {
-        (Some(session_id), _) => manager
-            .snapshot_workspace(session_id)
-            .await
-            .map_err(|e| e.to_string())?,
-        (None, Some(review)) => serde_json::from_str::<Target>(&review.target)
-            .ok()
-            .and_then(|target| target.worktree)
-            .map(PathBuf::from)
-            .ok_or("that review has no worktree to read from")?,
+    // the snapshot the node exports itself, never a path the agent names. A
+    // reviewer's account alone reads no file, so nothing is exported for it.
+    let bound = reviewing.is_some();
+    let root: Option<PathBuf> = match (ctx.session_id(), &review) {
+        (Some(_), _) if bound && paths.is_empty() => None,
+        (Some(session_id), _) => Some(
+            manager
+                .snapshot_workspace(session_id)
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
+        (None, Some(review)) => Some(
+            serde_json::from_str::<Target>(&review.target)
+                .ok()
+                .and_then(|target| target.worktree)
+                .map(PathBuf::from)
+                .ok_or("that review has no worktree to read from")?,
+        ),
         (None, None) => {
             return Err(
                 "a harness you run yourself shows work on a review: pass `review_id`".into(),
             )
         }
     };
-    let head_sha = crate::review::resolve(&root.to_string_lossy(), "HEAD")
-        .await
-        .map_err(|e| format!("the workspace has no commit to show work at: {e}"))?;
+    // A reviewer's work is bound to the candidate it exercised, whatever its
+    // own checkout holds: that is the commit it goes stale against.
+    let head_sha = match (&review, &root) {
+        (Some(review), _) if bound => store
+            .latest_review_revision(&review.id)
+            .map_err(|e| e.to_string())?
+            .map(|revision| revision.head_sha)
+            .unwrap_or_else(|| review.head_sha.clone()),
+        (_, Some(root)) => crate::review::resolve(&root.to_string_lossy(), "HEAD")
+            .await
+            .map_err(|e| format!("the workspace has no commit to show work at: {e}"))?,
+        (_, None) => return Err("there is no workspace to show work from".into()),
+    };
 
     let id = uuid::Uuid::now_v7().to_string();
     let collected = if paths.is_empty() {
         None
     } else {
-        let root = root.clone();
+        let root = root
+            .clone()
+            .ok_or("there is no workspace to read the paths from")?;
         Some(
             tokio::task::spawn_blocking(move || collect(&root, &paths))
                 .await

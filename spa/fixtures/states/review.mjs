@@ -465,7 +465,20 @@ const CRITERIA = {
       standard: 'agreed',
       refs: [],
       links: [],
-      coverage: 'nothing_points_at_it',
+      finding: {
+        id: 'f-1',
+        review_id: ID,
+        candidate_id: 'cand-7d3f9a1c',
+        outcome: 'supported',
+        note: 'opened the channel page under load; headroom fell to 0 and refilled to 120',
+        evidence: ['sw-r'],
+        provenance: 'inferred',
+        session_id: 's-review',
+        model: 'claude-sonnet-4-5',
+        criterion_text: "Operators can see a channel's current burst headroom.",
+        created_ms: -900000,
+      },
+      coverage: 'verified_unjudged',
     },
   ],
   gaps: {
@@ -475,12 +488,31 @@ const CRITERIA = {
     questions: ['Should a burst refusal be logged as a policy decision?'],
     orphaned_judgements: [],
   },
-  summary: '5 criteria · 1 judged met · 1 failing · 1 only the agent\'s proposal · 1 nothing points at it',
+  summary: '5 criteria · 1 only the agent\'s proposal · 1 failing · 1 verified by the reviewer, unjudged · 1 checks pass, unjudged · 1 judged met',
 }
 
 // --- shown work ------------------------------------------------------------------
 
 const SHOWN = [
+  {
+    id: 'sw-r',
+    channel: 'personal',
+    session_id: 's-review',
+    lane: null,
+    review_id: ID,
+    head_sha: HEAD,
+    title: 'Headroom on the channel page under load',
+    format: 'markdown',
+    markdown: 'Drove the channel page in the browser while 500 calls ran: the headroom read 120, fell to 0, and refilled to 120.',
+    document_id: null,
+    document_slug: null,
+    document_hash: null,
+    files: [],
+    created_ms: -950000,
+    stale: false,
+    stale_reason: null,
+    checks: [{ command: 'just check', outcome: 'passed', source_outcome: null }],
+  },
   {
     id: 'sw-1',
     channel: 'personal',

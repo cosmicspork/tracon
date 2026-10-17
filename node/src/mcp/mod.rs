@@ -162,8 +162,9 @@ enum ActionRecord {
 }
 
 impl Tools {
-    /// The tools a review session gets: what it needs to read, and its
-    /// verdict. Nothing that writes, publishes, or reaches a forge.
+    /// The tools a review session gets: what it needs to read, what it needs
+    /// to exercise the candidate and show what it saw, its findings, and its
+    /// verdict. Nothing that publishes or reaches a forge.
     pub const REVIEW_TOOLS: &'static [&'static str] = &[
         memory::RECALL,
         docs::DOC_READ,
@@ -174,12 +175,22 @@ impl Tools {
         // And which of those criteria anything actually points at: a reviewer
         // that cannot see an uncovered criterion cannot say it is uncovered.
         work::CRITERIA_READ,
+        // What it thinks would settle a criterion, asked like any session's.
+        work::CRITERIA_LINK,
+        // Running the candidate where no check settles a criterion: a
+        // browser beside the session, decided by the policy bundle by name,
+        // and what it saw shown to the operator, bound to the candidate.
+        services::START,
+        services::STATUS,
+        show::SHOW,
+        // Per criterion, what running it showed: never a verdict on one.
+        review::FINDING,
         review::VERDICT,
     ];
 
-    /// What an external harness is not offered: a verdict is what a
-    /// review session the node started gives on someone else's change.
-    pub const NOT_EXTERNAL: &'static [&'static str] = &[review::VERDICT];
+    /// What an external harness is not offered: a verdict and findings are
+    /// what a review session the node started gives on someone else's change.
+    pub const NOT_EXTERNAL: &'static [&'static str] = &[review::VERDICT, review::FINDING];
 
     /// Tool definitions for a channel, narrowed by phase: a review session
     /// sees only [`Self::REVIEW_TOOLS`].
@@ -499,7 +510,8 @@ impl Tools {
             | review::STATUS
             | review::SUBMIT_REPORT
             | review::REPORT_STATUS
-            | review::VERDICT => {
+            | review::VERDICT
+            | review::FINDING => {
                 let access = self
                     .session
                     .get()

@@ -20,6 +20,9 @@
 //! criterion as far as *its checks pass*. The word **met** comes from
 //! `store::criteria`, whose only writer is [`judge`], which refuses a session.
 //! Passing one's own checks is not the customer agreeing with the standard.
+//! Nor is a review session running the candidate and finding it does what the
+//! criterion says (`store::findings`): that raises a criterion to *verified*,
+//! still unjudged, and no further.
 //!
 //! What this module adds is the reading: per criterion, whether the standard is
 //! the operator's or only an agent's proposal, and how far the evidence for one
@@ -39,6 +42,7 @@ use super::brief::{
 use crate::config::Config;
 use crate::review::checks;
 use crate::store::criteria::CriterionJudgementRow;
+use crate::store::findings::ReviewFindingRow;
 use crate::store::{now_ms, Store, StoreError};
 use crate::stream::Bus;
 
@@ -80,8 +84,15 @@ pub enum Coverage {
     JudgedMet,
     JudgedNotMet,
     JudgedUnclear,
+    /// A review session exercised this candidate and found it contradicts the
+    /// criterion. A session's account, not a verdict: nobody has judged it.
+    ContradictedUnjudged,
     /// An agreed check's latest run for this candidate did not pass.
     Failing,
+    /// A review session exercised this candidate and found it supports the
+    /// criterion, and no agreed check is failing. Not *met*: nobody has said
+    /// so, and the reviewer's account is not the customer agreeing either.
+    VerifiedUnjudged,
     /// An agreed check has no run against this candidate yet.
     NoResultYet,
     /// Every agreed check passed. Not *met*: nobody has said so.
@@ -102,7 +113,11 @@ impl Coverage {
             Coverage::JudgedMet => "judged met",
             Coverage::JudgedNotMet => "judged not met",
             Coverage::JudgedUnclear => "judged unclear as written",
+            Coverage::ContradictedUnjudged => {
+                "a reviewer found it contradicted · nobody has judged it"
+            }
             Coverage::Failing => "a check is failing",
+            Coverage::VerifiedUnjudged => "a reviewer verified it · nobody has judged it",
             Coverage::NoResultYet => "no result against this candidate yet",
             Coverage::ChecksPass => "checks pass · nobody has judged it",
             Coverage::AwaitsJudgement => "only a person can settle this, and no one has",
@@ -172,6 +187,45 @@ impl From<&CriterionJudgementRow> for JudgementView {
     }
 }
 
+/// What a review session found when it exercised the candidate against one
+/// criterion: its account, with the shown work it rests on. Always `inferred`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingView {
+    pub id: String,
+    pub review_id: String,
+    pub candidate_id: String,
+    /// `supported`, `contradicted` or `not_shown`.
+    pub outcome: String,
+    pub note: String,
+    /// The `show_work` ids it rests on.
+    pub evidence: Vec<String>,
+    pub provenance: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The criterion as it read when the finding was made.
+    pub criterion_text: String,
+    pub created_ms: i64,
+}
+
+impl From<&ReviewFindingRow> for FindingView {
+    fn from(row: &ReviewFindingRow) -> Self {
+        Self {
+            id: row.id.clone(),
+            review_id: row.review_id.clone(),
+            candidate_id: row.candidate_id.clone(),
+            outcome: row.outcome.clone(),
+            note: row.note.clone(),
+            evidence: row.evidence.clone(),
+            provenance: row.provenance.clone(),
+            session_id: row.session_id.clone(),
+            model: row.model.clone(),
+            criterion_text: row.criterion_text.clone(),
+            created_ms: row.created_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CriterionView {
     /// `sc-` and twelve hex characters of the line's own text.
@@ -189,6 +243,10 @@ pub struct CriterionView {
     /// settle this candidate: the code changed since someone looked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub earlier_judgement: Option<JudgementView>,
+    /// The standing review finding on this criterion for the candidate being
+    /// read: the newest one. Kept apart from `judgement`; it is not one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding: Option<FindingView>,
     pub coverage: Coverage,
     /// Two lines of the section say the same thing. Said rather than merged:
     /// they share a name, so a verdict on one reads as a verdict on both.
@@ -271,6 +329,14 @@ pub enum CriteriaError {
     SessionJudgement,
     #[error("no candidate {0}")]
     MissingCandidate(String),
+    #[error("a finding is one of supported, contradicted or not_shown; {0:?} is not")]
+    Outcome(String),
+    #[error("a finding needs a note: what you ran, and what it showed")]
+    FindingNote,
+    #[error(
+        "a {0} finding rests on evidence: show what you ran with show_work and pass its shown_work_id"
+    )]
+    FindingEvidence(String),
     #[error("no revision {0}")]
     MissingRevision(String),
     #[error("revision does not match the work item and candidate")]
@@ -346,6 +412,16 @@ pub fn for_item(
         .filter(|row| row.channel == view.channel && row.brief_slug == view.slug)
         .collect();
     let candidate_id = candidate.as_ref().map(|c| c.id.clone());
+    // Findings are about one candidate: what a reviewer ran on an earlier
+    // attempt says nothing about this one, so it is not read at all.
+    let findings: Vec<_> = match &candidate {
+        Some(c) => store
+            .review_findings_for_candidate(item_id, &c.id)?
+            .into_iter()
+            .filter(|row| row.channel == view.channel && row.brief_slug == view.slug)
+            .collect(),
+        None => Vec::new(),
+    };
 
     let entries = view
         .brief
@@ -370,8 +446,12 @@ pub fn for_item(
             .is_none()
             .then(|| judgements.iter().find(|j| j.criterion_key == key))
             .flatten();
+        let finding = findings.iter().find(|f| f.criterion_key == key);
         let standard = Standard::of(entry.provenance);
-        let coverage = read_coverage(judgement.map(|j| j.verdict.as_str()), &links);
+        let coverage = with_finding(
+            read_coverage(judgement.map(|j| j.verdict.as_str()), &links),
+            finding.map(|f| f.outcome.as_str()),
+        );
         criteria.push(CriterionView {
             key,
             text: entry.text.clone(),
@@ -381,6 +461,7 @@ pub fn for_item(
             links,
             judgement: judgement.map(JudgementView::from),
             earlier_judgement: earlier_judgement.map(JudgementView::from),
+            finding: finding.map(FindingView::from),
             coverage,
             duplicate: false,
         });
@@ -508,6 +589,22 @@ fn read_coverage(verdict: Option<&str>, links: &[LinkView]) -> Coverage {
     Coverage::ChecksPass
 }
 
+/// Where a review finding puts a criterion. A person's verdict still outranks
+/// it, and a failing check outranks a reviewer's pass, as a failure outranks a
+/// pass anywhere; a reviewer's contradiction is itself a failure, and outranks
+/// the checks. `not_shown` says nothing about the candidate, so it moves
+/// nothing.
+fn with_finding(coverage: Coverage, finding: Option<&str>) -> Coverage {
+    if coverage.judged() {
+        return coverage;
+    }
+    match finding {
+        Some("contradicted") => Coverage::ContradictedUnjudged,
+        Some("supported") if coverage != Coverage::Failing => Coverage::VerifiedUnjudged,
+        _ => coverage,
+    }
+}
+
 fn read_gaps(
     brief: &Brief,
     criteria: &[CriterionView],
@@ -515,10 +612,9 @@ fn read_gaps(
 ) -> Gaps {
     let mut gaps = Gaps::default();
     for c in criteria {
-        if matches!(
-            c.coverage,
-            Coverage::NothingPointsAtIt | Coverage::OnlyProposed
-        ) {
+        // Read from the links rather than the coverage: a reviewer's finding
+        // moves the coverage, and still leaves nothing agreed pointing at it.
+        if !c.coverage.judged() && !c.links.iter().any(|l| l.standard == Standard::Agreed) {
             gaps.uncovered.push(c.key.clone());
         }
         if !c.coverage.judged() {
@@ -574,7 +670,15 @@ fn summarize(criteria: &[CriterionView], gaps: &Gaps) -> String {
     for (state, says) in [
         (Coverage::NothingPointsAtIt, "nothing points at them"),
         (Coverage::OnlyProposed, "only the agent's proposal"),
+        (
+            Coverage::ContradictedUnjudged,
+            "contradicted by the reviewer, unjudged",
+        ),
         (Coverage::Failing, "failing"),
+        (
+            Coverage::VerifiedUnjudged,
+            "verified by the reviewer, unjudged",
+        ),
         (Coverage::NoResultYet, "no result yet"),
         (Coverage::AwaitsJudgement, "await a person"),
         (Coverage::ChecksPass, "checks pass, unjudged"),
@@ -771,6 +875,89 @@ fn locate(brief: &Brief, criterion: &str) -> Result<usize, CriteriaError> {
     }
 }
 
+/// The item's channel, its brief's slug, and the criterion's text as it
+/// stands, for the criterion the caller named by key or by text.
+fn criterion_of(
+    store: &Store,
+    item_id: &str,
+    criterion: &str,
+) -> Result<(String, String, String), CriteriaError> {
+    let item = store
+        .work_get(item_id)?
+        .ok_or_else(|| CriteriaError::MissingItem(item_id.to_string()))?;
+    let slug = item
+        .brief_slug
+        .clone()
+        .ok_or_else(|| CriteriaError::NoBrief(item_id.to_string()))?;
+    let doc = store
+        .doc_get(&item.channel, &slug)?
+        .ok_or_else(|| CriteriaError::NoBrief(item_id.to_string()))?;
+    let parsed = Brief::parse(&doc.body);
+    let index = locate(&parsed, criterion)?;
+    let text = parsed
+        .section(Field::SuccessCriteria)
+        .map(|s| s.entries[index].text.clone())
+        .unwrap_or_default();
+    Ok((item.channel, slug, text))
+}
+
+/// What a review session found of one criterion, for [`record_finding`].
+pub struct FindingInput<'a> {
+    pub item_id: &'a str,
+    pub criterion: &'a str,
+    pub review_id: &'a str,
+    pub candidate_id: &'a str,
+    pub revision_id: Option<&'a str>,
+    pub outcome: &'a str,
+    pub note: &'a str,
+    /// Shown-work ids, already checked by the caller to be the reviewer's own
+    /// and shown at this candidate.
+    pub evidence: Vec<String>,
+    pub session_id: &'a str,
+    pub model: Option<&'a str>,
+}
+
+/// Record a review session's finding on one criterion. Always `inferred`, and
+/// never a verdict: it is written beside the operator's judgements, not among
+/// them, and the most it can make a criterion read is "verified · unjudged".
+pub fn record_finding(
+    store: &Store,
+    input: FindingInput<'_>,
+) -> Result<ReviewFindingRow, CriteriaError> {
+    let outcome = input.outcome.trim().to_ascii_lowercase();
+    if !crate::store::findings::OUTCOMES.contains(&outcome.as_str()) {
+        return Err(CriteriaError::Outcome(outcome));
+    }
+    let note = input.note.trim();
+    if note.is_empty() {
+        return Err(CriteriaError::FindingNote);
+    }
+    if outcome != "not_shown" && input.evidence.is_empty() {
+        return Err(CriteriaError::FindingEvidence(outcome));
+    }
+    let (channel, slug, text) = criterion_of(store, input.item_id, input.criterion)?;
+    let row = ReviewFindingRow {
+        id: super::new_id(),
+        channel,
+        review_id: input.review_id.to_string(),
+        candidate_id: input.candidate_id.to_string(),
+        revision_id: input.revision_id.map(str::to_string),
+        work_item_id: input.item_id.to_string(),
+        brief_slug: slug,
+        criterion_key: key_for(&text),
+        criterion_text: text,
+        outcome,
+        note: note.to_string(),
+        evidence: input.evidence,
+        provenance: crate::store::findings::PROVENANCE.to_string(),
+        session_id: input.session_id.to_string(),
+        model: input.model.map(str::to_string),
+        created_ms: now_ms(),
+    };
+    store.review_finding_record(&row)?;
+    Ok(row)
+}
+
 /// Say whether a criterion was met. The operator's, and only the operator's:
 /// an agent that judged its own work against its own standard would make the
 /// whole distinction this module exists for unreadable.
@@ -792,27 +979,9 @@ pub fn judge(
     if !crate::store::criteria::VERDICTS.contains(&verdict.as_str()) {
         return Err(CriteriaError::Verdict(verdict));
     }
-    let item = store
-        .work_get(item_id)?
-        .ok_or_else(|| CriteriaError::MissingItem(item_id.to_string()))?;
-    let slug = item
-        .brief_slug
-        .clone()
-        .ok_or_else(|| CriteriaError::NoBrief(item_id.to_string()))?;
-    let doc = store
-        .doc_get(&item.channel, &slug)?
-        .ok_or_else(|| CriteriaError::NoBrief(item_id.to_string()))?;
-    let parsed = Brief::parse(&doc.body);
-    let index = locate(&parsed, criterion)?;
-    let text = parsed
-        .section(Field::SuccessCriteria)
-        .map(|s| s.entries[index].text.clone())
-        .unwrap_or_default();
+    let (channel, slug, text) = criterion_of(store, item_id, criterion)?;
     if let Some(id) = candidate_id {
-        if store
-            .candidate_for_item(id, item_id, &item.channel)?
-            .is_none()
-        {
+        if store.candidate_for_item(id, item_id, &channel)?.is_none() {
             return Err(CriteriaError::MissingCandidate(id.to_string()));
         }
     }
@@ -828,8 +997,8 @@ pub fn judge(
     }
     let row = CriterionJudgementRow {
         id: super::new_id(),
-        channel: item.channel.clone(),
-        work_item_id: item.id.clone(),
+        channel,
+        work_item_id: item_id.to_string(),
         brief_slug: slug,
         criterion_key: key_for(&text),
         criterion_text: text,
@@ -875,6 +1044,7 @@ mod tests {
             links: coverage_links.clone(),
             judgement: None,
             earlier_judgement: None,
+            finding: None,
             coverage: read_coverage(None, &coverage_links),
             duplicate: false,
         }
@@ -940,6 +1110,55 @@ mod tests {
             Coverage::JudgedNotMet,
             "and a person's verdict outranks the absence of a result"
         );
+    }
+
+    #[test]
+    fn a_reviewers_finding_verifies_a_criterion_and_never_judges_it() {
+        use Coverage::*;
+        for base in [
+            NothingPointsAtIt,
+            OnlyProposed,
+            AwaitsJudgement,
+            NoResultYet,
+            ChecksPass,
+        ] {
+            let verified = with_finding(base, Some("supported"));
+            assert_eq!(verified, VerifiedUnjudged, "{base:?}");
+            assert!(
+                !verified.judged(),
+                "a reviewer's pass is not somebody agreeing"
+            );
+            assert_eq!(
+                with_finding(base, Some("contradicted")),
+                ContradictedUnjudged
+            );
+            assert_eq!(with_finding(base, Some("not_shown")), base, "{base:?}");
+            assert_eq!(with_finding(base, None), base, "{base:?}");
+        }
+        assert_eq!(
+            with_finding(Failing, Some("supported")),
+            Failing,
+            "a failing check outranks a reviewer's pass"
+        );
+        assert_eq!(
+            with_finding(Failing, Some("contradicted")),
+            ContradictedUnjudged
+        );
+        for judged in [JudgedMet, JudgedNotMet, JudgedUnclear] {
+            assert_eq!(with_finding(judged, Some("contradicted")), judged);
+            assert_eq!(with_finding(judged, Some("supported")), judged);
+        }
+    }
+
+    #[test]
+    fn a_verified_criterion_with_nothing_agreed_pointing_at_it_is_still_uncovered() {
+        let mut c = criterion("Exports open in Excel", Provenance::Decided, Vec::new());
+        c.coverage = with_finding(c.coverage, Some("supported"));
+        assert_eq!(c.coverage, Coverage::VerifiedUnjudged);
+        let gaps = read_gaps(&Brief::parse(""), std::slice::from_ref(&c), &[]);
+        assert_eq!(gaps.uncovered, vec![c.key.clone()]);
+        assert_eq!(gaps.unjudged, vec![c.key.clone()]);
+        assert!(summarize(&[c], &gaps).contains("1 verified by the reviewer, unjudged"));
     }
 
     #[test]

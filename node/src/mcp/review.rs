@@ -30,6 +30,7 @@ pub const STATUS: &str = "review_status";
 pub const SUBMIT_REPORT: &str = "submit_report";
 pub const REPORT_STATUS: &str = "report_status";
 pub const VERDICT: &str = "review_verdict";
+pub const FINDING: &str = "review_finding";
 
 pub fn definitions() -> Vec<Value> {
     let wait_secs_arg = json!({
@@ -200,6 +201,32 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["verdict", "summary"],
             },
         }),
+        json!({
+            "name": FINDING,
+            "description": "Review sessions only: what you found when you exercised the change \
+                            against one acceptance criterion from criteria_read, as opposed to \
+                            your verdict on the diff. Run the app (service_start with `browser` \
+                            gives you a headless browser), show what you saw with show_work, and \
+                            record here whether it `supported` the criterion, `contradicted` it, \
+                            or could `not_shown` either way. Call it once per criterion; calling \
+                            it again for the same one replaces your earlier finding. It is your \
+                            account, recorded as inferred: it never marks a criterion met, which \
+                            only the operator can. It does not end the session; review_verdict does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "criterion": { "type": "string", "description": "The criterion's key from criteria_read, or its text verbatim." },
+                    "outcome": { "type": "string", "enum": crate::store::findings::OUTCOMES },
+                    "note": { "type": "string", "description": "What you ran and what it showed, in a sentence or two." },
+                    "evidence": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "The shown_work_id of each show_work call this rests on: work you showed in this session, at this candidate. Required unless the outcome is not_shown.",
+                    },
+                },
+                "required": ["criterion", "outcome", "note"],
+            },
+        }),
     ]
 }
 
@@ -216,6 +243,7 @@ pub async fn call(
         SUBMIT_REPORT => submit_report(store, manager, ctx, args).await,
         REPORT_STATUS => report_status(store, manager, ctx, args).await,
         VERDICT => verdict(store, manager, ctx, args).await,
+        FINDING => finding(store, manager, ctx, args),
         other => Err(format!("no tool named {other}")),
     }
 }
@@ -1983,6 +2011,123 @@ async fn verdict(
     manager.publish_queue().await;
     manager.phase_done(session_id).await;
     Ok(json!({ "review_id": review_id, "recorded": true }))
+}
+
+/// `review_finding`: a review session's finding on one criterion, against the
+/// candidate of the review it was spawned for. Recorded beside the operator's
+/// judgements and never among them.
+fn finding(
+    store: &Arc<Store>,
+    manager: &Manager,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Value, String> {
+    let session_id = ctx
+        .session_id()
+        .ok_or("a finding is recorded by a review session")?;
+    let session = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("this session is gone")?;
+    if session.phase != "review" {
+        return Err(
+            "only a review session records a finding; criteria_link is how an execute session \
+             says what would settle a criterion"
+                .into(),
+        );
+    }
+    let review_id = session
+        .review_id
+        .clone()
+        .ok_or("this review session has no review")?;
+    let review = store
+        .get_review(&review_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("the review is gone")?;
+    let revision = store
+        .latest_review_revision(&review_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("this review has no candidate to have exercised")?;
+    let item_id = revision.requirements_work_item_id.clone().ok_or(
+        "the change under review is pinned to no work item, so it has no criteria to find against",
+    )?;
+    let criterion = str_arg(args, "criterion")?;
+    let outcome = str_arg(args, "outcome")?;
+    let note = args.get("note").and_then(Value::as_str).unwrap_or("");
+    let cited: Vec<String> = match args.get("evidence") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(|id| id.trim().to_string())
+                    .ok_or_else(|| "evidence is a list of shown_work_id strings".to_string())
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("evidence is a list of shown_work_id strings".into()),
+    };
+    // Evidence is what this reviewer showed at this candidate, and nothing
+    // else: the implementer's own account is not an independent check, and
+    // work shown at an earlier commit is about a change that is not this one.
+    let shown = store
+        .shown_work_for_review(&review)
+        .map_err(|e| e.to_string())?;
+    let mut evidence: Vec<String> = Vec::new();
+    for id in cited {
+        let Some(view) = shown.iter().find(|view| view.row.id == id) else {
+            return Err(format!("{id} is not work shown on this review"));
+        };
+        if view.row.session_id.as_deref() != Some(session_id) {
+            return Err(format!(
+                "{id} was shown by another session; a finding rests on what you ran yourself"
+            ));
+        }
+        if view.stale {
+            return Err(format!(
+                "{id} no longer describes this candidate: {}",
+                view.stale_reason.as_deref().unwrap_or("it is stale")
+            ));
+        }
+        if !evidence.contains(&id) {
+            evidence.push(id);
+        }
+    }
+    let row = crate::corpus::criteria::record_finding(
+        store,
+        crate::corpus::criteria::FindingInput {
+            item_id: &item_id,
+            criterion: &criterion,
+            review_id: &review_id,
+            candidate_id: &revision.candidate_id,
+            revision_id: Some(&revision.id),
+            outcome: &outcome,
+            note,
+            evidence,
+            session_id,
+            model: Some(&session.model),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    manager.record_event(
+        session_id,
+        ek::REVIEW_FINDING,
+        json!({
+            "review_id": review_id,
+            "criterion": row.criterion_key,
+            "criterion_text": row.criterion_text,
+            "outcome": row.outcome,
+            "note": row.note,
+            "evidence": row.evidence,
+        }),
+    );
+    Ok(json!({
+        "finding_id": row.id,
+        "criterion": row.criterion_key,
+        "outcome": row.outcome,
+        "candidate_id": row.candidate_id,
+        "standing": "recorded as your inferred account beside the criterion; only the operator \
+                     can say it was met",
+    }))
 }
 
 /// What `report_status` answers for a narrative report the operator has

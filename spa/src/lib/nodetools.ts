@@ -13,6 +13,7 @@ export const NODE_TOOLS = new Set([
   'submit_review',
   'review_status',
   'review_verdict',
+  'review_finding',
   'submit_report',
   'report_status',
   // the operator
@@ -161,6 +162,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return sp('Wait for review', short(str(a.review_id)))
     case 'review_verdict':
       return line('Give a verdict', str(a.verdict))
+    case 'review_finding':
+      return line('Record a finding', str(a.outcome).replace('_', ' '), clip(str(a.criterion), 56))
     case 'submit_report':
       return line(str(a.report_id) ? 'Revise the report' : 'Submit a report', clip(str(a.title)))
     case 'report_status':

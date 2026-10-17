@@ -956,11 +956,9 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
         json!({"criterion": TRIAGE, "kind": "check", "value": "just check"}),
     )
     .await;
-    assert!(
-        refused
-            .to_string()
-            .contains("not offered to a review session"),
-        "{refused}"
+    assert_eq!(
+        refused["state"], "awaiting_operator",
+        "a reviewer's proposed link is asked, like any session's: {refused}"
     );
     assert_eq!(brief_body(&h, &id), before);
 
@@ -1391,4 +1389,228 @@ async fn duplicate_rows_retain_their_own_link_coverage() {
     assert_eq!(view["criteria"][0]["coverage"], "no_result_yet");
     assert_eq!(view["criteria"][1]["coverage"], "nothing_points_at_it");
     assert_eq!(view["gaps"]["uncovered"].as_array().unwrap().len(), 1);
+}
+
+/// A review session that ran the candidate says, per criterion, what that
+/// showed, resting on work it showed itself at that candidate. The criterion
+/// then reads "verified · unjudged": further than its checks, and never met.
+#[tokio::test]
+async fn a_reviewers_finding_verifies_a_criterion_and_only_the_operator_judges_it() {
+    state::isolate();
+    let h = harness().await;
+    let id = an_item(&h, "Overnight alert triage").await;
+    write_brief(&h, &id, &brief_markdown()).await;
+    h.store
+        .insert_session(&session_row("s1", &id, "external"))
+        .unwrap();
+    let head = "c".repeat(40);
+    let candidate = a_candidate(&h, "s1", &head, now_ms());
+    h.store
+        .insert_review_with_revision(
+            &ReviewRow {
+                id: "rv1".into(),
+                session_id: Some("s1".into()),
+                node_id: "n1".into(),
+                channel: "personal".into(),
+                kind: "pr".into(),
+                title: "feat: triage".into(),
+                body: String::new(),
+                edited_title: None,
+                edited_body: None,
+                provider: "github".into(),
+                target: json!({ "project": "o/r" }).to_string(),
+                diff: String::new(),
+                files: "[]".into(),
+                head_sha: head.clone(),
+                base_ref: "main".into(),
+                added: 0,
+                removed: 0,
+                state: "new".into(),
+                verdict_reason: None,
+                publish_result: None,
+                claimed_ms: None,
+                created_ms: now_ms(),
+                created_mono_ms: 0,
+                resolved_mono_ms: None,
+                updated_ms: now_ms(),
+                checks_json: None,
+                review_session_id: Some("reviewer".into()),
+                ai_verdict_json: None,
+                revision_patch: None,
+                lane: None,
+            },
+            &ReviewRevisionRow {
+                id: "revision-1".into(),
+                review_id: "rv1".into(),
+                candidate_id: candidate.clone(),
+                title: "feat: triage".into(),
+                body: String::new(),
+                diff: String::new(),
+                files: "[]".into(),
+                head_sha: head.clone(),
+                context_json: "[]".into(),
+                requirements_work_item_id: Some(id.clone()),
+                requirements_title: Some("Overnight alert triage".into()),
+                requirements_body: Some(String::new()),
+                requirements_hash: Some("h".into()),
+                created_ms: now_ms(),
+                intent_json: None,
+            },
+        )
+        .unwrap();
+    let mut reviewer = session_row("reviewer", &id, "fake");
+    reviewer.phase = "review".into();
+    reviewer.review_id = Some("rv1".into());
+    h.store.insert_session(&reviewer).unwrap();
+    let token = h
+        .manager
+        .register_tool_token_for_test("reviewer", "personal")
+        .await;
+
+    // What the reviewer shows goes on its own review, at the candidate.
+    let shown = tool(
+        &h.harness,
+        "reviewer",
+        &token,
+        "show_work",
+        json!({"title": "The quiet hours", "markdown": "Paged at 03:00 only for a P1."}),
+    )
+    .await;
+    assert_eq!(shown["review_id"], "rv1", "{shown}");
+    assert_eq!(shown["head_sha"], json!(head), "{shown}");
+    let evidence = shown["shown_work_id"].as_str().unwrap().to_string();
+
+    // The implementer's own account is not an independent check.
+    h.store
+        .insert_shown_work(&tracon::store::shown::ShownWorkRow {
+            id: "implementer-shown".into(),
+            channel: "personal".into(),
+            session_id: Some("s1".into()),
+            lane: None,
+            review_id: Some("rv1".into()),
+            head_sha: head.clone(),
+            title: "It works".into(),
+            format: "markdown".into(),
+            markdown: "trust me".into(),
+            document_id: None,
+            document_slug: None,
+            document_hash: None,
+            files: Vec::new(),
+            created_ms: now_ms(),
+        })
+        .unwrap();
+    let refused = tool(
+        &h.harness,
+        "reviewer",
+        &token,
+        "review_finding",
+        json!({"criterion": QUIET, "outcome": "supported", "note": "n",
+               "evidence": ["implementer-shown"]}),
+    )
+    .await;
+    assert!(
+        refused.to_string().contains("shown by another session"),
+        "{refused}"
+    );
+    let refused = tool(
+        &h.harness,
+        "reviewer",
+        &token,
+        "review_finding",
+        json!({"criterion": QUIET, "outcome": "supported", "note": "n"}),
+    )
+    .await;
+    assert!(
+        refused.to_string().contains("rests on evidence"),
+        "{refused}"
+    );
+
+    let found = tool(
+        &h.harness,
+        "reviewer",
+        &token,
+        "review_finding",
+        json!({"criterion": QUIET, "outcome": "supported",
+               "note": "drove the rota at 03:00; only the P1 paged", "evidence": [evidence]}),
+    )
+    .await;
+    assert_eq!(found["candidate_id"], json!(candidate), "{found}");
+    let not_shown = tool(
+        &h.harness,
+        "reviewer",
+        &token,
+        "review_finding",
+        json!({"criterion": STALE, "outcome": "not_shown", "note": "the queue needs a night of data"}),
+    )
+    .await;
+    assert_eq!(not_shown["outcome"], "not_shown", "{not_shown}");
+
+    // An execute session does not record one, whatever it holds.
+    let s1_token = h
+        .manager
+        .register_tool_token_for_test("s1", "personal")
+        .await;
+    let refused = tool(
+        &h.harness,
+        "s1",
+        &s1_token,
+        "review_finding",
+        json!({"criterion": QUIET, "outcome": "supported", "note": "n"}),
+    )
+    .await;
+    assert!(
+        refused.to_string().contains("only a review session"),
+        "{refused}"
+    );
+
+    let (st, v) = call(&h.operator, "GET", "/api/reviews/rv1", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let quiet = of(&v["criteria"], QUIET);
+    assert_eq!(quiet["coverage"], "verified_unjudged", "{quiet}");
+    assert_eq!(quiet["finding"]["outcome"], "supported");
+    assert_eq!(quiet["finding"]["provenance"], "inferred");
+    assert_eq!(quiet["finding"]["evidence"], json!([evidence]));
+    assert!(quiet["judgement"].is_null(), "a finding is not a verdict");
+    assert!(
+        gap_holds(&v["criteria"], "unjudged", QUIET)
+            && gap_holds(&v["criteria"], "uncovered", QUIET),
+        "verified is still unjudged, and nothing agreed points at it yet: {v}"
+    );
+    let stale = of(&v["criteria"], STALE);
+    assert_eq!(
+        stale["coverage"], "awaits_judgement",
+        "not shown moves nothing"
+    );
+    assert_eq!(stale["finding"]["outcome"], "not_shown");
+    assert!(v["shown_work"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["id"] == json!(evidence) && w["session_id"] == "reviewer"));
+    assert!(h
+        .store
+        .criterion_judgements_for_item(&id)
+        .unwrap()
+        .is_empty());
+
+    // The operator's verdict is what settles it, and it outranks the finding.
+    let (st, judged) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{id}/criteria/judgements"),
+        Some(
+            json!({"criterion": QUIET, "verdict": "not_met", "candidate_id": candidate,
+                    "revision_id": "revision-1"}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{judged}");
+    let (_, v) = call(&h.operator, "GET", "/api/reviews/rv1", None).await;
+    assert_eq!(of(&v["criteria"], QUIET)["coverage"], "judged_not_met");
+
+    // And a finding is about its candidate: the next attempt starts unverified.
+    let next = a_candidate(&h, "s1", &"d".repeat(40), now_ms() + 1);
+    let read = read_criteria(&h, &id).await;
+    assert_eq!(read["candidate"]["id"], json!(next));
+    assert!(of(&read, QUIET)["finding"].is_null(), "{read}");
 }

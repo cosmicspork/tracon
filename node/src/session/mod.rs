@@ -284,8 +284,9 @@ fn kickoff(
             let review = review_id?;
             Some(format!(
                 "Review the change under review `{review}`. The requirements and the diff are \
-                 in your orientation and the change is checked out in the worktree. Give your \
-                 verdict with `review_verdict`."
+                 in your orientation and the change is checked out in the worktree. Where a \
+                 criterion needs the change run, show what you saw with `show_work` and record \
+                 a `review_finding` for it. Give your verdict with `review_verdict`."
             ))
         }
     }

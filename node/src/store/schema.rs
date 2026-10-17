@@ -1539,6 +1539,34 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX mesh_admin_statement_expires ON mesh_admin_statement(expires_ms);
     "#,
+    // 66: what a review session found when it exercised the candidate
+    // against one criterion (`review_finding`). A session's account, always
+    // `inferred`, with the shown work it rests on; never a verdict on the
+    // criterion, which stays the operator's alone in `criterion_judgement`.
+    // Append-only, and node-local like the checks and shown work it cites.
+    r#"
+    CREATE TABLE review_finding (
+        id             TEXT PRIMARY KEY,
+        channel        TEXT NOT NULL,
+        review_id      TEXT NOT NULL,
+        candidate_id   TEXT NOT NULL,
+        revision_id    TEXT,
+        work_item_id   TEXT NOT NULL,
+        brief_slug     TEXT NOT NULL,
+        criterion_key  TEXT NOT NULL,
+        criterion_text TEXT NOT NULL,
+        outcome        TEXT NOT NULL CHECK (outcome IN ('supported','contradicted','not_shown')),
+        note           TEXT NOT NULL,
+        evidence_json  TEXT NOT NULL,
+        provenance     TEXT NOT NULL CHECK (provenance = 'inferred'),
+        session_id     TEXT NOT NULL,
+        model          TEXT,
+        created_ms     INTEGER NOT NULL
+    );
+    CREATE INDEX review_finding_candidate
+        ON review_finding(work_item_id, candidate_id, created_ms DESC);
+    CREATE INDEX review_finding_review ON review_finding(review_id, created_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

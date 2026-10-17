@@ -19,7 +19,7 @@
 # A denial wins over any allow, whatever the order. An action no rule names —
 # a brokered write, a tool whose kind the node does not know — is asked.
 
-version = 19
+version = 20
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -114,7 +114,7 @@ kinds = ["write"]
 [[rule]]
 id = "brokered-reads"
 verdict = "allow"
-reason = "A read-only query or lookup, a search, a pipeline or check read, or a report/review submission that only enters the operator queue changes nothing the operator has not agreed to."
+reason = "A read-only query or lookup, a search, a pipeline or check read, or a report/review submission, verdict or finding that only enters the operator queue changes nothing the operator has not agreed to."
 kinds = ["tool"]
 matches = [
     "query",
@@ -124,6 +124,7 @@ matches = [
     "submit_report",
     "report_status",
     "review_verdict",
+    "review_finding",
     "mr_status",
     "mr_discussions",
     "mr_for_branch",

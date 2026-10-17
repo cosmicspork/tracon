@@ -12,10 +12,13 @@
   let {
     items,
     onReview = false,
+    reviewer = null,
   }: {
     items: ShownWork[]
     /** On a review, staleness is against its candidate; a session has none. */
     onReview?: boolean
+    /** The review session's id: what it showed is marked as the reviewer's. */
+    reviewer?: string | null
   } = $props()
 
   /** Preview URLs for the pages opened in place, by shown-work id. */
@@ -50,9 +53,12 @@
       <b>· the agent's account, to help you decide · not verification · it does not go to the forge</b>
     </div>
     {#each items as item (item.id)}
-      <article class:stale={onReview && item.stale}>
+      <article id="shown-{item.id}" class:stale={onReview && item.stale}>
         <header>
           <b>{item.title}</b>
+          {#if reviewer && item.session_id === reviewer}
+            <span class="tag" title="shown by the review session, at the candidate it exercised">reviewer</span>
+          {/if}
           <span class="tag">{item.format === 'markdown' ? 'account' : item.format === 'html' ? 'page' : 'files'}</span>
           <span class="mono" title={item.head_sha}>at {item.head_sha.slice(0, 12)}</span>
           {#if onReview && item.stale}

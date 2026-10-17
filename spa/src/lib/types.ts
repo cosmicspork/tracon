@@ -910,13 +910,16 @@ export type Standard = 'agreed' | 'proposed' | 'unattributed'
 /**
  * How far the evidence for one candidate got. `checks_pass` is deliberately not
  * `judged_met`: passing the checks an agent proposed is not the customer
- * agreeing with the standard.
+ * agreeing with the standard. Nor is `verified_unjudged`: a review session
+ * running the candidate and finding it does what the criterion says.
  */
 export type Coverage =
   | 'judged_met'
   | 'judged_not_met'
   | 'judged_unclear'
+  | 'contradicted_unjudged'
   | 'failing'
+  | 'verified_unjudged'
   | 'no_result_yet'
   | 'checks_pass'
   | 'awaits_judgement'
@@ -950,6 +953,26 @@ export interface CriterionJudgement {
   judged_ms: number
 }
 
+/**
+ * What a review session found when it exercised the candidate against one
+ * criterion: its account, always `inferred`, resting on the work it showed.
+ * Never a verdict on the criterion.
+ */
+export interface CriterionFinding {
+  id: string
+  review_id: string
+  candidate_id: string
+  outcome: 'supported' | 'contradicted' | 'not_shown'
+  note: string
+  /** The shown-work ids it rests on. */
+  evidence: string[]
+  provenance: 'inferred'
+  session_id: string
+  model?: string
+  criterion_text: string
+  created_ms: number
+}
+
 export interface Criterion {
   key: string
   text: string
@@ -960,6 +983,8 @@ export interface Criterion {
   judgement?: CriterionJudgement
   /** A verdict about another attempt, or about none. It does not settle this one. */
   earlier_judgement?: CriterionJudgement
+  /** The standing review finding for this candidate, kept apart from the judgement. */
+  finding?: CriterionFinding
   coverage: Coverage
   duplicate?: boolean
 }
