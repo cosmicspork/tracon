@@ -721,7 +721,11 @@
           <h3>Requirements</h3>
           {#if requirements}
             <b>{requirements.title}</b>
-            <p>{requirements.body || 'No additional requirement detail.'}</p>
+            {#if requirements.body.trim()}
+              <div class="md">{@html renderMessage(requirements.body)}</div>
+            {:else}
+              <p>No additional requirement detail.</p>
+            {/if}
             <a href="/tasks/{requirements.id}">open work item</a>
           {:else}
             <p class="missing">No work item was linked when this review was captured.</p>
@@ -1298,6 +1302,10 @@
     margin: 5px 0;
     white-space: pre-wrap;
   }
+  .evidence-panel .md {
+    margin: 5px 0;
+    overflow-wrap: anywhere;
+  }
   .evidence-panel details,
   .run {
     border-top: 1px solid var(--rule);
@@ -1616,57 +1624,58 @@
     color: var(--ink2);
     overflow-wrap: anywhere;
   }
-  .summary .md > :global(:first-child) {
+  /* Rendered Markdown: the summary and the pinned requirements. */
+  .md > :global(:first-child) {
     margin-top: 0;
   }
-  .summary .md > :global(:last-child) {
+  .md > :global(:last-child) {
     margin-bottom: 0;
   }
-  .summary .md :global(p),
-  .summary .md :global(ul),
-  .summary .md :global(ol),
-  .summary .md :global(pre),
-  .summary .md :global(blockquote) {
+  .md :global(p),
+  .md :global(ul),
+  .md :global(ol),
+  .md :global(pre),
+  .md :global(blockquote) {
     margin: 4px 0;
   }
-  .summary .md :global(ul),
-  .summary .md :global(ol) {
+  .md :global(ul),
+  .md :global(ol) {
     padding-left: 2.5ch;
   }
-  .summary .md :global(h1),
-  .summary .md :global(h2),
-  .summary .md :global(h3),
-  .summary .md :global(h4) {
+  .md :global(h1),
+  .md :global(h2),
+  .md :global(h3),
+  .md :global(h4) {
     margin: 0.7em 0 0.2em;
     font-size: 1em;
     font-weight: 600;
     color: var(--ink);
   }
-  .summary .md :global(code) {
+  .md :global(code) {
     font: 0.9em var(--mono);
     background: var(--s2);
     border-radius: 3px;
     padding: 0 3px;
   }
-  .summary .md :global(pre) {
+  .md :global(pre) {
     background: var(--s2);
     border-radius: 4px;
     padding: 8px 10px;
     overflow-x: auto;
   }
-  .summary .md :global(pre code) {
+  .md :global(pre code) {
     background: none;
     padding: 0;
     overflow-wrap: normal;
   }
-  .summary .md :global(blockquote) {
+  .md :global(blockquote) {
     border-left: 2px solid var(--rule);
     padding-left: 1.5ch;
   }
-  .summary .md :global(a) {
+  .md :global(a) {
     color: var(--acc);
   }
-  .summary .md :global(.no-fetch) {
+  .md :global(.no-fetch) {
     color: var(--dim);
   }
   .toggle {
