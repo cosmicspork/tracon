@@ -800,7 +800,12 @@ pub async fn carry_on(
         work_item_id: old.work_item_id.clone(),
         model: model.unwrap_or_else(|| old.model.clone()),
         budget_tokens: Some(old.budget_tokens),
-        initial_prompt: Some(handoff(&old, approach.as_deref(), plan.as_deref())),
+        initial_prompt: Some(handoff(
+            &old,
+            approach.as_deref(),
+            plan.as_deref(),
+            &store.carried_reviews(&old.id)?,
+        )),
         node_id: Some(old.node_id.clone()),
         // A written plan is carried on by executing it; an unfinished plan
         // goes on planning.
@@ -824,8 +829,14 @@ pub async fn carry_on(
 /// The new attempt's first prompt: what it continues, how that ended, that
 /// it inherits the workspace and nothing else, and the operator's changed
 /// approach when there is one. After a written plan, `plan` names it and the
-/// new attempt is told to carry it out.
-fn handoff(old: &SessionRow, approach: Option<&str>, plan: Option<&str>) -> String {
+/// new attempt is told to carry it out. Either way it is told about each
+/// review it takes over, `carried`.
+fn handoff(
+    old: &SessionRow,
+    approach: Option<&str>,
+    plan: Option<&str>,
+    carried: &[crate::store::ReviewRow],
+) -> String {
     if let Some(slug) = plan {
         let item = old.work_item_id.as_deref().unwrap_or_default();
         let mut note = format!(
@@ -835,6 +846,7 @@ fn handoff(old: &SessionRow, approach: Option<&str>, plan: Option<&str>) -> Stri
              Commit the work in the worktree and call `submit_review` when it is ready.",
             old.id, old.branch,
         );
+        note.push_str(&crate::session::carried_note(carried));
         if let Some(approach) = approach {
             note.push_str(&format!(
                 "\n\nThe operator has changed the approach. Work this way where the plan \
@@ -870,6 +882,7 @@ fn handoff(old: &SessionRow, approach: Option<&str>, plan: Option<&str>) -> Stri
             "\n\nIt was working on item {item}, which is still open."
         ));
     }
+    note.push_str(&crate::session::carried_note(carried));
     if let Some(approach) = approach {
         note.push_str(&format!(
             "\n\nThe operator has changed the approach. Work this way instead of \

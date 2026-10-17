@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use serde_json::{json, Value};
 use support::harness::{harness, Harness};
 use support::http::call;
-use support::rows::session_row;
+use support::rows::{review_row, session_row};
 use tracon::store::{now_ms, NewEvent, SessionRow};
 
 fn ended(id: &str, at: i64, end: &str, from: Option<&str>) -> SessionRow {
@@ -426,4 +426,79 @@ async fn continuing_a_written_plan_executes_it() {
     .await;
     assert_eq!(st, StatusCode::CREATED, "{row}");
     assert_eq!(row["phase"], "plan");
+}
+
+/// A review the operator sent back for changes outlives the attempt that
+/// submitted it: continuing that attempt, generically or by its written plan,
+/// hands the review to the new one and tells it the notes, that a patch came
+/// with them, and to resubmit under the same id. A review already decided
+/// stays with the attempt it was decided for.
+#[tokio::test]
+async fn continuing_an_attempt_hands_its_review_in_revision_to_the_next() {
+    let h = harness().await;
+    ready(&h).await;
+    let item = new_item(&h, "Lay the schema", vec![]);
+    write_plan(&h, &item.id);
+    let mut planned = ended("p", 1, "phase_done", None);
+    planned.phase = "plan".into();
+    planned.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&planned).unwrap();
+    h.store
+        .insert_session(&ended("a", 2, "killed_user", None))
+        .unwrap();
+    for (review, session, patch) in [
+        ("rv-p", "p", None),
+        ("rv-a", "a", Some("diff --git a/x b/x\n")),
+    ] {
+        let mut sent_back = review_row(review, session, "revising");
+        sent_back.verdict_reason = Some(format!("Rename the table in {review}."));
+        sent_back.revision_patch = patch.map(str::to_string);
+        h.store.insert_review(&sent_back).unwrap();
+    }
+    h.store
+        .insert_review(&review_row("rv-done", "a", "approved"))
+        .unwrap();
+
+    for (from, review, plan, patch) in [
+        ("p", "rv-p", true, "No edited diff is attached."),
+        ("a", "rv-a", false, "An edited diff is attached"),
+    ] {
+        let (st, row) = call(
+            &h.operator,
+            "POST",
+            "/api/continuation/continue",
+            Some(json!({ "session_id": from })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{row}");
+        let next = row["id"].as_str().unwrap();
+        let note = h
+            .store
+            .get_draft(next)
+            .unwrap()
+            .map(|(text, _)| text)
+            .unwrap_or_default();
+        assert_eq!(note.starts_with("Carry out work item"), plan, "{note}");
+        assert!(note.contains(&format!("`{review}`")), "{note}");
+        assert!(
+            note.contains(&format!("Rename the table in {review}.")),
+            "{note}"
+        );
+        assert!(note.contains(patch), "{note}");
+        assert!(note.contains("`review_status`"), "{note}");
+        assert!(note.contains("same review_id"), "{note}");
+        let moved = h.store.get_review(review).unwrap().unwrap();
+        assert_eq!(moved.session_id.as_deref(), Some(next));
+        assert_eq!(moved.state, "revising");
+        let taken = h
+            .store
+            .session_events_of_kind(next, "review_taken_over")
+            .unwrap();
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        assert_eq!(taken[0].payload["review_id"], review);
+        assert_eq!(taken[0].payload["from_session"], from);
+        assert_eq!(taken[0].payload["to_session"], next);
+    }
+    let decided = h.store.get_review("rv-done").unwrap().unwrap();
+    assert_eq!(decided.session_id.as_deref(), Some("a"));
 }
