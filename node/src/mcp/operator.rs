@@ -38,11 +38,9 @@ pub fn definitions() -> Vec<Value> {
                  `answered` with it, `cancelled` if the operator withdrew the question, or \
                  `unanswered` with `still_waiting: true` and a `question_id` when they have not \
                  answered yet. The question stays in their queue either way: call \
-                 {QUESTION_STATUS} with the question_id to keep waiting. In a session the node \
-                 runs you may instead end your turn: the session stays open while the question \
-                 is unanswered, and the node brings the answer back to you as your next prompt. \
-                 A stable request_id recovers the same question after a reconnect or restart. \
-                 An answer never grants access."
+                 {QUESTION_STATUS} with the question_id to keep waiting. A stable request_id \
+                 recovers the same question after a reconnect or restart. An answer never \
+                 grants access."
             ),
             "inputSchema": {
                 "type": "object",
@@ -60,14 +58,11 @@ pub fn definitions() -> Vec<Value> {
             "description": format!(
                 "Wait for the answer to questions you asked with {ASK}. Pass `question_id`, or \
                  `question_ids` to wait on several: the call returns as soon as any of them is \
-                 answered or cancelled, or after up to {MAX_WAIT_SECS} seconds, with every id's \
-                 state — `unanswered` while the operator has not answered, `answered` with the \
-                 `answer` (`{{choice, text}}`, either of which may be absent), or `cancelled` \
-                 when they withdrew it without answering. \
-                 `still_waiting` is true when nothing was decided; call again to keep waiting, \
-                 or, in a session the node runs, end your turn: the session stays open while a \
-                 question is unanswered and the node brings the answer back to you as your next \
-                 prompt."
+                 answered or cancelled, with every id's state — `unanswered`, `answered` with \
+                 the `answer` (`{{choice, text}}`, either of which may be absent), or \
+                 `cancelled` when the operator withdrew it without answering. `still_waiting` \
+                 is true when nothing was decided. {}",
+                 super::wait::pointer()
             ),
             "inputSchema": {
                 "type": "object",
@@ -85,11 +80,13 @@ pub fn definitions() -> Vec<Value> {
             "description": format!(
                 "What became of issues you drafted with {REPORT}. Pass `issue_id`, or \
                  `issue_ids` to wait on several: the call returns as soon as any of them is \
-                 decided, or after up to {MAX_WAIT_SECS} seconds, with every id's state — \
-                 `draft` or `publishing` while the operator has not decided, `published` with \
-                 the GitHub issue `number`, `url` and `title`, `discarded` with the operator's \
-                 `reason`, or `uncertain` when publication may or may not have reached GitHub. \
-                 `still_waiting` is true when nothing was decided; call again to keep waiting."
+                 decided, with every id's state — `draft` or `publishing` while the operator \
+                 has not decided, `published` with the GitHub issue `number`, `url` and \
+                 `title`, `discarded` with the operator's `reason`, or `uncertain` when \
+                 publication may or may not have reached GitHub. `still_waiting` is true when \
+                 nothing was decided. A draft is not a wait: ending your turn does not hold \
+                 the session for it. {}",
+                 super::wait::pointer()
             ),
             "inputSchema": {
                 "type": "object",
