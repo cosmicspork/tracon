@@ -3960,6 +3960,115 @@ async fn a_node_stopping_under_a_held_session_carries_it_on_once_answered() {
     tracon::session::materialize::remove(&next.id);
 }
 
+/// A held session whose review the operator sends back for changes after
+/// the node stopped under it is carried on, and the continuation takes the
+/// review over: its first prompt carries the notes and says a patch came
+/// with them, the decision is not brought back a second time, and the new
+/// session can read the review. A session that does not continue the one
+/// that submitted it is still refused.
+#[tokio::test]
+async fn a_held_sessions_continuation_takes_over_its_review_sent_back_for_changes() {
+    state::isolate();
+    let h = Held::new("held-revise").await;
+    let review = uuid::Uuid::now_v7().to_string();
+    let mut submitted = published_review(&review, &h.o.row.id);
+    submitted.state = "new".into();
+    submitted.publish_result = None;
+    h.o.store.insert_review(&submitted).unwrap();
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    h.o.manager.shutdown_all().await;
+    h.until(|s| s.state == "suspended", "put away").await;
+
+    let notes = "Keep the ledger append-only.";
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/reviews/{review}/verdict"),
+        Some(json!({ "verdict": "revise", "reason": notes,
+                     "patch": "diff --git a/x b/x\n" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let s = h.until(|s| s.state == "closed", "carried on").await;
+    assert_eq!(s.end_reason.as_deref(), Some("continued"));
+    let next =
+        h.o.store
+            .list_sessions(None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.continued_from.as_deref() == Some(h.o.row.id.as_str()))
+            .expect("a continuation");
+    let first = first_prompt(&h.o.store, &next.id).await;
+    assert_eq!(first.matches(notes).count(), 1, "{first}");
+    assert!(first.contains(&format!("`{review}`")), "{first}");
+    assert!(first.contains("An edited diff is attached"), "{first}");
+    assert!(!first.contains("not yours to poll"), "{first}");
+    let row = h.o.store.get_review(&review).unwrap().unwrap();
+    assert_eq!(row.session_id.as_deref(), Some(next.id.as_str()));
+
+    // Its first turn ends without the decision being brought back again.
+    for _ in 0..1200 {
+        if h.o.store.has_event(&next.id, "turn_end").unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let told: usize =
+        h.o.store
+            .events_after(&next.id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user_prompt")
+            .map(|e| {
+                e.payload["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .matches(notes)
+                    .count()
+            })
+            .sum();
+    assert_eq!(told, 1, "the notes arrive exactly once");
+
+    let status_of = |sid: String| {
+        let harness = h.harness.clone();
+        let manager = h.o.manager.clone();
+        let review = review.clone();
+        async move {
+            let token = manager.register_tool_token_for_test(&sid, "personal").await;
+            let (st, v) = mcp_call(
+                &harness,
+                &sid,
+                &token,
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                       "params":{"name": "review_status",
+                                 "arguments": {"review_id": review, "wait_secs": 0}}}),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            v
+        }
+    };
+    let v = status_of(next.id.clone()).await;
+    assert_ne!(v["result"]["isError"], true, "{v}");
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("changes_requested"), "{text}");
+    assert!(text.contains(notes), "{text}");
+    let v = status_of("not-a-continuation".to_string()).await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    assert!(
+        v.to_string()
+            .contains("that review belongs to another session"),
+        "{v}"
+    );
+    h.o.manager.kill(&next.id).await.ok();
+    tracon::session::materialize::remove(&h.o.row.id);
+    tracon::session::materialize::remove(&next.id);
+}
+
 /// A restart that finds a session held between turns on an open question
 /// puts it away with what it waits on; one cut off mid-turn still ends as
 /// `node_restart`.

@@ -24,7 +24,7 @@ use crate::{
         state::{event_kind as ek, EndReason, SessionState},
         supervisor::{Command, Prompted, Supervisor},
     },
-    store::{now_ms, NewEvent, SessionPatch, SessionRow, Store},
+    store::{now_ms, NewEvent, ReviewRow, SessionPatch, SessionRow, Store},
     stream::{Bus, Frame},
 };
 
@@ -131,20 +131,24 @@ fn reopen_phase(stored: &str) -> Phase {
 /// its plan, not what it had already tried. Saying so explicitly is the whole
 /// point — an agent handed a workspace with no account of how it got that way
 /// re-derives it, badly, and calls the result progress.
-fn handoff_note(old: &SessionRow, harness: &str) -> String {
+fn handoff_note(old: &SessionRow, harness: &str, carried: &[ReviewRow]) -> String {
     let why = format!(
         "This session continues session {} (`{}` {}), which ran a harness this node no \
          longer has and which is now archived read-only. You are {harness}, and you \
          inherit none of its context",
         old.id, old.harness_id, old.harness_version,
     );
-    handoff(old, &why)
+    handoff(old, &why, carried)
 }
 
 /// What a session carrying on a suspended, published one is told: where its
 /// work landed, and that what brings it back (a CI failure, a review comment)
 /// is on the forge to read.
-fn published_note(old: &SessionRow, published: &[(String, String)]) -> String {
+fn published_note(
+    old: &SessionRow,
+    published: &[(String, String)],
+    carried: &[ReviewRow],
+) -> String {
     let landed = published
         .iter()
         .map(|(_, url)| format!("- {url}"))
@@ -158,33 +162,38 @@ fn published_note(old: &SessionRow, published: &[(String, String)]) -> String {
          first. You inherit none of the earlier session's context",
         old.id,
     );
-    handoff(old, &why)
+    handoff(old, &why, carried)
 }
 
 /// What a session carrying on after a node restart is told. Same harness,
 /// same workspace, but none of the interrupted conversation: the harness
 /// process that held it is gone with the node.
-fn restart_note(old: &SessionRow) -> String {
+fn restart_note(old: &SessionRow, carried: &[ReviewRow]) -> String {
     let why = format!(
         "This session continues session {}, which was cut off when the node it ran on \
          stopped or restarted in the middle of its work. You inherit none of its context",
         old.id,
     );
-    handoff(old, &why)
+    handoff(old, &why, carried)
 }
 
 /// What a session carrying on one the node put away while it waited on the
 /// operator is told: the handoff, then what the operator decided, as the
-/// status tools returned it.
-fn held_note(old: &SessionRow, waited: &[waits::Wait]) -> String {
+/// status tools returned it. A review it takes over is the handoff's to tell,
+/// once, and is left out here.
+fn held_note(old: &SessionRow, waited: &[waits::Wait], carried: &[ReviewRow]) -> String {
     let why = format!(
         "This session continues session {}, which was waiting on the operator when the node \
          it ran on stopped or restarted, and was put away until they decided. You inherit \
          none of its context",
         old.id,
     );
-    let mut note = handoff(old, &why);
-    let (open, decided): (Vec<_>, Vec<_>) = waited.iter().cloned().partition(waits::Wait::is_open);
+    let mut note = handoff(old, &why, carried);
+    let (open, decided): (Vec<_>, Vec<_>) = waited
+        .iter()
+        .filter(|w| !carried.iter().any(|r| r.id == w.id))
+        .cloned()
+        .partition(waits::Wait::is_open);
     if !decided.is_empty() {
         note.push_str(
             "\n\nWhat it was waiting on was decided. Each result below is what its status \
@@ -204,7 +213,7 @@ fn held_note(old: &SessionRow, waited: &[waits::Wait]) -> String {
     note
 }
 
-fn exhausted_note(old: &SessionRow, fallback: Option<&str>) -> String {
+fn exhausted_note(old: &SessionRow, fallback: Option<&str>, carried: &[ReviewRow]) -> String {
     let why = match fallback {
         Some(model) => format!(
             "This session continues session {}, whose provider was exhausted, on another \
@@ -219,10 +228,10 @@ fn exhausted_note(old: &SessionRow, fallback: Option<&str>) -> String {
             old.id,
         ),
     };
-    handoff(old, &why)
+    handoff(old, &why, carried)
 }
 
-fn handoff(old: &SessionRow, why: &str) -> String {
+fn handoff(old: &SessionRow, why: &str, carried: &[ReviewRow]) -> String {
     let mut note = format!(
         "{why}: not its conversation, not its plan, not what it had already tried.\n\n\
          What you do have is its workspace, exactly as it left it, on branch `{}`.\n\n\
@@ -235,6 +244,57 @@ fn handoff(old: &SessionRow, why: &str) -> String {
     if let Some(item) = old.work_item_id.as_deref() {
         note.push_str(&format!(
             "\n\nIt was working on item {item}, which is still open."
+        ));
+    }
+    note.push_str(&carried_note(carried));
+    note
+}
+
+/// What a continuation is told about the reviews it takes over from the
+/// attempt it continues: each one sent back for changes with the operator's
+/// notes, whether an edited diff came with them, and how to resubmit it; each
+/// one still waiting, so that it is not submitted a second time. Empty when
+/// there are none. The notes are told here once: the takeover records this
+/// session as told, so they do not come back as a decision too.
+pub(crate) fn carried_note(carried: &[ReviewRow]) -> String {
+    let mut note = String::new();
+    for r in carried {
+        let (what, status, submit, key) = if r.kind == crate::store::reports::KIND {
+            ("report", "report_status", "submit_report", "report_id")
+        } else {
+            ("review", "review_status", "submit_review", "review_id")
+        };
+        if r.state != "revising" {
+            note.push_str(&format!(
+                "\n\nThe earlier session's {what} `{}` ({}) is still waiting on the \
+                 operator, and is yours now: their decision comes back to you as a prompt. \
+                 Resubmit it with that same {key} rather than opening a new {what}.",
+                r.id, r.title,
+            ));
+            continue;
+        }
+        let notes = r
+            .verdict_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or("(no notes given)");
+        let (patch, read) = if r.revision_patch.is_some() {
+            (
+                "An edited diff is attached: apply it to the worktree exactly as given.",
+                "the notes and the patch",
+            )
+        } else {
+            ("No edited diff is attached.", "the notes")
+        };
+        note.push_str(&format!(
+            "\n\nThe operator sent the earlier session's {what} `{id}` ({}) back for \
+             changes, and it is yours now. Their notes:\n\n{notes}\n\n{patch} Call \
+             `{status}` with {key} `{id}` for {read}, make the changes, then call \
+             `{submit}` again with that same {key}: the {what} carries on rather than a \
+             new one being opened.",
+            r.title,
+            id = r.id,
         ));
     }
     note
@@ -589,7 +649,7 @@ impl Manager {
             .strip_prefix("workspace://")
             .unwrap_or(&old.id)
             .to_string();
-        let note = handoff_note(&old, harness);
+        let note = handoff_note(&old, harness, &self.store.carried_reviews(&old.id)?);
         let spec = NewSession {
             channel: old.channel.clone(),
             repo_path: old.repo_path.clone(),
@@ -622,15 +682,18 @@ impl Manager {
     pub async fn continue_interrupted(&self, id: &str) -> Result<SessionRow, SessionError> {
         let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         let suspended = old.state == SessionState::Suspended.as_str();
+        let carried = self.store.carried_reviews(&old.id)?;
         let note = if let Some(waited) = suspended.then(|| self.held_on(&old.id)).flatten() {
-            held_note(&old, &waited)
+            held_note(&old, &waited, &carried)
         } else if suspended {
-            published_note(&old, &self.store.session_publications(&old.id)?)
+            published_note(&old, &self.store.session_publications(&old.id)?, &carried)
         } else {
             match old.end_reason.as_deref() {
-                Some(r) if r == state::EndReason::NodeRestart.as_str() => restart_note(&old),
+                Some(r) if r == state::EndReason::NodeRestart.as_str() => {
+                    restart_note(&old, &carried)
+                }
                 Some(r) if r == state::EndReason::ProviderExhausted.as_str() => {
-                    exhausted_note(&old, None)
+                    exhausted_note(&old, None, &carried)
                 }
                 _ => {
                     return Err(SessionError::Rejected(
@@ -737,6 +800,44 @@ impl Manager {
         Ok(row)
     }
 
+    /// A continuation takes over the reviews the attempt it continues left
+    /// open or sent back for changes, whichever path started it, before its
+    /// harness runs: from here its waits, the operator's decision and the
+    /// right to resubmit each one are the new session's. A session continuing
+    /// none of them gets none, so ownership still refuses everyone else.
+    ///
+    /// A review sent back for changes is already told: the handoff carried
+    /// its notes, and bringing them back as a decision would say them twice.
+    /// Candidates keep the session that captured them, and checks the earlier
+    /// attempt left running stay under its id, cancelled as it ends.
+    async fn take_over_reviews(&self, from: &str, to: &str) -> Result<(), SessionError> {
+        let moved = self.store.hand_over_reviews(from, to)?;
+        if moved.is_empty() {
+            return Ok(());
+        }
+        for review in &moved {
+            if review.state == "revising" {
+                self.waits().tell(to, &waits::review_key(review));
+            }
+            self.record(NewEvent {
+                session_id: to.to_string(),
+                work_item_id: None,
+                kind: ek::REVIEW_TAKEN_OVER.to_string(),
+                ref_id: Some(review.id.clone()),
+                payload: json!({
+                    "review_id": review.id,
+                    "state": review.state,
+                    "from_session": from,
+                    "to_session": to,
+                }),
+                at_ms: now_ms(),
+                mono_ms: 0,
+            });
+        }
+        self.publish_queue().await;
+        Ok(())
+    }
+
     /// What a suspended session was put away waiting on, as those waits stand
     /// now; `None` for one put away for sitting idle.
     fn held_on(&self, id: &str) -> Option<Vec<waits::Wait>> {
@@ -813,7 +914,8 @@ impl Manager {
         if !self.waits().open(&old.id).is_empty() {
             return None;
         }
-        let note = held_note(old, &waited);
+        let carried = self.store.carried_reviews(&old.id).ok()?;
+        let note = held_note(old, &waited, &carried);
         match self.continue_work(old, None, note, None).await {
             Ok(row) => Some(row),
             Err(error) => {
@@ -1653,6 +1755,9 @@ impl Manager {
         };
         self.store.insert_session(&row)?;
         self.store.exhaustion_choose(&id, &on_exhaustion)?;
+        if let Some(from) = spec.continued_from.as_deref() {
+            self.take_over_reviews(from, &id).await?;
+        }
         // A plain session has no work item to retain its first instruction.
         // Keep it as a draft before asynchronous setup, and let on_prompt
         // clear it only after the supervisor accepts it.
@@ -3350,7 +3455,11 @@ impl Manager {
                     continue;
                 }
                 let fallback = row.fallback.clone().unwrap_or_default();
-                let note = exhausted_note(&session, Some(&fallback));
+                let note = exhausted_note(
+                    &session,
+                    Some(&fallback),
+                    &self.store.carried_reviews(&session.id).unwrap_or_default(),
+                );
                 let result = self
                     .continue_work(&session, Some(fallback), note, Some(row.choice()))
                     .await;
@@ -3410,7 +3519,11 @@ impl Manager {
             } else if ended(&[state::EndReason::NodeRestart]) {
                 // The node restarted while it waited: carry it on, on the same
                 // model, once the reset has come.
-                let note = exhausted_note(&session, None);
+                let note = exhausted_note(
+                    &session,
+                    None,
+                    &self.store.carried_reviews(&session.id).unwrap_or_default(),
+                );
                 let result = self
                     .continue_work(&session, None, note, Some(row.choice()))
                     .await;
