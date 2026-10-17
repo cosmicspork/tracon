@@ -198,7 +198,20 @@ impl Audience {
                 review::VERDICT
             ),
             Self::Session(phase) => {
-                format!("{name} is not offered in a {} session", phase.as_str())
+                let article = if phase == Phase::Execute { "an" } else { "a" };
+                let refusal = format!(
+                    "{name} is not offered in {article} {} session",
+                    phase.as_str()
+                );
+                if name == review::VERDICT {
+                    format!(
+                        "{refusal}: only a review session gives a verdict; {} is what an \
+                         execute session calls",
+                        review::SUBMIT
+                    )
+                } else {
+                    refusal
+                }
             }
             Self::External if name == review::VERDICT => format!(
                 "{name} is for a review session the node starts; put your own change up with {}",
