@@ -697,6 +697,29 @@ pub fn managed_root(state_dir: &Path) -> PathBuf {
     state_dir.join("repos")
 }
 
+/// `repo` as it really sits on disk, when that is a clone inside managed
+/// storage, else why not. Both sides are canonicalised: a lexical prefix
+/// check passes `<root>/../../elsewhere` and a symlink out of the root, and
+/// what is done to a managed clone (`checkout --force`, `clean -ffdx`) must
+/// never reach an operator's checkout that way. The root itself may sit
+/// behind a symlink (`/home` to `/var/home`), so it is resolved too.
+pub fn managed_clone(repo: &Path) -> Result<PathBuf, String> {
+    let refuse = || {
+        format!(
+            "refusing {}: it is not a clone inside managed storage",
+            repo.display()
+        )
+    };
+    let root = managed_root(&crate::config::Config::state_dir())
+        .canonicalize()
+        .map_err(|_| refuse())?;
+    let real = repo.canonicalize().map_err(|_| refuse())?;
+    if real == root || !real.starts_with(&root) {
+        return Err(refuse());
+    }
+    Ok(real)
+}
+
 /// `<root>/<host>/<owner>/<name>`, with every component checked: a path is
 /// built from forge-supplied strings, so nothing may traverse or hide. The
 /// owner may be a GitLab group path (`group/sub/team`); each of its segments
@@ -751,7 +774,13 @@ pub fn git_token_for(
 /// for a path outside the managed root.
 fn managed_forge(state_dir: &Path, repo_path: &Path) -> Option<Forge> {
     let root = managed_root(state_dir);
-    let rest = repo_path.strip_prefix(&root).ok()?;
+    // A clone named by its real path, when the state directory is reached
+    // through a symlink, is under the real root instead.
+    let real = root.canonicalize().ok();
+    let rest = repo_path
+        .strip_prefix(&root)
+        .ok()
+        .or_else(|| repo_path.strip_prefix(real.as_deref()?).ok())?;
     let host = rest.components().next()?;
     let host = host.as_os_str().to_string_lossy();
     Some(match host.contains("github") {
@@ -781,6 +810,9 @@ pub async fn refresh_for_build(
         .ok()
         .and_then(|env| forge.token(&env).cloned());
     let credential = crate::git_remote::brokered(forge.git_user(), token.as_deref());
+    // Named under the root but resolving outside it is refused, not taken
+    // for a host checkout: nothing legitimate is spelled that way.
+    let repo_path = &managed_clone(repo_path)?;
     let lock = clone_lock(repo_path);
     let _guard = lock.lock().await;
     tokio::time::timeout(
@@ -794,7 +826,8 @@ pub async fn refresh_for_build(
 
 /// One writer at a time per managed clone: a session seeding from it while
 /// another syncs it, or a build fetching it, would otherwise read a tree
-/// halfway between two commits.
+/// halfway between two commits. Keyed by where the clone really is, so two
+/// spellings of one path share a lock.
 pub fn clone_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     type Locks = std::sync::Mutex<
         std::collections::HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>,
@@ -803,7 +836,7 @@ pub fn clone_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
     LOCKS
         .lock()
         .unwrap()
-        .entry(repo.to_path_buf())
+        .entry(repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf()))
         .or_default()
         .clone()
 }
@@ -815,7 +848,8 @@ pub struct Synced {
     pub default: String,
     /// The commit the clone's default branch and working tree now hold.
     pub commit: String,
-    /// When the clone last fetched from its forge, if git recorded it.
+    /// When the clone last fetched from its forge successfully, as the node
+    /// recorded it (`FETCHED_AT`); `None` before the node has.
     pub fetched_ms: Option<i64>,
     /// Why the fetch failed, when it did: the clone was brought to the
     /// `origin/<default>` it fetched last time instead.
@@ -827,11 +861,14 @@ pub struct Synced {
 /// branch onto it and remove anything the tree gathered. The clone is the
 /// node's own, so nothing in it is anyone's work to keep. A fetch that fails
 /// does not fail the session: the clone goes to the `origin/<default>` it
-/// last fetched, and `stale` says why. Callers hold `clone_lock`.
+/// last fetched, and `stale` says why. A path that is not a clone inside
+/// managed storage is refused before any Git command runs, and that refusal
+/// fails the start: it is never a stale fetch. Callers hold `clone_lock`.
 pub async fn sync_managed(
     repo: &Path,
     credential: &crate::git_remote::Credential<'_>,
 ) -> Result<Synced, String> {
+    let repo = &managed_clone(repo)?;
     let fetched = tokio::time::timeout(Duration::from_secs(300), fetch_managed(repo, credential))
         .await
         .unwrap_or_else(|_| Err("git fetch ran out of time".into()));
@@ -862,11 +899,9 @@ pub async fn sync_managed(
     local_git(repo, &["checkout", "--force", "-B", &default, &remote]).await?;
     local_git(repo, &["clean", "-ffdx"]).await?;
     let commit = local_git(repo, &["rev-parse", "HEAD"]).await?;
-    let fetched_ms = std::fs::metadata(repo.join(".git/FETCH_HEAD"))
-        .and_then(|meta| meta.modified())
+    let fetched_ms = std::fs::read_to_string(repo.join(".git").join(FETCHED_AT))
         .ok()
-        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|since| since.as_millis() as i64);
+        .and_then(|at| at.trim().parse().ok());
     Ok(Synced {
         default,
         commit,
@@ -881,8 +916,11 @@ async fn local_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     let anonymous = crate::git_remote::Credential::Anonymous;
     let mut command = crate::git_remote::git_in("git", repo, FORGE_HOME, &anonymous)
         .map_err(|e| e.to_string())?;
-    command.args(args);
-    let out = command.output().await.map_err(|e| e.to_string())?;
+    command.args(args).kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .map_err(|_| format!("git {} ran out of time", args[0]))?
+        .map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -929,22 +967,32 @@ pub async fn clone(
     Ok(())
 }
 
+/// A fetch that succeeds records when, in this file under the clone's
+/// `.git`, for a stale start to say how old its base is. `FETCH_HEAD`'s
+/// mtime will not do: a fetch that fails partway can still write it.
+pub const FETCHED_AT: &str = "tracon-fetched-ms";
+
 /// Refresh a trusted managed clone with broker-provided Git authentication.
 /// This is intentionally unavailable to agent workspaces: it only accepts a
 /// node-owned repository path, and runs with no ambient credential helpers.
+/// The fetch dies with its future, so a caller's timeout leaves nothing
+/// rewriting refs after the clone's lock is released.
 pub async fn fetch_managed(
     repo: &Path,
     credential: &crate::git_remote::Credential<'_>,
 ) -> Result<(), String> {
-    let root = managed_root(&crate::config::Config::state_dir());
-    if !repo.starts_with(&root) {
-        return Err("refusing to fetch a repository outside managed storage".into());
-    }
+    let repo = &managed_clone(repo)?;
     let mut command = crate::git_remote::git_in("git", repo, FORGE_HOME, credential)
         .map_err(|e| e.to_string())?;
-    command.args(["fetch", "--prune", "origin"]);
+    command
+        .args(["fetch", "--prune", "origin"])
+        .kill_on_drop(true);
     let out = command.output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
+        let _ = std::fs::write(
+            repo.join(".git").join(FETCHED_AT),
+            crate::store::now_ms().to_string(),
+        );
         Ok(())
     } else {
         Err(format!(
@@ -1341,8 +1389,8 @@ mod tests {
     async fn a_session_seeded_from_a_managed_clone_starts_at_the_upstream_tip() {
         let (tmp, clone) = managed_fixture("sync");
         let tip = advance(tmp.path(), "two");
-        // Leftovers in the clone's tree are the node's, and do not travel.
-        std::fs::write(clone.join("stray.txt"), "left behind").unwrap();
+        // An edit left in the clone's tree is the node's, and the sync
+        // puts it back.
         std::fs::write(clone.join("a.txt"), "edited in place").unwrap();
 
         let lock = clone_lock(&clone);
@@ -1353,6 +1401,10 @@ mod tests {
         assert_eq!(synced.default, "main");
         assert_eq!(synced.commit, tip);
         assert_eq!(synced.stale, None);
+        assert!(synced.fetched_ms.is_some());
+        // Written after the sync, so only the seed can keep it out: a
+        // managed clone's untracked files are not overlaid.
+        std::fs::write(clone.join("stray.txt"), "left behind").unwrap();
         let id = format!("seed-sync-{}", uuid::Uuid::now_v7());
         let workspace = crate::workspace::seed_from_clone("git", &clone, "feat/x", None, &id)
             .await
@@ -1377,7 +1429,10 @@ mod tests {
     async fn a_failed_fetch_starts_from_the_last_fetched_default_branch_and_says_so() {
         let (tmp, clone) = managed_fixture("stale");
         let fetched = advance(tmp.path(), "two");
-        sh(&clone, "git fetch -q origin");
+        fetch_managed(&clone, &crate::git_remote::Credential::Anonymous)
+            .await
+            .unwrap();
+        let at = std::fs::read_to_string(clone.join(".git").join(FETCHED_AT)).unwrap();
         sh(
             &clone,
             "git remote set-url origin /nonexistent/upstream.git",
@@ -1388,9 +1443,136 @@ mod tests {
             .unwrap();
         assert_eq!(synced.commit, fetched);
         assert!(synced.stale.is_some());
-        assert!(synced.fetched_ms.is_some());
+        // When the last fetch that succeeded ran, not when this one failed.
+        assert_eq!(synced.fetched_ms, at.trim().parse().ok());
         assert_eq!(sh(&clone, "git rev-parse main"), fetched);
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A forge that renamed its default branch since the clone was made: the
+    /// sync follows `origin/HEAD` to the new name rather than resetting the
+    /// old branch.
+    #[tokio::test]
+    async fn a_renamed_default_branch_is_followed_to_its_new_name() {
+        let (tmp, clone) = managed_fixture("renamed");
+        let tip = advance(tmp.path(), "two");
+        sh(
+            &tmp.path().join("upstream.git"),
+            "git branch -m main trunk && git symbolic-ref HEAD refs/heads/trunk",
+        );
+
+        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous)
+            .await
+            .unwrap();
+        assert_eq!(synced.default, "trunk");
+        assert_eq!(synced.commit, tip);
+        assert_eq!(synced.stale, None);
+        assert_eq!(sh(&clone, "git branch --show-current"), "trunk");
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A checkout outside managed storage with work in it that is not
+    /// committed: an edit, an untracked file and an ignored one.
+    fn host_checkout(tmp: &Path) -> PathBuf {
+        let host = tmp.join("host");
+        sh(
+            tmp,
+            "git init -q -b main host && cd host && echo one > a.txt \
+             && echo ignored.txt > .gitignore && git add a.txt .gitignore \
+             && git -c user.name=t -c user.email=t@t commit -qm one \
+             && echo mine > a.txt && echo untracked > new.txt && echo kept > ignored.txt",
+        );
+        host
+    }
+
+    fn assert_untouched(host: &Path) {
+        assert_eq!(
+            std::fs::read_to_string(host.join("a.txt")).unwrap(),
+            "mine\n"
+        );
+        assert!(host.join("new.txt").exists());
+        assert!(host.join("ignored.txt").exists());
+    }
+
+    /// A path spelled under the managed root that climbs out of it with `..`
+    /// passes a lexical prefix check. It is refused before any Git command
+    /// runs, as a refusal and not as a stale fetch, and the checkout it
+    /// reached keeps its uncommitted and ignored files.
+    #[tokio::test]
+    async fn a_path_that_climbs_out_of_managed_storage_is_refused_and_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host_checkout(tmp.path());
+        let root = managed_root(&crate::config::Config::state_dir());
+        std::fs::create_dir_all(&root).unwrap();
+        // Enough `..` to reach `/` however deep the root really sits; more
+        // stay at `/`.
+        let mut climbing = root.clone();
+        for _ in 0..root.canonicalize().unwrap().components().count() {
+            climbing.push("..");
+        }
+        climbing.push(host.strip_prefix("/").unwrap());
+        assert!(
+            climbing.starts_with(&root),
+            "the lexical check would pass it"
+        );
+        assert_eq!(
+            climbing.canonicalize().unwrap(),
+            host.canonicalize().unwrap()
+        );
+
+        let error = sync_managed(&climbing, &crate::git_remote::Credential::Anonymous)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("not a clone inside managed storage"),
+            "{error}"
+        );
+        let error = fetch_managed(&climbing, &crate::git_remote::Credential::Anonymous)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("not a clone inside managed storage"),
+            "{error}"
+        );
+        assert_untouched(&host);
+    }
+
+    /// The same through a symlink: a link inside managed storage to a
+    /// checkout outside it is where the link leads, not where it sits.
+    #[tokio::test]
+    async fn a_symlink_out_of_managed_storage_is_refused_and_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host_checkout(tmp.path());
+        let owner = format!("link-{}", uuid::Uuid::now_v7().simple());
+        let link = managed_root(&crate::config::Config::state_dir())
+            .join("github.com")
+            .join(owner)
+            .join("proj");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&host, &link).unwrap();
+
+        let error = sync_managed(&link, &crate::git_remote::Credential::Anonymous)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("not a clone inside managed storage"),
+            "{error}"
+        );
+        assert_untouched(&host);
+        let _ = std::fs::remove_dir_all(link.parent().unwrap());
+    }
+
+    /// Two spellings of one clone are one clone, so they share its lock.
+    #[test]
+    fn two_spellings_of_one_clone_share_a_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clone = tmp.path().join("a");
+        std::fs::create_dir_all(&clone).unwrap();
+        let other = tmp.path().join("a").join("..").join("a");
+        assert!(std::sync::Arc::ptr_eq(
+            &clone_lock(&clone),
+            &clone_lock(&other)
+        ));
     }
 
     #[test]

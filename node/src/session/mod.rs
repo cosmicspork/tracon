@@ -581,10 +581,14 @@ impl Manager {
                 crate::adapter::KNOWN.join(", ")
             )));
         }
+        // The old session's workspace, as `continue_work` takes it:
+        // seeding afresh would put the old branch name on a new base and
+        // leave the work in the old volume behind.
         let workspace_id = old
             .repo_path
             .strip_prefix("workspace://")
-            .map(str::to_string);
+            .unwrap_or(&old.id)
+            .to_string();
         let note = handoff_note(&old, harness);
         let spec = NewSession {
             channel: old.channel.clone(),
@@ -598,7 +602,7 @@ impl Manager {
             phase: reopen_phase(&old.phase),
             review_id: None,
             base_sha: None,
-            workspace_id,
+            workspace_id: Some(workspace_id),
             parent_session: Some(old.id.clone()),
             continued_from: Some(old.id.clone()),
             harness: Some(harness.to_string()),
@@ -1857,9 +1861,20 @@ impl Manager {
                 None,
             ),
             None => {
-                let workspace = if repo
-                    .starts_with(crate::forge::managed_root(&Config::state_dir()))
-                {
+                // Managed is decided by where the path really leads: one
+                // named under the root that resolves outside it is refused
+                // here, not seeded as a host checkout, and one that reaches
+                // the root by another spelling is still the node's clone.
+                let managed = match crate::forge::managed_clone(&repo) {
+                    Ok(real) => Some(real),
+                    Err(why)
+                        if repo.starts_with(crate::forge::managed_root(&Config::state_dir())) =>
+                    {
+                        anyhow::bail!(why)
+                    }
+                    Err(_) => None,
+                };
+                let workspace = if let Some(repo) = managed {
                     let brokered = crate::forge::git_token_for(
                         &self.tools.broker,
                         &Config::state_dir(),
@@ -1933,6 +1948,11 @@ impl Manager {
                 ..Default::default()
             },
         )?;
+        let stale = synced.as_ref().and_then(|sync| {
+            sync.stale
+                .as_ref()
+                .map(|error| stale_note(error, sync.fetched_ms))
+        });
         self.record(NewEvent {
             session_id: id.to_string(),
             work_item_id: None,
@@ -1948,7 +1968,7 @@ impl Manager {
                     "source_ref": format!("origin/{}", sync.default),
                     "source_commit": sync.commit,
                     "fetched_ms": sync.fetched_ms,
-                    "stale": sync.stale.as_ref().map(|error| stale_note(error, sync.fetched_ms)),
+                    "stale": stale,
                 })),
             }),
             at_ms: now_ms(),
@@ -2233,6 +2253,7 @@ impl Manager {
                         .map(|_| environment.session_egress.as_slice()),
                     forge_repo: forge_repo.as_ref(),
                     prepared: prepared.as_ref(),
+                    stale_base: stale.as_deref(),
                 },
             );
             (assembled, context.map(|(_, receipt)| receipt))
@@ -3851,23 +3872,15 @@ pub async fn reconcile_after_restart(
     cleaned
 }
 
-/// What the `worktree` event says of a session started from a clone that
-/// could not be fetched: why, and how old the default branch it started from
-/// is.
+/// What the `worktree` event and the orientation say of a session started
+/// from a clone that could not be fetched: when the default branch it
+/// started from was last fetched, and why this fetch failed.
 fn stale_note(error: &str, fetched_ms: Option<i64>) -> String {
     let when = match fetched_ms {
-        Some(at) => {
-            let minutes = (now_ms() - at).max(0) / 60_000;
-            match minutes {
-                0 => "under a minute ago".to_string(),
-                m if m < 120 => format!("{m} minutes ago"),
-                m if m < 48 * 60 => format!("{} hours ago", m / 60),
-                m => format!("{} days ago", m / (24 * 60)),
-            }
-        }
-        None => "at an unknown time".to_string(),
+        Some(at) => exhaustion::utc(at),
+        None => "an unknown time".to_string(),
     };
-    format!("stale: last fetched {when}; the fetch failed: {error}")
+    format!("stale: last fetched at {when}; the fetch failed: {error}")
 }
 
 /// A URL-safe random token. Not a session id: ids appear in logs and the
