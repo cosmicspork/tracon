@@ -668,6 +668,31 @@ pub async fn seed_from_checkout(
     base_sha: Option<&str>,
     id: &str,
 ) -> Result<Workspace, WorkspaceError> {
+    seed(git, source, branch, base_sha, id, true).await
+}
+
+/// Seed from a managed clone the node has just brought to its forge's
+/// default branch (`forge::sync_managed`). Only what is committed travels:
+/// the clone's tree is the node's, not anyone's uncommitted work, so there is
+/// nothing to overlay.
+pub async fn seed_from_clone(
+    git: &str,
+    source: &Path,
+    branch: &str,
+    base_sha: Option<&str>,
+    id: &str,
+) -> Result<Workspace, WorkspaceError> {
+    seed(git, source, branch, base_sha, id, false).await
+}
+
+async fn seed(
+    git: &str,
+    source: &Path,
+    branch: &str,
+    base_sha: Option<&str>,
+    id: &str,
+    overlay: bool,
+) -> Result<Workspace, WorkspaceError> {
     if !source.is_dir() {
         return Err(WorkspaceError::Missing(source.into()));
     }
@@ -721,7 +746,9 @@ pub async fn seed_from_checkout(
     .await?;
     // Overlay files after checkout so selected, uncommitted work arrives as
     // bytes only. .git stays the fresh, node-created checkout.
-    overlay_checkout(source, &stage)?;
+    if overlay {
+        overlay_checkout(source, &stage)?;
+    }
     sanitize_git(&stage)?;
     Ok(Workspace {
         id: id.to_string(),
@@ -878,12 +905,18 @@ pub fn selected_path(root: &Path, relative: &str) -> Result<PathBuf, WorkspaceEr
     Ok(root.join(path))
 }
 
+/// The commit a freshly seeded stage sits on, for the record of what the
+/// session started from.
+pub async fn head_of(git: &str, stage: &Path) -> Result<String, WorkspaceError> {
+    run_git(git, Some(stage), "rev-parse", ["rev-parse", "HEAD"]).await
+}
+
 async fn run_git<'a>(
     git: &str,
     dir: Option<&Path>,
     op: &'static str,
     args: impl IntoIterator<Item = &'a str>,
-) -> Result<(), WorkspaceError> {
+) -> Result<String, WorkspaceError> {
     let mut command = Command::new(crate::config::path_guard::program("publish.git", git)?);
     command
         .env_clear()
@@ -913,7 +946,7 @@ async fn run_git<'a>(
         .args(args);
     let out = command.output().await?;
     if out.status.success() {
-        Ok(())
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
         Err(WorkspaceError::Git {
             op,

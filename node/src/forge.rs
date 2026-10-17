@@ -781,6 +781,8 @@ pub async fn refresh_for_build(
         .ok()
         .and_then(|env| forge.token(&env).cloned());
     let credential = crate::git_remote::brokered(forge.git_user(), token.as_deref());
+    let lock = clone_lock(repo_path);
+    let _guard = lock.lock().await;
     tokio::time::timeout(
         std::time::Duration::from_secs(300),
         fetch_managed(repo_path, &credential),
@@ -788,6 +790,108 @@ pub async fn refresh_for_build(
     .await
     .map_err(|_| "git fetch ran out of time".to_string())??;
     Ok(true)
+}
+
+/// One writer at a time per managed clone: a session seeding from it while
+/// another syncs it, or a build fetching it, would otherwise read a tree
+/// halfway between two commits.
+pub fn clone_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    type Locks = std::sync::Mutex<
+        std::collections::HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    >;
+    static LOCKS: LazyLock<Locks> = LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap()
+        .entry(repo.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// What a managed clone was brought to before a session seeded from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Synced {
+    /// The forge's default branch, as `origin/HEAD` names it.
+    pub default: String,
+    /// The commit the clone's default branch and working tree now hold.
+    pub commit: String,
+    /// When the clone last fetched from its forge, if git recorded it.
+    pub fetched_ms: Option<i64>,
+    /// Why the fetch failed, when it did: the clone was brought to the
+    /// `origin/<default>` it fetched last time instead.
+    pub stale: Option<String>,
+}
+
+/// Bring a managed clone's default branch and working tree to what its forge
+/// holds now: fetch, follow the forge's default branch, reset the local
+/// branch onto it and remove anything the tree gathered. The clone is the
+/// node's own, so nothing in it is anyone's work to keep. A fetch that fails
+/// does not fail the session: the clone goes to the `origin/<default>` it
+/// last fetched, and `stale` says why. Callers hold `clone_lock`.
+pub async fn sync_managed(
+    repo: &Path,
+    credential: &crate::git_remote::Credential<'_>,
+) -> Result<Synced, String> {
+    let fetched = tokio::time::timeout(Duration::from_secs(300), fetch_managed(repo, credential))
+        .await
+        .unwrap_or_else(|_| Err("git fetch ran out of time".into()));
+    let stale = fetched.err();
+    if stale.is_none() {
+        // The forge may have renamed its default branch since the clone was
+        // made. Best effort: a failure leaves the `origin/HEAD` it had.
+        // It asks the forge, so it carries the fetch's credential.
+        if let Ok(mut command) = crate::git_remote::git_in("git", repo, FORGE_HOME, credential) {
+            command
+                .args(["remote", "set-head", "origin", "--auto"])
+                .kill_on_drop(true);
+            let _ = tokio::time::timeout(Duration::from_secs(60), command.output()).await;
+        }
+    }
+    let head = local_git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    .map_err(|e| format!("the clone has no origin/HEAD to start from: {e}"))?;
+    let default = head
+        .strip_prefix("origin/")
+        .filter(|name| !name.is_empty() && !name.starts_with('-'))
+        .ok_or_else(|| format!("origin/HEAD names {head:?}, not a branch of origin"))?
+        .to_string();
+    let remote = format!("refs/remotes/origin/{default}");
+    local_git(repo, &["checkout", "--force", "-B", &default, &remote]).await?;
+    local_git(repo, &["clean", "-ffdx"]).await?;
+    let commit = local_git(repo, &["rev-parse", "HEAD"]).await?;
+    let fetched_ms = std::fs::metadata(repo.join(".git/FETCH_HEAD"))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_millis() as i64);
+    Ok(Synced {
+        default,
+        commit,
+        fetched_ms,
+        stale,
+    })
+}
+
+/// A Git command against a managed clone that never leaves the disk, so it
+/// needs no credential, with its trimmed output.
+async fn local_git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let anonymous = crate::git_remote::Credential::Anonymous;
+    let mut command = crate::git_remote::git_in("git", repo, FORGE_HOME, &anonymous)
+        .map_err(|e| e.to_string())?;
+    command.args(args);
+    let out = command.output().await.map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(format!(
+            "git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 /// The home `$HOME` points at for forge-side Git commands.
@@ -1175,6 +1279,117 @@ mod tests {
             refresh_for_build(&broker, host.path(), "n1").await,
             Ok(false)
         );
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    fn sh(dir: &Path, script: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare upstream with one commit on `main`, a managed clone of it, and
+    /// a working copy to advance the upstream from.
+    fn managed_fixture(tag: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        sh(
+            tmp.path(),
+            "git init -q --bare -b main upstream.git && git clone -q upstream.git work \
+             && cd work && echo one > a.txt && git add a.txt \
+             && git -c user.name=t -c user.email=t@t commit -qm one && git push -q origin main",
+        );
+        let owner = format!("{tag}-{}", uuid::Uuid::now_v7().simple());
+        let clone = managed_root(&crate::config::Config::state_dir())
+            .join("github.com")
+            .join(owner)
+            .join("proj");
+        std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+        sh(
+            clone.parent().unwrap(),
+            &format!(
+                "git clone -q {} proj",
+                tmp.path().join("upstream.git").display()
+            ),
+        );
+        (tmp, clone)
+    }
+
+    fn advance(tmp: &Path, text: &str) -> String {
+        sh(
+            &tmp.join("work"),
+            &format!(
+                "echo {text} > a.txt && git -c user.name=t -c user.email=t@t commit -qam {text} \
+                 && git push -q origin main && git rev-parse HEAD"
+            ),
+        )
+    }
+
+    /// A session on a managed clone starts from what the forge's default
+    /// branch holds now, not from wherever the clone's own `main` was left
+    /// when it was made: the workspace's HEAD, its `origin/main` and its files
+    /// are all the upstream tip.
+    #[tokio::test]
+    async fn a_session_seeded_from_a_managed_clone_starts_at_the_upstream_tip() {
+        let (tmp, clone) = managed_fixture("sync");
+        let tip = advance(tmp.path(), "two");
+        // Leftovers in the clone's tree are the node's, and do not travel.
+        std::fs::write(clone.join("stray.txt"), "left behind").unwrap();
+        std::fs::write(clone.join("a.txt"), "edited in place").unwrap();
+
+        let lock = clone_lock(&clone);
+        let _guard = lock.lock().await;
+        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous)
+            .await
+            .unwrap();
+        assert_eq!(synced.default, "main");
+        assert_eq!(synced.commit, tip);
+        assert_eq!(synced.stale, None);
+        let id = format!("seed-sync-{}", uuid::Uuid::now_v7());
+        let workspace = crate::workspace::seed_from_clone("git", &clone, "feat/x", None, &id)
+            .await
+            .unwrap();
+
+        let stage = crate::workspace::staging_path(&workspace.id);
+        assert_eq!(sh(&stage, "git rev-parse HEAD"), tip);
+        assert_eq!(sh(&stage, "git rev-parse origin/main"), tip);
+        assert_eq!(
+            std::fs::read_to_string(stage.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert!(!stage.join("stray.txt").exists());
+        let _ = std::fs::remove_dir_all(&stage);
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A forge that cannot be reached does not fail the session: the clone
+    /// goes to the `origin/main` it fetched last, which is newer than its own
+    /// `main`, and says the start is stale.
+    #[tokio::test]
+    async fn a_failed_fetch_starts_from_the_last_fetched_default_branch_and_says_so() {
+        let (tmp, clone) = managed_fixture("stale");
+        let fetched = advance(tmp.path(), "two");
+        sh(&clone, "git fetch -q origin");
+        sh(
+            &clone,
+            "git remote set-url origin /nonexistent/upstream.git",
+        );
+
+        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous)
+            .await
+            .unwrap();
+        assert_eq!(synced.commit, fetched);
+        assert!(synced.stale.is_some());
+        assert!(synced.fetched_ms.is_some());
+        assert_eq!(sh(&clone, "git rev-parse main"), fetched);
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
     }
 

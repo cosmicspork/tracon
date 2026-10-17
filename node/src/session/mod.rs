@@ -65,7 +65,8 @@ pub struct NewSession {
     #[serde(default)]
     pub phase: Phase,
     /// Review sessions only: the review to read, and the commit to check out
-    /// (the worktree is created at it rather than at origin's default).
+    /// (the workspace is seeded at it rather than at the source's HEAD, which
+    /// for a managed clone is the forge's default branch as just fetched).
     #[serde(default)]
     pub review_id: Option<String>,
     #[serde(default)]
@@ -1844,14 +1845,21 @@ impl Manager {
             .insert(id.to_string(), (token.clone(), spec.channel.clone()));
 
         let repo = PathBuf::from(&spec.repo_path);
-        let workspace = match spec.workspace_id.as_deref() {
-            Some(existing) => crate::workspace::Workspace {
-                id: existing.to_string(),
-                volume: crate::workspace::volume_name(existing),
-                snapshot: crate::workspace::snapshot_path(existing),
-            },
+        let git = self.cfg.live().publish.git.clone();
+        let mut synced = None;
+        let (workspace, base) = match spec.workspace_id.as_deref() {
+            Some(existing) => (
+                crate::workspace::Workspace {
+                    id: existing.to_string(),
+                    volume: crate::workspace::volume_name(existing),
+                    snapshot: crate::workspace::snapshot_path(existing),
+                },
+                None,
+            ),
             None => {
-                if repo.starts_with(crate::forge::managed_root(&Config::state_dir())) {
+                let workspace = if repo
+                    .starts_with(crate::forge::managed_root(&Config::state_dir()))
+                {
                     let brokered = crate::forge::git_token_for(
                         &self.tools.broker,
                         &Config::state_dir(),
@@ -1865,25 +1873,42 @@ impl Manager {
                         }
                         None => crate::git_remote::Credential::Anonymous,
                     };
-                    crate::forge::fetch_managed(&repo, &credential)
+                    // Held from the fetch until the seed has read the tree,
+                    // so another session or a build cannot move it between.
+                    let lock = crate::forge::clone_lock(&repo);
+                    let _guard = lock.lock().await;
+                    let sync = crate::forge::sync_managed(&repo, &credential)
                         .await
                         .map_err(anyhow::Error::msg)?;
-                }
-                let workspace = crate::workspace::seed_from_checkout(
-                    &self.cfg.live().publish.git,
-                    &repo,
-                    &branch,
-                    spec.base_sha.as_deref(),
-                    id,
-                )
-                .await?;
-                crate::workspace::import(
-                    self.backend.as_ref(),
-                    &workspace,
-                    &crate::workspace::staging_path(id),
-                )
-                .await?;
-                workspace
+                    if let Some(error) = &sync.stale {
+                        tracing::warn!(
+                            session = id, repo = %repo.display(), %error,
+                            "managed clone not fetched; starting from its last-fetched default branch"
+                        );
+                    }
+                    synced = Some(sync);
+                    crate::workspace::seed_from_clone(
+                        &git,
+                        &repo,
+                        &branch,
+                        spec.base_sha.as_deref(),
+                        id,
+                    )
+                    .await?
+                } else {
+                    crate::workspace::seed_from_checkout(
+                        &git,
+                        &repo,
+                        &branch,
+                        spec.base_sha.as_deref(),
+                        id,
+                    )
+                    .await?
+                };
+                let stage = crate::workspace::staging_path(id);
+                let base = crate::workspace::head_of(&git, &stage).await?;
+                crate::workspace::import(self.backend.as_ref(), &workspace, &stage).await?;
+                (workspace, Some(base))
             }
         };
         let snapshot = crate::workspace::export(self.backend.as_ref(), &workspace).await?;
@@ -1917,7 +1942,14 @@ impl Manager {
                 "workspace_id": workspace.id,
                 "volume": workspace.volume,
                 "branch": branch,
-                "source": if spec.workspace_id.is_some() { "resumed" } else { "imported" }
+                "source": if spec.workspace_id.is_some() { "resumed" } else { "imported" },
+                "base": base,
+                "synced": synced.as_ref().map(|sync| json!({
+                    "source_ref": format!("origin/{}", sync.default),
+                    "source_commit": sync.commit,
+                    "fetched_ms": sync.fetched_ms,
+                    "stale": sync.stale.as_ref().map(|error| stale_note(error, sync.fetched_ms)),
+                })),
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
@@ -3817,6 +3849,25 @@ pub async fn reconcile_after_restart(
         cleaned.push(s.id);
     }
     cleaned
+}
+
+/// What the `worktree` event says of a session started from a clone that
+/// could not be fetched: why, and how old the default branch it started from
+/// is.
+fn stale_note(error: &str, fetched_ms: Option<i64>) -> String {
+    let when = match fetched_ms {
+        Some(at) => {
+            let minutes = (now_ms() - at).max(0) / 60_000;
+            match minutes {
+                0 => "under a minute ago".to_string(),
+                m if m < 120 => format!("{m} minutes ago"),
+                m if m < 48 * 60 => format!("{} hours ago", m / 60),
+                m => format!("{} days ago", m / (24 * 60)),
+            }
+        }
+        None => "at an unknown time".to_string(),
+    };
+    format!("stale: last fetched {when}; the fetch failed: {error}")
 }
 
 /// A URL-safe random token. Not a session id: ids appear in logs and the
