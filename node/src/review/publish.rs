@@ -209,6 +209,18 @@ pub struct Intent {
     /// the diff.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<super::prose::CommitLine>,
+    /// Under squash: the message with which the squash is the agent's head
+    /// but for its signature (`as_written`), so the head itself ships and
+    /// keeps its SHA. Absent when no message would make it so. The screen
+    /// compares the message the operator approves with it to say which
+    /// commit ships.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_written: Option<String>,
+    /// Those of `commits` that carry a signature and that a commit made in
+    /// publication would replace: under squash, those not already on what
+    /// it squashes onto. A commit made in publication is never signed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed: Vec<String>,
 }
 
 /// What the forge says about an existing change.
@@ -1197,6 +1209,38 @@ async fn signed_as(
     Ok(unsigned(&original) == made)
 }
 
+/// The message that makes a squash onto `onto` (and `merges`) the commit
+/// `raw` already is but for its signature, so that commit ships as written.
+/// It mirrors what `squash_commit` makes: `tree`, those parents, `author`,
+/// `committer`, a blank line, then the trimmed message and one newline.
+/// None when no message would: another parent, a header the squash never
+/// writes, or a message the squash's trimming would change.
+pub fn as_written(raw: &[u8], onto: &str, merges: Option<&str>) -> Option<String> {
+    let raw = unsigned(raw);
+    let at = raw.windows(2).position(|w| w == b"\n\n")?;
+    let mut lines = std::str::from_utf8(&raw[..at]).ok()?.split('\n');
+    lines.next()?.strip_prefix("tree ")?;
+    for parent in std::iter::once(onto).chain(merges) {
+        if lines.next()?.strip_prefix("parent ")? != parent {
+            return None;
+        }
+    }
+    lines.next()?.strip_prefix("author ")?;
+    lines.next()?.strip_prefix("committer ")?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let message = std::str::from_utf8(&raw[at + 2..])
+        .ok()?
+        .strip_suffix('\n')?;
+    (!message.is_empty() && message.trim() == message).then(|| message.to_string())
+}
+
+/// Whether a raw commit object carries a signature.
+pub fn is_signed(raw: &[u8]) -> bool {
+    unsigned(raw).len() != raw.len()
+}
+
 /// A raw commit object without its `gpgsig` and `gpgsig-sha256` headers and
 /// their continuation lines. Everything else, the message included, is kept
 /// as stored.
@@ -1421,12 +1465,6 @@ async fn reword_commits(
             if tree != original.tree {
                 return Err(PublishError::IdentityChanged);
             }
-            // Remade identical but for the signature: keep the signed one.
-            let remade = if signed_as(git, publisher, sha, &remade).await? {
-                sha.to_string()
-            } else {
-                remade
-            };
             made.insert(sha, remade);
         }
         if made.len() == before {
@@ -1833,6 +1871,42 @@ gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\
 \nsubject\n\ngpgsig in the body\n";
         assert_eq!(unsigned(signed), bare.to_vec());
         assert_eq!(unsigned(bare), bare.to_vec());
+        assert!(is_signed(signed));
+        assert!(!is_signed(bare));
+    }
+
+    /// The message a squash must carry to remake a commit is its own, and
+    /// only for a commit the squash could make at all: on those parents, with
+    /// no header the squash never writes.
+    #[test]
+    fn a_commit_ships_as_written_only_on_the_squash_parents() {
+        let one = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+gpgsig -----BEGIN SSH SIGNATURE-----\n abc\n -----END SSH SIGNATURE-----\n\
+\nsubject\n\nbody\n";
+        assert_eq!(
+            as_written(one, "p", None).as_deref(),
+            Some("subject\n\nbody")
+        );
+        assert_eq!(as_written(one, "q", None), None, "another parent");
+        assert_eq!(as_written(one, "p", Some("m")), None, "a merge it lacks");
+        let merged = b"tree t\nparent p\nparent m\nauthor a <a@e> 1 +0000\n\
+committer a <a@e> 1 +0000\n\nmerge\n";
+        assert_eq!(as_written(merged, "p", Some("m")).as_deref(), Some("merge"));
+        assert_eq!(as_written(merged, "p", None), None);
+        let encoded = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+encoding ISO-8859-1\n\nsubject\n";
+        assert_eq!(
+            as_written(encoded, "p", None),
+            None,
+            "a header it never writes"
+        );
+        let padded = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+\nsubject\n\n";
+        assert_eq!(
+            as_written(padded, "p", None),
+            None,
+            "a message trimming changes"
+        );
     }
 
     fn publication<'a>(
