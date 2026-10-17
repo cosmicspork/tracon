@@ -10,6 +10,7 @@
   import Card from './settings/Card.svelte'
 
   let creds = $state<CredentialSummary[]>([])
+  let loaded = $state(false)
   let to = $state<Record<string, string>>({})
   let busy = $state<string | null>(null)
   let errors = $state<Record<string, string>>({})
@@ -21,7 +22,8 @@
   let imported = $state<string[]>([])
 
   // `version` moves when the Forge tokens card saves or removes one;
-  // `onchange` tells it this card imported one.
+  // `onchange` tells it this card imported or shared one. A share changes
+  // the peer copies its rows warn about.
   let { version = 0, onchange }: { version?: number; onchange?: () => void } = $props()
 
   let local = $state(0)
@@ -32,6 +34,7 @@
       .credentials()
       .then((d) => (creds = d.credentials))
       .catch(() => (creds = []))
+      .finally(() => (loaded = true))
   })
 
   const peers = $derived(store.nodes.filter((n) => !n.is_self && n.reachable))
@@ -56,7 +59,8 @@
         [c.name]: updating ? `updated copy on ${node}` : `handed to ${node}`,
       }
       confirming = null
-      local += 1
+      if (onchange) onchange()
+      else local += 1
     } catch (e) {
       errors = { ...errors, [c.name]: e instanceof Error ? e.message : String(e) }
     } finally {
@@ -146,6 +150,8 @@
       </div>
     {/each}
   </div>
+  {:else if loaded}
+  <p class="empty">No credentials held yet.</p>
   {/if}
 </Card>
 
@@ -170,6 +176,11 @@
     flex-wrap: wrap;
     gap: 8px 12px;
     margin-top: 8px;
+  }
+  .empty {
+    margin: 10px 0 0;
+    font-size: 12.5px;
+    color: var(--dim);
   }
   .rows {
     display: flex;

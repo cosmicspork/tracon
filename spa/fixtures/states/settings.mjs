@@ -703,6 +703,16 @@ const SETUP = {
   machine_error: null,
 }
 
+const CONNECTIONS_EMPTY = {
+  '/api/nodes': [selfNode({ providers: [], models: [] })],
+  '/api/providers': [
+    { ...P_ANTHROPIC, state: 'disconnected', kind: null, identity: null, expires_ms: null, channels: [], updated_ms: null },
+    { ...P_CODEX, state: 'disconnected', url: null, completion: null, completion_note: null, device_code: null, channels: [] },
+  ],
+  '/api/credentials': { credentials: [] },
+  '/api/config': { ...CONFIG, providers: {} },
+}
+
 const click = (page, name, opts = {}) => page.getByRole('button', { name, exact: opts.exact ?? false }).first().click()
 const scrollTo = (page, text) => page.getByText(text, { exact: false }).first().scrollIntoViewIfNeeded()
 // A full-page shot taken while scrolled pins the sticky section nav and the
@@ -739,19 +749,19 @@ export default [
   }),
 
   // --- Connections -----------------------------------------------------------
-  S('connections', '/settings#connections', 'Connections: providers, forge tokens, credential copies', {
+  S('connections', '/settings#connections', 'Connections: providers, credentials, forge tokens', {
     note: 'One provider of each state: subscription connected (declared models open), device-code sign-in pending, API key connected (5 models, collapsed), API key failed. Node selector with an unavailable peer.',
   }),
   S('connections-empty', '/settings#connections', 'Connections: nothing connected yet', {
-    note: 'Onboarding call to action, no forge tokens, no credential copies card.',
-    over: {
-      '/api/nodes': [selfNode({ providers: [], models: [] })],
-      '/api/providers': [
-        { ...P_ANTHROPIC, state: 'disconnected', kind: null, identity: null, expires_ms: null, channels: [], updated_ms: null },
-        { ...P_CODEX, state: 'disconnected', url: null, completion: null, completion_note: null, device_code: null, channels: [] },
-      ],
-      '/api/credentials': { credentials: [] },
-      '/api/config': { ...CONFIG, providers: {} },
+    note: 'Onboarding call to action, no forge tokens, and the Credentials card with its collapsed import and an empty note.',
+    over: CONNECTIONS_EMPTY,
+  }),
+  S('connections-empty-import', '/settings#connections', 'Connections: importing the first credential', {
+    note: 'Import credential expanded on a node that holds none yet.',
+    over: CONNECTIONS_EMPTY,
+    act: async (page) => {
+      await page.getByText('Import credential', { exact: true }).first().click()
+      await scrollTo(page, 'Credential TOML')
     },
   }),
   S('connections-add-chooser', '/settings#connections', 'Add a provider: chooser', {
