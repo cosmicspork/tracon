@@ -2477,9 +2477,18 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     };
     // Who the commits are by, against the account approval would publish as,
     // so a commit the forge would not attribute to it is named before anyone
-    // approves. Node-local: the worktree is here.
+    // approves. Node-local: the worktree is here. On an existing change,
+    // what its branch held at submit is not this review's to answer for.
     let authorship = match (remote_owner.as_ref(), worktree_of(s, r)) {
         (None, Some(worktree)) => {
+            let updates_change = serde_json::from_str::<crate::review::publish::Target>(&r.target)
+                .is_ok_and(|target| target.change.is_some());
+            let change_head = revision
+                .as_ref()
+                .and_then(|revision| revision.intent_json.as_deref())
+                .filter(|_| updates_change)
+                .and_then(|json| serde_json::from_str::<crate::review::publish::Intent>(json).ok())
+                .and_then(|intent| intent.lease);
             crate::review::authorship(
                 &s.tools.broker,
                 &r.provider,
@@ -2488,6 +2497,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
                 &worktree,
                 &format!("origin/{}", r.base_ref),
                 &r.head_sha,
+                change_head.as_deref(),
             )
             .await
         }

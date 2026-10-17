@@ -215,27 +215,29 @@ pub struct CommitAuthor {
     pub committer_email: String,
 }
 
-/// Every commit `head` adds over `base`, with its author and committer. Read
-/// with the same hardened Git as the capture, so a `.mailmap` or a format
-/// configured in the repository cannot change what is reported.
+/// Every commit `head` adds over `base`, and over `held` when given, with its
+/// author and committer. Read with the same hardened Git as the capture, so a
+/// `.mailmap` or a format configured in the repository cannot change what is
+/// reported.
 pub async fn authors(
     worktree: &str,
     base: &str,
     head: &str,
+    held: Option<&str>,
 ) -> Result<Vec<CommitAuthor>, ReviewError> {
     let range = format!("{base}..{head}");
-    let out = git(
-        worktree,
+    let not = held.map(|held| format!("^{held}"));
+    let mut args = vec![
         "log",
-        &[
-            "log",
-            "--no-show-signature",
-            "--no-mailmap",
-            "--format=%H%x1f%an%x1f%ae%x1f%ce",
-            &range,
-        ],
-    )
-    .await?;
+        "--no-show-signature",
+        "--no-mailmap",
+        "--format=%H%x1f%an%x1f%ae%x1f%ce",
+        &range,
+    ];
+    if let Some(not) = &not {
+        args.push(not);
+    }
+    let out = git(worktree, "log", &args).await?;
     Ok(out
         .lines()
         .filter_map(|line| {
@@ -268,6 +270,12 @@ pub fn misattributed(
 /// target forge account, and each commit that is not authored and committed
 /// as it. `None` when that identity cannot be resolved (no credential bound,
 /// or the forge did not answer), which is said rather than guessed at.
+///
+/// `change_head` is what an existing change's branch holds when the review
+/// updates one. Its commits are already on the change, someone else's to
+/// answer for, so only what this submission adds beyond them is judged, and
+/// re-authoring is suggested from there rather than from the base.
+#[allow(clippy::too_many_arguments)]
 pub async fn authorship(
     broker: &crate::broker::SharedBroker,
     provider: &str,
@@ -276,6 +284,7 @@ pub async fn authorship(
     worktree: &str,
     base: &str,
     head: &str,
+    change_head: Option<&str>,
 ) -> Option<serde_json::Value> {
     let forge = crate::forge::Forge::parse(&provider.to_ascii_lowercase())?;
     let identity = tokio::time::timeout(
@@ -285,8 +294,15 @@ pub async fn authorship(
     .await
     .ok()?
     .ok()?;
-    let commits = authors(worktree, base, head).await.ok()?;
+    // A change head this worktree does not hold excludes nothing it could
+    // name, and asking Git to exclude it would fail the whole read.
+    let held = match change_head {
+        Some(held) if holds_commit(worktree, held).await => Some(held),
+        _ => None,
+    };
+    let commits = authors(worktree, base, head, held).await.ok()?;
     let wrong = misattributed(&commits, &identity);
+    let since = held.unwrap_or(base);
     let note = if wrong.is_empty() {
         format!(
             "Every commit is authored and committed as {}.",
@@ -297,7 +313,7 @@ pub async fn authorship(
             "{} of {} commits are not authored and committed as {} <{}>, so the forge will not \
              attribute them to {}. Set the identity in this repository (`git config user.name` \
              and `git config user.email`), then re-author them, for example with \
-             `git rebase --exec 'git commit --amend --no-edit --reset-author' {base}`. Nothing \
+             `git rebase --exec 'git commit --amend --no-edit --reset-author' {since}`. Nothing \
              is rewritten for you.",
             wrong.len(),
             commits.len(),
@@ -311,6 +327,17 @@ pub async fn authorship(
         "misattributed": wrong,
         "note": note,
     }))
+}
+
+/// Whether this worktree holds `sha` as a commit.
+async fn holds_commit(worktree: &str, sha: &str) -> bool {
+    let Ok(mut git) = hardened_git(worktree) else {
+        return false;
+    };
+    git.args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .output()
+        .await
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Whether `head` descends from `ancestor`, a commit this worktree holds. A
@@ -1039,11 +1066,40 @@ mod tests {
             forge: "github",
         };
         let dir = dir.to_string_lossy().into_owned();
-        let commits = authors(&dir, "main", "HEAD").await.unwrap();
+        let commits = authors(&dir, "main", "HEAD", None).await.unwrap();
         assert_eq!(commits.len(), 2, "{commits:?}");
         let wrong = misattributed(&commits, &identity);
         assert_eq!(wrong.len(), 1, "{wrong:?}");
         assert_eq!(wrong[0].author_email, "t@e");
+    }
+
+    /// On an existing change, the commits its branch already holds are its
+    /// author's, not the submission's: only what is added beyond them is
+    /// judged, so a colleague's commit is not named as misattributed.
+    #[tokio::test]
+    async fn commits_already_on_the_change_are_not_judged() {
+        let dir = repo("authorship-change").await;
+        let change_head = git(&dir.to_string_lossy(), "rev-parse", &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        sh(
+            &dir,
+            "git -c user.email=1+ada@users.noreply.github.com -c user.name=Ada \
+             commit -q --allow-empty -m mine",
+        )
+        .await;
+        let identity = crate::forge::Identity {
+            name: "Ada".into(),
+            email: "1+ada@users.noreply.github.com".into(),
+            login: "ada".into(),
+            forge: "github",
+        };
+        let dir = dir.to_string_lossy().into_owned();
+        let commits = authors(&dir, "main", "HEAD", Some(change_head.trim()))
+            .await
+            .unwrap();
+        assert_eq!(commits.len(), 1, "{commits:?}");
+        assert!(misattributed(&commits, &identity).is_empty());
     }
 
     /// Per test: these run in parallel, so a shared directory means one test
