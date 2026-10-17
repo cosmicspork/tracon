@@ -215,27 +215,47 @@ pub struct CommitAuthor {
     pub committer_email: String,
 }
 
-/// Every commit `head` adds over `base`, with its author and committer. Read
-/// with the same hardened Git as the capture, so a `.mailmap` or a format
-/// configured in the repository cannot change what is reported.
+/// Every commit `head` adds over `base`, and over `held` when given, with its
+/// author and committer, newest first. Read with the same hardened Git as the
+/// capture, so a `.mailmap` or a format configured in the repository cannot
+/// change what is reported.
 pub async fn authors(
     worktree: &str,
     base: &str,
     head: &str,
+    held: Option<&str>,
 ) -> Result<Vec<CommitAuthor>, ReviewError> {
     let range = format!("{base}..{head}");
-    let out = git(
-        worktree,
+    let not = held.map(|held| format!("^{held}"));
+    let mut revs = vec![range.as_str()];
+    revs.extend(not.as_deref());
+    log_authors(worktree, &revs).await
+}
+
+/// The commits a rewrite of `held` adds over `base`: those `head` has that
+/// `held` does not, less the ones carrying a patch `held` already had, as a
+/// rebase's copies of what was on the change do.
+async fn authors_beyond_rewrite(
+    worktree: &str,
+    base: &str,
+    head: &str,
+    held: &str,
+) -> Result<Vec<CommitAuthor>, ReviewError> {
+    let range = format!("{held}...{head}");
+    let not = format!("^{base}");
+    log_authors(worktree, &["--cherry-pick", "--right-only", &range, &not]).await
+}
+
+async fn log_authors(worktree: &str, revs: &[&str]) -> Result<Vec<CommitAuthor>, ReviewError> {
+    let mut args = vec![
         "log",
-        &[
-            "log",
-            "--no-show-signature",
-            "--no-mailmap",
-            "--format=%H%x1f%an%x1f%ae%x1f%ce",
-            &range,
-        ],
-    )
-    .await?;
+        "--no-show-signature",
+        "--no-mailmap",
+        "--topo-order",
+        "--format=%H%x1f%an%x1f%ae%x1f%ce",
+    ];
+    args.extend_from_slice(revs);
+    let out = git(worktree, "log", &args).await?;
     Ok(out
         .lines()
         .filter_map(|line| {
@@ -264,10 +284,40 @@ pub fn misattributed(
         .collect()
 }
 
+/// What an existing change's branch held when a revision of it was
+/// submitted, as this worktree names it, and whether the revision rewrites
+/// that history rather than building on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnChange {
+    pub held: String,
+    pub rewrite: bool,
+}
+
+impl OnChange {
+    /// For a revision that updates an existing change, from what its intent
+    /// settled; `None` for a new change or one whose branch this worktree
+    /// has nothing of.
+    pub fn of(target: &publish::Target, intent: &publish::Intent) -> Option<Self> {
+        target.change.as_ref()?;
+        Some(Self {
+            held: intent.held.clone()?,
+            rewrite: intent.rewrite,
+        })
+    }
+}
+
 /// What a review says about who its commits are by: the identity of the
 /// target forge account, and each commit that is not authored and committed
 /// as it. `None` when that identity cannot be resolved (no credential bound,
 /// or the forge did not answer), which is said rather than guessed at.
+///
+/// `change` is what an existing change's branch held when the review updates
+/// one. Its commits are already on the change, someone else's to answer for,
+/// so only what this submission adds beyond them is judged. Building on them,
+/// re-authoring is suggested from there rather than from the base; rewriting
+/// them, their rebased copies are still theirs, and never suggested for
+/// re-authoring.
+#[allow(clippy::too_many_arguments)]
 pub async fn authorship(
     broker: &crate::broker::SharedBroker,
     provider: &str,
@@ -276,6 +326,7 @@ pub async fn authorship(
     worktree: &str,
     base: &str,
     head: &str,
+    change: Option<&OnChange>,
 ) -> Option<serde_json::Value> {
     let forge = crate::forge::Forge::parse(&provider.to_ascii_lowercase())?;
     let identity = tokio::time::timeout(
@@ -285,7 +336,45 @@ pub async fn authorship(
     .await
     .ok()?
     .ok()?;
-    let commits = authors(worktree, base, head).await.ok()?;
+    // What the change held, if this worktree has it: a commit it does not
+    // hold excludes nothing it could name, and asking Git to exclude it
+    // would fail the whole read.
+    let held = match change {
+        Some(change) if holds_commit(worktree, &change.held).await => Some(change),
+        _ => None,
+    };
+    let builds_on = match held {
+        Some(change) if !change.rewrite => descends_from(worktree, head, &change.held).await,
+        _ => false,
+    };
+    // On a rewrite, every commit beyond the base in order, and those of them
+    // that were already on the change as rebased copies.
+    let (commits, rewritten, earlier) = match held {
+        Some(change) if builds_on => (
+            authors(worktree, base, head, Some(&change.held))
+                .await
+                .ok()?,
+            Vec::new(),
+            Vec::new(),
+        ),
+        Some(change) => {
+            let all = authors(worktree, base, head, None).await.ok()?;
+            let added = authors_beyond_rewrite(worktree, base, head, &change.held)
+                .await
+                .ok()?;
+            let earlier = all
+                .iter()
+                .filter(|c| !added.iter().any(|a| a.sha == c.sha))
+                .map(|c| c.sha.clone())
+                .collect::<Vec<_>>();
+            (added, all, earlier)
+        }
+        None => (
+            authors(worktree, base, head, None).await.ok()?,
+            Vec::new(),
+            Vec::new(),
+        ),
+    };
     let wrong = misattributed(&commits, &identity);
     let note = if wrong.is_empty() {
         format!(
@@ -293,12 +382,44 @@ pub async fn authorship(
             identity.email
         )
     } else {
+        // Building on the change, from what it held; after a rewrite, from
+        // the oldest commit to re-author, but only when nothing that was
+        // already on the change comes after it, since a rebase from there
+        // would re-author that too.
+        let since = match held {
+            Some(change) if builds_on => Some(change.held.clone()),
+            Some(_) => rewritten
+                .iter()
+                .rposition(|c| wrong.iter().any(|w| w.sha == c.sha))
+                .filter(|&oldest| {
+                    rewritten[..oldest]
+                        .iter()
+                        .all(|c| !earlier.contains(&c.sha))
+                })
+                .map(|oldest| format!("{}^", rewritten[oldest].sha)),
+            None => Some(base.to_string()),
+        };
+        let how = match since {
+            Some(since) => format!(
+                "for example with `git rebase --exec 'git commit --amend --no-edit \
+                 --reset-author' {since}`"
+            ),
+            None => "each on its own, for example by marking it `edit` in an interactive \
+                     rebase"
+                .to_string(),
+        };
+        let earlier = match earlier.len() {
+            0 => String::new(),
+            n => format!(
+                " Beyond those, {n} were already on the change before the rewrite: they are not \
+                 this submission's to re-author, so leave them as they are."
+            ),
+        };
         format!(
             "{} of {} commits are not authored and committed as {} <{}>, so the forge will not \
              attribute them to {}. Set the identity in this repository (`git config user.name` \
-             and `git config user.email`), then re-author them, for example with \
-             `git rebase --exec 'git commit --amend --no-edit --reset-author' {base}`. Nothing \
-             is rewritten for you.",
+             and `git config user.email`), then re-author them, {how}.{earlier} Nothing is \
+             rewritten for you.",
             wrong.len(),
             commits.len(),
             identity.name,
@@ -311,6 +432,17 @@ pub async fn authorship(
         "misattributed": wrong,
         "note": note,
     }))
+}
+
+/// Whether this worktree holds `sha` as a commit.
+pub async fn holds_commit(worktree: &str, sha: &str) -> bool {
+    let Ok(mut git) = hardened_git(worktree) else {
+        return false;
+    };
+    git.args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .output()
+        .await
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Whether `head` descends from `ancestor`, a commit this worktree holds. A
@@ -1039,11 +1171,215 @@ mod tests {
             forge: "github",
         };
         let dir = dir.to_string_lossy().into_owned();
-        let commits = authors(&dir, "main", "HEAD").await.unwrap();
+        let commits = authors(&dir, "main", "HEAD", None).await.unwrap();
         assert_eq!(commits.len(), 2, "{commits:?}");
         let wrong = misattributed(&commits, &identity);
         assert_eq!(wrong.len(), 1, "{wrong:?}");
         assert_eq!(wrong[0].author_email, "t@e");
+    }
+
+    /// A forge whose account is Ada, and a broker binding it to `work`. The
+    /// token is this forge's own, so no other test's cached identity answers.
+    async fn ada_on_a_forge() -> crate::broker::SharedBroker {
+        let app = axum::Router::new().route(
+            "/user",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "login": "ada", "id": 1, "name": "Ada" }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut broker = crate::broker::Broker::default();
+        broker.put(
+            "gh",
+            crate::broker::Credential {
+                env: [
+                    ("GH_TOKEN".to_string(), format!("authorship-{addr}")),
+                    ("GITHUB_API".to_string(), format!("http://{addr}")),
+                ]
+                .into(),
+                channels: vec!["work".into()],
+                ..Default::default()
+            },
+        );
+        broker.shared()
+    }
+
+    async fn head_of(dir: &str) -> String {
+        git(dir, "rev-parse", &["rev-parse", "HEAD"])
+            .await
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// Ada's own commit, made before she set the address the forge knows.
+    const ADA_ELSEWHERE: &str =
+        "git -c user.email=ada@laptop.local -c user.name=Ada commit -q --allow-empty -m mine";
+
+    async fn authorship_of(
+        broker: &crate::broker::SharedBroker,
+        dir: &str,
+        change: &OnChange,
+    ) -> serde_json::Value {
+        authorship(
+            broker,
+            "github",
+            "work",
+            "n1",
+            dir,
+            "main",
+            "HEAD",
+            Some(change),
+        )
+        .await
+        .expect("the forge names Ada")
+    }
+
+    /// Updating a change whose head is a colleague's commit, only the commit
+    /// the submission adds is named, and re-authoring starts from the
+    /// change's head rather than the base, so hers is never rewritten.
+    #[tokio::test]
+    async fn a_colleagues_commit_at_the_change_head_is_not_named() {
+        let broker = ada_on_a_forge().await;
+        let dir = repo("authorship-colleague").await;
+        let path = dir.to_string_lossy().into_owned();
+        let change_head = head_of(&path).await;
+        sh(&dir, ADA_ELSEWHERE).await;
+        let mine = head_of(&path).await;
+
+        let change = OnChange {
+            held: change_head.clone(),
+            rewrite: false,
+        };
+        let v = authorship_of(&broker, &path, &change).await;
+        let wrong = v["misattributed"].as_array().unwrap();
+        assert_eq!(wrong.len(), 1, "{v}");
+        assert_eq!(wrong[0]["sha"], mine.as_str());
+        let note = v["note"].as_str().unwrap();
+        assert!(note.starts_with("1 of 1 commits"), "{note}");
+        assert!(
+            note.contains(&format!("--reset-author' {change_head}`")),
+            "{note}"
+        );
+        assert!(!note.contains("' main`"), "{note}");
+    }
+
+    /// At the second revision of a squashed change, the branch holds the
+    /// node's squash, which the worktree never had. The first revision it was
+    /// made from stands for it, so neither the colleague's commit nor the
+    /// first revision is judged again, and re-authoring starts from there.
+    #[tokio::test]
+    async fn a_squashed_change_is_judged_from_the_revision_its_squash_was_made_from() {
+        let broker = ada_on_a_forge().await;
+        let dir = repo("authorship-squashed").await;
+        let path = dir.to_string_lossy().into_owned();
+        sh(
+            &dir,
+            "git -c user.email=1+ada@users.noreply.github.com -c user.name=Ada \
+             commit -q --allow-empty -m first",
+        )
+        .await;
+        let first = head_of(&path).await;
+        sh(&dir, ADA_ELSEWHERE).await;
+        let mine = head_of(&path).await;
+
+        let target = publish::Target {
+            provider: "github".into(),
+            project: "owner/name".into(),
+            base: "main".into(),
+            branch: "feat/x".into(),
+            worktree: None,
+            change: Some(publish::ChangeRef {
+                number: 63,
+                url: String::new(),
+            }),
+        };
+        let squash = "5".repeat(40);
+        let intent = publish::Intent {
+            lease: Some(squash.clone()),
+            held: Some(first.clone()),
+            ..Default::default()
+        };
+        let change = OnChange::of(&target, &intent).expect("an update of a change");
+        let v = authorship_of(&broker, &path, &change).await;
+        let wrong = v["misattributed"].as_array().unwrap();
+        assert_eq!(wrong.len(), 1, "{v}");
+        assert_eq!(wrong[0]["sha"], mine.as_str());
+        let note = v["note"].as_str().unwrap();
+        assert!(
+            note.contains(&format!("--reset-author' {first}`")),
+            "{note}"
+        );
+        assert!(!note.contains(&squash), "{note}");
+    }
+
+    /// A rewrite does not build on what the change held, so re-authoring from
+    /// there would replay the old history. The rebased copy of a colleague's
+    /// commit is hers still: it is not named, and re-authoring starts after it.
+    #[tokio::test]
+    async fn a_rewrite_leaves_the_rebased_copies_of_what_the_change_held() {
+        let broker = ada_on_a_forge().await;
+        let dir = repo("authorship-rewrite").await;
+        let path = dir.to_string_lossy().into_owned();
+        let change_head = head_of(&path).await;
+        sh(
+            &dir,
+            "git checkout -q main && echo moved > c.txt && git add -A && git commit -qm moved \
+             && git checkout -q feat/x && git rebase -q main",
+        )
+        .await;
+        let copy = head_of(&path).await;
+        assert_ne!(copy, change_head, "the rebase made a copy");
+        sh(&dir, ADA_ELSEWHERE).await;
+        let mine = head_of(&path).await;
+
+        let change = OnChange {
+            held: change_head.clone(),
+            rewrite: true,
+        };
+        let v = authorship_of(&broker, &path, &change).await;
+        let wrong = v["misattributed"].as_array().unwrap();
+        assert_eq!(wrong.len(), 1, "{v}");
+        assert_eq!(wrong[0]["sha"], mine.as_str());
+        let note = v["note"].as_str().unwrap();
+        assert!(
+            note.contains(&format!("--reset-author' {mine}^`")),
+            "{note}"
+        );
+        assert!(note.contains("before the rewrite"), "{note}");
+        assert!(!note.contains(&change_head), "{note}");
+    }
+
+    /// After a rewrite, a commit to re-author that comes before the copy of
+    /// one that was already on the change has no rebase range that spares
+    /// the copy, so none is suggested.
+    #[tokio::test]
+    async fn a_rewrite_suggests_no_range_that_would_reach_what_the_change_held() {
+        let broker = ada_on_a_forge().await;
+        let dir = repo("authorship-rewrite-under").await;
+        let path = dir.to_string_lossy().into_owned();
+        let change_head = head_of(&path).await;
+        sh(
+            &dir,
+            &format!(
+                "git reset -q --hard main && {ADA_ELSEWHERE} && git cherry-pick {change_head} >/dev/null"
+            ),
+        )
+        .await;
+
+        let change = OnChange {
+            held: change_head,
+            rewrite: true,
+        };
+        let v = authorship_of(&broker, &path, &change).await;
+        let wrong = v["misattributed"].as_array().unwrap();
+        assert_eq!(wrong.len(), 1, "{v}");
+        let note = v["note"].as_str().unwrap();
+        assert!(!note.contains("--reset-author"), "{note}");
+        assert!(note.contains("interactive rebase"), "{note}");
+        assert!(note.contains("before the rewrite"), "{note}");
     }
 
     /// Per test: these run in parallel, so a shared directory means one test

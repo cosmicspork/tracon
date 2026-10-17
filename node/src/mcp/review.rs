@@ -452,18 +452,6 @@ async fn submit(
         ),
     };
     let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
-    // Who the commits are by, against the account the review publishes as.
-    // Named, never rewritten: re-authoring is the agent's or operator's step.
-    let authorship = review::authorship(
-        manager.broker(),
-        &provider,
-        &ctx.channel,
-        &ctx.node_id,
-        &worktree,
-        &range_base,
-        &capture.head_sha,
-    )
-    .await;
 
     // The cap, before anything else: complexity accretes because nothing says
     // no at submission time. A resubmission is capped the same way.
@@ -607,6 +595,21 @@ async fn submit(
     )
     .await?;
     intent.commits = commits;
+    // Who the commits are by, against the account the review publishes as.
+    // Named, never rewritten: re-authoring is the agent's or operator's step.
+    // On an existing change, only what this submission adds over what the
+    // change's branch holds is the submission's to answer for.
+    let authorship = review::authorship(
+        manager.broker(),
+        &provider,
+        &ctx.channel,
+        &ctx.node_id,
+        &worktree,
+        &range_base,
+        &capture.head_sha,
+        review::OnChange::of(&target, &intent).as_ref(),
+    )
+    .await;
     if squash {
         // Onto what the branch holds when the push adds to it; otherwise
         // where the branch leaves its base, so the change is exactly the
@@ -1411,20 +1414,35 @@ async fn forge_intent(
     let lease = state.head_sha;
     let mut builds_on =
         lease == head_sha || review::descends_from(worktree, head_sha, &lease).await;
+    let mut held = builds_on.then(|| lease.clone());
     // What the branch holds may be this node's own earlier squash, which
     // the agent never had: building on the commit that squash was made from
-    // is building on it.
+    // is building on it, and that commit is what stands for the branch here.
     if let (false, Some(store)) = (builds_on, squashed_by) {
         let pushed = store
             .publications_that_pushed(&ctx.channel, &target.project, &lease)
             .map_err(|e| e.to_string())?;
-        for publication in pushed {
+        for publication in &pushed {
             let from = &publication.head_sha;
             if from == head_sha || review::descends_from(worktree, head_sha, from).await {
                 builds_on = true;
+                held = Some(from.clone());
                 break;
             }
         }
+        // A rewrite builds on none of them, but what the branch held is
+        // still named by whichever this worktree has.
+        if held.is_none() && !review::holds_commit(worktree, &lease).await {
+            for publication in pushed {
+                if review::holds_commit(worktree, &publication.head_sha).await {
+                    held = Some(publication.head_sha);
+                    break;
+                }
+            }
+        }
+    }
+    if held.is_none() && review::holds_commit(worktree, &lease).await {
+        held = Some(lease.clone());
     }
     if !builds_on && !rewrite {
         return Err(format!(
@@ -1439,6 +1457,7 @@ async fn forge_intent(
         // A branch that builds on what the change holds is a fast-forward,
         // whatever was asked: nothing is thrown away, so nothing is forced.
         rewrite: rewrite && !builds_on,
+        held,
         ..Intent::default()
     })
 }
