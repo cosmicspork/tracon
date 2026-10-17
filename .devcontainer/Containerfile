@@ -9,6 +9,9 @@ RUN dnf install -y \
         webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel librsvg2-devel \
         rust cargo clippy rustfmt \
         gcc make pkgconf-pkg-config openssl-devel \
+        # The node builds OpenSSL from source (`vendored`), and its Configure
+        # needs perl modules Fedora splits out of the base perl.
+        perl-FindBin perl-IPC-Cmd perl-File-Compare perl-File-Copy perl-Time-Piece \
         git just nodejs npm unzip fuse \
     && dnf clean all
 
