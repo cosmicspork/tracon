@@ -132,20 +132,14 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": STATUS,
             "description": format!(
-                "Wait for a review's verdict and return it. Blocks until the review is \
-                 decided or the wait elapses, whichever comes first. The wait is capped \
-                 at {MAX_WAIT_SECS} seconds so the call always returns before an MCP \
-                 client gives up on it; a human takes far longer than that, so expect to \
-                 poll — while the review is undecided this returns `still_waiting` with \
-                 the current state, and you call it again. A submission whose required \
-                 checks are still running reads `still_waiting` with `state: \"checking\"` \
-                 and how long they have run; if they fail it returns `state: \
-                 \"submit_failed\"` with the same message submit_review would have \
-                 refused with, and nothing was submitted. On approval the node publishes \
-                 the approved text itself and returns where it landed. In a session the \
-                 node runs you need not poll: end your turn and the session stays open \
-                 while the review is undecided, and the node brings its outcome back to \
-                 you as your next prompt."
+                "Wait for a review's verdict and return it: `still_waiting` with the current \
+                 state while the review is undecided. A submission whose required checks are \
+                 still running reads `still_waiting` with `state: \"checking\"` and how long \
+                 they have run; if they fail it returns `state: \"submit_failed\"` with the \
+                 same message submit_review would have refused with, and nothing was \
+                 submitted. On approval the node publishes the approved text itself and \
+                 returns where it landed. {}",
+                 super::wait::pointer()
             ),
             "inputSchema": {
                 "type": "object",
@@ -158,12 +152,12 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": REPORT_STATUS,
-            "description": "Wait for a standalone report's operator decision. It never publishes \
-                            code. An acknowledgement records receipt only; requested changes \
-                            returns notes for a new submit_report with the same report_id. In a \
-                            session the node runs you need not poll: end your turn and the \
-                            session stays open until the operator decides, and the node brings \
-                            the decision back to you as your next prompt.",
+            "description": format!(
+                "Wait for a standalone report's operator decision. It never publishes code. An \
+                 acknowledgement records receipt only; requested changes returns notes for a \
+                 new submit_report with the same report_id. {}",
+                super::wait::pointer()
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {

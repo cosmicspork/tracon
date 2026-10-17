@@ -110,6 +110,16 @@ impl Phase {
             Self::Review => "review",
         }
     }
+
+    /// The phase a session's row records, read back; anything else is
+    /// ordinary work.
+    pub fn from_row(stored: &str) -> Self {
+        match stored {
+            "plan" => Self::Plan,
+            "review" => Self::Review,
+            _ => Self::Execute,
+        }
+    }
 }
 
 /// The phase a reopened session starts in. A plan session reopens as one;

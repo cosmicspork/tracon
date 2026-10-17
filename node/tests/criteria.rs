@@ -959,7 +959,7 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
     assert!(
         refused
             .to_string()
-            .contains("not offered to a review session"),
+            .contains("not offered in a review session"),
         "{refused}"
     );
     assert_eq!(brief_body(&h, &id), before);

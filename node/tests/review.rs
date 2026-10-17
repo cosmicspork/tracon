@@ -1677,7 +1677,7 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
         v["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("not offered to a review session"),
+            .contains("not offered in a review session"),
         "{v}"
     );
     let v = f

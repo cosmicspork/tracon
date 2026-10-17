@@ -45,11 +45,11 @@ pub fn definitions() -> Vec<Value> {
              answer. Hosts your repository does not open are refused (403), and a refused \
              connection already asks the operator: its reason says so. Call this when you \
              know a host you need before you try it, or to wait for the answer to such a \
-             refusal. Blocks for up to {} seconds and returns `reachable` once the host is \
-             open, `still_waiting` while the operator has not answered (call again with the \
-             same host), or `rejected` with their reason — then do without it, and do not \
-             look for another way to fetch it. Only HTTPS on port 443 is ever proxied.",
-            super::wait::MAX_WAIT_SECS
+             refusal. Returns `reachable` once the host is open, `still_waiting` while the \
+             operator has not answered (call again with the same host), or `rejected` with \
+             their reason — then do without it, and do not look for another way to fetch \
+             it. Only HTTPS on port 443 is ever proxied. {}",
+            super::wait::pointer()
         ),
         "inputSchema": {
             "type": "object",

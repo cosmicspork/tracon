@@ -155,11 +155,13 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": PIPELINE_WAIT,
-            "description": "Wait for a pipeline to move: returns as soon as it or one of its jobs \
-                            changes state, when it has finished, or after wait_secs (at most 45), \
-                            with the same status and jobs as pipeline_status and a `state` token. \
-                            Pass that token back as `since` so a change between calls is not \
-                            missed. A failed job's log is job_trace.",
+            "description": format!(
+                "Wait for a pipeline to move: returns as soon as it or one of its jobs changes \
+                 state, when it has finished, or after wait_secs, with the same status and jobs \
+                 as pipeline_status and a `state` token. Pass that token back as `since` so a \
+                 change between calls is not missed. A failed job's log is job_trace. {}",
+                super::wait::pointer()
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
