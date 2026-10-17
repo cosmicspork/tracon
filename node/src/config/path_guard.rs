@@ -1911,6 +1911,18 @@ mod tests {
 
     use super::*;
 
+    /// Who the tree belongs to when the tests run as root, as a node's
+    /// check container runs them. Root owns what root writes, and the guard
+    /// trusts root, so every "the node owns this" case would pass. The tree
+    /// is handed to this stand-in user instead, and the guard runs as it.
+    /// Low enough to be mapped in a rootless container's user namespace.
+    const STAND_IN: u32 = 4242;
+
+    fn as_root() -> bool {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+
     /// A node laid out under one temporary directory: its state, config,
     /// data and home, a worktree root, and a "package manager prefix" the
     /// tests can put trusted programs in.
@@ -1973,9 +1985,17 @@ mod tests {
             let mut at = path.clone();
             while at.starts_with(&self.base) && at != self.base {
                 std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+                Self::own(&at);
                 at.pop();
             }
             path
+        }
+
+        /// Hand `path` to the stand-in user when running as root.
+        fn own(path: &Path) {
+            if as_root() {
+                std::os::unix::fs::chown(path, Some(STAND_IN), Some(STAND_IN)).unwrap();
+            }
         }
 
         fn at(&self, rel: &str) -> PathBuf {
@@ -2005,11 +2025,15 @@ mod tests {
         }
 
         fn guard(&self) -> Guard {
-            Guard::new(self.layout(), &[&self.config()])
+            self.guard_with(self.layout(), &self.config())
         }
 
         fn guard_with(&self, layout: Layout, cfg: &Config) -> Guard {
-            Guard::new(layout, &[cfg])
+            let guard = Guard::new(layout, &[cfg]);
+            match as_root() {
+                true => guard.running_as(STAND_IN).in_group(STAND_IN),
+                false => guard,
+            }
         }
 
         /// An executable script at `rel`.
@@ -2024,6 +2048,7 @@ mod tests {
             self.dir(Path::new(rel).parent().unwrap().to_str().unwrap());
             std::fs::write(&path, body).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            Self::own(&path);
             path
         }
     }
