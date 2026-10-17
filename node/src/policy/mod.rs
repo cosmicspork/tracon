@@ -882,6 +882,7 @@ mod tests {
             "issue_transitions",
             "pipeline_status",
             "pipeline_wait",
+            "pipeline_list_by_sha",
             "job_trace",
             "pr_status",
             "run_status",
@@ -910,6 +911,22 @@ mod tests {
         ] {
             let d = policy().decide(&tool(name, &none, name));
             assert_eq!(d.verdict, Verdict::Ask, "{name}");
+        }
+    }
+
+    /// A forge operation is as attended on one forge as on the other: a read
+    /// allowed on GitHub but asked on GitLab put a card in front of the
+    /// operator for every `pipeline_list_by_sha` (#550).
+    #[test]
+    fn both_forges_tools_for_one_operation_get_the_same_verdict() {
+        use crate::mcp::parity::{Side, OPERATIONS};
+        let none = serde_json::json!({});
+        for op in OPERATIONS {
+            if let (Side::Tool(github), Side::Tool(gitlab)) = (op.github, op.gitlab) {
+                let on_github = policy().decide(&tool(github, &none, github)).verdict;
+                let on_gitlab = policy().decide(&tool(gitlab, &none, gitlab)).verdict;
+                assert_eq!(on_github, on_gitlab, "{}: {github} and {gitlab}", op.what);
+            }
         }
     }
 
