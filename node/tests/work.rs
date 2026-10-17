@@ -235,6 +235,17 @@ async fn an_agent_sees_ready_work_and_discovered_work_links_to_its_item() {
     let found = v["id"].as_str().unwrap().to_string();
     let (_, one) = call(&h.operator, "GET", &format!("/api/work/{found}"), None).await;
     assert_eq!(one["item"]["discovered_by_session"], "s1");
+    assert_eq!(one["item"]["discovered_by_lane"], Value::Null);
+    // A session's items go to its own project; it does not name another.
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        "work_discover",
+        json!({"title": "Elsewhere", "worktree": "/tmp"}),
+    )
+    .await;
+    assert!(v["raw"].as_str().unwrap_or("").contains("worktree"), "{v}");
     assert_eq!(one["item"]["readiness"]["state"], "blocked");
     let (_, p) = call(&h.operator, "GET", &format!("/api/work/{parent}"), None).await;
     assert_eq!(p["discovered"][0]["id"], found);

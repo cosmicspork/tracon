@@ -141,7 +141,10 @@
     </dd>
     {#if item.discovered_from}
       <dt>Discovered from</dt>
-      <dd class="m"><a href="/tasks/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by session '}<a href="/sessions/{item.discovered_by_session}">{short(item.discovered_by_session)}</a>{/if}</dd>
+      <dd class="m"><a href="/tasks/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by session '}<a href="/sessions/{item.discovered_by_session}">{short(item.discovered_by_session)}</a>{/if}{#if item.discovered_by_lane}{` · by lane ${item.discovered_by_lane}`}{/if}</dd>
+    {:else if item.discovered_by_lane}
+      <dt>Discovered by</dt>
+      <dd class="m">lane {item.discovered_by_lane} · a harness you run yourself</dd>
     {/if}
     <dt>Sessions</dt>
     <dd class="m">

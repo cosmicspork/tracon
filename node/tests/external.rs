@@ -564,6 +564,128 @@ async fn an_external_caller_closes_an_item_by_id() {
         "the close is on the channel's external log"
     );
 }
+/// An item an external harness records against its worktree joins the
+/// project a session launched on that repository is bound to, so it is in
+/// that project's ready work; a detached HEAD does not matter, since only the
+/// repository does. The item is marked with the harness's lane.
+#[tokio::test]
+async fn an_external_item_named_by_its_worktree_joins_the_project_a_session_there_gets() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("discover");
+    sh(std::path::Path::new(&wt), "git checkout -q --detach");
+    let mut cfg = with_roots(&root);
+    cfg.session.worktree_root = root.parent().unwrap().join("worktrees");
+    let h = harness_with(cfg).await;
+    h.store
+        .put_node(&support::rows::node_row("n1", "external"))
+        .unwrap();
+    let session = h
+        .manager
+        .create_with(
+            tracon::session::NewSession {
+                channel: "work".into(),
+                repo_path: root.join("repo").to_string_lossy().into_owned(),
+                branch: None,
+                work_item_id: None,
+                model: "m/a".into(),
+                budget_tokens: Some(1000),
+                initial_prompt: Some("look around".into()),
+                node_id: None,
+                phase: tracon::session::Phase::Execute,
+                review_id: None,
+                base_sha: None,
+                workspace_id: None,
+                parent_session: None,
+                continued_from: None,
+                harness: None,
+                on_exhaustion: None,
+            },
+            Arc::new(support::fake::FakeAdapter {
+                tx: Arc::new(tokio::sync::Mutex::new(None)),
+                tokens: Arc::new(tokio::sync::Mutex::new(0)),
+            }),
+        )
+        .await
+        .unwrap();
+    let project = session
+        .project_id
+        .clone()
+        .expect("a launched session has a project");
+
+    let v = mcp_labelled(
+        &h.operator,
+        "work",
+        "repo:planning",
+        tool_call(
+            "work_discover",
+            json!({ "title": "port the tracker", "worktree": wt }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["project_id"], json!(project), "{out}");
+    let item = h
+        .store
+        .work_get(out["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(item.project_id.as_deref(), Some(project.as_str()));
+    assert_eq!(item.discovered_from, None);
+    assert_eq!(item.discovered_by_session, None);
+    assert_eq!(item.discovered_by_lane.as_deref(), Some("repo:planning"));
+    assert!(h.store.project_get(&project).unwrap().is_some());
+    let ready = h.store.work_ready("work", Some(&project)).unwrap();
+    assert!(ready.iter().any(|w| w.item.id == item.id), "{ready:?}");
+    tracon::session::materialize::remove(&session.id);
+}
+
+#[tokio::test]
+async fn an_external_item_named_by_a_worktree_outside_the_roots_is_refused() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("discover-outside");
+    let elsewhere = root.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let h = harness_with(with_roots(&elsewhere)).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "work_discover",
+            json!({ "title": "port the tracker", "worktree": wt }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err);
+    assert!(out.to_string().contains("repo_roots"), "{out}");
+    assert!(h.store.work_ready("work", None).unwrap().is_empty());
+}
+
+/// Without a worktree an external item belongs to the whole channel, and an
+/// unlabelled harness is still marked as one, not taken for the operator.
+#[tokio::test]
+async fn an_external_item_without_a_worktree_has_no_project() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_discover", json!({ "title": "port the tracker" })),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["project_id"], Value::Null, "{out}");
+    let item = h
+        .store
+        .work_get(out["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(item.project_id, None);
+    assert_eq!(item.discovered_by_lane.as_deref(), Some("external"));
+}
+
 /// Ask for something the operator decides: the call answers at once with an
 /// approval and runs nothing.
 async fn ask(h: &Harness, name: &str, args: Value) -> String {
