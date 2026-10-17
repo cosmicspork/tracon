@@ -1,7 +1,9 @@
 <script lang="ts">
   // What the broker holds — names, kinds, bindings, key names, never a value —
   // and a Share that hands one to another member, sealed to it over the hub.
-  // The step that used to need a terminal on the sharing node.
+  // The step that used to need a terminal on the sharing node. Importing one
+  // from TOML sits at the top, since it takes any credential, not only a
+  // forge token.
   import { api } from '../lib/api'
   import { store } from '../lib/store.svelte'
   import type { CredentialSummary } from '../lib/types'
@@ -13,10 +15,19 @@
   let errors = $state<Record<string, string>>({})
   let shared = $state<Record<string, string>>({})
   let confirming = $state<CredentialSummary | null>(null)
+  let toml = $state('')
+  let importing = $state(false)
+  let importError = $state('')
+  let imported = $state<string[]>([])
 
-  let version = $state(0)
+  // `version` moves when the Forge tokens card saves or removes one;
+  // `onchange` tells it this card imported one.
+  let { version = 0, onchange }: { version?: number; onchange?: () => void } = $props()
+
+  let local = $state(0)
   $effect(() => {
     void version
+    void local
     api
       .credentials()
       .then((d) => (creds = d.credentials))
@@ -45,18 +56,55 @@
         [c.name]: updating ? `updated copy on ${node}` : `handed to ${node}`,
       }
       confirming = null
-      version += 1
+      local += 1
     } catch (e) {
       errors = { ...errors, [c.name]: e instanceof Error ? e.message : String(e) }
     } finally {
       busy = null
     }
   }
+
+  async function importCredential() {
+    if (!toml.trim() || importing) return
+    importing = true
+    importError = ''
+    imported = []
+    try {
+      imported = (await api.importCredentials(toml)).imported
+      toml = ''
+      if (onchange) onchange()
+      else local += 1
+    } catch (caught) {
+      importError = caught instanceof Error ? caught.message : String(caught)
+    } finally {
+      importing = false
+    }
+  }
 </script>
 
-{#if creds.length > 0}
-  <Card title="Credential copies" note="Every credential the serving node holds, by name and key only. Sharing sends a sealed copy to one named peer; no value is ever read back.">
+<Card title="Credentials" note="Every credential the serving node holds, by name and key only. Sharing sends a sealed copy to one named peer; no value is ever read back.">
   {#snippet actions()}<span class="count">{creds.length} held</span>{/snippet}
+  <details class="import">
+    <summary>Import credential</summary>
+    <label>
+      <span>Credential TOML</span>
+      <textarea
+        bind:value={toml}
+        rows="6"
+        spellcheck="false"
+        placeholder={'[credentials.name]\nchannels = ["personal"]\n[credentials.name.env]\nTOKEN = "…"'}
+      ></textarea>
+      <small>Sealed on arrival under the serving node’s identity. Share a peer-bound copy from its row below.</small>
+    </label>
+    <div class="import-actions">
+      <button class="btn" onclick={importCredential} disabled={!toml.trim() || importing}>
+        {importing ? 'Sealing…' : 'Import credential'}
+      </button>
+      {#if imported.length}<small class="ok">Sealed {imported.join(', ')}.</small>{/if}
+    </div>
+    {#if importError}<small class="err" role="alert">{importError}</small>{/if}
+  </details>
+  {#if creds.length > 0}
   <div class="rows">
     {#each creds as c (c.name)}
       <div class="cred">
@@ -98,13 +146,30 @@
       </div>
     {/each}
   </div>
-  </Card>
-{/if}
+  {/if}
+</Card>
 
 <style>
   .count {
     font: 12px var(--mono);
     color: var(--dim);
+  }
+  .import summary {
+    cursor: pointer;
+    color: var(--acc);
+  }
+  .import > label {
+    margin-top: 10px;
+  }
+  .import textarea {
+    width: 100%;
+  }
+  .import-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin-top: 8px;
   }
   .rows {
     display: flex;

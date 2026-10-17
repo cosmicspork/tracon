@@ -4,6 +4,10 @@
   import { store } from '../lib/store.svelte'
   import type { CredentialSummary } from '../lib/types'
 
+  // `version` moves when the Credentials card imports one; `onchange` tells
+  // it a token was saved or removed here.
+  let { version = 0, onchange }: { version?: number; onchange?: () => void } = $props()
+
   type ForgeName = 'github' | 'gitlab'
   const forges: { forge: ForgeName; name: 'gh' | 'glab'; label: string }[] = [
     { forge: 'github', name: 'gh', label: 'GitHub' },
@@ -19,10 +23,6 @@
   let errors = $state<Record<ForgeName, string>>({ github: '', gitlab: '' })
   let notices = $state<Record<ForgeName, string>>({ github: '', gitlab: '' })
   let confirming = $state<ForgeName | null>(null)
-  let toml = $state('')
-  let importing = $state(false)
-  let importError = $state('')
-  let imported = $state<string[]>([])
 
   async function refetch() {
     try {
@@ -31,7 +31,10 @@
       loading = false
     }
   }
-  void refetch()
+  $effect(() => {
+    void version
+    void refetch()
+  })
 
   function current(name: string): CredentialSummary | undefined {
     return credentials.find((credential) => credential.name === name)
@@ -75,7 +78,8 @@
       selected = { ...selected, [forge]: [] }
       editing = { ...editing, [forge]: false }
       notices = { ...notices, [forge]: 'Token saved.' }
-      await refetch()
+      if (onchange) onchange()
+      else await refetch()
     } catch (caught) {
       errors = { ...errors, [forge]: caught instanceof Error ? caught.message : String(caught) }
     } finally {
@@ -95,27 +99,12 @@
       selected = { ...selected, [forge]: [] }
       editing = { ...editing, [forge]: false }
       notices = { ...notices, [forge]: 'Token removed from this node.' }
-      await refetch()
+      if (onchange) onchange()
+      else await refetch()
     } catch (caught) {
       errors = { ...errors, [forge]: caught instanceof Error ? caught.message : String(caught) }
     } finally {
       busy = null
-    }
-  }
-
-  async function importCredential() {
-    if (!toml.trim() || importing) return
-    importing = true
-    importError = ''
-    imported = []
-    try {
-      imported = (await api.importCredentials(toml)).imported
-      toml = ''
-      await refetch()
-    } catch (caught) {
-      importError = caught instanceof Error ? caught.message : String(caught)
-    } finally {
-      importing = false
     }
   }
 </script>
@@ -203,27 +192,6 @@
   {/each}
 </div>
 
-<details class="generic-import">
-  <summary>Import another credential</summary>
-  <label>
-    <span>Credential TOML</span>
-    <textarea
-      bind:value={toml}
-      rows="6"
-      spellcheck="false"
-      placeholder={'[credentials.name]\nchannels = ["personal"]\n[credentials.name.env]\nTOKEN = "…"'}
-    ></textarea>
-    <small>Sealed on arrival under the serving node’s identity. Share a peer-bound copy from Settings › Connections.</small>
-  </label>
-  <div class="actions">
-    <button class="btn" onclick={importCredential} disabled={!toml.trim() || importing}>
-      {importing ? 'Sealing…' : 'Import credential'}
-    </button>
-    {#if imported.length}<small class="ok">Sealed {imported.join(', ')}.</small>{/if}
-  </div>
-  {#if importError}<small class="bad" role="alert">{importError}</small>{/if}
-</details>
-
 <style>
   .forge-list {
     display: flex;
@@ -275,19 +243,6 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 8px 12px;
-  }
-  .generic-import {
-    margin-top: 4px;
-  }
-  .generic-import summary {
-    cursor: pointer;
-    color: var(--acc);
-  }
-  .generic-import > label {
-    margin-top: 10px;
-  }
-  .generic-import textarea {
-    width: 100%;
   }
   .warn {
     color: var(--wait);

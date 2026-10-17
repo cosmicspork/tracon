@@ -80,6 +80,9 @@
     sections.find(([id]) => id === router.hash.slice(1))?.[0] ?? 'general',
   )
   let adminRevision = $state(0)
+  // Bumped when either credential card changes what the node holds, so the
+  // other re-reads it.
+  let credentialsVersion = $state(0)
   const requestedNode = $derived(params.get('node'))
   const selectedNode = $derived(
     store.nodes.find((node) => node.id === requestedNode) ??
@@ -793,11 +796,11 @@
     {/if}
   </Card>
 
-  <Card title="Forge tokens" note={`GitHub and GitLab tokens on ${store.node?.name ?? 'the serving node'}, and the channels each may serve. Values are never shown.`}>
-    <CredentialSettings />
-  </Card>
+  <Credentials version={credentialsVersion} onchange={() => (credentialsVersion += 1)} />
 
-  <Credentials />
+  <Card title="Forge tokens" note={`GitHub and GitLab tokens on ${store.node?.name ?? 'the serving node'}, and the channels each may serve. Values are never shown.`}>
+    <CredentialSettings version={credentialsVersion} onchange={() => (credentialsVersion += 1)} />
+  </Card>
 {/if}
 
 {#if activeSection === 'channels'}
