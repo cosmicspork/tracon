@@ -520,7 +520,8 @@ async fn a_document_export_imports_into_a_fresh_node_unchanged() {
     // Export: plain Markdown files, archived ones under archive/.
     let dir = state::scratch("document-export-round-trip");
     let docs = exported(&from.operator, "personal").await;
-    let report = tracon::corpus::export::sync_dir(&dir, &docs).unwrap();
+    let kinds = tracon::config::default_doc_kinds();
+    let report = tracon::corpus::export::sync_dir(&dir, &docs, &kinds).unwrap();
     assert_eq!(report.written, written.len());
     // Nothing but `<slug>.md` and `archive/<slug>.md`: no sidecar, no
     // manifest, no index. A directory of Markdown is the whole format.
@@ -552,7 +553,7 @@ async fn a_document_export_imports_into_a_fresh_node_unchanged() {
 
     // Import into a node that has never held any of this, addressed only by
     // filename: no ids, no channel, no origin node is needed to read it back.
-    let (imported, skipped) = tracon::corpus::import::read_dir(&dir).unwrap();
+    let (imported, skipped) = tracon::corpus::import::read_dir(&dir, &kinds).unwrap();
     assert!(skipped.is_empty(), "{skipped:?}");
     let into = harness().await;
     for d in &imported {

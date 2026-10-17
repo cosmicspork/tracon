@@ -1,10 +1,11 @@
 //! Bringing a docs directory in: flat `<kind>-<slug>.md` files, no
 //! frontmatter, and those under `archive/` as archived documents. The
-//! filename is the slug; the kind is its prefix; the title is the first
-//! heading.
+//! filename is the slug; the kind is its prefix, by the node's configured
+//! kinds; the title is the first heading.
 
 use std::path::Path;
 
+use crate::config::DocKind;
 use crate::mcp::docs::{kind_of, title_of, valid_slug};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,15 +21,22 @@ pub struct Imported {
 /// `dir/archive` as archived, sorted by slug. A slug in both is taken from
 /// `dir`: the archive is where a document went, not a second copy of it.
 /// Returns what was skipped alongside, so the operator sees what did not
-/// come over.
-pub fn read_dir(dir: &Path) -> std::io::Result<(Vec<Imported>, Vec<String>)> {
+/// come over. `kinds` is the node's configured list (`GET /api/docs/kinds`).
+pub fn read_dir(dir: &Path, kinds: &[DocKind]) -> std::io::Result<(Vec<Imported>, Vec<String>)> {
     let mut docs = Vec::new();
     let mut skipped = Vec::new();
-    read_flat(dir, "", false, &mut docs, &mut skipped)?;
+    read_flat(dir, "", false, kinds, &mut docs, &mut skipped)?;
     let archive = dir.join("archive");
     if archive.is_dir() {
         let mut archived = Vec::new();
-        read_flat(&archive, "archive/", true, &mut archived, &mut skipped)?;
+        read_flat(
+            &archive,
+            "archive/",
+            true,
+            kinds,
+            &mut archived,
+            &mut skipped,
+        )?;
         for d in archived {
             if docs.iter().any(|x| x.slug == d.slug) {
                 skipped.push(format!("archive/{}.md: also outside the archive", d.slug));
@@ -45,6 +53,7 @@ fn read_flat(
     dir: &Path,
     shown_as: &str,
     archived: bool,
+    kinds: &[DocKind],
     docs: &mut Vec<Imported>,
     skipped: &mut Vec<String>,
 ) -> std::io::Result<()> {
@@ -66,8 +75,8 @@ fn read_flat(
         }
         let body = std::fs::read_to_string(&path)?;
         docs.push(Imported {
-            kind: kind_of(&slug).to_string(),
-            title: title_of(&slug, &body),
+            kind: kind_of(kinds, &slug).to_string(),
+            title: title_of(kinds, &slug, &body),
             slug,
             body,
             archived,
@@ -91,7 +100,7 @@ mod tests {
         std::fs::write(dir.join("archive/ref-deploy.md"), "# stale copy").unwrap();
         std::fs::write(dir.join("todo.txt"), "x").unwrap();
         std::fs::write(dir.join("bad slug.md"), "x").unwrap();
-        let (docs, skipped) = read_dir(&dir).unwrap();
+        let (docs, skipped) = read_dir(&dir, &crate::config::default_doc_kinds()).unwrap();
         let slugs: Vec<_> = docs.iter().map(|d| d.slug.as_str()).collect();
         assert_eq!(slugs, ["note-odd", "plan-old", "ref-deploy"]);
         assert_eq!(docs[0].title, "odd");

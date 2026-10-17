@@ -72,6 +72,7 @@ pub fn policy_decision(
         resource: Some(target),
         command: None,
         arguments: Some(args),
+        doc_kinds: None,
     })
 }
 

@@ -13,7 +13,7 @@ function fakeFile(name: string, size = 1, webkitRelativePath = ''): File {
 }
 
 test('single-file selection accepts exactly one HTML file', () => {
-  const selected = selectHtmlFile([fakeFile('Report.HTML', 12)])
+  const selected = selectHtmlFile([fakeFile('Report.HTML', 12)], ['ref', 'note'])
   expect(selected.sourceName).toBe('Report.HTML')
   expect(selected.entryPath).toBe('Report.HTML')
   expect(selected.totalBytes).toBe(12)
@@ -69,10 +69,15 @@ test('folder paths strip one root and reject unsafe normalization', () => {
   ).toThrow('one common root')
 })
 
-test('slug suggestions preserve document kinds and otherwise use ref', () => {
-  expect(suggestSlug('plan-PROJ 22')).toBe('plan-proj-22')
-  expect(suggestSlug('Quarterly Report')).toBe('ref-quarterly-report')
-  expect(suggestSlug('***')).toBe('ref-document')
+test('slug suggestions preserve the node\'s document kinds and otherwise use ref', () => {
+  const kinds = ['ref', 'runbook', 'plan', 'other']
+  expect(suggestSlug('plan-PROJ 22', kinds)).toBe('plan-proj-22')
+  expect(suggestSlug('runbook-Deploy', kinds)).toBe('runbook-deploy')
+  expect(suggestSlug('Quarterly Report', kinds)).toBe('ref-quarterly-report')
+  expect(suggestSlug('***', kinds)).toBe('ref-document')
+  expect(suggestSlug('other-thing', kinds)).toBe('ref-other-thing')
+  // A node without the ref kind gets the name as it is.
+  expect(suggestSlug('Quarterly Report', ['note'])).toBe('quarterly-report')
 })
 
 test('selection refuses file count and byte limits', () => {

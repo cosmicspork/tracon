@@ -3095,7 +3095,13 @@ mod tests {
             let Ok(dir) = guard.open_dir("docs.export_dir", &link.join("sub"), false) else {
                 continue;
             };
-            if crate::corpus::export::sync_fd(std::os::fd::AsFd::as_fd(&dir), &docs).is_ok() {
+            if crate::corpus::export::sync_fd(
+                std::os::fd::AsFd::as_fd(&dir),
+                &docs,
+                &crate::config::default_doc_kinds(),
+            )
+            .is_ok()
+            {
                 exported += 1;
             }
             assert!(

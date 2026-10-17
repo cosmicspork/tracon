@@ -227,6 +227,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/docs", get(api::list_docs))
         .route("/api/docs/reindex", post(api::reindex_docs))
+        .route("/api/docs/kinds", get(api::doc_kinds))
         .route(
             "/api/docs/{channel}/{slug}",
             get(api::get_doc).put(api::put_doc).delete(api::delete_doc),

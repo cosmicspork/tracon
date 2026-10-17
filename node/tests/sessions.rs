@@ -3039,6 +3039,7 @@ async fn orientation_setup(
             tracon::mcp::docs::write_document(
                 &store,
                 &Bus::new(),
+                &tracon::config::default_doc_kinds(),
                 "n1",
                 "personal",
                 slug,

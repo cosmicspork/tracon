@@ -8,11 +8,14 @@
     channel,
     initialSlug = '',
     ifMatch,
+    kinds = [],
     onimported,
   }: {
     channel: string
     initialSlug?: string
     ifMatch?: string
+    /** The node's document kinds, which a suggested slug keeps. */
+    kinds?: string[]
     onimported: (document: Document) => void
   } = $props()
 
@@ -33,7 +36,7 @@
     status = 'Validating selection…'
     error = null
     try {
-      selection = folder ? selectHtmlFolder(input) : selectHtmlFile(input)
+      selection = folder ? selectHtmlFolder(input, kinds) : selectHtmlFile(input, kinds)
       if (!ifMatch) slug = selection.suggestedSlug
       status = 'Ready to upload'
     } catch (cause) {

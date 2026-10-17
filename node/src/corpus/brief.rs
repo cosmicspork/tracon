@@ -722,7 +722,7 @@ pub fn read(store: &Store, channel: &str, slug: &str) -> Result<Option<BriefView
     let Some(doc) = store.doc_get(channel, slug)? else {
         return Ok(None);
     };
-    if doc.kind != KIND || doc.format != "markdown" {
+    if docs::reserved_kind_of(&doc.slug) != Some(KIND) || doc.format != "markdown" {
         return Ok(None);
     }
     Ok(Some(view_of(store, &doc)))
@@ -906,6 +906,9 @@ pub fn write_for_item(
     let doc = docs::write_document(
         store,
         bus,
+        // A brief's kind is reserved: it classifies the same under any
+        // configured list.
+        &[],
         site,
         &item.channel,
         &slug,

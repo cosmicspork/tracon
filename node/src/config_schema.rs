@@ -332,6 +332,11 @@ pub const KEYS: &[KeySpec] = &[
     live("docs.export_every_secs"),
     restart("docs.preview_listen"),
     restart("docs.preview_url"),
+    // [[docs.kind]]
+    live("docs.kind.prefix"),
+    live("docs.kind.label"),
+    live("docs.kind.description"),
+    live("docs.kind.working_note"),
     // [launch]
     restart("launch.plugins"),
     // [ui]

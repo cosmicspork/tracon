@@ -6,7 +6,7 @@
 use crate::corpus::html::{
     content_hash, media_type, validate_bundle, HtmlBundleError, HtmlFile, CHUNK_BYTES,
 };
-use crate::mcp::docs::kind_of;
+use crate::mcp::docs::{kind_of, KindFilter};
 use base64::Engine;
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -732,6 +732,7 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     pub fn write_html_document_change(
         &self,
+        kinds: &[crate::config::DocKind],
         site: &str,
         channel: &str,
         slug: &str,
@@ -747,7 +748,7 @@ impl Store {
         {
             return Err(HtmlWriteError::InvalidSourceName);
         }
-        let bundle = validate_bundle(slug, entry_path, files)?;
+        let bundle = validate_bundle(kinds, slug, entry_path, files)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let existing = tx
@@ -851,7 +852,7 @@ impl Store {
             id: document_id,
             channel: channel.to_string(),
             slug: slug.to_string(),
-            kind: kind_of(slug).to_string(),
+            kind: kind_of(kinds, slug).to_string(),
             title: bundle.title,
             body: bundle.entry_html,
             hash: bundle.hash,
@@ -1179,7 +1180,7 @@ impl Store {
             media_types.insert(path.clone(), media_type);
             html_files.push(HtmlFile { path, bytes });
         }
-        let validated = validate_bundle(&document.slug, entry_path, html_files)
+        let validated = validate_bundle(&[], &document.slug, entry_path, html_files)
             .map_err(|error| HtmlReadError::Corrupt(error.to_string()))?;
         if validated.hash != document.hash || validated.entry_html != document.body {
             return Err(HtmlReadError::Corrupt(
@@ -1292,7 +1293,7 @@ impl Store {
     pub fn doc_search(
         &self,
         channel: Option<&str>,
-        kind: Option<&str>,
+        kind: Option<KindFilter<'_>>,
         text: &str,
         limit: usize,
     ) -> Result<Vec<RecallHit>> {
@@ -1303,10 +1304,14 @@ impl Store {
     /// `vectors` is the text-only path above, unchanged — which is what makes
     /// "a node with no embedding endpoint behaves exactly as before" a
     /// property of the code rather than a claim about it.
+    ///
+    /// `kind` is decided from each slug against the configured kinds, not
+    /// from the kind stored with the row, which is only what it classified
+    /// as when it was written.
     pub fn doc_search_hybrid(
         &self,
         channel: Option<&str>,
-        kind: Option<&str>,
+        kind: Option<KindFilter<'_>>,
         text: &str,
         limit: usize,
         vectors: &[Neighbour],
@@ -1324,11 +1329,14 @@ impl Store {
                 "SELECT d.id, d.slug, d.title, d.format, snippet(document_fts, 1, '', '', '…', 14) AS snip, bm25(document_fts) AS score
                  FROM document_fts JOIN document d ON d.rowid = document_fts.rowid
                  WHERE document_fts MATCH ?1 AND d.deleted = 0 AND d.archived = 0
-                   AND (?2 IS NULL OR d.channel = ?2) AND (?3 IS NULL OR d.kind = ?3)
-                 ORDER BY score LIMIT ?4",
+                   AND (?2 IS NULL OR d.channel = ?2)
+                 ORDER BY score LIMIT ?3",
             )?;
+            // Filtered by kind after the query, so the limit is applied
+            // after the filter.
+            let sql_limit = if kind.is_some() { -1 } else { limit as i64 };
             let rows: Vec<RecallHit> = stmt
-                .query_map(params![q, channel, kind, limit as i64], |r| {
+                .query_map(params![q, channel, sql_limit], |r| {
                     Ok(RecallHit {
                         kind: "document".into(),
                         id: r.get(0)?,
@@ -1341,8 +1349,12 @@ impl Store {
                         rank: 3.0 + r.get::<_, f64>(5)?,
                     })
                 })?
-                .collect::<std::result::Result<_, _>>()?;
-            rows
+                .collect::<std::result::Result<Vec<RecallHit>, _>>()?;
+            rows.into_iter()
+                .filter(|hit| {
+                    kind.is_none_or(|k| hit.slug.as_deref().is_some_and(|slug| k.admits(slug)))
+                })
+                .collect()
         };
         if !near.is_empty() {
             self.fold_in_neighbours(&mut hits, &near, channel, kind)?;
@@ -1358,7 +1370,7 @@ impl Store {
         hits: &mut Vec<RecallHit>,
         near: &std::collections::HashMap<&str, (usize, i64, i64)>,
         channel: Option<&str>,
-        kind: Option<&str>,
+        kind: Option<KindFilter<'_>>,
     ) -> Result<()> {
         // A document FTS already found is promoted rather than repeated.
         for h in hits.iter_mut() {
@@ -1385,7 +1397,7 @@ impl Store {
             if row.deleted != 0
                 || row.archived != 0
                 || channel.is_some_and(|c| c != row.channel)
-                || kind.is_some_and(|k| k != row.kind)
+                || kind.is_some_and(|k| !k.admits(&row.slug))
             {
                 continue;
             }
@@ -1420,7 +1432,7 @@ impl Store {
         &self,
         hits: &mut Vec<RecallHit>,
         channel: Option<&str>,
-        kind: Option<&str>,
+        kind: Option<KindFilter<'_>>,
         text: &str,
     ) -> Result<()> {
         let wanted = name_words(text);
@@ -1432,14 +1444,13 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT id, slug, title FROM document
                  WHERE deleted = 0 AND archived = 0
-                   AND (?1 IS NULL OR channel = ?1) AND (?2 IS NULL OR kind = ?2)",
+                   AND (?1 IS NULL OR channel = ?1)",
             )?;
             let rows = stmt
-                .query_map(params![channel, kind], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?
+                .query_map(params![channel], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<std::result::Result<Vec<(String, String, String)>, _>>()?;
             rows.into_iter()
+                .filter(|(_, slug, _)| kind.is_none_or(|k| k.admits(slug)))
                 .filter(|(_, slug, title)| {
                     let mut have = name_words(title);
                     have.extend(name_words(slug));
@@ -1979,7 +1990,12 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].slug.as_deref(), Some("guide-workspace"));
         assert!(hits[0].text.contains("test"));
-        assert_eq!(s.doc_search(None, Some("ref"), "flux", 5).unwrap().len(), 1);
+        let kinds = crate::config::default_doc_kinds();
+        let refs = KindFilter {
+            kinds: &kinds,
+            kind: "ref",
+        };
+        assert_eq!(s.doc_search(None, Some(refs), "flux", 5).unwrap().len(), 1);
         assert_eq!(s.doc_list(Some("personal")).unwrap().len(), 2);
         // A second site created the same slug later: the list shows one, the newer.
         s.write_change(
@@ -2209,6 +2225,7 @@ mod tests {
         ];
         let (created, changes) = store
             .write_html_document_change(
+                &[],
                 "node-a",
                 "personal",
                 "ref-demo",
@@ -2242,6 +2259,7 @@ mod tests {
             .any(|change| change.table == "document_bundle_chunk"));
 
         let stale = store.write_html_document_change(
+            &[],
             "node-a",
             "personal",
             "ref-demo",
@@ -2258,6 +2276,7 @@ mod tests {
 
         let (replaced, changes) = store
             .write_html_document_change(
+                &[],
                 "node-a",
                 "personal",
                 "ref-demo",
@@ -2382,6 +2401,7 @@ mod tests {
         // same way it already preserves archived.
         let (created, _) = store
             .write_html_document_change(
+                &[],
                 "node-a",
                 "personal",
                 "ref-html-pinned",
@@ -2405,6 +2425,7 @@ mod tests {
         assert_eq!(set.pinned, 1);
         let (reimported, _) = store
             .write_html_document_change(
+                &[],
                 "node-a",
                 "personal",
                 "ref-html-pinned",

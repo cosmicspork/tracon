@@ -337,6 +337,105 @@ pub struct Docs {
     pub preview_listen: SocketAddr,
     /// Public HTTP(S) origin for the dedicated preview listener.
     pub preview_url: Option<String>,
+    /// The document kinds a slug's prefix files a document under
+    /// (`[[docs.kind]]`), beside the reserved ones the node's own behaviour
+    /// hangs on (`mcp::docs::RESERVED`). Written out, the list replaces the
+    /// default one whole. Read at the moment a document is classified, so a
+    /// kind added, renamed or removed applies to every document already
+    /// there: a removed kind's documents read as `other`.
+    pub kind: Vec<DocKind>,
+}
+
+/// One operator-configured document kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocKind {
+    /// The slug prefix: `runbook` files `runbook-deploy`, and `runbook`
+    /// itself, under this kind. Lowercase letters and digits.
+    pub prefix: String,
+    /// What the Documents screen calls it.
+    #[serde(default)]
+    pub label: String,
+    /// What it is for, in the words `doc_write` offers an agent.
+    #[serde(default)]
+    pub description: String,
+    /// A working note: what a policy rule's `slug_working_note = true`
+    /// matches, so the shipped bundle writes these unattended.
+    #[serde(default)]
+    pub working_note: bool,
+}
+
+impl DocKind {
+    fn new(prefix: &str, label: &str, description: &str, working_note: bool) -> Self {
+        Self {
+            prefix: prefix.into(),
+            label: label.into(),
+            description: description.into(),
+            working_note,
+        }
+    }
+}
+
+/// The kinds a node has before its operator configures any: the list it
+/// always had, less the reserved ones.
+pub fn default_doc_kinds() -> Vec<DocKind> {
+    vec![
+        DocKind::new(
+            "guide",
+            "Guide",
+            "how something is done here, for whoever does it next",
+            false,
+        ),
+        DocKind::new("ref", "Reference", "facts to look up", false),
+        DocKind::new(
+            "architecture",
+            "Architecture",
+            "how a system is put together, and why",
+            false,
+        ),
+        DocKind::new(
+            "proposal",
+            "Proposal",
+            "a change put to the operator to decide",
+            false,
+        ),
+        DocKind::new(
+            "repo",
+            "Repository",
+            "working notes on one repository",
+            true,
+        ),
+        DocKind::new("note", "Note", "working notes", true),
+        DocKind::new("meeting", "Meeting", "notes from a meeting", true),
+        DocKind::new("inbox", "Inbox", "something to look at later", true),
+    ]
+}
+
+/// Refuse a kind the node could not classify by: a prefix that is not one
+/// word of lowercase letters and digits, that is a reserved kind or `other`,
+/// or that another entry already has.
+pub fn validate_doc_kinds(kinds: &[DocKind]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for kind in kinds {
+        let prefix = kind.prefix.as_str();
+        if prefix.is_empty()
+            || !prefix
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            return Err(format!(
+                "docs.kind: prefix {prefix:?} is not lowercase letters and digits"
+            ));
+        }
+        if crate::mcp::docs::reserved(prefix).is_some() || prefix == crate::mcp::docs::OTHER {
+            return Err(format!(
+                "docs.kind: {prefix:?} is a kind the node reserves; it cannot be configured"
+            ));
+        }
+        if !seen.insert(prefix) {
+            return Err(format!("docs.kind: prefix {prefix:?} is given twice"));
+        }
+    }
+    Ok(())
 }
 
 impl Default for Docs {
@@ -347,6 +446,7 @@ impl Default for Docs {
             export_every_secs: 1800,
             preview_listen: "127.0.0.1:7422".parse().expect("valid preview address"),
             preview_url: None,
+            kind: default_doc_kinds(),
         }
     }
 }
@@ -2347,6 +2447,8 @@ impl Config {
         validate_repos(&config.repo).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_doc_kinds(&config.docs.kind)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_admin_peers(&config.mesh.admin_peers)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         config
@@ -3077,6 +3179,30 @@ models = [{ id = "gpt-6" }]
     #[test]
     fn default_models_tier3_is_empty_for_an_unknown_provider() {
         assert!(default_models_tiered("totally-unknown", None).is_empty());
+    }
+
+    #[test]
+    fn a_kind_the_node_reserves_or_already_has_is_refused() {
+        let load = |kinds: &str| Config::from_toml(kinds, Path::new("node.toml"));
+        let cfg = load("").unwrap();
+        assert_eq!(cfg.docs.kind, default_doc_kinds());
+        let cfg =
+            load("[[docs.kind]]\nprefix = \"runbook\"\nlabel = \"Runbook\"\nworking_note = true\n")
+                .unwrap();
+        assert_eq!(
+            cfg.docs.kind.len(),
+            1,
+            "written out, the list replaces the default"
+        );
+        assert!(cfg.docs.kind[0].working_note);
+        for refused in [
+            "context", "shown", "brief", "plan", "other", "run-book", "Runbook", "",
+        ] {
+            let text = format!("[[docs.kind]]\nprefix = {refused:?}\n");
+            assert!(load(&text).is_err(), "{refused:?}");
+        }
+        let twice = "[[docs.kind]]\nprefix = \"note\"\n[[docs.kind]]\nprefix = \"note\"\n";
+        assert!(load(twice).unwrap_err().contains("twice"));
     }
 
     #[test]

