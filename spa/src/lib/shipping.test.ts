@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { shipping } from './shipping'
+import { shipping, shippedMessage } from './shipping'
 import type { ReviewIntent } from './types'
 
 const one: ReviewIntent = {
@@ -47,4 +47,20 @@ test('under keep, an edited commit and the ones after it are remade', () => {
   }
   expect(shipping(keep, '', {})).toEqual({ own: true, dropped: [] })
   expect(shipping(keep, '', { bbbb2222: 'two, said again' })).toEqual({ own: false, dropped: ['cccc3333'] })
+})
+
+test('a changed title with the commit message untouched ships a new commit and drops the signature', () => {
+  const titled: ReviewIntent = { ...one, as_written: 'work\n\nthe detail' }
+  expect(shipping(titled, shippedMessage({}, '  work ', 'the detail\n'), {})).toEqual({ own: true, dropped: [] })
+  expect(shipping(titled, shippedMessage({}, 'work, retitled', 'the detail'), {})).toEqual({
+    own: false,
+    dropped: ['aaaa1111'],
+  })
+})
+
+test('the squash message is the one written, else the description, else the title and body', () => {
+  const description = { title: 'described', body: '' }
+  expect(shippedMessage({ commit: ' written\n', description }, 'title', 'body')).toBe('written')
+  expect(shippedMessage({ description }, 'title', 'body')).toBe('described')
+  expect(shippedMessage({}, 'title', ' body ')).toBe('title\n\nbody')
 })

@@ -34,7 +34,7 @@
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
-  import { shipping } from '../lib/shipping'
+  import { defaultMessage, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
@@ -109,7 +109,7 @@
   function proposedCommitMessage(intent: ReviewIntent, title: string, body: string): string {
     if (intent.forge.commit !== undefined) return intent.forge.commit
     const from = intent.forge.description ?? { title, body }
-    return from.body.trim() ? `${from.title.trim()}\n\n${from.body.trim()}` : from.title.trim()
+    return defaultMessage(from.title, from.body)
   }
 
   /** One of the agent's commits' messages, as it wrote it. */
@@ -399,8 +399,6 @@
   const squashing = $derived(intent.squash_onto !== undefined)
   /** Under `keep`: the commit messages you changed, by sha. */
   const reworded = $derived.by(editedMessages)
-  /** Whether the agent's own commit ships, and which signatures a new one drops. */
-  const ships = $derived(shipping(intent, message, reworded))
   /** Whether you can change the commit messages here. */
   const rewordable = $derived(!squashing && !remoteOwner && !closed && !surface.phone)
   const outputs = $derived<ReviewOutputs>({
@@ -414,6 +412,12 @@
     branch: change === null && branchName.trim() && branchName.trim() !== target?.branch ? branchName.trim() : undefined,
     messages: !squashing && Object.keys(reworded).length ? reworded : undefined,
   })
+  /**
+   * Whether the agent's own commit ships, and which signatures a new one
+   * drops, judged by the message the node will squash with: an edited title,
+   * body or description changes it as surely as an edited message does.
+   */
+  const ships = $derived(shipping(intent, shippedMessage(outputs, title, body), reworded))
   const files = $derived.by(() => {
     try {
       return JSON.parse(review?.files ?? '[]') as { path: string; blob: string }[]
@@ -996,7 +1000,7 @@
       {:else}
         <div class="note">
           Ships a new commit, not the agent's <code>{review.head_sha.slice(0, 8)}</code>{ships.dropped.length
-            ? `. The signature on ${ships.dropped.map((sha) => sha.slice(0, 8)).join(', ')} is dropped: a commit the node makes is never signed`
+            ? `. ${ships.dropped.length > 1 ? 'The signatures on' : 'The signature on'} ${ships.dropped.map((sha) => sha.slice(0, 8)).join(', ')} ${ships.dropped.length > 1 ? 'are' : 'is'} dropped: a commit the node makes is never signed`
             : ''}.{squashing && intent.as_written !== undefined ? " The agent's own message would ship its commit as written." : ''}
         </div>
       {/if}
