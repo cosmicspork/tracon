@@ -4735,6 +4735,61 @@ async fn a_new_change_ships_one_commit_of_the_reviewed_tree_as_approved() {
     assert_eq!(record.pushed_sha.as_deref(), Some(shipped.as_str()));
 }
 
+/// One signed commit whose message is the one approved is already what the
+/// squash would make, so it ships as it is and keeps its signature (#551).
+#[tokio::test]
+async fn a_signed_commit_the_squash_would_remake_ships_with_its_signature() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let wt = std::path::Path::new(&f.worktree);
+    // No key is needed: publication never checks the signature, only that
+    // the commit is otherwise the one it would make.
+    sh(
+        wt,
+        "signed=$(git cat-file commit HEAD | awk '{ print } /^committer / && !done { \
+         print \"gpgsig -----BEGIN SSH SIGNATURE-----\"; print \" c2lnbmVk\"; \
+         print \" -----END SSH SIGNATURE-----\"; done = 1 }' \
+         | git hash-object -t commit -w --stdin) && git reset -q --hard $signed",
+    );
+    let signed = sh_out(wt, "git rev-parse HEAD");
+
+    let mut args = f.submit_args();
+    args["message"] = json!("work");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shipped = f.forge_branch();
+    assert_eq!(shipped, signed, "the agent's own commit is what ships");
+    assert!(
+        sh_out(
+            &f.dir.join("origin.git"),
+            &format!("git cat-file commit {shipped}")
+        )
+        .contains("gpgsig -----BEGIN SSH SIGNATURE-----"),
+        "its signature is kept"
+    );
+}
+
+/// A message other than the commit's own needs a new commit, which carries
+/// no signature: what ships is not the agent's commit.
+#[tokio::test]
+async fn a_squash_with_another_message_ships_a_new_commit() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let head = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
+
+    let mut args = f.submit_args();
+    args["message"] = json!("work, said again");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(f.forge_branch(), head);
+}
+
 /// The next revision of a squashed change adds one more commit on top of
 /// the squash, though the agent never had that commit.
 #[tokio::test]

@@ -1170,7 +1170,54 @@ async fn squash_commit(
     if tree != p.reviewed_tree {
         return Err(PublishError::IdentityChanged);
     }
+    // The agent's own commit may already be exactly this one: one commit on
+    // `onto`, the message unchanged. Pushing it keeps its signature, which a
+    // commit made here never has (#551).
+    if signed_as(git, publisher, p.head_sha, &made).await? {
+        return Ok(p.head_sha.to_string());
+    }
     Ok(made)
+}
+
+/// Whether `original` is `made` but for a signature: the same commit object
+/// once its `gpgsig` headers are dropped. Then `original` is what would ship
+/// anyway, and pushing it keeps the signature. Compared byte for byte, so it
+/// decides the same way on a resumed attempt.
+async fn signed_as(
+    git: &str,
+    publisher: &Path,
+    original: &str,
+    made: &str,
+) -> Result<bool, PublishError> {
+    if original == made {
+        return Ok(true);
+    }
+    let original = publisher_raw(git, publisher, ["cat-file", "commit", original]).await?;
+    let made = publisher_raw(git, publisher, ["cat-file", "commit", made]).await?;
+    Ok(unsigned(&original) == made)
+}
+
+/// A raw commit object without its `gpgsig` and `gpgsig-sha256` headers and
+/// their continuation lines. Everything else, the message included, is kept
+/// as stored.
+fn unsigned(raw: &[u8]) -> Vec<u8> {
+    let end = raw
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map_or(raw.len(), |at| at + 1);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut in_signature = false;
+    for line in raw[..end].split_inclusive(|b| *b == b'\n') {
+        if line.starts_with(b" ") && in_signature {
+            continue;
+        }
+        in_signature = line.starts_with(b"gpgsig ") || line.starts_with(b"gpgsig-sha256 ");
+        if !in_signature {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(&raw[end..]);
+    out
 }
 
 /// Whether the publisher repository holds `commit`, fetching what the forge's
@@ -1374,6 +1421,12 @@ async fn reword_commits(
             if tree != original.tree {
                 return Err(PublishError::IdentityChanged);
             }
+            // Remade identical but for the signature: keep the signed one.
+            let remade = if signed_as(git, publisher, sha, &remade).await? {
+                sha.to_string()
+            } else {
+                remade
+            };
             made.insert(sha, remade);
         }
         if made.len() == before {
@@ -1768,6 +1821,19 @@ async fn output(cli: &str, mut command: Command) -> Result<String, PublishError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the signature headers go, continuation lines and all; a message
+    /// line that merely looks like one is the message's.
+    #[test]
+    fn a_commit_without_its_signature_keeps_every_other_byte() {
+        let signed = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\
+\nsubject\n\ngpgsig in the body\n";
+        let bare = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+\nsubject\n\ngpgsig in the body\n";
+        assert_eq!(unsigned(signed), bare.to_vec());
+        assert_eq!(unsigned(bare), bare.to_vec());
+    }
 
     fn publication<'a>(
         target: &'a Target,
