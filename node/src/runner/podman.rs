@@ -443,7 +443,7 @@ impl Runner for PodmanRunner {
         let output = self
             .podman()
             .ok()?
-            .args(["inspect", "--format", "{{index .RepoDigests 0}}", image])
+            .args(["inspect", "--format", "{{json .RepoDigests}}", image])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
@@ -452,9 +452,33 @@ impl Runner for PodmanRunner {
         if !output.status.success() {
             return None;
         }
-        let digest = String::from_utf8(output.stdout).ok()?;
-        let digest = digest.trim();
-        (!digest.is_empty() && digest.contains("@sha256:")).then(|| digest.to_string())
+        let digests: Vec<String> = serde_json::from_slice(&output.stdout).ok()?;
+        repo_digest_for(image, &digests)
+    }
+}
+
+/// One image built from one Dockerfile under two names carries a digest name
+/// per tag, in no order that says which was asked for. The evidence names the
+/// one under the requested repository; the first entry stands in only when
+/// none is (a short name podman qualified, say).
+fn repo_digest_for(image: &str, digests: &[String]) -> Option<String> {
+    let repository = image_repository(image);
+    digests
+        .iter()
+        .find(|digest| image_repository(digest) == repository)
+        .or_else(|| digests.first())
+        .map(|digest| digest.trim())
+        .filter(|digest| digest.contains("@sha256:"))
+        .map(str::to_string)
+}
+
+/// A reference without its digest or tag. A colon before the last `/` is a
+/// registry port, not a tag.
+fn image_repository(image: &str) -> &str {
+    let name = image.split_once('@').map_or(image, |(name, _)| name);
+    match name.rfind(':') {
+        Some(colon) if !name[colon..].contains('/') => &name[..colon],
+        _ => name,
     }
 }
 
@@ -464,6 +488,33 @@ mod tests {
 
     fn spec() -> RunSpec {
         RunSpec::from_config(&Config::default(), false)
+    }
+
+    #[test]
+    fn the_recorded_digest_name_is_the_requested_images_whichever_tag_podman_lists_first() {
+        let digest = format!("sha256:{}", "9e".repeat(32));
+        let ours = format!("localhost/tracon-repo-hound-d157e849da@{digest}");
+        let theirs = format!("localhost/tracon-repo-hound-4b9bd93690@{digest}");
+        for digests in [
+            vec![theirs.clone(), ours.clone()],
+            vec![ours.clone(), theirs.clone()],
+        ] {
+            assert_eq!(
+                repo_digest_for("localhost/tracon-repo-hound-d157e849da:latest", &digests),
+                Some(ours.clone())
+            );
+        }
+        // Nothing under the requested name: the first entry, as before.
+        assert_eq!(
+            repo_digest_for("alpine", &[theirs.clone(), ours.clone()]),
+            Some(theirs)
+        );
+        assert_eq!(repo_digest_for("alpine", &[]), None);
+        assert_eq!(
+            image_repository("registry:5000/a/b:1@sha256:x"),
+            "registry:5000/a/b"
+        );
+        assert_eq!(image_repository("registry:5000/a/b"), "registry:5000/a/b");
     }
 
     #[test]
