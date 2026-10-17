@@ -273,35 +273,20 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 
 **For the supported configuration**
 
-- [ ] **A hosted Anthropic API key, or the Anthropic subscription, end to end through the
-      gateway** from a node-started Claude Code session. The subscription flow's exchange,
-      refresh and an inference call were confirmed by hand against the live service on
-      2026-09-15; the node doing it is not yet proven.
-- [ ] **A private repository end to end**, through preparation, agent work, checks in the
-      project's toolchain image, and authorized publication to GitHub, with nothing in the
-      published result naming tracon.
+- [ ] **A hosted Anthropic API key end to end through the gateway** from a node-started
+      Claude Code session. (The subscription is proven: node-started plan and execute
+      sessions ran on it through the gateway on 2026-10-16.)
 - [ ] **The 0.29.0 live-session fixes, live** (#428, #429): a resubmitted, published
-      review updating the pull request it opened, with and without `change`; and an update
-      whose revision merged `main` clearing GitHub's conflict. Each is proven against a
-      fake forge or by test only. (#425 is proven: on 2026-10-10 a node-started Claude
-      Code session's `ask_operator`, left unanswered for 178 s, was answered and read back
-      on its third `question_status` call.)
-- [ ] **The 0.29.0 follow-ups, live** (#432, #433): a provider key saved from its
-      Connections card and used by a session; and a failed required check under the Podman
-      runner whose refusal names the failing test. The five-minute MCP cutoff (#434) no
-      longer bites: no node tool holds a call past 45 s, and on 2026-10-10 a session on
-      Claude Code 2.1.295 waited out a 5 m 35 s `just check` through `review_status`
-      (#417) and published #444.
-- [ ] **The #436 additions, live**: a setup proposal whose run notes appear in the next
-      session's operator notes, and a review under `publish.commits = keep` with an edited
-      message pushed to a real forge. (The built-in skill is proven: a 2.1.295 session in
-      the repository's image listed it as `tracon:repo-setup` on 2026-10-10.)
-- [ ] **The #449 fixes, live**: a scratch node started with the default
-      `harness_listen` beside a running one refusing to start while the first keeps its
-      sockets; `doc_search` for a word in a document's title returning that document
-      first; and the node log after a few sessions saying whether the gateway's retry on
-      a fresh connection answered the `BadRecordMac` sends (a stale pooled connection) or
-      failed too (the path).
+      review updating the pull request it opened, passing `change`; and an update whose
+      revision merged `main` clearing GitHub's conflict. Each is proven against a fake
+      forge or by test only. (The update without `change` is proven: on 2026-10-11 the
+      approved revision was pushed to the pull request the review had opened.)
+- [ ] **The 0.29.0 follow-ups, live** (#432): a provider key saved from its Connections
+      card and used by a session. (#433 is proven: on 2026-10-17 a failed `just check`
+      under the Podman runner was refused naming the four failing tests.)
+- [ ] **The #436 additions, live**: a review under `publish.commits = keep` with an edited
+      message pushed to a real forge. (The run notes are proven: on 2026-10-11 a setup
+      proposal's notes appeared in the next session's operator notes.)
 - [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
       interrupted execution, retained drafts, a node restart, and recovery through
       completion, with what actually ran, what stayed uncertain, and where the operator
@@ -345,9 +330,12 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       contract everywhere.
 - [ ] **A repository recipe offered over the real hub**: offered from the laptop, accepted
       on the homelab node, which builds and pins its own image from it.
-- [ ] **Real project workflows on Kubernetes**: preparation, a coding task, checks, review.
-      An OpenCode session started on the homelab cluster and ran gated tools on
-      2026-09-29 (after #291, #294); the whole workflow has not.
+- [ ] **Publication from the Kubernetes node**: an approved review on the homelab node
+      opening its own pull request, now that the node image carries `gh` (#547).
+      Preparation, a coding task, checks in the repository's registry image and review
+      are proven there: on 2026-10-15 a hounddogreading plan and execute on the homelab
+      node passed eight required checks and was approved. Its branch was pushed, but the
+      pull request had to be opened by hand.
 
 **Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
 web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
