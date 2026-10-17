@@ -6677,6 +6677,34 @@ pub async fn import_credentials(
     Ok(Json(json!({ "imported": names })))
 }
 
+/// Remove one sealed credential from the running broker and its store. An
+/// admin action, as importing one is: revoking a credential at the node is
+/// the only removal that takes effect at once, since a node brokers the copy
+/// it holds, not the file.
+pub async fn delete_credential(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    let key = crate::mesh::identity::load_or_generate()
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .0
+        .credential_store_key();
+    let mut broker = s.tools.broker.write().unwrap();
+    let mut staged = broker.clone();
+    if !staged.remove(&name) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no credential named {name}"),
+        ));
+    }
+    staged
+        .save(&key)
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    *broker = staged;
+    Ok(Json(json!({ "removed": name })))
+}
+
 #[derive(Deserialize)]
 pub struct CreateProviderBody {
     pub name: String,

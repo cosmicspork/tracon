@@ -475,7 +475,8 @@ enum CredentialCommand {
     /// them into the store. Existing names are replaced. A node running on
     /// this machine is handed them, and uses them at once.
     Import { file: std::path::PathBuf },
-    /// Remove one credential.
+    /// Remove one credential. A node running on this machine is asked to
+    /// remove it, and stops brokering it at once.
     Rm { name: String },
     /// Hand a credential to another member node, direct-sealed over the hub.
     /// The credential must list that node in `nodes`, or it is refused there.
@@ -1430,6 +1431,20 @@ async fn running_node() -> Option<String> {
 
 fn node_url() -> String {
     std::env::var("TRACON_URL").unwrap_or_else(|_| "http://127.0.0.1:7420".into())
+}
+
+/// One path segment for a name the operator typed: anything outside the
+/// characters a URL path keeps as they are is percent-encoded, so a name
+/// cannot add segments or a query to the route it is sent to.
+fn path_segment(name: &str) -> String {
+    name.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 async fn node_call(
@@ -2697,17 +2712,25 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             Ok(())
         }
         CredentialCommand::Rm { name } => {
+            // As with import: a running node brokers the copy it read at
+            // start, and would write it back the next time it saved. Removed
+            // through it, it stops brokering the credential now.
+            if let Some(url) = running_node().await {
+                node_call(
+                    reqwest::Method::DELETE,
+                    &format!("/api/credentials/{}", path_segment(&name)),
+                    None,
+                    None,
+                )
+                .await?;
+                println!("removed {name} from the running node at {url}");
+                return Ok(());
+            }
             if !broker.remove(&name) {
                 anyhow::bail!("no credential named {name}");
             }
             broker.save(&key)?;
             println!("removed {name}");
-            if let Some(url) = running_node().await {
-                println!(
-                    "the node running at {url} keeps its copy until it restarts \
-                     (`tracon service restart`)"
-                );
-            }
             Ok(())
         }
         CredentialCommand::Share { name, to } => {

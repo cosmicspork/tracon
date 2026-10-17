@@ -255,6 +255,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api::delete_memory).patch(api::edit_memory),
         )
         .route("/api/credentials", get(api::list_credentials))
+        .route(
+            "/api/credentials/{name}",
+            axum::routing::delete(api::delete_credential),
+        )
         .route("/api/credentials/{name}/share", post(api::share_credential))
         .route(
             "/api/credentials/forge/{forge}",

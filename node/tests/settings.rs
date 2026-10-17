@@ -283,6 +283,79 @@ async fn a_cli_import_reaches_the_running_node() {
     server.abort();
 }
 
+/// `tracon credential rm` with a node running here removes the credential
+/// through it, so the node stops brokering it at once rather than at its
+/// next restart; with none running it removes it from the store itself.
+#[tokio::test]
+async fn a_cli_rm_reaches_the_running_node() {
+    let n = node();
+    let toml = "[credentials.vega]\nchannels = [\"personal\"]\n\
+                [credentials.vega.env]\nVEGA_KEY = \"not-a-real-key\"\n";
+    let seal = || async {
+        let (s, v) = call(
+            &n,
+            "POST",
+            "/api/credentials/import",
+            Some(LOCAL),
+            Some(json!({ "toml": toml })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let rm = || {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
+            .args(["credential", "rm", "vega"])
+            .env("TRACON_URL", &url)
+            .env_remove("TRACON_TOKEN")
+            .output()
+    };
+
+    // Nothing answers yet: the store is opened here.
+    seal().await;
+    let out = rm().await.unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("running node"), "{stdout}");
+    assert!(stdout.contains("removed vega"), "{stdout}");
+
+    seal().await;
+    let app = n.app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let out = rm().await.unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("removed vega from the running node"),
+        "{stdout}"
+    );
+    let (_, v) = call(&n, "GET", "/api/credentials", Some(LOCAL), None).await;
+    assert!(!v.to_string().contains("vega"), "{v}");
+
+    // A second removal finds nothing, and says so.
+    let out = rm().await.unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no credential named vega"), "{stderr}");
+    server.abort();
+}
+
 #[tokio::test]
 async fn forge_tokens_are_write_only_replaceable_and_removable() {
     let n = node();
