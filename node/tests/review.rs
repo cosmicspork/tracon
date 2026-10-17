@@ -4850,10 +4850,15 @@ async fn two_commits_squash_to_a_new_commit_the_screen_names() {
     let mut args = f.submit_args();
     args["message"] = json!("more");
     let id = review_id(&f.tool("s1", "submit_review", args).await);
-    assert_eq!(
-        shipping_shown(&f, &id).await,
-        (Value::Null, json!([signed])),
+    let (as_written, dropped) = shipping_shown(&f, &id).await;
+    assert!(
+        as_written.is_null(),
         "no message ships the agent's head as written"
+    );
+    // The first commit is signed too where git signs every commit.
+    assert!(
+        dropped.as_array().unwrap().contains(&json!(signed)),
+        "{dropped}"
     );
     let (status, body) = f.approve(&id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
