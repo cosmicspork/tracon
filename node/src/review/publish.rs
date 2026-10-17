@@ -193,6 +193,12 @@ pub struct Intent {
     /// of `lease` and is forced — but only over `lease`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rewrite: bool,
+    /// The commit this worktree holds that stands for `lease` on an existing
+    /// change: `lease` itself, or the revision an earlier squash pushed as
+    /// `lease` was made from, which is all the agent ever had of it. Absent
+    /// when the worktree holds neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
     /// The commit the reviewed tree is squashed onto: `lease` when the push
     /// adds to what the branch holds, else where the branch leaves its base.
     /// Absent pushes the agent's commits as written.

@@ -2457,13 +2457,19 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     // the screen edits a copy and sends it back with the verdict.
     // Null for a mirrored review: the owner publishes its revision's own
     // outputs, and a default invented here would be sent back as an edit.
-    let intent = match remote_owner {
-        Some(_) => serde_json::Value::Null,
-        None => json!(crate::authority::revision_intent(
-            s.store(),
-            revision.as_ref().map(|revision| revision.id.as_str()),
-        )
-        .unwrap_or_default()),
+    let revision_intent = match remote_owner {
+        Some(_) => None,
+        None => Some(
+            crate::authority::revision_intent(
+                s.store(),
+                revision.as_ref().map(|revision| revision.id.as_str()),
+            )
+            .unwrap_or_default(),
+        ),
+    };
+    let intent = match &revision_intent {
+        Some(intent) => json!(intent),
+        None => serde_json::Value::Null,
     };
     // What changed since the operator last decided, beside the full diff.
     // Read from the owner's worktree, so a mirror has none.
@@ -2481,14 +2487,10 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     // what its branch held at submit is not this review's to answer for.
     let authorship = match (remote_owner.as_ref(), worktree_of(s, r)) {
         (None, Some(worktree)) => {
-            let updates_change = serde_json::from_str::<crate::review::publish::Target>(&r.target)
-                .is_ok_and(|target| target.change.is_some());
-            let change_head = revision
-                .as_ref()
-                .and_then(|revision| revision.intent_json.as_deref())
-                .filter(|_| updates_change)
-                .and_then(|json| serde_json::from_str::<crate::review::publish::Intent>(json).ok())
-                .and_then(|intent| intent.lease);
+            let change = serde_json::from_str::<crate::review::publish::Target>(&r.target)
+                .ok()
+                .zip(revision_intent.as_ref())
+                .and_then(|(target, intent)| crate::review::OnChange::of(&target, intent));
             crate::review::authorship(
                 &s.tools.broker,
                 &r.provider,
@@ -2497,7 +2499,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
                 &worktree,
                 &format!("origin/{}", r.base_ref),
                 &r.head_sha,
-                change_head.as_deref(),
+                change.as_ref(),
             )
             .await
         }

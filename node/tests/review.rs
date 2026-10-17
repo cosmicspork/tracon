@@ -4776,6 +4776,112 @@ async fn an_update_to_a_squashed_change_squashes_onto_it() {
     );
 }
 
+/// `gh` bound to `work`, on a loopback forge that answers only `/user`, as
+/// Ada: the account the authorship check reads. The token is this forge's own,
+/// so no other test's cached identity answers for it.
+async fn gh_as_ada() -> String {
+    let app = axum::Router::new().route(
+        "/user",
+        axum::routing::get(|| async {
+            axum::Json(json!({ "login": "ada", "id": 1, "name": "Ada" }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!(
+        r#"
+    [credentials.gh]
+    channels = ["work"]
+    [credentials.gh.env]
+    GH_TOKEN = "brokered-token-{port}"
+    GITHUB_API = "http://{addr}"
+"#,
+        port = addr.port()
+    )
+}
+
+impl Fixture {
+    /// What the review says about who its commits are by, as `submit_review`
+    /// answered and as the review screen shows it, which must agree.
+    async fn authorship(&self, submitted: &Value) -> Value {
+        let id = review_id(submitted);
+        let (status, body) = self.call("GET", &format!("/api/reviews/{id}"), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["authorship"], submitted["authorship"], "{body}");
+        assert!(submitted["authorship"].is_object(), "{submitted}");
+        submitted["authorship"].clone()
+    }
+}
+
+/// The change's branch holds a colleague's commit. Updating it, the review
+/// names only the commit this submission adds, and re-authoring starts from
+/// the change's head, so hers is never suggested for rewriting.
+#[tokio::test]
+async fn an_update_names_only_the_commits_it_adds_to_the_change() {
+    state::isolate();
+    let f = fixture(test_name!(), &gh_as_ada().await).await;
+    let wt = std::path::Path::new(&f.worktree);
+    // The fixture's commit is `t@e`'s: here, the colleague's.
+    let change_head = sh_out(wt, "git rev-parse HEAD");
+    f.forge_holds(&change_head);
+    gh_forge(&f, pull_seven(&change_head));
+    sh(
+        wt,
+        "echo mine >> a.txt && git add -A \
+         && git -c user.email=ada@laptop.local -c user.name=Ada commit -qm mine",
+    );
+    let mine = sh_out(wt, "git rev-parse HEAD");
+
+    let submitted = f.submit_update(json!({})).await;
+    let authorship = f.authorship(&submitted).await;
+    let wrong = authorship["misattributed"].as_array().unwrap();
+    assert_eq!(wrong.len(), 1, "{authorship}");
+    assert_eq!(wrong[0]["sha"], mine.as_str());
+    let note = authorship["note"].as_str().unwrap();
+    assert!(
+        note.contains(&format!("--reset-author' {change_head}`")),
+        "{note}"
+    );
+    assert!(!note.contains("origin/main"), "{note}");
+}
+
+/// The second revision of a squashed change: the branch holds the node's
+/// squash, which the agent never had. The first revision's commits are not
+/// judged again, and re-authoring starts from the revision the squash was
+/// made from rather than the base.
+#[tokio::test]
+async fn a_squashed_change_judges_only_what_the_next_revision_adds() {
+    state::isolate();
+    let f = fixture_with(test_name!(), &gh_as_ada().await, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let first_revision = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let squash = f.forge_branch();
+
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A && git commit -qm second",
+    );
+    let second = sh_out(wt, "git rev-parse HEAD");
+    gh_forge(&f, pull_seven(&squash));
+    let submitted = f.submit_update(json!({})).await;
+    let authorship = f.authorship(&submitted).await;
+    let wrong = authorship["misattributed"].as_array().unwrap();
+    assert_eq!(wrong.len(), 1, "{authorship}");
+    assert_eq!(wrong[0]["sha"], second.as_str());
+    let note = authorship["note"].as_str().unwrap();
+    assert!(
+        note.contains(&format!("--reset-author' {first_revision}`")),
+        "{note}"
+    );
+    assert!(!note.contains("origin/main"), "{note}");
+}
+
 /// An update whose revision merged its base, as an agent does to resolve a
 /// conflict, is squashed onto what the branch holds and keeps the base it
 /// merged as a second parent, so the forge sees the base merged.
