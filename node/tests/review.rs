@@ -310,6 +310,24 @@ impl Fixture {
                 .unwrap(),
             None => req.body(Body::empty()).unwrap(),
         };
+        self.send(req).await
+    }
+
+    /// A bodiless request made at the node itself, over loopback, the way an
+    /// admin action goes ahead without a passkey.
+    async fn call_at_node(&self, method: &str, uri: &str) -> (StatusCode, Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:5000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        self.send(req).await
+    }
+
+    async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
         let res = self.app.clone().oneshot(req).await.unwrap();
         let status = res.status();
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
@@ -1800,8 +1818,13 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
         .to_string();
     let start = format!("/api/reviews/{id}/review-session");
 
-    // Without a model there is none, and the review says that is why.
+    // It runs on the operator's models, so from off the node it needs a
+    // passkey, which a bearer request cannot present.
     let (status, body) = f.call("POST", &start, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // Without a model there is none, and the review says that is why.
+    let (status, body) = f.call_at_node("POST", &start).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
     assert!(
@@ -1813,7 +1836,7 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
     );
 
     bind_review_model(&f);
-    let (status, body) = f.call("POST", &start, None).await;
+    let (status, body) = f.call_at_node("POST", &start).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["state"], "started", "{body}");
     let reviewer = body["session_id"].as_str().unwrap().to_string();
@@ -1823,7 +1846,7 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
     assert_eq!(detail["review_session_reason"], Value::Null, "{detail}");
 
     // One reviewer at a time.
-    let (status, body) = f.call("POST", &start, None).await;
+    let (status, body) = f.call_at_node("POST", &start).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(
         body.to_string().contains("already reading this review"),
@@ -1840,7 +1863,7 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
         .await;
     assert_eq!(v["recorded"], true, "{v}");
     f.manager.stop(&reviewer).await.unwrap();
-    let (status, body) = f.call("POST", &start, None).await;
+    let (status, body) = f.call_at_node("POST", &start).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let (status, body) = f
         .call(
@@ -1850,7 +1873,7 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = f.call("POST", &start, None).await;
+    let (status, body) = f.call_at_node("POST", &start).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(body.to_string().contains("already decided"), "{body}");
 }
