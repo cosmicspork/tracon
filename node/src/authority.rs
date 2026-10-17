@@ -871,6 +871,167 @@ pub async fn publish_review(
     }
 }
 
+/// Settle a publication the operator finished outside this node: the branch
+/// was pushed, and the change was opened by hand at `change` (its web address
+/// or its number). Nothing is taken on the operator's word. The owning node
+/// asks the forge, and the change counts only when it is this publication's:
+/// open or merged, from this repository, from the publication's branch into
+/// the review's base, and with exactly the commit that was pushed at its head.
+/// A change that is not is refused with what the forge holds instead, and
+/// the review stays as it was. One that is settles the review exactly as an
+/// attempt that found its change already open does.
+pub async fn reconcile_publication(
+    ctx: &PublishContext<'_>,
+    review: &crate::store::ReviewRow,
+    row: &crate::store::PublicationRow,
+    change: &str,
+) -> Result<String, PublishError> {
+    use crate::review::publish::Journal as _;
+    use crate::store::PublicationOutcome as O;
+    match row.outcome(crate::process::instance_id()) {
+        O::Published => {
+            return Err(PublishError::Conflict(
+                "this publication already landed".into(),
+            ))
+        }
+        O::InProgress => {
+            return Err(PublishError::Conflict(
+                "an attempt at this publication is running now".into(),
+            ))
+        }
+        O::NotAttempted | O::Failed | O::Uncertain => {}
+    }
+    if !matches!(review.state.as_str(), "new" | "claimed" | "publishing") {
+        return Err(PublishError::Conflict(format!(
+            "the review was settled since ({}); there is nothing left to reconcile",
+            review.state
+        )));
+    }
+    let mut target: crate::review::publish::Target =
+        serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
+    // Where the publication pushed, which an operator's rename may have
+    // moved off the branch the review was submitted on.
+    target.branch = row.branch.clone();
+    let provider = crate::review::publish::Provider::parse(&target.provider).ok_or_else(|| {
+        PublishError::Conflict(format!(
+            "{} is not a provider this node publishes to",
+            target.provider
+        ))
+    })?;
+    let noun = provider.noun();
+    let given = change.trim();
+    let named_url = !given.chars().all(|c| c.is_ascii_digit());
+    let number = if named_url {
+        crate::review::publish::change_number(given)
+    } else {
+        given.parse().ok()
+    }
+    .filter(|number| *number > 0)
+    .ok_or_else(|| {
+        PublishError::Conflict(format!(
+            "{given:?} names no {noun}: give its number or its web address"
+        ))
+    })?;
+    if let Some(existing) = target.change.as_ref().filter(|c| c.number != number) {
+        return Err(PublishError::Conflict(format!(
+            "this review updates {noun} {}, not {number}",
+            existing.number
+        )));
+    }
+    // What the forge must show at the change's head: the commit the
+    // publication recorded pushing, or — for one that pushes the agent's
+    // commits as they are — the reviewed commit itself. A squash made here
+    // is a commit only this node knows, so without its record there is
+    // nothing to hold the change to.
+    let intent =
+        revision_intent(ctx.store, row.revision_id.as_deref()).map_err(PublishError::Conflict)?;
+    let pushed = match (&row.pushed_sha, &intent.squash_onto) {
+        (Some(sha), _) => sha.clone(),
+        (None, None) => row.head_sha.clone(),
+        (None, Some(_)) => {
+            return Err(PublishError::Conflict(
+                "this publication never recorded the squashed commit it pushed, so no change \
+                 can be checked against it; retry the publication instead"
+                    .into(),
+            ))
+        }
+    };
+    let env = ctx
+        .broker
+        .read()
+        .unwrap()
+        .env_for(provider.credential(), &review.channel, ctx.node_id)
+        .map_err(|e| {
+            PublishError::External(format!(
+                "reading {noun} {number} needs the forge credential on this channel: {e}"
+            ))
+        })?;
+    let dir = crate::review::publish::inspection_dir()
+        .map_err(|e| PublishError::External(e.to_string()))?;
+    let live = ctx.cfg.live();
+    let state = crate::review::publish::change_state(provider, &live, &dir, &env, &target, number)
+        .await
+        .map_err(|e| PublishError::External(format!("could not read {noun} {number}: {e}")))?;
+    if let Some(refusal) = state.reconcile_refusal(provider, &target, number, &pushed) {
+        return Err(PublishError::Conflict(refusal));
+    }
+    let url = state.url.clone();
+    if named_url && !same_address(given, &url) {
+        return Err(PublishError::Conflict(format!(
+            "{noun} {number} of {} is {url}, not {given}",
+            target.project
+        )));
+    }
+    let claimed = if review.state == "publishing" {
+        ctx.store
+            .reclaim_publish(&review.id, row.revision_id.as_deref())
+    } else {
+        ctx.store
+            .begin_publish(&review.id, row.revision_id.as_deref())
+    }
+    .map_err(|e| PublishError::External(e.to_string()))?;
+    if !claimed {
+        return Err(PublishError::Conflict(
+            "a newer revision was submitted since this was approved, or the review is being \
+             decided now; reload it"
+                .into(),
+        ));
+    }
+    // From here on, as an attempt that finds its change already open.
+    StoreJournal {
+        store: ctx.store,
+        id: &row.id,
+    }
+    .opened(&url)
+    .map_err(PublishError::External)?;
+    let title = row.title.as_deref().unwrap_or(review.approved_title());
+    let body = row.body.as_deref().unwrap_or(review.approved_body());
+    if !ctx
+        .store
+        .finish_publish(
+            &review.id,
+            title,
+            body,
+            &url,
+            &published_target(&target, &url)?,
+        )
+        .map_err(|e| PublishError::External(e.to_string()))?
+    {
+        return Err(PublishError::Conflict(
+            "the review claim was lost while reconciling; reload it".into(),
+        ));
+    }
+    ctx.manager.publish_queue().await;
+    Ok(url)
+}
+
+/// Whether two web addresses name the same page, as an operator copies one
+/// from a browser: in any case, with a trailing slash or without.
+fn same_address(given: &str, forge: &str) -> bool {
+    let tidy = |url: &str| url.trim().trim_end_matches('/').to_ascii_lowercase();
+    tidy(given) == tidy(forge)
+}
+
 /// The target as it published: on the branch it was pushed to, and naming
 /// the change it opened, so the review's next revision updates that change.
 fn published_target(

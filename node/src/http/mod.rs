@@ -450,6 +450,12 @@ pub fn router(state: AppState) -> Router {
             "/api/reviews/{id}/publication/recover",
             post(api::recover_publication),
         )
+        // Settles a review on the operator's word about the forge, checked
+        // against it: an admin action (`passkey::AdminAction`).
+        .route(
+            "/api/reviews/{id}/publication/reconcile",
+            post(api::reconcile_publication),
+        )
         .route("/api/reviews/{id}/release", post(api::release_review))
         .route("/api/evidence/candidates", get(evidence::list_candidates))
         .route(
