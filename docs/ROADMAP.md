@@ -51,7 +51,23 @@ and launch manifests. Do not replace the store or introduce another agent loop.
 Everything found on the live runs through 2026-10-08, in the 0.29.0 screen audit and in
 the 2026-10-10 validation of `main` on the node has landed (#419–#434, #439–#446, #449).
 The audit's states stay in `spa/scripts/ui-audit.mjs`; `--state <name>` reproduces one.
-Nothing is open here until the next real run finds something.
+
+The live runs of 2026-10-15 to 2026-10-17 found these, each tracked as an issue with the
+run that hit it:
+
+- [ ] Sessions start from a fresh forge clone of the default branch, and host checkouts
+      stop being a session source (#558). The first part, syncing the managed clone at
+      every start (#557), is in review.
+- [ ] Reviews: authorship judged only on the commits an update adds (#549); a signed commit
+      shipped as written, and the operator shown what ships (#551); a continued session
+      keeping its review in revision (#515); reconciling a review whose PR was opened
+      outside the node (#523); evidence naming the image a check actually ran in (#518).
+- [ ] Credentials and repositories: `credential rm` reaching the running node (#555); a
+      prefix in a credential's `repos` for a forge group (#553); `repo set
+      --prepare-credential` (#554); `pipeline_list_by_sha` allowed with the other reads
+      (#550).
+- [ ] An external harness adding a work item bound to its project (#510), and a peer
+      session's questions answerable from this node (#521).
 
 ## Next — the working loop, made comfortable
 
@@ -66,8 +82,10 @@ Needed for daily use, but not blocking it today.
       tests (`opencode_adversarial` ×2, `opencode_pty::a_real_shell_is_spawned_and_read_back_through_the_proxy`)
       fail on unmodified `main` on the desktop host with "Unexpected server error" from the
       `opencode` on its PATH (Homebrew, 1.18.30), so the recipe stops before the doc tests
-      and the SPA. Find what differs from CI, and have the tests use the pinned binary or
-      say why they skip.
+      and the SPA. What differs from CI: CI has no `opencode` on PATH, so `pinned_binary()`
+      skips these tests there, while the Homebrew build also reports 1.18.30, so the version
+      check never skips them here. Have the tests use the pinned binary from the image, or
+      skip when the one found is not it, saying why.
 
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
@@ -96,8 +114,10 @@ hit on a real task.
       mechanism with lending application credentials below. LFS and submodules from other
       repositories are out until a task needs them.
 - [ ] Refusals the agent can read: what the boundary refuses and which brokered tool to
-      use instead, stated in the orientation. A refused egress already asks the operator
-      (`request_egress`); this covers the rest.
+      use instead, stated in the orientation. It already covers a refused egress
+      (`request_egress`), the missing git remote (`submit_review`) and policy refusals;
+      what is left is the harness's own fetch tools and `curl`, which fail with a bare
+      network error.
 - [ ] **Lend application credentials through the gateway**, as model credentials are lent
       today. A broker entry names an upstream, how its key is attached, and the channel or
       repository it is bound to; the session gets the upstream as a base URL on the gateway
@@ -111,7 +131,10 @@ hit on a real task.
       in the broker. What cannot be lent this way can be passed as a plain secret,
       labelled as visible to the agent and to the model provider, with its upstream's
       egress opened beside it. Preparation and check runs get the same injection, which
-      replaces the separate "secrets for project checks" item.
+      replaces the separate "secrets for project checks" item. Today only the plain form
+      exists, and only for the default branch's base-cache warm-up: an `env` credential
+      bound by its `repos` and named in a `[[repo]]` entry's `prepare_credentials`.
+      Sessions and a candidate's own preparation hold none.
 
 **Review and publication**
 
@@ -120,28 +143,30 @@ hit on a real task.
       nextest) and runs past five minutes on this machine. The session cache (#390) is not
       the answer: no check may build on what an agent wrote. A node-built cache of the
       default branch, made when the repository image is built and mounted read-only, is.
+      Half of it exists: the image build warms the base cache by running `prepare` on the
+      default branch, so dependencies arrive warm. Build output does not, because the
+      warm-up never builds and checks get no `CARGO_TARGET_DIR` under `/cache`.
 
 
 **Node data**
 
 - [ ] **The model list follows what the operator saves.** Saving a provider's declared
       models (Settings › Connections › Providers) writes `node.toml` and nothing else; the
-      pickers change only after `probe_models_into_store` runs again, on a passing
-      boundary check or the "Refresh models" button. Re-probe after saving models and
-      after connecting or removing a provider, and drop the button. Keep a retry only
-      where the last probe failed, saying why.
+      pickers change only after `probe_models_into_store` runs again. It already runs at
+      startup, on a passing boundary check and after a provider is connected or its key
+      set. Re-probe also after saving models and after removing a provider, and drop the
+      "Refresh models" button. Keep a retry only where the last probe failed, saying why.
 
 **OpenCode, contingent on the spike above**
 
-- [ ] Show an OpenCode session's history in its native window. OpenCode keeps separate v1
-      and v2 session stores; the v2 runner writes one and the v1 native UI reads the other,
-      so the window opens on "New Session" with a blank history.
 - [ ] Open the native OpenCode window from any origin the SPA is served at. It loads only
       when the tracon tab is at exactly `http://127.0.0.1:7420`; `localhost`, a LAN address
       or the hub's origin get a refused frame.
-- [ ] Let the model catalogue refresh. `models.opencode.ai` is not on the gateway's
-      `allow_hosts`, so the harness's catalogue fetch is refused and its model list never
-      updates; fetch it node-side and serve it, or allow the one host.
+- [ ] Let the model catalogue refresh. The node already fetches it and hands the harness a
+      file, with the harness's own fetch turned off, but the node's fetch checks the
+      gateway's `allow_hosts`. `models.opencode.ai` is not there by default, so the node
+      keeps its cached copy and logs a skip. Exempt the one host from that check, or add it
+      to the defaults.
 - [ ] Tell an OpenCode agent why the node's policy refused its call. Claude Code now reads
       "the node's policy refused this (rule …): <reason>" (#441); OpenCode's v1 permission
       reply takes only `response`, so the same refusal reaches it as a bare `reject`.
@@ -155,9 +180,6 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 
 **Product engineering, the part that survived**
 
-- [ ] Show the criteria coverage the brief already carries beside the diff and the shown
-      work in review. The diff and runtime checks stay the authoritative record; this adds
-      what a product judgement needs and no more.
 - [ ] Design planning and review in the same frame: an agent-built HTML bundle proposing
       layouts or flows, attached like shown work and labelled as a proposal rather than an
       account of finished work.
@@ -165,13 +187,16 @@ wait until **Now** and **Next** have made a day's work unremarkable.
       outcome. Support optional published/awaiting-evaluation work rather than closing it
       merely because a PR opened. Bind acceptance to the evaluated candidate and criteria;
       a new candidate must not inherit an old verdict. Plain coding tasks may still end at
-      publication when that is the operator's chosen endpoint.
+      publication when that is the operator's chosen endpoint. Criterion judgements are
+      already bound to their candidate, and #514 adds the reviewer's per-criterion findings;
+      what is left is not closing the item on publication (`authority.rs` closes it today)
+      and accepting the item as a whole.
 - [ ] Individually addressable review feedback: general and file comments and line/range
       threads bound to revision, path and side, returned through the agent review contract
       and kept across resubmission. Addressed, unresolved and outdated are distinct; a moved
       anchor must not silently attach to unrelated code. Anchoring to criteria and
-      screenshots only if shown work makes it worth it, and screen recordings or browser
-      traces beside screenshots on the same evidence.
+      screenshots, and browser traces beside screenshots, moved to #514. Today the contract
+      returns one note and an optional edited patch.
 - [ ] Exit proof: one independent operator's complete loop on a real project — capture a
       user's problem and source, agree on good, delegate with selected context, capture a
       candidate, judge it from the diff and the shown work, record the result, inspect a
@@ -181,14 +206,17 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 
 **Screens, the rest of the 0.29.0 audit**
 
-- [ ] About sixty polish items and nits, reproducible from the audit's states: the
+- [ ] The polish items and nits left after #436, reproducible from the audit's states: the
       Settings layouts (the exhaustion policy row, meters, the phone section nav, clipped
       identities), the Documents screens (browser-default inputs on import and transfer,
       grey errors, duplicated actions), text formatting (missing spaces after conditional
-      fragments, raw Markdown and enum values from node strings, units and plurals), the
-      work item's layout, and the mirrored-review and squash editors.
-- [ ] Home's composer line reads `personal · tracon ·adjust` on a phone: its separators
-      come from CSS, not the Svelte trim #439 fixed, and the last one loses its space.
+      fragments, enum values from node strings, units and plurals), the work item's
+      layout, and the mirrored-review and squash editors. Raw Markdown is fixed for issue
+      drafts, review summaries and requirements (#534, #561), and #497 rebuilt the
+      Settings forms; re-run the audit to recount before taking this on.
+- [ ] Home's composer line reads `personal · tracon ·adjust` on a phone. On narrow
+      screens `.lnk` becomes `inline-flex` (`app.css`), so the `· ` its `::before` adds
+      (`Composer.svelte`) becomes a flex item and loses its trailing space.
 
 **The boundary, extended when a task needs it**
 
@@ -198,8 +226,9 @@ wait until **Now** and **Next** have made a day's work unremarkable.
       wrapper runs: chromedp's headless-shell puts socat on `0.0.0.0:9222`, which is why the
       browser is tracon's own image (#405).
 - [ ] Say when a newer `tracon-browser` digest is published than the one a `[[service]]`
-      entry pins, and pin it on the operator's word (Settings, or `tracon service pin
-      browser`). The entry stays a digest; only the step of copying one in goes away.
+      entry pins, and pin it on the operator's word (Settings, or a CLI command; not
+      `tracon service`, which already manages the node's own system service). The entry
+      stays a digest; only the step of copying one in goes away.
 - [ ] A keyed per-repository stash for artefacts that are expensive to rebuild
       (`stash_put` / `stash_get`, keyed on a digest of named input paths so a stale one is
       never silently reused); cached "before" screenshots of the default branch are a
