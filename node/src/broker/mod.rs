@@ -215,8 +215,9 @@ impl Credential {
             .collect()
     }
 
-    /// Refuse a `repos` entry that globs anywhere but a final `/**`, so one
-    /// that looks wider or narrower than it is never reaches the store.
+    /// Refuse a `repos` entry that globs anywhere but a final `/**`, or
+    /// whose prefix steps through `.` or `..`, so one that looks wider or
+    /// narrower than it is never reaches the store.
     fn check_repos(&self) -> Result<(), String> {
         for bound in &self.repos {
             let prefix = bound.strip_suffix("/**").unwrap_or(bound);
@@ -224,6 +225,13 @@ impl Credential {
                 return Err(format!(
                     "repos entry {bound:?}: `**` is allowed only as the last segment, as in \
                      `gitlab.com/group/**`, and no other wildcard is"
+                ));
+            }
+            // Read textually: `Path::components` drops an inner `.`.
+            if bound.ends_with("/**") && prefix.split('/').any(|part| part == "." || part == "..") {
+                return Err(format!(
+                    "repos entry {bound:?}: a `group/**` prefix is written without `.` or `..` \
+                     segments"
                 ));
             }
             let named = Path::new(prefix)
@@ -245,8 +253,15 @@ impl Credential {
 /// `[[repo]]` path does. Ending in `/**` it names every repository strictly
 /// under the prefix, matched by whole segment as the same rule matches the
 /// prefix: an absolute prefix must lead the root, a relative one must end
-/// one of its ancestors. Any other glob matches nothing.
+/// one of its ancestors. Any other glob matches nothing, and so does a root
+/// that steps through `..`, which could climb out from under the prefix.
 fn repos_entry_names(bound: &str, repo: &Path) -> bool {
+    if repo
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+    {
+        return false;
+    }
     let Some(prefix) = bound.strip_suffix("/**") else {
         return !bound.contains('*') && crate::config::repo_path_matches(Path::new(bound), repo);
     };
@@ -1047,12 +1062,16 @@ mod tests {
             "composer",
             "/var/lib/tracon/repos/gitlab.com/unebraska/portal"
         ));
+        // A root that climbs back out of the group is not under it.
+        assert!(!lent("composer", &format!("{clones}/../evil/x")));
+        assert!(!lent("composer", "gitlab.com/unebraska/uitao/../evil/x"));
         // An absolute prefix must lead the root; it is not found further down.
         assert!(lent("local", "/src/uitao/portal"));
         assert!(lent("local", "/src/uitao/group/portal"));
         assert!(!lent("local", "/home/me/src/uitao/portal"));
         assert!(!lent("local", "/src/uitao2/portal"));
         assert!(!lent("local", "/src/uitao"));
+        assert!(!lent("local", "/src/uitao/../evil/x"));
     }
 
     /// `**` is the last segment or nothing: anywhere else, any other
@@ -1073,6 +1092,10 @@ mod tests {
             "gitlab.com/uitao**",
             "**",
             "/**",
+            "a/../**",
+            "gitlab.com/uitao/../**",
+            "gitlab.com/./uitao/**",
+            "./gitlab.com/uitao/**",
         ] {
             let error = store(bound).unwrap_err().to_string();
             assert!(
