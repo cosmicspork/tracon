@@ -363,7 +363,7 @@
       savedChannel = channel
     })
   }
-  function bindModel(channel: string, phase: 'plan' | 'execute', model: string) {
+  function bindModel(channel: string, phase: 'plan' | 'execute' | 'review', model: string) {
     return act('binding', async () => {
       // A standalone node lists channels it has no row for; the create is
       // idempotent and gives the bindings somewhere to live.
@@ -804,7 +804,7 @@
 {/if}
 
 {#if activeSection === 'channels'}
-  <Card title="Channels" note="A channel is a shared key: a node that was never handed it cannot read its work. Each one names the models that plan and execute by default.">
+  <Card title="Channels" note="A channel is a shared key: a node that was never handed it cannot read its work. Each one names the models that plan and execute by default, and the model that reviews a submitted candidate in a fresh session.">
     <form class="inline-form" onsubmit={(event) => { event.preventDefault(); void addChannel() }}>
       <input bind:value={channelName} placeholder="New channel name" aria-label="New channel name" spellcheck="false" />
       <button class="btn" type="submit" disabled={!channelName.trim() || busy !== ''}>Create channel</button>
@@ -817,21 +817,22 @@
         <div class="empty">No node offers a model yet. Channel lifecycle still works; <a href="#connections">connect a provider</a> before choosing model defaults.</div>
       {/if}
       <div class="channel-table">
-        <div class="ch head" aria-hidden="true"><span>Channel</span><span>Plan model</span><span>Execute model</span><span></span></div>
+        <div class="ch head" aria-hidden="true"><span>Channel</span><span>Plan model</span><span>Execute model</span><span>Review model</span><span></span></div>
         {#each open_channels as c (c.name)}
           {@const plan = phaseDefaults(c.bindings, 'plan')}
           {@const execute = phaseDefaults(c.bindings, 'execute')}
+          {@const review = phaseDefaults(c.bindings, 'review')}
           {@const exh = exhaustionDraft[c.name] ?? exhaustionDefaults(c.bindings)}
           <div class="ch">
             <span class="nm">{c.name}</span>
-            {#each [['plan', plan], ['execute', execute]] as const as [ph, b] (ph)}
+            {#each [['plan', plan], ['execute', execute], ['review', review]] as const as [ph, b] (ph)}
               <label>
-                <span class="phase">{ph === 'plan' ? 'Plan' : 'Execute'}</span>
+                <span class="phase">{ph === 'plan' ? 'Plan' : ph === 'execute' ? 'Execute' : 'Review'}</span>
                 <ModelPicker
                   value={b.model ?? ''}
                   {models}
                   recent={recentModels}
-                  none="none · the session names one"
+                  none={ph === 'review' ? 'none · no review session' : 'none · the session names one'}
                   disabled={busy !== ''}
                   onchange={(v) => bindModel(c.name, ph, v)}
                 />
@@ -1378,7 +1379,7 @@
   }
   .ch {
     display: grid;
-    grid-template-columns: minmax(100px, 180px) minmax(0, 1fr) minmax(0, 1fr) minmax(110px, auto);
+    grid-template-columns: minmax(100px, 180px) repeat(3, minmax(0, 1fr)) minmax(110px, auto);
     gap: 12px 16px;
     align-items: center;
     padding: 10px 0;
@@ -1683,6 +1684,29 @@
     color: var(--crit);
   }
 
+  /* Three model pickers don't fit beside the name below this width: the
+     name and its actions take the first row, the pickers the second. */
+  @media (max-width: 1000px) {
+    .ch:not(.off) {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .ch:not(.off) .nm {
+      grid-column: 1 / 3;
+    }
+    .ch:not(.off) .end {
+      grid-row: 1;
+      grid-column: 3;
+    }
+    .ch.head {
+      display: none;
+    }
+    .ch .phase {
+      display: block;
+    }
+    .ch .exh {
+      grid-column: 1 / -1;
+    }
+  }
   @media (max-width: 700px) {
     .section-nav {
       flex-wrap: nowrap;
@@ -1699,9 +1723,15 @@
       grid-column: auto;
     }
     .ch,
+    .ch:not(.off),
     .ch.off {
       grid-template-columns: minmax(0, 1fr);
       gap: 8px;
+    }
+    .ch:not(.off) .nm,
+    .ch:not(.off) .end {
+      grid-row: auto;
+      grid-column: auto;
     }
     .ch.head {
       display: none;
