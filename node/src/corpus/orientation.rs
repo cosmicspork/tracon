@@ -485,10 +485,16 @@ fn push_review(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
             what: "the diff".into(),
             partial: true,
             chars: diff.len() - at,
-            fetch: Some("run `git diff` in the worktree for the rest".into()),
+            fetch: Some(format!(
+                "read `{}` in your workspace for the whole diff",
+                crate::mcp::review::REVIEW_DIFF
+            )),
         });
         diff.truncate(at);
-        diff.push_str("\n[diff cut here; run `git diff` in the worktree for the rest]");
+        diff.push_str(&format!(
+            "\n[diff cut here; `{}` in your workspace holds the whole diff]",
+            crate::mcp::review::REVIEW_DIFF
+        ));
     }
     out.push_str(&diff);
     out.push_str("\n```\n\n");

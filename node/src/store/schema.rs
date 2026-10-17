@@ -1539,6 +1539,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX mesh_admin_statement_expires ON mesh_admin_statement(expires_ms);
     "#,
+    // 66: why a review has no reviewer. A binding is only one of the reasons
+    // none started; the review screen says the one that applied.
+    r#"
+    ALTER TABLE review ADD COLUMN review_session_reason TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

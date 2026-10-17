@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { composerLabel, publishedChange, unavailable } from './verdicts'
+import { canStartReviewer, composerLabel, publishedChange, unavailable } from './verdicts'
 
 const ready = { busy: false, publishing: false, stale: [] as string[], reason: '' }
 
@@ -45,5 +45,24 @@ describe('verdict availability', () => {
     expect(publishedChange('pushed abc123')).toBeNull()
     expect(publishedChange(null)).toBeNull()
     expect(publishedChange('')).toBeNull()
+  })
+})
+
+describe('starting a reviewer by hand', () => {
+  test('is offered on an open review with no reviewer, or one that has finished', () => {
+    expect(canStartReviewer('new', null)).toBe(true)
+    expect(canStartReviewer('revising', 'closed')).toBe(true)
+    expect(canStartReviewer('claimed', 'failed')).toBe(true)
+  })
+
+  test('is not offered while a reviewer is reading it', () => {
+    expect(canStartReviewer('new', 'running')).toBe(false)
+    expect(canStartReviewer('new', 'starting')).toBe(false)
+  })
+
+  test('is not offered once the review is decided', () => {
+    expect(canStartReviewer('approved', null)).toBe(false)
+    expect(canStartReviewer('rejected', 'closed')).toBe(false)
+    expect(canStartReviewer('publishing', null)).toBe(false)
   })
 })

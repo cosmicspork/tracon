@@ -451,6 +451,10 @@ pub fn router(state: AppState) -> Router {
             post(api::recover_publication),
         )
         .route("/api/reviews/{id}/release", post(api::release_review))
+        .route(
+            "/api/reviews/{id}/review-session",
+            post(api::start_review_session),
+        )
         .route("/api/evidence/candidates", get(evidence::list_candidates))
         .route(
             "/api/evidence/candidates/by-commit/{head_sha}",

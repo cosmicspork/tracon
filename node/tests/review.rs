@@ -1649,26 +1649,22 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
     assert_eq!(rs.model, "m/reviewer");
     assert_eq!(rs.budget_tokens, 5000);
     assert_eq!(rs.review_id.as_deref(), Some(id.as_str()));
-    // Its content comes from a fresh, frozen workspace snapshotted from the
-    // reviewed commit, not from the implementing session's own (still
+    // Its content comes from a fresh workspace built from the review's
+    // immutable candidate, not from the implementing session's own (still
     // mutable) checkout.
     assert_eq!(rs.repo_path, format!("workspace://review-{id}"));
-    // Its worktree is at the reviewed commit, on its own branch, and the
-    // session is running before any tool call is made as it.
-    for _ in 0..600 {
-        let rs = f.store.get_session(&rsid).unwrap().unwrap();
-        if rs.worktree_path.is_some() && rs.state == "running" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    // Its workspace holds the reviewed tree and the whole diff, on its own
+    // branch, and the session is running before any tool call is made as it.
+    let wt = running_reviewer(&f, &rsid).await;
     let rs = f.store.get_session(&rsid).unwrap().unwrap();
-    let wt = rs.worktree_path.clone().expect("review worktree");
-    let head = std::process::Command::new("git")
-        .args(["-C", &wt, "rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), r.head_sha);
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&wt).join("a.txt")).unwrap(),
+        std::fs::read_to_string(std::path::Path::new(&f.worktree).join("a.txt")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&wt).join(".tracon/review.diff")).unwrap(),
+        r.diff
+    );
     assert!(rs.branch.starts_with("review/"));
 
     // A review session sees only reading tools and its verdict.
@@ -1712,6 +1708,151 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
             .contains("only a review session"),
         "{v}"
     );
+}
+
+/// Wait for a review session to be running in its workspace, and return the
+/// workspace's path.
+async fn running_reviewer(f: &Fixture, session_id: &str) -> String {
+    for _ in 0..600 {
+        let rs = f.store.get_session(session_id).unwrap().unwrap();
+        if rs.worktree_path.is_some() && rs.state == "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let rs = f.store.get_session(session_id).unwrap().unwrap();
+    rs.worktree_path
+        .clone()
+        .unwrap_or_else(|| panic!("review worktree: {rs:?}"))
+}
+
+fn bind_review_model(f: &Fixture) {
+    f.store
+        .channel_put(
+            "work",
+            b"",
+            &json!({"phases": {"review": {"model": "m/reviewer"}}}).to_string(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_review_from_a_harness_you_run_yourself_gets_a_reviewer_seeded_from_its_candidate() {
+    state::isolate();
+    // The workspace stands in for an external worktree, so it must be under
+    // a root the external door accepts.
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    bind_review_model(&f);
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let v = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &tracon::mcp::CallContext::external(None, "work", "n1"),
+        "submit_review",
+        &args,
+    )
+    .await
+    .unwrap();
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    // Its files are kept after the review is recorded; the reviewer starts
+    // from them once they are, rather than racing the read.
+    assert!(
+        ["starting", "started"].contains(&v["review_session"]["state"].as_str().unwrap()),
+        "{v}"
+    );
+    let mut reviewer = None;
+    for _ in 0..600 {
+        reviewer = f.store.get_review(&id).unwrap().unwrap().review_session_id;
+        if reviewer.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let reviewer = reviewer.expect("a reviewer for the external review");
+    let wt = running_reviewer(&f, &reviewer).await;
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&wt).join("a.txt")).unwrap(),
+        "base\nchange\n"
+    );
+    let rs = f.store.get_session(&reviewer).unwrap().unwrap();
+    assert_eq!(rs.phase, "review");
+    assert_eq!(rs.work_item_id, None);
+    assert_eq!(f.store.review_session_reason(&id).unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    assert_eq!(v["review_session"]["state"], "none", "{v}");
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let start = format!("/api/reviews/{id}/review-session");
+
+    // Without a model there is none, and the review says that is why.
+    let (status, body) = f.call("POST", &start, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert!(
+        detail["review_session_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no review model bound"),
+        "{detail}"
+    );
+
+    bind_review_model(&f);
+    let (status, body) = f.call("POST", &start, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "started", "{body}");
+    let reviewer = body["session_id"].as_str().unwrap().to_string();
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(review.review_session_id.as_deref(), Some(reviewer.as_str()));
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["review_session_reason"], Value::Null, "{detail}");
+
+    // One reviewer at a time.
+    let (status, body) = f.call("POST", &start, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.to_string().contains("already reading this review"),
+        "{body}"
+    );
+
+    // Once it is done, another can be started; once decided, none can.
+    let v = f
+        .tool(
+            &reviewer,
+            "review_verdict",
+            json!({"verdict": "approve", "summary": "fine"}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+    f.manager.stop(&reviewer).await.unwrap();
+    let (status, body) = f.call("POST", &start, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "not now" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = f.call("POST", &start, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("already decided"), "{body}");
 }
 
 #[tokio::test]
