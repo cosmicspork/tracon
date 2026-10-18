@@ -734,6 +734,31 @@ sessions, and work items link to the corresponding owner and channel; a peer's
 candidates are read from that owner. A missing local candidate is not evidence
 that a peer has none.
 
+### Review sessions
+
+A review can also get a second opinion from a **review session**: a fresh session
+that never saw the implementation. It starts from the submitted change with none of
+the implementing session's conversation, reads the item's brief and criteria and the
+diff, and judges the one against the other.
+
+It is off until a channel names its model. Pick one under **Settings → Channels →
+Review model**, beside Plan and Execute, or bind it from the command line:
+
+```sh
+tracon channel bind work phases.review.model=anthropic/claude-opus-5
+tracon channel bind work phases.review.budget_tokens=400000   # optional; else [session] budget_tokens
+```
+
+From then on each review a session on that channel submits, and each resubmission,
+starts one. The review page names the model under *Reviewed by*, and the submitting
+agent is told whether a reviewer started and, if not, why.
+
+A review session never decides. It ends by giving one `review_verdict`, approve or
+request changes with a summary and findings, which is shown on the review card;
+only your decision publishes or sends the work back. Its tools are read-only:
+`recall`, `doc_read`, `doc_search`, `brief_read`, `criteria_read`, and
+`review_verdict`.
+
 ### Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.
