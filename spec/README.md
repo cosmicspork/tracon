@@ -92,7 +92,7 @@ Channel names match `^[a-z0-9@._-]{1,64}$`. `@mesh` is the channel every node is
 a member of. A frame may be at most 4 MiB serialized.
 
 Payload kinds (JSON, discriminated on `kind`): `hello`, `snapshot`, `session`,
-`event`, `queue`, `reviews`, `node`, `command`, `ack`, `events_request`,
+`event`, `queue`, `reviews`, `questions`, `node`, `command`, `ack`, `events_request`,
 `events_batch`, `key_handoff` (direct only), `policy_bundle` (direct only),
 `credential_handoff` (direct only; broker rows for the recipient), `changes`,
 `changes_request` (direct only), `changes_batch` (direct only).
@@ -138,6 +138,14 @@ control, format or separator character. It is staged for the receiver's operator
 applied on receipt, and acks `{ offer_id, state, expires_ms, superseded }`. The op is
 additive and the contract version is unmoved: a node that predates it answers that it
 runs an older build.
+A `questions` payload `{ waiting }` lists the sender's open operator questions on a
+session in the channel, possibly none: a peer closes the ones it mirrored that the list
+no longer names, and a `snapshot` carries the same list as an optional `questions`
+field. An `answer_question` command `{ question_id, choice?, text? }` answers one on the
+node that asked it, which runs it only for a co-member of the question's channel and
+releases the session waiting on it. All three are additive and the contract version is
+unmoved: an older node cannot read a `questions` payload and drops it, ignores the
+snapshot field, and answers the command that it runs an older build.
 A peer administers another node only through `[mesh] admin_peers` on the owner and
 an admin statement (below). `provider_connect`, `provider_code` and
 `provider_disconnect` gain an optional `statement`; an owner on this build refuses one

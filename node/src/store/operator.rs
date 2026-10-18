@@ -241,6 +241,72 @@ impl Store {
         tx.commit()?;
         Ok(Some((session_id, created_ms)))
     }
+    /// Upsert a question a peer mirrored to us. An id already held for
+    /// another node or channel is never rewritten: that is `false`.
+    pub fn upsert_operator_question_mirror(&self, row: &OperatorQuestionRow) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO operator_question (id, session_id, channel, node_id, request_key, prompt, choices_json, state, answer_json, created_ms, answered_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(id) DO UPDATE SET prompt=?6, choices_json=?7, state=?8, answer_json=?9, answered_ms=?11
+             WHERE operator_question.node_id=?4 AND operator_question.channel=?3",
+            params![
+                row.id,
+                row.session_id,
+                row.channel,
+                row.node_id,
+                row.request_key,
+                row.prompt,
+                row.choices_json,
+                row.state,
+                row.answer_json,
+                row.created_ms,
+                row.answered_ms
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Open mirrored questions of `node_id` on `channel` not in `keep` are
+    /// closed: the owner no longer lists them, so they were answered or
+    /// withdrawn there. The owner's row says which.
+    pub fn close_absent_operator_questions(
+        &self,
+        node_id: &str,
+        channel: &str,
+        keep: &[String],
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM operator_question
+             WHERE node_id=?1 AND channel=?2 AND state='unanswered' AND session_id IS NOT NULL",
+        )?;
+        let open: Vec<String> = stmt
+            .query_map([node_id, channel], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut n = 0;
+        for id in open.into_iter().filter(|id| !keep.contains(id)) {
+            n += conn.execute(
+                "UPDATE operator_question SET state='cancelled', answered_ms=?2
+                 WHERE id=?1 AND state='unanswered'",
+                params![id, now_ms()],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// Record on a mirrored question the answer its owner accepted from
+    /// here, ahead of the owner's next list saying so. No event is written:
+    /// the owner records the intervention, and its event mirrors back.
+    pub fn answer_mirrored_operator_question(&self, id: &str, answer_json: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE operator_question SET state='answered', answer_json=?2, answered_ms=?3
+             WHERE id=?1 AND state='unanswered'",
+            params![id, answer_json, now_ms()],
+        )? == 1)
+    }
+
     pub fn cancel_operator_question(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute("UPDATE operator_question SET state='cancelled', answered_ms=?2 WHERE id=?1 AND state='unanswered'", params![id, now_ms()])? == 1)

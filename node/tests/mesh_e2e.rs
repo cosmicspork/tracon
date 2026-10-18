@@ -36,6 +36,8 @@ struct Node {
     adapter: Arc<FakeAdapter>,
     broker: tracon::broker::SharedBroker,
     cfg: Arc<Config>,
+    bus: Bus,
+    tools: Arc<tracon::mcp::Tools>,
 }
 
 /// A node that lets A (seed 1) administer it, as the tests' operator does.
@@ -106,6 +108,10 @@ async fn node_admins(
         state::scratch(&format!("e2e-cred-{name}")).join("credentials.sealed"),
     );
     manager.set_mesh(client.clone());
+    let _ = tools.session.set(tracon::mcp::SessionAccess {
+        store: store.clone(),
+        manager: manager.clone(),
+    });
     let adapter = Arc::new(FakeAdapter {
         tx: Arc::new(Mutex::new(None)),
         tokens: Arc::new(Mutex::new(0)),
@@ -143,6 +149,7 @@ async fn node_admins(
     providers.set_on_publish(Box::new(carry));
     state.manager.set_providers(providers);
     let cfg = state.cfg.clone();
+    let tools = state.tools.clone();
     Node {
         id,
         app: tracon::http::router(state),
@@ -151,6 +158,8 @@ async fn node_admins(
         adapter,
         broker,
         cfg,
+        bus,
+        tools,
     }
 }
 
@@ -603,6 +612,97 @@ async fn prompt_answer_and_kill_forward_to_the_owner() {
     assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
     let _ = a.adapter.tokens.lock().await;
     let _: Option<HarnessEvent> = None;
+}
+
+/// A question an agent on B asks shows on A, as one of A's own would: in the
+/// queue and on the session. A answers it, B records the answer, and the
+/// agent waiting on B is released with it.
+#[tokio::test]
+async fn a_question_asked_on_b_is_answered_from_a() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+
+    let session = support::rows::session_row("asked-on-b", &bi, "personal");
+    b.store.insert_session(&session).unwrap();
+    b.bus
+        .publish(tracon::stream::Frame::Session(Box::new(session)));
+    wait_for("A to mirror the session", || {
+        a.store.get_session("asked-on-b").ok().flatten().is_some()
+    })
+    .await;
+
+    let (tools, ctx) = (
+        b.tools.clone(),
+        tracon::mcp::CallContext::session("asked-on-b", "personal", bi.clone()),
+    );
+    let asking = tokio::spawn(async move {
+        tools
+            .call(
+                &ctx,
+                "ask_operator",
+                &json!({ "request_id": "remote", "question": "which remote?",
+                          "choices": ["origin", "fork"] }),
+            )
+            .await
+    });
+
+    wait_for("B to hold the question", || {
+        b.store
+            .open_operator_questions()
+            .is_ok_and(|open| open.len() == 1)
+    })
+    .await;
+    assert!(!asking.is_finished(), "the agent on B waits for an answer");
+    wait_for("A to show B's question", || {
+        a.store
+            .open_operator_questions()
+            .is_ok_and(|open| open.len() == 1)
+    })
+    .await;
+    let (st, open) = call(&a.app, "GET", "/api/operator/questions", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let question = open["questions"][0].clone();
+    assert_eq!(question["node_id"], bi);
+    assert_eq!(question["prompt"], "which remote?");
+    let (_, shown) = call(&a.app, "GET", "/api/sessions/asked-on-b", None).await;
+    assert_eq!(shown["questions"][0]["id"], question["id"], "{shown}");
+
+    let qid = question["id"].as_str().unwrap();
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/operator/questions/{qid}/cancel"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::CONFLICT,
+        "only B withdraws B's question: {v}"
+    );
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/operator/questions/{qid}/answer"),
+        Some(json!({ "choice": "fork" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    let answered = tokio::time::timeout(Duration::from_secs(10), asking)
+        .await
+        .expect("the answer releases the agent on B")
+        .unwrap()
+        .unwrap();
+    assert_eq!(answered["state"], "answered", "{answered}");
+    assert_eq!(answered["answer"]["choice"], "fork");
+    assert_eq!(
+        b.store.operator_question(qid).unwrap().unwrap().state,
+        "answered"
+    );
+    assert!(b.store.open_operator_questions().unwrap().is_empty());
+    assert!(a.store.open_operator_questions().unwrap().is_empty());
 }
 
 /// One sign-in for the pair, and a refresh either node may make but only one

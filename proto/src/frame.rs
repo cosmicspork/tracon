@@ -114,6 +114,10 @@ pub enum Payload {
         sessions: Vec<Value>,
         waiting: Vec<Value>,
         reviews: Vec<Value>,
+        /// The sender's open operator questions on the channel. Additive: an
+        /// older sender names none, and an older receiver ignores the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        questions: Vec<Value>,
     },
     Session(Value),
     Event {
@@ -129,6 +133,12 @@ pub enum Payload {
         waiting: Vec<Value>,
     },
     Reviews {
+        waiting: Vec<Value>,
+    },
+    /// The sender's open operator questions on one channel, possibly none: an
+    /// empty list is how a peer learns one it mirrored was answered. An older
+    /// receiver cannot read this kind and drops it.
+    Questions {
         waiting: Vec<Value>,
     },
     /// A bounded, aggregate view for an opt-in hub replica. It deliberately
@@ -301,6 +311,17 @@ pub enum Command {
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notes: Option<String>,
+    },
+    /// Answer an operator question the receiver holds: a choice it offered,
+    /// the operator's own words, or both. The owner answers it as a local
+    /// request would and releases the session waiting on it. An older peer
+    /// cannot read this op and answers that it runs an older build.
+    AnswerQuestion {
+        question_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     Kill {
         session_id: String,
