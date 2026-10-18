@@ -442,6 +442,7 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
         ("PUT", ["api", "channels", name, "bindings"]) => format!("Change {name}'s bindings"),
         ("POST", ["api", "credentials", "import"]) => "Import credentials".to_string(),
         ("POST", ["api", "credentials", name, "share"]) => format!("Share the {name} credential"),
+        ("DELETE", ["api", "credentials", name]) => format!("Remove the {name} credential"),
         ("PUT", ["api", "credentials", "forge", forge]) => format!("Set the {forge} token"),
         ("DELETE", ["api", "credentials", "forge", forge]) => format!("Remove the {forge} token"),
         ("POST", ["api", "providers", name, "connect"])

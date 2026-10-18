@@ -18,6 +18,8 @@ pub struct NewWork {
     pub priority: i64,
     pub discovered_from: Option<String>,
     pub discovered_by_session: Option<String>,
+    /// The lane of the harness outside the boundary that recorded it.
+    pub discovered_by_lane: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +61,7 @@ pub fn create(store: &Store, bus: &Bus, site: &str, w: NewWork) -> Result<WorkIt
         deps,
         discovered_from: w.discovered_from,
         discovered_by_session: w.discovered_by_session,
+        discovered_by_lane: w.discovered_by_lane,
         phase_plan_slug: None,
         brief_slug: None,
         closed_by_session: None,

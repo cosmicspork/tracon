@@ -123,6 +123,10 @@ pub struct Facts<'a> {
     /// What the repository's `prepare` did to the workspace before the
     /// session started. `None` when its entry prepares nothing.
     pub prepared: Option<&'a crate::environment::WorkspacePreparation>,
+    /// Why the workspace's base may be behind its forge: the managed clone
+    /// could not be fetched, so the session starts from the default branch
+    /// it fetched last (`stale: last fetched at …`). `None` for a fresh base.
+    pub stale_base: Option<&'a str>,
 }
 
 /// Context this orientation could not carry in full. Named, with the call
@@ -246,6 +250,13 @@ fn push_node(out: &mut String, facts: &Facts) {
         "- Your worktree is `{}`; the main checkout is not yours.\n",
         facts.worktree
     ));
+    if let Some(note) = facts.stale_base {
+        out.push_str(&format!(
+            "- Your base may be stale ({note}). The workspace starts from the default \
+             branch as the node last fetched it, which can be behind what the forge holds \
+             now; a diff against it can carry changes that are already upstream.\n"
+        ));
+    }
     // The one refusal an agent meets as a bare status code from a package
     // manager. Said up front, in the words the refusal itself uses, so it is
     // read as the boundary and not as a fault to route around.
@@ -880,6 +891,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         assert!(missing.is_empty(), "{missing:?}");
@@ -959,6 +971,7 @@ mod tests {
                 egress: None,
                 forge_repo: repo,
                 prepared: None,
+                stale_base: None,
             };
             let (text, _) = assemble(&store, &Policy::default(), &facts);
             let node = &text[text.find("## This node").unwrap()..];
@@ -1033,6 +1046,7 @@ mod tests {
             deps: vec![],
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
             phase_plan_slug: None,
             brief_slug: None,
             closed_by_session: None,
@@ -1101,6 +1115,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -1162,6 +1177,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&"x".repeat(KNOWN_CHARS)), "{text}");
@@ -1206,6 +1222,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&ready_title), "ready work bypassed the cap");
@@ -1256,6 +1273,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("old guidance"), "{text}");
@@ -1304,6 +1322,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(
@@ -1357,6 +1376,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, _) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("should not appear"), "{text}");
@@ -1402,6 +1422,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         // All three pinned documents survive in full: none was capped,
@@ -1457,6 +1478,7 @@ mod tests {
                 egress: None,
                 forge_repo: None,
                 prepared: None,
+                stale_base: None,
             }
         }
         let (bare, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
@@ -1534,6 +1556,7 @@ mod tests {
                 egress: None,
                 forge_repo: None,
                 prepared: None,
+                stale_base: None,
             }
         }
 
@@ -1603,6 +1626,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
 
@@ -1664,6 +1688,7 @@ mod tests {
                 egress: None,
                 forge_repo: None,
                 prepared: None,
+                stale_base: None,
             };
             assemble(&store, &Policy::shipped(), &facts)
         };
@@ -1752,6 +1777,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -1804,6 +1830,7 @@ mod tests {
             egress: None,
             forge_repo: None,
             prepared: None,
+            stale_base: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
         assert!(text.contains("## Working agreements"), "{text}");

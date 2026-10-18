@@ -26,6 +26,11 @@ pub struct WorkItem {
     pub deps: Vec<String>,
     pub discovered_from: Option<String>,
     pub discovered_by_session: Option<String>,
+    /// The lane of the harness outside the boundary that recorded the item,
+    /// when one did; `external` when it gave no label. Null for an item the
+    /// operator or a node-started session made.
+    #[serde(default)]
+    pub discovered_by_lane: Option<String>,
     pub phase_plan_slug: Option<String>,
     /// The slug of this item's product brief, when the operator started one.
     pub brief_slug: Option<String>,
@@ -213,6 +218,7 @@ mod tests {
             deps: deps.iter().map(|d| d.to_string()).collect(),
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
             phase_plan_slug: None,
             brief_slug: None,
             closed_by_session: None,

@@ -159,6 +159,15 @@ test('the worktree line names the source and says only what the node recorded', 
     'host worktree · /w/orbit · on feat/x · from origin/main · main checkout is dirty and was left alone',
   )
   expect(worktreeLine({})).toBe('workspace')
+  // A managed clone that could not be fetched says its base is stale.
+  expect(
+    worktreeLine({
+      branch: 'feat/x',
+      source: 'imported',
+      synced: { source_ref: 'origin/main', stale: 'stale: last fetched at 2026-10-07 12:00 UTC; the fetch failed: x' },
+    }),
+  ).toBe('workspace imported · on feat/x · stale: last fetched at 2026-10-07 12:00 UTC; the fetch failed: x')
+  expect(worktreeLine({ source: 'imported', synced: { stale: null } })).toBe('workspace imported')
 })
 
 test('the start line says which image the harness is in only when it matters', () => {
