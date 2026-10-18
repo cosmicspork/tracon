@@ -905,6 +905,17 @@ pub fn selected_path(root: &Path, relative: &str) -> Result<PathBuf, WorkspaceEr
     Ok(root.join(path))
 }
 
+/// Give a tree rebuilt from a candidate's files an empty repository of its
+/// own, which a session's workspace needs. A candidate carries no history,
+/// and nothing is committed here, so the repository claims no commit. It is
+/// on the session's own branch, as `seed_from_files` names one, not on
+/// whatever Git's default is here.
+pub async fn init_empty_git(git: &str, root: &Path, branch: &str) -> Result<(), WorkspaceError> {
+    run_git(git, Some(root), "init", ["init", "-q", "-b", branch])
+        .await
+        .map(drop)
+}
+
 /// The commit a freshly seeded stage sits on, for the record of what the
 /// session started from.
 pub async fn head_of(git: &str, stage: &Path) -> Result<String, WorkspaceError> {

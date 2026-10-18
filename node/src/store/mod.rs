@@ -2977,10 +2977,36 @@ impl Store {
     pub fn set_review_session(&self, id: &str, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE review SET review_session_id=?2, updated_ms=?3 WHERE id=?1",
+            "UPDATE review SET review_session_id=?2, review_session_reason=NULL, updated_ms=?3
+             WHERE id=?1",
             rusqlite::params![id, session_id, now_ms()],
         )?;
         Ok(())
+    }
+
+    /// Record why no review session started for a review. A reviewer that
+    /// started before keeps its id, so its verdict still reads as its own.
+    pub fn set_review_session_reason(&self, id: &str, reason: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET review_session_reason=?2, updated_ms=?3 WHERE id=?1",
+            rusqlite::params![id, reason, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Why the last attempt to start a review session for a review started
+    /// none, if it did not.
+    pub fn review_session_reason(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT review_session_reason FROM review WHERE id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(Into::into)
     }
 
     /// Record a review session's verdict. Never a decision: the human's

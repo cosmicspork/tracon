@@ -510,6 +510,9 @@ pub struct Manager {
     /// Required checks `submit_review` started, owned by the node rather
     /// than by the call that asked for them.
     checking: Arc<crate::mcp::checking::Checking>,
+    /// The reviews a review session is being started for, so that only one
+    /// start at a time reads into a review's workspace.
+    review_starts: Arc<crate::mcp::review::ReviewStarts>,
     /// What each session has been told of the decisions it waited on.
     told: Arc<waits::Told>,
     /// A restart asked for and waiting: while it waits, new sessions and
@@ -560,6 +563,7 @@ impl Manager {
             previews: Arc::new(crate::http::preview::PreviewTokens::default()),
             egress: Arc::default(),
             checking: Arc::default(),
+            review_starts: Arc::default(),
             told: Arc::default(),
             restart: Arc::default(),
         }
@@ -598,6 +602,11 @@ impl Manager {
     /// ones came to.
     pub fn checking(&self) -> &Arc<crate::mcp::checking::Checking> {
         &self.checking
+    }
+
+    /// The review sessions being started here.
+    pub fn review_starts(&self) -> &Arc<crate::mcp::review::ReviewStarts> {
+        &self.review_starts
     }
 
     pub fn backend(&self) -> &Arc<dyn crate::boundary::Backend> {

@@ -2509,8 +2509,19 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         }
         _ => None,
     };
+    // Why no reviewer is reading it, as the node last found when it tried.
+    // Node-local: the owner is what starts one.
+    let review_session_reason = match remote_owner {
+        Some(_) => None,
+        None => s.store().review_session_reason(&id)?,
+    };
+    // A reviewer being started here, which the review row does not show
+    // until it has started.
+    let review_session_starting = remote_owner.is_none() && s.manager.review_starts().pending(&id);
     Ok(json!({
         "review": r,
+        "review_session_reason": review_session_reason,
+        "review_session_starting": review_session_starting,
         "remote_owner": remote_owner,
         "revision": revision_ref,
         "intent": intent,
@@ -2886,6 +2897,87 @@ pub async fn release_review(
     s.store().release_review(&id)?;
     s.manager.publish_queue().await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/reviews/{id}/review-session`: start a fresh review session on
+/// a review by hand, on one that never had one or again after changes were
+/// requested. Refused while one is starting or still running, and on a review already
+/// approved or rejected, which takes no reviewer's verdict. It starts a
+/// session on the operator's models and budget, so it is an admin action.
+pub async fn start_review_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.kind == crate::store::reports::KIND {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "a report has no diff for a reviewer to read".into(),
+        ));
+    }
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review's candidate is held by the node that owns it; start a reviewer there"
+                .into(),
+        ));
+    }
+    // Held from before the review is read again until the new reviewer is
+    // recorded. The checks below run on that second read, so they see any
+    // session another start recorded before it let go of its claim, and two
+    // starts cannot both find none running.
+    let Some(start) = s.manager.review_starts().claim(&id) else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            crate::mcp::review::ALREADY_STARTING.into(),
+        ));
+    };
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if !matches!(r.state.as_str(), "new" | "claimed" | "revising") {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "this review was already decided ({}); a reviewer's verdict now would be about a \
+                 decision that has already been made",
+                r.state
+            ),
+        ));
+    }
+    if let Some(running) = r
+        .review_session_id
+        .as_deref()
+        .and_then(|session| s.store().get_session(session).ok().flatten())
+        .filter(|session| {
+            !crate::session::state::SessionState::TERMINAL.contains(&session.state.as_str())
+        })
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "a review session is already reading this review ({}); wait for its verdict",
+                running.id
+            ),
+        ));
+    }
+    let started =
+        crate::mcp::review::spawn_claimed_review_session(s.store(), &s.manager, start, None).await;
+    if started["state"] != "started" {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            started["reason"]
+                .as_str()
+                .unwrap_or("no review session started")
+                .to_string(),
+        ));
+    }
+    Ok(Json(started))
 }
 
 /// Record a verdict; what the operator had written toward it stops being a
