@@ -843,6 +843,7 @@ async fn every_moved_admin_route_needs_a_passkey_off_loopback() {
             "/api/credentials/import".into(),
             Some(json!({ "toml": "[credentials.x]\nkind='env'\n" })),
         ),
+        ("DELETE", "/api/credentials/jira".into(), None),
         (
             "POST",
             "/api/providers/anthropic/connect".into(),

@@ -948,6 +948,22 @@ impl Providers {
         Ok(())
     }
 
+    /// The credential a provider uses was removed outside [`Self::disconnect`],
+    /// as `tracon credential rm` does: what the disconnect would have cleared
+    /// goes too. A sign-in still in flight is stopped, or it would store the
+    /// credential again when it finished; the note is forgotten; and the new
+    /// state is published, so the interface and the mesh stop showing a
+    /// connection that is gone.
+    pub fn credential_removed(&self, name: &str) {
+        let pending = self.inflight.lock().remove(name);
+        if let Some(slot) = pending {
+            stop_capture(&slot);
+            slot.cancel.cancel();
+        }
+        self.notes.lock().remove(name);
+        self.publish();
+    }
+
     /// Change the channels a connected provider's credential serves, keeping
     /// its tokens. A shared credential also goes to the members of any added
     /// channel; a node that already holds it keeps its copy for a channel

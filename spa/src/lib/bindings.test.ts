@@ -38,6 +38,7 @@ test('choosing nothing removes the binding', () => {
   expect(modelPatch('plan', 'm/a')).toEqual({ 'phases.plan.model': 'm/a' })
   expect(modelPatch('execute', '')).toEqual({ 'phases.execute.model': null })
   expect(modelPatch('execute', '   ')).toEqual({ 'phases.execute.model': null })
+  expect(modelPatch('review', '')).toEqual({ 'phases.review.model': null })
 })
 
 test('a channel pauses on exhaustion unless it says otherwise', () => {

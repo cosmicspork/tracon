@@ -571,7 +571,8 @@ name it from the entry:
 ```toml
 # a plaintext file for `tracon credential import`, chmod 600
 [credentials.nova]
-repos = ["github.com/acme/shop"]    # written as a [[repo]] path is; empty lends it nowhere
+repos = ["github.com/acme/shop"]    # written as a [[repo]] path is, or a group as "gitlab.com/acme/**";
+                                    # empty lends it nowhere
 [credentials.nova.env]
 COMPOSER_AUTH = '{"http-basic":{"nova.laravel.com":{"username":"…","password":"…"}}}'
 
@@ -586,7 +587,16 @@ prepare_credentials = ["nova"]
 
 `tracon repo set github.com/acme/shop --prepare-credential nova` sets the same list
 (repeat the flag for several; `--prepare-credential ""` clears it). Both sides must agree: an entry naming a credential that does not name the repository
-is refused at the warm-up, and the warm-up does not run. Read the secret from the
+is refused at the warm-up, and the warm-up does not run. A credential's `repos` can name a
+forge group instead of each repository: `repos = ["gitlab.com/acme/**"]` names every
+repository under `gitlab.com/acme`, by whole segment (`gitlab.com/acme2/x` is not one), and
+each of them still has to name the credential in `prepare_credentials`. `**` is allowed
+only as the last segment, and nothing else is a wildcard; an import that globs anywhere
+else is refused. Settings lists the configured repositories each credential covers. A
+prefix widens what can read the value: every repository under it, on whichever entry opts
+in, has its default-branch install, and that install's Composer plugins and npm lifecycle
+scripts, run with the credential, so a repository added to the group later gets the same
+reach without anyone editing the credential. Read the secret from the
 environment (`COMPOSER_AUTH`, or an `.npmrc` line like
 `//npm.pkg.github.com/:_authToken=${NPM_TOKEN}`) and never write it to a file: the cache
 the warm-up fills is copied into every session on the repository. What preparation
@@ -733,6 +743,31 @@ yourself shows work on a review it submitted, from that review's worktree.
 sessions, and work items link to the corresponding owner and channel; a peer's
 candidates are read from that owner. A missing local candidate is not evidence
 that a peer has none.
+
+### Review sessions
+
+A review can also get a second opinion from a **review session**: a fresh session
+that never saw the implementation. It starts from the submitted change with none of
+the implementing session's conversation, reads the item's brief and criteria and the
+diff, and judges the one against the other.
+
+It is off until a channel names its model. Pick one under **Settings → Channels →
+Review model**, beside Plan and Execute, or bind it from the command line:
+
+```sh
+tracon channel bind work phases.review.model=anthropic/claude-opus-5
+tracon channel bind work phases.review.budget_tokens=400000   # optional; else [session] budget_tokens
+```
+
+From then on each review a session on that channel submits, and each resubmission,
+starts one. The review page names the model under *Reviewed by*, and the submitting
+agent is told whether a reviewer started and, if not, why.
+
+A review session never decides. It ends by giving one `review_verdict`, approve or
+request changes with a summary and findings, which is shown on the review card;
+only your decision publishes or sends the work back. Its tools are read-only:
+`recall`, `doc_read`, `doc_search`, `brief_read`, `criteria_read`, and
+`review_verdict`.
 
 ### Asking, pinging, and complaining
 
@@ -1185,7 +1220,7 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # prepare_credentials = ["nova"]    # broker credentials (kind `env`) whose environment is lent to the
                                     # default branch's preparation when the image is built, and to
                                     # nothing else. Needs `dockerfile`; each credential must also list
-                                    # this repository in its own `repos`
+                                    # this repository, or a `group/**` above it, in its own `repos`
 
 # [[service]]                       # something a session may start beside itself by name
                                     # (`service_start`), never by image or command. It joins the

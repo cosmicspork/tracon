@@ -361,6 +361,34 @@ async fn reopening_makes_a_new_session_with_the_workspace_and_the_lineage() {
     assert_eq!(old.state, "closed");
 }
 
+/// A session that was seeded from a checkout keeps its work in a volume under
+/// its own id. Reopening it resumes that volume, as continuing one does,
+/// rather than seeding the old branch name afresh from wherever the source
+/// now is and leaving the old work behind.
+#[tokio::test]
+async fn reopening_a_session_seeded_from_a_checkout_resumes_its_own_workspace() {
+    state::isolate();
+    let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
+        Arc::new(tracon::adapter::opencode::OpenCodeAdapter::new(
+            tracon::adapter::opencode::OpenCodeAdapter::PINNED_VERSION,
+        ));
+    let h = Harness::new(adapter).await;
+    let mut row = session_row("legacy-2", "omp", "closed");
+    row.repo_path = "/state/repos/github.com/o/r".into();
+    h.store.insert_session(&row).unwrap();
+    h.post("/api/sessions/archive-legacy", None).await;
+
+    let (status, row) = h
+        .post(
+            "/api/sessions/legacy-2/reopen",
+            Some(json!({ "harness": "opencode" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert_eq!(row["repo_path"], "workspace://legacy-2");
+    assert_eq!(row["branch"], "feat/half-finished");
+}
+
 /// Either supported harness may be named: the node holds an image for each and
 /// a session runs the one it names, whatever the node's default is. Only a
 /// harness that does not exist is refused.

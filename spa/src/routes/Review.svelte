@@ -34,6 +34,7 @@
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
+  import { defaultMessage, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
@@ -85,6 +86,9 @@
   let branchName = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
+  /** The change the operator opened by hand, while "Published at…" is open;
+   * `null` while it is closed. */
+  let reconcileChange = $state<string | null>(null)
   let loaded = $state(false)
   /** The node said there is no such review, as opposed to failing to say. */
   let missing = $state(false)
@@ -108,7 +112,7 @@
   function proposedCommitMessage(intent: ReviewIntent, title: string, body: string): string {
     if (intent.forge.commit !== undefined) return intent.forge.commit
     const from = intent.forge.description ?? { title, body }
-    return from.body.trim() ? `${from.title.trim()}\n\n${from.body.trim()}` : from.title.trim()
+    return defaultMessage(from.title, from.body)
   }
 
   /** One of the agent's commits' messages, as it wrote it. */
@@ -411,6 +415,12 @@
     branch: change === null && branchName.trim() && branchName.trim() !== target?.branch ? branchName.trim() : undefined,
     messages: !squashing && Object.keys(reworded).length ? reworded : undefined,
   })
+  /**
+   * Whether the agent's own commit ships, and which signatures a new one
+   * drops, judged by the message the node will squash with: an edited title,
+   * body or description changes it as surely as an edited message does.
+   */
+  const ships = $derived(shipping(intent, shippedMessage(outputs, title, body), reworded))
   const files = $derived.by(() => {
     try {
       return JSON.parse(review?.files ?? '[]') as { path: string; blob: string }[]
@@ -560,6 +570,33 @@
     try {
       decided = true
       const res = await api.recoverPublication(id, latest.id)
+      await store.refetch()
+      leaveAfterVerdict(router, {
+        reviewId: id,
+        from: openedFrom,
+        fallback: res.published && review.session_id ? `/sessions/${review.session_id}` : '/',
+      })
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+      await reread()
+    } finally {
+      busy = false
+    }
+  }
+
+  /** Settle the latest publication as published at the change the operator
+   * opened by hand. The node checks it against the forge, and refuses a
+   * change that is not exactly this publication's. */
+  async function reconcile() {
+    const latest = publication?.latest
+    const change = reconcileChange?.trim()
+    if (!review || !latest || !change) return
+    busy = true
+    error = null
+    try {
+      decided = true
+      const res = await api.reconcilePublication(id, latest.id, change)
+      reconcileChange = null
       await store.refetch()
       leaveAfterVerdict(router, {
         reviewId: id,
@@ -912,12 +949,35 @@
       {:else if settled.refusal}
         <span class="note">{settled.refusal}</span>
       {/if}
+      {#if !remoteOwner}
+        {@render publishedAt()}
+      {/if}
     </div>
   {:else if publishing}
     <div class="banner crit">
       publication outcome requires reconciliation <b>· this review may have reached the forge; do not approve, revise, or reject it again</b>
     </div>
+    {#if publication?.latest && !remoteOwner}
+      <div class="recover">{@render publishedAt()}</div>
+    {/if}
   {/if}
+
+  {#snippet publishedAt()}
+    {#if reconcileChange === null}
+      <button class="btn" disabled={busy} onclick={() => (reconcileChange = '')}>Published at…</button>
+    {:else}
+      <input
+        class="edit change"
+        placeholder="the pull or merge request you opened: its address or number"
+        aria-label="The change you opened by hand"
+        bind:value={reconcileChange}
+        disabled={busy}
+      />
+      <button class="btn p" disabled={busy || !reconcileChange.trim()} onclick={reconcile}>Record it</button>
+      <button class="btn" disabled={busy} onclick={() => (reconcileChange = null)}>Cancel</button>
+      <span class="note dim">The node checks it on the forge: the pushed commit, this branch into the base, open or merged.</span>
+    {/if}
+  {/snippet}
 
   {#if authorship && authorship.misattributed.length > 0}
     <div class="banner">
@@ -988,6 +1048,20 @@
             : 'pushed as the agent wrote them'}</b
       >
     </div>
+    {#if review && intent.commits?.length}
+      {#if ships.own}
+        <div class="note dim">
+          Ships the agent's own commit <code>{review.head_sha.slice(0, 8)}</code
+          >{(intent.signed ?? []).includes(review.head_sha) ? ', signature kept' : ''}.
+        </div>
+      {:else}
+        <div class="note">
+          Ships a new commit, not the agent's <code>{review.head_sha.slice(0, 8)}</code>{ships.dropped.length
+            ? `. ${ships.dropped.length > 1 ? 'The signatures on' : 'The signature on'} ${ships.dropped.map((sha) => sha.slice(0, 8)).join(', ')} ${ships.dropped.length > 1 ? 'are' : 'is'} dropped: a commit the node makes is never signed`
+            : ''}.{squashing && intent.as_written !== undefined ? " The agent's own message would ship its commit as written." : ''}
+        </div>
+      {/if}
+    {/if}
     {#if intent.commits?.length}
       <ul class="commits">
         {#each intent.commits as c (c.sha)}
@@ -1195,6 +1269,10 @@
     gap: 12px;
     flex-wrap: wrap;
     margin: 6px 0 12px;
+  }
+  .recover .change {
+    flex: 1 1 260px;
+    min-width: 0;
   }
   .head {
     display: grid;
