@@ -87,6 +87,9 @@ pub struct Facts<'a> {
     pub project_id: Option<&'a str>,
     pub project_name: Option<&'a str>,
     pub tools: &'a [String],
+    /// The names in the node's service catalogue: what `service_start` can
+    /// actually start, so nothing promises a service the node lacks.
+    pub services: &'a [String],
     pub worktree: &'a str,
     /// `plan`, `execute`, or `review`.
     pub phase: &'a str,
@@ -456,13 +459,14 @@ fn push_criteria(out: &mut String, store: &Store, item: &WorkItem) {
 
 /// What a reviewer can do besides reading the diff: run the change, where the
 /// node offers a browser, and say per criterion what that showed. Said only of
-/// the tools this session actually has.
-fn exercising(tools: &[String]) -> String {
+/// the tools this session actually has and the services its catalogue holds.
+fn exercising(tools: &[String], services: &[String]) -> String {
     let has = |name: &str| tools.iter().any(|t| t == name);
     if !has(crate::mcp::review::FINDING) {
         return String::new();
     }
-    let run = if has(crate::mcp::services::START) {
+    let browser = services.iter().any(|s| s == crate::mcp::services::BROWSER);
+    let run = if browser && has(crate::mcp::services::START) {
         "run it (`service_start` with `browser` gives you a headless browser beside you), "
     } else {
         "run it in your worktree, "
@@ -487,7 +491,7 @@ fn push_review(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
          plan, run the tests in your worktree if it helps, and end by calling \
          `review_verdict` (approve, or request_changes with findings). A human decides \
          after you; your verdict informs them.\n\n{}### Proposed change\n\n**{}**\n\n",
-        exercising(facts.tools),
+        exercising(facts.tools, facts.services),
         r.title
     ));
     push_capped(
@@ -887,6 +891,7 @@ mod tests {
             project_id: Some("p1"),
             project_name: Some("tracon"),
             tools: &["recall".into(), "retain".into()],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -966,6 +971,7 @@ mod tests {
                 project_id: Some("6c90cf32aaaa"),
                 project_name: Some("tracon"),
                 tools,
+                services: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: None,
@@ -1108,6 +1114,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1169,6 +1176,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1213,6 +1221,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: Some(&current),
@@ -1263,6 +1272,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1311,6 +1321,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1364,6 +1375,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1409,6 +1421,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: Some(&current),
@@ -1464,6 +1477,7 @@ mod tests {
                 project_id: None,
                 project_name: None,
                 tools: &[],
+                services: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: Some(item),
@@ -1541,6 +1555,7 @@ mod tests {
                 project_id: None,
                 project_name: None,
                 tools: &[],
+                services: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: Some(item),
@@ -1610,6 +1625,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: Some(&item),
@@ -1671,6 +1687,7 @@ mod tests {
                 project_id: None,
                 project_name: None,
                 tools: &[],
+                services: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: Some(&item),
@@ -1759,6 +1776,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: Some(&it),
@@ -1811,6 +1829,7 @@ mod tests {
             project_id: None,
             project_name: None,
             tools: &[],
+            services: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1896,20 +1915,23 @@ mod tests {
     #[test]
     fn a_reviewer_is_told_how_to_exercise_the_change_only_with_the_tools_it_has() {
         let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        let browser = exercising(&names(&[
-            "review_verdict",
-            "review_finding",
-            "service_start",
-        ]));
+        let offered = names(&["review_verdict", "review_finding", "service_start"]);
+        let browser = exercising(&offered, &names(&["browser"]));
         assert!(
             browser.contains("`service_start` with `browser`"),
             "{browser}"
         );
         assert!(browser.contains("`show_work`"), "{browser}");
         assert!(browser.contains("never marks a criterion met"), "{browser}");
-        let no_catalogue = exercising(&names(&["review_verdict", "review_finding"]));
+        // A catalogue that holds services, none of them a browser, offers
+        // `service_start` but no browser to promise.
+        let no_browser = exercising(&offered, &names(&["postgres"]));
+        assert!(!no_browser.contains("browser"), "{no_browser}");
+        assert!(no_browser.contains("`review_finding`"), "{no_browser}");
+        let no_catalogue = exercising(&names(&["review_verdict", "review_finding"]), &[]);
         assert!(!no_catalogue.contains("service_start"), "{no_catalogue}");
         assert!(no_catalogue.contains("`review_finding`"), "{no_catalogue}");
-        assert_eq!(exercising(&names(&["review_verdict"])), "");
+        assert_eq!(exercising(&names(&["review_verdict"]), &[]), "");
     }
+
 }

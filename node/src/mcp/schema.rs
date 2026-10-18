@@ -127,7 +127,7 @@ fn registry() -> &'static HashMap<String, Value> {
             super::setup::definitions(),
             super::services::definitions_for(&[], ""),
             work::definitions(),
-            review::definitions(),
+            review::definitions(false),
         ]
         .into_iter()
         .flatten()

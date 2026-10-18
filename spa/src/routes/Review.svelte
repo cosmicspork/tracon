@@ -456,16 +456,16 @@
     }
   }
 
-  /**
-   * Record a verdict on one criterion, bound to the revision on the screen.
-   * This is the only thing that can say a criterion was met: the checks
-   * passing says the checks passed, and nothing more.
-   */
   /** The title of shown work on this review, for a finding that cites it. */
   function shownTitle(id: string): string | null {
     return shownWork.find((w) => w.id === id)?.title ?? null
   }
 
+  /**
+   * Record a verdict on one criterion, bound to the revision on the screen.
+   * This is the only thing that can say a criterion was met: the checks
+   * passing says the checks passed, and nothing more.
+   */
   async function judgeCriterion(key: string) {
     if (!criteria) return
     busy = true

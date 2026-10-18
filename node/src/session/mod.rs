@@ -2166,6 +2166,13 @@ impl Manager {
                 .iter()
                 .filter_map(|t| t["name"].as_str().map(str::to_string))
                 .collect();
+            let services: Vec<String> = self
+                .tools
+                .cfg
+                .service
+                .iter()
+                .map(|service| service.name.clone())
+                .collect();
             // What the operator selected for this item, delivered and
             // recorded before the orientation is assembled, so the receipt
             // says exactly what the text below carries. A receipt that
@@ -2189,6 +2196,7 @@ impl Manager {
                     project_id: project.as_ref().map(|p| p.id.as_str()),
                     project_name: project.as_ref().map(|p| p.name.as_str()),
                     tools: &tool_names,
+                    services: &services,
                     worktree: "/work",
                     phase: spec.phase.as_str(),
                     item: item.as_ref(),

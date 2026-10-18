@@ -18,6 +18,9 @@ use crate::{
 
 pub const START: &str = "service_start";
 pub const STATUS: &str = "service_status";
+/// The catalogue name a reviewer is pointed at to drive the candidate: only
+/// said where the operator's catalogue holds a service by this name.
+pub const BROWSER: &str = "browser";
 
 pub fn definitions(cfg: &Config) -> Vec<Value> {
     let names: Vec<&str> = cfg.service.iter().map(|s| s.name.as_str()).collect();

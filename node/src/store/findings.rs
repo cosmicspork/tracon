@@ -14,10 +14,10 @@
 //! Node-local, like the checks and the shown work it cites: a peer mirroring
 //! the review never saw the candidate run.
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use super::{Result, Store, StoreError};
+use super::{now_ms, Result, ReviewRevisionRow, SessionRow, Store, StoreError};
 
 /// What a reviewer may say of a criterion. `not_shown` is a finding too: the
 /// reviewer looked and could not make the candidate show it either way.
@@ -107,6 +107,56 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Record the revision a review session was started for: the candidate
+    /// it exercises, whatever the review is resubmitted to later.
+    pub fn review_session_revision_record(
+        &self,
+        session_id: &str,
+        review_id: &str,
+        revision_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO review_session_revision
+                (session_id, review_id, revision_id, created_ms)
+             VALUES (?1,?2,?3,?4)",
+            params![session_id, review_id, revision_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The revision a review session exercises: the one recorded when it was
+    /// started, or, for a session started before that was recorded, the
+    /// review's latest revision created at or before the session.
+    pub fn review_session_revision(
+        &self,
+        session: &SessionRow,
+    ) -> Result<Option<ReviewRevisionRow>> {
+        let Some(review_id) = session.review_id.as_deref() else {
+            return Ok(None);
+        };
+        let recorded: Option<String> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT revision_id FROM review_session_revision
+                 WHERE session_id=?1 AND review_id=?2",
+                [&session.id, review_id],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        if let Some(id) = recorded {
+            if let Some(revision) = self.review_revision(&id)? {
+                return Ok(Some(revision));
+            }
+        }
+        Ok(self
+            .review_revisions(review_id)?
+            .into_iter()
+            .rev()
+            .find(|revision| revision.created_ms <= session.created_ms))
     }
 
     /// Every finding about one candidate of an item, newest first: the first

@@ -32,7 +32,14 @@ pub const REPORT_STATUS: &str = "report_status";
 pub const VERDICT: &str = "review_verdict";
 pub const FINDING: &str = "review_finding";
 
-pub fn definitions() -> Vec<Value> {
+/// `browser`: whether the node's catalogue holds a service by that name, so a
+/// reviewer is pointed at one only where `service_start` can give it one.
+pub fn definitions(browser: bool) -> Vec<Value> {
+    let run = if browser {
+        "Run the app (service_start with `browser` gives you a headless browser), show"
+    } else {
+        "Run it in your worktree, show"
+    };
     let wait_secs_arg = json!({
         "type": "integer",
         "description": format!(
@@ -203,15 +210,16 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": FINDING,
-            "description": "Review sessions only: what you found when you exercised the change \
-                            against one acceptance criterion from criteria_read, as opposed to \
-                            your verdict on the diff. Run the app (service_start with `browser` \
-                            gives you a headless browser), show what you saw with show_work, and \
-                            record here whether it `supported` the criterion, `contradicted` it, \
-                            or could `not_shown` either way. Call it once per criterion; calling \
-                            it again for the same one replaces your earlier finding. It is your \
-                            account, recorded as inferred: it never marks a criterion met, which \
-                            only the operator can. It does not end the session; review_verdict does.",
+            "description": format!(
+                "Review sessions only: what you found when you exercised the change against one \
+                 acceptance criterion from criteria_read, as opposed to your verdict on the diff. \
+                 {run} what you saw with show_work, and record here whether it `supported` the \
+                 criterion, `contradicted` it, or could `not_shown` either way. Call it once per \
+                 criterion; calling it again for the same one replaces your earlier finding. It \
+                 is your account of the candidate you were started for, recorded as inferred: it \
+                 never marks a criterion met, which only the operator can. It does not end the \
+                 session; review_verdict does."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -934,7 +942,8 @@ impl Submission {
             }
             retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
             manager.publish_queue().await;
-            let reviewer = spawn_review_session(store, manager, ctx, &id, session.as_ref()).await;
+            let reviewer =
+                spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref()).await;
             return Ok(json!({
                 "review_id": id,
                 "state": "new",
@@ -1008,7 +1017,8 @@ impl Submission {
             .map_err(|error| error.to_string())?;
         retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
         manager.publish_queue().await;
-        let reviewer = spawn_review_session(store, manager, ctx, &id, session.as_ref()).await;
+        let reviewer =
+                spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref()).await;
 
         Ok(json!({
             "review_id": id,
@@ -1886,6 +1896,7 @@ async fn spawn_review_session(
     manager: &Manager,
     ctx: &CallContext,
     review_id: &str,
+    revision_id: &str,
     implementing: Option<&crate::store::SessionRow>,
 ) -> Value {
     let Some(implementing) = implementing else {
@@ -1934,6 +1945,9 @@ async fn spawn_review_session(
     match manager.create(spec).await {
         Ok(row) => {
             let _ = store.set_review_session(review_id, &row.id);
+            // What it shows and finds stays about this revision, even after
+            // a resubmission starts another reviewer beside it.
+            let _ = store.review_session_revision_record(&row.id, review_id, revision_id);
             manager.publish_queue().await;
             json!({ "state": "started", "session_id": row.id })
         }
@@ -2044,10 +2058,29 @@ fn finding(
         .get_review(&review_id)
         .map_err(|e| e.to_string())?
         .ok_or("the review is gone")?;
+    if review.review_session_id.as_deref() != Some(session_id) {
+        return Err(format!(
+            "another review session has since been started on {review_id}; only the current \
+             reviewer records findings"
+        ));
+    }
+    // The candidate this reviewer was started for, not the review's latest:
+    // an account of one candidate never lands on the next.
     let revision = store
-        .latest_review_revision(&review_id)
+        .review_session_revision(&session)
         .map_err(|e| e.to_string())?
         .ok_or("this review has no candidate to have exercised")?;
+    let latest = store
+        .latest_review_revision(&review_id)
+        .map_err(|e| e.to_string())?;
+    if latest.as_ref().is_some_and(|latest| latest.id != revision.id) {
+        return Err(format!(
+            "{review_id} has moved past the candidate you exercised ({}): it was resubmitted \
+             after you started, so a finding from you would describe a change no longer under \
+             review",
+            &revision.head_sha[..revision.head_sha.len().min(12)]
+        ));
+    }
     let item_id = revision.requirements_work_item_id.clone().ok_or(
         "the change under review is pinned to no work item, so it has no criteria to find against",
     )?;

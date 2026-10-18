@@ -219,16 +219,18 @@ pub async fn call(
     };
     // A reviewer's work is bound to the candidate it exercised, whatever its
     // own checkout holds: that is the commit it goes stale against.
-    let head_sha = match (&review, &root) {
-        (Some(review), _) if bound => store
-            .latest_review_revision(&review.id)
+    // That is the revision it was started for, not the review's latest: a
+    // resubmission does not stop it, and its work must go stale on the next.
+    let head_sha = match (&review, &root, &reviewing) {
+        (Some(review), _, Some(session)) => store
+            .review_session_revision(session)
             .map_err(|e| e.to_string())?
             .map(|revision| revision.head_sha)
             .unwrap_or_else(|| review.head_sha.clone()),
-        (_, Some(root)) => crate::review::resolve(&root.to_string_lossy(), "HEAD")
+        (_, Some(root), _) => crate::review::resolve(&root.to_string_lossy(), "HEAD")
             .await
             .map_err(|e| format!("the workspace has no commit to show work at: {e}"))?,
-        (_, None) => return Err("there is no workspace to show work from".into()),
+        (_, None, _) => return Err("there is no workspace to show work from".into()),
     };
 
     let id = uuid::Uuid::now_v7().to_string();

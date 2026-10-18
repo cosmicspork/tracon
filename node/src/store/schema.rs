@@ -1544,6 +1544,7 @@ const MIGRATIONS: &[&str] = &[
     // `inferred`, with the shown work it rests on; never a verdict on the
     // criterion, which stays the operator's alone in `criterion_judgement`.
     // Append-only, and node-local like the checks and shown work it cites.
+    // Beside it, the revision each review session was started for.
     r#"
     CREATE TABLE review_finding (
         id             TEXT PRIMARY KEY,
@@ -1566,6 +1567,15 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX review_finding_candidate
         ON review_finding(work_item_id, candidate_id, created_ms DESC);
     CREATE INDEX review_finding_review ON review_finding(review_id, created_ms);
+    -- The revision each review session was started for. A resubmission does
+    -- not stop the earlier reviewer, so what it shows and finds stays bound
+    -- to the candidate it exercised, not to whatever the review holds now.
+    CREATE TABLE review_session_revision (
+        session_id  TEXT PRIMARY KEY,
+        review_id   TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        created_ms  INTEGER NOT NULL
+    );
     "#,
 ];
 

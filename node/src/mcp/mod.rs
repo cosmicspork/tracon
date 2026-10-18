@@ -237,7 +237,8 @@ impl Tools {
         // allowed, and publishing is what needs one. An agent that cannot
         // publish can still ask for review and be told why it stopped there.
         if self.session.get().is_some() {
-            out.extend(review::definitions());
+            let browser = self.cfg.service.iter().any(|s| s.name == services::BROWSER);
+            out.extend(review::definitions(browser));
             // Memory and documents need no credential either: the corpus is
             // the node's own, and reading it is what every session starts by
             // doing. This means every session gets an MCP server.
