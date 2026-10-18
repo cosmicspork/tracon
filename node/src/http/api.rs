@@ -3735,7 +3735,18 @@ pub async fn answer_operator_question(
     Path(id): Path<String>,
     Json(b): Json<OperatorAnswerBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let question = s.store().operator_question(&id)?.ok_or(ApiError(
+    answer_question(&s, &id, b).await.map(Json)
+}
+
+/// Answer a question here, or on the node that asked it when it is a
+/// peer's question mirrored here: that node records the answer and releases
+/// its session, as it would for its own operator.
+async fn answer_question(
+    s: &AppState,
+    id: &str,
+    b: OperatorAnswerBody,
+) -> ApiResult<serde_json::Value> {
+    let question = s.store().operator_question(id)?.ok_or(ApiError(
         StatusCode::NOT_FOUND,
         "no such operator question".into(),
     ))?;
@@ -3761,18 +3772,48 @@ pub async fn answer_operator_question(
             "stored question choices are invalid".into(),
         )
     })?;
-    let answer = operator_answer(&choices, b)?.to_string();
-    if s.store().answer_operator_question(&id, &answer)?.is_none() {
+    let answer = operator_answer(&choices, b)?;
+    if question.node_id != s.node_id {
+        if question.state != "unanswered" {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "this question was already answered or cancelled".into(),
+            ));
+        }
+        let command = proto::frame::Command::AnswerQuestion {
+            question_id: id.to_string(),
+            choice: answer["choice"].as_str().map(str::to_string),
+            text: answer["text"].as_str().map(str::to_string),
+        };
+        let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+        peer_command(s, &question.node_id, command, timeout).await?;
+        // The owner's next list says so too; this shows it answered now.
+        if s.store()
+            .answer_mirrored_operator_question(id, &s.node_id, &answer.to_string())?
+        {
+            if let Ok(waiting) = s.store().open_operator_questions() {
+                s.manager
+                    .bus()
+                    .publish_untapped(crate::stream::Frame::Questions { waiting });
+            }
+        }
+        return Ok(json!({ "answered": true }));
+    }
+    if s.store()
+        .answer_operator_question(id, &answer.to_string())?
+        .is_none()
+    {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "this question was already answered or cancelled".into(),
         ));
     }
+    crate::mcp::operator::publish_questions(s.store(), s.manager.bus());
     // A session held on this question takes the answer as its next prompt.
     if let Some(session_id) = question.session_id.as_deref() {
         s.manager.wait_moved(session_id).await;
     }
-    Ok(Json(json!({ "answered": true })))
+    Ok(json!({ "answered": true }))
 }
 
 /// The stored answer: `{choice, text}`, each present only when given, and
@@ -3824,6 +3865,17 @@ pub async fn cancel_operator_question(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Withdrawing is the asking node's to do: a mirror that cancelled its
+    // copy would show nothing waiting while the agent there still waits.
+    if s.store()
+        .operator_question(&id)?
+        .is_some_and(|question| question.node_id != s.node_id)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this question was asked on another node; withdraw it there".into(),
+        ));
+    }
     if !s.store().cancel_operator_question(&id)? {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -3837,6 +3889,7 @@ pub async fn cancel_operator_question(
     {
         s.manager.wait_moved(&session_id).await;
     }
+    crate::mcp::operator::publish_questions(s.store(), s.manager.bus());
     Ok(Json(json!({ "cancelled": true })))
 }
 
@@ -6224,6 +6277,22 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
                 .ok_or(ApiError(StatusCode::NOT_FOUND, "no such permission".into()))?;
             forwarded_session(s, sender, &session_id)
         }
+        C::AnswerQuestion { question_id, .. } => {
+            let question = s.store().operator_question(question_id)?.ok_or(ApiError(
+                StatusCode::NOT_FOUND,
+                "no such operator question".into(),
+            ))?;
+            owned_here(s, &question.node_id, "question")?;
+            sender_in_channel(s, sender, &question.channel, "question")?;
+            // A question with no session is answered where it was asked, as
+            // a session-less permission is; one on a session is the session's
+            // owner's to release.
+            let session_id = question.session_id.ok_or(ApiError(
+                StatusCode::NOT_FOUND,
+                "no such operator question".into(),
+            ))?;
+            forwarded_session(s, sender, &session_id)
+        }
         C::ProviderConnect { name, channels, .. } => {
             for channel in channels {
                 sender_in_channel(s, sender, channel, "sign-in")?;
@@ -6479,6 +6548,22 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 .await
                 .map(|_| json!({ "answered": true }))
                 .map_err(Into::into),
+            C::AnswerQuestion {
+                question_id,
+                choice,
+                text,
+            } => {
+                answer_question(
+                    self,
+                    &question_id,
+                    OperatorAnswerBody {
+                        answer: None,
+                        choice,
+                        text,
+                    },
+                )
+                .await
+            }
             C::Kill { session_id } => self
                 .manager
                 .stop(&session_id)

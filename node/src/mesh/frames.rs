@@ -5,7 +5,7 @@
 use proto::frame::{Payload, MESH_CHANNEL};
 use serde_json::{json, Value};
 
-use crate::store::{PermissionView, ReviewRow, Store};
+use crate::store::{OperatorQuestionRow, PermissionView, ReviewRow, Store};
 use crate::stream::Frame;
 
 /// Changes per frame, well under the 4 MiB frame cap for ordinary rows.
@@ -57,6 +57,20 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
             .into_iter()
             .map(|(c, rows)| (c, Payload::Queue { waiting: rows }))
             .collect()
+        }
+        Frame::Questions { waiting } => {
+            // As the queue: one list per member channel, possibly empty. A
+            // question with no session is answered where it was asked, as a
+            // session-less permission card is, and a peer's question mirrored
+            // here is never relayed as ours.
+            let mine: Vec<&OperatorQuestionRow> = waiting
+                .iter()
+                .filter(|q| q.node_id == self_id && q.session_id.is_some())
+                .collect();
+            grouped(store, self_id, &mine, |q| Some(q.channel.clone()))
+                .into_iter()
+                .map(|(c, rows)| (c, Payload::Questions { waiting: rows }))
+                .collect()
         }
         Frame::Reviews { .. } => {
             // The UI frame only lists waiting reviews. The mesh additionally
@@ -133,8 +147,8 @@ fn push_change_batch(
     ));
 }
 
-/// This node's full mirrored review state and open session state per member
-/// channel, for peers that connect late or resync after falling behind
+/// This node's full mirrored review state and open session state (with its
+/// open questions) per member channel, for peers that connect late or resync after falling behind
 /// retention. A terminal session accompanies any mirrored review that still
 /// references it, preserving the review row's foreign-key prerequisite without
 /// reopening that session.
@@ -142,6 +156,7 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
     let sessions = store.sessions_of_node(self_id).unwrap_or_default();
     let waiting = store.open_permissions().unwrap_or_default();
     let reviews = store.mirrored_reviews().unwrap_or_default();
+    let questions = store.open_operator_questions().unwrap_or_default();
     let mut out = Vec::new();
     for c in store.node_channels(self_id).unwrap_or_default() {
         let r: Vec<&ReviewRow> = reviews
@@ -176,12 +191,18 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             })
             .map(|p| json!(p))
             .collect();
+        let q: Vec<Value> = questions
+            .iter()
+            .filter(|q| q.node_id == self_id && q.channel == c && q.session_id.is_some())
+            .map(|q| json!(q))
+            .collect();
         out.push((
             c,
             Payload::Snapshot {
                 sessions: s,
                 waiting: w,
                 reviews: r.into_iter().map(|review| json!(review)).collect(),
+                questions: q,
             },
         ));
     }

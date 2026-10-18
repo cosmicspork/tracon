@@ -342,6 +342,58 @@ async fn asking_tells_the_notifier_once() {
     }
 }
 
+/// A peer's question mirrored here, asked by its own external harness under
+/// the same request_id, is not this node's: a local caller with no session
+/// still gets a question of its own, and keeps getting that one, however
+/// recent the peer's is.
+#[tokio::test]
+async fn a_peers_mirrored_question_never_answers_a_local_external_ask() {
+    state::isolate();
+    let rig = rig();
+    rig.store.ensure_peer_node("n2").unwrap();
+    let mut peer_session = support::rows::session_row("peer-ext", "n2", "personal");
+    peer_session.harness_id = "external".into();
+    rig.store.insert_session(&peer_session).unwrap();
+    let mirrored = tracon::store::OperatorQuestionRow {
+        id: "peer-question".into(),
+        session_id: Some("peer-ext".into()),
+        channel: "personal".into(),
+        node_id: "n2".into(),
+        request_key: Some("q-shared".into()),
+        prompt: "the peer's question".into(),
+        choices_json: "[]".into(),
+        state: "unanswered".into(),
+        answer_json: None,
+        created_ms: now_ms() + 60_000,
+        answered_ms: None,
+    };
+    assert!(rig
+        .store
+        .upsert_operator_question_mirror(&mirrored)
+        .unwrap());
+
+    let local = CallContext::external(None, "personal", "n1");
+    let args = json!({ "request_id": "q-shared", "question": "ship it?", "wait_secs": 0 });
+    let asked = rig
+        .tools
+        .call(&local, "ask_operator", &args)
+        .await
+        .expect("the local caller's own question");
+    let own = asked["question_id"].as_str().unwrap().to_string();
+    assert_ne!(own, "peer-question");
+    let row = rig.store.operator_question(&own).unwrap().unwrap();
+    assert_eq!(row.node_id, "n1");
+    assert_eq!(row.session_id, None);
+    assert_eq!(row.prompt, "ship it?");
+
+    let again = rig
+        .tools
+        .call(&local, "ask_operator", &args)
+        .await
+        .expect("asking again finds the same question");
+    assert_eq!(again["question_id"], own.as_str());
+}
+
 /// The agent that drafted an issue learns it was published, and as which
 /// issue, from the node rather than by searching GitHub for its title.
 #[tokio::test]
@@ -926,4 +978,123 @@ async fn questions_wait_together_and_only_for_whoever_asked() {
         .await
         .unwrap_err()
         .contains("question_id"));
+}
+
+/// A question on this node's session, as an agent here would ask it.
+fn question_on(store: &Store, id: &str, session_id: Option<&str>, node: &str) {
+    store
+        .insert_operator_question(&tracon::store::OperatorQuestionRow {
+            id: id.into(),
+            session_id: session_id.map(str::to_string),
+            channel: "personal".into(),
+            node_id: node.into(),
+            request_key: Some(id.into()),
+            prompt: "which remote?".into(),
+            choices_json: r#"["origin","fork"]"#.into(),
+            state: "unanswered".into(),
+            answer_json: None,
+            created_ms: now_ms(),
+            answered_ms: None,
+        })
+        .unwrap();
+}
+
+fn relayed_answer(question_id: &str) -> proto::frame::Command {
+    proto::frame::Command::AnswerQuestion {
+        question_id: question_id.into(),
+        choice: Some("fork".into()),
+        text: None,
+    }
+}
+
+/// An answer relayed from a peer is the owner's to take only from a member
+/// of the question's channel, and only for a question asked on a session:
+/// one with no session is answered where it was asked.
+#[tokio::test]
+async fn a_relayed_answer_from_outside_the_channel_or_to_a_sessionless_question_is_refused() {
+    use tracon::mesh::forward::CommandExecutor;
+
+    let h = support::harness::harness().await;
+    for node in ["member", "outsider"] {
+        h.store.ensure_peer_node(node).unwrap();
+    }
+    for (node, channel) in [
+        ("n1", "personal"),
+        ("member", "personal"),
+        ("outsider", "work"),
+    ] {
+        h.store.node_channel_add(node, channel).unwrap();
+    }
+    h.store
+        .insert_session(&support::rows::session_row("asked-here", "n1", "personal"))
+        .unwrap();
+    question_on(&h.store, "on-session", Some("asked-here"), "n1");
+    question_on(&h.store, "no-session", None, "n1");
+
+    let refusal = h
+        .state
+        .execute("outsider", relayed_answer("on-session"))
+        .await
+        .expect_err("a node outside the channel");
+    assert!(refusal.contains("not a member"), "{refusal}");
+    let refusal = h
+        .state
+        .execute("member", relayed_answer("no-session"))
+        .await
+        .expect_err("a question with no session");
+    assert!(refusal.contains("no such operator question"), "{refusal}");
+    for id in ["on-session", "no-session"] {
+        assert_eq!(
+            h.store.operator_question(id).unwrap().unwrap().state,
+            "unanswered",
+            "{id}"
+        );
+    }
+}
+
+/// A question mirrored here from the node that asked it is that node's to
+/// answer: a relayed answer for it is refused here, not recorded on the copy.
+#[tokio::test]
+async fn a_relayed_answer_to_a_question_mirrored_from_another_node_is_refused() {
+    use tracon::mesh::forward::CommandExecutor;
+
+    let h = support::harness::harness().await;
+    for node in ["member", "n2"] {
+        h.store.ensure_peer_node(node).unwrap();
+    }
+    for node in ["n1", "member", "n2"] {
+        h.store.node_channel_add(node, "personal").unwrap();
+    }
+    h.store
+        .insert_session(&support::rows::session_row("asked-on-n2", "n2", "personal"))
+        .unwrap();
+    let mut mirrored = tracon::store::OperatorQuestionRow {
+        id: "theirs".into(),
+        session_id: Some("asked-on-n2".into()),
+        channel: "personal".into(),
+        node_id: "n2".into(),
+        request_key: Some("theirs".into()),
+        prompt: "which remote?".into(),
+        choices_json: r#"["origin","fork"]"#.into(),
+        state: "unanswered".into(),
+        answer_json: None,
+        created_ms: now_ms(),
+        answered_ms: None,
+    };
+    assert!(h.store.upsert_operator_question_mirror(&mirrored).unwrap());
+
+    for sender in ["member", "n2"] {
+        let refusal = h
+            .state
+            .execute(sender, relayed_answer("theirs"))
+            .await
+            .expect_err(sender);
+        assert!(
+            refusal.contains("belongs to another node"),
+            "{sender}: {refusal}"
+        );
+    }
+    mirrored = h.store.operator_question("theirs").unwrap().unwrap();
+    assert_eq!(mirrored.state, "unanswered");
+    assert_eq!(mirrored.answer_json, None);
 }
