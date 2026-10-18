@@ -54,6 +54,7 @@
   let publication = $state<ReviewPublication | null>(null)
   /** Why no reviewer is reading it, as the node last found. */
   let reviewerReason = $state<string | null>(null)
+  let reviewerStarting = $state(false)
   let requirements = $state<PinnedRequirements | null>(null)
   /** The pinned item's criteria against this revision's candidate, if any. */
   let criteria = $state<Criteria | null>(null)
@@ -162,6 +163,7 @@
         authorship = d.authorship ?? null
         publication = d.publication ?? null
         reviewerReason = d.review_session_reason ?? null
+        reviewerStarting = d.review_session_starting ?? false
         requirements = d.requirements
         criteria = d.criteria
         surroundingCode = d.surrounding_code
@@ -555,6 +557,7 @@
       review = d.review
       publication = d.publication ?? null
       reviewerReason = d.review_session_reason ?? null
+      reviewerStarting = d.review_session_starting ?? false
     } catch {
       /* the error already shown is the one that matters */
     }
@@ -922,7 +925,7 @@
     <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
   {/if}
 
-  {#if !remoteOwner && canStartReviewer(review.state, review.review_session_id ? (reviewer?.state ?? 'closed') : null)}
+  {#if !remoteOwner && canStartReviewer(review.state, review.review_session_id ? (reviewer?.state ?? 'closed') : null, reviewerStarting)}
     <div class="recover">
       {#if review.review_session_id && reviewerReason}<span class="note">{reviewerReason}</span>{/if}
       <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>

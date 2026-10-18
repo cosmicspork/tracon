@@ -60,6 +60,11 @@ describe('starting a reviewer by hand', () => {
     expect(canStartReviewer('new', 'starting')).toBe(false)
   })
 
+  test('is not offered while the node is starting one it has not recorded yet', () => {
+    expect(canStartReviewer('new', null, true)).toBe(false)
+    expect(canStartReviewer('revising', 'closed', true)).toBe(false)
+  })
+
   test('is not offered once the review is decided', () => {
     expect(canStartReviewer('approved', null)).toBe(false)
     expect(canStartReviewer('rejected', 'closed')).toBe(false)

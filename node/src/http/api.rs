@@ -2512,9 +2512,13 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         Some(_) => None,
         None => s.store().review_session_reason(&id)?,
     };
+    // A reviewer being started here, which the review row does not show
+    // until it has started.
+    let review_session_starting = remote_owner.is_none() && s.manager.review_starts().pending(&id);
     Ok(json!({
         "review": r,
         "review_session_reason": review_session_reason,
+        "review_session_starting": review_session_starting,
         "remote_owner": remote_owner,
         "revision": revision_ref,
         "intent": intent,
@@ -2894,7 +2898,7 @@ pub async fn release_review(
 
 /// `POST /api/reviews/{id}/review-session`: start a fresh review session on
 /// a review by hand, on one that never had one or again after changes were
-/// requested. Refused while one is still running, and on a review already
+/// requested. Refused while one is starting or still running, and on a review already
 /// approved or rejected, which takes no reviewer's verdict. It starts a
 /// session on the operator's models and budget, so it is an admin action.
 pub async fn start_review_session(
@@ -2929,6 +2933,14 @@ pub async fn start_review_session(
             ),
         ));
     }
+    // Held from before the check for a running reviewer until the new one is
+    // recorded, so two starts cannot both find none running.
+    let Some(start) = s.manager.review_starts().claim(&id) else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            crate::mcp::review::ALREADY_STARTING.into(),
+        ));
+    };
     if let Some(running) = r
         .review_session_id
         .as_deref()
@@ -2945,7 +2957,8 @@ pub async fn start_review_session(
             ),
         ));
     }
-    let started = crate::mcp::review::spawn_review_session(s.store(), &s.manager, &id).await;
+    let started =
+        crate::mcp::review::spawn_claimed_review_session(s.store(), &s.manager, start, None).await;
     if started["state"] != "started" {
         return Err(ApiError(
             StatusCode::CONFLICT,

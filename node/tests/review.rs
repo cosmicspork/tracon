@@ -1803,6 +1803,11 @@ async fn a_review_from_a_harness_you_run_yourself_gets_a_reviewer_seeded_from_it
     let rs = f.store.get_session(&reviewer).unwrap().unwrap();
     assert_eq!(rs.phase, "review");
     assert_eq!(rs.work_item_id, None);
+    // Its repository is on the session's branch, not on Git's default.
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&wt).join(".git/HEAD")).unwrap(),
+        format!("ref: refs/heads/{}\n", rs.branch)
+    );
     assert_eq!(f.store.review_session_reason(&id).unwrap(), None);
 }
 
@@ -1876,6 +1881,112 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
     let (status, body) = f.call_at_node("POST", &start).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(body.to_string().contains("already decided"), "{body}");
+}
+
+#[tokio::test]
+async fn a_reviewer_is_not_started_by_hand_while_another_start_is_pending() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    bind_review_model(&f);
+    let start = format!("/api/reviews/{id}/review-session");
+
+    // What an external review's submit holds while its candidate's files are
+    // still being kept: no reviewer is recorded yet, but one is coming.
+    let pending = f
+        .manager
+        .review_starts()
+        .claim(&id)
+        .expect("the first start");
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["review_session_starting"], true, "{detail}");
+    let (status, body) = f.call_at_node("POST", &start).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("already starting"), "{body}");
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().review_session_id,
+        None
+    );
+
+    // Once that start is over, one can be started by hand.
+    drop(pending);
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["review_session_starting"], false, "{detail}");
+    let (status, body) = f.call_at_node("POST", &start).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_reviewer_is_not_started_by_hand_on_a_review_another_node_owns() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review_model(&f);
+    let local = f.submit().await;
+    let mut mirrored = f.store.get_review(&local).unwrap().unwrap();
+    mirrored.id = uuid::Uuid::now_v7().to_string();
+    mirrored.node_id = "peer-node".into();
+    mirrored.review_session_id = None;
+    f.store.insert_review(&mirrored).unwrap();
+
+    let (status, body) = f
+        .call_at_node(
+            "POST",
+            &format!("/api/reviews/{}/review-session", mirrored.id),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.to_string().contains("start a reviewer there"),
+        "{body}"
+    );
+    let mirrored = f.store.get_review(&mirrored.id).unwrap().unwrap();
+    assert_eq!(mirrored.review_session_id, None);
+}
+
+#[tokio::test]
+async fn a_candidate_too_large_to_keep_is_why_no_reviewer_started() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.supervision.max_snapshot_bytes = 1;
+    })
+    .await;
+    bind_review_model(&f);
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let v = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &tracon::mcp::CallContext::external(None, "work", "n1"),
+        "submit_review",
+        &args,
+    )
+    .await
+    .unwrap();
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let mut reason = None;
+    for _ in 0..600 {
+        reason = f.store.review_session_reason(&id).unwrap();
+        if reason.as_deref().is_some_and(|r| !r.starts_with("waiting")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let reason = reason.unwrap_or_default();
+    assert!(reason.contains("were not kept"), "{reason}");
+    assert!(reason.contains("the operator limit is 1"), "{reason}");
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().review_session_id,
+        None
+    );
 }
 
 #[tokio::test]
