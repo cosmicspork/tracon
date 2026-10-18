@@ -205,8 +205,8 @@ impl Audience {
                 );
                 if name == review::VERDICT {
                     format!(
-                        "{refusal}: only a review session gives a verdict; {} is what an \
-                         execute session calls",
+                        "{refusal}: only a review session gives a verdict; an execute session \
+                         calls {}",
                         review::SUBMIT
                     )
                 } else {

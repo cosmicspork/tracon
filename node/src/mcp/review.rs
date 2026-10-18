@@ -1924,8 +1924,7 @@ async fn verdict(
         .ok_or("this session is gone")?;
     if session.phase != "review" {
         return Err(
-            "only a review session gives a verdict; submit_review is what an execute session calls"
-                .into(),
+            "only a review session gives a verdict; an execute session calls submit_review".into(),
         );
     }
     let review_id = session
