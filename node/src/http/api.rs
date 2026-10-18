@@ -2509,8 +2509,19 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         }
         _ => None,
     };
+    // Why no reviewer is reading it, as the node last found when it tried.
+    // Node-local: the owner is what starts one.
+    let review_session_reason = match remote_owner {
+        Some(_) => None,
+        None => s.store().review_session_reason(&id)?,
+    };
+    // A reviewer being started here, which the review row does not show
+    // until it has started.
+    let review_session_starting = remote_owner.is_none() && s.manager.review_starts().pending(&id);
     Ok(json!({
         "review": r,
+        "review_session_reason": review_session_reason,
+        "review_session_starting": review_session_starting,
         "remote_owner": remote_owner,
         "revision": revision_ref,
         "intent": intent,
@@ -2886,6 +2897,87 @@ pub async fn release_review(
     s.store().release_review(&id)?;
     s.manager.publish_queue().await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/reviews/{id}/review-session`: start a fresh review session on
+/// a review by hand, on one that never had one or again after changes were
+/// requested. Refused while one is starting or still running, and on a review already
+/// approved or rejected, which takes no reviewer's verdict. It starts a
+/// session on the operator's models and budget, so it is an admin action.
+pub async fn start_review_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.kind == crate::store::reports::KIND {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "a report has no diff for a reviewer to read".into(),
+        ));
+    }
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review's candidate is held by the node that owns it; start a reviewer there"
+                .into(),
+        ));
+    }
+    // Held from before the review is read again until the new reviewer is
+    // recorded. The checks below run on that second read, so they see any
+    // session another start recorded before it let go of its claim, and two
+    // starts cannot both find none running.
+    let Some(start) = s.manager.review_starts().claim(&id) else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            crate::mcp::review::ALREADY_STARTING.into(),
+        ));
+    };
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if !matches!(r.state.as_str(), "new" | "claimed" | "revising") {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "this review was already decided ({}); a reviewer's verdict now would be about a \
+                 decision that has already been made",
+                r.state
+            ),
+        ));
+    }
+    if let Some(running) = r
+        .review_session_id
+        .as_deref()
+        .and_then(|session| s.store().get_session(session).ok().flatten())
+        .filter(|session| {
+            !crate::session::state::SessionState::TERMINAL.contains(&session.state.as_str())
+        })
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "a review session is already reading this review ({}); wait for its verdict",
+                running.id
+            ),
+        ));
+    }
+    let started =
+        crate::mcp::review::spawn_claimed_review_session(s.store(), &s.manager, start, None).await;
+    if started["state"] != "started" {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            started["reason"]
+                .as_str()
+                .unwrap_or("no review session started")
+                .to_string(),
+        ));
+    }
+    Ok(Json(started))
 }
 
 /// Record a verdict; what the operator had written toward it stops being a
@@ -3735,7 +3827,18 @@ pub async fn answer_operator_question(
     Path(id): Path<String>,
     Json(b): Json<OperatorAnswerBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let question = s.store().operator_question(&id)?.ok_or(ApiError(
+    answer_question(&s, &id, b).await.map(Json)
+}
+
+/// Answer a question here, or on the node that asked it when it is a
+/// peer's question mirrored here: that node records the answer and releases
+/// its session, as it would for its own operator.
+async fn answer_question(
+    s: &AppState,
+    id: &str,
+    b: OperatorAnswerBody,
+) -> ApiResult<serde_json::Value> {
+    let question = s.store().operator_question(id)?.ok_or(ApiError(
         StatusCode::NOT_FOUND,
         "no such operator question".into(),
     ))?;
@@ -3761,18 +3864,48 @@ pub async fn answer_operator_question(
             "stored question choices are invalid".into(),
         )
     })?;
-    let answer = operator_answer(&choices, b)?.to_string();
-    if s.store().answer_operator_question(&id, &answer)?.is_none() {
+    let answer = operator_answer(&choices, b)?;
+    if question.node_id != s.node_id {
+        if question.state != "unanswered" {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "this question was already answered or cancelled".into(),
+            ));
+        }
+        let command = proto::frame::Command::AnswerQuestion {
+            question_id: id.to_string(),
+            choice: answer["choice"].as_str().map(str::to_string),
+            text: answer["text"].as_str().map(str::to_string),
+        };
+        let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+        peer_command(s, &question.node_id, command, timeout).await?;
+        // The owner's next list says so too; this shows it answered now.
+        if s.store()
+            .answer_mirrored_operator_question(id, &s.node_id, &answer.to_string())?
+        {
+            if let Ok(waiting) = s.store().open_operator_questions() {
+                s.manager
+                    .bus()
+                    .publish_untapped(crate::stream::Frame::Questions { waiting });
+            }
+        }
+        return Ok(json!({ "answered": true }));
+    }
+    if s.store()
+        .answer_operator_question(id, &answer.to_string())?
+        .is_none()
+    {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "this question was already answered or cancelled".into(),
         ));
     }
+    crate::mcp::operator::publish_questions(s.store(), s.manager.bus());
     // A session held on this question takes the answer as its next prompt.
     if let Some(session_id) = question.session_id.as_deref() {
         s.manager.wait_moved(session_id).await;
     }
-    Ok(Json(json!({ "answered": true })))
+    Ok(json!({ "answered": true }))
 }
 
 /// The stored answer: `{choice, text}`, each present only when given, and
@@ -3824,6 +3957,17 @@ pub async fn cancel_operator_question(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Withdrawing is the asking node's to do: a mirror that cancelled its
+    // copy would show nothing waiting while the agent there still waits.
+    if s.store()
+        .operator_question(&id)?
+        .is_some_and(|question| question.node_id != s.node_id)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this question was asked on another node; withdraw it there".into(),
+        ));
+    }
     if !s.store().cancel_operator_question(&id)? {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -3837,6 +3981,7 @@ pub async fn cancel_operator_question(
     {
         s.manager.wait_moved(&session_id).await;
     }
+    crate::mcp::operator::publish_questions(s.store(), s.manager.bus());
     Ok(Json(json!({ "cancelled": true })))
 }
 
@@ -6224,6 +6369,22 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
                 .ok_or(ApiError(StatusCode::NOT_FOUND, "no such permission".into()))?;
             forwarded_session(s, sender, &session_id)
         }
+        C::AnswerQuestion { question_id, .. } => {
+            let question = s.store().operator_question(question_id)?.ok_or(ApiError(
+                StatusCode::NOT_FOUND,
+                "no such operator question".into(),
+            ))?;
+            owned_here(s, &question.node_id, "question")?;
+            sender_in_channel(s, sender, &question.channel, "question")?;
+            // A question with no session is answered where it was asked, as
+            // a session-less permission is; one on a session is the session's
+            // owner's to release.
+            let session_id = question.session_id.ok_or(ApiError(
+                StatusCode::NOT_FOUND,
+                "no such operator question".into(),
+            ))?;
+            forwarded_session(s, sender, &session_id)
+        }
         C::ProviderConnect { name, channels, .. } => {
             for channel in channels {
                 sender_in_channel(s, sender, channel, "sign-in")?;
@@ -6479,6 +6640,22 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 .await
                 .map(|_| json!({ "answered": true }))
                 .map_err(Into::into),
+            C::AnswerQuestion {
+                question_id,
+                choice,
+                text,
+            } => {
+                answer_question(
+                    self,
+                    &question_id,
+                    OperatorAnswerBody {
+                        answer: None,
+                        choice,
+                        text,
+                    },
+                )
+                .await
+            }
             C::Kill { session_id } => self
                 .manager
                 .stop(&session_id)

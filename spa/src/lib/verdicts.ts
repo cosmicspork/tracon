@@ -61,3 +61,20 @@ export function publishedChange(result: string | null | undefined): { url: strin
   const m = /\/(?:pull|pulls|merge_requests)\/(\d+)(?:[/?#]|$)/.exec(url)
   return { url, number: m ? Number(m[1]) : null }
 }
+
+/**
+ * Whether a reviewer can be started on a review by hand: one that is still
+ * open to a reviewer's verdict (undecided, or with changes requested) and
+ * has none reading it now. `reviewer` is the state of the last one started;
+ * `starting` is the node saying one is being started that it has not
+ * recorded yet.
+ */
+export function canStartReviewer(
+  state: string,
+  reviewer: string | null | undefined,
+  starting = false,
+): boolean {
+  if (!['new', 'claimed', 'revising'].includes(state)) return false
+  if (starting) return false
+  return !reviewer || ['closed', 'killed_budget', 'failed'].includes(reviewer)
+}

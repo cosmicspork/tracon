@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api'
   import { renderMessage } from '../lib/markdown'
+  import { store } from '../lib/store.svelte'
   import type { OperatorQuestion } from '../lib/types'
 
   let { question, done }: { question: OperatorQuestion; done?: () => void } = $props()
@@ -10,6 +11,8 @@
   const choices = $derived.by(() => {
     try { return JSON.parse(question.choices_json) as string[] } catch { return [] }
   })
+  // A peer's question is answered here but withdrawn only where it was asked.
+  const own = $derived(question.node_id === store.node?.id)
   // The note goes with a picked choice, or alone as the answer: a choice
   // such as "Other" is worth little without the words that explain it.
   async function submit(choice?: string) {
@@ -48,7 +51,9 @@
     <button class="btn" class:p={!choices.length} type="submit" disabled={busy || !answer.trim()}>
       {choices.length ? 'Send note only' : 'Answer'}
     </button>
-    <button type="button" class="lnk d" onclick={cancel} disabled={busy}>Cancel question</button>
+    {#if own}
+      <button type="button" class="lnk d" onclick={cancel} disabled={busy}>Cancel question</button>
+    {/if}
   </form>
   {#if error}<div class="error">{error}</div>{/if}
 </article>

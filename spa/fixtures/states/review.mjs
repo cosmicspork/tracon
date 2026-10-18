@@ -1335,6 +1335,19 @@ export default [
     detail: raw(details({ shown_work: SHOWN })),
   }),
 
+  state('no-reviewer', 'No reviewer, and why none started', {
+    note: 'The "Reviewed by" line says why no review session is reading it, and "Start reviewer" offers one by hand.',
+    since: '#514',
+    detail: raw(
+      details({
+        review: { review_session_id: null, ai_verdict_json: null },
+        review_session_reason: 'no review model bound on this channel (phases.review.model)',
+        review_session_starting: false,
+      }),
+    ),
+    api: { 'POST /api/reviews/*/review-session': { state: 'started', session_id: 's-review' } },
+  }),
+
   state('legacy', 'A review from before candidate capture', {
     note: 'No revision, evidence, intent or publication: the evidence-missing banner.',
     detail: raw({

@@ -153,7 +153,9 @@ async fn ask(
     let choices_json = serde_json::to_string(&choices).unwrap();
     let existing = match ctx.session_id() {
         Some(session_id) => store.operator_question_for_request(session_id, &request_key),
-        None => store.operator_question_for_channel_request(&ctx.channel, &request_key),
+        None => {
+            store.operator_question_for_channel_request(&ctx.channel, &ctx.node_id, &request_key)
+        }
     }
     .map_err(|e| e.to_string())?;
     let row = match existing {
@@ -192,18 +194,22 @@ async fn ask(
                 return Err("request_id is already bound to a different question".into());
             }
             if stored.id == row.id {
-                // Untapped: questions are node-local, so there is nothing for
-                // the mesh to carry. The notifier diffs and debounces it.
-                if let Ok(waiting) = store.open_operator_questions() {
-                    manager
-                        .bus()
-                        .publish_untapped(crate::stream::Frame::Questions { waiting });
-                }
+                publish_questions(store, manager.bus());
             }
             stored
         }
     };
     question_status(store, manager, ctx, &[row.id], args).await
+}
+
+/// Tell the notifier and the mesh which questions are open, after one is
+/// asked, answered or withdrawn here. The notifier diffs and debounces it;
+/// the mesh carries this node's own, so a peer showing them learns when one
+/// is no longer open.
+pub(crate) fn publish_questions(store: &Store, bus: &crate::stream::Bus) {
+    if let Ok(waiting) = store.open_operator_questions() {
+        bus.publish(crate::stream::Frame::Questions { waiting });
+    }
 }
 
 /// Where the caller's questions stand, waiting up to the caller's

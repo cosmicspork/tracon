@@ -474,6 +474,9 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
         | ("DELETE", ["api", "external", channel, "stop"]) => {
             format!("Reopen {channel} to external harnesses")
         }
+        ("POST", ["api", "reviews", _, "review-session"]) => {
+            "Start a review session on a review".to_string()
+        }
         ("POST", ["api", "repos", "offer"]) => {
             "Offer a repository recipe to channel members".to_string()
         }

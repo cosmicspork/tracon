@@ -374,9 +374,11 @@ fn kickoff(
             let review = review_id?;
             Some(format!(
                 "Review the change under review `{review}`. The requirements and the diff are \
-                 in your orientation and the change is checked out in the worktree. Where a \
-                 criterion needs the change run, show what you saw with `show_work` and record \
-                 a `review_finding` for it. Give your verdict with `review_verdict`."
+                 in your orientation. Your workspace holds the candidate's files, without its \
+                 Git history, and `{diff}` holds the whole diff. Where a criterion needs the \
+                 change run, show what you saw with `show_work` and record a `review_finding` \
+                 for it. Give your verdict with `review_verdict`.",
+                diff = crate::mcp::review::REVIEW_DIFF,
             ))
         }
     }
@@ -511,6 +513,9 @@ pub struct Manager {
     /// Required checks `submit_review` started, owned by the node rather
     /// than by the call that asked for them.
     checking: Arc<crate::mcp::checking::Checking>,
+    /// The reviews a review session is being started for, so that only one
+    /// start at a time reads into a review's workspace.
+    review_starts: Arc<crate::mcp::review::ReviewStarts>,
     /// What each session has been told of the decisions it waited on.
     told: Arc<waits::Told>,
     /// A restart asked for and waiting: while it waits, new sessions and
@@ -561,6 +566,7 @@ impl Manager {
             previews: Arc::new(crate::http::preview::PreviewTokens::default()),
             egress: Arc::default(),
             checking: Arc::default(),
+            review_starts: Arc::default(),
             told: Arc::default(),
             restart: Arc::default(),
         }
@@ -599,6 +605,11 @@ impl Manager {
     /// ones came to.
     pub fn checking(&self) -> &Arc<crate::mcp::checking::Checking> {
         &self.checking
+    }
+
+    /// The review sessions being started here.
+    pub fn review_starts(&self) -> &Arc<crate::mcp::review::ReviewStarts> {
+        &self.review_starts
     }
 
     pub fn backend(&self) -> &Arc<dyn crate::boundary::Backend> {

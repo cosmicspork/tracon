@@ -139,18 +139,22 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// This node's question for a caller with no session, by its key. Only
+    /// `node_id`'s own: a peer's question mirrored here, on its own external
+    /// session, is never the local caller's to resume.
     pub fn operator_question_for_channel_request(
         &self,
         channel: &str,
+        node_id: &str,
         request_key: &str,
     ) -> Result<Option<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT q.* FROM operator_question q LEFT JOIN session s ON s.id=q.session_id
-             WHERE q.channel=?1 AND q.request_key=?2
+             WHERE q.channel=?1 AND q.request_key=?2 AND q.node_id=?3
                AND (q.session_id IS NULL OR s.harness_id='external')
              ORDER BY q.created_ms DESC LIMIT 1",
-            params![channel, request_key],
+            params![channel, request_key, node_id],
             OperatorQuestionRow::from_row,
         )
         .optional()
@@ -241,6 +245,82 @@ impl Store {
         tx.commit()?;
         Ok(Some((session_id, created_ms)))
     }
+    /// Upsert a question a peer mirrored to us. An id already held for
+    /// another node or channel is never rewritten: that is `false`.
+    pub fn upsert_operator_question_mirror(&self, row: &OperatorQuestionRow) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO operator_question (id, session_id, channel, node_id, request_key, prompt, choices_json, state, answer_json, created_ms, answered_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(id) DO UPDATE SET prompt=?6, choices_json=?7, state=?8, answer_json=?9, answered_ms=?11
+             WHERE operator_question.node_id=?4 AND operator_question.channel=?3",
+            params![
+                row.id,
+                row.session_id,
+                row.channel,
+                row.node_id,
+                row.request_key,
+                row.prompt,
+                row.choices_json,
+                row.state,
+                row.answer_json,
+                row.created_ms,
+                row.answered_ms
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Open mirrored questions of `node_id` on `channel` not in `keep` are
+    /// closed: the owner no longer lists them, so they were answered or
+    /// withdrawn there. The owner's row says which.
+    pub fn close_absent_operator_questions(
+        &self,
+        node_id: &str,
+        channel: &str,
+        keep: &[String],
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM operator_question
+             WHERE node_id=?1 AND channel=?2 AND state='unanswered' AND session_id IS NOT NULL",
+        )?;
+        let open: Vec<String> = stmt
+            .query_map([node_id, channel], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut n = 0;
+        for id in open.into_iter().filter(|id| !keep.contains(id)) {
+            n += conn.execute(
+                "UPDATE operator_question SET state='cancelled', answered_ms=?2
+                 WHERE id=?1 AND state='unanswered'",
+                params![id, now_ms()],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// Record on a mirrored question the answer its owner accepted from
+    /// here, ahead of the owner's next list saying so. No event is written:
+    /// the owner records the intervention, and its event mirrors back.
+    ///
+    /// The owner lists its open questions before it acks the answer, so that
+    /// list can arrive first and close the copy here as cancelled. The ack
+    /// says it was answered, so a cancelled copy takes the answer too; a
+    /// question this node (`self_id`) asked is never touched here.
+    pub fn answer_mirrored_operator_question(
+        &self,
+        id: &str,
+        self_id: &str,
+        answer_json: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE operator_question SET state='answered', answer_json=?2, answered_ms=?3
+             WHERE id=?1 AND node_id<>?4 AND state IN ('unanswered','cancelled')",
+            params![id, answer_json, now_ms(), self_id],
+        )? == 1)
+    }
+
     pub fn cancel_operator_question(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute("UPDATE operator_question SET state='cancelled', answered_ms=?2 WHERE id=?1 AND state='unanswered'", params![id, now_ms()])? == 1)

@@ -36,7 +36,7 @@
   import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
   import { defaultMessage, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
-  import { CLOSED_STATES, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
+  import { CLOSED_STATES, canStartReviewer, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, FINDING, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
   let { id }: { id: string } = $props()
@@ -52,6 +52,9 @@
   let shownWork = $state<ShownWorkItem[]>([])
   let authorship = $state<ReviewAuthorship | null>(null)
   let publication = $state<ReviewPublication | null>(null)
+  /** Why no reviewer is reading it, as the node last found. */
+  let reviewerReason = $state<string | null>(null)
+  let reviewerStarting = $state(false)
   let requirements = $state<PinnedRequirements | null>(null)
   /** The pinned item's criteria against this revision's candidate, if any. */
   let criteria = $state<Criteria | null>(null)
@@ -162,6 +165,8 @@
         shownWork = d.shown_work ?? []
         authorship = d.authorship ?? null
         publication = d.publication ?? null
+        reviewerReason = d.review_session_reason ?? null
+        reviewerStarting = d.review_session_starting ?? false
         requirements = d.requirements
         criteria = d.criteria
         surroundingCode = d.surrounding_code
@@ -559,8 +564,26 @@
       const d = await api.review(id)
       review = d.review
       publication = d.publication ?? null
+      reviewerReason = d.review_session_reason ?? null
+      reviewerStarting = d.review_session_starting ?? false
     } catch {
       /* the error already shown is the one that matters */
+    }
+  }
+
+  /** Start a fresh reviewer on this review; the node says why when none starts. */
+  async function startReviewer() {
+    if (!review) return
+    busy = true
+    error = null
+    try {
+      await api.startReviewer(id)
+      await store.refetch()
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+      await reread()
     }
   }
 
@@ -923,7 +946,7 @@
     <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
     <div><dt>Item</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
     <div><dt>Policy</dt><dd>{session?.policy_version != null ? `working-agreements v${session.policy_version}` : '—'}</dd></div>
-    <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : 'no review model bound'}</dd></div>
+    <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}</dd></div>
     <div><dt>Commit</dt><dd>{review.head_sha.slice(0, 8)}</dd></div>
   </dl>
 
@@ -944,6 +967,13 @@
     </div>
   {:else if review.review_session_id}
     <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
+  {/if}
+
+  {#if !remoteOwner && canStartReviewer(review.state, review.review_session_id ? (reviewer?.state ?? 'closed') : null, reviewerStarting)}
+    <div class="recover">
+      {#if review.review_session_id && reviewerReason}<span class="note">{reviewerReason}</span>{/if}
+      <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>
+    </div>
   {/if}
 
   {#if review.state === 'revising'}

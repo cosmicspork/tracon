@@ -533,6 +533,9 @@ export const api = {
       change,
     }),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
+  /** Start a fresh review session on a review: an admin action. */
+  startReviewer: (id: string) =>
+    call<{ state: string; session_id: string }>('POST', `/api/reviews/${id}/review-session`),
   /** `reason` goes back with a rejection, `notes` with a request for changes. */
   answer: (
     permissionId: string,

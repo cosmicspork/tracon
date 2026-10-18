@@ -1539,7 +1539,12 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX mesh_admin_statement_expires ON mesh_admin_statement(expires_ms);
     "#,
-    // 66: what a review session found when it exercised the candidate
+    // 66: why a review has no reviewer. A binding is only one of the reasons
+    // none started; the review screen says the one that applied.
+    r#"
+    ALTER TABLE review ADD COLUMN review_session_reason TEXT;
+    "#,
+    // 67: what a review session found when it exercised the candidate
     // against one criterion (`review_finding`). A session's account, always
     // `inferred`, with the shown work it rests on; never a verdict on the
     // criterion, which stays the operator's alone in `criterion_judgement`.

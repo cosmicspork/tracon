@@ -11,7 +11,9 @@ use std::sync::Arc;
 use proto::frame::Payload;
 use serde_json::Value;
 
-use crate::store::{now_ms, NewEvent, NodeRow, PermissionRow, ReviewRow, SessionRow, Store};
+use crate::store::{
+    now_ms, NewEvent, NodeRow, OperatorQuestionRow, PermissionRow, ReviewRow, SessionRow, Store,
+};
 use crate::stream::{Bus, Frame};
 
 pub struct Mirror {
@@ -111,10 +113,18 @@ impl Mirror {
                 }
                 r
             }
+            Payload::Questions { waiting } => {
+                let r = self.apply_questions(sender, channel, &waiting);
+                if r == Applied::Stored {
+                    self.publish_questions();
+                }
+                r
+            }
             Payload::Snapshot {
                 sessions,
                 waiting,
                 reviews,
+                questions,
             } => {
                 let mut keep = Vec::new();
                 let _ = self.store.ensure_peer_node(sender);
@@ -143,13 +153,15 @@ impl Mirror {
                 }
                 let p = self.apply_permissions(sender, channel, &waiting);
                 let r = self.apply_reviews(sender, channel, &reviews);
-                if p == Applied::Impersonation || r == Applied::Impersonation {
+                let q = self.apply_questions(sender, channel, &questions);
+                if [&p, &r, &q].contains(&&Applied::Impersonation) {
                     return Applied::Impersonation;
                 }
-                if p == Applied::Malformed || r == Applied::Malformed {
+                if [&p, &r, &q].contains(&&Applied::Malformed) {
                     return Applied::Malformed;
                 }
                 self.publish_queue();
+                self.publish_questions();
                 Applied::Stored
             }
             Payload::Command { .. } => Applied::Unhandled("command"),
@@ -289,6 +301,56 @@ impl Mirror {
         Applied::Stored
     }
 
+    /// A peer's open questions on `channel`, the whole list of them: one
+    /// mirrored here that it no longer lists was answered or withdrawn there.
+    /// A question with no session is answered where it was asked.
+    fn apply_questions(&self, sender: &str, channel: &str, rows: &[Value]) -> Applied {
+        let mut keep = Vec::new();
+        for v in rows {
+            match serde_json::from_value::<OperatorQuestionRow>(v.clone()) {
+                Ok(q) if q.node_id != sender || q.channel != channel => {
+                    return Applied::Impersonation
+                }
+                Ok(q) if q.session_id.is_none() => {}
+                Ok(q) => {
+                    // A question on a session another node runs is not the
+                    // sender's to ask.
+                    let session = q.session_id.as_deref().unwrap_or_default();
+                    if let Ok(Some(s)) = self.store.get_session(session) {
+                        if s.node_id != sender {
+                            return Applied::Impersonation;
+                        }
+                    }
+                    match self.store.upsert_operator_question_mirror(&q) {
+                        Ok(true) => keep.push(q.id.clone()),
+                        // The id is already bound to another owner or channel.
+                        Ok(false) => return Applied::Impersonation,
+                        Err(error) => {
+                            tracing::warn!(%error, question = %q.id, "mirrored question not stored");
+                            return Applied::Malformed;
+                        }
+                    }
+                }
+                Err(_) => return Applied::Malformed,
+            }
+        }
+        if let Err(error) = self
+            .store
+            .close_absent_operator_questions(sender, channel, &keep)
+        {
+            tracing::warn!(%error, "mirrored question absence reconciliation failed");
+            return Applied::Malformed;
+        }
+        Applied::Stored
+    }
+
+    /// Questions reach the notifier by frame; the interface polls for them.
+    fn publish_questions(&self) {
+        if let Ok(waiting) = self.store.open_operator_questions() {
+            self.bus.publish_untapped(Frame::Questions { waiting });
+        }
+    }
+
     fn publish_queue(&self) {
         if let Ok(waiting) = self.store.open_permission_views() {
             self.bus.publish_untapped(Frame::Queue { waiting });
@@ -419,6 +481,150 @@ mod tests {
         assert!(
             peer.open_reviews().unwrap().is_empty(),
             "terminal reports must not re-enter the operator queue"
+        );
+    }
+
+    #[test]
+    fn a_peers_open_questions_are_mirrored_and_closed_once_it_stops_listing_them() {
+        let owner = owner_with_acknowledged_report();
+        let question = OperatorQuestionRow {
+            id: "question".into(),
+            session_id: Some("report-session".into()),
+            channel: "personal".into(),
+            node_id: "owner".into(),
+            request_key: Some("remote".into()),
+            prompt: "which remote?".into(),
+            choices_json: r#"["origin","fork"]"#.into(),
+            state: "unanswered".into(),
+            answer_json: None,
+            created_ms: now_ms(),
+            answered_ms: None,
+        };
+        owner.insert_operator_question(&question).unwrap();
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus: Bus::new(),
+            self_id: "peer".into(),
+        };
+        let listed = |store: &Store| {
+            crate::mesh::frames::to_payloads(
+                &Frame::Questions {
+                    waiting: store.open_operator_questions().unwrap(),
+                },
+                store,
+                "owner",
+            )
+            .into_iter()
+            .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
+            .unwrap()
+        };
+
+        assert_eq!(
+            mirror.apply("owner", "personal", listed(&owner)),
+            Applied::Stored
+        );
+        let open = peer.open_operator_questions().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].node_id, "owner");
+
+        // A third node cannot list the owner's question as its own.
+        assert_eq!(
+            mirror.apply("third", "personal", listed(&owner)),
+            Applied::Impersonation
+        );
+
+        owner.cancel_operator_question("question").unwrap();
+        assert_eq!(
+            mirror.apply("owner", "personal", listed(&owner)),
+            Applied::Stored
+        );
+        assert!(peer.open_operator_questions().unwrap().is_empty());
+    }
+
+    /// The owner lists its open questions before it acks an answer relayed
+    /// from here, so the list can close the copy here as cancelled first. The
+    /// ack still records the answer on it; a question this node asked itself
+    /// is never answered that way.
+    #[test]
+    fn an_answer_acked_after_the_owners_list_closed_the_copy_still_shows_answered() {
+        let owner = owner_with_acknowledged_report();
+        let question = OperatorQuestionRow {
+            id: "question".into(),
+            session_id: Some("report-session".into()),
+            channel: "personal".into(),
+            node_id: "owner".into(),
+            request_key: Some("remote".into()),
+            prompt: "which remote?".into(),
+            choices_json: r#"["origin","fork"]"#.into(),
+            state: "unanswered".into(),
+            answer_json: None,
+            created_ms: now_ms(),
+            answered_ms: None,
+        };
+        owner.insert_operator_question(&question).unwrap();
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus: Bus::new(),
+            self_id: "peer".into(),
+        };
+        let listed = |store: &Store| {
+            crate::mesh::frames::to_payloads(
+                &Frame::Questions {
+                    waiting: store.open_operator_questions().unwrap(),
+                },
+                store,
+                "owner",
+            )
+            .into_iter()
+            .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
+            .unwrap()
+        };
+        assert_eq!(
+            mirror.apply("owner", "personal", listed(&owner)),
+            Applied::Stored
+        );
+
+        // The owner takes the answer and lists what is still open, and that
+        // list lands here before the ack does.
+        owner
+            .answer_operator_question("question", r#"{"choice":"fork"}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            mirror.apply("owner", "personal", listed(&owner)),
+            Applied::Stored
+        );
+        assert_eq!(
+            peer.operator_question("question").unwrap().unwrap().state,
+            "cancelled"
+        );
+
+        assert!(peer
+            .answer_mirrored_operator_question("question", "peer", r#"{"choice":"fork"}"#)
+            .unwrap());
+        let shown = peer.operator_question("question").unwrap().unwrap();
+        assert_eq!(shown.state, "answered");
+        assert_eq!(shown.answer_json.as_deref(), Some(r#"{"choice":"fork"}"#));
+
+        // This node's own withdrawn question stays withdrawn.
+        let own = OperatorQuestionRow {
+            id: "own".into(),
+            session_id: None,
+            node_id: "peer".into(),
+            request_key: Some("own".into()),
+            ..question
+        };
+        peer.ensure_peer_node("peer").unwrap();
+        peer.insert_operator_question(&own).unwrap();
+        peer.cancel_operator_question("own").unwrap();
+        assert!(!peer
+            .answer_mirrored_operator_question("own", "peer", r#"{"choice":"fork"}"#)
+            .unwrap());
+        assert_eq!(
+            peer.operator_question("own").unwrap().unwrap().state,
+            "cancelled"
         );
     }
 

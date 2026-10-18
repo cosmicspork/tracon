@@ -940,11 +940,10 @@ impl Submission {
                      review_status to wait for the verdict"
                 ));
             }
-            retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
+            let retained = retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
             manager.publish_queue().await;
             let reviewer =
-                spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref())
-                    .await;
+                spawn_review_session_when_kept(store, manager, &id, &ctx.channel, retained).await;
             return Ok(json!({
                 "review_id": id,
                 "state": "new",
@@ -1016,10 +1015,10 @@ impl Submission {
         store
             .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
-        retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
+        let retained = retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
         manager.publish_queue().await;
         let reviewer =
-            spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref()).await;
+            spawn_review_session_when_kept(store, manager, &id, &ctx.channel, retained).await;
 
         Ok(json!({
             "review_id": id,
@@ -1247,25 +1246,26 @@ async fn record_candidate(
 /// transfer can carry them without the submitting client waiting on a
 /// whole-tree read and its insert. A candidate that already has them is left
 /// alone; one that cannot be read stays unmaterialized, which a transfer
-/// refuses.
+/// refuses. Returns the read when one was started, for what must wait on it,
+/// which comes to why the files were not kept if they were not.
 fn retain_candidate_files(
     store: &Arc<Store>,
     worktree: &str,
     candidate: &CandidateRow,
     max_snapshot_bytes: u64,
-) {
+) -> Option<tokio::task::JoinHandle<Result<(), String>>> {
     let materialized = serde_json::from_str::<Value>(&candidate.capture_json)
         .ok()
         .and_then(|capture| capture["materialized"].as_bool())
         .unwrap_or(false);
     if materialized {
-        return;
+        return None;
     }
     let store = store.clone();
     let worktree = worktree.to_string();
     let id = candidate.id.clone();
     let head_sha = candidate.head_sha.clone();
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let retained = match review::read_candidate(&worktree, &head_sha, max_snapshot_bytes).await
         {
             Ok(tree) => tokio::task::spawn_blocking(move || {
@@ -1277,10 +1277,11 @@ fn retain_candidate_files(
             .and_then(|stored| stored.map_err(|error| error.to_string())),
             Err(error) => Err(error.to_string()),
         };
-        if let Err(error) = retained {
+        if let Err(error) = &retained {
             tracing::warn!(%error, head_sha, "could not keep a candidate's files");
         }
-    });
+        retained
+    }))
 }
 
 fn forge_arg(args: &Value) -> Result<Outputs, String> {
@@ -1942,48 +1943,246 @@ fn not_runnable_line(
     )
 }
 
+/// Where a review session finds the whole diff in its workspace. The diff in
+/// its instructions is cut at a length, and the workspace is the candidate's
+/// tree with no Git history to ask for the rest.
+pub const REVIEW_DIFF: &str = ".tracon/review.diff";
+
 /// A fresh session that reads only the requirements and the diff, when the
 /// channel binds a model for it (`phases.review.model`). Its verdict lands on
-/// the review card; the human still decides. Returns what happened, for the
-/// submitting agent's information.
-async fn spawn_review_session(
+/// the review card; the human still decides. Its workspace is the review's
+/// immutable candidate, never the submitting session's workspace, so a review
+/// from a harness the operator runs gets one too. Why none started is kept on
+/// the review. Returns what happened, for the caller's information.
+pub(crate) async fn spawn_review_session(
     store: &Arc<Store>,
     manager: &Manager,
-    ctx: &CallContext,
     review_id: &str,
-    revision_id: &str,
-    implementing: Option<&crate::store::SessionRow>,
 ) -> Value {
-    let Some(implementing) = implementing else {
-        return json!({ "state": "none", "reason": "a review session reads the submitting session's workspace; a harness you run yourself has none" });
+    match manager.review_starts().claim(review_id) {
+        Some(start) => spawn_claimed_review_session(store, manager, start, None).await,
+        None => already_starting(),
+    }
+}
+
+/// [`spawn_review_session`] under a start already claimed, which ends when
+/// this does. `unkept` is why the candidate's files were not kept, when
+/// keeping them was tried and failed.
+pub(crate) async fn spawn_claimed_review_session(
+    store: &Arc<Store>,
+    manager: &Manager,
+    start: ReviewStart,
+    unkept: Option<String>,
+) -> Value {
+    let review_id = start.review_id();
+    match start_review_session(store, manager, review_id, unkept.as_deref()).await {
+        Ok(session_id) => json!({ "state": "started", "session_id": session_id }),
+        Err((state, reason)) => {
+            if let Err(error) = store.set_review_session_reason(review_id, &reason) {
+                tracing::warn!(%error, review_id, "could not record why no reviewer started");
+            }
+            json!({ "state": state, "reason": reason })
+        }
+    }
+}
+
+/// What a start says when another is already under way for the review. Its
+/// reason is not recorded: the start under way records its own.
+fn already_starting() -> Value {
+    json!({ "state": "none", "reason": ALREADY_STARTING })
+}
+
+/// Why a start was refused while another was under way.
+pub const ALREADY_STARTING: &str =
+    "a review session is already starting on this review; wait for it to start";
+
+/// The reviews a review session is being started for on this node, from
+/// the claim until the session is recorded on the review or found not to
+/// start. Until then `review_session_id` says nothing, and a second start
+/// would import into the same `review-{id}` workspace as the first and
+/// replace it while the first runs. Node-local: only a review's owner
+/// starts one.
+#[derive(Default)]
+pub struct ReviewStarts(std::sync::Mutex<std::collections::HashSet<String>>);
+
+impl ReviewStarts {
+    /// Claim the start for a review, or `None` while another holds it.
+    pub fn claim(self: &Arc<Self>, review_id: &str) -> Option<ReviewStart> {
+        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        pending.insert(review_id.to_string()).then(|| ReviewStart {
+            starts: self.clone(),
+            review_id: review_id.to_string(),
+        })
+    }
+
+    /// Whether a review session is being started for a review.
+    pub fn pending(&self, review_id: &str) -> bool {
+        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        pending.contains(review_id)
+    }
+}
+
+/// A claimed start; dropping it lets the next one through.
+pub struct ReviewStart {
+    starts: Arc<ReviewStarts>,
+    review_id: String,
+}
+
+impl ReviewStart {
+    pub fn review_id(&self) -> &str {
+        &self.review_id
+    }
+}
+
+impl Drop for ReviewStart {
+    fn drop(&mut self) {
+        let mut pending = self.starts.0.lock().unwrap_or_else(|e| e.into_inner());
+        pending.remove(&self.review_id);
+    }
+}
+
+/// [`spawn_review_session`] once the candidate's files are kept: they are
+/// what the reviewer's workspace is built from, and an external harness's are
+/// read after its review is recorded (`retain_candidate_files`). The
+/// submitter is not held on that read; it hears that a reviewer is starting.
+async fn spawn_review_session_when_kept(
+    store: &Arc<Store>,
+    manager: &Manager,
+    review_id: &str,
+    channel: &str,
+    retained: Option<tokio::task::JoinHandle<Result<(), String>>>,
+) -> Value {
+    let Some(retained) = retained.filter(|_| review_model(manager, channel).is_some()) else {
+        return spawn_review_session(store, manager, review_id).await;
     };
-    let bindings = manager.bindings(&ctx.channel);
-    let Some(model) = bindings["phases"]["review"]["model"]
+    // Claimed now, not once the files are kept: from here until the session
+    // is recorded, a start by hand must see this one.
+    let Some(start) = manager.review_starts().claim(review_id) else {
+        return already_starting();
+    };
+    let reason = "waiting for the candidate's files to be kept before starting";
+    if let Err(error) = store.set_review_session_reason(review_id, reason) {
+        tracing::warn!(%error, review_id, "could not record why no reviewer started");
+    }
+    tokio::spawn({
+        let store = store.clone();
+        let manager = manager.clone();
+        async move {
+            let unkept = match retained.await {
+                Ok(Ok(())) => None,
+                Ok(Err(why)) => Some(why),
+                Err(error) => Some(error.to_string()),
+            };
+            spawn_claimed_review_session(&store, &manager, start, unkept).await;
+        }
+    });
+    json!({ "state": "starting", "reason": reason })
+}
+
+/// The model a channel binds for review sessions, if any.
+fn review_model(manager: &Manager, channel: &str) -> Option<String> {
+    manager.bindings(channel)["phases"]["review"]["model"]
         .as_str()
         .filter(|m| !m.trim().is_empty())
         .map(str::to_string)
-    else {
-        return json!({ "state": "none", "reason": "no review model bound on this channel (phases.review.model)" });
+}
+
+/// Start a review session from the review's latest candidate: its session
+/// id, or whether none was due (`none`) or one could not start (`failed`),
+/// and why.
+async fn start_review_session(
+    store: &Arc<Store>,
+    manager: &Manager,
+    review_id: &str,
+    unkept: Option<&str>,
+) -> Result<String, (&'static str, String)> {
+    let none = |reason: &str| ("none", reason.to_string());
+    let failed = |error: &dyn std::fmt::Display| ("failed", error.to_string());
+    let r = store
+        .get_review(review_id)
+        .map_err(|e| failed(&e))?
+        .ok_or_else(|| none("review not found"))?;
+    let Some(model) = review_model(manager, &r.channel) else {
+        return Err(none(
+            "no review model bound on this channel (phases.review.model)",
+        ));
     };
-    let Ok(Some(r)) = store.get_review(review_id) else {
-        return json!({ "state": "none", "reason": "review not found" });
-    };
-    let source = match manager.snapshot_workspace(&implementing.id).await {
-        Ok(path) => path,
-        Err(error) => return json!({ "state": "failed", "reason": error.to_string() }),
-    };
-    let workspace_id = format!("review-{review_id}");
-    if let Err(error) =
-        crate::workspace::from_snapshot(manager.backend().as_ref(), &workspace_id, &source).await
-    {
-        return json!({ "state": "failed", "reason": error.to_string() });
+    let revision = store
+        .latest_review_revision(review_id)
+        .map_err(|e| failed(&e))?
+        .ok_or_else(|| none("this review has no recorded revision to start a reviewer from"))?;
+    let candidate = store
+        .candidate(&revision.candidate_id)
+        .map_err(|e| failed(&e))?
+        .ok_or_else(|| none("the candidate this review is of is gone"))?;
+    let materialized = serde_json::from_str::<Value>(&candidate.capture_json)
+        .ok()
+        .and_then(|capture| capture["materialized"].as_bool())
+        .unwrap_or(false);
+    if !materialized {
+        return Err(none(&match unkept {
+            Some(why) => format!(
+                "the candidate's files were not kept ({why}), so there is no tree to start a \
+                 reviewer from"
+            ),
+            None => "the candidate's files were not kept, so there is no tree to start a \
+                     reviewer from"
+                .to_string(),
+        }));
     }
+    let mut files = store
+        .candidate_files(&candidate.id)
+        .map_err(|e| failed(&e))?;
+    // The whole diff beside the tree, where the instructions point for the
+    // part they leave out.
+    files.retain(|file| file.path != ".tracon" && file.path != REVIEW_DIFF);
+    files.push(crate::store::CandidateFile {
+        path: REVIEW_DIFF.into(),
+        mode: 0o100644,
+        content: revision.diff.clone().into_bytes(),
+    });
+    let root = std::env::temp_dir()
+        .join("tracon-candidates")
+        .join(uuid::Uuid::now_v7().to_string());
+    let tree_sha = candidate.tree_sha.clone().unwrap_or_default();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let snapshot = review::CandidateSnapshot::materialize(root, tree_sha, files)?;
+        // Writable at its top only, for the repository a session needs.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&snapshot.root, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok::<_, review::ReviewError>(snapshot)
+    })
+    .await
+    .map_err(|e| failed(&e))?
+    .map_err(|e| failed(&e))?;
+    let workspace_id = format!("review-{review_id}");
     let short = &review_id[review_id.len().saturating_sub(12)..];
+    let branch = format!("review/{short}");
+    let git = manager.cfg().live().publish.git.clone();
+    let seeded = match crate::workspace::init_empty_git(&git, &snapshot.root, &branch).await {
+        Ok(()) => {
+            crate::workspace::from_snapshot(
+                manager.backend().as_ref(),
+                &workspace_id,
+                &snapshot.root,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    tokio::task::spawn_blocking(move || drop(snapshot));
+    seeded.map_err(|e| failed(&e))?;
+    let bindings = manager.bindings(&r.channel);
     let spec = crate::session::NewSession {
-        channel: ctx.channel.clone(),
+        channel: r.channel.clone(),
         repo_path: String::new(),
-        branch: Some(format!("review/{short}")),
-        work_item_id: implementing.work_item_id.clone(),
+        branch: Some(branch),
+        // The item this revision was pinned to, not whatever the submitting
+        // session holds now; a harness the operator runs has no session.
+        work_item_id: revision.requirements_work_item_id.clone(),
         workspace_id: Some(workspace_id),
         parent_session: None,
         continued_from: None,
@@ -1996,19 +2195,19 @@ async fn spawn_review_session(
         node_id: None,
         phase: crate::session::Phase::Review,
         review_id: Some(review_id.to_string()),
-        base_sha: Some(r.head_sha.clone()),
+        base_sha: Some(revision.head_sha.clone()),
     };
-    match manager.create(spec).await {
-        Ok(row) => {
-            let _ = store.set_review_session(review_id, &row.id);
-            // What it shows and finds stays about this revision, even after
-            // a resubmission starts another reviewer beside it.
-            let _ = store.review_session_revision_record(&row.id, review_id, revision_id);
-            manager.publish_queue().await;
-            json!({ "state": "started", "session_id": row.id })
-        }
-        Err(e) => json!({ "state": "failed", "reason": e.to_string() }),
+    let row = manager.create(spec).await.map_err(|e| failed(&e))?;
+    store
+        .set_review_session(review_id, &row.id)
+        .map_err(|e| failed(&e))?;
+    // What it shows and finds stays about the revision it was started from,
+    // even after a resubmission starts another reviewer beside it.
+    if let Err(error) = store.review_session_revision_record(&row.id, review_id, &revision.id) {
+        tracing::warn!(%error, review_id, "could not record the revision a reviewer started from");
     }
+    manager.publish_queue().await;
+    Ok(row.id)
 }
 
 /// `review_verdict`: a review session's verdict on the review it was

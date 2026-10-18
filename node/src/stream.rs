@@ -70,9 +70,10 @@ pub enum Frame {
     Promotions {
         waiting: Vec<crate::store::PromotionRow>,
     },
-    /// Unanswered `ask_operator` questions, published when one is asked so the
-    /// notifier hears of it. The interface polls for these instead; this
-    /// node's alone, never forwarded.
+    /// Unanswered `ask_operator` questions, published when one is asked,
+    /// answered or withdrawn, so the notifier hears of it. The interface polls
+    /// for these instead. This node's own questions on a session go to the
+    /// channel's members, who show and answer them as their own.
     Questions {
         waiting: Vec<crate::store::OperatorQuestionRow>,
     },

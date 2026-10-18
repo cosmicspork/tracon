@@ -561,6 +561,18 @@ export interface SinceReviewed {
 export interface ReviewDetails {
   review: Review
   /**
+   * Why no review session is reading it, as the node last found when it
+   * tried. Null when one started, or for a mirrored review; absent from a
+   * node that predates it.
+   */
+  review_session_reason?: string | null
+  /**
+   * Whether this node is starting a review session it has not recorded on
+   * the review yet, as while an external review's files are being kept.
+   * Absent from a node that predates it.
+   */
+  review_session_starting?: boolean
+  /**
    * What this screen is showing. A verdict names it, and the node refuses one
    * that names a revision the review has moved past — the commit alone cannot
    * say, because a resubmission may carry the same one with different
