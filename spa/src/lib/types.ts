@@ -105,6 +105,10 @@ export interface CredentialSummary {
   provider: string | null
   channels: string[]
   nodes: string[]
+  /** Repository paths, or `group/**` prefixes, whose default-branch preparation may borrow it. */
+  repos?: string[]
+  /** The configured `[[repo]]` entries `repos` names now, by path. */
+  covers?: string[]
   identity: string | null
   expires_ms: number | null
   env_keys: string[]
@@ -757,6 +761,13 @@ export interface ReviewIntent {
   squash_onto?: string
   /** The agent's commits beyond the base, oldest first. */
   commits?: ReviewCommit[]
+  /**
+   * Under squash: the message with which the squash is the agent's head but
+   * for its signature, so the head itself ships. Absent when none would.
+   */
+  as_written?: string
+  /** Of `commits`, the signed ones a commit made in publication would replace. */
+  signed?: string[]
 }
 
 export interface ReviewRevisionRef {
@@ -819,6 +830,8 @@ export interface WorkItem {
   deps: string[]
   discovered_from: string | null
   discovered_by_session: string | null
+  /** The lane of the harness outside the boundary that recorded the item, if one did. */
+  discovered_by_lane?: string | null
   phase_plan_slug: string | null
   /** The document holding this item's product brief, when it has one. */
   brief_slug: string | null

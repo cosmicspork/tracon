@@ -1483,6 +1483,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
             priority: c.priority,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .map_err(work_err)?;
@@ -2457,13 +2458,19 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     // the screen edits a copy and sends it back with the verdict.
     // Null for a mirrored review: the owner publishes its revision's own
     // outputs, and a default invented here would be sent back as an edit.
-    let intent = match remote_owner {
-        Some(_) => serde_json::Value::Null,
-        None => json!(crate::authority::revision_intent(
-            s.store(),
-            revision.as_ref().map(|revision| revision.id.as_str()),
-        )
-        .unwrap_or_default()),
+    let revision_intent = match remote_owner {
+        Some(_) => None,
+        None => Some(
+            crate::authority::revision_intent(
+                s.store(),
+                revision.as_ref().map(|revision| revision.id.as_str()),
+            )
+            .unwrap_or_default(),
+        ),
+    };
+    let intent = match &revision_intent {
+        Some(intent) => json!(intent),
+        None => serde_json::Value::Null,
     };
     // What changed since the operator last decided, beside the full diff.
     // Read from the owner's worktree, so a mirror has none.
@@ -2477,9 +2484,14 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     };
     // Who the commits are by, against the account approval would publish as,
     // so a commit the forge would not attribute to it is named before anyone
-    // approves. Node-local: the worktree is here.
+    // approves. Node-local: the worktree is here. On an existing change,
+    // what its branch held at submit is not this review's to answer for.
     let authorship = match (remote_owner.as_ref(), worktree_of(s, r)) {
         (None, Some(worktree)) => {
+            let change = serde_json::from_str::<crate::review::publish::Target>(&r.target)
+                .ok()
+                .zip(revision_intent.as_ref())
+                .and_then(|(target, intent)| crate::review::OnChange::of(&target, intent));
             crate::review::authorship(
                 &s.tools.broker,
                 &r.provider,
@@ -2488,6 +2500,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
                 &worktree,
                 &format!("origin/{}", r.base_ref),
                 &r.head_sha,
+                change.as_ref(),
             )
             .await
         }
@@ -3338,6 +3351,104 @@ pub async fn recover_publication(
                 "approved",
                 waiting_ms,
             );
+            Ok(Json(json!({ "state": "approved", "published": published })))
+        }
+        Err(crate::authority::PublishError::Conflict(message)) => {
+            Err(ApiError(StatusCode::CONFLICT, message))
+        }
+        Err(crate::authority::PublishError::External(message))
+        | Err(crate::authority::PublishError::Uncertain(message)) => {
+            Err(ApiError(StatusCode::BAD_GATEWAY, message))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ReconcileBody {
+    /// The publication record the operator is settling, as the review screen
+    /// showed it.
+    pub publication_id: String,
+    /// The change the operator opened by hand: its web address or number.
+    pub change: String,
+}
+
+/// Record that a publication which stopped after its push was finished by
+/// hand: the operator names the change they opened, and this node asks the
+/// forge whether it is exactly this publication's before settling the review
+/// as published there (`authority::reconcile_publication`). An admin action,
+/// since it settles a review on the operator's say-so about the forge; a
+/// change that does not match is refused and the review is left as it was.
+pub async fn reconcile_publication(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    super::auth::AdminAction(Json(b)): super::auth::AdminAction<Json<ReconcileBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review belongs to another node; reconcile it on the node that owns it".into(),
+        ));
+    }
+    let row = s
+        .store()
+        .publication(&b.publication_id)?
+        .filter(|row| row.review_id == id)
+        .ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            "no such publication for this review".into(),
+        ))?;
+    let revision = match row.revision_id.as_deref() {
+        Some(revision) => s.store().review_revision(revision)?,
+        None => None,
+    };
+    match crate::authority::reconcile_publication(
+        &crate::authority::PublishContext {
+            store: s.store(),
+            manager: &s.manager,
+            broker: &s.tools.broker,
+            cfg: &s.cfg,
+            node_id: &s.node_id,
+        },
+        &r,
+        &row,
+        &b.change,
+    )
+    .await
+    {
+        Ok(published) => {
+            let waiting_ms = record_evidence_decision(
+                s.store(),
+                revision.as_ref(),
+                &id,
+                "approved",
+                Some(&format!(
+                    "reconciled by the operator: published at {published}, opened outside \
+                     this node"
+                )),
+                row.title.as_deref(),
+                row.body.as_deref(),
+                None,
+                None,
+            )?;
+            // The operator's decision, marked as the reconciliation it was
+            // rather than an approval that published.
+            if let Some(session_id) = r.session_id.as_deref() {
+                s.manager.record_event(
+                    session_id,
+                    crate::session::state::event_kind::REVIEW_DECISION,
+                    json!({
+                        "source": "operator",
+                        "review_id": id,
+                        "decision": "approved",
+                        "reconciled": published,
+                        "waiting_ms": waiting_ms,
+                    }),
+                );
+            }
             Ok(Json(json!({ "state": "approved", "published": published })))
         }
         Err(crate::authority::PublishError::Conflict(message)) => {
@@ -4677,6 +4788,7 @@ pub async fn add_work(
             priority: w.priority,
             discovered_from: w.discovered_from,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .map_err(work_err)?;
@@ -5225,10 +5337,27 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
 
 /// What the broker holds: names, kinds, bindings, env key names. Never a
 /// value — the response shape is the broker's `summaries`, which cannot
-/// carry one.
+/// carry one. Each also lists the `[[repo]]` entries its `repos` covers,
+/// since a group prefix reaches repositories nobody wrote down.
 pub async fn list_credentials(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let state = Config::state_dir();
+    let root = crate::forge::managed_root(&state);
+    let clones: Vec<std::path::PathBuf> = crate::forge::managed_repos(&state)
+        .into_iter()
+        .map(|r| root.join(&r.host).join(&r.owner).join(&r.name))
+        .collect();
+    let entries = s.cfg.repos();
     let b = s.tools.broker.read().unwrap();
-    Ok(Json(json!({ "credentials": b.summaries() })))
+    let mut summaries = b.summaries();
+    for summary in &mut summaries {
+        let covers = summary["name"]
+            .as_str()
+            .and_then(|name| b.get(name))
+            .map(|cred| cred.covers(&entries, &clones))
+            .unwrap_or_default();
+        summary["covers"] = json!(covers);
+    }
+    Ok(Json(json!({ "credentials": summaries })))
 }
 
 /// The channels a credential is asked to serve: at least one, each a
@@ -6675,6 +6804,67 @@ pub async fn import_credentials(
     };
     // Names only: a value that went in never comes back out.
     Ok(Json(json!({ "imported": names })))
+}
+
+/// Remove one sealed credential from the running broker and its store. An
+/// admin action, as importing one is: revoking a credential at the node is
+/// the only removal that takes effect at once, since a node brokers the copy
+/// it holds, not the file.
+pub async fn delete_credential(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    remove_credential(&s, &name).map(Json)
+}
+
+/// `DELETE /api/credentials/import`: the import route is a static one, and
+/// would otherwise answer a credential named `import` with a 405.
+pub async fn delete_credential_named_import(
+    State(s): State<AppState>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    remove_credential(&s, "import").map(Json)
+}
+
+/// Staged, saved, then swapped in, as a forge token's removal is. The removal
+/// is this node's alone: the mesh has no revocation, so the other nodes the
+/// credential lists keep the copies they were handed, and the answer names
+/// them.
+fn remove_credential(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
+    let key = crate::mesh::identity::load_or_generate()
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .0
+        .credential_store_key();
+    let removed = {
+        let mut broker = s.tools.broker.write().unwrap();
+        let mut staged = broker.clone();
+        let Some(removed) = staged.get(name).cloned() else {
+            return Err(ApiError(
+                StatusCode::NOT_FOUND,
+                format!("no credential named {name}"),
+            ));
+        };
+        staged.remove(name);
+        staged
+            .save(&key)
+            .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        *broker = staged;
+        removed
+    };
+    // A provider's credential goes the way a disconnect takes it, so the
+    // providers frame and what peers are told catch up now rather than at
+    // the next publish. Not a refusal: revoking a leaked token stays one
+    // command.
+    if let (Some(provider), Some(providers)) = (&removed.provider, s.manager.providers()) {
+        providers.credential_removed(provider);
+    }
+    let still_held_by: Vec<&String> = removed
+        .nodes
+        .iter()
+        .filter(|node| **node != s.node_id)
+        .collect();
+    Ok(json!({ "removed": name, "still_held_by": still_held_by }))
 }
 
 #[derive(Deserialize)]

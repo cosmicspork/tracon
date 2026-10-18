@@ -22,15 +22,12 @@ pub fn definitions() -> Vec<Value> {
              operator returns `awaiting_operator` with an `approval_id` and has NOT run; \
              when the operator allows it, the node runs it and keeps the result here. Pass \
              `approval_id`, or `approval_ids` to wait on several: the call returns as soon \
-             as any of them is decided, or after up to {MAX_WAIT_SECS} seconds, with every \
-             id's state — `still_waiting`, `running`, `succeeded` with the tool's result, \
-             `failed` or `uncertain` with the reason, `rejected` with the operator's reason, \
-             `changes_requested` with their `notes`, or `expired`. A rejected or \
-             changes_requested call did not run: revise it as the operator said and call \
-             the tool again, which asks anew. Call again to keep waiting, or, in a session \
-             the node runs, end your turn: the session stays open while a call you asked \
-             for waits on the operator, and the node brings what became of it back to you \
-             as your next prompt."
+             as any of them is decided, with every id's state — `still_waiting`, `running`, \
+             `succeeded` with the tool's result, `failed` or `uncertain` with the reason, \
+             `rejected` with the operator's reason, `changes_requested` with their `notes`, \
+             or `expired`. A rejected or changes_requested call did not run: revise it as \
+             the operator said and call the tool again, which asks anew. {}",
+            super::wait::pointer()
         ),
         "inputSchema": {
             "type": "object",

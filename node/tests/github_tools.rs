@@ -852,3 +852,129 @@ async fn offered_schemas_hold_no_null() {
         assert!(found.is_empty(), "nulls offered: {found:?}");
     }
 }
+
+/// A session in each phase, on the rig's channel: `plan`, `exec` and
+/// `review`, each in that phase.
+async fn phase_rig() -> Arc<Tools> {
+    let (t, _) = session_rig(r#""run_status""#).await;
+    let store = &t.session.get().unwrap().store;
+    for (id, phase) in [("plan", "plan"), ("exec", "execute"), ("review", "review")] {
+        let mut row = support::rows::session_row(id, "n1", "work");
+        row.phase = phase.into();
+        store.insert_session(&row).unwrap();
+    }
+    t
+}
+
+/// The names `tools/list` answers the caller with, in order.
+async fn listed(t: &Tools, c: &CallContext) -> Vec<String> {
+    let res = t
+        .handle(c, &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+        .await
+        .unwrap();
+    res["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Each phase is offered its own list and nothing else, narrowed again to
+/// what the channel has credentials for: a plan session is not handed the
+/// tools that submit, merge or set a repository up.
+#[tokio::test]
+async fn each_phase_lists_exactly_its_tools_of_the_channels() {
+    state::isolate();
+    let t = phase_rig().await;
+    let channel: Vec<String> = t
+        .list("work", "n1")
+        .iter()
+        .map(|d| d["name"].as_str().unwrap().to_string())
+        .collect();
+    let narrowed = |offers: &dyn Fn(&str) -> bool| -> Vec<String> {
+        channel.iter().filter(|n| offers(n)).cloned().collect()
+    };
+    let plan = listed(&t, &CallContext::session("plan", "work", "n1")).await;
+    assert_eq!(plan, narrowed(&|n| Tools::PLAN_TOOLS.contains(&n)));
+    // The channel has GitHub and no GitLab or Jira: GitHub's reading tools
+    // are there, its writes are not, and nothing of the others is.
+    for offered in [
+        "doc_write",
+        "ask_operator",
+        "work_discover",
+        "pr_status",
+        "run_wait",
+    ] {
+        assert!(
+            plan.iter().any(|n| n == offered),
+            "{offered} not in {plan:?}"
+        );
+    }
+    for withheld in [
+        "work_close",
+        "submit_review",
+        "pr_merge",
+        "pr_comment",
+        "run_dispatch",
+        "repo_setup_draft",
+        "request_egress",
+        "show_work",
+        "brief_note",
+        "criteria_link",
+        "review_verdict",
+        "mr_status",
+        "issue",
+    ] {
+        assert!(
+            !plan.iter().any(|n| n == withheld),
+            "{withheld} in {plan:?}"
+        );
+    }
+
+    let exec = listed(&t, &CallContext::session("exec", "work", "n1")).await;
+    assert_eq!(exec, narrowed(&|n| n != "review_verdict"));
+
+    let review = listed(&t, &CallContext::session("review", "work", "n1")).await;
+    assert_eq!(review, narrowed(&|n| Tools::REVIEW_TOOLS.contains(&n)));
+
+    let external = listed(&t, &CallContext::external(None, "work", "n1")).await;
+    assert_eq!(external, narrowed(&|n| !Tools::NOT_EXTERNAL.contains(&n)));
+    for withheld in [
+        "review_verdict",
+        "brief_read",
+        "brief_note",
+        "criteria_read",
+        "criteria_link",
+    ] {
+        assert!(
+            !external.iter().any(|n| n == withheld),
+            "{withheld} in {external:?}"
+        );
+    }
+    assert!(
+        external.iter().any(|n| n == "submit_review"),
+        "{external:?}"
+    );
+}
+
+/// A tool a phase is not offered is refused when called, not only left off
+/// the list, and the refusal names the phase.
+#[tokio::test]
+async fn a_plan_session_calling_work_close_or_submit_review_is_refused() {
+    state::isolate();
+    let t = phase_rig().await;
+    let plan = CallContext::session("plan", "work", "n1");
+    for (tool, args) in [
+        ("work_close", json!({ "summary": "done" })),
+        ("submit_review", json!({ "title": "t", "body": "b" })),
+    ] {
+        let (err, v) = call(&t, &plan, tool, args).await;
+        assert!(err, "{v}");
+        assert!(
+            v.to_string()
+                .contains(&format!("{tool} is not offered in a plan session")),
+            "{v}"
+        );
+    }
+}

@@ -835,6 +835,7 @@ mod tests {
             deps: vec![],
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
             phase_plan_slug: None,
             brief_slug: None,
             closed_by_session: None,
@@ -1105,6 +1106,7 @@ mod tests {
                 priority: 0,
                 discovered_from: None,
                 discovered_by_session: None,
+                discovered_by_lane: None,
             },
         )
         .unwrap();

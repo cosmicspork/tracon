@@ -113,7 +113,7 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                             "draft": { "type": "boolean", "description": "Open the new change as a draft. Not for an existing change." },
                         },
                     },
-                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message (else the description's, else title and body); a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it." },
+                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message (else the description's, else title and body); a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it. To ship your own signed commit as written, with its SHA and signature, make it the one commit on the base (or on what the change's branch holds) and pass its exact message here; otherwise a new, unsigned commit ships." },
                     "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title when that is the node's placeholder. Fixed by the first submit of a review. An existing change is pushed to its own branch whatever your worktree's is called." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds: the change's head, or for a branch pushed before its change opened, whatever the branch holds now. Forced only over what it held at submit, and always approved by the operator." },
                 },
@@ -140,20 +140,14 @@ pub fn definitions(browser: bool) -> Vec<Value> {
         json!({
             "name": STATUS,
             "description": format!(
-                "Wait for a review's verdict and return it. Blocks until the review is \
-                 decided or the wait elapses, whichever comes first. The wait is capped \
-                 at {MAX_WAIT_SECS} seconds so the call always returns before an MCP \
-                 client gives up on it; a human takes far longer than that, so expect to \
-                 poll — while the review is undecided this returns `still_waiting` with \
-                 the current state, and you call it again. A submission whose required \
-                 checks are still running reads `still_waiting` with `state: \"checking\"` \
-                 and how long they have run; if they fail it returns `state: \
-                 \"submit_failed\"` with the same message submit_review would have \
-                 refused with, and nothing was submitted. On approval the node publishes \
-                 the approved text itself and returns where it landed. In a session the \
-                 node runs you need not poll: end your turn and the session stays open \
-                 while the review is undecided, and the node brings its outcome back to \
-                 you as your next prompt."
+                "Wait for a review's verdict and return it: `still_waiting` with the current \
+                 state while the review is undecided. A submission whose required checks are \
+                 still running reads `still_waiting` with `state: \"checking\"` and how long \
+                 they have run; if they fail it returns `state: \"submit_failed\"` with the \
+                 same message submit_review would have refused with, and nothing was \
+                 submitted. On approval the node publishes the approved text itself and \
+                 returns where it landed. {}",
+                 super::wait::pointer()
             ),
             "inputSchema": {
                 "type": "object",
@@ -166,12 +160,12 @@ pub fn definitions(browser: bool) -> Vec<Value> {
         }),
         json!({
             "name": REPORT_STATUS,
-            "description": "Wait for a standalone report's operator decision. It never publishes \
-                            code. An acknowledgement records receipt only; requested changes \
-                            returns notes for a new submit_report with the same report_id. In a \
-                            session the node runs you need not poll: end your turn and the \
-                            session stays open until the operator decides, and the node brings \
-                            the decision back to you as your next prompt.",
+            "description": format!(
+                "Wait for a standalone report's operator decision. It never publishes code. An \
+                 acknowledgement records receipt only; requested changes returns notes for a \
+                 new submit_report with the same report_id. {}",
+                super::wait::pointer()
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -488,18 +482,6 @@ async fn submit(
         ),
     };
     let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
-    // Who the commits are by, against the account the review publishes as.
-    // Named, never rewritten: re-authoring is the agent's or operator's step.
-    let authorship = review::authorship(
-        manager.broker(),
-        &provider,
-        &ctx.channel,
-        &ctx.node_id,
-        &worktree,
-        &range_base,
-        &capture.head_sha,
-    )
-    .await;
 
     // The cap, before anything else: complexity accretes because nothing says
     // no at submission time. A resubmission is capped the same way.
@@ -643,6 +625,21 @@ async fn submit(
     )
     .await?;
     intent.commits = commits;
+    // Who the commits are by, against the account the review publishes as.
+    // Named, never rewritten: re-authoring is the agent's or operator's step.
+    // On an existing change, only what this submission adds over what the
+    // change's branch holds is the submission's to answer for.
+    let authorship = review::authorship(
+        manager.broker(),
+        &provider,
+        &ctx.channel,
+        &ctx.node_id,
+        &worktree,
+        &range_base,
+        &capture.head_sha,
+        review::OnChange::of(&target, &intent).as_ref(),
+    )
+    .await;
     if squash {
         // Onto what the branch holds when the push adds to it; otherwise
         // where the branch leaves its base, so the change is exactly the
@@ -664,6 +661,9 @@ async fn submit(
             _ => intent.squash_onto = Some(leaves),
         }
     }
+    shipping(&worktree, &capture.head_sha, &mut intent)
+        .await
+        .map_err(|e| e.to_string())?;
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     let max_snapshot_bytes = manager.cfg().live().supervision.max_snapshot_bytes;
     // Capture the committed candidate before any check can execute. The
@@ -943,7 +943,8 @@ impl Submission {
             retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
             manager.publish_queue().await;
             let reviewer =
-                spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref()).await;
+                spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref())
+                    .await;
             return Ok(json!({
                 "review_id": id,
                 "state": "new",
@@ -1018,7 +1019,7 @@ impl Submission {
         retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
         manager.publish_queue().await;
         let reviewer =
-                spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref()).await;
+            spawn_review_session(store, manager, ctx, &id, &revision.id, session.as_ref()).await;
 
         Ok(json!({
             "review_id": id,
@@ -1322,6 +1323,44 @@ fn stored_target(store: &Store, review: &ReviewRow) -> Result<Target, String> {
     )
 }
 
+/// Which of the agent's commits a commit made in publication would replace
+/// with their signatures, and under squash the message that ships the head
+/// itself, so the operator sees before approving whether what ships is the
+/// agent's commit or a new one (#551).
+async fn shipping(
+    worktree: &str,
+    head_sha: &str,
+    intent: &mut review::publish::Intent,
+) -> Result<(), review::ReviewError> {
+    for commit in &intent.commits {
+        let raw = review::raw_commit(worktree, &commit.sha).await?;
+        let replaced = match &intent.squash_onto {
+            Some(onto) => !review::descends_from(worktree, onto, &commit.sha).await,
+            None => true,
+        };
+        if replaced && review::publish::is_signed(&raw) {
+            intent.signed.push(commit.sha.clone());
+        }
+        let Some(onto) = intent
+            .squash_onto
+            .as_deref()
+            .filter(|_| commit.sha == head_sha)
+        else {
+            continue;
+        };
+        // A head with the tree it sits on is no revision: the squash
+        // pushes nothing new, and the head does not ship either.
+        let tree = |raw: &[u8]| raw.split(|b| *b == b'\n').next().map(<[u8]>::to_vec);
+        let onto_tree = review::raw_commit(worktree, onto).await.ok();
+        if onto_tree.as_deref().map(tree) == Some(tree(&raw)) {
+            continue;
+        }
+        intent.as_written =
+            review::publish::as_written(&raw, onto, intent.squash_merges.as_deref());
+    }
+    Ok(())
+}
+
 /// Settle what this revision may do on the forge, asking the forge rather
 /// than finding out after the operator approved. An existing change must be
 /// open and of this repository into this base, and is pushed to on its own
@@ -1449,20 +1488,35 @@ async fn forge_intent(
     let lease = state.head_sha;
     let mut builds_on =
         lease == head_sha || review::descends_from(worktree, head_sha, &lease).await;
+    let mut held = builds_on.then(|| lease.clone());
     // What the branch holds may be this node's own earlier squash, which
     // the agent never had: building on the commit that squash was made from
-    // is building on it.
+    // is building on it, and that commit is what stands for the branch here.
     if let (false, Some(store)) = (builds_on, squashed_by) {
         let pushed = store
             .publications_that_pushed(&ctx.channel, &target.project, &lease)
             .map_err(|e| e.to_string())?;
-        for publication in pushed {
+        for publication in &pushed {
             let from = &publication.head_sha;
             if from == head_sha || review::descends_from(worktree, head_sha, from).await {
                 builds_on = true;
+                held = Some(from.clone());
                 break;
             }
         }
+        // A rewrite builds on none of them, but what the branch held is
+        // still named by whichever this worktree has.
+        if held.is_none() && !review::holds_commit(worktree, &lease).await {
+            for publication in pushed {
+                if review::holds_commit(worktree, &publication.head_sha).await {
+                    held = Some(publication.head_sha);
+                    break;
+                }
+            }
+        }
+    }
+    if held.is_none() && review::holds_commit(worktree, &lease).await {
+        held = Some(lease.clone());
     }
     if !builds_on && !rewrite {
         return Err(format!(
@@ -1477,6 +1531,7 @@ async fn forge_intent(
         // A branch that builds on what the change holds is a fast-forward,
         // whatever was asked: nothing is thrown away, so nothing is forced.
         rewrite: rewrite && !builds_on,
+        held,
         ..Intent::default()
     })
 }
@@ -1972,8 +2027,7 @@ async fn verdict(
         .ok_or("this session is gone")?;
     if session.phase != "review" {
         return Err(
-            "only a review session gives a verdict; submit_review is what an execute session calls"
-                .into(),
+            "only a review session gives a verdict; an execute session calls submit_review".into(),
         );
     }
     let review_id = session
@@ -2073,7 +2127,10 @@ fn finding(
     let latest = store
         .latest_review_revision(&review_id)
         .map_err(|e| e.to_string())?;
-    if latest.as_ref().is_some_and(|latest| latest.id != revision.id) {
+    if latest
+        .as_ref()
+        .is_some_and(|latest| latest.id != revision.id)
+    {
         return Err(format!(
             "{review_id} has moved past the candidate you exercised ({}): it was resubmitted \
              after you started, so a finding from you would describe a change no longer under \
@@ -2406,7 +2463,7 @@ mod tests {
 
     #[test]
     fn the_cap_is_what_the_tool_description_promises() {
-        let def = definitions()
+        let def = definitions(false)
             .into_iter()
             .find(|d| d["name"] == STATUS)
             .expect("review_status is defined");
@@ -2423,7 +2480,7 @@ mod tests {
     /// with notes for the operator sent to `show_work` instead.
     #[test]
     fn submit_says_who_reads_what_reaches_the_forge() {
-        let def = definitions()
+        let def = definitions(false)
             .into_iter()
             .find(|d| d["name"] == SUBMIT)
             .expect("submit_review is defined");

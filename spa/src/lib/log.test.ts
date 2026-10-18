@@ -159,6 +159,15 @@ test('the worktree line names the source and says only what the node recorded', 
     'host worktree · /w/orbit · on feat/x · from origin/main · main checkout is dirty and was left alone',
   )
   expect(worktreeLine({})).toBe('workspace')
+  // A managed clone that could not be fetched says its base is stale.
+  expect(
+    worktreeLine({
+      branch: 'feat/x',
+      source: 'imported',
+      synced: { source_ref: 'origin/main', stale: 'stale: last fetched at 2026-10-07 12:00 UTC; the fetch failed: x' },
+    }),
+  ).toBe('workspace imported · on feat/x · stale: last fetched at 2026-10-07 12:00 UTC; the fetch failed: x')
+  expect(worktreeLine({ source: 'imported', synced: { stale: null } })).toBe('workspace imported')
 })
 
 test('the start line says which image the harness is in only when it matters', () => {
@@ -307,6 +316,11 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['candidate_verified', { candidate_id: 'c', head_sha: '8c4be91f03a2d6e7b5c1', reused: true }, 'checks passed · at 8c4be91f03a2 · evidence reused'],
     ['review_decision', { source: 'operator', review_id: 'r', decision: 'approved', waiting_ms: 720_000 }, 'review approved · by the operator · after 12m waiting'],
     ['review_decision', { decision: 'revise', waiting_ms: 5000 }, 'review sent back with notes · by the operator · after 5s waiting'],
+    [
+      'review_decision',
+      { source: 'operator', review_id: 'r', decision: 'approved', reconciled: 'https://forge.test/pull/7' },
+      'review recorded as published · at https://forge.test/pull/7 · by the operator',
+    ],
     ['uncertain', { reason: 'the prompt never reported', refusing: 'prompt' }, 'outcome unknown · the prompt never reported · new prompts refused until it settles'],
     ['uncertain', { cleared: 'the turn ended' }, 'outcome settled · the turn ended'],
     ['pty_opened', { phase: 'spawn', command: 'bash', args: ['-l'], cwd: '/w' }, 'terminal opened · bash -l · in /w · what is typed in it is not recorded'],

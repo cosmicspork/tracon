@@ -1061,7 +1061,8 @@ default branch, made when the repository's image is built — so a candidate's i
 which may run the candidate's own scripts, can reach its own evidence and nobody else's.
 That warm-up is also the only preparation lent a registry credential: the entry's
 `prepare_credentials` name `env` credentials in the broker, each of which must name the
-repository in its own `repos`, and their environment goes into the warm-up's commands
+repository in its own `repos` (by path, or by a `group/**` prefix matched segment by
+segment), and their environment goes into the warm-up's commands
 and is taken out of what they print. It travels as secret environment
 (`RunnerCommand::secret_env`), as every egress grant's proxy URL does, since that URL
 carries the grant's password. Neither is ever written where another reader finds it.
@@ -1263,7 +1264,12 @@ default, the publisher makes one commit holding exactly the reviewed tree, on
 the commit pinned at submit — where the branch leaves its base for a new
 branch, or what the change's branch holds for an update, including an earlier
 squash the agent never had — with the candidate head's author and dates, so a
-resumed attempt makes the identical commit. `keep` pushes the agent's commits
+resumed attempt makes the identical commit. When the agent's own head already
+is that commit but for its signature (one commit whose parents are that commit
+and, for an update that merged its base, the base it merged; the message
+unchanged), its head is pushed instead, so the signature survives; a commit
+the publisher makes is never signed. The review says before approval which
+of the two ships, and which signatures a new commit drops. `keep` pushes the agent's commits
 as written, unless the operator edited a commit's message (`messages` in the
 approved outputs, by the commit's sha): then that commit and those after it are
 remade in the publisher with the same trees, authors, committers and dates and

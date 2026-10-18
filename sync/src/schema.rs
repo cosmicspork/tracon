@@ -209,6 +209,13 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE document ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
     "#,
+    // Step 7: the lane of the harness outside the boundary that recorded an
+    // item, so what an agent added reads apart from what the operator did.
+    // Null for every other item. A peer that predates the column leaves the
+    // field out of its rows, so a row from one keeps what this replica holds.
+    r#"
+    ALTER TABLE work_item ADD COLUMN discovered_by_lane TEXT;
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.

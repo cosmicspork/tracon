@@ -50,6 +50,7 @@ fn new_item(h: &Harness, title: &str, deps: Vec<String>) -> tracon_sync::work::W
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap()

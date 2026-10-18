@@ -193,6 +193,12 @@ pub struct Intent {
     /// of `lease` and is forced — but only over `lease`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rewrite: bool,
+    /// The commit this worktree holds that stands for `lease` on an existing
+    /// change: `lease` itself, or the revision an earlier squash pushed as
+    /// `lease` was made from, which is all the agent ever had of it. Absent
+    /// when the worktree holds neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
     /// The commit the reviewed tree is squashed onto: `lease` when the push
     /// adds to what the branch holds, else where the branch leaves its base.
     /// Absent pushes the agent's commits as written.
@@ -209,6 +215,18 @@ pub struct Intent {
     /// the diff.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<super::prose::CommitLine>,
+    /// Under squash: the message with which the squash is the agent's head
+    /// but for its signature (`as_written`), so the head itself ships and
+    /// keeps its SHA. Absent when no message would make it so. The screen
+    /// compares the message the operator approves with it to say which
+    /// commit ships.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_written: Option<String>,
+    /// Those of `commits` that carry a signature and that a commit made in
+    /// publication would replace: under squash, those not already on what
+    /// it squashes onto. A commit made in publication is never signed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed: Vec<String>,
 }
 
 /// What the forge says about an existing change.
@@ -216,6 +234,8 @@ pub struct Intent {
 pub struct ChangeState {
     pub url: String,
     pub open: bool,
+    /// Closed by merging, as opposed to closed and left.
+    pub merged: bool,
     pub source_branch: String,
     pub target_branch: String,
     /// The change's source branch lives in another repository (a fork).
@@ -247,6 +267,35 @@ impl ChangeState {
         } else {
             None
         }
+    }
+
+    /// Why this change is not the one a publication of `target` would have
+    /// opened for `pushed`, if it is not: the same checks an update is held
+    /// to, except that a merged change counts, and its head must be exactly
+    /// the commit that was pushed. Each names what the forge holds instead.
+    pub fn reconcile_refusal(
+        &self,
+        provider: Provider,
+        target: &Target,
+        number: u64,
+        pushed: &str,
+    ) -> Option<String> {
+        let noun = provider.noun();
+        if !self.open && !self.merged {
+            return Some(format!("{noun} {number} was closed without being merged"));
+        }
+        let landed = Self {
+            open: true,
+            ..self.clone()
+        };
+        landed.refusal(provider, target, number).or_else(|| {
+            (self.head_sha != pushed).then(|| {
+                format!(
+                    "{noun} {number}'s head is {:.8}, not {pushed:.8} that this publication pushed",
+                    self.head_sha
+                )
+            })
+        })
     }
 }
 
@@ -753,7 +802,7 @@ async fn attempt(
 
 /// The number a forge gives a change, from its web address: the last path
 /// segment of `…/pull/7` or `…/-/merge_requests/7`.
-fn change_number(url: &str) -> Option<u64> {
+pub fn change_number(url: &str) -> Option<u64> {
     url.trim()
         .trim_end_matches('/')
         .rsplit('/')
@@ -847,6 +896,8 @@ pub async fn change_state(
         Provider::Github => ChangeState {
             url: text("/html_url"),
             open: text("/state") == "open",
+            merged: v.get("merged").and_then(Value::as_bool).unwrap_or(false)
+                || v.get("merged_at").is_some_and(Value::is_string),
             source_branch: text("/head/ref"),
             target_branch: text("/base/ref"),
             cross_repository: !text("/head/repo/full_name").eq_ignore_ascii_case(&target.project),
@@ -855,6 +906,7 @@ pub async fn change_state(
         Provider::Gitlab => ChangeState {
             url: text("/web_url"),
             open: text("/state") == "opened",
+            merged: text("/state") == "merged",
             source_branch: text("/source_branch"),
             target_branch: text("/target_branch"),
             cross_repository: v.get("source_project_id") != v.get("target_project_id"),
@@ -1170,7 +1222,86 @@ async fn squash_commit(
     if tree != p.reviewed_tree {
         return Err(PublishError::IdentityChanged);
     }
+    // The agent's own commit may already be exactly this one: one commit on
+    // `onto`, the message unchanged. Pushing it keeps its signature, which a
+    // commit made here never has (#551).
+    if signed_as(git, publisher, p.head_sha, &made).await? {
+        return Ok(p.head_sha.to_string());
+    }
     Ok(made)
+}
+
+/// Whether `original` is `made` but for a signature: the same commit object
+/// once its `gpgsig` headers are dropped. Then `original` is what would ship
+/// anyway, and pushing it keeps the signature. Compared byte for byte, so it
+/// decides the same way on a resumed attempt.
+async fn signed_as(
+    git: &str,
+    publisher: &Path,
+    original: &str,
+    made: &str,
+) -> Result<bool, PublishError> {
+    if original == made {
+        return Ok(true);
+    }
+    let original = publisher_raw(git, publisher, ["cat-file", "commit", original]).await?;
+    let made = publisher_raw(git, publisher, ["cat-file", "commit", made]).await?;
+    Ok(unsigned(&original) == made)
+}
+
+/// The message that makes a squash onto `onto` (and `merges`) the commit
+/// `raw` already is but for its signature, so that commit ships as written.
+/// It mirrors what `squash_commit` makes: `tree`, those parents, `author`,
+/// `committer`, a blank line, then the trimmed message and one newline.
+/// None when no message would: another parent, a header the squash never
+/// writes, or a message the squash's trimming would change.
+pub fn as_written(raw: &[u8], onto: &str, merges: Option<&str>) -> Option<String> {
+    let raw = unsigned(raw);
+    let at = raw.windows(2).position(|w| w == b"\n\n")?;
+    let mut lines = std::str::from_utf8(&raw[..at]).ok()?.split('\n');
+    lines.next()?.strip_prefix("tree ")?;
+    for parent in std::iter::once(onto).chain(merges) {
+        if lines.next()?.strip_prefix("parent ")? != parent {
+            return None;
+        }
+    }
+    lines.next()?.strip_prefix("author ")?;
+    lines.next()?.strip_prefix("committer ")?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let message = std::str::from_utf8(&raw[at + 2..])
+        .ok()?
+        .strip_suffix('\n')?;
+    (!message.is_empty() && message.trim() == message).then(|| message.to_string())
+}
+
+/// Whether a raw commit object carries a signature.
+pub fn is_signed(raw: &[u8]) -> bool {
+    unsigned(raw).len() != raw.len()
+}
+
+/// A raw commit object without its `gpgsig` and `gpgsig-sha256` headers and
+/// their continuation lines. Everything else, the message included, is kept
+/// as stored.
+fn unsigned(raw: &[u8]) -> Vec<u8> {
+    let end = raw
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map_or(raw.len(), |at| at + 1);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut in_signature = false;
+    for line in raw[..end].split_inclusive(|b| *b == b'\n') {
+        if line.starts_with(b" ") && in_signature {
+            continue;
+        }
+        in_signature = line.starts_with(b"gpgsig ") || line.starts_with(b"gpgsig-sha256 ");
+        if !in_signature {
+            out.extend_from_slice(line);
+        }
+    }
+    out.extend_from_slice(&raw[end..]);
+    out
 }
 
 /// Whether the publisher repository holds `commit`, fetching what the forge's
@@ -1769,6 +1900,55 @@ async fn output(cli: &str, mut command: Command) -> Result<String, PublishError>
 mod tests {
     use super::*;
 
+    /// Only the signature headers go, continuation lines and all; a message
+    /// line that merely looks like one is the message's.
+    #[test]
+    fn a_commit_without_its_signature_keeps_every_other_byte() {
+        let signed = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\
+\nsubject\n\ngpgsig in the body\n";
+        let bare = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+\nsubject\n\ngpgsig in the body\n";
+        assert_eq!(unsigned(signed), bare.to_vec());
+        assert_eq!(unsigned(bare), bare.to_vec());
+        assert!(is_signed(signed));
+        assert!(!is_signed(bare));
+    }
+
+    /// The message a squash must carry to remake a commit is its own, and
+    /// only for a commit the squash could make at all: on those parents, with
+    /// no header the squash never writes.
+    #[test]
+    fn a_commit_ships_as_written_only_on_the_squash_parents() {
+        let one = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+gpgsig -----BEGIN SSH SIGNATURE-----\n abc\n -----END SSH SIGNATURE-----\n\
+\nsubject\n\nbody\n";
+        assert_eq!(
+            as_written(one, "p", None).as_deref(),
+            Some("subject\n\nbody")
+        );
+        assert_eq!(as_written(one, "q", None), None, "another parent");
+        assert_eq!(as_written(one, "p", Some("m")), None, "a merge it lacks");
+        let merged = b"tree t\nparent p\nparent m\nauthor a <a@e> 1 +0000\n\
+committer a <a@e> 1 +0000\n\nmerge\n";
+        assert_eq!(as_written(merged, "p", Some("m")).as_deref(), Some("merge"));
+        assert_eq!(as_written(merged, "p", None), None);
+        let encoded = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+encoding ISO-8859-1\n\nsubject\n";
+        assert_eq!(
+            as_written(encoded, "p", None),
+            None,
+            "a header it never writes"
+        );
+        let padded = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
+\nsubject\n\n";
+        assert_eq!(
+            as_written(padded, "p", None),
+            None,
+            "a message trimming changes"
+        );
+    }
+
     fn publication<'a>(
         target: &'a Target,
         outputs: &'a Outputs,
@@ -2037,5 +2217,49 @@ mod tests {
     fn an_unknown_outcome_is_neither_success_nor_failure() {
         assert!(PublishError::Unknown("x".into()).is_unknown());
         assert!(!PublishError::IdentityChanged.is_unknown());
+    }
+
+    #[test]
+    fn a_change_reconciles_open_or_merged_but_only_at_the_pushed_commit() {
+        let target = Target {
+            provider: "github".into(),
+            project: "owner/name".into(),
+            base: "main".into(),
+            branch: "feat/x".into(),
+            worktree: None,
+            change: None,
+        };
+        let state = ChangeState {
+            url: "https://github.test/pull/7".into(),
+            open: false,
+            merged: true,
+            source_branch: "feat/x".into(),
+            target_branch: "main".into(),
+            cross_repository: false,
+            head_sha: "abc123".into(),
+        };
+        let gh = Provider::Github;
+        assert_eq!(state.reconcile_refusal(gh, &target, 7, "abc123"), None);
+        let moved = state.reconcile_refusal(gh, &target, 7, "def456").unwrap();
+        assert!(
+            moved.contains("abc123") && moved.contains("def456"),
+            "{moved}"
+        );
+        let closed = ChangeState {
+            merged: false,
+            ..state.clone()
+        };
+        assert!(closed
+            .reconcile_refusal(gh, &target, 7, "abc123")
+            .unwrap()
+            .contains("closed without being merged"));
+        let elsewhere = ChangeState {
+            target_branch: "release".into(),
+            ..state
+        };
+        assert!(elsewhere
+            .reconcile_refusal(gh, &target, 7, "abc123")
+            .unwrap()
+            .contains("merges into release, not main"));
     }
 }

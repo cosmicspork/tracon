@@ -183,6 +183,7 @@ async fn approvals_and_tokens_per_accepted_change_are_numbers_you_can_read() {
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();

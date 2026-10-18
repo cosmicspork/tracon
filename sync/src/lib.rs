@@ -89,6 +89,7 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "deps_json",
             "discovered_from",
             "discovered_by_session",
+            "discovered_by_lane",
             "phase_plan_slug",
             "brief_slug",
             "closed_by_session",

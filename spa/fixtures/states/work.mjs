@@ -30,6 +30,8 @@ const ID = {
   mesh: 'f3a8d1c6e72b0954',
   audit: '0c4f9e7a2d61b835',
   long: 'a9e1c4f7b2d06358',
+  laned: '6d2b8f0e4a7c1953',
+  lanedChild: 'b4e8a1d6f03c7295',
 }
 const SID = {
   plan: '3f9a2c71e0b4d865',
@@ -51,6 +53,7 @@ const item = (o) => ({
   deps: [],
   discovered_from: null,
   discovered_by_session: null,
+  discovered_by_lane: null,
   phase_plan_slug: null,
   brief_slug: null,
   closed_by_session: null,
@@ -628,6 +631,33 @@ const states = [
     api: itemApi(ledger.find((i) => i.id === ID.export), {
       continuation: continuation(ledger.find((i) => i.id === ID.export), { decisions: { plan: null, brief: null, answered: [] } }),
     }),
+  },
+  // An external harness records work with work_discover from its own worktree:
+  // the node binds the item to that worktree's project and names the lane, and
+  // no node session is behind it.
+  {
+    id: 'work-item-discovered-by-lane',
+    area: 'work',
+    route: `/tasks/${ID.laned}`,
+    title: 'Recorded by an external harness, no parent',
+    since: '#510',
+    note: 'standalone "Discovered by" row naming lane repo:planning; no "Discovered from" row; bound to project orbit like any worktree-bound item',
+    api: (() => {
+      const it = item({ id: ID.laned, title: 'Split the planning notes into one doc per milestone', discovered_by_lane: 'repo:planning', created_ms: -20 * M })
+      return itemApi(it, { continuation: continuation(it, { decisions: { plan: null, brief: null, answered: [] } }) })
+    })(),
+  },
+  {
+    id: 'work-item-discovered-from-by-lane',
+    area: 'work',
+    route: `/tasks/${ID.lanedChild}`,
+    title: 'Recorded by an external harness under a parent',
+    since: '#510',
+    note: '"Discovered from" row links the parent and ends "· by lane repo:planning"; no session link, since no node session recorded it',
+    api: (() => {
+      const it = item({ id: ID.lanedChild, title: 'Link each milestone doc from the roadmap', discovered_from: ID.limits, discovered_by_lane: 'repo:planning', created_ms: -15 * M })
+      return itemApi(it, { continuation: continuation(it, { decisions: { plan: null, brief: null, answered: [] } }) })
+    })(),
   },
   {
     id: 'work-item-planned',

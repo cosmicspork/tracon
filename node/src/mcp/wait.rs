@@ -32,6 +32,41 @@ pub fn wait_secs(args: &Value) -> u64 {
         .min(MAX_WAIT_SECS)
 }
 
+/// The tools that wait: each blocks inside one call for at most
+/// [`MAX_WAIT_SECS`]. How to keep waiting on one is said once, in the
+/// orientation, and each description carries only [`pointer`].
+pub const WAITING: &[&str] = &[
+    super::operator::QUESTION_STATUS,
+    super::approvals::STATUS,
+    super::review::STATUS,
+    super::review::REPORT_STATUS,
+    super::operator::REPORT_STATUS,
+    super::egress::REQUEST,
+    super::setup::TRY,
+    super::github::RUN_WAIT,
+    super::gitlab::PIPELINE_WAIT,
+];
+
+/// The waits on the operator a session is held open for when its turn ends,
+/// as `session::waits` reads them: ending the turn on one of these is a way
+/// to wait, and on any other wait it is not.
+pub const HELD: &[&str] = &[
+    super::operator::QUESTION_STATUS,
+    super::approvals::STATUS,
+    super::review::STATUS,
+    super::review::REPORT_STATUS,
+];
+
+/// The line a waiting tool's description ends with in place of the shared
+/// paragraph on waiting. It says enough on its own for a harness the
+/// operator runs, which has no orientation.
+pub fn pointer() -> String {
+    format!(
+        "Blocks at most {MAX_WAIT_SECS} seconds a call; call again to keep waiting (your \
+         orientation says when ending your turn waits instead)."
+    )
+}
+
 /// Whether a call to one of the node's own tools is a poll: a wait its
 /// description tells the agent to repeat, unchanged, until something moves.
 /// Each of these blocks for at most [`MAX_WAIT_SECS`] and then answers that it
@@ -57,6 +92,37 @@ pub fn is_poll(tool: &str, args: Option<&Value>) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Waiting is explained once, in the orientation: a waiting tool's own
+    /// description names its states and ends on the pointer, and does not
+    /// say again how ending a turn waits.
+    #[test]
+    fn every_waiting_tool_ends_on_the_pointer_rather_than_explaining_waiting() {
+        use super::super::*;
+        let all = [
+            operator::definitions(),
+            approvals::definitions(),
+            review::definitions(true),
+            egress::definitions(),
+            setup::definitions(),
+            github::definitions(),
+            gitlab::definitions(),
+        ]
+        .concat();
+        for name in WAITING.iter().chain(HELD) {
+            let description = all
+                .iter()
+                .find(|d| d["name"] == *name)
+                .unwrap_or_else(|| panic!("{name} is not defined"))["description"]
+                .as_str()
+                .unwrap();
+            assert!(description.ends_with(&pointer()), "{name}: {description}");
+            assert!(
+                !description.contains("end your turn"),
+                "{name}: {description}"
+            );
+        }
+    }
 
     #[test]
     fn the_wait_stays_under_any_mcp_client_timeout() {
