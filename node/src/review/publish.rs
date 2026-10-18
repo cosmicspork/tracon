@@ -234,6 +234,8 @@ pub struct Intent {
 pub struct ChangeState {
     pub url: String,
     pub open: bool,
+    /// Closed by merging, as opposed to closed and left.
+    pub merged: bool,
     pub source_branch: String,
     pub target_branch: String,
     /// The change's source branch lives in another repository (a fork).
@@ -265,6 +267,35 @@ impl ChangeState {
         } else {
             None
         }
+    }
+
+    /// Why this change is not the one a publication of `target` would have
+    /// opened for `pushed`, if it is not: the same checks an update is held
+    /// to, except that a merged change counts, and its head must be exactly
+    /// the commit that was pushed. Each names what the forge holds instead.
+    pub fn reconcile_refusal(
+        &self,
+        provider: Provider,
+        target: &Target,
+        number: u64,
+        pushed: &str,
+    ) -> Option<String> {
+        let noun = provider.noun();
+        if !self.open && !self.merged {
+            return Some(format!("{noun} {number} was closed without being merged"));
+        }
+        let landed = Self {
+            open: true,
+            ..self.clone()
+        };
+        landed.refusal(provider, target, number).or_else(|| {
+            (self.head_sha != pushed).then(|| {
+                format!(
+                    "{noun} {number}'s head is {:.8}, not {pushed:.8} that this publication pushed",
+                    self.head_sha
+                )
+            })
+        })
     }
 }
 
@@ -771,7 +802,7 @@ async fn attempt(
 
 /// The number a forge gives a change, from its web address: the last path
 /// segment of `…/pull/7` or `…/-/merge_requests/7`.
-fn change_number(url: &str) -> Option<u64> {
+pub fn change_number(url: &str) -> Option<u64> {
     url.trim()
         .trim_end_matches('/')
         .rsplit('/')
@@ -865,6 +896,8 @@ pub async fn change_state(
         Provider::Github => ChangeState {
             url: text("/html_url"),
             open: text("/state") == "open",
+            merged: v.get("merged").and_then(Value::as_bool).unwrap_or(false)
+                || v.get("merged_at").is_some_and(Value::is_string),
             source_branch: text("/head/ref"),
             target_branch: text("/base/ref"),
             cross_repository: !text("/head/repo/full_name").eq_ignore_ascii_case(&target.project),
@@ -873,6 +906,7 @@ pub async fn change_state(
         Provider::Gitlab => ChangeState {
             url: text("/web_url"),
             open: text("/state") == "opened",
+            merged: text("/state") == "merged",
             source_branch: text("/source_branch"),
             target_branch: text("/target_branch"),
             cross_repository: v.get("source_project_id") != v.get("target_project_id"),
@@ -2183,5 +2217,49 @@ encoding ISO-8859-1\n\nsubject\n";
     fn an_unknown_outcome_is_neither_success_nor_failure() {
         assert!(PublishError::Unknown("x".into()).is_unknown());
         assert!(!PublishError::IdentityChanged.is_unknown());
+    }
+
+    #[test]
+    fn a_change_reconciles_open_or_merged_but_only_at_the_pushed_commit() {
+        let target = Target {
+            provider: "github".into(),
+            project: "owner/name".into(),
+            base: "main".into(),
+            branch: "feat/x".into(),
+            worktree: None,
+            change: None,
+        };
+        let state = ChangeState {
+            url: "https://github.test/pull/7".into(),
+            open: false,
+            merged: true,
+            source_branch: "feat/x".into(),
+            target_branch: "main".into(),
+            cross_repository: false,
+            head_sha: "abc123".into(),
+        };
+        let gh = Provider::Github;
+        assert_eq!(state.reconcile_refusal(gh, &target, 7, "abc123"), None);
+        let moved = state.reconcile_refusal(gh, &target, 7, "def456").unwrap();
+        assert!(
+            moved.contains("abc123") && moved.contains("def456"),
+            "{moved}"
+        );
+        let closed = ChangeState {
+            merged: false,
+            ..state.clone()
+        };
+        assert!(closed
+            .reconcile_refusal(gh, &target, 7, "abc123")
+            .unwrap()
+            .contains("closed without being merged"));
+        let elsewhere = ChangeState {
+            target_branch: "release".into(),
+            ..state
+        };
+        assert!(elsewhere
+            .reconcile_refusal(gh, &target, 7, "abc123")
+            .unwrap()
+            .contains("merges into release, not main"));
     }
 }
