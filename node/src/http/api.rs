@@ -2923,6 +2923,20 @@ pub async fn start_review_session(
                 .into(),
         ));
     }
+    // Held from before the review is read again until the new reviewer is
+    // recorded. The checks below run on that second read, so they see any
+    // session another start recorded before it let go of its claim, and two
+    // starts cannot both find none running.
+    let Some(start) = s.manager.review_starts().claim(&id) else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            crate::mcp::review::ALREADY_STARTING.into(),
+        ));
+    };
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
     if !matches!(r.state.as_str(), "new" | "claimed" | "revising") {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -2933,14 +2947,6 @@ pub async fn start_review_session(
             ),
         ));
     }
-    // Held from before the check for a running reviewer until the new one is
-    // recorded, so two starts cannot both find none running.
-    let Some(start) = s.manager.review_starts().claim(&id) else {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            crate::mcp::review::ALREADY_STARTING.into(),
-        ));
-    };
     if let Some(running) = r
         .review_session_id
         .as_deref()
