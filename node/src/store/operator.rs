@@ -139,18 +139,22 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// This node's question for a caller with no session, by its key. Only
+    /// `node_id`'s own: a peer's question mirrored here, on its own external
+    /// session, is never the local caller's to resume.
     pub fn operator_question_for_channel_request(
         &self,
         channel: &str,
+        node_id: &str,
         request_key: &str,
     ) -> Result<Option<OperatorQuestionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT q.* FROM operator_question q LEFT JOIN session s ON s.id=q.session_id
-             WHERE q.channel=?1 AND q.request_key=?2
+             WHERE q.channel=?1 AND q.request_key=?2 AND q.node_id=?3
                AND (q.session_id IS NULL OR s.harness_id='external')
              ORDER BY q.created_ms DESC LIMIT 1",
-            params![channel, request_key],
+            params![channel, request_key, node_id],
             OperatorQuestionRow::from_row,
         )
         .optional()
@@ -298,12 +302,22 @@ impl Store {
     /// Record on a mirrored question the answer its owner accepted from
     /// here, ahead of the owner's next list saying so. No event is written:
     /// the owner records the intervention, and its event mirrors back.
-    pub fn answer_mirrored_operator_question(&self, id: &str, answer_json: &str) -> Result<bool> {
+    ///
+    /// The owner lists its open questions before it acks the answer, so that
+    /// list can arrive first and close the copy here as cancelled. The ack
+    /// says it was answered, so a cancelled copy takes the answer too; a
+    /// question this node (`self_id`) asked is never touched here.
+    pub fn answer_mirrored_operator_question(
+        &self,
+        id: &str,
+        self_id: &str,
+        answer_json: &str,
+    ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute(
             "UPDATE operator_question SET state='answered', answer_json=?2, answered_ms=?3
-             WHERE id=?1 AND state='unanswered'",
-            params![id, answer_json, now_ms()],
+             WHERE id=?1 AND node_id<>?4 AND state IN ('unanswered','cancelled')",
+            params![id, answer_json, now_ms(), self_id],
         )? == 1)
     }
 

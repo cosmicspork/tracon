@@ -156,7 +156,9 @@ async fn ask(
     let choices_json = serde_json::to_string(&choices).unwrap();
     let existing = match ctx.session_id() {
         Some(session_id) => store.operator_question_for_request(session_id, &request_key),
-        None => store.operator_question_for_channel_request(&ctx.channel, &request_key),
+        None => {
+            store.operator_question_for_channel_request(&ctx.channel, &ctx.node_id, &request_key)
+        }
     }
     .map_err(|e| e.to_string())?;
     let row = match existing {

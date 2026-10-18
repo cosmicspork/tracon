@@ -899,6 +899,28 @@ export default [
     },
   },
   {
+    id: 'home-peer-question',
+    area: 'home',
+    route: '/',
+    title: 'Operator question asked on a peer',
+    note: "An agent on work-pod asked it; it shows and is answered here as this node's own are. No \"Cancel question\": withdrawing it is the asking node's to do.",
+    since: '#521',
+    api: base({
+      '/api/queue': queue({ running: [S_RUN, session({ id: 's-peer', node_id: PEER, branch: 'fix/export-dupes', state: 'waiting_on_you' })] }),
+      '/api/operator/questions': {
+        questions: [
+          question({
+            id: 'q-peer',
+            session_id: 's-peer',
+            node_id: PEER,
+            prompt: 'The nightly export writes each row twice when a retry overlaps the run. Dedupe on the export id, or skip a retry while a run is open?',
+            choices_json: JSON.stringify(['Dedupe on export id', 'Skip overlapping retries']),
+          }),
+        ],
+      },
+    }),
+  },
+  {
     id: 'home-issue-discard-open',
     area: 'home',
     route: '/',

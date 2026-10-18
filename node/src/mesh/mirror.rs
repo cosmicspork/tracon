@@ -542,6 +542,92 @@ mod tests {
         assert!(peer.open_operator_questions().unwrap().is_empty());
     }
 
+    /// The owner lists its open questions before it acks an answer relayed
+    /// from here, so the list can close the copy here as cancelled first. The
+    /// ack still records the answer on it; a question this node asked itself
+    /// is never answered that way.
+    #[test]
+    fn an_answer_acked_after_the_owners_list_closed_the_copy_still_shows_answered() {
+        let owner = owner_with_acknowledged_report();
+        let question = OperatorQuestionRow {
+            id: "question".into(),
+            session_id: Some("report-session".into()),
+            channel: "personal".into(),
+            node_id: "owner".into(),
+            request_key: Some("remote".into()),
+            prompt: "which remote?".into(),
+            choices_json: r#"["origin","fork"]"#.into(),
+            state: "unanswered".into(),
+            answer_json: None,
+            created_ms: now_ms(),
+            answered_ms: None,
+        };
+        owner.insert_operator_question(&question).unwrap();
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus: Bus::new(),
+            self_id: "peer".into(),
+        };
+        let listed = |store: &Store| {
+            crate::mesh::frames::to_payloads(
+                &Frame::Questions {
+                    waiting: store.open_operator_questions().unwrap(),
+                },
+                store,
+                "owner",
+            )
+            .into_iter()
+            .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
+            .unwrap()
+        };
+        assert_eq!(
+            mirror.apply("owner", "personal", listed(&owner)),
+            Applied::Stored
+        );
+
+        // The owner takes the answer and lists what is still open, and that
+        // list lands here before the ack does.
+        owner
+            .answer_operator_question("question", r#"{"choice":"fork"}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            mirror.apply("owner", "personal", listed(&owner)),
+            Applied::Stored
+        );
+        assert_eq!(
+            peer.operator_question("question").unwrap().unwrap().state,
+            "cancelled"
+        );
+
+        assert!(peer
+            .answer_mirrored_operator_question("question", "peer", r#"{"choice":"fork"}"#)
+            .unwrap());
+        let shown = peer.operator_question("question").unwrap().unwrap();
+        assert_eq!(shown.state, "answered");
+        assert_eq!(shown.answer_json.as_deref(), Some(r#"{"choice":"fork"}"#));
+
+        // This node's own withdrawn question stays withdrawn.
+        let own = OperatorQuestionRow {
+            id: "own".into(),
+            session_id: None,
+            node_id: "peer".into(),
+            request_key: Some("own".into()),
+            ..question
+        };
+        peer.ensure_peer_node("peer").unwrap();
+        peer.insert_operator_question(&own).unwrap();
+        peer.cancel_operator_question("own").unwrap();
+        assert!(!peer
+            .answer_mirrored_operator_question("own", "peer", r#"{"choice":"fork"}"#)
+            .unwrap());
+        assert_eq!(
+            peer.operator_question("own").unwrap().unwrap().state,
+            "cancelled"
+        );
+    }
+
     #[test]
     fn review_frame_mirrors_acknowledgement_without_reopening_the_queue() {
         let owner = owner_with_acknowledged_report();

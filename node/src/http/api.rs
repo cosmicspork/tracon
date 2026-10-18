@@ -3675,7 +3675,7 @@ async fn answer_question(
         peer_command(s, &question.node_id, command, timeout).await?;
         // The owner's next list says so too; this shows it answered now.
         if s.store()
-            .answer_mirrored_operator_question(id, &answer.to_string())?
+            .answer_mirrored_operator_question(id, &s.node_id, &answer.to_string())?
         {
             if let Ok(waiting) = s.store().open_operator_questions() {
                 s.manager
@@ -6125,7 +6125,15 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
                 "no such operator question".into(),
             ))?;
             owned_here(s, &question.node_id, "question")?;
-            sender_in_channel(s, sender, &question.channel, "question")
+            sender_in_channel(s, sender, &question.channel, "question")?;
+            // A question with no session is answered where it was asked, as
+            // a session-less permission is; one on a session is the session's
+            // owner's to release.
+            let session_id = question.session_id.ok_or(ApiError(
+                StatusCode::NOT_FOUND,
+                "no such operator question".into(),
+            ))?;
+            forwarded_session(s, sender, &session_id)
         }
         C::ProviderConnect { name, channels, .. } => {
             for channel in channels {
