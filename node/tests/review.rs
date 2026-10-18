@@ -1677,7 +1677,7 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
         v["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("not offered to a review session"),
+            .contains("not offered in a review session"),
         "{v}"
     );
     let v = f
@@ -1705,11 +1705,10 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
             json!({"verdict": "approve", "summary": "x"}),
         )
         .await;
-    assert!(
-        v["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("only a review session"),
+    assert_eq!(
+        v["error"],
+        "review_verdict is not offered in an execute session: only a review session gives a \
+         verdict; an execute session calls submit_review",
         "{v}"
     );
 }

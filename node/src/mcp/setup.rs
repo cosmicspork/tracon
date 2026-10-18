@@ -125,10 +125,10 @@ pub fn definitions() -> Vec<Value> {
                  this node already built the same Dockerfile and context. Building one is the \
                  operator's to allow: the call then returns `awaiting_operator` with an approval_id, \
                  approval_status gives the started trial once they allow it, and its `build` step \
-                 says how the build went. Blocks for up to {} seconds and returns the trial: \
-                 `running` (call again with its `trial_id`), `passed`, or `failed` with each step's \
-                 exit and the end of its output. One trial runs per session at a time.",
-                super::wait::MAX_WAIT_SECS
+                 says how the build went. Returns the trial: `running` (call again with its \
+                 `trial_id`), `passed`, or `failed` with each step's exit and the end of its \
+                 output. One trial runs per session at a time. {}",
+                super::wait::pointer()
             ),
             "inputSchema": { "type": "object", "properties": try_properties },
         }),
