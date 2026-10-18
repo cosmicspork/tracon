@@ -4293,6 +4293,9 @@ mod tests {
         let text = kickoff(Phase::Review, None, Some("r-1")).unwrap();
         assert!(text.contains("`r-1`"), "{text}");
         assert!(text.contains("`review_verdict`"), "{text}");
+        // The workspace is the candidate's files, not a checkout.
+        assert!(text.contains(crate::mcp::review::REVIEW_DIFF), "{text}");
+        assert!(!text.contains("checked out"), "{text}");
     }
 
     fn preparing(prepare: &[&str], timeout_secs: u64) -> crate::environment::RepoEnvironment {
