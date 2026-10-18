@@ -88,11 +88,7 @@ pub fn session_authority(
     node: Option<&NodeRow>,
 ) -> SessionAuthority {
     let policy = tools.policy.read();
-    let phase = match session.phase.as_str() {
-        "plan" => crate::session::Phase::Plan,
-        "review" => crate::session::Phase::Review,
-        _ => crate::session::Phase::Execute,
-    };
+    let phase = crate::session::Phase::from_row(&session.phase);
     // The exact definitions this session is offered, from the same call the
     // harness's `tools/list` is answered with: a tool the channel has no
     // credential for is not offered, and so is not explained as available.

@@ -179,7 +179,10 @@ pub fn router(state: AppState) -> Router {
             "/api/mesh/enroll",
             get(api::enroll_status).post(api::start_enroll),
         )
-        .route("/api/credentials/import", post(api::import_credentials))
+        .route(
+            "/api/credentials/import",
+            post(api::import_credentials).delete(api::delete_credential_named_import),
+        )
         .route("/api/usage", get(api::usage))
         .route("/api/metrics", get(api::metrics))
         .route("/api/provenance/{sha}", get(api::provenance))
@@ -256,6 +259,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api::delete_memory).patch(api::edit_memory),
         )
         .route("/api/credentials", get(api::list_credentials))
+        .route(
+            "/api/credentials/{name}",
+            axum::routing::delete(api::delete_credential),
+        )
         .route("/api/credentials/{name}/share", post(api::share_credential))
         .route(
             "/api/credentials/forge/{forge}",
@@ -450,6 +457,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/reviews/{id}/publication/recover",
             post(api::recover_publication),
+        )
+        // Settles a review on the operator's word about the forge, checked
+        // against it: an admin action (`passkey::AdminAction`).
+        .route(
+            "/api/reviews/{id}/publication/reconcile",
+            post(api::reconcile_publication),
         )
         .route("/api/reviews/{id}/release", post(api::release_review))
         .route("/api/evidence/candidates", get(evidence::list_candidates))

@@ -161,7 +161,110 @@ enum ActionRecord {
     Replay(Value),
 }
 
+/// Who a tool definition is offered to: a session the node runs, in its
+/// phase, or a harness the operator runs themselves. Each has one list, and
+/// `tools/list` and a call are read against the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    Session(crate::session::Phase),
+    External,
+}
+
+impl From<crate::session::Phase> for Audience {
+    fn from(phase: crate::session::Phase) -> Self {
+        Self::Session(phase)
+    }
+}
+
+impl Audience {
+    /// Whether this audience is offered `name`, before the channel's
+    /// credentials narrow it further.
+    pub fn offers(self, name: &str) -> bool {
+        use crate::session::Phase;
+        match self {
+            Self::Session(Phase::Plan) => Tools::PLAN_TOOLS.contains(&name),
+            Self::Session(Phase::Execute) => !Tools::NOT_EXECUTE.contains(&name),
+            Self::Session(Phase::Review) => Tools::REVIEW_TOOLS.contains(&name),
+            Self::External => !Tools::NOT_EXTERNAL.contains(&name),
+        }
+    }
+
+    /// Why a call to a tool this audience is not offered is refused.
+    fn refusal(self, name: &str) -> String {
+        use crate::session::Phase;
+        match self {
+            Self::Session(Phase::Review) => format!(
+                "{name} is not offered in a review session; give a verdict with {}",
+                review::VERDICT
+            ),
+            Self::Session(phase) => {
+                let article = if phase == Phase::Execute { "an" } else { "a" };
+                let refusal = format!(
+                    "{name} is not offered in {article} {} session",
+                    phase.as_str()
+                );
+                if name == review::VERDICT {
+                    format!(
+                        "{refusal}: only a review session gives a verdict; an execute session \
+                         calls {}",
+                        review::SUBMIT
+                    )
+                } else {
+                    refusal
+                }
+            }
+            Self::External if name == review::VERDICT => format!(
+                "{name} is for a review session the node starts; put your own change up with {}",
+                review::SUBMIT
+            ),
+            Self::External => format!(
+                "{name} is not offered to a harness you run yourself: it works on the item a \
+                 session holds, and yours holds none"
+            ),
+        }
+    }
+}
+
 impl Tools {
+    /// The tools a plan session gets: what it needs to read, ask and write its
+    /// plan, and to record work it finds. Nothing that closes the item,
+    /// submits, sets anything up or writes to a forge or tracker; the reading
+    /// forge and Jira tools are here, and the channel's credentials decide
+    /// which of those it actually has.
+    pub const PLAN_TOOLS: &'static [&'static str] = &[
+        memory::RECALL,
+        memory::RETAIN,
+        docs::DOC_READ,
+        docs::DOC_SEARCH,
+        docs::DOC_WRITE,
+        work::BRIEF_READ,
+        work::CRITERIA_READ,
+        operator::ASK,
+        operator::QUESTION_STATUS,
+        operator::NOTIFY,
+        work::WORK_READY,
+        work::WORK_DISCOVER,
+        github::PR_STATUS,
+        github::PR_THREADS,
+        github::PR_FOR_BRANCH,
+        github::RUN_STATUS,
+        github::RUN_LOGS,
+        github::RUN_WAIT,
+        gitlab::MR_STATUS,
+        gitlab::MR_DISCUSSIONS,
+        gitlab::MR_FOR_BRANCH,
+        gitlab::PIPELINE_STATUS,
+        gitlab::PIPELINE_WAIT,
+        gitlab::PIPELINE_LIST_BY_SHA,
+        gitlab::JOB_TRACE,
+        jira::ISSUE,
+        jira::ISSUE_SEARCH,
+        jira::ISSUE_TRANSITIONS,
+    ];
+
+    /// What an execute session is not offered: everything else is its to use.
+    pub const NOT_EXECUTE: &'static [&'static str] = &[review::VERDICT];
+
     /// The tools a review session gets: what it needs to read, and its
     /// verdict. Nothing that writes, publishes, or reaches a forge.
     pub const REVIEW_TOOLS: &'static [&'static str] = &[
@@ -177,30 +280,32 @@ impl Tools {
         review::VERDICT,
     ];
 
-    /// What an external harness is not offered: a verdict is what a
-    /// review session the node started gives on someone else's change.
-    pub const NOT_EXTERNAL: &'static [&'static str] = &[review::VERDICT];
+    /// What an external harness is not offered: a verdict is what a review
+    /// session the node started gives on someone else's change, and the brief
+    /// and criteria tools read and write the item a session holds, which an
+    /// external harness never does.
+    pub const NOT_EXTERNAL: &'static [&'static str] = &[
+        review::VERDICT,
+        work::BRIEF_READ,
+        work::BRIEF_NOTE,
+        work::CRITERIA_READ,
+        work::CRITERIA_LINK,
+    ];
 
-    /// Tool definitions for a channel, narrowed by phase: a review session
-    /// sees only [`Self::REVIEW_TOOLS`].
+    /// Tool definitions for a channel, narrowed to what `audience` is offered.
+    /// This is the one list: `tools/list`, the orientation, the session's
+    /// wiring and its explanation all read it.
     pub fn list_for(
         &self,
         channel: &str,
         node_id: &str,
-        phase: crate::session::Phase,
+        audience: impl Into<Audience>,
     ) -> Vec<Value> {
-        let all = self.list(channel, node_id);
-        match phase {
-            crate::session::Phase::Review => all
-                .into_iter()
-                .filter(|t| {
-                    t["name"]
-                        .as_str()
-                        .is_some_and(|n| Self::REVIEW_TOOLS.contains(&n))
-                })
-                .collect(),
-            _ => all,
-        }
+        let audience = audience.into();
+        self.list(channel, node_id)
+            .into_iter()
+            .filter(|t| t["name"].as_str().is_some_and(|n| audience.offers(n)))
+            .collect()
     }
 
     /// Tool definitions for a channel. A channel with no credential bound to it
@@ -261,22 +366,14 @@ impl Tools {
         // A plan session's own plan document is the phase's artifact: writing
         // that one slug is what the session exists to do, so it is not asked.
         let plan_write = name == docs::DOC_WRITE && self.is_plan_artifact(ctx, args);
-        if self.is_review_session(ctx) && !Self::REVIEW_TOOLS.contains(&name) {
-            return Err(format!(
-                "{name} is not offered to a review session; give a verdict with {}",
-                review::VERDICT
-            ));
+        let audience = self.audience(ctx);
+        if !audience.offers(name) {
+            return Err(audience.refusal(name));
         }
         if name == docs::DOC_WRITE {
             if let Some(refusal) = docs::reserved_for_operator(args) {
                 return Err(refusal);
             }
-        }
-        if Self::NOT_EXTERNAL.contains(&name) && ctx.is_external() {
-            return Err(format!(
-                "{name} is for a review session the node starts; put your own change up with {}",
-                review::SUBMIT
-            ));
         }
         if matches!(
             name,
@@ -906,12 +1003,12 @@ impl Tools {
         }
     }
 
-    /// The definitions this caller is offered: the channel's tools, less what
-    /// an external caller cannot use. A session on a forge repository is not
-    /// required to name it to that forge's tools, since the call defaults to
-    /// it; an external caller has no repository to default to.
+    /// The definitions this caller is offered: the channel's tools, as
+    /// [`Self::list_for`] narrows them to its phase. A session on a forge
+    /// repository is not required to name it to that forge's tools, since the
+    /// call defaults to it; an external caller has no repository to default to.
     pub fn list_offered(&self, ctx: &CallContext) -> Vec<Value> {
-        let mut all = self.list(&ctx.channel, &ctx.node_id);
+        let mut all = self.list_for(&ctx.channel, &ctx.node_id, self.audience(ctx));
         if !ctx.is_external() {
             if let Some(repo) = self.session_forge_repo(ctx) {
                 for tool in &mut all {
@@ -932,15 +1029,8 @@ impl Tools {
                     }
                 }
             }
-            return all;
         }
-        all.into_iter()
-            .filter(|t| {
-                !t["name"]
-                    .as_str()
-                    .is_some_and(|n| Self::NOT_EXTERNAL.contains(&n))
-            })
-            .collect()
+        all
     }
 
     /// The repository the calling session works on, as its launch resolved
@@ -983,14 +1073,21 @@ impl Tools {
         }
     }
 
-    fn is_review_session(&self, ctx: &CallContext) -> bool {
+    /// Whose list the caller is read against: its session's phase as the
+    /// session's row records it, or the external harness's. A session the
+    /// store does not know is read as ordinary work.
+    fn audience(&self, ctx: &CallContext) -> Audience {
+        use crate::session::Phase;
         let Some(id) = ctx.session_id() else {
-            return false;
+            return Audience::External;
         };
-        self.session
+        let phase = self
+            .session
             .get()
             .and_then(|a| a.store.get_session(id).ok().flatten())
-            .is_some_and(|s| s.phase == "review")
+            .map(|s| Phase::from_row(&s.phase))
+            .unwrap_or_default();
+        Audience::Session(phase)
     }
 
     fn is_plan_artifact(&self, ctx: &CallContext, args: &Value) -> bool {

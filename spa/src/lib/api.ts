@@ -524,6 +524,14 @@ export const api = {
     call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/publication/recover`, {
       publication_id: publicationId,
     }),
+  /** Record that a publication stopped after its push was finished by hand
+   * at `change` (its web address or number). The node asks the forge and
+   * refuses a change that is not exactly this publication's. An admin action. */
+  reconcilePublication: (id: string, publicationId: string, change: string) =>
+    call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/publication/reconcile`, {
+      publication_id: publicationId,
+      change,
+    }),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
   /** `reason` goes back with a rejection, `notes` with a request for changes. */
   answer: (

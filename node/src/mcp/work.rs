@@ -49,9 +49,13 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": WORK_DISCOVER,
-            "description": "Record work you found but are not doing now. It is linked to this session's \
-                            item as discovered-from, so it survives the session. Say what and why; add \
-                            deps if it must wait on other items.",
+            "description": "Record work you found but are not doing now. In a session the node started \
+                            it is linked to this session's item as discovered-from and bound to this \
+                            session's project, so it survives the session. A harness you run yourself \
+                            holds no item, so its items are linked to none and are marked with your \
+                            lane; pass `worktree` to bind the item to that repository's project, or \
+                            leave it out and the item belongs to the whole channel, with no project. \
+                            Say what and why; add deps if it must wait on other items.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -59,6 +63,12 @@ pub fn definitions() -> Vec<Value> {
                     "body": { "type": "string" },
                     "deps": { "type": "array", "items": { "type": "string" } },
                     "priority": { "type": "integer", "default": 0 },
+                    "worktree": {
+                        "type": "string",
+                        "description": "Only for a harness you run yourself: the absolute path of a \
+                                        worktree of the repository the item is for. Its repository \
+                                        must be under [external] repo_roots.",
+                    },
                 },
                 "required": ["title"],
             },
@@ -183,6 +193,42 @@ pub fn definitions() -> Vec<Value> {
     ]
 }
 
+/// The project a harness outside the boundary means by `path`: the
+/// repository of that worktree, found as `submit_review` finds it and named as
+/// a session launched on it would name it, so its items sit with theirs.
+async fn external_project(
+    cfg: &Config,
+    store: &crate::store::Store,
+    channel: &str,
+    path: &str,
+) -> Result<String, String> {
+    let roots: Vec<_> = cfg
+        .external
+        .repo_roots
+        .iter()
+        .map(|r| crate::config::expand_home(r))
+        .collect();
+    let (_, repo) = crate::review::locate_repo(path, &roots)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (id, name, remote) = corpus::project::identify(
+        channel,
+        std::path::Path::new(&repo),
+        &cfg.live().publish.git,
+    )
+    .await;
+    store
+        .project_put(&crate::store::ProjectRow {
+            id: id.clone(),
+            channel: channel.to_string(),
+            name,
+            remote_url: remote,
+            created_ms: crate::store::now_ms(),
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 pub async fn call(
     cfg: &Config,
     access: &SessionAccess,
@@ -231,6 +277,24 @@ pub async fn call(
                         .collect()
                 })
                 .unwrap_or_default();
+            let worktree = args["worktree"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            // A session's project is the one it was launched on; only a
+            // harness outside the boundary names one, by a worktree of it.
+            let project_id = match (external, worktree) {
+                (false, Some(_)) => {
+                    return Err("worktree is for a harness you run yourself; \
+                                this session's items go to its own project"
+                        .into())
+                }
+                (true, Some(path)) => {
+                    Some(external_project(cfg, &access.store, &ctx.channel, path).await?)
+                }
+                (true, None) => None,
+                (false, None) => project_id,
+            };
             let item = corpus::work::create(
                 &access.store,
                 access.manager.bus(),
@@ -244,12 +308,16 @@ pub async fn call(
                     priority: args["priority"].as_i64().unwrap_or(0),
                     discovered_from: item_id,
                     discovered_by_session: ctx.session_id().map(str::to_string),
+                    // An unlabelled harness is still not the operator.
+                    discovered_by_lane: external
+                        .then(|| ctx.lane().unwrap_or("external").to_string()),
                 },
             )
             .map_err(|e| e.to_string())?;
-            Ok(
-                json!({ "id": item.id, "title": item.title, "discovered_from": item.discovered_from }),
-            )
+            Ok(json!({
+                "id": item.id, "title": item.title, "project_id": item.project_id,
+                "discovered_from": item.discovered_from,
+            }))
         }
         WORK_CLOSE if external => {
             let id = args["id"]
