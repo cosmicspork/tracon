@@ -1949,6 +1949,7 @@ async fn spawn_review_session(
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
         initial_prompt: None,

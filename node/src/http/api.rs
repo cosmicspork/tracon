@@ -855,6 +855,7 @@ pub async fn import_transfer(
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -924,6 +925,7 @@ pub async fn import_transfer(
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
     };
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
@@ -1495,6 +1497,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         continued_from: None,
         harness: c.harness,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,

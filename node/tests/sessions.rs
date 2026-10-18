@@ -237,6 +237,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             continued_from: None,
             harness: None,
             on_exhaustion: None,
+            told_reviews: Vec::new(),
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -2684,6 +2685,7 @@ async fn streamed_chunks_are_coalesced_into_one_logged_message() {
 use axum::http::Request as HttpRequest;
 use tracon::broker::Broker;
 use tracon::mcp::Tools;
+use tracon::session::Phase;
 
 /// The MCP surface over its real HTTP route, with the token check in place.
 async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
@@ -2891,18 +2893,19 @@ async fn orientation_with(
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
 ) -> Orientation {
-    orientation_setup(tag, launch_with, pinned_docs, false, &[]).await
+    orientation_setup(tag, launch_with, pinned_docs, false, &[], Phase::Plan).await
 }
 
 /// The whole setup, optionally with a context the operator selected for the
 /// item before its session starts: one research document this node holds and
-/// one constraint it does not.
+/// one constraint it does not. The session runs in `phase`.
 async fn orientation_setup(
     tag: &str,
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
     with_context: bool,
     prepare: &[&str],
+    phase: Phase,
 ) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
@@ -3082,6 +3085,24 @@ async fn orientation_setup(
         )
         .unwrap();
     }
+    // An execute session carries out the item's plan, so there is one.
+    if phase == Phase::Execute {
+        let slug = tracon::corpus::work::plan_slug(&item.id);
+        tracon::corpus::write(
+            &store,
+            &Bus::new(),
+            "n1",
+            "personal",
+            "document",
+            tracon_sync::ChangeOp::Upsert,
+            &slug,
+            json!({"channel": "personal", "slug": slug, "kind": "plan",
+                   "title": "Plan", "body": "Add the table, then the view.",
+                   "pinned": false, "hash": "p", "created_ms": now_ms(), "updated_ms": now_ms()}),
+        )
+        .unwrap();
+        tracon::corpus::work::set_plan(&store, &Bus::new(), "n1", &item.id, &slug).unwrap();
+    }
     let row = manager
         .create_with(
             tracon::session::NewSession {
@@ -3093,7 +3114,7 @@ async fn orientation_setup(
                 budget_tokens: Some(1000),
                 initial_prompt: None,
                 node_id: None,
-                phase: tracon::session::Phase::Plan,
+                phase,
                 review_id: None,
                 base_sha: None,
                 workspace_id: None,
@@ -3101,6 +3122,7 @@ async fn orientation_setup(
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -3244,6 +3266,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             adapter.clone(),
         )
@@ -3269,7 +3292,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
 async fn a_session_is_told_whether_its_workspace_was_prepared() {
     state::isolate();
     let Orientation { store, row, .. } =
-        orientation_setup("prepared", None, 0, false, &["make deps"]).await;
+        orientation_setup("prepared", None, 0, false, &["make deps"], Phase::Plan).await;
     let mut events = Vec::new();
     for _ in 0..300 {
         events = store.events_after(&row.id, 0, 500).unwrap();
@@ -3484,7 +3507,7 @@ async fn a_session_receives_its_items_selected_context_and_the_receipt_is_kept()
     state::isolate();
     let Orientation {
         store, item, row, ..
-    } = orientation_setup("context", None, 0, true, &[]).await;
+    } = orientation_setup("context", None, 0, true, &[], Phase::Plan).await;
 
     let mut found = None;
     for _ in 0..300 {
@@ -3603,7 +3626,8 @@ async fn writing_the_plan_document_ends_the_plan_phase() {
 
 // ---- a session's turn ends on an open wait ------------------------------
 
-/// A plan session, its harness's MCP route, and the operator's API.
+/// A plan session (or, with `Held::in_phase`, one in another phase), its
+/// harness's MCP route, and the operator's API.
 struct Held {
     o: Orientation,
     harness: axum::Router,
@@ -3613,7 +3637,11 @@ struct Held {
 
 impl Held {
     async fn new(tag: &str) -> Self {
-        let o = orientation(tag).await;
+        Self::in_phase(tag, Phase::Plan).await
+    }
+
+    async fn in_phase(tag: &str, phase: Phase) -> Self {
+        let o = orientation_setup(tag, None, 0, false, &[], phase).await;
         o.manager.set_default_adapter(o.adapter.clone());
         // The kickoff turn has run and the session is idle, its own tool
         // token registered before the test's replaces it.
@@ -3956,6 +3984,205 @@ async fn a_node_stopping_under_a_held_session_carries_it_on_once_answered() {
     assert!(first.contains(&h.o.row.id), "{first}");
     assert!(first.contains("Keep the ledger?"), "{first}");
     assert!(first.contains("\"text\": \"yes\""), "{first}");
+    h.o.manager.kill(&next.id).await.ok();
+    tracon::session::materialize::remove(&h.o.row.id);
+    tracon::session::materialize::remove(&next.id);
+}
+
+/// A held session whose review the operator sends back for changes after
+/// the node stopped under it is carried on, and the continuation takes the
+/// review over: its first prompt carries the notes and says a patch came
+/// with them, the decision is not brought back a second time, and the new
+/// session can read the review. A session that does not continue the one
+/// that submitted it is still refused.
+#[tokio::test]
+async fn a_held_sessions_continuation_takes_over_its_review_sent_back_for_changes() {
+    state::isolate();
+    // A session that submits a review is executing its plan.
+    let h = Held::in_phase("held-revise", Phase::Execute).await;
+    let review = uuid::Uuid::now_v7().to_string();
+    let mut submitted = published_review(&review, &h.o.row.id);
+    submitted.state = "new".into();
+    submitted.publish_result = None;
+    h.o.store.insert_review(&submitted).unwrap();
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    h.o.manager.shutdown_all().await;
+    h.until(|s| s.state == "suspended", "put away").await;
+
+    let notes = "Keep the ledger append-only.";
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/reviews/{review}/verdict"),
+        Some(json!({ "verdict": "revise", "reason": notes,
+                     "patch": "diff --git a/x b/x\n" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let s = h.until(|s| s.state == "closed", "carried on").await;
+    assert_eq!(s.end_reason.as_deref(), Some("continued"));
+    let next =
+        h.o.store
+            .list_sessions(None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.continued_from.as_deref() == Some(h.o.row.id.as_str()))
+            .expect("a continuation");
+    let first = first_prompt(&h.o.store, &next.id).await;
+    assert_eq!(first.matches(notes).count(), 1, "{first}");
+    assert!(first.contains(&format!("`{review}`")), "{first}");
+    assert!(first.contains("An edited diff is attached"), "{first}");
+    assert!(!first.contains("not yours to poll"), "{first}");
+    let row = h.o.store.get_review(&review).unwrap().unwrap();
+    assert_eq!(row.session_id.as_deref(), Some(next.id.as_str()));
+
+    // Its first turn ends without the decision being brought back again.
+    for _ in 0..1200 {
+        if h.o.store.has_event(&next.id, "turn_end").unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let told: usize =
+        h.o.store
+            .events_after(&next.id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user_prompt")
+            .map(|e| {
+                e.payload["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .matches(notes)
+                    .count()
+            })
+            .sum();
+    assert_eq!(told, 1, "the notes arrive exactly once");
+
+    let status_of = |sid: String| {
+        let harness = h.harness.clone();
+        let manager = h.o.manager.clone();
+        let review = review.clone();
+        async move {
+            let token = manager.register_tool_token_for_test(&sid, "personal").await;
+            let (st, v) = mcp_call(
+                &harness,
+                &sid,
+                &token,
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                       "params":{"name": "review_status",
+                                 "arguments": {"review_id": review, "wait_secs": 0}}}),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            v
+        }
+    };
+    let v = status_of(next.id.clone()).await;
+    assert_ne!(v["result"]["isError"], true, "{v}");
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("changes_requested"), "{text}");
+    assert!(text.contains(notes), "{text}");
+    let v = status_of("not-a-continuation".to_string()).await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    assert!(
+        v.to_string()
+            .contains("that review belongs to another session"),
+        "{v}"
+    );
+    h.o.manager.kill(&next.id).await.ok();
+    tracon::session::materialize::remove(&h.o.row.id);
+    tracon::session::materialize::remove(&next.id);
+}
+
+/// A review that is sent back for changes after a continuation's first
+/// prompt was written, but before the continuation takes it over, is not
+/// lost: that prompt said it was still waiting, so the takeover does not
+/// record it as told, and the operator's notes reach the new session exactly
+/// once, as the decision.
+#[tokio::test]
+async fn a_review_sent_back_while_its_continuation_is_made_is_told_once() {
+    state::isolate();
+    let h = Held::new("revise-race").await;
+    let review = uuid::Uuid::now_v7().to_string();
+    let mut submitted = published_review(&review, &h.o.row.id);
+    submitted.state = "new".into();
+    submitted.publish_result = None;
+    h.o.store.insert_review(&submitted).unwrap();
+    h.o.manager.kill(&h.o.row.id).await.unwrap();
+    let old = h.session();
+
+    // The handoff is written from the review as it stands: still waiting.
+    let carried = h.o.store.carried_reviews(&old.id).unwrap();
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].state, "new");
+    let spec = tracon::session::NewSession {
+        channel: old.channel.clone(),
+        repo_path: old.repo_path.clone(),
+        branch: Some(old.branch.clone()),
+        work_item_id: old.work_item_id.clone(),
+        model: old.model.clone(),
+        budget_tokens: Some(old.budget_tokens),
+        initial_prompt: Some(format!("This session continues session {}.", old.id)),
+        node_id: Some(old.node_id.clone()),
+        phase: tracon::session::Phase::Plan,
+        review_id: None,
+        base_sha: None,
+        workspace_id: Some(old.id.clone()),
+        parent_session: Some(old.id.clone()),
+        continued_from: Some(old.id.clone()),
+        harness: None,
+        on_exhaustion: None,
+        told_reviews: tracon::session::told_reviews(&carried),
+    };
+
+    // Then, before the continuation exists, the operator sends it back.
+    let notes = "Keep the ledger append-only.";
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/reviews/{review}/verdict"),
+        Some(json!({ "verdict": "revise", "reason": notes })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let next = h.o.manager.create(spec).await.unwrap();
+    let row = h.o.store.get_review(&review).unwrap().unwrap();
+    assert_eq!(row.session_id.as_deref(), Some(next.id.as_str()));
+    assert_eq!(row.state, "revising");
+
+    let prompts = || {
+        h.o.store
+            .events_after(&next.id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user_prompt")
+            .map(|e| e.payload["text"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+    let mut delivered = false;
+    for _ in 0..1200 {
+        if prompts()
+            .iter()
+            .any(|p| p.contains("The operator has decided") && p.contains(notes))
+        {
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        delivered,
+        "the decision was never brought back: {:?}",
+        prompts()
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let told: usize = prompts().iter().map(|p| p.matches(notes).count()).sum();
+    assert_eq!(told, 1, "the notes arrive exactly once: {:?}", prompts());
     h.o.manager.kill(&next.id).await.ok();
     tracon::session::materialize::remove(&h.o.row.id);
     tracon::session::materialize::remove(&next.id);
@@ -4325,6 +4552,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             Arc::new(StallingAdapter),
         )
@@ -4883,7 +5111,7 @@ async fn the_node_wakes_an_exhausted_session_or_carries_it_on() {
         adapter,
         row,
         ..
-    } = orientation_setup("exhausted-wake", None, 0, false, &[]).await;
+    } = orientation_setup("exhausted-wake", None, 0, false, &[], Phase::Plan).await;
     manager.set_default_adapter(adapter.clone());
     let wait = |id: String, want: &'static str| {
         let store = store.clone();

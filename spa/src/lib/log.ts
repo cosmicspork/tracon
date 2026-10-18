@@ -473,6 +473,13 @@ export function eventLine(e: Event): EventLine | null {
       if (reconciled) return line('ok', ['review recorded as published', `at ${reconciled}`, 'by the operator'])
       return line(tone, [text, 'by the operator', waited !== null ? `after ${formatDuration(waited)} waiting` : ''])
     }
+    case 'review_taken_over': {
+      // The continuation took over a review the attempt before it left open
+      // or sent back for changes; the link is that attempt.
+      const from = str(p.from_session)
+      const what = str(p.state) === 'revising' ? 'review sent back for changes taken over' : 'open review taken over'
+      return line('mark', [what, from ? `from ${from.slice(0, 8)}` : ''], from ? `/sessions/${from}` : undefined, from ? from.slice(0, 8) : undefined)
+    }
     case 'provider_exhausted': {
       const note = exhaustionNote(p as unknown as SessionExhaustion)
       const provider = str(p.provider) || 'its provider'

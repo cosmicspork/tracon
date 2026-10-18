@@ -420,6 +420,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
     };
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> = Arc::new(
         tracon::adapter::opencode::OpenCodeAdapter::new(String::from("1")),
