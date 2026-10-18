@@ -599,6 +599,7 @@ async fn an_external_item_named_by_its_worktree_joins_the_project_a_session_ther
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             Arc::new(support::fake::FakeAdapter {
                 tx: Arc::new(tokio::sync::Mutex::new(None)),

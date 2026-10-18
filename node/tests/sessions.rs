@@ -237,6 +237,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             continued_from: None,
             harness: None,
             on_exhaustion: None,
+            told_reviews: Vec::new(),
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -3100,6 +3101,7 @@ async fn orientation_setup(
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -3243,6 +3245,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             adapter.clone(),
         )
@@ -4069,6 +4072,95 @@ async fn a_held_sessions_continuation_takes_over_its_review_sent_back_for_change
     tracon::session::materialize::remove(&next.id);
 }
 
+/// A review that is sent back for changes after a continuation's first
+/// prompt was written, but before the continuation takes it over, is not
+/// lost: that prompt said it was still waiting, so the takeover does not
+/// record it as told, and the operator's notes reach the new session exactly
+/// once, as the decision.
+#[tokio::test]
+async fn a_review_sent_back_while_its_continuation_is_made_is_told_once() {
+    state::isolate();
+    let h = Held::new("revise-race").await;
+    let review = uuid::Uuid::now_v7().to_string();
+    let mut submitted = published_review(&review, &h.o.row.id);
+    submitted.state = "new".into();
+    submitted.publish_result = None;
+    h.o.store.insert_review(&submitted).unwrap();
+    h.o.manager.kill(&h.o.row.id).await.unwrap();
+    let old = h.session();
+
+    // The handoff is written from the review as it stands: still waiting.
+    let carried = h.o.store.carried_reviews(&old.id).unwrap();
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].state, "new");
+    let spec = tracon::session::NewSession {
+        channel: old.channel.clone(),
+        repo_path: old.repo_path.clone(),
+        branch: Some(old.branch.clone()),
+        work_item_id: old.work_item_id.clone(),
+        model: old.model.clone(),
+        budget_tokens: Some(old.budget_tokens),
+        initial_prompt: Some(format!("This session continues session {}.", old.id)),
+        node_id: Some(old.node_id.clone()),
+        phase: tracon::session::Phase::Plan,
+        review_id: None,
+        base_sha: None,
+        workspace_id: Some(old.id.clone()),
+        parent_session: Some(old.id.clone()),
+        continued_from: Some(old.id.clone()),
+        harness: None,
+        on_exhaustion: None,
+        told_reviews: tracon::session::told_reviews(&carried),
+    };
+
+    // Then, before the continuation exists, the operator sends it back.
+    let notes = "Keep the ledger append-only.";
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/reviews/{review}/verdict"),
+        Some(json!({ "verdict": "revise", "reason": notes })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let next = h.o.manager.create(spec).await.unwrap();
+    let row = h.o.store.get_review(&review).unwrap().unwrap();
+    assert_eq!(row.session_id.as_deref(), Some(next.id.as_str()));
+    assert_eq!(row.state, "revising");
+
+    let prompts = || {
+        h.o.store
+            .events_after(&next.id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user_prompt")
+            .map(|e| e.payload["text"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+    let mut delivered = false;
+    for _ in 0..1200 {
+        if prompts()
+            .iter()
+            .any(|p| p.contains("The operator has decided") && p.contains(notes))
+        {
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        delivered,
+        "the decision was never brought back: {:?}",
+        prompts()
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let told: usize = prompts().iter().map(|p| p.matches(notes).count()).sum();
+    assert_eq!(told, 1, "the notes arrive exactly once: {:?}", prompts());
+    h.o.manager.kill(&next.id).await.ok();
+    tracon::session::materialize::remove(&h.o.row.id);
+    tracon::session::materialize::remove(&next.id);
+}
+
 /// A restart that finds a session held between turns on an open question
 /// puts it away with what it waits on; one cut off mid-turn still ends as
 /// `node_restart`.
@@ -4433,6 +4525,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             Arc::new(StallingAdapter),
         )

@@ -793,6 +793,7 @@ pub async fn carry_on(
         .strip_prefix("workspace://")
         .unwrap_or(&old.id)
         .to_string();
+    let carried = store.carried_reviews(&old.id)?;
     let spec = NewSession {
         channel: old.channel.clone(),
         repo_path: old.repo_path.clone(),
@@ -804,7 +805,7 @@ pub async fn carry_on(
             &old,
             approach.as_deref(),
             plan.as_deref(),
-            &store.carried_reviews(&old.id)?,
+            &carried,
         )),
         node_id: Some(old.node_id.clone()),
         // A written plan is carried on by executing it; an unfinished plan
@@ -822,6 +823,7 @@ pub async fn carry_on(
         harness,
         // The policy the old attempt ran under carries over with the work.
         on_exhaustion: store.exhaustion(&old.id)?.map(|row| row.choice()),
+        told_reviews: crate::session::told_reviews(&carried),
     };
     manager.create(spec).await
 }

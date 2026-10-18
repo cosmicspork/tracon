@@ -92,6 +92,13 @@ pub struct NewSession {
     /// `exhaustion` binding. Absent: the channel's, else pause.
     #[serde(default)]
     pub on_exhaustion: Option<exhaustion::Choice>,
+    /// A continuation only: the wait keys of the reviews its first prompt
+    /// already told it the operator sent back, as [`told_reviews`] read them
+    /// when that prompt was written. Only those are recorded as told when it
+    /// takes them over; a review that moved after the prompt was written has
+    /// its decision delivered as usual.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told_reviews: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -250,12 +257,23 @@ fn handoff(old: &SessionRow, why: &str, carried: &[ReviewRow]) -> String {
     note
 }
 
+/// The wait keys of the `carried` reviews whose notes [`carried_note`] tells:
+/// those sent back for changes, as they stood when it read them.
+pub fn told_reviews(carried: &[ReviewRow]) -> Vec<String> {
+    carried
+        .iter()
+        .filter(|r| r.state == "revising")
+        .map(waits::review_key)
+        .collect()
+}
+
 /// What a continuation is told about the reviews it takes over from the
 /// attempt it continues: each one sent back for changes with the operator's
 /// notes, whether an edited diff came with them, and how to resubmit it; each
-/// one still waiting, so that it is not submitted a second time. Empty when
+/// one still waiting, so that it is not opened a second time. Empty when
 /// there are none. The notes are told here once: the takeover records this
-/// session as told, so they do not come back as a decision too.
+/// session as told for [`told_reviews`], so they do not come back as a
+/// decision too.
 pub(crate) fn carried_note(carried: &[ReviewRow]) -> String {
     let mut note = String::new();
     for r in carried {
@@ -267,8 +285,9 @@ pub(crate) fn carried_note(carried: &[ReviewRow]) -> String {
         if r.state != "revising" {
             note.push_str(&format!(
                 "\n\nThe earlier session's {what} `{}` ({}) is still waiting on the \
-                 operator, and is yours now: their decision comes back to you as a prompt. \
-                 Resubmit it with that same {key} rather than opening a new {what}.",
+                 operator. It is yours now, and their decision comes back to you as a \
+                 prompt. If you change the work, call `{submit}` with that same {key} \
+                 rather than opening a new {what}.",
                 r.id, r.title,
             ));
             continue;
@@ -649,7 +668,8 @@ impl Manager {
             .strip_prefix("workspace://")
             .unwrap_or(&old.id)
             .to_string();
-        let note = handoff_note(&old, harness, &self.store.carried_reviews(&old.id)?);
+        let carried = self.store.carried_reviews(&old.id)?;
+        let note = handoff_note(&old, harness, &carried);
         let spec = NewSession {
             channel: old.channel.clone(),
             repo_path: old.repo_path.clone(),
@@ -667,6 +687,7 @@ impl Manager {
             continued_from: Some(old.id.clone()),
             harness: Some(harness.to_string()),
             on_exhaustion: None,
+            told_reviews: told_reviews(&carried),
         };
         self.create(spec).await
     }
@@ -705,7 +726,8 @@ impl Manager {
             }
         };
         let choice = self.store.exhaustion(id)?.map(|row| row.choice());
-        self.continue_work(&old, None, note, choice).await
+        self.continue_work(&old, None, note, told_reviews(&carried), choice)
+            .await
     }
 
     /// The continuation itself: `model` replaces the old session's (a
@@ -715,6 +737,7 @@ impl Manager {
         old: &SessionRow,
         model: Option<String>,
         note: String,
+        told: Vec<String>,
         choice: Option<exhaustion::Choice>,
     ) -> Result<SessionRow, SessionError> {
         let id = old.id.as_str();
@@ -772,6 +795,7 @@ impl Manager {
             continued_from: Some(old.id.clone()),
             harness,
             on_exhaustion: choice,
+            told_reviews: told,
         };
         let row = self.create(spec).await?;
         // A suspended session's work now lives in the new one; the operator
@@ -806,18 +830,29 @@ impl Manager {
     /// right to resubmit each one are the new session's. A session continuing
     /// none of them gets none, so ownership still refuses everyone else.
     ///
-    /// A review sent back for changes is already told: the handoff carried
+    /// A review sent back for changes is already told when the handoff carried
     /// its notes, and bringing them back as a decision would say them twice.
-    /// Candidates keep the session that captured them, and checks the earlier
-    /// attempt left running stay under its id, cancelled as it ends.
-    async fn take_over_reviews(&self, from: &str, to: &str) -> Result<(), SessionError> {
+    /// Only the keys in `told` are recorded, the reviews as the handoff read
+    /// them: one that moved between the handoff being written and this
+    /// takeover (still waiting then, sent back now) has a key the handoff
+    /// never named, so its decision is delivered by `settle_waits` instead of
+    /// being lost. Candidates keep the session that captured them, and checks
+    /// the earlier attempt left running stay under its id, cancelled as it
+    /// ends.
+    async fn take_over_reviews(
+        &self,
+        from: &str,
+        to: &str,
+        told: &[String],
+    ) -> Result<(), SessionError> {
         let moved = self.store.hand_over_reviews(from, to)?;
         if moved.is_empty() {
             return Ok(());
         }
         for review in &moved {
-            if review.state == "revising" {
-                self.waits().tell(to, &waits::review_key(review));
+            let key = waits::review_key(review);
+            if told.contains(&key) {
+                self.waits().tell(to, &key);
             }
             self.record(NewEvent {
                 session_id: to.to_string(),
@@ -916,7 +951,10 @@ impl Manager {
         }
         let carried = self.store.carried_reviews(&old.id).ok()?;
         let note = held_note(old, &waited, &carried);
-        match self.continue_work(old, None, note, None).await {
+        match self
+            .continue_work(old, None, note, told_reviews(&carried), None)
+            .await
+        {
             Ok(row) => Some(row),
             Err(error) => {
                 tracing::warn!(session = %old.id, %error, "could not carry on a session whose waits were decided");
@@ -1756,7 +1794,8 @@ impl Manager {
         self.store.insert_session(&row)?;
         self.store.exhaustion_choose(&id, &on_exhaustion)?;
         if let Some(from) = spec.continued_from.as_deref() {
-            self.take_over_reviews(from, &id).await?;
+            self.take_over_reviews(from, &id, &spec.told_reviews)
+                .await?;
         }
         // A plain session has no work item to retain its first instruction.
         // Keep it as a draft before asynchronous setup, and let on_prompt
@@ -3455,13 +3494,16 @@ impl Manager {
                     continue;
                 }
                 let fallback = row.fallback.clone().unwrap_or_default();
-                let note = exhausted_note(
-                    &session,
-                    Some(&fallback),
-                    &self.store.carried_reviews(&session.id).unwrap_or_default(),
-                );
+                let carried = self.store.carried_reviews(&session.id).unwrap_or_default();
+                let note = exhausted_note(&session, Some(&fallback), &carried);
                 let result = self
-                    .continue_work(&session, Some(fallback), note, Some(row.choice()))
+                    .continue_work(
+                        &session,
+                        Some(fallback),
+                        note,
+                        told_reviews(&carried),
+                        Some(row.choice()),
+                    )
                     .await;
                 self.settle_continuation(&row.session_id, result);
                 continue;
@@ -3519,13 +3561,16 @@ impl Manager {
             } else if ended(&[state::EndReason::NodeRestart]) {
                 // The node restarted while it waited: carry it on, on the same
                 // model, once the reset has come.
-                let note = exhausted_note(
-                    &session,
-                    None,
-                    &self.store.carried_reviews(&session.id).unwrap_or_default(),
-                );
+                let carried = self.store.carried_reviews(&session.id).unwrap_or_default();
+                let note = exhausted_note(&session, None, &carried);
                 let result = self
-                    .continue_work(&session, None, note, Some(row.choice()))
+                    .continue_work(
+                        &session,
+                        None,
+                        note,
+                        told_reviews(&carried),
+                        Some(row.choice()),
+                    )
                     .await;
                 self.settle_continuation(&row.session_id, result);
             } else if current.is_terminal()
