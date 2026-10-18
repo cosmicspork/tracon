@@ -941,20 +941,31 @@ pub async fn reconcile_publication(
     // What the forge must show at the change's head: the commit the
     // publication recorded pushing, or — for one that pushes the agent's
     // commits as they are — the reviewed commit itself. A squash made here
-    // is a commit only this node knows, so without its record there is
-    // nothing to hold the change to.
+    // is a commit only this node knows, and so is a commit remade with the
+    // operator's message, so without its record there is nothing to hold
+    // the change to.
     let intent =
         revision_intent(ctx.store, row.revision_id.as_deref()).map_err(PublishError::Conflict)?;
-    let pushed = match (&row.pushed_sha, &intent.squash_onto) {
+    let reworded = row
+        .outputs_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<crate::review::publish::Outputs>(json).ok())
+        .is_some_and(|outputs| !outputs.messages.is_empty());
+    let unrecorded = if intent.squash_onto.is_some() {
+        Some("the squashed commit it pushed, so no change can be checked against it")
+    } else if reworded {
+        Some("pushing the commits it reworded, so no change can be checked against them")
+    } else {
+        None
+    };
+    let pushed = match (&row.pushed_sha, unrecorded) {
         (Some(sha), _) => sha.clone(),
-        (None, None) => row.head_sha.clone(),
-        (None, Some(_)) => {
-            return Err(PublishError::Conflict(
-                "this publication never recorded the squashed commit it pushed, so no change \
-                 can be checked against it; retry the publication instead"
-                    .into(),
-            ))
+        (None, Some(what)) => {
+            return Err(PublishError::Conflict(format!(
+                "this publication never recorded {what}; retry the publication instead"
+            )))
         }
+        (None, None) => row.head_sha.clone(),
     };
     let env = ctx
         .broker
@@ -981,6 +992,27 @@ pub async fn reconcile_publication(
             "{noun} {number} of {} is {url}, not {given}",
             target.project
         )));
+    }
+    // A Retry started while the forge was read would push and open on its
+    // own; settling the review under it as well would race it.
+    let now = ctx
+        .store
+        .publication(&row.id)
+        .map_err(|e| PublishError::External(e.to_string()))?
+        .ok_or_else(|| PublishError::Conflict("this publication is gone; reload it".into()))?;
+    match now.outcome(crate::process::instance_id()) {
+        O::InProgress => {
+            return Err(PublishError::Conflict(
+                "an attempt at this publication started while the forge was read; let it finish"
+                    .into(),
+            ))
+        }
+        O::Published => {
+            return Err(PublishError::Conflict(
+                "this publication landed while the forge was read".into(),
+            ))
+        }
+        O::NotAttempted | O::Failed | O::Uncertain => {}
     }
     let claimed = if review.state == "publishing" {
         ctx.store

@@ -942,7 +942,9 @@
       {:else if settled.refusal}
         <span class="note">{settled.refusal}</span>
       {/if}
-      {@render publishedAt()}
+      {#if !remoteOwner}
+        {@render publishedAt()}
+      {/if}
     </div>
   {:else if publishing}
     <div class="banner crit">

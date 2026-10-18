@@ -4782,6 +4782,55 @@ async fn a_change_whose_head_is_not_the_pushed_commit_is_refused() {
     assert_eq!(f.publication(&id).state, "failed");
 }
 
+/// Commits the operator reworded are remade, so the reviewed head is not
+/// what such a publication would have pushed. Without a record of the push
+/// there is nothing to hold a change to, even one at the agent's own
+/// commits: refused before the forge is asked, and the review is left as
+/// it was.
+#[tokio::test]
+async fn a_reworded_publication_that_never_recorded_its_push_is_refused() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    git_that_swallows_pushes(&f);
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": {
+                "messages": { head.clone(): "feat: the operator's words" },
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let before = f.store.get_review(&id).unwrap().unwrap();
+    let publication = f.publication(&id);
+    assert_eq!(publication.state, "failed");
+    assert!(publication.pushed_sha.is_none());
+    gh_forge(&f, pull_seven(&head));
+    f.forget_logs();
+
+    let (status, body) = reconcile(&f, &id, &publication.id, "7").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("never recorded pushing the commits it reworded")
+            && message.contains("retry the publication instead"),
+        "{message}"
+    );
+    assert!(
+        f.gh_log().is_empty(),
+        "the forge is not asked: {}",
+        f.gh_log()
+    );
+    let after = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.target, before.target, "no change is recorded");
+    assert!(after.publish_result.is_none());
+    assert_eq!(f.publication(&id).state, "failed");
+}
+
 /// Only the node that owns a review can ask its forge about it; a peer
 /// holding a mirror refuses rather than forwarding.
 #[tokio::test]
