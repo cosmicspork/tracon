@@ -1750,6 +1750,20 @@ An earlier verdict does not settle a later candidate. Index-based link removal
 requires the displayed brief hash: another editor's change refuses a stale
 index instead of deleting a different link.
 
+**A reviewer may exercise the candidate; it still does not judge.** A review
+session is offered `service_start` (the catalogue's browser, run unattended by
+the shipped policy), `show_work` and `review_finding` beside its verdict. What
+it shows goes on its own review, marked with the review's candidate rather than
+its checkout's commit. A finding is one append-only, node-local
+`review_finding` row per criterion and candidate — `supported`, `contradicted`
+or `not_shown`, a note, and the ids of work that session showed at that
+candidate — and is always `inferred`. It moves coverage only to
+`verified_unjudged` ("verified · unjudged"), unless an agreed check is failing,
+or to `contradicted_unjudged`; a person's verdict outranks both, `not_shown`
+moves nothing, and a finding about one candidate says nothing about the next.
+The verdict on the diff (`review_verdict`) stays separate. A reviewer's
+`criteria_link` is asked like any session's.
+
 Beside the criteria the view carries the gaps: what nothing points at, what
 nobody has judged, every inferred or unattributed line in the brief, the
 questions it still asks, and the orphaned verdicts — because a coverage view

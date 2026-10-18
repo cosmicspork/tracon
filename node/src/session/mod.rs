@@ -374,8 +374,11 @@ fn kickoff(
             let review = review_id?;
             Some(format!(
                 "Review the change under review `{review}`. The requirements and the diff are \
-                 in your orientation and the change is checked out in the worktree. Give your \
-                 verdict with `review_verdict`."
+                 in your orientation. Your workspace holds the candidate's files, without its \
+                 Git history, and `{diff}` holds the whole diff. Where a criterion needs the \
+                 change run, show what you saw with `show_work` and record a `review_finding` \
+                 for it. Give your verdict with `review_verdict`.",
+                diff = crate::mcp::review::REVIEW_DIFF,
             ))
         }
     }
@@ -2380,6 +2383,13 @@ impl Manager {
                 .iter()
                 .filter_map(|t| t["name"].as_str().map(str::to_string))
                 .collect();
+            let services: Vec<String> = self
+                .tools
+                .cfg
+                .service
+                .iter()
+                .map(|service| service.name.clone())
+                .collect();
             // What the operator selected for this item, delivered and
             // recorded before the orientation is assembled, so the receipt
             // says exactly what the text below carries. A receipt that
@@ -2403,6 +2413,7 @@ impl Manager {
                     project_id: project.as_ref().map(|p| p.id.as_str()),
                     project_name: project.as_ref().map(|p| p.name.as_str()),
                     tools: &tool_names,
+                    services: &services,
                     worktree: "/work",
                     phase: spec.phase.as_str(),
                     item: item.as_ref(),
@@ -4282,6 +4293,9 @@ mod tests {
         let text = kickoff(Phase::Review, None, Some("r-1")).unwrap();
         assert!(text.contains("`r-1`"), "{text}");
         assert!(text.contains("`review_verdict`"), "{text}");
+        // The workspace is the candidate's files, not a checkout.
+        assert!(text.contains(crate::mcp::review::REVIEW_DIFF), "{text}");
+        assert!(!text.contains("checked out"), "{text}");
     }
 
     fn preparing(prepare: &[&str], timeout_secs: u64) -> crate::environment::RepoEnvironment {

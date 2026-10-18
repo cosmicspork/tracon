@@ -229,6 +229,8 @@
         <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>
       {:else if e.kind === 'review_verdict'}
         <div class="mark ok">verdict · {e.payload.verdict} · {e.payload.summary}</div>
+      {:else if e.kind === 'review_finding'}
+        <div class="mark" class:crit={e.payload.outcome === 'contradicted'}>finding · {String(e.payload.outcome ?? '').replace('_', ' ')} · {e.payload.criterion_text} · {e.payload.note} · inferred, not a verdict</div>
       {:else if e.kind === 'provider_error'}
         {#if typeof e.payload.frame === 'string' && e.payload.frame}
           <!-- A retry that named no cause keeps what the harness sent. -->

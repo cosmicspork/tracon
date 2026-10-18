@@ -30,6 +30,7 @@ pub mod device;
 pub mod evidence;
 pub mod exhaustion;
 pub mod external;
+pub mod findings;
 pub mod holdings;
 pub mod manifest;
 pub mod metrics;

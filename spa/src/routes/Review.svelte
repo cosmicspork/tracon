@@ -37,7 +37,7 @@
   import { defaultMessage, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, canStartReviewer, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
-  import { COVERAGE, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
+  import { COVERAGE, FINDING, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
   let { id }: { id: string } = $props()
 
@@ -471,6 +471,11 @@
     }
   }
 
+  /** The title of shown work on this review, for a finding that cites it. */
+  function shownTitle(id: string): string | null {
+    return shownWork.find((w) => w.id === id)?.title ?? null
+  }
+
   /**
    * Record a verdict on one criterion, bound to the revision on the screen.
    * This is the only thing that can say a criterion was met: the checks
@@ -848,7 +853,7 @@
     </section>
   {/if}
 
-  <ShownWork items={shownWork} onReview />
+  <ShownWork items={shownWork} onReview reviewer={review.review_session_id} />
 
   {#if criteria}
     <section class="criteria-block">
@@ -879,6 +884,15 @@
               {/each}
               {#if c.links.length === 0}
                 <small>Nothing points at this one, so nothing on this screen speaks to it.</small>
+              {/if}
+              {#if c.finding}
+                <small class="finding" class:contra={c.finding.outcome === 'contradicted'}>
+                  review finding · {FINDING[c.finding.outcome]}{c.finding.note ? ` · ${c.finding.note}` : ''}
+                  {#each c.finding.evidence as ev, n (ev)}
+                    {' · '}<a href="#shown-{ev}">{shownTitle(ev) ?? `evidence ${n + 1}`}</a>
+                  {/each}
+                  · the reviewer's account, not a verdict
+                </small>
               {/if}
               {#if c.judgement}
                 <small class="judged">
@@ -1538,6 +1552,12 @@
   }
   .criteria-block small.judged {
     color: var(--ok);
+  }
+  .criteria-block small.finding {
+    color: var(--ink2);
+  }
+  .criteria-block small.finding.contra {
+    color: var(--crit);
   }
   .criteria-block small.earlier {
     color: var(--wait);

@@ -203,7 +203,13 @@ impl Audience {
                     "{name} is not offered in {article} {} session",
                     phase.as_str()
                 );
-                if name == review::VERDICT {
+                if name == review::FINDING {
+                    format!(
+                        "{refusal}: only a review session records a finding; {} is how an \
+                         execute session says what would settle a criterion",
+                        work::CRITERIA_LINK
+                    )
+                } else if name == review::VERDICT {
                     format!(
                         "{refusal}: only a review session gives a verdict; an execute session \
                          calls {}",
@@ -263,10 +269,13 @@ impl Tools {
     ];
 
     /// What an execute session is not offered: everything else is its to use.
-    pub const NOT_EXECUTE: &'static [&'static str] = &[review::VERDICT];
+    /// A verdict and findings are a review session's account of someone
+    /// else's change.
+    pub const NOT_EXECUTE: &'static [&'static str] = &[review::VERDICT, review::FINDING];
 
-    /// The tools a review session gets: what it needs to read, and its
-    /// verdict. Nothing that writes, publishes, or reaches a forge.
+    /// The tools a review session gets: what it needs to read, what it needs
+    /// to exercise the candidate and show what it saw, its findings, and its
+    /// verdict. Nothing that publishes or reaches a forge.
     pub const REVIEW_TOOLS: &'static [&'static str] = &[
         memory::RECALL,
         docs::DOC_READ,
@@ -277,15 +286,27 @@ impl Tools {
         // And which of those criteria anything actually points at: a reviewer
         // that cannot see an uncovered criterion cannot say it is uncovered.
         work::CRITERIA_READ,
+        // What it thinks would settle a criterion, asked like any session's.
+        work::CRITERIA_LINK,
+        // Running the candidate where no check settles a criterion: a
+        // browser beside the session, decided by the policy bundle by name,
+        // and what it saw shown to the operator, bound to the candidate.
+        services::START,
+        services::STATUS,
+        show::SHOW,
+        // Per criterion, what running it showed: never a verdict on one.
+        review::FINDING,
         review::VERDICT,
     ];
 
-    /// What an external harness is not offered: a verdict is what a review
-    /// session the node started gives on someone else's change, and the brief
+    /// What an external harness is not offered: a verdict and findings are
+    /// what a review session the node started gives on someone else's change,
+    /// and the brief
     /// and criteria tools read and write the item a session holds, which an
     /// external harness never does.
     pub const NOT_EXTERNAL: &'static [&'static str] = &[
         review::VERDICT,
+        review::FINDING,
         work::BRIEF_READ,
         work::BRIEF_NOTE,
         work::CRITERIA_READ,
@@ -331,7 +352,8 @@ impl Tools {
         // allowed, and publishing is what needs one. An agent that cannot
         // publish can still ask for review and be told why it stopped there.
         if self.session.get().is_some() {
-            out.extend(review::definitions());
+            let browser = self.cfg.service.iter().any(|s| s.name == services::BROWSER);
+            out.extend(review::definitions(browser));
             // Memory and documents need no credential either: the corpus is
             // the node's own, and reading it is what every session starts by
             // doing. This means every session gets an MCP server.
@@ -598,7 +620,8 @@ impl Tools {
             | review::STATUS
             | review::SUBMIT_REPORT
             | review::REPORT_STATUS
-            | review::VERDICT => {
+            | review::VERDICT
+            | review::FINDING => {
                 let access = self
                     .session
                     .get()

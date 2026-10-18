@@ -23,6 +23,9 @@ test('review and report calls name what they wait on', () => {
   expect(nodeCallText('submit_review', { title: 'fix: x', review_id: '01a128ee-0940' })).toBe('Resubmit for review · fix: x')
   expect(nodeCallText('review_status', { review_id: '01a128ee-0940-7cf0-85e7-a5f3aa718404' })).toBe('Wait for review 01a128ee')
   expect(nodeCallText('review_verdict', { verdict: 'approve', summary: 'ok' })).toBe('Give a verdict · approve')
+  expect(nodeCallText('review_finding', { criterion: 'sc-0123', outcome: 'not_shown', note: 'n' })).toBe(
+    'Record a finding · not shown · sc-0123',
+  )
   expect(nodeCallText('submit_report', { title: 'Why exports double' })).toBe('Submit a report · Why exports double')
   expect(nodeCallText('report_status', { report_id: 'r-1' })).toBe('Wait for the report r-1')
 })

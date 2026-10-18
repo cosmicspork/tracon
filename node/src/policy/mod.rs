@@ -792,6 +792,22 @@ mod tests {
         );
     }
 
+    /// A reviewer's finding enters the operator's queue like its verdict, and
+    /// a proposed link is asked whoever proposes it, a reviewer included.
+    #[test]
+    fn a_review_finding_runs_unattended_and_a_proposed_link_is_still_asked() {
+        let p = Policy::shipped();
+        let none = serde_json::json!({});
+        assert_eq!(
+            p.decide(&tool("review_finding", &none, "")).verdict,
+            Verdict::Allow
+        );
+        assert_eq!(
+            p.decide(&tool("criteria_link", &none, "")).verdict,
+            Verdict::Ask
+        );
+    }
+
     #[test]
     fn globs_match_only_what_they_say() {
         assert!(glob("note-*", "note-personal"));
