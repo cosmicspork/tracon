@@ -515,6 +515,114 @@ mod tests {
     }
 
     #[test]
+    fn the_kind_filter_classifies_when_it_reads_not_by_the_stored_kind() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let bus = crate::stream::Bus::new();
+        let defaults = crate::config::default_doc_kinds();
+        // Written while the node knew no runbook kind: stored as `other`.
+        let written = write_document(
+            &store,
+            &bus,
+            &defaults,
+            "A",
+            "personal",
+            "runbook-deploy",
+            "# Deploy\n\nRoll the hub behind the proxy.",
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(written.kind, OTHER);
+        let mut kinds = defaults.clone();
+        kinds.push(runbook());
+        let found = |kind: &str| {
+            store
+                .doc_search(
+                    None,
+                    Some(KindFilter {
+                        kinds: &kinds,
+                        kind,
+                    }),
+                    "hub proxy",
+                    5,
+                )
+                .unwrap()
+                .into_iter()
+                .filter_map(|hit| hit.slug)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("runbook"), ["runbook-deploy"]);
+        assert!(found(OTHER).is_empty(), "{:?}", found(OTHER));
+        // Under the list it was written with, it is still `other`.
+        let before = store
+            .doc_search(
+                None,
+                Some(KindFilter {
+                    kinds: &defaults,
+                    kind: OTHER,
+                }),
+                "hub proxy",
+                5,
+            )
+            .unwrap();
+        assert_eq!(before.len(), 1);
+    }
+
+    #[test]
+    fn the_kind_list_is_the_configured_kinds_then_the_reserved_then_other() {
+        let mut kinds = crate::config::default_doc_kinds();
+        kinds.push(DocKind {
+            label: String::new(),
+            ..runbook()
+        });
+        let list = kind_list(&kinds);
+        let order: Vec<&str> = list.iter().map(|k| k["kind"].as_str().unwrap()).collect();
+        assert_eq!(
+            order,
+            [
+                "guide",
+                "ref",
+                "architecture",
+                "proposal",
+                "repo",
+                "note",
+                "meeting",
+                "inbox",
+                "runbook",
+                "brief",
+                "context",
+                "plan",
+                "shown",
+                "other",
+            ]
+        );
+        for entry in &list {
+            let keys: Vec<&str> = entry
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                ["description", "kind", "label", "reserved", "working_note"],
+                "{entry}"
+            );
+        }
+        assert_eq!(list[1]["label"], "Reference");
+        assert_eq!(list[4]["working_note"], true);
+        assert_eq!(list[4]["reserved"], false);
+        // A configured kind with no label is called by its prefix.
+        assert_eq!(list[8]["label"], "runbook");
+        assert_eq!(list[11]["label"], "Plan");
+        assert_eq!(list[11]["reserved"], true);
+        assert_eq!(list[13]["label"], "Other");
+        assert_eq!(list[13]["reserved"], true);
+    }
+
+    #[test]
     fn the_tools_offer_the_configured_kinds_and_nothing_else() {
         let mut kinds = crate::config::default_doc_kinds();
         kinds.push(runbook());

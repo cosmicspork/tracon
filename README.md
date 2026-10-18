@@ -1328,7 +1328,9 @@ document is listed, searched or exported, not taken from what it was filed as wh
 written. So a kind added, renamed or removed applies at once to every document
 already there, with no step to reclassify them: a removed kind's documents show as
 `other`, and the export leaves their files alone, as it does any file without a
-kind's prefix. Four kinds are the node's own and cannot be configured: `context` (a
+kind's prefix. The reverse holds too: adding a kind puts the `<prefix>-*.md` files
+already in the export directory under the export's management, so a file there that
+is not a document is deleted at the next export. Four kinds are the node's own and cannot be configured: `context` (a
 work item's selected context), `shown` (what `show_work` wrote), `brief` and `plan`.
 An entry that names one of them, `other`, or a prefix already listed, is refused.
 `doc_write` and `doc_search` offer agents the list as it is, and the Documents screen

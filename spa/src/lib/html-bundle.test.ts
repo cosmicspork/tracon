@@ -78,6 +78,10 @@ test('slug suggestions preserve the node\'s document kinds and otherwise use ref
   expect(suggestSlug('other-thing', kinds)).toBe('ref-other-thing')
   // A node without the ref kind gets the name as it is.
   expect(suggestSlug('Quarterly Report', ['note'])).toBe('quarterly-report')
+  // The Documents screen passes only the kinds a document may be written
+  // under, so a file named for a reserved kind is filed as a reference.
+  expect(suggestSlug('shown-demo', kinds)).toBe('ref-shown-demo')
+  expect(suggestSlug('context-wi-2', kinds)).toBe('ref-context-wi-2')
 })
 
 test('selection refuses file count and byte limits', () => {

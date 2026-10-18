@@ -31,7 +31,9 @@
       .then((k) => (kinds = k.kinds))
       .catch(() => {})
   })
-  // What a new document may be called: the configured kinds and the plan.
+  // What a new document may be called: the configured kinds and the plan. An
+  // imported file's name is kept as its slug only under one of these, so a
+  // file named `shown-…` or `context-…` is suggested as `ref-…`.
   const writable = $derived(kinds.filter((k) => !k.reserved || k.kind === 'plan').map((k) => k.kind))
 
   const channels = $derived(store.channels.map((c) => c.name))
@@ -151,7 +153,7 @@
 {/if}
 
 {#if importing}
-  <HtmlImport {channel} kinds={kinds.map((k) => k.kind)} onimported={imported} />
+  <HtmlImport {channel} kinds={writable} onimported={imported} />
 {/if}
 
 {#if hits !== null}
