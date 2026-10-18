@@ -122,24 +122,9 @@ fn provider(credential: &str, shape: &str) -> Provider {
 }
 
 fn repo() -> String {
-    let repo = state::scratch("session-egress").join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec!["config", "user.email", "t@t"],
-        vec!["config", "user.name", "t"],
-        vec!["config", "commit.gpgsign", "false"],
-        vec!["commit", "-q", "--allow-empty", "-m", "init"],
-    ] {
-        let st = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(&args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {args:?}");
-    }
-    repo.to_string_lossy().into_owned()
+    state::managed_clone("session-egress")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn spec(repo: &str, model: &str) -> NewSession {

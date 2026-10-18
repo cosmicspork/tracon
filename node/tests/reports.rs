@@ -175,22 +175,22 @@ async fn a_report_or_mismatched_code_review_cannot_create_a_review_session() {
     let cases = [
         (
             "a report is never an execute-session context",
-            json!({ "channel": "work", "repo_path": "/nonexistent/repo", "model": "local",
+            json!({ "channel": "work", "repo_path": "forge.invalid/o/r", "model": "local",
                     "phase": "execute", "review_id": report_id }),
         ),
         (
             "a report is never a review-session context",
-            json!({ "channel": "work", "repo_path": "/nonexistent/repo", "model": "local",
+            json!({ "channel": "work", "repo_path": "forge.invalid/o/r", "model": "local",
                     "phase": "review", "review_id": report.id }),
         ),
         (
             "a code review cannot cross channels",
-            json!({ "channel": "work", "repo_path": "/nonexistent/repo", "model": "local",
+            json!({ "channel": "work", "repo_path": "forge.invalid/o/r", "model": "local",
                     "phase": "review", "review_id": wrong_channel.id }),
         ),
         (
             "a code review cannot run on a node other than its owner",
-            json!({ "channel": "work", "repo_path": "/nonexistent/repo", "model": "local",
+            json!({ "channel": "work", "repo_path": "forge.invalid/o/r", "model": "local",
                     "phase": "review", "review_id": foreign_owner.id }),
         ),
     ];

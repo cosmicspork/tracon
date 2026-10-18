@@ -324,8 +324,6 @@ export const api = {
     if (cursor) query.set('cursor', cursor)
     return call<{ forges: ForgeList[] }>('GET', `/api/forge/repos?${query}`)
   },
-  cloneRepo: (b: { channel: string; forge: string; host: string; owner: string; name: string }) =>
-    call<{ repo_path: string }>('POST', '/api/repos/clone', b),
   importWorkspace: (files: FileList | File[]) => {
     const form = new FormData()
     for (const file of Array.from(files)) {

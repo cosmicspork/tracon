@@ -265,7 +265,7 @@ async fn an_archived_channel_starts_nothing_new() {
         .body(Body::from(
             json!({
                 "channel": "personal",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "model": "m/a",
             })
             .to_string(),

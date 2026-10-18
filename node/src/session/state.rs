@@ -113,6 +113,10 @@ impl EndReason {
 /// or markup in `Log.svelte`, keeping the `pub const NAME: &str = "kind";` form.
 pub mod event_kind {
     pub const SESSION_STARTED: &str = "session_started";
+    /// The repository the session names is not cloned on this node yet,
+    /// and is being cloned from its forge (`repo`, its identity) before the
+    /// workspace is seeded. Once per repository per node.
+    pub const CLONING: &str = "cloning";
     pub const WORKTREE: &str = "worktree";
     /// The repository's `prepare` ran on the workspace before the harness
     /// started (`outcome`: prepared, failed, timed_out, cancelled, not_run;

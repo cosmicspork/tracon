@@ -579,12 +579,16 @@ async fn an_external_item_named_by_its_worktree_joins_the_project_a_session_ther
     h.store
         .put_node(&support::rows::node_row("n1", "external"))
         .unwrap();
+    // The node's own clone of that repository: sessions start from nothing
+    // else. Neither has a forge remote here, so each is named by its
+    // directory, `repo`, as `identify` falls back to.
+    let clone = state::managed_clone("external-discover");
     let session = h
         .manager
         .create_with(
             tracon::session::NewSession {
                 channel: "work".into(),
-                repo_path: root.join("repo").to_string_lossy().into_owned(),
+                repo_path: clone.to_string_lossy().into_owned(),
                 branch: None,
                 work_item_id: None,
                 model: "m/a".into(),

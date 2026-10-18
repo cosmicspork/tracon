@@ -809,11 +809,168 @@ fn managed_forge(state_dir: &Path, repo_path: &Path) -> Option<Forge> {
         .ok()
         .or_else(|| repo_path.strip_prefix(real.as_deref()?).ok())?;
     let host = rest.components().next()?;
-    let host = host.as_os_str().to_string_lossy();
-    Some(match host.contains("github") {
+    Some(forge_for_host(&host.as_os_str().to_string_lossy()))
+}
+
+/// The forge a host is, as the node clones and authenticates for it: a host
+/// that names GitHub is GitHub, and any other is a GitLab.
+pub fn forge_for_host(host: &str) -> Forge {
+    match host.contains("github") {
         true => Forge::Github,
         false => Forge::Gitlab,
-    })
+    }
+}
+
+/// Why a session named a repository the node will not start from.
+pub const HOST_CHECKOUT_REFUSED: &str = "host checkouts are not a session source; name the \
+     forge repository (github.com/owner/name), upload files, or run your own harness and use \
+     submit_review";
+
+/// The managed clone a new session starts from, for the repository it
+/// names: a forge identity (`host/owner/name`), or an absolute path that
+/// canonicalises under managed storage (old rows, and a client that still
+/// sends the path it was given). Either way the answer is the absolute path
+/// `<root>/<identity>`, so repository images, caches and `[[repo]]` matching
+/// key on what they always did. The clone need not exist yet: the start
+/// makes it. Anything else, an operator's own checkout above all, is
+/// refused.
+pub fn session_repo(state_dir: &Path, repo: &str) -> Result<PathBuf, String> {
+    let refuse = || HOST_CHECKOUT_REFUSED.to_string();
+    let given = Path::new(repo);
+    let identity = if given.is_absolute() {
+        managed_identity(state_dir, given).ok_or_else(refuse)?
+    } else {
+        repo.to_string()
+    };
+    crate::mesh::recipe::valid_identity(&identity).map_err(|_| refuse())?;
+    Ok(managed_root(state_dir).join(identity))
+}
+
+/// The forge identity of a path inside managed storage, `host/owner/name`.
+/// A path that exists is judged by where it really leads, so a symlink out
+/// of the root, or `..` back out of it, is not inside; one that does not
+/// exist yet (a clone still to be made) is read as it is spelled, and any
+/// `..` in it is refused. `None` for anything outside, and for the root.
+pub fn managed_identity(state_dir: &Path, repo: &Path) -> Option<String> {
+    let root = managed_root(state_dir);
+    let rest = if repo.exists() {
+        let real = repo.canonicalize().ok()?;
+        real.strip_prefix(root.canonicalize().ok()?)
+            .ok()?
+            .to_path_buf()
+    } else {
+        let real_root = root.canonicalize().ok();
+        repo.strip_prefix(&root)
+            .ok()
+            .or_else(|| repo.strip_prefix(real_root.as_deref()?).ok())?
+            .to_path_buf()
+    };
+    let parts: Vec<&str> = rest
+        .components()
+        .map(|part| match part {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// What a new `[[repo]]` entry for `repo` is written as: a managed clone by
+/// its forge identity, which matches the clone's path as a suffix and says
+/// which repository it is to whoever reads node.toml; anything else by its
+/// path, as it was given.
+pub fn entry_path(state_dir: &Path, repo: &Path) -> PathBuf {
+    managed_identity(state_dir, repo)
+        .filter(|identity| crate::mesh::recipe::valid_identity(identity).is_ok())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.to_path_buf())
+}
+
+/// Why a clone could not be made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloneError {
+    /// The repository is named in a way the node will not make a path from.
+    Name(String),
+    /// The channel has no forge credential it may use here.
+    Credential(String),
+    TimedOut,
+    Failed(String),
+}
+
+impl std::fmt::Display for CloneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Name(why) | Self::Credential(why) | Self::Failed(why) => f.write_str(why),
+            Self::TimedOut => f.write_str("the clone ran out of time"),
+        }
+    }
+}
+
+/// The managed clone of `host/owner/name`, made now with the channel's forge
+/// credential when it is not on disk yet. Idempotent: an existing clone is
+/// the answer. A credential without a token clones anonymously; nothing
+/// else on the host may answer for it. Made under the clone's lock, so two
+/// sessions asking for one repository at once make one clone, and neither
+/// seeds from it halfway.
+pub async fn ensure_clone(
+    broker: &SharedBroker,
+    channel: &str,
+    node_id: &str,
+    forge: Forge,
+    (host, owner, name): (&str, &str, &str),
+) -> Result<PathBuf, CloneError> {
+    let root = managed_root(&crate::config::Config::state_dir());
+    let dest = clone_dest(&root, host, owner, name).map_err(CloneError::Name)?;
+    let token = {
+        let broker = broker.read().unwrap();
+        let env = broker
+            .env_for(forge.credential(), channel, node_id)
+            .map_err(|e| CloneError::Credential(e.to_string()))?;
+        forge.token(&env).cloned()
+    };
+    let credential = crate::git_remote::brokered(forge.git_user(), token.as_deref());
+    // Keyed by where the clone will really be, which is the key a sync takes
+    // once it exists, even when the root sits behind a symlink.
+    std::fs::create_dir_all(&root).map_err(|e| CloneError::Failed(e.to_string()))?;
+    let key = root
+        .canonicalize()
+        .ok()
+        .and_then(|real| Some(real.join(dest.strip_prefix(&root).ok()?)))
+        .unwrap_or_else(|| dest.clone());
+    let lock = clone_lock(&key);
+    let _guard = lock.lock().await;
+    tokio::time::timeout(
+        Duration::from_secs(600),
+        clone(&credential, host, owner, name, &dest),
+    )
+    .await
+    .map_err(|_| CloneError::TimedOut)?
+    .map_err(CloneError::Failed)?;
+    Ok(dest)
+}
+
+/// [`ensure_clone`], for a repository named by its forge identity.
+pub async fn ensure_clone_of(
+    broker: &SharedBroker,
+    channel: &str,
+    node_id: &str,
+    identity: &str,
+) -> Result<PathBuf, CloneError> {
+    crate::mesh::recipe::valid_identity(identity).map_err(CloneError::Name)?;
+    let (host, rest) = identity
+        .split_once('/')
+        .ok_or_else(|| CloneError::Name(format!("{identity:?} names no repository")))?;
+    let (owner, name) = rest
+        .rsplit_once('/')
+        .ok_or_else(|| CloneError::Name(format!("{identity:?} names no owner")))?;
+    ensure_clone(
+        broker,
+        channel,
+        node_id,
+        forge_for_host(host),
+        (host, owner, name),
+    )
+    .await
 }
 
 /// Fetch a managed clone before an image is built from its default branch,
@@ -873,7 +1030,10 @@ pub fn clone_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
 pub struct Synced {
     /// The forge's default branch, as `origin/HEAD` names it.
     pub default: String,
-    /// The commit the clone's default branch and working tree now hold.
+    /// The forge branch the working tree was brought to: the default, or the
+    /// branch the session named when the forge has it.
+    pub source: String,
+    /// The commit the clone's working tree now holds.
     pub commit: String,
     /// When the clone last fetched from its forge successfully, as the node
     /// recorded it (`FETCHED_AT`); `None` before the node has.
@@ -891,9 +1051,17 @@ pub struct Synced {
 /// last fetched, and `stale` says why. A path that is not a clone inside
 /// managed storage is refused before any Git command runs, and that refusal
 /// fails the start: it is never a stale fetch. Callers hold `clone_lock`.
+///
+/// `branch`, the branch a session names, is where the tree goes instead
+/// when the forge has a branch of that name (continuing an open change's
+/// branch); the default branch is still reset first, so it never goes
+/// stale behind it. A name the forge has no branch for is a new branch, and
+/// starts from the default. Only a branch name will do: a revision such as
+/// `main~3` is not one, so no caller chooses an arbitrary commit this way.
 pub async fn sync_managed(
     repo: &Path,
     credential: &crate::git_remote::Credential<'_>,
+    branch: Option<&str>,
 ) -> Result<Synced, String> {
     let repo = &managed_clone(repo)?;
     let fetched = tokio::time::timeout(Duration::from_secs(300), fetch_managed(repo, credential))
@@ -924,6 +1092,19 @@ pub async fn sync_managed(
         .to_string();
     let remote = format!("refs/remotes/origin/{default}");
     local_git(repo, &["checkout", "--force", "-B", &default, &remote]).await?;
+    let mut source = default.clone();
+    if let Some(named) = branch.filter(|named| *named != default && !named.starts_with('-')) {
+        let local = format!("refs/heads/{named}");
+        let remote = format!("refs/remotes/origin/{named}");
+        let on_forge = local_git(repo, &["check-ref-format", &local]).await.is_ok()
+            && local_git(repo, &["show-ref", "--verify", "--quiet", &remote])
+                .await
+                .is_ok();
+        if on_forge {
+            local_git(repo, &["checkout", "--force", "-B", named, &remote]).await?;
+            source = named.to_string();
+        }
+    }
     local_git(repo, &["clean", "-ffdx"]).await?;
     let commit = local_git(repo, &["rev-parse", "HEAD"]).await?;
     let fetched_ms = std::fs::read_to_string(repo.join(".git").join(FETCHED_AT))
@@ -931,6 +1112,7 @@ pub async fn sync_managed(
         .and_then(|at| at.trim().parse().ok());
     Ok(Synced {
         default,
+        source,
         commit,
         fetched_ms,
         stale,
@@ -1420,7 +1602,7 @@ mod tests {
 
         let lock = clone_lock(&clone);
         let _guard = lock.lock().await;
-        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous)
+        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
             .await
             .unwrap();
         assert_eq!(synced.default, "main");
@@ -1431,7 +1613,7 @@ mod tests {
         // managed clone's untracked files are not overlaid.
         std::fs::write(clone.join("stray.txt"), "left behind").unwrap();
         let id = format!("seed-sync-{}", uuid::Uuid::now_v7());
-        let workspace = crate::workspace::seed_from_clone("git", &clone, "feat/x", None, &id)
+        let workspace = crate::workspace::seed_from_clone("git", &clone, "feat/x", &id)
             .await
             .unwrap();
 
@@ -1463,7 +1645,7 @@ mod tests {
             "git remote set-url origin /nonexistent/upstream.git",
         );
 
-        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous)
+        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
             .await
             .unwrap();
         assert_eq!(synced.commit, fetched);
@@ -1486,7 +1668,7 @@ mod tests {
             "git branch -m main trunk && git symbolic-ref HEAD refs/heads/trunk",
         );
 
-        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous)
+        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
             .await
             .unwrap();
         assert_eq!(synced.default, "trunk");
@@ -1494,6 +1676,95 @@ mod tests {
         assert_eq!(synced.stale, None);
         assert_eq!(sh(&clone, "git branch --show-current"), "trunk");
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A session that names a branch the forge has (continuing an open
+    /// change) starts from the forge's tip of that branch; the default branch
+    /// is still brought up to date beside it. A name the forge has no branch
+    /// for, or a revision rather than a name, starts from the default.
+    #[tokio::test]
+    async fn a_named_forge_branch_is_started_from_and_anything_else_is_the_default() {
+        let (tmp, clone) = managed_fixture("branch");
+        let pr = sh(
+            &tmp.path().join("work"),
+            "git checkout -q -b fix/thing && echo fix > a.txt \
+             && git -c user.name=t -c user.email=t@t commit -qam fix \
+             && git push -q origin fix/thing && git rev-parse HEAD && git checkout -q main",
+        );
+        let tip = advance(tmp.path(), "two");
+        let anonymous = crate::git_remote::Credential::Anonymous;
+
+        let synced = sync_managed(&clone, &anonymous, Some("fix/thing"))
+            .await
+            .unwrap();
+        assert_eq!(synced.source, "fix/thing");
+        assert_eq!(synced.commit, pr);
+        assert_eq!(sh(&clone, "git rev-parse main"), tip);
+        assert_eq!(sh(&clone, "git rev-parse HEAD"), pr);
+
+        for other in ["feat/new-work", "main~1", "fix/thing~1"] {
+            let synced = sync_managed(&clone, &anonymous, Some(other)).await.unwrap();
+            assert_eq!(synced.source, "main", "{other}");
+            assert_eq!(synced.commit, tip, "{other}");
+        }
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A session names its repository by its forge identity, or by a path
+    /// already inside managed storage; either way the row gets the clone's
+    /// absolute path, made or not. A host checkout, a relative path and a
+    /// path that climbs out of the root are refused with the same words.
+    #[test]
+    fn a_session_repository_is_a_forge_identity_or_a_managed_path() {
+        let state = tempfile::tempdir().unwrap();
+        let root = managed_root(state.path());
+        std::fs::create_dir_all(root.join("github.com/me/made/.git")).unwrap();
+        let host = tempfile::tempdir().unwrap();
+        assert_eq!(
+            session_repo(state.path(), "github.com/me/proj"),
+            Ok(root.join("github.com/me/proj"))
+        );
+        assert_eq!(
+            session_repo(state.path(), "gitlab.example/group/sub/tool"),
+            Ok(root.join("gitlab.example/group/sub/tool"))
+        );
+        for path in [
+            root.join("github.com/me/made"),
+            root.join("github.com/me/not-yet"),
+        ] {
+            assert_eq!(
+                session_repo(state.path(), &path.to_string_lossy()),
+                Ok(path.clone())
+            );
+        }
+        for refused in [
+            host.path().to_string_lossy().into_owned(),
+            ".".into(),
+            "src/proj".into(),
+            "github.com/me".into(),
+            root.to_string_lossy().into_owned(),
+            root.join("github.com/me/../../../../etc")
+                .to_string_lossy()
+                .into_owned(),
+            root.join("github.com/../escape/x")
+                .to_string_lossy()
+                .into_owned(),
+        ] {
+            assert_eq!(
+                session_repo(state.path(), &refused),
+                Err(HOST_CHECKOUT_REFUSED.to_string()),
+                "{refused}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let link = root.join("github.com/me/link");
+            std::os::unix::fs::symlink(host.path(), &link).unwrap();
+            assert_eq!(
+                session_repo(state.path(), &link.to_string_lossy()),
+                Err(HOST_CHECKOUT_REFUSED.to_string())
+            );
+        }
     }
 
     /// A checkout outside managed storage with work in it that is not
@@ -1545,7 +1816,7 @@ mod tests {
             host.canonicalize().unwrap()
         );
 
-        let error = sync_managed(&climbing, &crate::git_remote::Credential::Anonymous)
+        let error = sync_managed(&climbing, &crate::git_remote::Credential::Anonymous, None)
             .await
             .unwrap_err();
         assert!(
@@ -1576,7 +1847,7 @@ mod tests {
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&host, &link).unwrap();
 
-        let error = sync_managed(&link, &crate::git_remote::Credential::Anonymous)
+        let error = sync_managed(&link, &crate::git_remote::Credential::Anonymous, None)
             .await
             .unwrap_err();
         assert!(
@@ -1624,7 +1895,7 @@ mod tests {
         std::fs::write(owner.join("work.txt"), "mine").unwrap();
         let before = repo_state(&enclosing);
 
-        let error = sync_managed(&owner, &crate::git_remote::Credential::Anonymous)
+        let error = sync_managed(&owner, &crate::git_remote::Credential::Anonymous, None)
             .await
             .unwrap_err();
         assert!(
@@ -1670,7 +1941,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = sync_managed(&clone, &crate::git_remote::Credential::Anonymous)
+        let error = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
             .await
             .unwrap_err();
         assert!(

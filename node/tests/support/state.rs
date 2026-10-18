@@ -123,6 +123,48 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// A forge repository this binary's node has already cloned, as a session's
+/// repository always is: a bare upstream under scratch with one commit on
+/// `main`, and its managed clone at `<state>/repos/github.com/<owner>/repo`,
+/// which a session's start fetches from that upstream. `owner` keeps one
+/// test's clone apart from another's, and should be the test's own name.
+/// Returns the clone's path; the repository's identity is
+/// `github.com/<owner>/repo`.
+#[allow(dead_code)]
+pub fn managed_clone(owner: &str) -> PathBuf {
+    let dir = scratch(&format!("upstream-{owner}"));
+    let sh = |dir: &Path, script: &str| {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    sh(
+        &dir,
+        "git init -q --bare -b main upstream.git && git clone -q upstream.git work 2>/dev/null \
+         && cd work && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false \
+         commit -q --allow-empty -m init && git push -q origin main",
+    );
+    let clone = tracon::forge::managed_root(&tracon::config::Config::state_dir())
+        .join("github.com")
+        .join(owner)
+        .join("repo");
+    let _ = std::fs::remove_dir_all(&clone);
+    std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+    sh(
+        clone.parent().unwrap(),
+        &format!("git clone -q {} repo", dir.join("upstream.git").display()),
+    );
+    clone
+}
+
 /// `node.toml` is one file per test binary (`Config::config_path`, guarded by
 /// `TRACON_CONFIG_DIR` the same way `TRACON_STATE_DIR` is above), unlike
 /// `Store::open_in_memory()`, which every test gets its own copy of. The node

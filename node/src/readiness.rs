@@ -56,6 +56,12 @@ pub struct Readiness {
 #[derive(Debug, Clone, Default)]
 pub struct Facts {
     pub repo_exists: bool,
+    /// Why the node will not start a session from what was named: an
+    /// operator's own checkout, or nothing that is a forge repository.
+    pub repo_refused: Option<String>,
+    /// The forge repository named is not cloned on this node yet; a session
+    /// clones it before it starts.
+    pub will_clone: bool,
     /// Why this node would refuse to start a session here: not ready, the
     /// channel archived, no usable model or harness. `None` when it would.
     pub launch_refused: Option<String>,
@@ -113,7 +119,15 @@ pub fn repo_missing(repo: &str) -> String {
 
 pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
     let mut launch = Vec::new();
-    if !facts.repo_exists {
+    let mut launch_notes = Vec::new();
+    if let Some(refused) = &facts.repo_refused {
+        launch.push(gap("repo", refused.clone()));
+    } else if facts.will_clone {
+        launch_notes.push(gap(
+            "repo",
+            format!("{repo} is not cloned yet (will clone)"),
+        ));
+    } else if !facts.repo_exists {
         launch.push(gap("repo", repo_missing(repo)));
     }
     if let Some(reason) = &facts.launch_refused {
@@ -196,7 +210,7 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
     Readiness {
         channel: channel.to_string(),
         repo: repo.to_string(),
-        investigate: path(INVESTIGATE, launch, Vec::new()),
+        investigate: path(INVESTIGATE, launch, launch_notes),
         verify: path(VERIFY, verifying, verify_notes),
         publish: path(PUBLISH, publishing, publish_notes),
     }
@@ -213,8 +227,15 @@ pub async fn readiness(
 ) -> Readiness {
     let cfg = manager.cfg();
     let store = manager.store();
-    let repo_path = Path::new(repo);
-    let repo_exists = repo_path.is_dir();
+    // What a session would start from: the managed clone of the repository
+    // named, as `create` resolves it, whether or not it is cloned yet.
+    let state_dir = crate::config::Config::state_dir();
+    let resolved = crate::forge::session_repo(&state_dir, repo.trim());
+    let repo_refused = resolved.as_ref().err().cloned();
+    let repo_path = resolved.unwrap_or_else(|_| Path::new(repo).to_path_buf());
+    let repo_path = repo_path.as_path();
+    let repo_exists = repo_path.join(".git").exists();
+    let will_clone = repo_refused.is_none() && !repo_exists;
 
     let spec: Option<crate::session::NewSession> = serde_json::from_value(serde_json::json!({
         "channel": channel,
@@ -245,6 +266,9 @@ pub async fn readiness(
         crate::corpus::project::identify(channel, repo_path, &cfg.live().publish.git)
             .await
             .2
+    } else if will_clone {
+        // The clone will have the forge it is named after as its origin.
+        crate::forge::managed_identity(&state_dir, repo_path)
     } else {
         None
     };
@@ -279,6 +303,8 @@ pub async fn readiness(
         repo,
         &Facts {
             repo_exists,
+            repo_refused,
+            will_clone,
             launch_refused,
             checks: environment.checks,
             image: environment.image,
@@ -301,6 +327,8 @@ mod tests {
     fn ready() -> Facts {
         Facts {
             repo_exists: true,
+            repo_refused: None,
+            will_clone: false,
             launch_refused: None,
             checks: vec!["just check".into()],
             image: DIGEST.into(),
@@ -397,6 +425,41 @@ mod tests {
         );
         for p in [&r.investigate, &r.verify, &r.publish] {
             assert_eq!(keys(p)[..2], ["repo", "launch"]);
+        }
+    }
+
+    /// A forge repository the node has not cloned yet is no gap: the
+    /// session clones it first, and says so. A host checkout is refused on
+    /// every path, in the words `create` refuses it with.
+    #[test]
+    fn an_uncloned_repository_will_clone_and_a_host_checkout_is_refused() {
+        let r = assess(
+            "personal",
+            "github.com/o/r",
+            &Facts {
+                repo_exists: false,
+                will_clone: true,
+                ..ready()
+            },
+        );
+        assert!(r.investigate.ready && r.verify.ready && r.publish.ready);
+        assert_eq!(
+            r.investigate.notes[0].message,
+            "github.com/o/r is not cloned yet (will clone)"
+        );
+
+        let r = assess(
+            "personal",
+            "/home/me/src/r",
+            &Facts {
+                repo_exists: false,
+                repo_refused: Some(crate::forge::HOST_CHECKOUT_REFUSED.into()),
+                ..ready()
+            },
+        );
+        for p in [&r.investigate, &r.verify, &r.publish] {
+            assert_eq!(keys(p)[0], "repo");
+            assert_eq!(p.missing[0].message, crate::forge::HOST_CHECKOUT_REFUSED);
         }
     }
 

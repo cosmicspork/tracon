@@ -7,6 +7,7 @@ mod support;
 use support::{
     harness::{harness, harness_on, Harness},
     rows::session_row,
+    state,
 };
 
 use std::sync::{Arc, Mutex};
@@ -43,29 +44,40 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 }
 
 /// A repository whose default branch has a `just check` recipe and a Cargo
-/// lockfile, and a session `s1` working in it.
-fn repository(h: &Harness) -> tempfile::TempDir {
+/// lockfile, cloned on the node, and a session `s1` working in it.
+fn repository(h: &Harness) -> ManagedRepo {
     repository_for(h, "s1")
+}
+
+/// A managed clone a test's session works in. Each test gets its own, even
+/// for one session id, since tests run at once.
+struct ManagedRepo(std::path::PathBuf);
+
+impl ManagedRepo {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
 }
 
 /// As `repository`, for a session of the test's own. Trials are the node's,
 /// not the store's, and one session runs one at a time: a test that waits on
 /// its own trial does not share a session with another test's.
-fn repository_for(h: &Harness, session_id: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    git(root, &["init", "-q"]);
+fn repository_for(h: &Harness, session_id: &str) -> ManagedRepo {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = state::managed_clone(&format!("setup-{session_id}-{n}"));
     std::fs::write(root.join("justfile"), "check:\n    cargo test\n").unwrap();
     std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
     std::fs::write(root.join("Cargo.lock"), "").unwrap();
-    git(root, &["add", "."]);
-    git(root, &["commit", "-qm", "init"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "init"]);
+    git(&root, &["push", "-q", "origin", "main"]);
     // What the working tree says after the commit is not the default branch.
     std::fs::write(root.join("package.json"), r#"{"scripts":{"test":"x"}}"#).unwrap();
     let mut session = session_row(session_id, "n1", "personal");
     session.repo_path = root.to_string_lossy().to_string();
     h.store.insert_session(&session).unwrap();
-    dir
+    ManagedRepo(root)
 }
 
 async fn tool(h: &Harness, name: &str, args: Value) -> Result<Value, String> {
@@ -163,6 +175,10 @@ async fn a_proposal_is_written_only_once_the_operator_allows_it() {
     assert_eq!(settled.state, "succeeded", "{:?}", settled.reason);
     let repos = h.manager.cfg().repos();
     let entry = repos.iter().find(|e| e.matches(&repo)).expect("written");
+    // Written by the repository's forge identity, which names the clone.
+    let identity = tracon::forge::managed_identity(&Config::state_dir(), &repo).unwrap();
+    assert!(identity.starts_with("github.com/setup-s1-"), "{identity}");
+    assert_eq!(entry.path, std::path::PathBuf::from(identity));
     assert_eq!(
         entry.checks.as_deref(),
         Some(&["just check".to_string()][..])
@@ -334,6 +350,7 @@ fn dev_dockerfile(root: &std::path::Path) {
     std::fs::write(root.join(".devcontainer/Dockerfile"), "FROM debian\n").unwrap();
     git(root, &["add", ".devcontainer"]);
     git(root, &["commit", "-qm", "devcontainer"]);
+    git(root, &["push", "-q", "origin", "main"]);
 }
 
 async fn settled(h: &Harness, id: &str) -> tracon::store::approvals::ApprovalRow {
@@ -374,7 +391,7 @@ async fn a_dockerfile_is_built_for_a_trial_once_the_operator_allows_it() {
         card.title.starts_with("repo_setup_try ")
             && card
                 .title
-                .contains(": build .devcontainer/Dockerfile from HEAD at "),
+                .contains(": build .devcontainer/Dockerfile from origin/main at "),
         "{}",
         card.title
     );

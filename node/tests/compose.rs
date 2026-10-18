@@ -134,7 +134,7 @@ async fn a_prompt_writes_the_item_and_starts_the_session() {
                 "channel": "personal",
                 "title": "Archive ended sessions from the home",
                 "body": "in bulk and per row",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "model": "m/a",
             })),
         )
@@ -171,7 +171,7 @@ async fn a_refused_session_keeps_the_item_and_says_where_it_went() {
             Some(json!({
                 "channel": "personal",
                 "title": "Something worth keeping",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
             })),
         )
         .await;
@@ -199,7 +199,7 @@ async fn composing_straight_to_execute_is_refused_before_anything_is_written() {
             Some(json!({
                 "channel": "personal",
                 "title": "Cannot have a plan yet",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "phase": "execute",
             })),
         )
@@ -237,7 +237,7 @@ async fn a_prompt_takes_the_channel_s_bound_model() {
             Some(json!({
                 "channel": "personal",
                 "title": "No model named here",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
             })),
         )
         .await;
@@ -277,10 +277,12 @@ async fn peer_compose_applies_its_scoped_work_before_the_mesh_tap_arrives() {
         .work_item_change("sender", "personal", &item.id)
         .unwrap()
         .unwrap();
+    // A forwarded create names a clone the receiver has, by its path.
+    let repo = state::managed_clone("forwarded-compose");
     let command = json!({
         "op": "create",
         "spec": {
-            "channel": "personal", "phase": "plan", "repo_path": ".",
+            "channel": "personal", "phase": "plan", "repo_path": repo,
             "work_item_id": item.id, "model": "m/a",
         },
         "work_item": change,
