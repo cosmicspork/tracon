@@ -2685,6 +2685,7 @@ async fn streamed_chunks_are_coalesced_into_one_logged_message() {
 use axum::http::Request as HttpRequest;
 use tracon::broker::Broker;
 use tracon::mcp::Tools;
+use tracon::session::Phase;
 
 /// The MCP surface over its real HTTP route, with the token check in place.
 async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
@@ -2892,18 +2893,19 @@ async fn orientation_with(
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
 ) -> Orientation {
-    orientation_setup(tag, launch_with, pinned_docs, false, &[]).await
+    orientation_setup(tag, launch_with, pinned_docs, false, &[], Phase::Plan).await
 }
 
 /// The whole setup, optionally with a context the operator selected for the
 /// item before its session starts: one research document this node holds and
-/// one constraint it does not.
+/// one constraint it does not. The session runs in `phase`.
 async fn orientation_setup(
     tag: &str,
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
     with_context: bool,
     prepare: &[&str],
+    phase: Phase,
 ) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
@@ -3082,6 +3084,24 @@ async fn orientation_setup(
         )
         .unwrap();
     }
+    // An execute session carries out the item's plan, so there is one.
+    if phase == Phase::Execute {
+        let slug = tracon::corpus::work::plan_slug(&item.id);
+        tracon::corpus::write(
+            &store,
+            &Bus::new(),
+            "n1",
+            "personal",
+            "document",
+            tracon_sync::ChangeOp::Upsert,
+            &slug,
+            json!({"channel": "personal", "slug": slug, "kind": "plan",
+                   "title": "Plan", "body": "Add the table, then the view.",
+                   "pinned": false, "hash": "p", "created_ms": now_ms(), "updated_ms": now_ms()}),
+        )
+        .unwrap();
+        tracon::corpus::work::set_plan(&store, &Bus::new(), "n1", &item.id, &slug).unwrap();
+    }
     let row = manager
         .create_with(
             tracon::session::NewSession {
@@ -3093,7 +3113,7 @@ async fn orientation_setup(
                 budget_tokens: Some(1000),
                 initial_prompt: None,
                 node_id: None,
-                phase: tracon::session::Phase::Plan,
+                phase,
                 review_id: None,
                 base_sha: None,
                 workspace_id: None,
@@ -3271,7 +3291,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
 async fn a_session_is_told_whether_its_workspace_was_prepared() {
     state::isolate();
     let Orientation { store, row, .. } =
-        orientation_setup("prepared", None, 0, false, &["make deps"]).await;
+        orientation_setup("prepared", None, 0, false, &["make deps"], Phase::Plan).await;
     let mut events = Vec::new();
     for _ in 0..300 {
         events = store.events_after(&row.id, 0, 500).unwrap();
@@ -3486,7 +3506,7 @@ async fn a_session_receives_its_items_selected_context_and_the_receipt_is_kept()
     state::isolate();
     let Orientation {
         store, item, row, ..
-    } = orientation_setup("context", None, 0, true, &[]).await;
+    } = orientation_setup("context", None, 0, true, &[], Phase::Plan).await;
 
     let mut found = None;
     for _ in 0..300 {
@@ -3605,7 +3625,8 @@ async fn writing_the_plan_document_ends_the_plan_phase() {
 
 // ---- a session's turn ends on an open wait ------------------------------
 
-/// A plan session, its harness's MCP route, and the operator's API.
+/// A plan session (or, with `Held::in_phase`, one in another phase), its
+/// harness's MCP route, and the operator's API.
 struct Held {
     o: Orientation,
     harness: axum::Router,
@@ -3615,7 +3636,11 @@ struct Held {
 
 impl Held {
     async fn new(tag: &str) -> Self {
-        let o = orientation(tag).await;
+        Self::in_phase(tag, Phase::Plan).await
+    }
+
+    async fn in_phase(tag: &str, phase: Phase) -> Self {
+        let o = orientation_setup(tag, None, 0, false, &[], phase).await;
         o.manager.set_default_adapter(o.adapter.clone());
         // The kickoff turn has run and the session is idle, its own tool
         // token registered before the test's replaces it.
@@ -3972,7 +3997,8 @@ async fn a_node_stopping_under_a_held_session_carries_it_on_once_answered() {
 #[tokio::test]
 async fn a_held_sessions_continuation_takes_over_its_review_sent_back_for_changes() {
     state::isolate();
-    let h = Held::new("held-revise").await;
+    // A session that submits a review is executing its plan.
+    let h = Held::in_phase("held-revise", Phase::Execute).await;
     let review = uuid::Uuid::now_v7().to_string();
     let mut submitted = published_review(&review, &h.o.row.id);
     submitted.state = "new".into();
@@ -5084,7 +5110,7 @@ async fn the_node_wakes_an_exhausted_session_or_carries_it_on() {
         adapter,
         row,
         ..
-    } = orientation_setup("exhausted-wake", None, 0, false, &[]).await;
+    } = orientation_setup("exhausted-wake", None, 0, false, &[], Phase::Plan).await;
     manager.set_default_adapter(adapter.clone());
     let wait = |id: String, want: &'static str| {
         let store = store.clone();
