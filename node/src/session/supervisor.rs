@@ -1181,6 +1181,7 @@ impl Supervisor {
             resource: request.resource.as_deref(),
             command: request.command.as_deref(),
             arguments: None,
+            doc_kinds: None,
         };
         let mut decision = self.policy.read().decide(&subject);
         let grant = crate::policy::session_grant(&subject);

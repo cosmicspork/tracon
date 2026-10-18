@@ -124,6 +124,7 @@ async fn every_verdict_shown_is_the_one_the_gate_would_give() {
             resource: None,
             command: None,
             arguments: None,
+            doc_kinds: None,
         });
         assert_eq!(
             action["verdict"],

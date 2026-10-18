@@ -7,10 +7,10 @@
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { hasAnswer } from '../lib/load'
   import { Loader } from '../lib/loader.svelte'
-  import { groupDocs } from '../lib/docs'
+  import { groupDocs, kindLabel, kindOf } from '../lib/docs'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import type { Document, RecallHit } from '../lib/types'
+  import type { DocKindInfo, Document, RecallHit } from '../lib/types'
 
   let channel = $state<string>('')
   const listing = new Loader<Document[]>()
@@ -20,6 +20,21 @@
   let importing = $state(false)
   let newSlug = $state('')
   let showArchived = $state(false)
+  let kindFilter = $state('')
+  // The node's kinds, the one list grouping, the kind filter and the slug
+  // hint follow. Until it answers the list is shown ungrouped by order.
+  let kinds = $state<DocKindInfo[]>([])
+  $effect(() => {
+    void store.docsVersion
+    api
+      .docKinds()
+      .then((k) => (kinds = k.kinds))
+      .catch(() => {})
+  })
+  // What a new document may be called: the configured kinds and the plan. An
+  // imported file's name is kept as its slug only under one of these, so a
+  // file named `shown-…` or `context-…` is suggested as `ref-…`.
+  const writable = $derived(kinds.filter((k) => !k.reserved || k.kind === 'plan').map((k) => k.kind))
 
   const channels = $derived(store.channels.map((c) => c.name))
 
@@ -39,7 +54,8 @@
     if (!store.loads.channels.loaded || (!channel && channels.length)) return
     const name = channel || undefined
     const archived = showArchived
-    listing.load(`${name ?? ''}|${archived}`, () => api.docs(name, undefined, archived).then((d) => d.docs))
+    const kind = kindFilter || undefined
+    listing.load(`${name ?? ''}|${archived}|${kind ?? ''}`, () => api.docs(name, kind, archived).then((d) => d.docs))
   })
   // Before the channel list answers there is nothing to ask for yet.
   const status = $derived(store.loads.channels.loaded ? listing : store.loads.channels)
@@ -54,6 +70,7 @@
   let searchTimer: ReturnType<typeof setTimeout> | undefined
   $effect(() => {
     const q = query.trim()
+    const kind = kindFilter || undefined
     clearTimeout(searchTimer)
     if (!q) {
       hits = null
@@ -62,7 +79,7 @@
     }
     searchTimer = setTimeout(() => {
       api
-        .searchDocs(q, channel || undefined)
+        .searchDocs(q, channel || undefined, kind)
         .then((d) => {
           hits = d.hits
           textOnly = d.text_only ?? false
@@ -72,7 +89,7 @@
   })
 
   const live = $derived(docs.filter((d) => !d.archived))
-  const grouped = $derived(groupDocs(docs))
+  const grouped = $derived(groupDocs(docs, kinds))
 
   function create() {
     const slug = newSlug.trim().toLowerCase()
@@ -108,6 +125,15 @@
       </select>
     </label>
   {/if}
+  {#if kinds.length}
+    <label class="channel">
+      <span>Kind</span>
+      <select bind:value={kindFilter}>
+        <option value="">All kinds</option>
+        {#each kinds as k (k.kind)}<option value={k.kind} title={k.description}>{k.label}</option>{/each}
+      </select>
+    </label>
+  {/if}
   <label class="search">
     <span>Search documents</span>
     <input placeholder="Search by content" bind:value={query} />
@@ -122,12 +148,12 @@
       <input placeholder="kind-slug, e.g. guide-deploy" bind:value={newSlug} />
     </label>
     <button class="btn p" type="submit" disabled={!newSlug.trim()}>Write Markdown</button>
-    <small>Kinds: guide, ref, architecture, plan, proposal, repo, note, meeting, inbox.</small>
+    {#if writable.length}<small>Kinds: {writable.join(', ')}.</small>{/if}
   </form>
 {/if}
 
 {#if importing}
-  <HtmlImport {channel} onimported={imported} />
+  <HtmlImport {channel} kinds={writable} onimported={imported} />
 {/if}
 
 {#if hits !== null}
@@ -139,7 +165,7 @@
         <a class="row" href="/docs/{channel}/{h.slug}">
           <span class="bar"></span>
           <span class="t">
-            <em>{h.slug?.split('-')[0]}</em>
+            <em>{kindLabel(kindOf(h.slug ?? '', kinds), kinds)}</em>
             {#if h.format === 'html'}<em>HTML</em>{/if}
             {h.title}
             <small>{h.text}</small>
@@ -162,7 +188,7 @@
       </div>
     {:else}
       {#each grouped as [kind, list] (kind)}
-        <div class="h5">{kind} <b>{list.length}</b></div>
+        <div class="h5">{kind === 'archived' ? kind : kindLabel(kind, kinds)} <b>{list.length}</b></div>
         <div class="rows">
           {#each list as d (d.id)}
             <a class="row" href="/docs/{d.channel}/{d.slug}">

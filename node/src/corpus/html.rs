@@ -50,7 +50,10 @@ pub enum HtmlBundleError {
     EntryNotUtf8,
 }
 
+/// `kinds` is the node's configured document kinds, which the fallback title
+/// strips a slug's prefix by.
 pub fn validate_bundle(
+    kinds: &[crate::config::DocKind],
     slug: &str,
     entry_path: &str,
     files: Vec<HtmlFile>,
@@ -99,7 +102,7 @@ pub fn validate_bundle(
     let entry_html = std::str::from_utf8(&entry.bytes)
         .map_err(|_| HtmlBundleError::EntryNotUtf8)?
         .to_string();
-    let title = html_title(&entry_html).unwrap_or_else(|| title_of(slug, ""));
+    let title = html_title(&entry_html).unwrap_or_else(|| title_of(kinds, slug, ""));
     let hash = generation_hash(&entry_path, &normalized);
 
     Ok(ValidatedHtmlBundle {
@@ -225,6 +228,7 @@ mod tests {
     #[test]
     fn validates_sorts_hashes_and_extracts_title() {
         let bundle = validate_bundle(
+            &[],
             "ref-fallback",
             "index.html",
             vec![
@@ -238,6 +242,7 @@ mod tests {
         assert_eq!(bundle.hash.len(), 64);
 
         let reordered = validate_bundle(
+            &[],
             "ref-fallback",
             "index.html",
             vec![
@@ -258,12 +263,13 @@ mod tests {
             "a\\index.html",
         ] {
             assert!(matches!(
-                validate_bundle("ref-x", path, vec![file(path, b"x")]),
+                validate_bundle(&[], "ref-x", path, vec![file(path, b"x")]),
                 Err(HtmlBundleError::InvalidPath(_))
             ));
         }
         assert!(matches!(
             validate_bundle(
+                &[],
                 "ref-x",
                 "index.html",
                 vec![file("index.html", b"x"), file("index.html", b"y")]
@@ -275,11 +281,16 @@ mod tests {
     #[test]
     fn requires_html_utf8_entry() {
         assert!(matches!(
-            validate_bundle("ref-x", "readme.txt", vec![file("readme.txt", b"x")]),
+            validate_bundle(&[], "ref-x", "readme.txt", vec![file("readme.txt", b"x")]),
             Err(HtmlBundleError::EntryNotHtml(_))
         ));
         assert!(matches!(
-            validate_bundle("ref-x", "index.html", vec![file("index.html", &[0xff])]),
+            validate_bundle(
+                &[],
+                "ref-x",
+                "index.html",
+                vec![file("index.html", &[0xff])]
+            ),
             Err(HtmlBundleError::EntryNotUtf8)
         ));
     }

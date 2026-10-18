@@ -793,6 +793,9 @@ pub fn write(
     docs::write_document(
         store,
         bus,
+        // The selected context's kind is reserved: it classifies the same
+        // under any configured list.
+        &[],
         site,
         &item.channel,
         &slug,
@@ -846,8 +849,8 @@ mod tests {
 
     fn doc(store: &Store, slug: &str, body: &str, extra: serde_json::Value) {
         let mut row = json!({
-            "channel": "personal", "slug": slug, "kind": docs::kind_of(slug),
-            "title": docs::title_of(slug, body), "body": body,
+            "channel": "personal", "slug": slug, "kind": docs::kind_of(&crate::config::default_doc_kinds(), slug),
+            "title": docs::title_of(&[], slug, body), "body": body,
             "hash": crate::corpus::hash_body(body), "created_ms": 1, "updated_ms": 1,
         });
         for (k, v) in extra.as_object().unwrap() {

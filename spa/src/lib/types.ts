@@ -1417,7 +1417,8 @@ export interface PolicyRule {
   kinds: string[]
   channels: string[]
   matches: string[]
-  args: Record<string, string[]>
+  /** Globs per argument, or `slug_working_note = true`. */
+  args: Record<string, string[] | boolean>
 }
 
 /** A narrow local authority decision. It never edits the signed policy bundle. */
@@ -1472,6 +1473,19 @@ export interface Document {
   pinned?: number
   created_ms: number
   updated_ms: number
+}
+
+/** A kind a document is filed under, as the node lists them
+ *  (`GET /api/docs/kinds`): the operator's `[[docs.kind]]` entries, then the
+ *  reserved kinds, then `other`. */
+export interface DocKindInfo {
+  kind: string
+  label: string
+  description: string
+  /** Written unattended by the shipped policy (`slug_working_note`). */
+  working_note: boolean
+  /** Built into the node; no configuration changes it. */
+  reserved: boolean
 }
 
 /** A memory as the node keeps it. */

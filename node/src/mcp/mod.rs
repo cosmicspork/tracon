@@ -336,7 +336,7 @@ impl Tools {
             // the node's own, and reading it is what every session starts by
             // doing. This means every session gets an MCP server.
             out.extend(memory::definitions());
-            out.extend(docs::definitions());
+            out.extend(docs::definitions(&self.cfg.live().docs.kind));
             // These are intervention-only: asking, pinging, and drafting a
             // report do not touch a credential or widen a tool policy.
             out.extend(operator::definitions());
@@ -508,6 +508,7 @@ impl Tools {
             let (action, target, revision) = consequential(name, args)
                 .expect("consequential action record has canonical arguments");
             let policy = self.policy.read();
+            let live = self.cfg.live();
             let tool = policy.decide(&Request {
                 channel: &ctx.channel,
                 action: name,
@@ -515,6 +516,7 @@ impl Tools {
                 resource: None,
                 command: None,
                 arguments: Some(args),
+                doc_kinds: Some(&live.docs.kind),
             });
             if tool.verdict == Verdict::Deny {
                 return Err(refusal(tool));
@@ -1442,6 +1444,7 @@ impl Tools {
     }
 
     fn decide(&self, ctx: &CallContext, name: &str, args: &Value) -> Decision {
+        let live = self.cfg.live();
         let tool = self.policy.read().decide(&Request {
             channel: &ctx.channel,
             action: name,
@@ -1449,6 +1452,7 @@ impl Tools {
             resource: None,
             command: None,
             arguments: Some(args),
+            doc_kinds: Some(&live.docs.kind),
         });
         if tool.verdict == Verdict::Deny {
             return tool;
@@ -1488,6 +1492,7 @@ impl Tools {
         name: &str,
         args: &Value,
     ) -> Result<(), String> {
+        let live = self.cfg.live();
         let decision = self.policy.read().decide(&Request {
             channel: &ctx.channel,
             action: name,
@@ -1495,6 +1500,7 @@ impl Tools {
             resource: None,
             command: None,
             arguments: Some(args),
+            doc_kinds: Some(&live.docs.kind),
         });
         if decision.verdict == Verdict::Deny {
             return Err(refusal(decision));
@@ -2233,6 +2239,7 @@ mod tests {
                     resource: None,
                     command: None,
                     arguments: Some(&none),
+                    doc_kinds: None,
                 });
                 decision.verdict == Verdict::Ask
             })

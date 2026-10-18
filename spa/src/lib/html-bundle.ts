@@ -2,19 +2,6 @@ export const MAX_BUNDLE_BYTES = 20 * 1024 * 1024
 export const MAX_FILE_BYTES = 16 * 1024 * 1024
 export const MAX_FILES = 256
 
-const KINDS = [
-  'note',
-  'repo',
-  'meeting',
-  'inbox',
-  'proposal',
-  'plan',
-  'brief',
-  'guide',
-  'ref',
-  'architecture',
-]
-
 export interface HtmlBundleFile {
   file: File
   path: string
@@ -28,7 +15,9 @@ export interface HtmlBundleSelection {
   suggestedSlug: string
 }
 
-export function selectHtmlFile(input: FileList | File[]): HtmlBundleSelection {
+/** `kinds` are the prefixes the node files documents under
+ *  (`GET /api/docs/kinds`), which the suggested slug keeps. */
+export function selectHtmlFile(input: FileList | File[], kinds: string[] = []): HtmlBundleSelection {
   const files = Array.from(input)
   if (files.length !== 1 || !isHtml(files[0].name)) {
     throw new Error('Choose exactly one .html file')
@@ -41,11 +30,11 @@ export function selectHtmlFile(input: FileList | File[]): HtmlBundleSelection {
     entryPath: path,
     files: [{ file, path }],
     totalBytes: file.size,
-    suggestedSlug: suggestSlug(file.name.replace(/\.html?$/i, '')),
+    suggestedSlug: suggestSlug(file.name.replace(/\.html?$/i, ''), kinds),
   }
 }
 
-export function selectHtmlFolder(input: FileList | File[]): HtmlBundleSelection {
+export function selectHtmlFolder(input: FileList | File[], kinds: string[] = []): HtmlBundleSelection {
   const files = Array.from(input)
   if (files.length === 0) throw new Error('Choose a folder containing HTML')
   validateLimits(files)
@@ -76,11 +65,13 @@ export function selectHtmlFolder(input: FileList | File[]): HtmlBundleSelection 
     entryPath: entry.path,
     files: selected,
     totalBytes: files.reduce((sum, file) => sum + file.size, 0),
-    suggestedSlug: suggestSlug(root),
+    suggestedSlug: suggestSlug(root, kinds),
   }
 }
 
-export function suggestSlug(name: string): string {
+/** A slug for `name`: kept as it is when it already starts with one of the
+ *  node's `kinds`, else filed as a reference when the node has that kind. */
+export function suggestSlug(name: string, kinds: string[]): string {
   const normalized = name
     .normalize('NFKD')
     .toLowerCase()
@@ -88,8 +79,9 @@ export function suggestSlug(name: string): string {
     .replace(/-+/g, '-')
     .replace(/^[._-]+|[._-]+$/g, '')
   const base = normalized || 'document'
-  const hasKind = KINDS.some((kind) => base === kind || base.startsWith(`${kind}-`))
-  return hasKind ? base : `ref-${base}`
+  const hasKind = kinds.some((kind) => kind !== 'other' && (base === kind || base.startsWith(`${kind}-`)))
+  if (hasKind || !kinds.includes('ref')) return base
+  return `ref-${base}`
 }
 
 function normalizePath(path: string): string {

@@ -402,6 +402,100 @@ async fn an_archived_document_is_kept_but_out_of_the_list_and_search_until_asked
 
 /// The documents `tracon doc export` writes, by the CLI's own route: GET the
 /// list, then GET each body. This breaks if the CLI's route breaks.
+#[tokio::test]
+async fn the_api_files_a_document_under_a_kind_added_after_it_was_written() {
+    state::isolate();
+    let mut cfg = tracon::config::Config::default();
+    cfg.docs.kind.push(tracon::config::DocKind {
+        prefix: "runbook".into(),
+        label: "Runbook".into(),
+        description: "how to run something here".into(),
+        working_note: false,
+    });
+    let h = support::harness::harness_with(cfg).await;
+    // Written by a node that knew no runbook kind, so stored as `other`.
+    let body = "# Deploy\n\nRoll the hub behind the proxy.";
+    h.store
+        .write_document_change(
+            "A",
+            "personal",
+            "runbook-deploy",
+            "other",
+            "Deploy",
+            body,
+            &tracon::corpus::hash_body(body),
+            None,
+            true,
+            "doc-runbook",
+            None,
+            None,
+        )
+        .unwrap();
+
+    let slugs = |list: &Value, key: &str| -> Vec<String> {
+        list[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["slug"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let get = |uri: &'static str| call_with(&h.operator, "GET", uri, None, &[]);
+    let (st, list) = get("/api/docs?channel=personal&kind=runbook").await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    assert_eq!(slugs(&list, "docs"), ["runbook-deploy"]);
+    assert_eq!(list["docs"][0]["kind"], "runbook");
+    let (_, list) = get("/api/docs?channel=personal&kind=other").await;
+    assert!(slugs(&list, "docs").is_empty(), "{list}");
+    let (_, found) = get("/api/docs?channel=personal&kind=runbook&q=hub%20proxy").await;
+    assert_eq!(slugs(&found, "hits"), ["runbook-deploy"]);
+    let (_, found) = get("/api/docs?channel=personal&kind=other&q=hub%20proxy").await;
+    assert!(slugs(&found, "hits").is_empty(), "{found}");
+
+    // The kinds, in the order the Documents screen groups by: the
+    // configured ones as written, the reserved ones, then `other`.
+    let (st, kinds) = get("/api/docs/kinds").await;
+    assert_eq!(st, StatusCode::OK, "{kinds}");
+    let kinds = kinds["kinds"].as_array().unwrap();
+    let order: Vec<&str> = kinds.iter().map(|k| k["kind"].as_str().unwrap()).collect();
+    assert_eq!(
+        order,
+        [
+            "guide",
+            "ref",
+            "architecture",
+            "proposal",
+            "repo",
+            "note",
+            "meeting",
+            "inbox",
+            "runbook",
+            "brief",
+            "context",
+            "plan",
+            "shown",
+            "other",
+        ]
+    );
+    let runbook = &kinds[8];
+    assert_eq!(
+        runbook,
+        &json!({
+            "kind": "runbook",
+            "label": "Runbook",
+            "description": "how to run something here",
+            "working_note": false,
+            "reserved": false,
+        })
+    );
+    assert_eq!(kinds[5]["working_note"], true);
+    assert_eq!(kinds[12]["label"], "Shown work");
+    assert!(
+        kinds[9..].iter().all(|k| k["reserved"] == true),
+        "{kinds:?}"
+    );
+}
+
 async fn exported(app: &axum::Router, channel: &str) -> Vec<tracon::corpus::export::ExportDoc> {
     let (st, list) = call_with(
         app,
@@ -520,7 +614,8 @@ async fn a_document_export_imports_into_a_fresh_node_unchanged() {
     // Export: plain Markdown files, archived ones under archive/.
     let dir = state::scratch("document-export-round-trip");
     let docs = exported(&from.operator, "personal").await;
-    let report = tracon::corpus::export::sync_dir(&dir, &docs).unwrap();
+    let kinds = tracon::config::default_doc_kinds();
+    let report = tracon::corpus::export::sync_dir(&dir, &docs, &kinds).unwrap();
     assert_eq!(report.written, written.len());
     // Nothing but `<slug>.md` and `archive/<slug>.md`: no sidecar, no
     // manifest, no index. A directory of Markdown is the whole format.
@@ -552,7 +647,7 @@ async fn a_document_export_imports_into_a_fresh_node_unchanged() {
 
     // Import into a node that has never held any of this, addressed only by
     // filename: no ids, no channel, no origin node is needed to read it back.
-    let (imported, skipped) = tracon::corpus::import::read_dir(&dir).unwrap();
+    let (imported, skipped) = tracon::corpus::import::read_dir(&dir, &kinds).unwrap();
     assert!(skipped.is_empty(), "{skipped:?}");
     let into = harness().await;
     for d in &imported {

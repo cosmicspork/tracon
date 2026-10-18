@@ -371,6 +371,7 @@ async fn a_late_joiner_backfills_records_from_each_site() {
     let (html, html_changes) = a
         .store
         .write_html_document_change(
+            &[],
             &ai,
             "personal",
             "ref-bundle",
