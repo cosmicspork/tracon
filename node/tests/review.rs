@@ -4659,6 +4659,216 @@ async fn a_retry_is_refused_once_a_newer_revision_arrives() {
     );
 }
 
+// ---- a publication finished by hand ----
+
+/// Reconcile the review's latest publication with the change the operator
+/// names, from the node's own machine: it is an admin action.
+async fn reconcile(f: &Fixture, id: &str, publication: &str, change: &str) -> (StatusCode, Value) {
+    support::http::call_local(
+        &f.app,
+        "POST",
+        &format!("/api/reviews/{id}/publication/reconcile"),
+        Some(json!({ "publication_id": publication, "change": change })),
+    )
+    .await
+}
+
+/// A review stuck in `publishing` after its push, whose pull request the
+/// operator opened by hand: named, checked against the forge, and settled as
+/// published there, with the review now updating that change.
+#[tokio::test]
+async fn a_change_opened_by_hand_that_matches_the_push_settles_the_review() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    let revision = f
+        .store
+        .latest_review_revision(&id)
+        .unwrap()
+        .map(|revision| revision.id);
+    // The branch reached the forge and then the attempt stopped, as it does
+    // on a node with no forge CLI to open the change with.
+    sh(
+        &f.dir.join("wt"),
+        &format!("git push -q origin {head}:refs/heads/feat/x"),
+    );
+    let publication = f.publication_id(&id);
+    f.store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: &id,
+            revision_id: revision.as_deref(),
+            candidate_id: &tracon::store::candidate_id(&head, "work"),
+            channel: "work",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat/x",
+            head_sha: &head,
+            instance: "a-process-that-is-no-longer-running",
+        })
+        .unwrap();
+    f.store.publication_pushed(&publication, &head).unwrap();
+    f.store.publication_opening(&publication).unwrap();
+    assert!(f.store.begin_publish(&id, revision.as_deref()).unwrap());
+    assert_eq!(
+        f.publication(&id).outcome(tracon::process::instance_id()),
+        tracon::store::PublicationOutcome::Uncertain
+    );
+    gh_forge(&f, pull_seven(&head));
+    f.forget_logs();
+
+    let (status, body) = reconcile(&f, &id, &publication, "https://github.test/pull/7/").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["published"], "https://github.test/pull/7");
+    let gh = f.gh_log();
+    assert!(gh.contains("api -X GET repos/owner/name/pulls/7"), "{gh}");
+    assert!(!gh.contains("pr create"), "nothing is opened: {gh}");
+    assert!(
+        !f.git_log().contains("push"),
+        "nothing is pushed: {}",
+        f.git_log()
+    );
+
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(review.state, "approved");
+    assert_eq!(
+        review.publish_result.as_deref(),
+        Some("https://github.test/pull/7")
+    );
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert_eq!(target.change.map(|change| change.number), Some(7));
+    let row = f.publication(&id);
+    assert_eq!(row.state, "opened");
+    assert_eq!(row.result.as_deref(), Some("https://github.test/pull/7"));
+    let decisions = f.store.review_decisions(&id).unwrap();
+    assert!(
+        decisions.iter().any(|decision| decision
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("reconciled by the operator"))),
+        "{decisions:?}"
+    );
+}
+
+/// A change whose head is not the commit this publication pushed is not this
+/// publication's, whatever the operator says: refused with what the forge
+/// holds, and the review is left exactly as it was.
+#[tokio::test]
+async fn a_change_whose_head_is_not_the_pushed_commit_is_refused() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    git_that_swallows_pushes(&f);
+    let (status, _) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let before = f.store.get_review(&id).unwrap().unwrap();
+    let publication = f.publication(&id);
+    assert_eq!(publication.state, "failed");
+    let elsewhere = "0123456789abcdef0123456789abcdef01234567";
+    gh_forge(&f, pull_seven(elsewhere));
+
+    let (status, body) = reconcile(&f, &id, &publication.id, "7").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("head is 01234567") && message.contains(&head[..8]),
+        "{message}"
+    );
+    let after = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.target, before.target, "no change is recorded");
+    assert!(after.publish_result.is_none());
+    assert_eq!(f.publication(&id).state, "failed");
+}
+
+/// Commits the operator reworded are remade, so the reviewed head is not
+/// what such a publication would have pushed. Without a record of the push
+/// there is nothing to hold a change to, even one at the agent's own
+/// commits: refused before the forge is asked, and the review is left as
+/// it was.
+#[tokio::test]
+async fn a_reworded_publication_that_never_recorded_its_push_is_refused() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    git_that_swallows_pushes(&f);
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": {
+                "messages": { head.clone(): "feat: the operator's words" },
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let before = f.store.get_review(&id).unwrap().unwrap();
+    let publication = f.publication(&id);
+    assert_eq!(publication.state, "failed");
+    assert!(publication.pushed_sha.is_none());
+    gh_forge(&f, pull_seven(&head));
+    f.forget_logs();
+
+    let (status, body) = reconcile(&f, &id, &publication.id, "7").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("never recorded pushing the commits it reworded")
+            && message.contains("retry the publication instead"),
+        "{message}"
+    );
+    assert!(
+        f.gh_log().is_empty(),
+        "the forge is not asked: {}",
+        f.gh_log()
+    );
+    let after = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.target, before.target, "no change is recorded");
+    assert!(after.publish_result.is_none());
+    assert_eq!(f.publication(&id).state, "failed");
+}
+
+/// Only the node that owns a review can ask its forge about it; a peer
+/// holding a mirror refuses rather than forwarding.
+#[tokio::test]
+async fn a_peer_refuses_to_reconcile_a_review_it_does_not_own() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let local = f.submit().await;
+    let mut mirrored = f.store.get_review(&local).unwrap().unwrap();
+    mirrored.id = uuid::Uuid::now_v7().to_string();
+    mirrored.node_id = "peer-node".into();
+    mirrored.state = "publishing".into();
+    f.store.insert_review(&mirrored).unwrap();
+    gh_forge(&f, pull_seven(&mirrored.head_sha));
+    f.forget_logs();
+
+    let (status, body) = reconcile(&f, &mirrored.id, "any", "7").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reconcile it on the node that owns it"),
+        "{body}"
+    );
+    assert!(
+        f.gh_log().is_empty(),
+        "the forge is not asked: {}",
+        f.gh_log()
+    );
+    assert_eq!(
+        f.store.get_review(&mirrored.id).unwrap().unwrap().state,
+        "publishing"
+    );
+}
+
 // ---- what ships under the operator's name ----
 
 fn squashing(c: &mut Config) {
