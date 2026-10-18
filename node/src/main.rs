@@ -2229,11 +2229,32 @@ async fn skill_command(cmd: SkillCommand) -> Result<()> {
     }
 }
 
+/// The node's configured document kinds, as `GET /api/docs/kinds` lists
+/// them: the reserved ones and `other` are the node's own and left out.
+async fn node_doc_kinds() -> Result<Vec<tracon::config::DocKind>> {
+    let v = node_call(reqwest::Method::GET, "/api/docs/kinds", None, None).await?;
+    Ok(v["kinds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|k| k["reserved"] != true)
+        .filter_map(|k| {
+            Some(tracon::config::DocKind {
+                prefix: k["kind"].as_str()?.to_string(),
+                label: k["label"].as_str().unwrap_or_default().to_string(),
+                description: k["description"].as_str().unwrap_or_default().to_string(),
+                working_note: k["working_note"] == true,
+            })
+        })
+        .collect())
+}
+
 async fn doc_command(cmd: DocCommand) -> Result<()> {
     use reqwest::Method;
     match cmd {
         DocCommand::Import { dir, channel } => {
-            let (docs, skipped) = tracon::corpus::import::read_dir(&dir)?;
+            let kinds = node_doc_kinds().await?;
+            let (docs, skipped) = tracon::corpus::import::read_dir(&dir, &kinds)?;
             for s in &skipped {
                 eprintln!("skipped {s}");
             }
@@ -2347,7 +2368,10 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
                     archived: d["archived"].as_i64() == Some(1),
                 });
             }
-            let r = tracon::corpus::export::sync_dir(&dir, &docs)?;
+            // Pruned by the node's kinds, which decide what the export
+            // manages, not by this binary's defaults.
+            let kinds = node_doc_kinds().await?;
+            let r = tracon::corpus::export::sync_dir(&dir, &docs, &kinds)?;
             println!(
                 "{} Markdown documents in {}: {} written, {} unchanged, {} removed, {} HTML skipped",
                 docs.len(),

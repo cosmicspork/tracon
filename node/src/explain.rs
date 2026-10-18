@@ -93,6 +93,8 @@ pub fn session_authority(
     // harness's `tools/list` is answered with: a tool the channel has no
     // credential for is not offered, and so is not explained as available.
     let offered = tools.list_for(&session.channel, &session.node_id, phase);
+    // A working-note scope is explained as the slugs it covers now.
+    let kinds = tools.cfg.live().docs.kind.clone();
     let mut actions: Vec<ActionStanding> = offered
         .iter()
         .filter_map(|tool| tool["name"].as_str())
@@ -111,6 +113,7 @@ pub fn session_authority(
                 resource: None,
                 command: None,
                 arguments: None,
+                doc_kinds: Some(&kinds),
             }),
             grants: Vec::new(),
         })
@@ -138,6 +141,7 @@ pub fn session_authority(
             resource: None,
             command: None,
             arguments: None,
+            doc_kinds: None,
         });
         let grants: Vec<Value> = live
             .iter()

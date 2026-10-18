@@ -160,6 +160,7 @@ fn spec(repo: &str, model: &str) -> NewSession {
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
     }
 }
 

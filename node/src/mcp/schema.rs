@@ -120,7 +120,9 @@ fn registry() -> &'static HashMap<String, Value> {
             github::definitions(),
             gitlab::definitions(),
             super::consulta::definitions(&[]),
-            docs::definitions(),
+            // Edits are checked against the default kinds: no asked
+            // document call takes a kind.
+            docs::definitions(&crate::config::default_doc_kinds()),
             memory::definitions(),
             super::operator::definitions(),
             super::egress::definitions(),

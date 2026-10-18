@@ -1052,6 +1052,101 @@
       }
     ]
   },
+  "/api/docs/kinds": {
+    "kinds": [
+      {
+        "kind": "guide",
+        "label": "Guide",
+        "description": "how something is done here, for whoever does it next",
+        "working_note": false,
+        "reserved": false
+      },
+      {
+        "kind": "ref",
+        "label": "Reference",
+        "description": "facts to look up",
+        "working_note": false,
+        "reserved": false
+      },
+      {
+        "kind": "architecture",
+        "label": "Architecture",
+        "description": "how a system is put together, and why",
+        "working_note": false,
+        "reserved": false
+      },
+      {
+        "kind": "proposal",
+        "label": "Proposal",
+        "description": "a change put to the operator to decide",
+        "working_note": false,
+        "reserved": false
+      },
+      {
+        "kind": "repo",
+        "label": "Repository",
+        "description": "working notes on one repository",
+        "working_note": true,
+        "reserved": false
+      },
+      {
+        "kind": "note",
+        "label": "Note",
+        "description": "working notes",
+        "working_note": true,
+        "reserved": false
+      },
+      {
+        "kind": "meeting",
+        "label": "Meeting",
+        "description": "notes from a meeting",
+        "working_note": true,
+        "reserved": false
+      },
+      {
+        "kind": "inbox",
+        "label": "Inbox",
+        "description": "something to look at later",
+        "working_note": true,
+        "reserved": false
+      },
+      {
+        "kind": "brief",
+        "label": "Brief",
+        "description": "a work item's brief: what it is for and how it is judged",
+        "working_note": false,
+        "reserved": true
+      },
+      {
+        "kind": "context",
+        "label": "Context",
+        "description": "a work item's selected context, which only the operator changes",
+        "working_note": false,
+        "reserved": true
+      },
+      {
+        "kind": "plan",
+        "label": "Plan",
+        "description": "a plan; `plan-<item id>` written in a plan session is that item's plan",
+        "working_note": false,
+        "reserved": true
+      },
+      {
+        "kind": "shown",
+        "label": "Shown work",
+        "description": "work shown to the operator, which only `show_work` writes",
+        "working_note": false,
+        "reserved": true
+      },
+      {
+        "kind": "other",
+        "label": "Other",
+        "description": "a slug with no kind's prefix",
+        "working_note": false,
+        "reserved": true
+      }
+    ]
+  },
   "/api/docs/personal/ref-html-preview": {
     "id": "doc-html-preview",
     "channel": "personal",

@@ -185,14 +185,17 @@ matches = [
 
 # Working notes are the agent's to keep current. A plan, a guide, a proposal or
 # a reference is not, and stays asked. A document's kind is its slug's prefix,
-# so the allow is scoped by that.
+# and which kinds are working notes is the node's `[[docs.kind]]` list
+# (`working_note = true`; by default note, repo, meeting and inbox), so the
+# allow is scoped by that rather than by a second list of slugs here. A reserved
+# kind (context, shown, brief, plan) is never a working note.
 [[rule]]
 id = "unattended-notes"
 verdict = "allow"
 reason = "Keeping working notes current changes nothing the operator has not agreed to; plans, guides and references are asked."
 kinds = ["tool"]
 matches = ["doc_write"]
-args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }
+args = { slug_working_note = true }
 
 # A catalogue service is the operator's image, run beside the session in its
 # network and nowhere else, so the service itself is the authority, by name. A

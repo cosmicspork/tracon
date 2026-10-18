@@ -374,6 +374,7 @@ mod tests {
             resource: None,
             command: Some("gh pr merge 12"),
             arguments: None,
+            doc_kinds: None,
         });
         assert_eq!(d.verdict, Verdict::Deny);
     }

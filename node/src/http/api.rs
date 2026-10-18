@@ -855,6 +855,7 @@ pub async fn import_transfer(
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -924,6 +925,7 @@ pub async fn import_transfer(
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
     };
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
@@ -1495,6 +1497,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         continued_from: None,
         harness: c.harness,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
         branch: c.branch,
         work_item_id: Some(item.id.clone()),
         model: c.model,
@@ -4133,22 +4136,43 @@ pub async fn list_docs(
             50,
         )
         .await;
-        let hits = s.store().doc_search_hybrid(
-            q.channel.as_deref(),
-            q.kind.as_deref(),
-            text,
-            50,
-            &near.hits,
-        )?;
+        let live = s.cfg.live();
+        let kind = q.kind.as_deref().map(|kind| crate::mcp::docs::KindFilter {
+            kinds: &live.docs.kind,
+            kind,
+        });
+        let hits = s
+            .store()
+            .doc_search_hybrid(q.channel.as_deref(), kind, text, 50, &near.hits)?;
         return Ok(Json(json!({ "hits": hits, "text_only": near.degraded })));
     }
     let docs = s.store().doc_list(q.channel.as_deref())?;
+    let live = s.cfg.live();
     let docs: Vec<_> = docs
         .into_iter()
+        .map(|d| classified(&live.docs.kind, d))
         .filter(|d| q.kind.as_deref().is_none_or(|k| k == d.kind))
         .filter(|d| q.archived || d.archived == 0)
         .collect();
     Ok(Json(json!({ "docs": docs })))
+}
+
+/// `GET /api/docs/kinds`: every kind a document is filed under, configured
+/// and reserved, then `other`, in the order the Documents screen shows them.
+/// The one list the interface and the CLI classify and group by.
+pub async fn doc_kinds(State(s): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({ "kinds": crate::mcp::docs::kind_list(&s.cfg.live().docs.kind) }))
+}
+
+/// A document as it reads now: its kind from its slug and the configured
+/// kinds, not the one stored when it was written, so a kind renamed or
+/// removed applies to every document already there.
+fn classified(
+    kinds: &[crate::config::DocKind],
+    mut doc: crate::store::DocumentRow,
+) -> crate::store::DocumentRow {
+    doc.kind = crate::mcp::docs::kind_of(kinds, &doc.slug).to_string();
+    doc
 }
 
 pub async fn get_doc(
@@ -4159,11 +4183,14 @@ pub async fn get_doc(
         StatusCode::NOT_FOUND,
         format!("no document {slug} on {channel}"),
     ))?;
+    let doc = classified(&s.cfg.live().docs.kind, doc);
     let mut value = json!(doc);
     if doc.format == "html" {
         value["bundle_files"] = json!(s.store().html_bundle_metadata(&doc)?);
     }
-    if doc.kind == crate::corpus::brief::KIND && doc.format == "markdown" {
+    if crate::mcp::docs::reserved_kind_of(&doc.slug) == Some(crate::corpus::brief::KIND)
+        && doc.format == "markdown"
+    {
         value["brief"] = json!(crate::corpus::brief::view_of(s.store(), &doc));
     }
     Ok(Json(value))
@@ -4461,6 +4488,7 @@ pub async fn import_html(
         .into_response();
     };
     match s.store().write_html_document_change(
+        &s.cfg.live().docs.kind,
         &s.node_id,
         &channel,
         &slug,
@@ -4655,6 +4683,7 @@ pub async fn put_doc(
     match crate::mcp::docs::write_document(
         s.store(),
         s.manager.bus(),
+        &s.cfg.live().docs.kind,
         &s.node_id,
         &channel,
         &slug,

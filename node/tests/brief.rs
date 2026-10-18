@@ -224,6 +224,7 @@ async fn each_line_says_who_is_behind_it_and_what_it_rests_on() {
     tracon::mcp::docs::write_document(
         &h.store,
         h.manager.bus(),
+        &tracon::config::default_doc_kinds(),
         "n1",
         "personal",
         "meeting-ops-ride-along",

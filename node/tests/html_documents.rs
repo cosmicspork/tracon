@@ -195,6 +195,7 @@ async fn preview_capability_is_document_bound_and_replacement_invalidates_it() {
     let (first, _) = h
         .store
         .write_html_document_change(
+            &[],
             "n1",
             "personal",
             "ref-first",
@@ -210,6 +211,7 @@ async fn preview_capability_is_document_bound_and_replacement_invalidates_it() {
         .unwrap();
     h.store
         .write_html_document_change(
+            &[],
             "n1",
             "personal",
             "ref-secret",
@@ -276,6 +278,7 @@ async fn preview_capability_is_document_bound_and_replacement_invalidates_it() {
 
     h.store
         .write_html_document_change(
+            &[],
             "n1",
             "personal",
             "ref-first",

@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 
 use crate::{
+    config::DocKind,
     corpus,
     mcp::{CallContext, SessionAccess},
     store::{DocumentRow, DocumentWrite},
@@ -14,38 +15,142 @@ pub const DOC_READ: &str = "doc_read";
 pub const DOC_SEARCH: &str = "doc_search";
 pub const DOC_WRITE: &str = "doc_write";
 
-/// The filename prefixes, kept as the document's kind.
-pub const KINDS: &[&str] = &[
-    "note",
-    "repo",
-    "meeting",
-    "inbox",
-    "proposal",
-    "plan",
-    "brief",
-    "context",
-    "guide",
-    "ref",
-    "architecture",
-    "shown",
+/// A reserved kind: one the node's own behaviour hangs on, so it is built in
+/// and no `[[docs.kind]]` entry removes or redefines it.
+pub struct Reserved {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+}
+
+/// The reserved kinds. A work item's selected context (`corpus::context`)
+/// and shown work (`show_work`) are refused to `doc_write`; a brief is what
+/// the work tools read an item's criteria from; `plan-<item>`, written in a
+/// plan session, is the plan artifact that ends the phase.
+pub const RESERVED: &[Reserved] = &[
+    Reserved {
+        kind: corpus::brief::KIND,
+        label: "Brief",
+        description: "a work item's brief: what it is for and how it is judged",
+    },
+    Reserved {
+        kind: corpus::context::KIND,
+        label: "Context",
+        description: "a work item's selected context, which only the operator changes",
+    },
+    Reserved {
+        kind: PLAN,
+        label: "Plan",
+        description: "a plan; `plan-<item id>` written in a plan session is that item's plan",
+    },
+    Reserved {
+        kind: SHOWN,
+        label: "Shown work",
+        description: "work shown to the operator, which only `show_work` writes",
+    },
 ];
 
-/// `<kind>-<slug>` → kind, else `other`.
-pub fn kind_of(slug: &str) -> &'static str {
-    KINDS
+/// The kind of a plan, and of the plan artifact (`corpus::work::plan_slug`).
+pub const PLAN: &str = "plan";
+
+/// What a slug with no kind's prefix is filed under.
+pub const OTHER: &str = "other";
+
+/// Whether `slug` carries `prefix`: it is `prefix` or starts `prefix-`.
+fn has_prefix(slug: &str, prefix: &str) -> bool {
+    slug.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+}
+
+/// The reserved kind named `kind`, if it is one.
+pub fn reserved(kind: &str) -> Option<&'static Reserved> {
+    RESERVED.iter().find(|r| r.kind == kind)
+}
+
+/// The reserved kind `slug` is filed under, whatever the configuration.
+pub fn reserved_kind_of(slug: &str) -> Option<&'static str> {
+    RESERVED
         .iter()
-        .find(|k| slug == **k || slug.starts_with(&format!("{k}-")))
-        .copied()
-        .unwrap_or("other")
+        .find(|r| has_prefix(slug, r.kind))
+        .map(|r| r.kind)
+}
+
+/// `<kind>-<slug>` → kind, by the reserved kinds and then `kinds`, the
+/// node's configured ones (`[[docs.kind]]`); else `other`. Decided when a
+/// document is read, not taken from the kind stored with it, so a kind the
+/// operator renames or removes applies at once and peers agree.
+pub fn kind_of<'a>(kinds: &'a [DocKind], slug: &str) -> &'a str {
+    reserved_kind_of(slug)
+        .or_else(|| {
+            kinds
+                .iter()
+                .find(|k| has_prefix(slug, &k.prefix))
+                .map(|k| k.prefix.as_str())
+        })
+        .unwrap_or(OTHER)
+}
+
+/// Whether `slug` is a working note: its kind is configured with
+/// `working_note = true`. What a policy rule's `slug_working_note` matches.
+pub fn is_working_note(kinds: &[DocKind], slug: &str) -> bool {
+    reserved_kind_of(slug).is_none()
+        && kinds
+            .iter()
+            .any(|k| k.working_note && has_prefix(slug, &k.prefix))
+}
+
+/// Every kind a document can be filed under, in the order the Documents
+/// screen shows them: the configured ones as written, then the reserved,
+/// then `other`. What `GET /api/docs/kinds` answers and `doc_search`'s
+/// `kind` takes.
+pub fn kind_list(kinds: &[DocKind]) -> Vec<Value> {
+    let configured = kinds.iter().map(|k| {
+        json!({
+            "kind": k.prefix,
+            "label": if k.label.is_empty() { &k.prefix } else { &k.label },
+            "description": k.description,
+            "working_note": k.working_note,
+            "reserved": false,
+        })
+    });
+    let reserved = RESERVED.iter().map(|r| {
+        json!({
+            "kind": r.kind, "label": r.label, "description": r.description,
+            "working_note": false, "reserved": true,
+        })
+    });
+    let other = json!({
+        "kind": OTHER, "label": "Other",
+        "description": "a slug with no kind's prefix",
+        "working_note": false, "reserved": true,
+    });
+    configured
+        .chain(reserved)
+        .chain(std::iter::once(other))
+        .collect()
+}
+
+/// What a search's `kind` filter admits: a document whose slug classifies
+/// as that kind under the configured list.
+#[derive(Clone, Copy)]
+pub struct KindFilter<'a> {
+    pub kinds: &'a [DocKind],
+    pub kind: &'a str,
+}
+
+impl KindFilter<'_> {
+    pub fn admits(&self, slug: &str) -> bool {
+        kind_of(self.kinds, slug) == self.kind
+    }
 }
 
 /// The first `# ` heading, else the slug de-prefixed and de-hyphenated.
-pub fn title_of(slug: &str, body: &str) -> String {
+pub fn title_of(kinds: &[DocKind], slug: &str, body: &str) -> String {
     body.lines()
         .find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string()))
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| {
-            let kind = kind_of(slug);
+            let kind = kind_of(kinds, slug);
             let rest = slug.strip_prefix(&format!("{kind}-")).unwrap_or(slug);
             rest.replace('-', " ")
         })
@@ -62,8 +167,8 @@ pub fn title_of(slug: &str, body: &str) -> String {
 /// nobody showed at any commit.
 pub fn reserved_for_operator(args: &Value) -> Option<String> {
     let slug = args["slug"].as_str().unwrap_or("").trim();
-    match kind_of(slug) {
-        kind if kind == corpus::context::KIND => Some(format!(
+    match reserved_kind_of(slug)? {
+        corpus::context::KIND => Some(format!(
             "`{slug}` is a work item's selected context, which only the operator changes. \
              Say which document belongs in it, and why, with `ask_operator`."
         )),
@@ -87,7 +192,34 @@ pub fn valid_slug(slug: &str) -> bool {
         && !slug.starts_with('.')
 }
 
-pub fn definitions() -> Vec<Value> {
+/// The tools, their kinds generated from `kinds`, the node's configured
+/// list, so what an agent is told it may write and search by is what the
+/// node classifies by.
+pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
+    let every: Vec<String> = kind_list(kinds)
+        .into_iter()
+        .filter_map(|k| k["kind"].as_str().map(str::to_string))
+        .collect();
+    // What `doc_write` may write: every configured kind, and the plan. A
+    // brief is the work tools' to write, and context and shown work are
+    // refused (`reserved_for_operator`).
+    let writable: Vec<String> = kinds
+        .iter()
+        .map(|k| match k.description.is_empty() {
+            true => format!("`{}`", k.prefix),
+            false => format!("`{}` ({})", k.prefix, k.description),
+        })
+        .chain(reserved(PLAN).map(|r| format!("`{}` ({})", r.kind, r.description)))
+        .collect();
+    let write_description = format!(
+        "Create or replace a document on this channel. Slugs are `<kind>-<name>` with kind one \
+         of {}; any other prefix is filed as `{OTHER}`. Pass if_hash (from doc_read) to refuse \
+         overwriting an edit you have not seen. The operator is asked before this runs, unless \
+         the policy writes it unattended (working notes): an asked call returns \
+         `awaiting_operator` with an `approval_id` at once, and approval_status reports the \
+         outcome.",
+        writable.join(", ")
+    );
     vec![
         json!({
             "name": DOC_SEARCH,
@@ -96,7 +228,7 @@ pub fn definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "kind": { "type": "string", "enum": KINDS },
+                    "kind": { "type": "string", "enum": every },
                     "limit": { "type": "integer", "default": 8 },
                 },
                 "required": ["query"],
@@ -113,10 +245,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": DOC_WRITE,
-            "description": "Create or replace a document on this channel. Slugs are `<kind>-<name>` with \
-                            kind one of note, repo, meeting, inbox, proposal, plan, guide, ref, \
-                            architecture. Pass if_hash (from doc_read) to refuse overwriting an edit \
-                            you have not seen. The operator is asked before this runs: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+            "description": write_description,
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -151,15 +280,14 @@ pub async fn call(
                 limit,
             )
             .await;
+            let live = tools.cfg.live();
+            let kind = args["kind"].as_str().map(|kind| KindFilter {
+                kinds: &live.docs.kind,
+                kind,
+            });
             let hits = access
                 .store
-                .doc_search_hybrid(
-                    Some(&ctx.channel),
-                    args["kind"].as_str(),
-                    query,
-                    limit,
-                    &near.hits,
-                )
+                .doc_search_hybrid(Some(&ctx.channel), kind, query, limit, &near.hits)
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "hits": hits }))
         }
@@ -170,8 +298,9 @@ pub async fn call(
                 .doc_get(&ctx.channel, slug)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no document {slug} on channel {}", ctx.channel))?;
+            let kind = kind_of(&tools.cfg.live().docs.kind, &doc.slug).to_string();
             Ok(json!({
-                "slug": doc.slug, "kind": doc.kind, "title": doc.title, "hash": doc.hash,
+                "slug": doc.slug, "kind": kind, "title": doc.title, "hash": doc.hash,
                 "format": doc.format, "entry_path": doc.entry_path, "source_name": doc.source_name,
                 "archived": doc.archived != 0, "body": doc.body,
             }))
@@ -180,9 +309,11 @@ pub async fn call(
             let slug = args["slug"].as_str().unwrap_or("").trim();
             let body = args["body"].as_str().unwrap_or("");
             let node_id = access.manager.node_id().to_string();
+            let kinds = tools.cfg.live().docs.kind.clone();
             let doc = write_document(
                 &access.store,
                 access.manager.bus(),
+                &kinds,
                 &node_id,
                 &ctx.channel,
                 slug,
@@ -231,6 +362,8 @@ pub enum WriteError {
 }
 
 /// Create or replace a document at a slug, on this node, as a sync write.
+/// `kinds` is the node's configured list: the kind stored with the row is a
+/// cache of what it classified as when written, never what it is read as.
 /// `if_hash` is the edit's precondition: the hash the caller last read.
 /// `create_only` is the HTTP `If-None-Match: *` precondition. `archived` and
 /// `pinned` of `None` leave the document as it was.
@@ -238,6 +371,7 @@ pub enum WriteError {
 pub fn write_document(
     store: &crate::store::Store,
     bus: &crate::stream::Bus,
+    kinds: &[DocKind],
     site: &str,
     channel: &str,
     slug: &str,
@@ -261,8 +395,8 @@ pub fn write_document(
         site,
         channel,
         slug,
-        kind_of(slug),
-        &title_of(slug, body),
+        kind_of(kinds, slug),
+        &title_of(kinds, slug, body),
         body,
         &hash,
         if_hash,
@@ -311,7 +445,7 @@ mod tests {
     /// agent calling `doc_write` must never be able to set it.
     #[test]
     fn doc_write_schema_has_no_operator_only_fields() {
-        let defs = definitions();
+        let defs = definitions(&crate::config::default_doc_kinds());
         let write = defs
             .iter()
             .find(|d| d["name"] == DOC_WRITE)
@@ -331,18 +465,193 @@ mod tests {
         assert!(!props.contains_key("archived"), "{props:?}");
     }
 
+    fn runbook() -> DocKind {
+        DocKind {
+            prefix: "runbook".into(),
+            label: "Runbook".into(),
+            description: "how to run something".into(),
+            working_note: false,
+        }
+    }
+
     #[test]
     fn kinds_and_titles_follow_the_prefix_scheme() {
-        assert_eq!(kind_of("guide-workspace"), "guide");
-        assert_eq!(kind_of("ref"), "ref");
-        assert_eq!(kind_of("refx-y"), "other");
-        assert_eq!(kind_of("todo"), "other");
-        assert_eq!(title_of("plan-hdr-todo", "# HDR todo\n\nbody"), "HDR todo");
-        assert_eq!(title_of("plan-hdr-todo", "no heading"), "hdr todo");
+        let kinds = crate::config::default_doc_kinds();
+        assert_eq!(kind_of(&kinds, "guide-workspace"), "guide");
+        assert_eq!(kind_of(&kinds, "ref"), "ref");
+        assert_eq!(kind_of(&kinds, "refx-y"), "other");
+        assert_eq!(kind_of(&kinds, "todo"), "other");
+        assert_eq!(
+            title_of(&kinds, "plan-hdr-todo", "# HDR todo\n\nbody"),
+            "HDR todo"
+        );
+        assert_eq!(title_of(&kinds, "plan-hdr-todo", "no heading"), "hdr todo");
         assert!(valid_slug("guide-work_space.v2"));
         assert!(!valid_slug("Guide"));
         assert!(!valid_slug("../x"));
         assert!(!valid_slug(""));
+    }
+
+    #[test]
+    fn a_configured_kind_classifies_and_a_removed_one_reads_as_other() {
+        let mut kinds = crate::config::default_doc_kinds();
+        assert_eq!(kind_of(&kinds, "runbook-deploy"), OTHER);
+        kinds.push(runbook());
+        kinds.retain(|k| k.prefix != "meeting");
+        assert_eq!(kind_of(&kinds, "runbook-deploy"), "runbook");
+        assert_eq!(kind_of(&kinds, "meeting-weekly"), OTHER);
+        // The reserved kinds hold whatever the list says.
+        for (slug, kind) in [
+            ("context-0192f3a17c4e", "context"),
+            ("shown-x", "shown"),
+            ("brief-x", "brief"),
+            ("plan-x", "plan"),
+        ] {
+            assert_eq!(kind_of(&[], slug), kind, "{slug}");
+        }
+        assert!(is_working_note(&kinds, "note-x"));
+        assert!(!is_working_note(&kinds, "runbook-x"));
+        assert!(!is_working_note(&kinds, "meeting-x"));
+    }
+
+    #[test]
+    fn the_kind_filter_classifies_when_it_reads_not_by_the_stored_kind() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let bus = crate::stream::Bus::new();
+        let defaults = crate::config::default_doc_kinds();
+        // Written while the node knew no runbook kind: stored as `other`.
+        let written = write_document(
+            &store,
+            &bus,
+            &defaults,
+            "A",
+            "personal",
+            "runbook-deploy",
+            "# Deploy\n\nRoll the hub behind the proxy.",
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(written.kind, OTHER);
+        let mut kinds = defaults.clone();
+        kinds.push(runbook());
+        let found = |kind: &str| {
+            store
+                .doc_search(
+                    None,
+                    Some(KindFilter {
+                        kinds: &kinds,
+                        kind,
+                    }),
+                    "hub proxy",
+                    5,
+                )
+                .unwrap()
+                .into_iter()
+                .filter_map(|hit| hit.slug)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("runbook"), ["runbook-deploy"]);
+        assert!(found(OTHER).is_empty(), "{:?}", found(OTHER));
+        // Under the list it was written with, it is still `other`.
+        let before = store
+            .doc_search(
+                None,
+                Some(KindFilter {
+                    kinds: &defaults,
+                    kind: OTHER,
+                }),
+                "hub proxy",
+                5,
+            )
+            .unwrap();
+        assert_eq!(before.len(), 1);
+    }
+
+    #[test]
+    fn the_kind_list_is_the_configured_kinds_then_the_reserved_then_other() {
+        let mut kinds = crate::config::default_doc_kinds();
+        kinds.push(DocKind {
+            label: String::new(),
+            ..runbook()
+        });
+        let list = kind_list(&kinds);
+        let order: Vec<&str> = list.iter().map(|k| k["kind"].as_str().unwrap()).collect();
+        assert_eq!(
+            order,
+            [
+                "guide",
+                "ref",
+                "architecture",
+                "proposal",
+                "repo",
+                "note",
+                "meeting",
+                "inbox",
+                "runbook",
+                "brief",
+                "context",
+                "plan",
+                "shown",
+                "other",
+            ]
+        );
+        for entry in &list {
+            let keys: Vec<&str> = entry
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                ["description", "kind", "label", "reserved", "working_note"],
+                "{entry}"
+            );
+        }
+        assert_eq!(list[1]["label"], "Reference");
+        assert_eq!(list[4]["working_note"], true);
+        assert_eq!(list[4]["reserved"], false);
+        // A configured kind with no label is called by its prefix.
+        assert_eq!(list[8]["label"], "runbook");
+        assert_eq!(list[11]["label"], "Plan");
+        assert_eq!(list[11]["reserved"], true);
+        assert_eq!(list[13]["label"], "Other");
+        assert_eq!(list[13]["reserved"], true);
+    }
+
+    #[test]
+    fn the_tools_offer_the_configured_kinds_and_nothing_else() {
+        let mut kinds = crate::config::default_doc_kinds();
+        kinds.push(runbook());
+        kinds.retain(|k| k.prefix != "meeting");
+        let defs = definitions(&kinds);
+        let def = |name: &str| defs.iter().find(|d| d["name"] == name).unwrap().clone();
+        let search = def(DOC_SEARCH);
+        let offered: Vec<&str> = search["inputSchema"]["properties"]["kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        let mut want: Vec<&str> = kinds.iter().map(|k| k.prefix.as_str()).collect();
+        want.extend(RESERVED.iter().map(|r| r.kind));
+        want.push(OTHER);
+        assert_eq!(offered, want);
+        let write = def(DOC_WRITE)["description"].as_str().unwrap().to_string();
+        assert!(
+            write.contains("`runbook` (how to run something)"),
+            "{write}"
+        );
+        assert!(write.contains("`plan`"), "{write}");
+        assert!(!write.contains("`meeting`"), "{write}");
+        // Refused to doc_write, so not offered by it.
+        assert!(
+            !write.contains("`context`") && !write.contains("`shown`"),
+            "{write}"
+        );
     }
 
     #[test]
@@ -352,6 +661,7 @@ mod tests {
         let original = write_document(
             &store,
             &bus,
+            &[],
             "A",
             "personal",
             "guide-race",
@@ -366,6 +676,7 @@ mod tests {
             write_document(
                 &store,
                 &bus,
+                &[],
                 "A",
                 "personal",
                 "guide-race",
@@ -389,6 +700,7 @@ mod tests {
                 write_document(
                     &store,
                     &bus,
+                    &[],
                     "A",
                     "personal",
                     "guide-race",

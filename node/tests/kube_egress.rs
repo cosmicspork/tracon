@@ -534,6 +534,7 @@ async fn a_session_is_refused_without_the_secret_rights() {
                 continued_from: None,
                 harness: None,
                 on_exhaustion: None,
+                told_reviews: Vec::new(),
             },
             Arc::new(support::fake::FakeAdapter {
                 tx: Arc::new(tokio::sync::Mutex::new(None)),

@@ -46,11 +46,80 @@ pub struct Rule {
     /// globs (`*` is the only wildcard), so a rule can allow `doc_write` for
     /// working notes without allowing it for every document. Deny rules have no
     /// need of it; their substrings already see the arguments.
+    ///
+    /// One key is not an argument: `slug_working_note = true` matches a call
+    /// whose `slug` classifies to a document kind the node's configuration
+    /// marks `working_note` (`[[docs.kind]]`), so which documents are working
+    /// notes is said once, where the kinds are.
     #[serde(default)]
-    pub args: std::collections::BTreeMap<String, Vec<String>>,
+    pub args: std::collections::BTreeMap<String, ArgMatch>,
     /// Channels this applies to. Empty means every channel.
     #[serde(default)]
     pub channels: Vec<String>,
+}
+
+/// What a rule's `args` entry holds: globs one of which the argument must
+/// match, or, for [`SLUG_WORKING_NOTE`], whether the slug must be a working
+/// note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ArgMatch {
+    Globs(Vec<String>),
+    Flag(bool),
+}
+
+/// The `args` key that matches a document's slug by its kind's
+/// `working_note`, not by globs.
+pub const SLUG_WORKING_NOTE: &str = "slug_working_note";
+
+impl ArgMatch {
+    /// Whether the request's arguments satisfy this entry under `key`. A
+    /// flag under any other key, or globs under the flag's key, match
+    /// nothing: a rule that cannot be read as written allows nothing.
+    fn admits(&self, key: &str, req: &Request) -> bool {
+        let value = |name: &str| {
+            req.arguments
+                .and_then(|a| a.get(name))
+                .and_then(serde_json::Value::as_str)
+        };
+        match (key, self) {
+            (SLUG_WORKING_NOTE, ArgMatch::Flag(want)) => {
+                // No configured kinds, no working notes: asked.
+                match (value("slug"), req.doc_kinds) {
+                    (Some(slug), Some(kinds)) => {
+                        crate::mcp::docs::is_working_note(kinds, slug.trim()) == *want
+                    }
+                    _ => false,
+                }
+            }
+            (SLUG_WORKING_NOTE, ArgMatch::Globs(_)) | (_, ArgMatch::Flag(_)) => false,
+            (_, ArgMatch::Globs(globs)) => {
+                value(key).is_some_and(|v| globs.iter().any(|g| glob(g, v)))
+            }
+        }
+    }
+
+    /// This entry as the globs an operator reads it as: a working-note flag
+    /// is shown as the slugs it covers under `kinds` now.
+    fn described(
+        &self,
+        key: &str,
+        kinds: Option<&[crate::config::DocKind]>,
+    ) -> (String, Vec<String>) {
+        match (key, self) {
+            (SLUG_WORKING_NOTE, ArgMatch::Flag(true)) => (
+                "slug".into(),
+                kinds
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|k| k.working_note)
+                    .map(|k| format!("{}-*", k.prefix))
+                    .collect(),
+            ),
+            (_, ArgMatch::Globs(globs)) => (key.to_string(), globs.clone()),
+            (_, ArgMatch::Flag(flag)) => (key.to_string(), vec![flag.to_string()]),
+        }
+    }
 }
 
 impl Rule {
@@ -113,13 +182,7 @@ impl Rule {
                     .matches
                     .iter()
                     .any(|pat| pat.trim().eq_ignore_ascii_case(req.action.trim()));
-            return named
-                && self.args.iter().all(|(key, globs)| {
-                    req.arguments
-                        .and_then(|a| a.get(key))
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|v| globs.iter().any(|g| glob(g, v)))
-                });
+            return named && self.args.iter().all(|(key, want)| want.admits(key, req));
         }
         let Some(command) = req.command else {
             // A file action is matched on its path: a pattern ending in `/` is
@@ -343,6 +406,9 @@ pub struct Request<'a> {
     pub command: Option<&'a str>,
     /// A brokered tool call's arguments, for allow rules scoped by them.
     pub arguments: Option<&'a serde_json::Value>,
+    /// The node's configured document kinds, which `slug_working_note`
+    /// classifies a slug by. `None` where no document is in question.
+    pub doc_kinds: Option<&'a [crate::config::DocKind]>,
 }
 
 /// The narrative fields of a call: text it carries, not an action it takes. A
@@ -541,7 +607,11 @@ impl Policy {
                 .map(|rule| ScopedAllow {
                     rule_id: rule.id.clone(),
                     reason: rule.reason.clone(),
-                    args: rule.args.clone(),
+                    args: rule
+                        .args
+                        .iter()
+                        .map(|(key, want)| want.described(key, req.doc_kinds))
+                        .collect(),
                 })
                 .collect()
         } else {
@@ -589,6 +659,8 @@ pub struct Standing {
 pub struct ScopedAllow {
     pub rule_id: String,
     pub reason: String,
+    /// Each argument and the globs it must match, a working-note flag shown
+    /// as the slugs it covers.
     pub args: std::collections::BTreeMap<String, Vec<String>>,
 }
 
@@ -679,6 +751,7 @@ mod tests {
             resource: None,
             command: Some(command),
             arguments: None,
+            doc_kinds: None,
         }
     }
 
@@ -690,7 +763,14 @@ mod tests {
             resource: None,
             command: None,
             arguments: Some(args),
+            doc_kinds: Some(default_kinds()),
         }
+    }
+
+    fn default_kinds() -> &'static [crate::config::DocKind] {
+        static KINDS: std::sync::LazyLock<Vec<crate::config::DocKind>> =
+            std::sync::LazyLock::new(crate::config::default_doc_kinds);
+        &KINDS
     }
 
     #[test]
@@ -760,6 +840,84 @@ mod tests {
             let d = p.decide(&tool("doc_write", &args, "doc_write"));
             assert_eq!(d.verdict, Verdict::Ask, "{args}");
         }
+    }
+
+    #[test]
+    fn a_working_note_is_whatever_the_configuration_says_it_is() {
+        let p = policy();
+        let mut kinds: Vec<crate::config::DocKind> = default_kinds()
+            .iter()
+            .filter(|k| k.prefix != "meeting")
+            .cloned()
+            .collect();
+        kinds.push(crate::config::DocKind {
+            prefix: "runbook".into(),
+            label: "Runbook".into(),
+            description: String::new(),
+            working_note: true,
+        });
+        let decide = |slug: &str, kinds: Option<&[crate::config::DocKind]>| {
+            let args = serde_json::json!({ "slug": slug, "body": "x" });
+            p.decide(&Request {
+                doc_kinds: kinds,
+                ..tool("doc_write", &args, "doc_write")
+            })
+            .verdict
+        };
+        assert_eq!(decide("runbook-deploy", Some(&kinds)), Verdict::Allow);
+        assert_eq!(decide("note-x", Some(&kinds)), Verdict::Allow);
+        assert_eq!(decide("meeting-weekly", Some(&kinds)), Verdict::Ask);
+        // A reserved kind is never a working note, and without the node's
+        // kinds nothing is.
+        assert_eq!(decide("plan-x", Some(&kinds)), Verdict::Ask);
+        assert_eq!(decide("note-x", None), Verdict::Ask);
+    }
+
+    #[test]
+    fn an_operators_own_slug_globs_still_scope_an_allow() {
+        let p: Policy = toml::from_str(
+            r#"
+            [[rule]]
+            id = "runbooks"
+            verdict = "allow"
+            reason = "r"
+            kinds = ["tool"]
+            matches = ["doc_write"]
+            args = { slug = ["runbook-*"] }
+
+            [[rule]]
+            id = "misread"
+            verdict = "allow"
+            reason = "a flag under an argument's name matches nothing"
+            kinds = ["tool"]
+            matches = ["doc_write"]
+            args = { slug = true }
+            "#,
+        )
+        .unwrap();
+        let args = serde_json::json!({ "slug": "runbook-deploy", "body": "x" });
+        let d = p.decide(&tool("doc_write", &args, "doc_write"));
+        assert_eq!(d.rule_id.as_deref(), Some("runbooks"));
+        let args = serde_json::json!({ "slug": "note-x", "body": "x" });
+        assert_eq!(
+            p.decide(&tool("doc_write", &args, "doc_write")).verdict,
+            Verdict::Ask
+        );
+    }
+
+    #[test]
+    fn a_working_note_scope_is_explained_as_the_slugs_it_covers() {
+        let args = serde_json::json!({});
+        let standing = policy().explain(&tool("doc_write", &args, "doc_write"));
+        let scope = standing
+            .scoped
+            .iter()
+            .find(|s| s.rule_id == "unattended-notes")
+            .expect("the working-notes allow names doc_write");
+        assert_eq!(
+            scope.args["slug"],
+            ["repo-*", "note-*", "meeting-*", "inbox-*"]
+        );
     }
 
     #[test]
@@ -1070,6 +1228,7 @@ mod tests {
             resource: Some(path),
             command: None,
             arguments: None,
+            doc_kinds: None,
         };
         for (path, rule) in [
             ("/work/.claude/settings.json", "harness-settings"),
@@ -1115,6 +1274,7 @@ mod tests {
             resource: Some(path),
             command: None,
             arguments: None,
+            doc_kinds: None,
         };
         for path in [
             "/tmp/x",
@@ -1141,6 +1301,7 @@ mod tests {
             resource: Some(path),
             command: None,
             arguments: None,
+            doc_kinds: None,
         };
         for path in ["/tmp/x", "/root/notes.md", "/work/src/main.rs", "/cache/x"] {
             let d = policy().decide(&write(path));
@@ -1227,6 +1388,7 @@ mod tests {
             resource: Some("/work/file"),
             command: None,
             arguments: None,
+            doc_kinds: None,
         };
         assert_eq!(policy().decide(&benign).verdict, Verdict::Ask);
 
@@ -1341,6 +1503,7 @@ mod tests {
             resource: Some("/work/x"),
             command: None,
             arguments: None,
+            doc_kinds: None,
         };
         let exec = Request {
             channel: "work",
@@ -1349,6 +1512,7 @@ mod tests {
             resource: None,
             command: Some("x"),
             arguments: None,
+            doc_kinds: None,
         };
         assert_eq!(p.decide(&read).verdict, Verdict::Allow);
         assert_eq!(p.decide(&exec).verdict, Verdict::Ask);

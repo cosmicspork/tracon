@@ -16,6 +16,7 @@ import type {
   CredentialSummary,
   StorageItem,
   DataInventory,
+  DocKindInfo,
   Document,
   EnrollStatus,
   Event,
@@ -557,12 +558,14 @@ export const api = {
     const s = q.toString()
     return call<{ docs: Document[] }>('GET', `/api/docs${s ? `?${s}` : ''}`)
   },
-  searchDocs: (text: string, channel?: string) => {
+  searchDocs: (text: string, channel?: string, kind?: string) => {
     const q = new URLSearchParams({ q: text })
     if (channel) q.set('channel', channel)
+    if (kind) q.set('kind', kind)
     return call<{ hits: RecallHit[]; text_only?: boolean }>('GET', `/api/docs?${q}`)
   },
   doc: (channel: string, slug: string) => call<Document>('GET', `/api/docs/${channel}/${slug}`),
+  docKinds: () => call<{ kinds: DocKindInfo[] }>('GET', '/api/docs/kinds'),
   putDoc: async (
     channel: string,
     slug: string,

@@ -316,6 +316,8 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['candidate_verified', { candidate_id: 'c', head_sha: '8c4be91f03a2d6e7b5c1', reused: true }, 'checks passed · at 8c4be91f03a2 · evidence reused'],
     ['review_decision', { source: 'operator', review_id: 'r', decision: 'approved', waiting_ms: 720_000 }, 'review approved · by the operator · after 12m waiting'],
     ['review_decision', { decision: 'revise', waiting_ms: 5000 }, 'review sent back with notes · by the operator · after 5s waiting'],
+    ['review_taken_over', { review_id: 'r', state: 'revising', from_session: '0b1c2d3e-4f50', to_session: 's2' }, 'review sent back for changes taken over · from 0b1c2d3e'],
+    ['review_taken_over', { review_id: 'r', state: 'new' }, 'open review taken over'],
     [
       'review_decision',
       { source: 'operator', review_id: 'r', decision: 'approved', reconciled: 'https://forge.test/pull/7' },

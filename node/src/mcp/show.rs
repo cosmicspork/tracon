@@ -282,6 +282,9 @@ pub async fn call(
             let slug = format!("{}-{id}", super::docs::SHOWN);
             let (doc, changes) = store
                 .write_html_document_change(
+                    // Shown work is a reserved kind: it classifies the same under
+                    // any configured list.
+                    &[],
                     manager.node_id(),
                     &ctx.channel,
                     &slug,

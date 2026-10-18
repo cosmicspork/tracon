@@ -218,6 +218,11 @@ pub mod event_kind {
     /// An operator persisted a review decision. Authority-driven transitions
     /// intentionally do not emit this human-intervention metric.
     pub const REVIEW_DECISION: &str = "review_decision";
+    /// This session continues the one that submitted a review still open or
+    /// sent back for changes, and took it over (`review_id`, `state`,
+    /// `from_session`, `to_session`): it resubmits it, and the decision comes
+    /// back here.
+    pub const REVIEW_TAKEN_OVER: &str = "review_taken_over";
     /// The channel reached its daily token ceiling; the gateway refused a
     /// model call. Recorded once per session.
     pub const CEILING: &str = "ceiling";

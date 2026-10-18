@@ -1424,6 +1424,7 @@ async fn mediate(
                     resource: None,
                     command: None,
                     arguments: None,
+                    doc_kinds: None,
                 })
             };
             if decision.verdict == Verdict::Deny {

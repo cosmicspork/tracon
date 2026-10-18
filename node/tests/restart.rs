@@ -183,6 +183,7 @@ fn spec() -> NewSession {
         continued_from: None,
         harness: None,
         on_exhaustion: None,
+        told_reviews: Vec::new(),
     }
 }
 

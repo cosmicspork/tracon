@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use tracon::store::{now_ms, NodeRow, SessionRow};
+use tracon::store::{now_ms, NodeRow, ReviewRow, SessionRow};
 
 /// A ready self node running the fake harness.
 pub fn node_row(id: &str, name: &str) -> NodeRow {
@@ -74,5 +74,41 @@ pub fn session_row(id: &str, node: &str, channel: &str) -> SessionRow {
         parent_session: None,
         continued_from: None,
         manifest_digest: None,
+    }
+}
+
+/// A pull request review `session` submitted, in `state`, on `personal`.
+pub fn review_row(id: &str, session: &str, state: &str) -> ReviewRow {
+    ReviewRow {
+        id: id.into(),
+        session_id: Some(session.into()),
+        node_id: "n1".into(),
+        channel: "personal".into(),
+        kind: "pr".into(),
+        title: format!("feat: {id}"),
+        body: String::new(),
+        edited_title: None,
+        edited_body: None,
+        provider: "github".into(),
+        target: "{}".into(),
+        diff: "+x".into(),
+        files: "[]".into(),
+        head_sha: "abc1234567890".into(),
+        base_ref: "main".into(),
+        added: 1,
+        removed: 0,
+        state: state.into(),
+        verdict_reason: None,
+        publish_result: None,
+        claimed_ms: None,
+        created_ms: now_ms(),
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        updated_ms: now_ms(),
+        checks_json: None,
+        review_session_id: None,
+        ai_verdict_json: None,
+        revision_patch: None,
+        lane: None,
     }
 }

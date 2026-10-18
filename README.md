@@ -1316,6 +1316,15 @@ export_every_secs = 1800            # at startup, then this often (at least 60)
 preview_listen = "127.0.0.1:7422"   # isolated HTML capability origin
 # preview_url = "https://preview.example.com" # public origin when a reverse proxy terminates TLS
 
+# Document kinds: a slug's prefix files it (`runbook-deploy` is a runbook). Written
+# out, the list replaces the default one whole: guide, ref, architecture, proposal,
+# and the working notes repo, note, meeting and inbox.
+# [[docs.kind]]
+# prefix = "runbook"                # lowercase letters and digits
+# label = "Runbook"                 # what the Documents screen calls it
+# description = "how to run something here"   # what doc_write tells an agent it is for
+# working_note = false              # true: the shipped policy writes it unasked
+
 [embed]                             # semantic search; off unless enabled
 enabled = false
 base_url = "http://127.0.0.1:8080"  # an OpenAI-shaped /v1/embeddings
@@ -1349,6 +1358,19 @@ single file. External fonts, CDNs, and live API connections are intentionally
 blocked, not fetched automatically. HTTPS operator access needs a distinct HTTPS
 preview origin configured with `preview_url`.
 
+A document's kind is its slug's prefix, read against `[[docs.kind]]` whenever the
+document is listed, searched or exported, not taken from what it was filed as when
+written. So a kind added, renamed or removed applies at once to every document
+already there, with no step to reclassify them: a removed kind's documents show as
+`other`, and the export leaves their files alone, as it does any file without a
+kind's prefix. The reverse holds too: adding a kind puts the `<prefix>-*.md` files
+already in the export directory under the export's management, so a file there that
+is not a document is deleted at the next export. Four kinds are the node's own and cannot be configured: `context` (a
+work item's selected context), `shown` (what `show_work` wrote), `brief` and `plan`.
+An entry that names one of them, `other`, or a prefix already listed, is refused.
+`doc_write` and `doc_search` offer agents the list as it is, and the Documents screen
+groups and filters by it (`GET /api/docs/kinds`).
+
 CLI import, put, and export remain Markdown-only. Agents can read HTML through
 `doc_read`; HTML creation and replacement use the operator's import flow, not
 `doc_write`.
@@ -1380,6 +1402,15 @@ kinds = ["tool"]
 matches = ["doc_write"]
 args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }
 ```
+
+The shipped bundle's `unattended-notes` rule names no slugs. It says
+`args = { slug_working_note = true }` instead, which matches a `doc_write` whose slug
+is of a kind `[[docs.kind]]` marks `working_note = true`, so which documents are
+working notes is said once, beside the kinds. The trade-off is deliberate: part of
+what runs unattended is now decided by `node.toml`, which is not signed. An edit of
+`node.toml` is already an administrative act, gated by a passkey, so this asks no
+more trust of it than its other keys do. A bundle of your own that keeps slug globs
+is matched exactly as before.
 
 The shipped bundle lets the boundary do the containing. Inside a session's
 container, reading, editing and running shell commands go unasked: the container

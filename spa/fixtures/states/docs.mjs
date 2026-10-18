@@ -5,6 +5,8 @@
 // carries no bodies, search returns { hits, text_only }, a lost edit is a 412
 // with { error, hash, body }, and a preview is a POST minting { url, expires_ms }.
 
+import { readFileSync } from 'node:fs'
+
 import { flaky, streamEvent } from '../flaky.mjs'
 
 const area = 'docs'
@@ -21,8 +23,21 @@ const hex = (seed) => {
   return out.slice(0, 64)
 }
 
-const KINDS = ['note', 'repo', 'meeting', 'inbox', 'proposal', 'plan', 'brief', 'context', 'guide', 'ref', 'architecture', 'shown']
-const kindOf = (slug) => KINDS.find((k) => slug === k || slug.startsWith(`${k}-`)) ?? 'other'
+// The node's default kinds as GET /api/docs/kinds answers them (api.json), and
+// a node whose operator added a runbook kind to them.
+const baseline = JSON.parse(readFileSync(new URL('../api.json', import.meta.url), 'utf8'))
+const defaultKinds = baseline['/api/docs/kinds'].kinds
+const runbook = { kind: 'runbook', label: 'Runbook', description: 'how to run something here', working_note: false, reserved: false }
+const runbookKinds = [...defaultKinds.filter((k) => !k.reserved), runbook, ...defaultKinds.filter((k) => k.reserved)]
+
+// A slug's kind as the node decides it (`mcp::docs::kind_of`): a reserved
+// kind, else a configured one, whose prefix the slug is or starts with
+// followed by `-`; else `other`.
+const classifier = (kinds) => {
+  const order = [...kinds.filter((k) => k.reserved), ...kinds.filter((k) => !k.reserved)].filter((k) => k.kind !== 'other')
+  return (slug) => order.find((k) => slug === k.kind || slug.startsWith(`${k.kind}-`))?.kind ?? 'other'
+}
+const kindOf = classifier(defaultKinds)
 
 function doc(slug, title, o = {}) {
   const channel = o.channel ?? 'personal'
@@ -90,17 +105,36 @@ const workDocs = [
   doc('ref-ci-matrix', 'CI matrix and required checks', { channel: 'work', updated_ms: -86400000 }),
 ]
 
-/** GET /api/docs answered like the node: list by channel/archived, or search hits. */
+/** GET /api/docs answered like the node: list by channel/archived, or search
+ *  hits, either filtered by `kind`. Each document is classified as it is
+ *  read, under `kinds`, the way the node reclassifies by its configuration. */
 const listing =
-  (sets, search = () => ({ hits: [], text_only: false })) =>
+  (sets, search = () => ({ hits: [], text_only: false }), kinds = defaultKinds) =>
   (req) => {
-    if (req.query.q) return search(req.query.q)
+    const kindOf = classifier(kinds)
+    const kind = req.query.kind
+    if (req.query.q) {
+      const found = search(req.query.q)
+      return { ...found, hits: found.hits.filter((h) => !kind || kindOf(h.slug ?? '') === kind) }
+    }
     const ch = req.query.channel ?? 'personal'
     const all = sets[ch] ?? []
-    return { docs: all.filter((d) => req.query.archived === 'true' || !d.archived).map((d) => ({ ...d, body: '' })) }
+    return {
+      docs: all
+        .map((d) => ({ ...d, kind: kindOf(d.slug), body: '' }))
+        .filter((d) => !kind || d.kind === kind)
+        .filter((d) => req.query.archived === 'true' || !d.archived),
+    }
   }
 
 const populated = listing({ personal: [...personal, ...personalArchived], work: workDocs })
+
+// Runbooks written before the operator added the kind: stored as `other`,
+// listed as runbooks once the node is told about them.
+const runbooks = [
+  doc('runbook-deploy', 'Deploying the hub behind the reverse proxy', { updated_ms: -86400000 * 3 }),
+  doc('runbook-rotate-hub-cert', 'Rotating the hub certificate', { updated_ms: -86400000 * 8 }),
+]
 
 // A busy channel: over a hundred notes and long, unbroken titles and slugs.
 const many = (() => {
@@ -177,6 +211,13 @@ const hits = [
     rank: 0.7,
   },
 ]
+
+// The bar's select labelled `name`: Channel and Kind are both selects there.
+const barSelect = (page, name) =>
+  page
+    .locator('.bar label')
+    .filter({ has: page.getByText(name, { exact: true }) })
+    .locator('select')
 
 const typeSearch = (q) => async (page) => {
   await page.getByPlaceholder('Search by content').fill(q)
@@ -445,8 +486,47 @@ export default [
     area,
     route: '/docs',
     title: 'Documents grouped by kind',
-    note: 'Every kind the node writes is present, context-wi-2 under context, and the header count matches the rows. Pinned doc carries no marker in the list.',
+    note: 'Groups in the node\'s order under its labels (Guide, Reference, … Inbox, then Brief, Context, Plan, Shown work, Other last); context-wi-2 under Context, scratch-ideas under Other. A Kind filter beside Channel; the header count matches the rows. Pinned doc carries no marker in the list.',
     api: { '/api/docs': populated },
+  },
+  {
+    id: 'docs-list-kind-filter',
+    area,
+    route: '/docs',
+    title: 'Kind filter set to Note',
+    note: 'Only the Note group, both live notes; the header count says 2.',
+    api: { '/api/docs': populated },
+    act: async (page) => {
+      await page.locator('.h5').first().waitFor()
+      await barSelect(page, 'Kind').selectOption('note')
+      await page.waitForTimeout(300)
+    },
+  },
+  {
+    id: 'docs-list-configured-kind',
+    area,
+    route: '/docs',
+    title: 'A node configured with a runbook kind',
+    note: 'runbook-deploy and runbook-rotate-hub-cert under Runbook, after Inbox and before Brief, not under Other; Runbook in the Kind filter.',
+    api: {
+      '/api/docs': listing({ personal: [...personal, ...runbooks] }, undefined, runbookKinds),
+      '/api/docs/kinds': { kinds: runbookKinds },
+    },
+  },
+  {
+    id: 'docs-list-kinds-error',
+    area,
+    route: '/docs',
+    title: 'Kinds request failed',
+    note: 'The list still shows, grouped by raw kind names in alphabetical order with other last; no Kind filter, and the New Markdown form has no kinds hint.',
+    api: {
+      '/api/docs': populated,
+      '/api/docs/kinds': { status: 500, body: { error: { code: 500, message: 'database is locked' } } },
+    },
+    act: async (page) => {
+      await page.locator('.h5').first().waitFor()
+      await page.getByRole('button', { name: 'New Markdown' }).click()
+    },
   },
   {
     id: 'docs-list-many',
@@ -512,7 +592,7 @@ export default [
     title: 'Switched to the work channel',
     api: { '/api/docs': populated },
     act: async (page) => {
-      await page.locator('.bar select').selectOption('work')
+      await barSelect(page, 'Channel').selectOption('work')
       await page.waitForTimeout(300)
     },
   },
@@ -531,7 +611,7 @@ export default [
     area,
     route: '/docs',
     title: 'Search results',
-    note: 'Kind label taken from the slug prefix, HTML badge, snippets with ellipses; a long title and snippet.',
+    note: 'Kind label is the node\'s (Guide, Plan, Reference, Note), HTML badge, snippets with ellipses; a long title and snippet.',
     api: { '/api/docs': listing({ personal }, () => ({ hits, text_only: false })) },
     act: typeSearch('release'),
   },
@@ -557,7 +637,7 @@ export default [
     area,
     route: '/docs',
     title: 'New Markdown form with a slug typed',
-    note: 'The kinds hint omits brief, context and shown.',
+    note: 'The kinds hint is the node\'s writable list: guide, ref, architecture, proposal, repo, note, meeting, inbox, plan. It omits brief, context, shown and other.',
     api: { '/api/docs': populated },
     act: async (page) => {
       await page.getByRole('button', { name: 'New Markdown' }).click()

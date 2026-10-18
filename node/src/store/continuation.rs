@@ -1,6 +1,7 @@
 //! The reads a work-level continuation view is assembled from: a session's
 //! whole lineage, and what was decided and shown across a set of attempts.
-//! Everything here is recorded state; nothing is summarized.
+//! Everything here is recorded state; nothing is summarized. The one write is
+//! a continuation taking over the reviews its attempt left open.
 
 use rusqlite::params_from_iter;
 use serde::Serialize;
@@ -20,6 +21,10 @@ pub struct Decided {
     pub answer: String,
     pub at_ms: i64,
 }
+
+/// The review states a continuation takes over: `new`, `claimed` and
+/// `revising`.
+const CARRIED: &str = "'new','claimed','revising'";
 
 fn placeholders(n: usize) -> String {
     vec!["?"; n].join(",")
@@ -62,6 +67,40 @@ impl Store {
         let rows = stmt
             .query_map(params_from_iter(ids), ReviewRow::from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The reviews and reports `session_id` submitted that are still the
+    /// work's to answer for, oldest first: waiting on the operator, or sent
+    /// back for a revision.
+    pub fn carried_reviews(&self, session_id: &str) -> Result<Vec<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT * FROM review WHERE session_id=?1 AND state IN ({CARRIED})
+              ORDER BY created_ms, id"
+        ))?;
+        let rows = stmt
+            .query_map([session_id], ReviewRow::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Hand `from`'s [carried](Self::carried_reviews) reviews to `to`, the
+    /// session continuing it, and return them as they now stand. One write:
+    /// every read that follows a review's session (its waits, its decision's
+    /// delivery, who may resubmit it) then follows the live attempt. A review
+    /// being published, decided or gone stays with the attempt it was decided
+    /// for.
+    pub fn hand_over_reviews(&self, from: &str, to: &str) -> Result<Vec<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "UPDATE review SET session_id=?2 WHERE session_id=?1 AND state IN ({CARRIED})
+             RETURNING *"
+        ))?;
+        let mut rows = stmt
+            .query_map([from, to], ReviewRow::from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
         Ok(rows)
     }
 
