@@ -5239,10 +5239,27 @@ fn provider_err(e: crate::providers::ProviderError) -> ApiError {
 
 /// What the broker holds: names, kinds, bindings, env key names. Never a
 /// value — the response shape is the broker's `summaries`, which cannot
-/// carry one.
+/// carry one. Each also lists the `[[repo]]` entries its `repos` covers,
+/// since a group prefix reaches repositories nobody wrote down.
 pub async fn list_credentials(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let state = Config::state_dir();
+    let root = crate::forge::managed_root(&state);
+    let clones: Vec<std::path::PathBuf> = crate::forge::managed_repos(&state)
+        .into_iter()
+        .map(|r| root.join(&r.host).join(&r.owner).join(&r.name))
+        .collect();
+    let entries = s.cfg.repos();
     let b = s.tools.broker.read().unwrap();
-    Ok(Json(json!({ "credentials": b.summaries() })))
+    let mut summaries = b.summaries();
+    for summary in &mut summaries {
+        let covers = summary["name"]
+            .as_str()
+            .and_then(|name| b.get(name))
+            .map(|cred| cred.covers(&entries, &clones))
+            .unwrap_or_default();
+        summary["covers"] = json!(covers);
+    }
+    Ok(Json(json!({ "credentials": summaries })))
 }
 
 /// The channels a credential is asked to serve: at least one, each a

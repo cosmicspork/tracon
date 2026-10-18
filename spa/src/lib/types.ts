@@ -105,6 +105,10 @@ export interface CredentialSummary {
   provider: string | null
   channels: string[]
   nodes: string[]
+  /** Repository paths, or `group/**` prefixes, whose default-branch preparation may borrow it. */
+  repos?: string[]
+  /** The configured `[[repo]]` entries `repos` names now, by path. */
+  covers?: string[]
   identity: string | null
   expires_ms: number | null
   env_keys: string[]
