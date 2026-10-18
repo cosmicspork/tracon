@@ -1015,6 +1015,7 @@ mod tests {
                 egress: None,
                 forge_repo: None,
                 prepared: None,
+                stale_base: None,
             };
             assemble(&store, &Policy::shipped(), &facts).0
         };
