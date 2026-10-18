@@ -1373,10 +1373,13 @@ committed as that account. Rewriting one is never done silently.
 **Nothing is bind-mounted into the boundary.** A session names its repository by
 its forge identity (`github.com/owner/name`), and its Git history is seeded once,
 host-side, into a short-lived clone of the node's managed clone of it: cloned on
-demand at the session's start with the channel's forge credential (a recorded
-`cloning` event, so creating the session stays fast), then fetched with a brokered
-credential and brought to the forge's default branch, or to the forge branch the
-session names, under a per-clone lock. The row keeps the clone's absolute path, so
+demand at the session's start with the channel's forge credential, or anonymously
+when the channel has none (a recorded `cloning` event, so creating the session stays
+fast; made beside its place and renamed in only once whole), then fetched with a
+brokered credential and brought to the forge's default branch under a per-clone lock.
+A session that names a forge branch starts from that branch's fetched tip; the clone's
+own tree stays on the default. The forge a host is comes from the channel's
+credentials (`GH_HOST`, `GITLAB_HOST`), and only failing that from its name. The row keeps the clone's absolute path, so
 repository images, caches and `[[repo]]` entries key on what they always did. An
 operator's own checkout is not a session source and is refused at create; files
 uploaded in the browser seed a workspace of their own, and a harness the operator

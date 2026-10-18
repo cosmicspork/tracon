@@ -83,10 +83,18 @@
   // be on the next bounded page even when the loaded rows do not match.
   const forgeCount = $derived((forges ?? []).reduce((n, f) => n + f.repos.length, 0))
   const searchable = $derived(forgeCount > 6 || (forges ?? []).some((f) => !f.complete))
+  // Only a recent repository that is still one of the node's clones is
+  // offered: anything else (a host checkout an older session ran in) is not
+  // a source a session can start from, so it is not shown at all rather than
+  // shown as a choice that does nothing.
+  const recentClones = $derived(
+    recents.flatMap((r) => {
+      const clone = allManaged.find((m) => m.repo_path === r.repo_path)
+      return clone ? [{ recent: r, clone }] : []
+    }),
+  )
   const shownRecents = $derived(
-    recents.filter(
-      (r) => allManaged.some((managed) => managed.repo_path === r.repo_path) && repoMatches(query, repoLabel(r.repo_path), r.repo_path),
-    ),
+    recentClones.filter(({ recent }) => repoMatches(query, repoLabel(recent.repo_path), recent.repo_path)),
   )
   const shownForges = $derived(
     (forges ?? []).map((f) => ({ ...f, repos: f.repos.filter((r) => repoMatches(query, r.full_name, r.host)) })),
@@ -149,7 +157,7 @@
       }
     }
   }
-  const known = $derived([...recents, ...managed])
+  const known = $derived([...recentClones, ...managed])
   const chosenManaged = $derived(managedFor(value, allManaged))
   const chosenUncloned = $derived(
     chosenManaged === null && chosenForge !== null && repoIdentity(chosenForge) === value ? chosenForge : null,
@@ -254,14 +262,11 @@
   >
   {#if showRecents}
     <div class="picker" role="radiogroup">
-      {#each shownRecents as r (r.repo_path)}
-        {@const clone = managedFor(r.repo_path, allManaged)}
+      {#each shownRecents as { recent: r, clone } (r.repo_path)}
         <button
           type="button"
-          class:on={clone !== null && value === repoIdentity(clone)}
-          onclick={() => {
-            if (clone) selectRepository(repoIdentity(clone), null)
-          }}
+          class:on={value === repoIdentity(clone)}
+          onclick={() => selectRepository(repoIdentity(clone), null)}
         >
           <i></i>
           <span>{repoLabel(r.repo_path)}</span>

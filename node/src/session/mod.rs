@@ -2119,8 +2119,10 @@ impl Manager {
                             "managed clone not fetched; starting from its last-fetched branch"
                         );
                     }
+                    let start = sync.source_ref.clone();
                     synced = Some(sync);
-                    crate::workspace::seed_from_clone(&git, &repo, &branch, id).await?
+                    crate::workspace::seed_from_clone(&git, &repo, &branch, start.as_deref(), id)
+                        .await?
                 };
                 let stage = crate::workspace::staging_path(id);
                 let base = crate::workspace::head_of(&git, &stage).await?;

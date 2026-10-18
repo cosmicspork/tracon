@@ -57,11 +57,10 @@ pub struct Readiness {
 pub struct Facts {
     pub repo_exists: bool,
     /// Why the node will not start a session from what was named: an
-    /// operator's own checkout, or nothing that is a forge repository.
+    /// operator's own checkout, or nothing that is a forge repository. When
+    /// `None`, a repository that does not exist yet is one the session
+    /// clones before it starts.
     pub repo_refused: Option<String>,
-    /// The forge repository named is not cloned on this node yet; a session
-    /// clones it before it starts.
-    pub will_clone: bool,
     /// Why this node would refuse to start a session here: not ready, the
     /// channel archived, no usable model or harness. `None` when it would.
     pub launch_refused: Option<String>,
@@ -122,13 +121,11 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
     let mut launch_notes = Vec::new();
     if let Some(refused) = &facts.repo_refused {
         launch.push(gap("repo", refused.clone()));
-    } else if facts.will_clone {
+    } else if !facts.repo_exists {
         launch_notes.push(gap(
             "repo",
             format!("{repo} is not cloned yet (will clone)"),
         ));
-    } else if !facts.repo_exists {
-        launch.push(gap("repo", repo_missing(repo)));
     }
     if let Some(reason) = &facts.launch_refused {
         launch.push(gap("launch", reason.clone()));
@@ -304,7 +301,6 @@ pub async fn readiness(
         &Facts {
             repo_exists,
             repo_refused,
-            will_clone,
             launch_refused,
             checks: environment.checks,
             image: environment.image,
@@ -328,7 +324,6 @@ mod tests {
         Facts {
             repo_exists: true,
             repo_refused: None,
-            will_clone: false,
             launch_refused: None,
             checks: vec!["just check".into()],
             image: DIGEST.into(),
@@ -419,6 +414,7 @@ mod tests {
             "/r",
             &Facts {
                 repo_exists: false,
+                repo_refused: Some(crate::forge::HOST_CHECKOUT_REFUSED.into()),
                 launch_refused: Some("this node is failed: podman".into()),
                 ..ready()
             },
@@ -438,7 +434,6 @@ mod tests {
             "github.com/o/r",
             &Facts {
                 repo_exists: false,
-                will_clone: true,
                 ..ready()
             },
         );

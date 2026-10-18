@@ -5749,6 +5749,21 @@ async fn a_session_naming_a_forge_branch_starts_from_its_tip() {
         sh(&dir.join("upstream.git"), "git rev-parse main"),
         "the default branch is still brought up to date"
     );
+    // The clone itself stays on its default branch, so whatever reads its
+    // tree as the repository reads the default, and no local branch is made
+    // for the one the session continues.
+    assert_eq!(sh(&clone, "git branch --show-current"), "main");
+    assert_eq!(
+        sh(&clone, "git rev-parse HEAD"),
+        sh(&clone, "git rev-parse main")
+    );
+    assert_eq!(
+        sh(
+            &clone,
+            "git for-each-ref '--format=%(refname:short)' refs/heads"
+        ),
+        "main"
+    );
 }
 
 /// A session starts from its forge's default branch or a branch it names,
@@ -5782,10 +5797,11 @@ async fn a_session_naming_a_base_commit_is_refused() {
 
 /// A repository the node has not cloned is cloned on demand, at the start
 /// rather than in the create, and the session's log says so before it waits.
-/// Cloning takes the channel's forge credential: without one the session
-/// fails, saying why, and leaves nothing half-cloned behind.
+/// Cloning takes the channel's forge credential, or none when the channel
+/// has none, as a sync of the clone does: a clone that fails fails the
+/// session, saying why, and leaves nothing half-cloned behind.
 #[tokio::test]
-async fn a_repository_not_cloned_yet_is_cloned_at_the_start_with_the_channels_credential() {
+async fn a_repository_not_cloned_yet_is_cloned_at_the_start_and_a_failed_clone_leaves_nothing() {
     state::isolate();
     let h = Harness::new(0).await;
     let (status, body) = h
@@ -5812,11 +5828,15 @@ async fn a_repository_not_cloned_yet_is_cloned_at_the_start_with_the_channels_cr
         if s.state == "failed" {
             let error = s.last_error.unwrap_or_default();
             assert!(
-                error.starts_with("gitlab.invalid/not-cloned/proj could not be cloned:")
-                    && error.contains("glab"),
+                error.starts_with("gitlab.invalid/not-cloned/proj could not be cloned: git clone"),
                 "{error}"
             );
-            assert!(!clone.join(".git").exists());
+            assert!(!clone.exists());
+            let left: Vec<_> = std::fs::read_dir(clone.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .collect();
+            assert!(left.is_empty(), "left behind: {left:?}");
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

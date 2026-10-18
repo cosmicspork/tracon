@@ -657,16 +657,21 @@ pub fn write_context(selected: &Path, context: &serde_json::Value) -> Result<(),
     Ok(())
 }
 
-/// Seed from a managed clone the node has just brought to the forge branch
-/// the session starts from (`forge::sync_managed`), on `branch`. Only what is
-/// committed travels: the clone's tree is the node's, not anyone's
-/// uncommitted work, so there is nothing to overlay. `source` is read only;
-/// `git clone --no-local` keeps Git from hard-linking or writing back into
-/// it, and none of its Git configuration reaches the workspace.
+/// Seed from a managed clone the node has just synced (`forge::sync_managed`),
+/// on `branch`. The workspace starts at the clone's HEAD, its default
+/// branch, or at `start` when the session continues another forge branch:
+/// the clone's remote-tracking ref for it (`refs/remotes/origin/<branch>`),
+/// fetched into the workspace by itself, so the clone's tree never moves
+/// off the default for it and no ref of the workspace can clash with it. Only what is committed travels:
+/// the clone's tree is the node's, not anyone's uncommitted work, so there
+/// is nothing to overlay. `source` is read only; `git clone --no-local`
+/// keeps Git from hard-linking or writing back into it, and none of its Git
+/// configuration reaches the workspace.
 pub async fn seed_from_clone(
     git: &str,
     source: &Path,
     branch: &str,
+    start: Option<&str>,
     id: &str,
 ) -> Result<Workspace, WorkspaceError> {
     if !source.is_dir() {
@@ -683,6 +688,21 @@ pub async fn seed_from_clone(
             message: "branch looks like a command-line option".into(),
         });
     }
+    // `start` is the node's own, from the sync; only a remote-tracking ref
+    // of the clone will do.
+    let start = match start {
+        Some(start) => Some(
+            start
+                .strip_prefix("refs/remotes/origin/")
+                .filter(|named| !named.is_empty() && !named.starts_with('-'))
+                .map(|_| start.to_string())
+                .ok_or_else(|| WorkspaceError::Git {
+                    op: "fetch",
+                    message: format!("{start:?} is not a branch of the clone's origin"),
+                })?,
+        ),
+        None => None,
+    };
     let stage = staging_path(id);
     let _ = std::fs::remove_dir_all(&stage);
     if let Some(parent) = stage.parent() {
@@ -705,11 +725,24 @@ pub async fn seed_from_clone(
         ],
     )
     .await?;
+    let revision = match &start {
+        Some(start) => {
+            run_git(
+                git,
+                Some(&stage),
+                "fetch",
+                ["fetch", "--no-tags", "origin", start.as_str()],
+            )
+            .await?;
+            "FETCH_HEAD"
+        }
+        None => "HEAD",
+    };
     run_git(
         git,
         Some(&stage),
         "checkout",
-        ["checkout", "--detach", "HEAD"],
+        ["checkout", "--detach", revision],
     )
     .await?;
     run_git(
@@ -1213,7 +1246,7 @@ mod tests {
         );
 
         let id = format!("seed-graft-{}", uuid::Uuid::now_v7());
-        match seed_from_clone("git", &source, "feat/x", &id).await {
+        match seed_from_clone("git", &source, "feat/x", None, &id).await {
             // Either outcome upholds the invariant: the clone asks for the
             // history the commits actually describe, so a source that will
             // only serve the grafted one is refused rather than quietly
@@ -1244,7 +1277,7 @@ mod tests {
         );
 
         let id = format!("seed-committed-{}", uuid::Uuid::now_v7());
-        let workspace = seed_from_clone("git", &source, "feat/x", &id)
+        let workspace = seed_from_clone("git", &source, "feat/x", None, &id)
             .await
             .unwrap();
         let stage = staging_path(&workspace.id);
