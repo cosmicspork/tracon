@@ -2450,6 +2450,74 @@
     },
     {
       "admin": true,
+      "apply": "live",
+      "array": "docs.kind",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.kind.prefix",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "docs.kind",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.kind.label",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "docs.kind",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.kind.description",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "docs.kind",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "docs.kind.working_note",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
