@@ -6689,6 +6689,67 @@ pub async fn import_credentials(
     Ok(Json(json!({ "imported": names })))
 }
 
+/// Remove one sealed credential from the running broker and its store. An
+/// admin action, as importing one is: revoking a credential at the node is
+/// the only removal that takes effect at once, since a node brokers the copy
+/// it holds, not the file.
+pub async fn delete_credential(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    remove_credential(&s, &name).map(Json)
+}
+
+/// `DELETE /api/credentials/import`: the import route is a static one, and
+/// would otherwise answer a credential named `import` with a 405.
+pub async fn delete_credential_named_import(
+    State(s): State<AppState>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    remove_credential(&s, "import").map(Json)
+}
+
+/// Staged, saved, then swapped in, as a forge token's removal is. The removal
+/// is this node's alone: the mesh has no revocation, so the other nodes the
+/// credential lists keep the copies they were handed, and the answer names
+/// them.
+fn remove_credential(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
+    let key = crate::mesh::identity::load_or_generate()
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .0
+        .credential_store_key();
+    let removed = {
+        let mut broker = s.tools.broker.write().unwrap();
+        let mut staged = broker.clone();
+        let Some(removed) = staged.get(name).cloned() else {
+            return Err(ApiError(
+                StatusCode::NOT_FOUND,
+                format!("no credential named {name}"),
+            ));
+        };
+        staged.remove(name);
+        staged
+            .save(&key)
+            .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        *broker = staged;
+        removed
+    };
+    // A provider's credential goes the way a disconnect takes it, so the
+    // providers frame and what peers are told catch up now rather than at
+    // the next publish. Not a refusal: revoking a leaked token stays one
+    // command.
+    if let (Some(provider), Some(providers)) = (&removed.provider, s.manager.providers()) {
+        providers.credential_removed(provider);
+    }
+    let still_held_by: Vec<&String> = removed
+        .nodes
+        .iter()
+        .filter(|node| **node != s.node_id)
+        .collect();
+    Ok(json!({ "removed": name, "still_held_by": still_held_by }))
+}
+
 #[derive(Deserialize)]
 pub struct CreateProviderBody {
     pub name: String,
