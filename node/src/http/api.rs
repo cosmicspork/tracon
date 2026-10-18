@@ -3449,6 +3449,104 @@ pub async fn recover_publication(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ReconcileBody {
+    /// The publication record the operator is settling, as the review screen
+    /// showed it.
+    pub publication_id: String,
+    /// The change the operator opened by hand: its web address or number.
+    pub change: String,
+}
+
+/// Record that a publication which stopped after its push was finished by
+/// hand: the operator names the change they opened, and this node asks the
+/// forge whether it is exactly this publication's before settling the review
+/// as published there (`authority::reconcile_publication`). An admin action,
+/// since it settles a review on the operator's say-so about the forge; a
+/// change that does not match is refused and the review is left as it was.
+pub async fn reconcile_publication(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    super::auth::AdminAction(Json(b)): super::auth::AdminAction<Json<ReconcileBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review belongs to another node; reconcile it on the node that owns it".into(),
+        ));
+    }
+    let row = s
+        .store()
+        .publication(&b.publication_id)?
+        .filter(|row| row.review_id == id)
+        .ok_or(ApiError(
+            StatusCode::NOT_FOUND,
+            "no such publication for this review".into(),
+        ))?;
+    let revision = match row.revision_id.as_deref() {
+        Some(revision) => s.store().review_revision(revision)?,
+        None => None,
+    };
+    match crate::authority::reconcile_publication(
+        &crate::authority::PublishContext {
+            store: s.store(),
+            manager: &s.manager,
+            broker: &s.tools.broker,
+            cfg: &s.cfg,
+            node_id: &s.node_id,
+        },
+        &r,
+        &row,
+        &b.change,
+    )
+    .await
+    {
+        Ok(published) => {
+            let waiting_ms = record_evidence_decision(
+                s.store(),
+                revision.as_ref(),
+                &id,
+                "approved",
+                Some(&format!(
+                    "reconciled by the operator: published at {published}, opened outside \
+                     this node"
+                )),
+                row.title.as_deref(),
+                row.body.as_deref(),
+                None,
+                None,
+            )?;
+            // The operator's decision, marked as the reconciliation it was
+            // rather than an approval that published.
+            if let Some(session_id) = r.session_id.as_deref() {
+                s.manager.record_event(
+                    session_id,
+                    crate::session::state::event_kind::REVIEW_DECISION,
+                    json!({
+                        "source": "operator",
+                        "review_id": id,
+                        "decision": "approved",
+                        "reconciled": published,
+                        "waiting_ms": waiting_ms,
+                    }),
+                );
+            }
+            Ok(Json(json!({ "state": "approved", "published": published })))
+        }
+        Err(crate::authority::PublishError::Conflict(message)) => {
+            Err(ApiError(StatusCode::CONFLICT, message))
+        }
+        Err(crate::authority::PublishError::External(message))
+        | Err(crate::authority::PublishError::Uncertain(message)) => {
+            Err(ApiError(StatusCode::BAD_GATEWAY, message))
+        }
+    }
+}
+
 /// Why a verdict did not land. The decision was already refused atomically by
 /// the statement that would have recorded it; this only reads back enough to
 /// say which precondition failed, so the operator learns whether to reload the

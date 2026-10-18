@@ -290,18 +290,43 @@ fn push_node(out: &mut String, facts: &Facts) {
         push_preparation(out, prepared, facts.worktree);
     }
     if facts.tools.is_empty() {
-        out.push_str("- No node tools are offered on this channel.\n\n");
-    } else {
+        out.push_str("- No node tools are offered on this channel.\n");
+    }
+    push_waiting(out, facts);
+    out.push('\n');
+}
+
+/// How to wait, said once for every tool that waits, so each of their
+/// descriptions names only its own states. Only the offered ones are named;
+/// a session offered none is told nothing.
+fn push_waiting(out: &mut String, facts: &Facts) {
+    use crate::mcp::wait::{HELD, MAX_WAIT_SECS, WAITING};
+    let named = |set: &[&str]| {
+        set.iter()
+            .filter(|name| facts.tools.iter().any(|t| t == *name))
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+    };
+    let waiting = named(WAITING);
+    if waiting.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "- Waiting: each call to {} blocks for at most {MAX_WAIT_SECS} seconds, so it \
+         returns before an MCP client gives up on it. A person takes far longer: expect \
+         `still_waiting`, and call again to keep waiting.",
+        waiting.join(", ")
+    ));
+    let held = named(HELD);
+    if !held.is_empty() {
         out.push_str(&format!(
-            "- Node tools (MCP server `tracon`): {}.\n\n",
-            facts
-                .tools
-                .iter()
-                .map(|t| format!("`{t}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            " A wait on the operator ({}) need not be polled: end your turn and the session \
+             stays open while it is undecided, and the node brings the outcome back to you \
+             as your next prompt. Ending your turn waits on nothing else.",
+            held.join(", ")
         ));
     }
+    out.push('\n');
 }
 
 /// Which repository on which forge, so a forge tool is not called with a
@@ -366,12 +391,20 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
         out.push_str(&format!(
             "This item has a product brief (`{slug}`): who the work is for, what would make it \
              good, and what is still open. `brief_read` returns it, with every line marked \
-             observed, inferred or decided. `brief_note` adds a line to it — `observed` must \
-             cite what the customer said or did, `inferred` is your own reasoning, and a \
-             decision is the operator's and is refused. Every line you add goes to the \
-             operator for approval before it lands.\n\n"
+             observed, inferred or decided."
         ));
-        push_criteria(out, store, item);
+        // A session not offered `brief_note` is not told how to add a line:
+        // it would spend a turn on a call that is refused.
+        if offered(facts, crate::mcp::work::BRIEF_NOTE) {
+            out.push_str(
+                " `brief_note` adds a line to it — `observed` must cite what the customer said \
+                 or did, `inferred` is your own reasoning, and a decision is the operator's and \
+                 is refused. Every line you add goes to the operator for approval before it \
+                 lands.",
+            );
+        }
+        out.push_str("\n\n");
+        push_criteria(out, store, facts, item);
     }
     if let Some(from) = &item.discovered_from {
         out.push_str(&format!(
@@ -433,7 +466,7 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
 /// brief states any. Said here because a session that never learns a criterion
 /// has nothing pointing at it will not go looking: the gap is what is worth the
 /// reserved space, not the coverage.
-fn push_criteria(out: &mut String, store: &Store, item: &WorkItem) {
+fn push_criteria(out: &mut String, store: &Store, facts: &Facts, item: &WorkItem) {
     let Some(slug) = item.brief_slug.as_deref() else {
         return;
     };
@@ -457,12 +490,24 @@ fn push_criteria(out: &mut String, store: &Store, item: &WorkItem) {
     };
     out.push_str(&format!(
         "It states {} success criteri{}, and {gap}. `criteria_read` says which, and what the \
-         checks say about the current candidate; `criteria_link` records what you think would \
-         settle one. Your link is a proposal: only the operator decides what good means, and \
-         your own checks passing is not the customer agreeing with the standard.\n\n",
+         checks say about the current candidate",
         standing.total,
         if standing.total == 1 { "on" } else { "a" },
     ));
+    if offered(facts, crate::mcp::work::CRITERIA_LINK) {
+        out.push_str(
+            "; `criteria_link` records what you think would settle one. Your link is a \
+             proposal: only the operator decides what good means, and your own checks passing \
+             is not the customer agreeing with the standard",
+        );
+    }
+    out.push_str(".\n\n");
+}
+
+/// Whether this session is offered `name`, so the orientation names only
+/// the tools it can call.
+fn offered(facts: &Facts, name: &str) -> bool {
+    facts.tools.iter().any(|t| t == name)
 }
 
 /// A review session: requirements and diff, nothing of how the diff came to
@@ -933,10 +978,81 @@ mod tests {
         // being left to read a channel document as a rule of the system.
         assert!(i("## Pinned documents") < i("They are not tracon's"));
         assert!(text.contains("(directive) run just test"));
-        assert!(text.contains("`recall`, `retain`"));
+        // The tools are not listed: their definitions already say them, and
+        // none of these waits, so there is nothing to say about waiting.
+        assert!(!text.contains("`recall`, `retain`"), "{text}");
+        assert!(!text.contains("Waiting:"), "{text}");
         assert!(text.contains("Project `tracon`"));
         // No forge remote, no repository line: nothing is guessed.
         assert!(!text.contains("Repository:"), "{text}");
+    }
+
+    /// How to wait is said once, naming only the waiting tools offered, and
+    /// ending the turn is offered only for the waits on the operator that hold
+    /// the session; each tool's own description just points here.
+    #[test]
+    fn how_to_wait_is_said_once_for_the_waiting_tools_offered() {
+        let store = Store::open_in_memory().unwrap();
+        let told = |tools: &[String]| {
+            let facts = Facts {
+                node_name: "laptop",
+                node_id: "0123456789abcdef",
+                backend: "podman",
+                harness: "opencode",
+                harness_version: "18.0.4",
+                channel: "personal",
+                project_id: None,
+                project_name: None,
+                tools,
+                worktree: "/work",
+                phase: "execute",
+                item: None,
+                plan_body: None,
+                ready: &[],
+                review: None,
+                manifest: &crate::manifest::LaunchManifest::default(),
+                context: None,
+                egress: None,
+                forge_repo: None,
+                prepared: None,
+            };
+            assemble(&store, &Policy::shipped(), &facts).0
+        };
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let text = told(&names(&[
+            "recall",
+            "question_status",
+            "run_wait",
+            "review_status",
+        ]));
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("- Waiting:"))
+            .unwrap_or_else(|| panic!("no waiting line in:\n{text}"));
+        assert!(
+            line.starts_with(
+                "- Waiting: each call to `question_status`, `review_status`, `run_wait` blocks \
+                 for at most 45 seconds"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains("A wait on the operator (`question_status`, `review_status`) need not"),
+            "{line}"
+        );
+        assert!(line.contains("end your turn"), "{line}");
+        assert_eq!(text.matches("end your turn").count(), 1, "{text}");
+
+        // A pipeline wait does not hold the session, so ending the turn is not
+        // offered as a way to wait on it.
+        let text = told(&names(&["run_wait"]));
+        assert!(
+            text.contains("- Waiting: each call to `run_wait` blocks"),
+            "{text}"
+        );
+        assert!(!text.contains("end your turn"), "{text}");
+
+        assert!(!told(&names(&["recall"])).contains("Waiting:"));
     }
 
     /// The workspace has no remote, so the orientation is where a session
@@ -1453,9 +1569,14 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let mut item = item("Overnight alert triage", "");
         let manifest = crate::manifest::LaunchManifest::default();
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plan = names(crate::mcp::Tools::PLAN_TOOLS);
+        let execute = names(&["brief_read", "brief_note"]);
         fn facts<'a>(
             item: &'a WorkItem,
             manifest: &'a crate::manifest::LaunchManifest,
+            tools: &'a [String],
+            phase: &'a str,
         ) -> Facts<'a> {
             Facts {
                 node_name: "n",
@@ -1466,9 +1587,9 @@ mod tests {
                 channel: "personal",
                 project_id: None,
                 project_name: None,
-                tools: &[],
+                tools,
                 worktree: "/work",
-                phase: "execute",
+                phase,
                 item: Some(item),
                 plan_body: None,
                 ready: &[],
@@ -1481,11 +1602,19 @@ mod tests {
                 stale_base: None,
             }
         }
-        let (bare, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        let (bare, _) = assemble(
+            &store,
+            &Policy::default(),
+            &facts(&item, &manifest, &execute, "execute"),
+        );
         assert!(!bare.contains("brief"), "no brief, nothing said: {bare}");
 
         item.brief_slug = Some("brief-item0001dead".into());
-        let (text, missing) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        let (text, missing) = assemble(
+            &store,
+            &Policy::default(),
+            &facts(&item, &manifest, &execute, "execute"),
+        );
         assert!(text.contains("`brief-item0001dead`"), "{text}");
         assert!(text.contains("`brief_read`"), "and how to read it: {text}");
         // Reading a brief is only half of it: a session that learns something
@@ -1504,6 +1633,15 @@ mod tests {
             "the pointer sits with the task"
         );
         assert!(missing.is_empty(), "a pointer costs nothing: {missing:?}");
+
+        // A plan session is not offered `brief_note`, so it is not told of it.
+        let (planned, _) = assemble(
+            &store,
+            &Policy::default(),
+            &facts(&item, &manifest, &plan, "plan"),
+        );
+        assert!(planned.contains("`brief_read`"), "{planned}");
+        assert!(!planned.contains("brief_note"), "{planned}");
     }
 
     /// A criterion nothing points at is the thing a session will not go
@@ -1514,6 +1652,9 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let mut item = item("Overnight alert triage", "");
         let manifest = crate::manifest::LaunchManifest::default();
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plan = names(crate::mcp::Tools::PLAN_TOOLS);
+        let execute = names(&["criteria_read", "criteria_link"]);
         let write = |slug: &str, body: &str| {
             store
                 .write_change(
@@ -1534,6 +1675,8 @@ mod tests {
         fn facts<'a>(
             item: &'a WorkItem,
             manifest: &'a crate::manifest::LaunchManifest,
+            tools: &'a [String],
+            phase: &'a str,
         ) -> Facts<'a> {
             Facts {
                 node_name: "n",
@@ -1544,9 +1687,9 @@ mod tests {
                 channel: "personal",
                 project_id: None,
                 project_name: None,
-                tools: &[],
+                tools,
                 worktree: "/work",
-                phase: "execute",
+                phase,
                 item: Some(item),
                 plan_body: None,
                 ready: &[],
@@ -1565,7 +1708,11 @@ mod tests {
             "# Brief: Overnight alert triage\n\n## Problem\n\n- decided: it is slow\n",
         );
         item.brief_slug = Some("brief-quiet".into());
-        let (quiet, _) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        let (quiet, _) = assemble(
+            &store,
+            &Policy::default(),
+            &facts(&item, &manifest, &execute, "execute"),
+        );
         assert!(
             !quiet.contains("It states") && !quiet.contains("criteria_read"),
             "a brief that states none is not told it has an uncovered one: {quiet}"
@@ -1579,7 +1726,11 @@ mod tests {
              - inferred: nobody scrolls to find the urgent one\n",
         );
         item.brief_slug = Some("brief-stated".into());
-        let (text, missing) = assemble(&store, &Policy::default(), &facts(&item, &manifest));
+        let (text, missing) = assemble(
+            &store,
+            &Policy::default(),
+            &facts(&item, &manifest, &execute, "execute"),
+        );
         assert!(text.contains("It states 3 success criteria"), "{text}");
         assert!(
             text.contains("2 of them have nothing agreed pointing at them"),
@@ -1594,6 +1745,20 @@ mod tests {
             "and that a proposal is not agreement: {text}"
         );
         assert!(missing.is_empty(), "a sentence costs nothing: {missing:?}");
+
+        // A plan session is not offered `criteria_link`, so it is not told of
+        // it, but still learns of the gap and how to read it.
+        let (planned, _) = assemble(
+            &store,
+            &Policy::default(),
+            &facts(&item, &manifest, &plan, "plan"),
+        );
+        assert!(
+            planned.contains("2 of them have nothing agreed pointing at them")
+                && planned.contains("`criteria_read`"),
+            "{planned}"
+        );
+        assert!(!planned.contains("criteria_link"), "{planned}");
     }
 
     /// An orientation that names a tool the node does not serve is worse than

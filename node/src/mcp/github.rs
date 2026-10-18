@@ -189,11 +189,14 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": RUN_WAIT,
-            "description": "Wait for a GitHub Actions run to move: returns as soon as it or one \
-                            of its jobs changes state, when it has completed, or after wait_secs \
-                            (at most 45), with the same run and jobs as run_status with run_id \
-                            and a `state` token. Pass that token back as `since` so a change \
-                            between calls is not missed. A failed job's log is run_logs.",
+            "description": format!(
+                "Wait for a GitHub Actions run to move: returns as soon as it or one of its \
+                 jobs changes state, when it has completed, or after wait_secs, with the same \
+                 run and jobs as run_status with run_id and a `state` token. Pass that token \
+                 back as `since` so a change between calls is not missed. A failed job's log \
+                 is run_logs. {}",
+                super::wait::pointer()
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {

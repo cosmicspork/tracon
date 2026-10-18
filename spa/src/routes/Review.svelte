@@ -89,6 +89,9 @@
   let branchName = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
+  /** The change the operator opened by hand, while "Published at…" is open;
+   * `null` while it is closed. */
+  let reconcileChange = $state<string | null>(null)
   let loaded = $state(false)
   /** The node said there is no such review, as opposed to failing to say. */
   let missing = $state(false)
@@ -604,6 +607,33 @@
     }
   }
 
+  /** Settle the latest publication as published at the change the operator
+   * opened by hand. The node checks it against the forge, and refuses a
+   * change that is not exactly this publication's. */
+  async function reconcile() {
+    const latest = publication?.latest
+    const change = reconcileChange?.trim()
+    if (!review || !latest || !change) return
+    busy = true
+    error = null
+    try {
+      decided = true
+      const res = await api.reconcilePublication(id, latest.id, change)
+      reconcileChange = null
+      await store.refetch()
+      leaveAfterVerdict(router, {
+        reviewId: id,
+        from: openedFrom,
+        fallback: res.published && review.session_id ? `/sessions/${review.session_id}` : '/',
+      })
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+      await reread()
+    } finally {
+      busy = false
+    }
+  }
+
   const draftLine = $derived(
     draftState === 'saving'
       ? 'saving draft…'
@@ -949,12 +979,35 @@
       {:else if settled.refusal}
         <span class="note">{settled.refusal}</span>
       {/if}
+      {#if !remoteOwner}
+        {@render publishedAt()}
+      {/if}
     </div>
   {:else if publishing}
     <div class="banner crit">
       publication outcome requires reconciliation <b>· this review may have reached the forge; do not approve, revise, or reject it again</b>
     </div>
+    {#if publication?.latest && !remoteOwner}
+      <div class="recover">{@render publishedAt()}</div>
+    {/if}
   {/if}
+
+  {#snippet publishedAt()}
+    {#if reconcileChange === null}
+      <button class="btn" disabled={busy} onclick={() => (reconcileChange = '')}>Published at…</button>
+    {:else}
+      <input
+        class="edit change"
+        placeholder="the pull or merge request you opened: its address or number"
+        aria-label="The change you opened by hand"
+        bind:value={reconcileChange}
+        disabled={busy}
+      />
+      <button class="btn p" disabled={busy || !reconcileChange.trim()} onclick={reconcile}>Record it</button>
+      <button class="btn" disabled={busy} onclick={() => (reconcileChange = null)}>Cancel</button>
+      <span class="note dim">The node checks it on the forge: the pushed commit, this branch into the base, open or merged.</span>
+    {/if}
+  {/snippet}
 
   {#if authorship && authorship.misattributed.length > 0}
     <div class="banner">
@@ -1246,6 +1299,10 @@
     gap: 12px;
     flex-wrap: wrap;
     margin: 6px 0 12px;
+  }
+  .recover .change {
+    flex: 1 1 260px;
+    min-width: 0;
   }
   .head {
     display: grid;
