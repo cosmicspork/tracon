@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.34.0](https://github.com/cosmicspork/tracon/compare/v0.33.3...v0.34.0) (2026-10-18)
+
+
+### Features
+
+* **broker:** let a credential's repos name a forge group with `/**` ([#574](https://github.com/cosmicspork/tracon/issues/574)) ([ca5b196](https://github.com/cosmicspork/tracon/commit/ca5b1965a3d67aa4bd82844461da9dba854bdfff))
+* **cli:** add repo set --prepare-credential and report a stale save plainly ([#572](https://github.com/cosmicspork/tracon/issues/572)) ([e348790](https://github.com/cosmicspork/tracon/commit/e34879014a2216d053ecf97ebeb18b3090d50ec2))
+* **docs:** operator-configured document kinds in node.toml ([#581](https://github.com/cosmicspork/tracon/issues/581)) ([9a1269e](https://github.com/cosmicspork/tracon/commit/9a1269e959cc8ab406b6299a0dbd0ce459ce38ec))
+* **mcp:** let an external harness bind work_discover items to a project ([#576](https://github.com/cosmicspork/tracon/issues/576)) ([c96ea4d](https://github.com/cosmicspork/tracon/commit/c96ea4dbf53312e4b97d564b787faa11a19b54d9))
+* **mesh:** show and answer a peer's operator questions ([#584](https://github.com/cosmicspork/tracon/issues/584)) ([13a7733](https://github.com/cosmicspork/tracon/commit/13a77331c155d2158da21b5fe2be14230ac6e622))
+* **node:** scope tracon tools to the session's phase and trim wait wording ([#578](https://github.com/cosmicspork/tracon/issues/578)) ([7cef0d7](https://github.com/cosmicspork/tracon/commit/7cef0d7c5550d2e10c7fe731dcc0d4e7b675c9f1))
+* **review:** let review sessions exercise the candidate and record per-criterion findings ([#583](https://github.com/cosmicspork/tracon/issues/583)) ([aace3b8](https://github.com/cosmicspork/tracon/commit/aace3b8fabbaa7a5f447e9e544938ae58d68acbc))
+* **review:** reconcile a publication finished by hand ([#580](https://github.com/cosmicspork/tracon/issues/580)) ([91d13e4](https://github.com/cosmicspork/tracon/commit/91d13e47235d086a8968f66826af08e93cf97762))
+* **review:** start review sessions from the candidate, and by hand ([#582](https://github.com/cosmicspork/tracon/issues/582)) ([11c85e9](https://github.com/cosmicspork/tracon/commit/11c85e9fee401fa31c772eafbe56100b1b523026))
+* **spa:** bind a channel's review model in Settings ([#577](https://github.com/cosmicspork/tracon/issues/577)) ([3dcec0b](https://github.com/cosmicspork/tracon/commit/3dcec0b49b662bee806664c0c19c3279f3c2b942))
+
+
+### Bug Fixes
+
+* **cli:** remove credentials through the running node ([#564](https://github.com/cosmicspork/tracon/issues/564)) ([23351ee](https://github.com/cosmicspork/tracon/commit/23351eedc413a4a988b0d6f8b1f26444f8fa6d2d))
+* **podman:** record the requested image's digest name, not RepoDigests[0] ([#573](https://github.com/cosmicspork/tracon/issues/573)) ([06d22ee](https://github.com/cosmicspork/tracon/commit/06d22eed5fd063b3525a8d530bdf29d9680a44e1))
+* **policy:** allow pipeline_list_by_sha with the other brokered reads ([#567](https://github.com/cosmicspork/tracon/issues/567)) ([936db23](https://github.com/cosmicspork/tracon/commit/936db2304da7a59b8d3e1c974ad40845f786ea36))
+* **publish:** ship the agent's signed commit when it is the squash, and say which commit ships ([#566](https://github.com/cosmicspork/tracon/issues/566)) ([dbe2186](https://github.com/cosmicspork/tracon/commit/dbe2186d41c3cb425451eb630ff00d2c4df5d965))
+* **review:** judge authorship only on commits a change update adds ([#565](https://github.com/cosmicspork/tracon/issues/565)) ([217ff5b](https://github.com/cosmicspork/tracon/commit/217ff5ba89e3929df4a7bfc4ee774235f7e6ea0a))
+* **session:** hand a review sent back for changes to the session continuing its attempt ([#575](https://github.com/cosmicspork/tracon/issues/575)) ([43e8b23](https://github.com/cosmicspork/tracon/commit/43e8b2325135816a8c7ef7c1e05eb4ce78536b14))
+* **session:** start managed-clone sessions from the fetched default branch ([#563](https://github.com/cosmicspork/tracon/issues/563)) ([4f67fdb](https://github.com/cosmicspork/tracon/commit/4f67fdb3c918a0693c7e11701b70ff804cd1275c))
+* **spa:** import credentials from the Credentials card, not Forge tokens ([#562](https://github.com/cosmicspork/tracon/issues/562)) ([5fe4876](https://github.com/cosmicspork/tracon/commit/5fe4876e1cdc18e0104e85b4d37b6e3171c311f3))
+* **spa:** render a work item's requirements as Markdown ([#561](https://github.com/cosmicspork/tracon/issues/561)) ([131f1f5](https://github.com/cosmicspork/tracon/commit/131f1f5c32daacaa149bfd3b3e5ce0af47441d93))
+* **test:** give main's orientation wait test the stale_base field ([#585](https://github.com/cosmicspork/tracon/issues/585)) ([69e45ea](https://github.com/cosmicspork/tracon/commit/69e45ea2fa5d7131920c52f1ee43ec21033bf85c))
+
 ## [0.33.3](https://github.com/cosmicspork/tracon/compare/v0.33.2...v0.33.3) (2026-10-16)
 
 
