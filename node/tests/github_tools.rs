@@ -923,6 +923,7 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
         "brief_note",
         "criteria_link",
         "review_verdict",
+        "review_finding",
         "mr_status",
         "issue",
     ] {
@@ -933,7 +934,16 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
     }
 
     let exec = listed(&t, &CallContext::session("exec", "work", "n1")).await;
-    assert_eq!(exec, narrowed(&|n| n != "review_verdict"));
+    assert_eq!(exec, narrowed(&|n| !Tools::NOT_EXECUTE.contains(&n)));
+    // A verdict and findings are a review session's account of someone
+    // else's change; everything else is the execute session's to use.
+    for withheld in ["review_verdict", "review_finding"] {
+        assert!(
+            !exec.iter().any(|n| n == withheld),
+            "{withheld} in {exec:?}"
+        );
+    }
+    assert_eq!(exec.len(), channel.len() - 2, "{exec:?}");
 
     let review = listed(&t, &CallContext::session("review", "work", "n1")).await;
     assert_eq!(review, narrowed(&|n| Tools::REVIEW_TOOLS.contains(&n)));
@@ -942,6 +952,7 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
     assert_eq!(external, narrowed(&|n| !Tools::NOT_EXTERNAL.contains(&n)));
     for withheld in [
         "review_verdict",
+        "review_finding",
         "brief_read",
         "brief_note",
         "criteria_read",
