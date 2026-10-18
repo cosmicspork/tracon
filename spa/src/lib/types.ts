@@ -761,6 +761,13 @@ export interface ReviewIntent {
   squash_onto?: string
   /** The agent's commits beyond the base, oldest first. */
   commits?: ReviewCommit[]
+  /**
+   * Under squash: the message with which the squash is the agent's head but
+   * for its signature, so the head itself ships. Absent when none would.
+   */
+  as_written?: string
+  /** Of `commits`, the signed ones a commit made in publication would replace. */
+  signed?: string[]
 }
 
 export interface ReviewRevisionRef {

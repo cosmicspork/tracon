@@ -469,6 +469,11 @@ pub async fn descends_from(worktree: &str, head: &str, ancestor: &str) -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
+/// A commit object exactly as Git stores it, signature and all.
+pub async fn raw_commit(worktree: &str, sha: &str) -> Result<Vec<u8>, ReviewError> {
+    git_bytes(worktree, "cat-file", &["cat-file", "commit", sha]).await
+}
+
 async fn git_bytes(dir: &str, op: &'static str, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
     let out = hardened_git(dir)?.args(args).output().await?;
     if out.status.success() {

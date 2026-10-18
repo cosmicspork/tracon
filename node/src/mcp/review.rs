@@ -105,7 +105,7 @@ pub fn definitions() -> Vec<Value> {
                             "draft": { "type": "boolean", "description": "Open the new change as a draft. Not for an existing change." },
                         },
                     },
-                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message (else the description's, else title and body); a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it." },
+                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message (else the description's, else title and body); a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it. To ship your own signed commit as written, with its SHA and signature, make it the one commit on the base (or on what the change's branch holds) and pass its exact message here; otherwise a new, unsigned commit ships." },
                     "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title when that is the node's placeholder. Fixed by the first submit of a review. An existing change is pushed to its own branch whatever your worktree's is called." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds: the change's head, or for a branch pushed before its change opened, whatever the branch holds now. Forced only over what it held at submit, and always approved by the operator." },
                 },
@@ -631,6 +631,9 @@ async fn submit(
             _ => intent.squash_onto = Some(leaves),
         }
     }
+    shipping(&worktree, &capture.head_sha, &mut intent)
+        .await
+        .map_err(|e| e.to_string())?;
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     let max_snapshot_bytes = manager.cfg().live().supervision.max_snapshot_bytes;
     // Capture the committed candidate before any check can execute. The
@@ -1285,6 +1288,44 @@ fn stored_target(store: &Store, review: &ReviewRow) -> Result<Target, String> {
             None => target,
         },
     )
+}
+
+/// Which of the agent's commits a commit made in publication would replace
+/// with their signatures, and under squash the message that ships the head
+/// itself, so the operator sees before approving whether what ships is the
+/// agent's commit or a new one (#551).
+async fn shipping(
+    worktree: &str,
+    head_sha: &str,
+    intent: &mut review::publish::Intent,
+) -> Result<(), review::ReviewError> {
+    for commit in &intent.commits {
+        let raw = review::raw_commit(worktree, &commit.sha).await?;
+        let replaced = match &intent.squash_onto {
+            Some(onto) => !review::descends_from(worktree, onto, &commit.sha).await,
+            None => true,
+        };
+        if replaced && review::publish::is_signed(&raw) {
+            intent.signed.push(commit.sha.clone());
+        }
+        let Some(onto) = intent
+            .squash_onto
+            .as_deref()
+            .filter(|_| commit.sha == head_sha)
+        else {
+            continue;
+        };
+        // A head with the tree it sits on is no revision: the squash
+        // pushes nothing new, and the head does not ship either.
+        let tree = |raw: &[u8]| raw.split(|b| *b == b'\n').next().map(<[u8]>::to_vec);
+        let onto_tree = review::raw_commit(worktree, onto).await.ok();
+        if onto_tree.as_deref().map(tree) == Some(tree(&raw)) {
+            continue;
+        }
+        intent.as_written =
+            review::publish::as_written(&raw, onto, intent.squash_merges.as_deref());
+    }
+    Ok(())
 }
 
 /// Settle what this revision may do on the forge, asking the forge rather
