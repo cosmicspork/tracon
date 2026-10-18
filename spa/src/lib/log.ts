@@ -178,6 +178,9 @@ export function repetitionLine(payload: Record<string, unknown>): string {
 /// workspace in a runtime volume names its volume and has no path, while a
 /// host worktree names its path and the base it started from. Only the parts
 /// the node recorded are said; a field it left out is left out of the line.
+/// A managed clone the node could not fetch says so last, in the node's own
+/// words ("stale: last fetched at …"), so the operator sees the base may be
+/// behind its forge.
 export function worktreeLine(payload: Record<string, unknown>): string {
   const source = str(payload.source)
   const path = str(payload.path)
@@ -187,6 +190,7 @@ export function worktreeLine(payload: Record<string, unknown>): string {
   const branch = str(payload.branch)
   const base = str(payload.base)
   const volume = str(payload.volume)
+  const synced = payload.synced && typeof payload.synced === 'object' ? (payload.synced as Record<string, unknown>) : {}
   return [
     head,
     path,
@@ -194,6 +198,7 @@ export function worktreeLine(payload: Record<string, unknown>): string {
     base ? `from ${base}` : '',
     volume ? `volume ${volume}` : '',
     payload.main_checkout_dirty === true ? 'main checkout is dirty and was left alone' : '',
+    str(synced.stale),
   ]
     .filter(Boolean)
     .join(' · ')

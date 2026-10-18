@@ -5301,3 +5301,210 @@ async fn a_prompt_sent_mid_turn_is_queued_and_reaches_the_agent_once() {
         "the queued prompt is a turn of its own"
     );
 }
+
+// ---- where a session's workspace starts ---------------------------------
+
+fn sh(dir: &std::path::Path, script: &str) -> String {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{script}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A bare upstream, a managed clone of it under this binary's state, and the
+/// upstream moved on one commit since: the tip a fresh start must reach.
+fn managed_clone_behind(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    let dir = state::scratch(&format!("start-{tag}"));
+    sh(
+        &dir,
+        "git init -q --bare -b main upstream.git && git clone -q upstream.git work \
+         && cd work && echo one > a.txt && git add a.txt \
+         && git -c user.name=t -c user.email=t@t commit -qm one && git push -q origin main",
+    );
+    let clone = tracon::forge::managed_root(&Config::state_dir())
+        .join("github.com")
+        .join(tag)
+        .join("proj");
+    std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+    sh(
+        clone.parent().unwrap(),
+        &format!("git clone -q {} proj", dir.join("upstream.git").display()),
+    );
+    let tip = sh(
+        &dir.join("work"),
+        "echo two > a.txt && git -c user.name=t -c user.email=t@t commit -qam two \
+         && git push -q origin main && git rev-parse HEAD",
+    );
+    (dir, clone, tip)
+}
+
+/// The first event of `kind` a session recorded.
+async fn first_event(store: &Store, session_id: &str, kind: &str) -> Value {
+    for _ in 0..500 {
+        if let Some(e) = store
+            .events_after(session_id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == kind)
+        {
+            return e.payload;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let s = store.get_session(session_id).unwrap().unwrap();
+    panic!(
+        "no {kind} event; state={} error={:?}",
+        s.state, s.last_error
+    )
+}
+
+async fn start_on(h: &Harness, repo: &std::path::Path) -> String {
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": repo.to_string_lossy(),
+                "initial_prompt": "look",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["id"].as_str().unwrap().to_string()
+}
+
+/// A session on a managed clone starts from the forge's default branch as
+/// just fetched, and its `worktree` event says so: the base it started from,
+/// the ref and commit the clone was brought to, and that the start is fresh.
+#[tokio::test]
+async fn a_session_on_a_managed_clone_records_the_fetched_tip_it_started_from() {
+    state::isolate();
+    let (_dir, clone, tip) = managed_clone_behind("fresh");
+    let h = Harness::new(0).await;
+    let id = start_on(&h, &clone).await;
+
+    let worktree = first_event(&h.store, &id, "worktree").await;
+    assert_eq!(worktree["base"], tip.as_str(), "{worktree}");
+    assert_eq!(
+        worktree["synced"]["source_ref"], "origin/main",
+        "{worktree}"
+    );
+    assert_eq!(
+        worktree["synced"]["source_commit"],
+        tip.as_str(),
+        "{worktree}"
+    );
+    assert!(worktree["synced"]["stale"].is_null(), "{worktree}");
+    let orientation = first_event(&h.store, &id, "orientation").await;
+    assert!(
+        !orientation["text"]
+            .as_str()
+            .unwrap()
+            .contains("base may be stale"),
+        "{orientation}"
+    );
+}
+
+/// A managed clone whose forge cannot be reached still starts, from the
+/// default branch it fetched last, and both the operator's log and the
+/// session's orientation say the base is stale.
+#[tokio::test]
+async fn a_session_on_a_clone_that_could_not_be_fetched_is_told_its_base_is_stale() {
+    state::isolate();
+    let (_dir, clone, _tip) = managed_clone_behind("stale");
+    let cloned = sh(&clone, "git rev-parse HEAD");
+    sh(
+        &clone,
+        "git remote set-url origin /nonexistent/upstream.git",
+    );
+    let h = Harness::new(0).await;
+    let id = start_on(&h, &clone).await;
+
+    let worktree = first_event(&h.store, &id, "worktree").await;
+    assert_eq!(worktree["base"], cloned.as_str(), "{worktree}");
+    assert_eq!(
+        worktree["synced"]["source_commit"],
+        cloned.as_str(),
+        "{worktree}"
+    );
+    let stale = worktree["synced"]["stale"].as_str().unwrap_or_default();
+    assert!(stale.starts_with("stale: last fetched at"), "{worktree}");
+    let orientation = first_event(&h.store, &id, "orientation").await;
+    let text = orientation["text"].as_str().unwrap();
+    assert!(
+        text.contains("Your base may be stale (stale: last fetched at"),
+        "{text}"
+    );
+}
+
+/// A checkout outside managed storage is not synced: it is seeded as it
+/// stands, its uncommitted work overlaid, and the event records no sync.
+#[tokio::test]
+async fn a_session_on_a_host_checkout_is_seeded_as_it_stands_and_records_no_sync() {
+    state::isolate();
+    let dir = state::scratch("start-host");
+    sh(
+        &dir,
+        "git init -q -b main host && cd host && echo one > a.txt && git add a.txt \
+         && git -c user.name=t -c user.email=t@t commit -qm one && echo mine > a.txt",
+    );
+    let host = dir.join("host");
+    let head = sh(&host, "git rev-parse HEAD");
+    let h = Harness::new(0).await;
+    let id = start_on(&h, &host).await;
+
+    let worktree = first_event(&h.store, &id, "worktree").await;
+    assert_eq!(worktree["base"], head.as_str(), "{worktree}");
+    assert!(worktree["synced"].is_null(), "{worktree}");
+    assert_eq!(
+        sh(&host, "cat a.txt"),
+        "mine",
+        "the host checkout is left as it was"
+    );
+}
+
+/// A path spelled under managed storage that leads out of it is refused
+/// before anything runs in it, rather than seeded as a host checkout.
+#[tokio::test]
+async fn a_session_on_a_path_that_climbs_out_of_managed_storage_is_refused() {
+    state::isolate();
+    let dir = state::scratch("start-climb");
+    sh(
+        &dir,
+        "git init -q -b main host && cd host && echo one > a.txt && git add a.txt \
+         && git -c user.name=t -c user.email=t@t commit -qm one && echo mine > a.txt",
+    );
+    let root = tracon::forge::managed_root(&Config::state_dir());
+    std::fs::create_dir_all(&root).unwrap();
+    // `<state>/repos/../scratch/start-climb/host`.
+    let climbing = root
+        .join("..")
+        .join("scratch")
+        .join("start-climb")
+        .join("host");
+    let h = Harness::new(0).await;
+    let id = start_on(&h, &climbing).await;
+
+    for _ in 0..500 {
+        let s = h.store.get_session(&id).unwrap().unwrap();
+        if let Some(error) = s.last_error {
+            assert!(
+                error.contains("not a clone inside managed storage"),
+                "{error}"
+            );
+            assert_eq!(sh(&dir.join("host"), "cat a.txt"), "mine");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the session was not refused");
+}
