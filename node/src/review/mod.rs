@@ -49,6 +49,28 @@ pub async fn locate_worktree(
     path: &str,
     roots: &[std::path::PathBuf],
 ) -> Result<Located, ReviewError> {
+    let (dir, repo) = locate_repo(path, roots).await?;
+    let branch = git(&dir, "rev-parse", &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    if branch == "HEAD" {
+        return Err(ReviewError::Rejected(
+            "the worktree is on a detached HEAD; check out the branch to publish".into(),
+        ));
+    }
+    Ok(Located {
+        worktree: dir,
+        branch,
+        repo,
+    })
+}
+
+/// The same checks short of the branch: a worktree's top level, and the
+/// repository it belongs to under one of `roots`, as `(worktree, repo)`. For
+/// a caller that needs only to know which repository it is, where a detached
+/// HEAD is no obstacle.
+pub async fn locate_repo(
+    path: &str,
+    roots: &[std::path::PathBuf],
+) -> Result<(String, String), ReviewError> {
     let given = std::fs::canonicalize(path)
         .map_err(|_| ReviewError::Rejected(format!("{path} does not exist")))?;
     let dir = given.to_string_lossy().into_owned();
@@ -82,17 +104,7 @@ pub async fn locate_worktree(
             repo: repo.display().to_string(),
         });
     }
-    let branch = git(&dir, "rev-parse", &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
-    if branch == "HEAD" {
-        return Err(ReviewError::Rejected(
-            "the worktree is on a detached HEAD; check out the branch to publish".into(),
-        ));
-    }
-    Ok(Located {
-        worktree: dir,
-        branch,
-        repo: repo.display().to_string(),
-    })
+    Ok((dir, repo.display().to_string()))
 }
 
 /// One file as it stood when the review was submitted. The blob is git's own

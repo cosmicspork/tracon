@@ -177,6 +177,7 @@ async fn a_channel_binds_a_model_to_each_phase() {
                 priority: 0,
                 discovered_from: None,
                 discovered_by_session: None,
+                discovered_by_lane: None,
             },
         )
         .unwrap()
@@ -297,6 +298,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
                 priority: 0,
                 discovered_from: None,
                 discovered_by_session: None,
+                discovered_by_lane: None,
             },
         )
         .unwrap()
@@ -614,6 +616,7 @@ async fn a_waiting_request_carries_the_intent_of_the_session_that_asked() {
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();
@@ -3031,6 +3034,7 @@ async fn orientation_setup(
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();
@@ -3201,6 +3205,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();

@@ -1731,6 +1731,7 @@ async fn publishing_closes_the_item_the_session_holds() {
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();
@@ -1880,6 +1881,7 @@ async fn requirements_shown_on_review_are_pinned_to_the_revision() {
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();
@@ -2650,6 +2652,7 @@ async fn a_same_commit_resubmission_with_new_prose_requires_a_fresh_reading() {
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();

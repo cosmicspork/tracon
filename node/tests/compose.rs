@@ -269,6 +269,7 @@ async fn peer_compose_applies_its_scoped_work_before_the_mesh_tap_arrives() {
             priority: 0,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .unwrap();

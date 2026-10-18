@@ -1483,6 +1483,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
             priority: c.priority,
             discovered_from: None,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .map_err(work_err)?;
@@ -4689,6 +4690,7 @@ pub async fn add_work(
             priority: w.priority,
             discovered_from: w.discovered_from,
             discovered_by_session: None,
+            discovered_by_lane: None,
         },
     )
     .map_err(work_err)?;

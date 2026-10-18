@@ -819,6 +819,8 @@ export interface WorkItem {
   deps: string[]
   discovered_from: string | null
   discovered_by_session: string | null
+  /** The lane of the harness outside the boundary that recorded the item, if one did. */
+  discovered_by_lane?: string | null
   phase_plan_slug: string | null
   /** The document holding this item's product brief, when it has one. */
   brief_slug: string | null
