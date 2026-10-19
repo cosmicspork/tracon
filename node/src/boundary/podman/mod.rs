@@ -80,25 +80,27 @@ async fn volume_copy_in(
     }
 }
 
-/// Stages a workspace as Git sees it under `/export`, in the transfer
-/// container's own filesystem. The index names the tracked files and the
-/// ignore rules decide the untracked ones, so a deleted file stays deleted and
-/// build output stays behind. The list and the archive are files rather than a
+/// Stages a workspace as Git sees it under `/tmp/tracon-export`, in the
+/// transfer container's own filesystem: the harness image may be any image,
+/// its `/` may be read-only even to root once capabilities are dropped
+/// (Fedora ships it 0555), and `/tmp` is writable in all of them. The index
+/// names the tracked files and the ignore rules decide the untracked ones, so
+/// a deleted file stays deleted and build output stays behind. The list and the archive are files rather than a
 /// pipe: a failure on either side of a pipe would stage a partial tree as if
 /// it were the whole one. A volume with no repository is copied as it is.
 const STAGE_WORKSPACE: &str = r#"set -eu
-mkdir -p /export
+mkdir -p /tmp/tracon-export
 cd /data
 if [ -d .git ]; then
   export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
   git -c safe.directory=/data -c core.fsmonitor=false -c core.hooksPath=/dev/null \
     ls-files -z -co --exclude-standard > /tmp/tracon-export.list
   tar --null --ignore-failed-read -T /tmp/tracon-export.list -cf /tmp/tracon-export.tar
-  tar -xf /tmp/tracon-export.tar -C /export
+  tar -xf /tmp/tracon-export.tar -C /tmp/tracon-export
   rm -f /tmp/tracon-export.tar /tmp/tracon-export.list
-  cp -a .git /export/.git
+  cp -a .git /tmp/tracon-export/.git
 else
-  cp -a /data/. /export/
+  cp -a /data/. /tmp/tracon-export/
 fi
 "#;
 
@@ -145,7 +147,12 @@ async fn workspace_copy_out(
         .map_err(BoundaryError::Io);
     let result = match staged {
         Ok(staged) if staged.status.success() => {
-            copy_out(podman_bin, &format!("{name}:/export/."), destination).await
+            copy_out(
+                podman_bin,
+                &format!("{name}:/tmp/tracon-export/."),
+                destination,
+            )
+            .await
         }
         Ok(staged) => Err(BoundaryError::Other(format!(
             "stage workspace export: {}",
@@ -935,5 +942,59 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Against a real Podman and the image named by
+    /// `TRACON_E2E_HARNESS_IMAGE`, which should be one whose `/` root may not
+    /// write once capabilities are dropped (a Fedora base): a workspace goes
+    /// into a volume and comes back out as Git sees it.
+    #[tokio::test]
+    #[ignore = "needs Podman and a harness image"]
+    async fn a_workspace_exports_from_an_image_with_a_read_only_root() {
+        let Ok(image) = std::env::var("TRACON_E2E_HARNESS_IMAGE") else {
+            eprintln!("skipped: no image named");
+            return;
+        };
+        let source = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(source.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(source.path().join("tracked"), "kept").unwrap();
+        std::fs::create_dir(source.path().join("target")).unwrap();
+        std::fs::write(source.path().join("target/built"), "left behind").unwrap();
+        git(&["add", ".gitignore", "tracked"]);
+
+        let podman = "podman";
+        let volume = format!("tracon-e2e-export-{}", uuid::Uuid::now_v7().simple());
+        let exported = tempfile::tempdir().unwrap();
+        let destination = exported.path().join("workspace");
+        let result = async {
+            super::volume_copy_in(podman, &image, &volume, source.path()).await?;
+            super::workspace_copy_out(podman, &image, &volume, &destination).await
+        }
+        .await;
+        let _ = super::podman_at(&super::guarded_podman(podman).unwrap())
+            .args(["volume", "rm", "-f", &volume])
+            .output()
+            .await;
+        result.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("tracked")).unwrap(),
+            "kept"
+        );
+        assert!(destination.join(".git").is_dir());
+        assert!(!destination.join("target").exists());
     }
 }
