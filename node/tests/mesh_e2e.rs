@@ -319,47 +319,94 @@ async fn a_session_on_b_is_driven_from_a() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{item}");
-    // A repository B has no directory for is refused by B before it writes
-    // a session, or a project named after a directory that is not there.
-    let (st, refused) = call(
+    // B resolves the repository on its own disk, and refuses there, before
+    // it writes a session, whatever it would refuse from its own operator:
+    // a host checkout, and a directory in managed storage that is not a
+    // clone. The refusal names B, since "this node" relayed reads as A.
+    let root = tracon::forge::managed_root(&Config::state_dir());
+    let occupied = root.join("forge.invalid/e2e/occupied");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("notes.txt"), "someone's").unwrap();
+    let host = state::scratch("e2e-host-checkout");
+    for (repo, words) in [
+        (
+            host.to_string_lossy().into_owned(),
+            "beta: host checkouts are not a session source",
+        ),
+        (
+            "forge.invalid/e2e/occupied".to_string(),
+            "beta: forge.invalid/e2e/occupied is a directory in managed storage that is not a clone",
+        ),
+    ] {
+        let (st, refused) = call(
+            &a.app,
+            "POST",
+            "/api/sessions",
+            Some(
+                json!({"channel": "personal", "repo_path": repo, "model": "m/a",
+                        "node_id": bi, "work_item_id": item["id"], "phase": "plan"}),
+            ),
+        )
+        .await;
+        assert_ne!(st, StatusCode::CREATED, "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(words)),
+            "{refused}"
+        );
+    }
+    assert!(b.store.list_sessions(None).unwrap().is_empty());
+
+    // An older sender forwards its own clone's path, under a state directory
+    // B does not have: B reads the repository it names and takes that.
+    let (_, older_item) = call(
+        &b.app,
+        "POST",
+        "/api/work",
+        Some(json!({"channel": "personal", "title": "Run on B, sent by an older A"})),
+    )
+    .await;
+    let (st, row) = call(
         &a.app,
         "POST",
         "/api/sessions",
-        Some(
-            json!({"channel": "personal", "repo_path": "github.com/o/r", "model": "m/a",
-                    "node_id": bi, "work_item_id": item["id"], "phase": "plan"}),
-        ),
+        Some(json!({"channel": "personal",
+                "repo_path": "/home/older/.local/state/tracon/repos/forge.invalid/e2e/older-sender",
+                "model": "m/a", "node_id": bi, "work_item_id": older_item["id"], "phase": "plan"})),
     )
     .await;
-    assert_ne!(st, StatusCode::CREATED, "{refused}");
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("github.com/o/r is not a directory on this node")),
-        "{refused}"
+    assert_eq!(st, StatusCode::CREATED, "{row}");
+    assert_eq!(
+        row["repo_path"],
+        root.join("forge.invalid/e2e/older-sender")
+            .to_string_lossy()
+            .as_ref()
     );
-    assert!(b.store.list_sessions(None).unwrap().is_empty());
 
-    // A directory inside managed storage that is not a clone yet: B takes
-    // the path A forwards, and its start has no forge credential to clone with.
-    let repo =
-        tracon::forge::managed_root(&Config::state_dir()).join("github.com/e2e/driven-from-a");
-    std::fs::create_dir_all(&repo).unwrap();
+    // A names the repository by its forge identity, which B has no clone of:
+    // B takes it, and makes its own clone when the session starts.
     let (st, row) = call(
         &a.app,
         "POST",
         "/api/sessions",
         Some(
-            json!({"channel": "personal", "repo_path": repo, "model": "m/a", "node_id": bi,
-                    "work_item_id": item["id"], "phase": "plan"}),
+            json!({"channel": "personal", "repo_path": "forge.invalid/e2e/driven-from-a",
+                    "model": "m/a", "node_id": bi, "work_item_id": item["id"], "phase": "plan"}),
         ),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{row}");
     assert_eq!(row["node_id"], bi);
     let sid = row["id"].as_str().unwrap().to_string();
-    // It runs on B (the clone step fails without a forge credential, so it
-    // ends failed there — what matters is where it ran and that A sees it).
+    assert_eq!(
+        row["repo_path"],
+        root.join("forge.invalid/e2e/driven-from-a")
+            .to_string_lossy()
+            .as_ref()
+    );
+    // It runs on B (the clone of forge.invalid fails, so it ends failed
+    // there — what matters is where it ran and that A sees it).
     wait_for("B to own the session", || {
         b.store.get_session(&sid).ok().flatten().is_some()
     })

@@ -1561,6 +1561,12 @@ impl Manager {
         if let Some(node) = spec.node_id.as_deref().filter(|n| *n != self.node_id) {
             let mut remote = spec.clone();
             remote.node_id = None;
+            // The peer resolves the repository on its own disk, so it is sent
+            // the forge identity, never this node's path to its clone.
+            if remote.workspace_id.is_none() {
+                remote.repo_path =
+                    crate::forge::forwarded_repo(&Config::state_dir(), remote.repo_path.trim());
+            }
             let work_item = match remote.work_item_id.as_deref() {
                 Some(id) => self
                     .store

@@ -1381,7 +1381,12 @@ A session that names a forge branch starts from that branch's fetched tip; the c
 own tree stays on the default. The forge a host is comes from the channel's
 credentials (`GH_HOST`, `GITLAB_HOST`), and only failing that from its name. The row keeps the clone's absolute path, so
 repository images, caches and `[[repo]]` entries key on what they always did. An
-operator's own checkout is not a session source and is refused at create; files
+operator's own checkout is not a session source and is refused at create. A session
+started on a peer is sent the identity, never the sender's path to its clone: the peer
+resolves it to its own managed clone and clones it with its own channel forge credential,
+refusing what it would refuse from its own operator (in words that name it) before
+anything is written. An older sender's absolute clone path (`…/repos/<identity>`) is read
+as the identity it spells. Files
 uploaded in the browser seed a workspace of their own, and a harness the operator
 runs submits its worktree through `submit_review`. The seed is copied, never
 bind-mounted, into a runtime-owned volume; the copy strips `.git` hooks, replace refs, grafts,

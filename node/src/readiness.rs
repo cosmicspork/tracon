@@ -109,13 +109,6 @@ fn path(purpose: &'static str, missing: Vec<Gap>, notes: Vec<Gap>) -> PathReadin
     }
 }
 
-/// What the `repo` gap says. A peer asked to start a session here says the
-/// same before it writes anything, since the asker's own readiness check read
-/// its own disk, not this one.
-pub fn repo_missing(repo: &str) -> String {
-    format!("{repo} is not a directory on this node")
-}
-
 pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
     let mut launch = Vec::new();
     let mut launch_notes = Vec::new();

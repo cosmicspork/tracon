@@ -865,6 +865,40 @@ pub fn session_repo(state_dir: &Path, repo: &str) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
+/// What a new session's repository is called when it is sent to a peer to
+/// start: a managed clone by its forge identity, which the peer resolves to
+/// its own clone (made with its own forge credential if it has none),
+/// because this node's path means nothing on the peer's disk. Anything else
+/// goes as it was given, for the peer to judge.
+pub fn forwarded_repo(state_dir: &Path, repo: &str) -> String {
+    Some(Path::new(repo))
+        .filter(|path| path.is_absolute())
+        .and_then(|path| managed_identity(state_dir, path))
+        .filter(|identity| crate::mesh::recipe::valid_identity(identity).is_ok())
+        .unwrap_or_else(|| repo.to_string())
+}
+
+/// The forge identity an absolute path names when it is spelled as some
+/// node's managed clone, `<state>/repos/<host>/<owner>/<name>`, whatever
+/// that node's state directory is. A sender older than identity forwarding
+/// sends its own clone's path, which is not on this node's disk; this is the
+/// repository it meant. Only ever a name to resolve: nothing at the path is
+/// read.
+pub fn identity_in_managed_spelling(repo: &str) -> Option<String> {
+    if !Path::new(repo).is_absolute() {
+        return None;
+    }
+    let root = managed_root(Path::new("/"));
+    let root = root.file_name()?.to_str()?;
+    let segments: Vec<&str> = repo.split('/').collect();
+    segments
+        .iter()
+        .enumerate()
+        .filter(|(_, segment)| **segment == root)
+        .map(|(at, _)| segments[at + 1..].join("/"))
+        .find(|identity| crate::mesh::recipe::valid_identity(identity).is_ok())
+}
+
 /// An identity with its host in lower case, as hosts are spelled in managed
 /// storage (`GitHub.com/o/r` is `github.com/o/r`). The owner and name are
 /// left as they were given: the forge's own spelling of those is only known
@@ -1995,6 +2029,55 @@ mod tests {
                 session_repo(state.path(), &link.to_string_lossy()),
                 Err(HOST_CHECKOUT_REFUSED.to_string())
             );
+        }
+    }
+
+    /// A session sent to a peer names a managed clone by its identity, since
+    /// the peer resolves that on its own disk; anything else goes as given.
+    /// The peer reads the repository an older sender meant from the clone
+    /// path it forwards, whatever node's state directory that path is under.
+    #[test]
+    fn a_peer_is_sent_the_forge_identity_and_reads_one_from_an_older_senders_path() {
+        let state = tempfile::tempdir().unwrap();
+        let root = managed_root(state.path());
+        std::fs::create_dir_all(root.join("github.com/me/made/.git")).unwrap();
+        for (given, sent) in [
+            (
+                root.join("github.com/me/made")
+                    .to_string_lossy()
+                    .into_owned(),
+                "github.com/me/made".to_string(),
+            ),
+            (
+                root.join("github.com/me/not-yet")
+                    .to_string_lossy()
+                    .into_owned(),
+                "github.com/me/not-yet".to_string(),
+            ),
+            ("github.com/me/proj".into(), "github.com/me/proj".into()),
+            ("/home/me/src/proj".into(), "/home/me/src/proj".into()),
+        ] {
+            assert_eq!(forwarded_repo(state.path(), &given), sent, "{given}");
+        }
+
+        assert_eq!(
+            identity_in_managed_spelling("/home/them/.local/state/tracon/repos/github.com/o/r")
+                .as_deref(),
+            Some("github.com/o/r")
+        );
+        assert_eq!(
+            identity_in_managed_spelling("/srv/repos/state/repos/gitlab.example/g/sub/r")
+                .as_deref(),
+            Some("gitlab.example/g/sub/r")
+        );
+        for unnamed in [
+            "/home/them/src/proj",
+            "/home/them/repos/proj",
+            "/state/repos/github.com/o/../../../etc",
+            "state/repos/github.com/o/r",
+            "github.com/o/r",
+        ] {
+            assert_eq!(identity_in_managed_spelling(unnamed), None, "{unnamed}");
         }
     }
 

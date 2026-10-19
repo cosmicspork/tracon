@@ -6542,7 +6542,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
             }
             C::Create { spec, work_item } => {
                 async {
-                    let spec: NewSession = serde_json::from_value(spec).map_err(|error| {
+                    let mut spec: NewSession = serde_json::from_value(spec).map_err(|error| {
                         ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
                     })?;
                     let members = self.store().nodes_in_channel(&spec.channel)?;
@@ -6558,20 +6558,34 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                             "sender and destination must belong to the task channel",
                         ));
                     }
-                    // The sender's readiness check read the sender's disk.
-                    // Refused here before anything is written: a session
-                    // that could only fail to start, and a project named
-                    // after a directory that is not there, help no one.
-                    if spec.workspace_id.is_none()
-                        && !std::path::Path::new(&spec.repo_path).is_dir()
-                    {
-                        return Err(ApiError::new(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            format!(
-                                "{}; clone it on this node first",
-                                crate::readiness::repo_missing(&spec.repo_path)
-                            ),
-                        ));
+                    // The repository is resolved here, on this node's disk:
+                    // a forge identity is this node's managed clone of it,
+                    // which the start makes with this node's own forge
+                    // credential when there is none yet. A sender older than
+                    // identity forwarding sends its own clone's path, which
+                    // names the repository it meant. Anything this node would
+                    // refuse is refused before the item is written, in words
+                    // that say which node refused it: relayed, "this node"
+                    // reads as the sender.
+                    if spec.workspace_id.is_none() {
+                        let state_dir = Config::state_dir();
+                        let named = spec.repo_path.trim();
+                        let path = std::path::Path::new(named);
+                        let here = path.starts_with(crate::forge::managed_root(&state_dir))
+                            || crate::forge::managed_identity(&state_dir, path).is_some();
+                        if let Some(identity) =
+                            crate::forge::identity_in_managed_spelling(named).filter(|_| !here)
+                        {
+                            spec.repo_path = identity;
+                        }
+                        crate::forge::session_repo(&state_dir, spec.repo_path.trim()).map_err(
+                            |why| {
+                                ApiError::new(
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                    format!("{}: {why}", self.cfg.node_name),
+                                )
+                            },
+                        )?;
                     }
                     if let Some(change) = work_item {
                         if change.table != "work_item"
