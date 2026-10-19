@@ -13,7 +13,7 @@
   import { preparationBlock } from '../lib/preparation'
   import { cannotWork } from '../lib/readiness'
   import { eligibleNodes, harnessChoice, modelsForChannel, nodeHarnesses, nodeReadiness } from '../lib/nodes'
-  import { defaultRepo, repoLabel } from '../lib/repo'
+  import { defaultRepo, managedFor, repoLabel } from '../lib/repo'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { ManagedRepo, NodeInfo, PreparationPreview as Preparation, RepoReadiness, WorkView } from '../lib/types'
@@ -86,10 +86,14 @@
   let preparation = $state<Preparation | null>(null)
   let prepTimer: ReturnType<typeof setTimeout> | undefined
   $effect(() => {
-    const path = repo.trim()
+    // A repository is named by its identity; what preparation reads is the
+    // node's clone of it, when it has one yet.
+    const named = repo.trim()
+    const clone = managedRepos ? managedFor(named, managedRepos) : null
+    const path = clone?.repo_path ?? (named.startsWith('/') ? named : '')
     clearTimeout(prepTimer)
     preparation = null
-    if (!local || !path.startsWith('/')) return
+    if (!local || !path) return
     // Typed paths change a keystroke at a time; ask once they settle.
     prepTimer = setTimeout(async () => {
       try {

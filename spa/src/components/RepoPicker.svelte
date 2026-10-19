@@ -1,12 +1,14 @@
 <script lang="ts">
-  // The node owns forge clones. Other source enters only as files explicitly
-  // selected in the browser and copied into a managed workspace; no operator
-  // machine path is ever sent to the node.
+  // The node owns forge clones. A repository is chosen by its forge identity
+  // (`host/owner/name`), and the node clones it when the session starts if it
+  // has not yet. Other source enters only as files explicitly selected in the
+  // browser and copied into a managed workspace; no operator machine path is
+  // ever sent to the node.
   import { onDestroy } from 'svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
-  import { repoLabel, repoMatches } from '../lib/repo'
+  import { managedFor, repoIdentity, repoLabel, repoMatches } from '../lib/repo'
   import type { ForgeList, ManagedRepo, RecentRepo } from '../lib/types'
 
   let {
@@ -26,9 +28,7 @@
   let recents = $state<RecentRepo[]>([])
   let managed = $state<ManagedRepo[]>([])
   let allManaged = $state<ManagedRepo[]>([])
-  let version = $state(0)
   $effect(() => {
-    void version
     api
       .recentRepos()
       .then((d) => {
@@ -45,7 +45,8 @@
 
   let browsing = $state(false)
   let forges = $state<ForgeList[] | null>(null)
-  let cloning = $state<string | null>(null)
+  // A forge repository chosen that this node has not cloned yet.
+  let chosenForge = $state<{ full_name: string; host: string } | null>(null)
   let loadingMore = $state<string | null>(null)
   let uploading = $state(false)
   let error = $state<string | null>(null)
@@ -82,10 +83,18 @@
   // be on the next bounded page even when the loaded rows do not match.
   const forgeCount = $derived((forges ?? []).reduce((n, f) => n + f.repos.length, 0))
   const searchable = $derived(forgeCount > 6 || (forges ?? []).some((f) => !f.complete))
+  // Only a recent repository that is still one of the node's clones is
+  // offered: anything else (a host checkout an older session ran in) is not
+  // a source a session can start from, so it is not shown at all rather than
+  // shown as a choice that does nothing.
+  const recentClones = $derived(
+    recents.flatMap((r) => {
+      const clone = allManaged.find((m) => m.repo_path === r.repo_path)
+      return clone ? [{ recent: r, clone }] : []
+    }),
+  )
   const shownRecents = $derived(
-    recents.filter(
-      (r) => allManaged.some((managed) => managed.repo_path === r.repo_path) && repoMatches(query, repoLabel(r.repo_path), r.repo_path),
-    ),
+    recentClones.filter(({ recent }) => repoMatches(query, repoLabel(recent.repo_path), recent.repo_path)),
   )
   const shownForges = $derived(
     (forges ?? []).map((f) => ({ ...f, repos: f.repos.filter((r) => repoMatches(query, r.full_name, r.host)) })),
@@ -148,26 +157,19 @@
       }
     }
   }
-  const known = $derived([...recents, ...managed])
-  const chosenManaged = $derived(allManaged.find((m) => m.repo_path === value) ?? null)
+  const known = $derived([...recentClones, ...managed])
+  const chosenManaged = $derived(managedFor(value, allManaged))
+  const chosenUncloned = $derived(
+    chosenManaged === null && chosenForge !== null && repoIdentity(chosenForge) === value ? chosenForge : null,
+  )
 
-  async function clone(forge: string, r: { host: string; owner: string; name: string; full_name: string }) {
-    if (cloning) return
-    const selection = selectionGeneration
-    cloning = r.full_name
+  // Nothing is cloned here: the session clones what it names when it starts,
+  // with the channel's forge credential, so choosing stays instant.
+  function choose(r: { host: string; full_name: string }) {
     error = null
-    try {
-      const d = await api.cloneRepo({ channel, forge, host: r.host, owner: r.owner, name: r.name })
-      if (!active || selection !== selectionGeneration) return
-      selectRepository(d.repo_path, null)
-      browsing = false
-      version += 1
-    } catch (e) {
-      if (!active || selection !== selectionGeneration) return
-      error = e instanceof Error ? e.message : String(e)
-    } finally {
-      if (active && selection === selectionGeneration) cloning = null
-    }
+    chosenForge = { host: r.host, full_name: r.full_name }
+    selectRepository(repoIdentity(r), null)
+    browsing = false
   }
 
 
@@ -212,17 +214,22 @@
         <small class="crit">{f.forge}: {f.error}</small>
       {/if}
       {#each f.repos as r (f.forge + r.full_name)}
-        <button type="button" disabled={cloning !== null || loadingMore !== null} onclick={() => clone(f.forge, r)}>
+        <button
+          type="button"
+          class:on={value === repoIdentity(r)}
+          disabled={loadingMore !== null}
+          onclick={() => choose(r)}
+        >
           <i></i>
           <span>{r.full_name} <small>{r.host}{r.private ? ' · private' : ''}</small></span>
-          <small>{cloning === r.full_name ? 'cloning…' : f.forge}</small>
+          <small>{f.forge}</small>
         </button>
       {/each}
       {#if f.next_cursor}
         <button
           type="button"
           class="more"
-          disabled={cloning !== null || loadingMore !== null}
+          disabled={loadingMore !== null}
           onclick={() => loadMore(f)}
         >
           {loadingMore === f.forge
@@ -255,14 +262,11 @@
   >
   {#if showRecents}
     <div class="picker" role="radiogroup">
-      {#each shownRecents as r (r.repo_path)}
+      {#each shownRecents as { recent: r, clone } (r.repo_path)}
         <button
           type="button"
-          class:on={value === r.repo_path}
-          onclick={() => {
-            value = r.repo_path
-            workspaceId = null
-          }}
+          class:on={value === repoIdentity(clone)}
+          onclick={() => selectRepository(repoIdentity(clone), null)}
         >
           <i></i>
           <span>{repoLabel(r.repo_path)}</span>
@@ -272,11 +276,8 @@
       {#each shownManaged as m (m.repo_path)}
         <button
           type="button"
-          class:on={value === m.repo_path}
-          onclick={() => {
-            value = m.repo_path
-            workspaceId = null
-          }}
+          class:on={value === repoIdentity(m)}
+          onclick={() => selectRepository(repoIdentity(m), null)}
         >
           <i></i>
           <span>{m.full_name} <small>{m.host}</small></span>
@@ -298,6 +299,11 @@
 {:else if chosenManaged}
   <div class="chosen">
     <span>{chosenManaged.full_name} <small>{chosenManaged.host} · cloned on this node</small></span>
+    <button type="button" class="lnk" onclick={() => (value = '')}>change</button>
+  </div>
+{:else if chosenUncloned}
+  <div class="chosen">
+    <span>{chosenUncloned.full_name} <small>{chosenUncloned.host} · cloned on this node when the session starts</small></span>
     <button type="button" class="lnk" onclick={() => (value = '')}>change</button>
   </div>
 {/if}

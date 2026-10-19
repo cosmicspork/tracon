@@ -30,10 +30,16 @@ struct Proxy {
 
 /// A session `s1` on `personal`, holding its own grant, whose refusals the
 /// node watches.
+/// The managed clone the session works in: a session's repository always
+/// is one. It need not be on disk for its entry to be written.
+fn session_repo() -> std::path::PathBuf {
+    tracon::forge::managed_root(&tracon::config::Config::state_dir()).join("github.com/egress/r")
+}
+
 async fn session_proxy(h: &Harness) -> Proxy {
-    h.store
-        .insert_session(&session_row("s1", "n1", "personal"))
-        .unwrap();
+    let mut session = session_row("s1", "n1", "personal");
+    session.repo_path = session_repo().to_string_lossy().into_owned();
+    h.store.insert_session(&session).unwrap();
     let grants = Grants::default();
     h.manager.watch_egress(&grants);
     let token = grants
@@ -271,8 +277,10 @@ async fn saving_to_the_repository_adds_the_host_and_never_widens_more() {
     let repos = h.manager.cfg().repos();
     let entry = repos
         .iter()
-        .find(|entry| entry.matches(std::path::Path::new("/r")))
+        .find(|entry| entry.matches(&session_repo()))
         .expect("an entry for the session's repository");
+    // Written by the repository's forge identity, which names the clone.
+    assert_eq!(entry.path, std::path::PathBuf::from("github.com/egress/r"));
     assert_eq!(entry.egress, [HOST]);
     assert!(entry.session_egress);
     let file = tracon::config::Config::try_load().unwrap();
@@ -280,7 +288,7 @@ async fn saving_to_the_repository_adds_the_host_and_never_widens_more() {
 
     let h = harness_with(tracon::config::Config {
         repo: vec![tracon::config::Repo {
-            path: "/r".into(),
+            path: session_repo(),
             egress: vec!["crates".into()],
             ..Default::default()
         }],

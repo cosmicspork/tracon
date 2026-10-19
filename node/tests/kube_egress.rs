@@ -519,7 +519,7 @@ async fn a_session_is_refused_without_the_secret_rights() {
         .create_with(
             tracon::session::NewSession {
                 channel: "personal".into(),
-                repo_path: "/nonexistent/repo".into(),
+                repo_path: "forge.invalid/o/r".into(),
                 branch: None,
                 work_item_id: None,
                 model: "m/a".into(),

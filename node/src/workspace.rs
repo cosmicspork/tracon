@@ -116,8 +116,8 @@ fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 /// Copy selected bytes without following symlinks.  `skip_git` is used only
-/// when overlaying an operator checkout onto the separately cloned seed: host
-/// Git configuration and executable metadata never cross that boundary.
+/// when copying browser-uploaded files into a new workspace: host Git
+/// configuration and executable metadata never cross that boundary.
 ///
 /// What crosses is what Git itself records of a file: its bytes, whether it
 /// is executable, and a symbolic link as a link (see `link_stays_inside`).
@@ -657,56 +657,52 @@ pub fn write_context(selected: &Path, context: &serde_json::Value) -> Result<(),
     Ok(())
 }
 
-/// Make an independent checkout that carries committed and selected
-/// uncommitted files but none of the operator's Git configuration.  `source`
-/// is read only; `git clone --no-local` keeps Git from hard-linking or writing
-/// back into it.
-pub async fn seed_from_checkout(
-    git: &str,
-    source: &Path,
-    branch: &str,
-    base_sha: Option<&str>,
-    id: &str,
-) -> Result<Workspace, WorkspaceError> {
-    seed(git, source, branch, base_sha, id, true).await
-}
-
-/// Seed from a managed clone the node has just brought to its forge's
-/// default branch (`forge::sync_managed`). Only what is committed travels:
-/// the clone's tree is the node's, not anyone's uncommitted work, so there is
-/// nothing to overlay.
+/// Seed from a managed clone the node has just synced (`forge::sync_managed`),
+/// on `branch`. The workspace starts at the clone's HEAD, its default
+/// branch, or at `start` when the session continues another forge branch:
+/// the clone's remote-tracking ref for it (`refs/remotes/origin/<branch>`),
+/// fetched into the workspace by itself, so the clone's tree never moves
+/// off the default for it and no ref of the workspace can clash with it. Only what is committed travels:
+/// the clone's tree is the node's, not anyone's uncommitted work, so there
+/// is nothing to overlay. `source` is read only; `git clone --no-local`
+/// keeps Git from hard-linking or writing back into it, and none of its Git
+/// configuration reaches the workspace.
 pub async fn seed_from_clone(
     git: &str,
     source: &Path,
     branch: &str,
-    base_sha: Option<&str>,
+    start: Option<&str>,
     id: &str,
-) -> Result<Workspace, WorkspaceError> {
-    seed(git, source, branch, base_sha, id, false).await
-}
-
-async fn seed(
-    git: &str,
-    source: &Path,
-    branch: &str,
-    base_sha: Option<&str>,
-    id: &str,
-    overlay: bool,
 ) -> Result<Workspace, WorkspaceError> {
     if !source.is_dir() {
         return Err(WorkspaceError::Missing(source.into()));
     }
-    // `branch`/`base_sha` are client-supplied (`NewSession::branch`/`base_sha`)
-    // and reach `git` as bare positional arguments below. A value starting
-    // with `-` would be parsed as an option instead of a revision — with
-    // `clone --no-local` forcing a remote-style transport, an option like
-    // `--upload-pack=...` on a revision is a known command-injection vector.
-    if branch.starts_with('-') || base_sha.is_some_and(|s| s.starts_with('-')) {
+    // `branch` is client-supplied (`NewSession::branch`) and reaches `git` as
+    // a bare positional argument below. A value starting with `-` would be
+    // parsed as an option instead of a branch name — with `clone --no-local`
+    // forcing a remote-style transport, an option like `--upload-pack=...` is
+    // a known command-injection vector.
+    if branch.starts_with('-') {
         return Err(WorkspaceError::Git {
             op: "checkout",
-            message: "branch or base commit looks like a command-line option".into(),
+            message: "branch looks like a command-line option".into(),
         });
     }
+    // `start` is the node's own, from the sync; only a remote-tracking ref
+    // of the clone will do.
+    let start = match start {
+        Some(start) => Some(
+            start
+                .strip_prefix("refs/remotes/origin/")
+                .filter(|named| !named.is_empty() && !named.starts_with('-'))
+                .map(|_| start.to_string())
+                .ok_or_else(|| WorkspaceError::Git {
+                    op: "fetch",
+                    message: format!("{start:?} is not a branch of the clone's origin"),
+                })?,
+        ),
+        None => None,
+    };
     let stage = staging_path(id);
     let _ = std::fs::remove_dir_all(&stage);
     if let Some(parent) = stage.parent() {
@@ -729,7 +725,19 @@ async fn seed(
         ],
     )
     .await?;
-    let revision = base_sha.unwrap_or("HEAD");
+    let revision = match &start {
+        Some(start) => {
+            run_git(
+                git,
+                Some(&stage),
+                "fetch",
+                ["fetch", "--no-tags", "origin", start.as_str()],
+            )
+            .await?;
+            "FETCH_HEAD"
+        }
+        None => "HEAD",
+    };
     run_git(
         git,
         Some(&stage),
@@ -741,14 +749,9 @@ async fn seed(
         git,
         Some(&stage),
         "branch",
-        ["checkout", "-B", branch, revision],
+        ["checkout", "-B", branch, "HEAD"],
     )
     .await?;
-    // Overlay files after checkout so selected, uncommitted work arrives as
-    // bytes only. .git stays the fresh, node-created checkout.
-    if overlay {
-        overlay_checkout(source, &stage)?;
-    }
     sanitize_git(&stage)?;
     Ok(Workspace {
         id: id.to_string(),
@@ -1216,20 +1219,25 @@ mod tests {
     }
 
     /// A graft file rewrites parentage for whatever reads the repository —
-    /// including the `upload-pack` the seed clone runs inside the operator's
-    /// own checkout. Honoured, it would seed the session from a history the
-    /// source repository does not have.
+    /// including the `upload-pack` the seed clone runs inside the node's
+    /// managed clone. Honoured, it would seed the session from a history the
+    /// forge's repository does not have.
     #[tokio::test]
-    async fn a_graft_in_the_source_checkout_cannot_truncate_the_seeded_history() {
+    async fn a_graft_in_the_managed_clone_cannot_truncate_the_seeded_history() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("source");
-        std::fs::create_dir_all(&source).unwrap();
+        let upstream = tmp.path().join("upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
         sh(
-            &source,
+            &upstream,
             "git init -q -b main . && git config user.email t@e && git config user.name t \
              && echo one > a.txt && git add -A && git commit -qm one \
-             && echo two >> a.txt && git add -A && git commit -qm two \
-             && mkdir -p .git/info && git rev-parse HEAD > .git/info/grafts",
+             && echo two >> a.txt && git add -A && git commit -qm two",
+        );
+        sh(tmp.path(), "git clone -q upstream clone");
+        let source = tmp.path().join("clone");
+        sh(
+            &source,
+            "mkdir -p .git/info && git rev-parse HEAD > .git/info/grafts",
         );
         assert_eq!(
             sh_out(&source, "git rev-list --count HEAD"),
@@ -1238,7 +1246,7 @@ mod tests {
         );
 
         let id = format!("seed-graft-{}", uuid::Uuid::now_v7());
-        match seed_from_checkout("git", &source, "feat/x", None, &id).await {
+        match seed_from_clone("git", &source, "feat/x", None, &id).await {
             // Either outcome upholds the invariant: the clone asks for the
             // history the commits actually describe, so a source that will
             // only serve the grafted one is refused rather than quietly
@@ -1253,12 +1261,41 @@ mod tests {
         }
     }
 
-    /// A checkout that has installed its dependencies holds symlinks and
-    /// build output its ignore rules exclude; the overlay carries what Git
-    /// would show and nothing it ignores.
-    #[cfg(unix)]
+    /// What a seed carries is what the clone has committed: the node's
+    /// clone holds nobody's uncommitted work, so nothing in its tree is
+    /// overlaid on the workspace.
     #[tokio::test]
-    async fn the_overlay_carries_untracked_work_but_nothing_ignored() {
+    async fn a_seed_from_a_clone_carries_only_what_is_committed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("clone");
+        std::fs::create_dir_all(&source).unwrap();
+        sh(
+            &source,
+            "git init -q -b main . && git config user.email t@e && git config user.name t \
+             && echo one > a.txt && git add -A && git commit -qm one \
+             && echo edited > a.txt && echo new > b.txt",
+        );
+
+        let id = format!("seed-committed-{}", uuid::Uuid::now_v7());
+        let workspace = seed_from_clone("git", &source, "feat/x", None, &id)
+            .await
+            .unwrap();
+        let stage = staging_path(&workspace.id);
+        assert_eq!(
+            std::fs::read_to_string(stage.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        assert!(!stage.join("b.txt").exists());
+        assert_eq!(sh_out(&stage, "git branch --show-current"), "feat/x");
+        let _ = std::fs::remove_dir_all(&stage);
+    }
+
+    /// A checkout that has installed its dependencies holds symlinks and
+    /// build output its ignore rules exclude; an export's overlay carries
+    /// what Git would show and nothing it ignores.
+    #[cfg(unix)]
+    #[test]
+    fn the_overlay_carries_untracked_work_but_nothing_ignored() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         std::fs::create_dir_all(&source).unwrap();
@@ -1271,22 +1308,18 @@ mod tests {
              && mkdir -p app/node_modules/.bin && ln -s ../acorn app/node_modules/.bin/acorn",
         );
 
-        let id = format!("seed-overlay-{}", uuid::Uuid::now_v7());
-        let workspace = seed_from_checkout("git", &source, "feat/x", None, &id)
-            .await
-            .unwrap();
-        let stage = staging_path(&workspace.id);
+        let exported = tmp.path().join("exported");
+        copy_checkout(&source, &exported).unwrap();
         assert_eq!(
-            std::fs::read_to_string(stage.join("a.txt")).unwrap(),
+            std::fs::read_to_string(exported.join("a.txt")).unwrap(),
             "edited\n"
         );
         assert_eq!(
-            std::fs::read_to_string(stage.join("b.txt")).unwrap(),
+            std::fs::read_to_string(exported.join("b.txt")).unwrap(),
             "new\n"
         );
-        assert!(!stage.join(".env").exists());
-        assert!(!stage.join("app/node_modules").exists());
-        let _ = std::fs::remove_dir_all(&stage);
+        assert!(!exported.join(".env").exists());
+        assert!(!exported.join("app/node_modules").exists());
     }
 
     /// A session that installed or built leaves dependency trees and build

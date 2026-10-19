@@ -565,13 +565,15 @@ pub fn save(
                 current.path.display().to_string()
             }
             None => {
+                let path = crate::forge::entry_path(&Config::state_dir(), repo);
+                let shown = path.display().to_string();
                 entries.push(Repo {
-                    path: repo.to_path_buf(),
+                    path,
                     session_egress: false,
                     prepare_credentials: Vec::new(),
                     ..entry
                 });
-                repo.display().to_string()
+                shown
             }
         };
         crate::config::validate_repos(entries)?;

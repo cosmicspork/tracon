@@ -1110,7 +1110,7 @@ services today; both run until the session ends. A runtime that cannot share a
 namespace (the local and Kubernetes runners) reports that it cannot run one rather than
 starting it somewhere the session cannot reach. What a repository asks of
 preparation and does not get is said before launch: `GET /api/preparation` (shown under
-the repository in the composer) reads the checkout and names the install it would run,
+the repository in the composer) reads the managed clone and names the install it would run,
 the entry's `prepare` commands and the image, then every devcontainer field the node
 will not honour (hooks, `initializeCommand` on the host, features, mounts, privileges,
 environment, a `build`) and every install script a scripts-off install skips, each with
@@ -1370,11 +1370,21 @@ committed as that account. Rewriting one is never done silently.
 
 ## Workspaces
 
-**Nothing is bind-mounted into the boundary.** A session's Git history is seeded
-once, host-side, into a short-lived clone or worktree — a managed clone the node
-refreshes with a brokered credential, or the operator's own checkout, which is
-read and never written — and that seed is copied, never bind-mounted,
-into a runtime-owned volume; the copy strips `.git` hooks, replace refs, grafts,
+**Nothing is bind-mounted into the boundary.** A session names its repository by
+its forge identity (`github.com/owner/name`), and its Git history is seeded once,
+host-side, into a short-lived clone of the node's managed clone of it: cloned on
+demand at the session's start with the channel's forge credential, or anonymously
+when the channel has none (a recorded `cloning` event, so creating the session stays
+fast; made beside its place and renamed in only once whole), then fetched with a
+brokered credential and brought to the forge's default branch under a per-clone lock.
+A session that names a forge branch starts from that branch's fetched tip; the clone's
+own tree stays on the default. The forge a host is comes from the channel's
+credentials (`GH_HOST`, `GITLAB_HOST`), and only failing that from its name. The row keeps the clone's absolute path, so
+repository images, caches and `[[repo]]` entries key on what they always did. An
+operator's own checkout is not a session source and is refused at create; files
+uploaded in the browser seed a workspace of their own, and a harness the operator
+runs submits its worktree through `submit_review`. The seed is copied, never
+bind-mounted, into a runtime-owned volume; the copy strips `.git` hooks, replace refs, grafts,
 alternates, and `config.worktree` before anything node-side or harness-side reads
 it. The harness sees `/work` and no host path. A workspace outlives its session:
 resume it, export a checked snapshot, or download it. An export stages the tree
@@ -1825,8 +1835,9 @@ failure at spawn; an empty one never is.
 **What a session needs depends on what it is for.** Investigating, verifying and
 publishing ask different things of a repository, and `GET /api/readiness` (the line
 under the composer) says what each lacks before a session is spent finding out. An
-investigation needs a node that would start it and a checkout to start it in, and
-nothing else: no checks, no forge credential, no brief. Verifying adds required
+investigation needs a node that would start it and a forge repository to start it
+in (one not cloned yet is noted, "not cloned yet (will clone)", not held against
+it), and nothing else: no checks, no forge credential, no brief. Verifying adds required
 checks and an image they can run in, since without them nothing the node runs can
 vouch for the result. Publishing adds an `origin` on a forge the node publishes to
 and that forge's credential bound to the channel; a work item with no brief is noted

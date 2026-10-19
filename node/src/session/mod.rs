@@ -419,6 +419,10 @@ pub enum SessionError {
     NoMesh,
     #[error("{0}")]
     Rejected(String),
+    /// What a new session was asked to start from is not something a
+    /// session starts from: a host checkout, or a commit.
+    #[error("{0}")]
+    Source(String),
     /// An operator's answer the node cannot act on as sent, field by field.
     /// Nothing was decided; the operator can fix it and answer again.
     #[error("{}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
@@ -1734,6 +1738,23 @@ impl Manager {
             Some(prompt) if !prompt.trim().is_empty() => None,
             _ => kickoff(spec.phase, held_item.as_ref(), spec.review_id.as_deref()),
         };
+        // A new workspace starts from the node's own clone of a forge
+        // repository, named by its identity, at the forge's default branch or
+        // the forge branch it names. Never an operator's checkout, and never
+        // a commit of the caller's choosing: a review session's base is the
+        // node's, and it arrives with its workspace already made.
+        if spec.workspace_id.is_none() {
+            let repo = crate::forge::session_repo(&Config::state_dir(), spec.repo_path.trim())
+                .map_err(SessionError::Source)?;
+            spec.repo_path = repo.to_string_lossy().into_owned();
+            if spec.base_sha.is_some() {
+                return Err(SessionError::Source(
+                    "a session starts from its forge's default branch, or the forge branch it \
+                     names, not from a commit"
+                        .into(),
+                ));
+            }
+        }
         // Bank identity: the channel and the repository's remote, resolved on
         // this side of the boundary and recorded on the row for memory to key
         // on; never a checkout path.
@@ -1744,6 +1765,21 @@ impl Manager {
                     crate::corpus::project::project_id(&spec.channel, &canonical),
                     "imported workspace".to_string(),
                     None,
+                )
+            }
+            // Not cloned yet: the identity it was named by is the remote the
+            // clone will have.
+            None if !std::path::Path::new(&spec.repo_path).join(".git").exists() => {
+                let identity = crate::forge::managed_identity(
+                    &Config::state_dir(),
+                    std::path::Path::new(&spec.repo_path),
+                )
+                .unwrap_or_default();
+                let name = identity.rsplit('/').next().unwrap_or("repo").to_string();
+                (
+                    crate::corpus::project::project_id(&spec.channel, &identity),
+                    name,
+                    Some(identity),
                 )
             }
             None => {
@@ -2027,64 +2063,66 @@ impl Manager {
                 None,
             ),
             None => {
-                // Managed is decided by where the path really leads: one
-                // named under the root that resolves outside it is refused
-                // here, not seeded as a host checkout, and one that reaches
-                // the root by another spelling is still the node's clone.
-                let managed = match crate::forge::managed_clone(&repo) {
-                    Ok(real) => Some(real),
-                    Err(why)
-                        if repo.starts_with(crate::forge::managed_root(&Config::state_dir())) =>
-                    {
-                        anyhow::bail!(why)
-                    }
-                    Err(_) => None,
-                };
-                let workspace = if let Some(repo) = managed {
-                    let brokered = crate::forge::git_token_for(
+                // `create` resolved the repository to its managed clone. One
+                // not on this node yet is cloned now, with the channel's
+                // forge credential: minutes for a large repository, once,
+                // so it is said before it is waited on.
+                if !repo.join(".git").exists() {
+                    let identity = crate::forge::managed_identity(&Config::state_dir(), &repo)
+                        .ok_or_else(|| anyhow::anyhow!(crate::forge::HOST_CHECKOUT_REFUSED))?;
+                    self.record(NewEvent {
+                        session_id: id.to_string(),
+                        work_item_id: None,
+                        kind: ek::CLONING.into(),
+                        ref_id: None,
+                        payload: json!({ "repo": identity }),
+                        at_ms: now_ms(),
+                        mono_ms: started.elapsed().as_millis() as i64,
+                    });
+                    crate::forge::ensure_clone_of(
                         &self.tools.broker,
-                        &Config::state_dir(),
                         &spec.channel,
-                        &repo,
                         &self.node_id,
-                    );
-                    let credential = match &brokered {
-                        Some((forge, token)) => {
-                            crate::git_remote::brokered(forge.git_user(), Some(token.as_str()))
-                        }
-                        None => crate::git_remote::Credential::Anonymous,
-                    };
+                        &identity,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{identity} could not be cloned: {e}"))?;
+                }
+                // Where the path really leads decides: one named under the
+                // root that resolves outside it is refused here.
+                let repo = crate::forge::managed_clone(&repo).map_err(anyhow::Error::msg)?;
+                let brokered = crate::forge::git_token_for(
+                    &self.tools.broker,
+                    &Config::state_dir(),
+                    &spec.channel,
+                    &repo,
+                    &self.node_id,
+                );
+                let credential = match &brokered {
+                    Some((forge, token)) => {
+                        crate::git_remote::brokered(forge.git_user(), Some(token.as_str()))
+                    }
+                    None => crate::git_remote::Credential::Anonymous,
+                };
+                let workspace = {
                     // Held from the fetch until the seed has read the tree,
                     // so another session or a build cannot move it between.
                     let lock = crate::forge::clone_lock(&repo);
                     let _guard = lock.lock().await;
-                    let sync = crate::forge::sync_managed(&repo, &credential)
-                        .await
-                        .map_err(anyhow::Error::msg)?;
+                    let sync =
+                        crate::forge::sync_managed(&repo, &credential, spec.branch.as_deref())
+                            .await
+                            .map_err(anyhow::Error::msg)?;
                     if let Some(error) = &sync.stale {
                         tracing::warn!(
                             session = id, repo = %repo.display(), %error,
-                            "managed clone not fetched; starting from its last-fetched default branch"
+                            "managed clone not fetched; starting from its last-fetched branch"
                         );
                     }
+                    let start = sync.source_ref.clone();
                     synced = Some(sync);
-                    crate::workspace::seed_from_clone(
-                        &git,
-                        &repo,
-                        &branch,
-                        spec.base_sha.as_deref(),
-                        id,
-                    )
-                    .await?
-                } else {
-                    crate::workspace::seed_from_checkout(
-                        &git,
-                        &repo,
-                        &branch,
-                        spec.base_sha.as_deref(),
-                        id,
-                    )
-                    .await?
+                    crate::workspace::seed_from_clone(&git, &repo, &branch, start.as_deref(), id)
+                        .await?
                 };
                 let stage = crate::workspace::staging_path(id);
                 let base = crate::workspace::head_of(&git, &stage).await?;
@@ -2131,7 +2169,7 @@ impl Manager {
                 "source": if spec.workspace_id.is_some() { "resumed" } else { "imported" },
                 "base": base,
                 "synced": synced.as_ref().map(|sync| json!({
-                    "source_ref": format!("origin/{}", sync.default),
+                    "source_ref": format!("origin/{}", sync.source),
                     "source_commit": sync.commit,
                     "fetched_ms": sync.fetched_ms,
                     "stale": stale,

@@ -68,27 +68,14 @@ fn provider(credential: &str, shape: &str) -> Provider {
 }
 
 /// A committed repository for sessions to start from.
+/// A forge repository the node has cloned, named the way a session names
+/// it: by its identity.
 fn repo() -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let repo = state::scratch(&format!("harness-choice-{n}")).join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec!["config", "user.email", "t@t"],
-        vec!["config", "user.name", "t"],
-        vec!["config", "commit.gpgsign", "false"],
-        vec!["commit", "-q", "--allow-empty", "-m", "init"],
-    ] {
-        let st = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(&args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {args:?}");
-    }
-    repo.to_string_lossy().into_owned()
+    let owner = format!("harness-choice-{n}");
+    state::managed_clone(&owner);
+    format!("github.com/{owner}/repo")
 }
 
 async fn node(default: &'static str) -> Node {

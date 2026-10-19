@@ -30,19 +30,40 @@ export function isManagedPath(path: string, managed: { repo_path: string }[]): b
 }
 
 /**
- * The repository a new session here starts in by default: the newest one this
- * node and channel ran in that is still one of the node's own clones. A path
- * typed for an earlier session may be gone since, and the picker would not
- * offer it, so it is never chosen for the operator.
+ * A forge repository's identity, `host/owner/name`: what a new session names
+ * its repository by. The node resolves it to its own clone, cloning it at the
+ * start when it has none yet.
+ */
+export function repoIdentity(repo: { host: string; full_name: string }): string {
+  return `${repo.host}/${repo.full_name}`
+}
+
+/**
+ * The managed clone a repository choice names: by its identity, or by the
+ * clone's path, which is how a session's row records it.
+ */
+export function managedFor<T extends { repo_path: string; host: string; full_name: string }>(
+  value: string,
+  managed: T[],
+): T | null {
+  return managed.find((m) => m.repo_path === value || repoIdentity(m) === value) ?? null
+}
+
+/**
+ * The repository a new session here starts in by default, by its identity:
+ * the newest one this node and channel ran in that is still one of the node's
+ * own clones. A path typed for an earlier session may be gone since, and the
+ * picker would not offer it, so it is never chosen for the operator.
  */
 export function defaultRepo(
   sessions: Iterable<{ node_id: string; channel: string; repo_path: string; created_ms: number }>,
   nodeId: string,
   channel: string,
-  managed: { repo_path: string }[],
+  managed: { repo_path: string; host: string; full_name: string }[],
 ): string | null {
   const last = [...sessions]
     .filter((s) => s.node_id === nodeId && s.channel === channel && isManagedPath(s.repo_path, managed))
     .sort((a, b) => b.created_ms - a.created_ms)[0]
-  return last?.repo_path ?? null
+  const clone = last ? managedFor(last.repo_path, managed) : null
+  return clone ? repoIdentity(clone) : null
 }

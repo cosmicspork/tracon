@@ -9,6 +9,7 @@
 mod support;
 use support::harness::{harness_with, Harness};
 use support::http::call;
+use support::state;
 
 use std::collections::BTreeMap;
 
@@ -71,13 +72,13 @@ fn bind_gh(h: &Harness, channel: &str) {
 
 #[tokio::test]
 async fn each_path_asks_only_for_what_it_needs() {
-    let dir = tempfile::tempdir().unwrap();
-    git(dir.path(), &["init", "-q"]);
+    state::isolate();
+    let clone = state::managed_clone("readiness-paths");
     git(
-        dir.path(),
-        &["remote", "add", "origin", "git@github.com:o/r.git"],
+        &clone,
+        &["remote", "set-url", "origin", "git@github.com:o/r.git"],
     );
-    let repo = dir.path().to_string_lossy().to_string();
+    let repo = "github.com/readiness-paths/repo".to_string();
 
     // No checks, and no credential at all.
     let h = harness_with(Config {
@@ -98,7 +99,7 @@ async fn each_path_asks_only_for_what_it_needs() {
     // credential serves another channel.
     let h = harness_with(Config {
         repo: vec![Repo {
-            path: dir.path().to_path_buf(),
+            path: clone.clone(),
             image: Some(PINNED.into()),
             checks: Some(vec!["just check".into()]),
             ..Repo::default()
@@ -126,6 +127,7 @@ async fn each_path_asks_only_for_what_it_needs() {
 
 #[tokio::test]
 async fn a_node_that_cannot_launch_says_so_on_every_path() {
+    state::isolate();
     let dir = tempfile::tempdir().unwrap();
     let h = harness_with(Config::default()).await;
     // The node row has never been checked, and the directory is not a git
@@ -148,4 +150,38 @@ async fn a_node_that_cannot_launch_says_so_on_every_path() {
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// A forge repository this node has not cloned is no gap: the session clones
+/// it first, and readiness says so. An operator's own checkout is refused on
+/// every path, in the words a create is refused with.
+#[tokio::test]
+async fn an_uncloned_repository_will_clone_and_a_host_checkout_is_refused() {
+    state::isolate();
+    let h = harness_with(Config::default()).await;
+    ready_node(&h).await;
+    bind_gh(&h, "personal");
+    let v = readiness(&h, "github.com/readiness/not-cloned").await;
+    assert_eq!(v["investigate"]["ready"], true, "{v}");
+    assert_eq!(
+        v["investigate"]["notes"][0]["message"],
+        "github.com/readiness/not-cloned is not cloned yet (will clone)",
+        "{v}"
+    );
+    assert!(
+        !missing(&v, "publish").contains(&"remote".to_string()),
+        "{v}"
+    );
+
+    let host = tempfile::tempdir().unwrap();
+    git(host.path(), &["init", "-q"]);
+    let v = readiness(&h, &host.path().to_string_lossy()).await;
+    for path in ["investigate", "verify", "publish"] {
+        assert_eq!(missing(&v, path)[0], "repo", "{v}");
+        assert_eq!(
+            v[path]["missing"][0]["message"],
+            tracon::forge::HOST_CHECKOUT_REFUSED,
+            "{v}"
+        );
+    }
 }

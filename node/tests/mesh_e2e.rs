@@ -340,7 +340,11 @@ async fn a_session_on_b_is_driven_from_a() {
     );
     assert!(b.store.list_sessions(None).unwrap().is_empty());
 
-    let repo = state::scratch("e2e-driven-from-a");
+    // A directory inside managed storage that is not a clone yet: B takes
+    // the path A forwards, and its start has no forge credential to clone with.
+    let repo =
+        tracon::forge::managed_root(&Config::state_dir()).join("github.com/e2e/driven-from-a");
+    std::fs::create_dir_all(&repo).unwrap();
     let (st, row) = call(
         &a.app,
         "POST",
@@ -354,9 +358,8 @@ async fn a_session_on_b_is_driven_from_a() {
     assert_eq!(st, StatusCode::CREATED, "{row}");
     assert_eq!(row["node_id"], bi);
     let sid = row["id"].as_str().unwrap().to_string();
-    // It runs on B (the worktree step fails against a directory that is not
-    // a repository, so it ends failed there — what matters is where it ran
-    // and that A sees it).
+    // It runs on B (the clone step fails without a forge credential, so it
+    // ends failed there — what matters is where it ran and that A sees it).
     wait_for("B to own the session", || {
         b.store.get_session(&sid).ok().flatten().is_some()
     })
@@ -541,14 +544,14 @@ async fn prompt_answer_and_kill_forward_to_the_owner() {
         "POST",
         "/api/sessions",
         Some(
-            json!({"channel": "personal", "repo_path": "/nonexistent", "model": "m/a",
+            json!({"channel": "personal", "repo_path": "forge.invalid/o/r", "model": "m/a",
                     "work_item_id": item["id"], "phase": "plan"}),
         ),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
     let sid = row["id"].as_str().unwrap().to_string();
-    // The fake cannot make a worktree at /nonexistent; that session fails. Use
+    // The node cannot clone forge.invalid/o/r; that session fails. Use
     // the supervisor path the sessions test uses instead: a session row in
     // `running` on B with a live fake handle is beyond this test's reach
     // without a worktree, so assert the forwarding contract on what does exist.

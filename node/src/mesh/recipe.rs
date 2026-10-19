@@ -397,7 +397,7 @@ pub fn changes(before: Option<&Repo>, after: &Repo) -> Vec<Value> {
 pub fn valid_identity(repo: &str) -> Result<(), String> {
     let refuse = || {
         Err(format!(
-            "a recipe names its repository by its forge identity (host/owner/name, like \
+            "a repository is named by its forge identity (host/owner/name, like \
              github.com/owner/name), not {repo:?}"
         ))
     };

@@ -162,6 +162,8 @@
         <div class="mark crit">{e.payload.reason ?? 'denied: unanswered'}</div>
       {:else if e.kind === 'turn_end'}
         <div class="mark">{turnEnd(e)}</div>
+      {:else if e.kind === 'cloning'}
+        <div class="sys">cloning {e.payload.repo} from its forge · once on this node, before the workspace is made</div>
       {:else if e.kind === 'worktree'}
         <div class="sys">{worktreeLine(e.payload)}</div>
       {:else if e.kind === 'session_started'}

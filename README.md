@@ -365,11 +365,15 @@ When a peer runs the task, enter a repository path on that peer: local clones an
 browser imports are not transferred. Changing runner or channel clears the old
 repository selection; changing model scope clears stale model and budget overrides.
 
-**Repositories can come from a forge.** Give the broker a `gh` or `glab` credential
-(the same one publishing uses) and the form lists your GitHub/GitLab repositories
-and clones the one you pick into the node's own root — the token reaches git only
+**Repositories come from a forge.** Give the broker a `gh` or `glab` credential
+(the same one publishing uses) and the form lists your GitHub/GitLab repositories.
+A session names the one you pick by its identity (`github.com/owner/name`, the
+`repo_path` of `POST /api/sessions`); the node clones it into its own root when the
+first session on it starts, and fetches it fresh at every start, from the forge's
+default branch or the branch the session names. The token reaches git only
 through the environment, never argv, never `.git/config`, never the stored remote
-URL. `GH_HOST`/`GITHUB_API` and `GITLAB_HOST` in the credential point the same
+URL. A checkout on this machine is not a session source: upload its files, or run
+your own harness in it and submit the result with `submit_review`. `GH_HOST`/`GITHUB_API` and `GITLAB_HOST` in the credential point the same
 machinery at an enterprise forge.
 
 ```toml

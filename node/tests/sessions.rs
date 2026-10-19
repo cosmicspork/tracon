@@ -135,7 +135,7 @@ async fn a_plain_session_uses_the_node_model_default_without_a_work_item() {
             "/api/sessions",
             Some(json!({
                 "channel": "personal",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "initial_prompt": "inspect this repository",
             })),
         )
@@ -190,7 +190,7 @@ async fn a_channel_binds_a_model_to_each_phase() {
                 "/api/sessions",
                 Some(json!({
                     "channel": "personal",
-                    "repo_path": "/nonexistent/repo",
+                    "repo_path": "forge.invalid/o/r",
                     "work_item_id": item,
                     "phase": "plan",
                     "model": model,
@@ -248,7 +248,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             "/api/sessions",
             Some(json!({
                 "channel": "personal",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "model": "anthropic/claude-x",
             })),
         )
@@ -271,7 +271,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             "/api/sessions",
             Some(json!({
                 "channel": "personal",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "model": "m/a",
             })),
         )
@@ -306,7 +306,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
     };
     let a = mk("A", vec![]);
     let b = mk("B", vec![a.id.clone()]);
-    let base = json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "m/a" });
+    let base = json!({ "channel": "personal", "repo_path": "forge.invalid/o/r", "model": "m/a" });
     let spec = |extra: Value| {
         let mut v = base.clone();
         for (k, val) in extra.as_object().unwrap() {
@@ -393,7 +393,7 @@ async fn a_refused_node_refuses_sessions_and_says_which_check_failed() {
             "POST",
             "/api/sessions",
             Some(
-                json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "m/a" }),
+                json!({ "channel": "personal", "repo_path": "forge.invalid/o/r", "model": "m/a" }),
             ),
         )
         .await;
@@ -442,7 +442,7 @@ async fn a_version_mismatch_blocks_new_sessions() {
             "POST",
             "/api/sessions",
             Some(
-                json!({ "channel": "personal", "repo_path": "/nonexistent/repo", "model": "m/a" }),
+                json!({ "channel": "personal", "repo_path": "forge.invalid/o/r", "model": "m/a" }),
             ),
         )
         .await;
@@ -2909,28 +2909,11 @@ async fn orientation_setup(
 ) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
-    let repo = dir.join("repo");
-    let origin = dir.join("origin.git");
-    std::fs::create_dir_all(&repo).unwrap();
-    let origin_url = format!("file://{}", origin.display());
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec!["config", "user.email", "t@t"],
-        vec!["config", "user.name", "t"],
-        vec!["config", "commit.gpgsign", "false"],
-        vec!["commit", "-q", "--allow-empty", "-m", "init"],
-        vec!["clone", "-q", "--bare", ".", origin.to_str().unwrap()],
-        vec!["remote", "add", "origin", &origin_url],
-        vec!["fetch", "-q", "origin"],
-    ] {
-        let st = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(&args)
-            .status()
-            .unwrap();
-        assert!(st.success(), "git {args:?}");
-    }
+    let repo = state::managed_clone(&format!("orientation-{tag}"));
+    // A remote spelled as a URL, so the project is named by it.
+    let upstream = sh(&repo, "git config --get remote.origin.url");
+    let origin_url = format!("file://{upstream}");
+    sh(&repo, &format!("git remote set-url origin {origin_url}"));
 
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
@@ -4452,37 +4435,7 @@ async fn until_really(secs: u64, mut f: impl FnMut() -> bool) -> bool {
 async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_harness() {
     state::isolate();
     let dir = state::scratch("stalled-startup");
-    let repo = dir.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec!["config", "user.email", "t@t"],
-        vec!["config", "user.name", "t"],
-        vec!["config", "commit.gpgsign", "false"],
-        vec!["commit", "-q", "--allow-empty", "-m", "init"],
-        vec![
-            "clone",
-            "-q",
-            "--bare",
-            ".",
-            dir.join("origin.git").to_str().unwrap(),
-        ],
-        vec![
-            "remote",
-            "add",
-            "origin",
-            dir.join("origin.git").to_str().unwrap(),
-        ],
-        vec!["fetch", "-q", "origin"],
-    ] {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(&args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
+    let repo = state::managed_clone("stalled-startup");
 
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
@@ -5272,7 +5225,7 @@ async fn a_fallback_policy_without_a_fallback_is_refused_at_create() {
             "/api/sessions",
             Some(json!({
                 "channel": "personal",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "on_exhaustion": { "policy": "fallback_then_wait" },
             })),
         )
@@ -5295,7 +5248,7 @@ async fn a_fallback_policy_without_a_fallback_is_refused_at_create() {
             "/api/sessions",
             Some(json!({
                 "channel": "personal",
-                "repo_path": "/nonexistent/repo",
+                "repo_path": "forge.invalid/o/r",
                 "on_exhaustion": { "policy": "pause" },
             })),
         )
@@ -5675,10 +5628,11 @@ async fn a_session_on_a_clone_that_could_not_be_fetched_is_told_its_base_is_stal
     );
 }
 
-/// A checkout outside managed storage is not synced: it is seeded as it
-/// stands, its uncommitted work overlaid, and the event records no sync.
+/// An operator's own checkout is not a session source: the create is
+/// refused, in words that say what to name instead, before anything is
+/// written or anything runs in it.
 #[tokio::test]
-async fn a_session_on_a_host_checkout_is_seeded_as_it_stands_and_records_no_sync() {
+async fn a_session_on_a_host_checkout_is_refused_and_the_checkout_left_alone() {
     state::isolate();
     let dir = state::scratch("start-host");
     sh(
@@ -5687,53 +5641,205 @@ async fn a_session_on_a_host_checkout_is_seeded_as_it_stands_and_records_no_sync
          && git -c user.name=t -c user.email=t@t commit -qm one && echo mine > a.txt",
     );
     let host = dir.join("host");
-    let head = sh(&host, "git rev-parse HEAD");
-    let h = Harness::new(0).await;
-    let id = start_on(&h, &host).await;
-
-    let worktree = first_event(&h.store, &id, "worktree").await;
-    assert_eq!(worktree["base"], head.as_str(), "{worktree}");
-    assert!(worktree["synced"].is_null(), "{worktree}");
-    assert_eq!(
-        sh(&host, "cat a.txt"),
-        "mine",
-        "the host checkout is left as it was"
-    );
-}
-
-/// A path spelled under managed storage that leads out of it is refused
-/// before anything runs in it, rather than seeded as a host checkout.
-#[tokio::test]
-async fn a_session_on_a_path_that_climbs_out_of_managed_storage_is_refused() {
-    state::isolate();
-    let dir = state::scratch("start-climb");
-    sh(
-        &dir,
-        "git init -q -b main host && cd host && echo one > a.txt && git add a.txt \
-         && git -c user.name=t -c user.email=t@t commit -qm one && echo mine > a.txt",
-    );
     let root = tracon::forge::managed_root(&Config::state_dir());
     std::fs::create_dir_all(&root).unwrap();
-    // `<state>/repos/../scratch/start-climb/host`.
+    // `<state>/repos/../scratch/start-host/host`: spelled under managed
+    // storage, leading out of it.
     let climbing = root
         .join("..")
         .join("scratch")
-        .join("start-climb")
+        .join("start-host")
         .join("host");
     let h = Harness::new(0).await;
-    let id = start_on(&h, &climbing).await;
+    for repo in [host.clone(), climbing, dir.clone()] {
+        let (status, body) = h
+            .call(
+                "POST",
+                "/api/sessions",
+                Some(json!({
+                    "channel": "personal",
+                    "repo_path": repo.to_string_lossy(),
+                    "initial_prompt": "look",
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "host checkouts are not a session source; name the forge repository \
+             (github.com/owner/name), upload files, or run your own harness and use \
+             submit_review",
+            "{}",
+            repo.display()
+        );
+    }
+    assert!(h.store.list_sessions(None).unwrap().is_empty());
+    assert_eq!(sh(&host, "cat a.txt"), "mine");
+}
 
+/// A session names its repository by its forge identity. The row keeps the
+/// managed clone's absolute path, which images, caches and `[[repo]]`
+/// entries are keyed by, and the start is the clone brought to its forge's
+/// default branch.
+#[tokio::test]
+async fn a_session_named_by_its_forge_identity_starts_in_the_managed_clone() {
+    state::isolate();
+    let (_dir, clone, tip) = managed_clone_behind("identity");
+    let h = Harness::new(0).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "github.com/identity/proj",
+                "initial_prompt": "look",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["repo_path"], clone.to_string_lossy().as_ref());
+    let id = body["id"].as_str().unwrap();
+
+    let worktree = first_event(&h.store, id, "worktree").await;
+    assert_eq!(worktree["base"], tip.as_str(), "{worktree}");
+    assert_eq!(worktree["synced"]["source_ref"], "origin/main");
+    let events = h.store.events_after(id, 0, 500).unwrap();
+    assert!(
+        !events.iter().any(|e| e.kind == "cloning"),
+        "a clone already on the node is not cloned again"
+    );
+}
+
+/// A session that names a branch its forge has (an open change's) starts
+/// from that branch's tip, and works on it.
+#[tokio::test]
+async fn a_session_naming_a_forge_branch_starts_from_its_tip() {
+    state::isolate();
+    let (dir, clone, _tip) = managed_clone_behind("branch");
+    let pr = sh(
+        &dir.join("work"),
+        "git checkout -q -b fix/thing && echo fix > a.txt \
+         && git -c user.name=t -c user.email=t@t commit -qam fix \
+         && git push -q origin fix/thing && git rev-parse HEAD",
+    );
+    let h = Harness::new(0).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "github.com/branch/proj",
+                "branch": "fix/thing",
+                "initial_prompt": "look",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["branch"], "fix/thing");
+    let id = body["id"].as_str().unwrap();
+
+    let worktree = first_event(&h.store, id, "worktree").await;
+    assert_eq!(worktree["base"], pr.as_str(), "{worktree}");
+    assert_eq!(worktree["synced"]["source_ref"], "origin/fix/thing");
+    assert_eq!(worktree["synced"]["source_commit"], pr.as_str());
+    assert_eq!(
+        sh(&clone, "git rev-parse main"),
+        sh(&dir.join("upstream.git"), "git rev-parse main"),
+        "the default branch is still brought up to date"
+    );
+    // The clone itself stays on its default branch, so whatever reads its
+    // tree as the repository reads the default, and no local branch is made
+    // for the one the session continues.
+    assert_eq!(sh(&clone, "git branch --show-current"), "main");
+    assert_eq!(
+        sh(&clone, "git rev-parse HEAD"),
+        sh(&clone, "git rev-parse main")
+    );
+    assert_eq!(
+        sh(
+            &clone,
+            "git for-each-ref '--format=%(refname:short)' refs/heads"
+        ),
+        "main"
+    );
+}
+
+/// A session starts from its forge's default branch or a branch it names,
+/// never from a commit of the caller's choosing.
+#[tokio::test]
+async fn a_session_naming_a_base_commit_is_refused() {
+    state::isolate();
+    let (_dir, _clone, tip) = managed_clone_behind("base-sha");
+    let h = Harness::new(0).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "github.com/base-sha/proj",
+                "base_sha": tip,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not from a commit"),
+        "{body}"
+    );
+    assert!(h.store.list_sessions(None).unwrap().is_empty());
+}
+
+/// A repository the node has not cloned is cloned on demand, at the start
+/// rather than in the create, and the session's log says so before it waits.
+/// Cloning takes the channel's forge credential, or none when the channel
+/// has none, as a sync of the clone does: a clone that fails fails the
+/// session, saying why, and leaves nothing half-cloned behind.
+#[tokio::test]
+async fn a_repository_not_cloned_yet_is_cloned_at_the_start_and_a_failed_clone_leaves_nothing() {
+    state::isolate();
+    let h = Harness::new(0).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal",
+                "repo_path": "gitlab.invalid/not-cloned/proj",
+                "initial_prompt": "look",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let clone =
+        tracon::forge::managed_root(&Config::state_dir()).join("gitlab.invalid/not-cloned/proj");
+    assert_eq!(body["repo_path"], clone.to_string_lossy().as_ref());
+    let id = body["id"].as_str().unwrap();
+
+    let cloning = first_event(&h.store, id, "cloning").await;
+    assert_eq!(cloning["repo"], "gitlab.invalid/not-cloned/proj");
     for _ in 0..500 {
-        let s = h.store.get_session(&id).unwrap().unwrap();
-        if let Some(error) = s.last_error {
+        let s = h.store.get_session(id).unwrap().unwrap();
+        if s.state == "failed" {
+            let error = s.last_error.unwrap_or_default();
             assert!(
-                error.contains("not a clone inside managed storage"),
+                error.starts_with("gitlab.invalid/not-cloned/proj could not be cloned: git clone"),
                 "{error}"
             );
-            assert_eq!(sh(&dir.join("host"), "cat a.txt"), "mine");
+            assert!(!clone.exists());
+            let left: Vec<_> = std::fs::read_dir(clone.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .collect();
+            assert!(left.is_empty(), "left behind: {left:?}");
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("the session was not refused");
+    panic!("the session did not fail");
 }

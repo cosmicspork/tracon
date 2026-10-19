@@ -482,13 +482,15 @@ pub fn save_session_host(
     let (path, _) = crate::config::edit::update_repos(cfg, store, &actor, |entries| {
         let path = match entries.iter_mut().find(|entry| entry.matches(&repo)) {
             None => {
+                let path = crate::forge::entry_path(&Config::state_dir(), &repo);
+                let shown = path.display().to_string();
                 entries.push(crate::config::Repo {
-                    path: repo.clone(),
+                    path,
                     egress: vec![host.to_string()],
                     session_egress: true,
                     ..Default::default()
                 });
-                repo.display().to_string()
+                shown
             }
             Some(entry) => {
                 let hosts = entry.egress_hosts()?;

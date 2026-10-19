@@ -102,7 +102,7 @@
       <ol>
         <li>
           {#if selected.node.is_self}
-            Choose a managed checkout, clone from a forge, or copy files into a workspace on {selected.node.name}.
+            Choose a forge repository, which {selected.node.name} clones if it has not yet, or copy files into a workspace there.
           {:else}
             Enter a repository path on {selected.node.name}. Local imports are not sent to a peer.
           {/if}

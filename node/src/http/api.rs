@@ -74,6 +74,7 @@ impl From<SessionError> for ApiError {
             | SessionError::NotReady(_)
             | SessionError::InSession(_)
             | SessionError::PlanRequired(_)
+            | SessionError::Source(_)
             | SessionError::Unfit(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SessionError::Ceiling(_) => StatusCode::TOO_MANY_REQUESTS,
             SessionError::ChannelArchived(_) => StatusCode::CONFLICT,
@@ -1126,28 +1127,26 @@ pub async fn clone_repo(
     State(s): State<AppState>,
     Json(b): Json<CloneBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    use crate::forge::CloneError;
     let forge = crate::forge::Forge::parse(&b.forge)
         .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "no such forge"))?;
-    let root = crate::forge::managed_root(&Config::state_dir());
-    let dest = crate::forge::clone_dest(&root, &b.host, &b.owner, &b.name)
-        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    // A credential without a token clones anonymously; nothing else on the
-    // host may answer for it.
-    let token = {
-        let broker = s.tools.broker.read().unwrap();
-        let cred = broker
-            .env_for(forge.credential(), &b.channel, &s.node_id)
-            .map_err(|e| ApiError::new(StatusCode::CONFLICT, e.to_string()))?;
-        forge.token(&cred).cloned()
-    };
-    let credential = crate::git_remote::brokered(forge.git_user(), token.as_deref());
-    let cloned = tokio::time::timeout(
-        std::time::Duration::from_secs(600),
-        crate::forge::clone(&credential, &b.host, &b.owner, &b.name, &dest),
+    let dest = crate::forge::ensure_clone(
+        &s.tools.broker,
+        &b.channel,
+        &s.node_id,
+        forge,
+        (&b.host, &b.owner, &b.name),
     )
     .await
-    .map_err(|_| ApiError::new(StatusCode::GATEWAY_TIMEOUT, "the clone ran out of time"))?;
-    cloned.map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e))?;
+    .map_err(|e| {
+        let status = match &e {
+            CloneError::Name(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            CloneError::Credential(_) => StatusCode::CONFLICT,
+            CloneError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+            CloneError::Failed(_) => StatusCode::BAD_GATEWAY,
+        };
+        ApiError::new(status, e.to_string())
+    })?;
     Ok(Json(json!({ "repo_path": dest })))
 }
 
