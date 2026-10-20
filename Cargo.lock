@@ -3523,6 +3523,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracon-agent"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "futures-util",
+ "globset",
+ "hex",
+ "ignore",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracon-hub"
 version = "0.34.0"
 dependencies = [

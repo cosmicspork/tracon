@@ -17,7 +17,9 @@ environment sprawl (agents running locally against remote environments force
 devcontainers on the laptop just to run tests), no enforcement (working agreements
 are prose the agent may not still have in context an hour in), and no visibility when
 the laptops are closed. The system is a supervisor and control plane between the
-human and existing coding agents. It does not implement an agent loop.
+human and existing coding agents. The node does not implement an agent loop; the
+harness tracon is building, `tracon-agent`, is a separate binary that runs inside the
+boundary like any other harness.
 
 ## Principles
 
@@ -79,9 +81,9 @@ tools, and persists everything to local SQLite. Explicitly not its responsibilit
 model inference, an agent loop, prompt construction beyond assembling injected
 context, and any business domain.
 
-Build rules: static musl on Linux `x86_64`, and Apple Silicon macOS, SPA embedded
-so every node serves the identical bundle, log to stdout, no self-daemonizing, clean
-SIGTERM, idempotent restart. Supervision is external — the platform's service
+Build rules: static musl on Linux `x86_64` (the node and `tracon-agent`), and Apple
+Silicon macOS, SPA embedded so every node serves the identical bundle, log to stdout,
+no self-daemonizing, clean SIGTERM, idempotent restart. Supervision is external — the platform's service
 manager, which `tracon service install` or the desktop app sets up. Static
 musl is also why consulta stays a Python sidecar: every Rust Oracle crate wraps a
 dynamically linked glibc blob, and `oracledb` thin mode is a pure-Python wire
@@ -491,8 +493,17 @@ its provider wiring and its catalogue workarounds, and nothing else. What surviv
 the shared vocabulary the adapters translate into (`node/src/adapter/types.rs` — tool
 calls, permission options, usage), because both remaining harnesses have the same
 things to say. Sessions the retired harness ran are archived read-only rather than
-deleted; see `tracon session archive-legacy` in RECOVERY.md. Two concrete adapters
+deleted; see `tracon session archive-legacy` in RECOVERY.md. A few concrete adapters
 behind one trait is the whole ambition; a plugin system for harnesses is not.
+
+The third, experimental, is tracon's own: `tracon-agent` (`agent/`), for models that
+are not Claude (local llama.cpp, the Codex subscription). It is a harness like the
+others, not part of the node: a separate binary in the boundary that holds no
+credential, catalogue or settings, reaches models through the gateway, and asks the
+node at the permission gate. Its wire protocol is meant to be `adapter/types.rs` itself,
+so its adapter has nothing to translate. Today it runs only standalone
+(`--standalone`, no node and no gate) while its loop and tools are proven against local
+models; see `agent/README.md`.
 
 ### The OpenCode boundary
 

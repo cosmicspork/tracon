@@ -28,9 +28,9 @@ absence is felt in real work.
 
 One configuration is what daily use runs on, and what a defect has to be in to enter
 **Now**: the desktop app on macOS or Linux, rootless Podman, Claude Code as the managed
-harness, a single node. Everything else — OpenCode, the Kubernetes runtime, the hub and
-mesh, the installed phone app, handoff between nodes — is built and tested but
-*experimental* until that configuration is boring. The homelab node keeps running the
+harness, a single node. Everything else — OpenCode, the native harness, the Kubernetes
+runtime, the hub and mesh, the installed phone app, handoff between nodes — is built and
+tested but *experimental* until that configuration is boring. The homelab node keeps running the
 hub and serving the phone; work on those surfaces is deferred, not removed.
 
 ### How work enters this file
@@ -44,7 +44,9 @@ documents under `docs/reference/` carry the history. Live validation of existing
 features is tracked separately under [Live proofs](#live-proofs-still-the-operators).
 
 Build on the existing ledger, documents, workspace snapshots, evidence, scoped grants
-and launch manifests. Do not replace the store or introduce another agent loop.
+and launch manifests. Do not replace the store, and keep any agent loop out of the node:
+the one exception is `tracon-agent`, a separate harness binary run inside the boundary
+(see Next, *The native harness*).
 
 ## Now — start, build, ship from one node
 
@@ -156,6 +158,25 @@ hit on a real task.
       startup, on a passing boundary check and after a provider is connected or its key
       set. Re-probe also after saving models and after removing a provider, and drop the
       "Refresh models" button. Keep a retry only where the last probe failed, saying why.
+
+**The native harness, experimental**
+
+The Codex subscription and local llama.cpp models cannot be used from tracon today: that
+path runs through the OpenCode adapter, whose v1 routes OpenCode 2.x removed. A
+work-funded Codex pilot is under way and tracon cannot measure it. `tracon-agent` is a
+harness tracon owns for models that are not Claude: a separate binary in the boundary,
+in the same trust position as `claude`. The node still does not reason. Plan:
+`plan-tracon-native-harness` on the personal channel. Development runs on local models
+first so that iterating spends no credits.
+
+- [ ] Phase 0, standalone: the loop, Chat Completions, six tools with hashline anchors,
+      accepted against local models (qwen3-8b here; Qwen3-Coder-Next and a 27B on the
+      Framework).
+- [ ] Phase 1, under the node: `adapter/native.rs`, `containers/harness-native/`, the
+      JSON-RPC protocol with `seq`-numbered events, permission requests and per-request
+      `usage` matched against the gateway's count.
+- [ ] Phase 2, reliability: compaction, restore after a kill, retry. Phase 3: the OpenAI
+      API. Phase 4: Codex through the ChatGPT backend with the node's own OAuth.
 
 **OpenCode, contingent on the spike above**
 
@@ -488,8 +509,9 @@ Kept as intent, off the plan until the supported configuration has earned them.
 
 - Multi-user tenancy or a team product.
 - Federated work marketplaces, reputation scores or agent organization charts as product goals.
-- A model/agent loop inside the node.
-- A general-purpose multi-harness framework: two concrete adapters behind one trait, not a
+- A model/agent loop inside the node. `tracon-agent` runs its loop in the boundary, as
+  `claude` does.
+- A general-purpose multi-harness framework: a few concrete adapters behind one trait, not a
   plugin system for harnesses.
 - Forking and maintaining the OpenCode UI.
 - Required tracon configuration files installed into project repositories, or any other
