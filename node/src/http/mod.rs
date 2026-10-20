@@ -1219,12 +1219,12 @@ async fn harness_states(
             .map_or("unknown", |image| image.state)
             .to_string(),
     };
-    if !crate::adapter::KNOWN.contains(&adapter.id()) {
+    if !crate::adapter::is_enabled(cfg, adapter.id()) {
         return vec![default];
     }
     let mut out = Vec::new();
-    for id in crate::adapter::KNOWN {
-        if *id == adapter.id() {
+    for id in crate::adapter::enabled(cfg) {
+        if id == adapter.id() {
             out.push(default.clone());
             continue;
         }

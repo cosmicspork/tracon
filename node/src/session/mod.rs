@@ -1071,7 +1071,7 @@ impl Manager {
     /// the node cannot classify it.
     pub fn model_harnesses(&self, model: &str) -> Vec<&'static str> {
         self.credential_class(model)
-            .map(|class| class.harnesses())
+            .map(|class| class.harnesses_among(&crate::adapter::enabled(&self.cfg)))
             .unwrap_or_default()
     }
 
@@ -1085,10 +1085,10 @@ impl Manager {
     ) -> Result<(Arc<dyn HarnessAdapter>, &'static str), SessionError> {
         let class = self.credential_class(&spec.model);
         if let Some(named) = spec.harness.as_deref().filter(|h| !h.trim().is_empty()) {
-            if !crate::adapter::KNOWN.contains(&named) {
+            if !crate::adapter::is_enabled(&self.cfg, named) {
                 return Err(SessionError::Rejected(format!(
                     "unknown harness `{named}`; this node runs {}",
-                    crate::adapter::KNOWN.join(", ")
+                    crate::adapter::enabled(&self.cfg).join(", ")
                 )));
             }
             self.check_fit(&spec.model, class, named)?;
@@ -1097,7 +1097,10 @@ impl Manager {
         let Some(class) = class else {
             return Ok((self.default_adapter()?, "node_default"));
         };
-        match class.harnesses().as_slice() {
+        match class
+            .harnesses_among(&crate::adapter::enabled(&self.cfg))
+            .as_slice()
+        {
             [only] => Ok((self.adapter_by_id(only)?, "credential")),
             [] => Err(SessionError::Rejected(format!(
                 "no supported harness runs {}",

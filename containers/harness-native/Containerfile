@@ -1,0 +1,53 @@
+# Harness runner: tracon-agent, tracon's own harness, plus git, a shell and CA
+# certificates. No network at run time; the model is reached through the
+# tracon gateway, whose URL the node stages per session.
+#
+# tracon-agent is built from the node's own tree, so its version is the
+# node's: `tracon setup` passes it as TRACON_AGENT_VERSION. The binary comes
+# from one of two places, checked in this order:
+#
+# - `local/tracon-agent` in this directory, staged by `tracon setup` from
+#   `[harness] native_binary` (a node whose version has no release yet), or
+#   by the release workflow from the asset it just built;
+# - the release asset for that version, checked against the release's own
+#   `.sha256`.
+FROM docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+ARG TRACON_AGENT_VERSION
+ARG TARGETARCH
+# `tini` is not run in this image; its static build is the init a session
+# image layered for a Kubernetes pod copies in (`repo_image::layered`).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends git curl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/tini-static --version
+COPY local/ /tmp/local/
+RUN set -eu; \
+    if [ -f /tmp/local/tracon-agent ]; then \
+      install -m 0755 /tmp/local/tracon-agent /usr/local/bin/tracon-agent; \
+    else \
+      test -n "${TRACON_AGENT_VERSION}" || { echo "TRACON_AGENT_VERSION is not set" >&2; exit 1; }; \
+      case "${TARGETARCH}" in \
+        amd64) triple=x86_64-unknown-linux-musl ;; \
+        arm64) triple=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+      esac; \
+      asset="tracon-agent-${triple}"; \
+      base="https://github.com/cosmicspork/tracon/releases/download/v${TRACON_AGENT_VERSION}"; \
+      cd /tmp; \
+      curl -fsSL -o "${asset}" "${base}/${asset}"; \
+      curl -fsSL -o "${asset}.sha256" "${base}/${asset}.sha256"; \
+      sha256sum -c "${asset}.sha256"; \
+      install -m 0755 "${asset}" /usr/local/bin/tracon-agent; \
+      rm -f "${asset}" "${asset}.sha256"; \
+    fi; \
+    rm -rf /tmp/local; \
+    /usr/local/bin/tracon-agent --version
+RUN mkdir -p /home/harness /work && chown 65532:65532 /home/harness /work
+WORKDIR /work

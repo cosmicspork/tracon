@@ -501,9 +501,11 @@ are not Claude (local llama.cpp, the Codex subscription). It is a harness like t
 others, not part of the node: a separate binary in the boundary that holds no
 credential, catalogue or settings, reaches models through the gateway, and asks the
 node at the permission gate. Its wire protocol is meant to be `adapter/types.rs` itself,
-so its adapter has nothing to translate. Today it runs only standalone
-(`--standalone`, no node and no gate) while its loop and tools are proven against local
-models; see `agent/README.md`.
+so its adapter has nothing to translate: `adapter/native.rs` is the retired omp
+adapter's handshake and pump over that shared vocabulary (the `acp` crate). It runs only
+where a node turns it on (`[harness] experimental = ["native"]`), because every harness a
+node runs needs its image before the boundary passes, and one still being proven must not
+be able to stop the supported ones. See `agent/README.md`.
 
 ### The OpenCode boundary
 

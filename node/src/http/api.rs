@@ -1871,7 +1871,11 @@ pub async fn archive_legacy(
     let harness = body
         .and_then(|Json(b)| b.harness)
         .unwrap_or_else(|| crate::adapter::RETIRED.to_string());
-    if crate::adapter::KNOWN.contains(&harness.as_str()) {
+    if crate::adapter::KNOWN
+        .iter()
+        .chain(crate::adapter::EXPERIMENTAL)
+        .any(|id| *id == harness)
+    {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("`{harness}` is a harness this node still runs; it has no legacy sessions"),
@@ -6208,10 +6212,10 @@ pub async fn probe_models_into_store(
     // adapters answer from the wiring alone and launch nothing, so the other
     // one is asked through the same runner. A harness with nothing to offer
     // (OpenCode with no models declared) leaves the other's list standing.
-    if crate::adapter::KNOWN.contains(&s.adapter.id()) {
-        for id in crate::adapter::KNOWN
-            .iter()
-            .filter(|id| **id != s.adapter.id())
+    if crate::adapter::is_enabled(&s.cfg, s.adapter.id()) {
+        for id in crate::adapter::enabled(&s.cfg)
+            .into_iter()
+            .filter(|id| *id != s.adapter.id())
         {
             let Ok(other) = crate::adapter::adapter_for_id(&s.cfg, id) else {
                 continue;

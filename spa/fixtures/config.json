@@ -72,6 +72,39 @@
       "editable": true,
       "editable_at_node": true,
       "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "harness.experimental",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "harness.native_binary",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
       "exec_path": true,
       "fs_path": false,
       "key": "boundary.podman",
@@ -2723,7 +2756,9 @@
       }
     },
     "harness": {
+      "experimental": [],
       "id": "claude",
+      "native_binary": "",
       "tools": [],
       "version": "2.5.0"
     },

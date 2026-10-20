@@ -463,6 +463,7 @@ fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
     match harness_id {
         crate::adapter::claude::ClaudeAdapter::ID => Some(claude_layer(run_as)),
         crate::adapter::opencode::OpenCodeAdapter::ID => Some(opencode_layer(run_as)),
+        crate::adapter::native::NativeAdapter::ID => Some(native_layer(run_as)),
         _ => None,
     }
 }
@@ -530,6 +531,41 @@ fn claude_layer(run_as: &RunAs) -> HarnessLayer {
              COPY --from=harness {binary} {binary}\n\
              ENV CLAUDE_CONFIG_DIR={home}/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n"
         ),
+        probe: match run_as {
+            RunAs::Root => probe,
+            RunAs::Pod { .. } => format!("{probe} && {POD_INIT} --version"),
+        },
+    }
+}
+
+/// `tracon-agent` over a repository's image: one static binary, which needs
+/// nothing from the image but `sh` and whatever the agent's commands run.
+///
+/// `layer_guard` refuses an image that sets a `TRACON_AGENT_*` variable (the
+/// agent reads its endpoint and key file from those when it is not given a
+/// providers file, which a session always is) or `LD_PRELOAD`, `LD_AUDIT`
+/// or `LD_LIBRARY_PATH`, and removes anything at the binary's path or the
+/// init's.
+fn native_layer(run_as: &RunAs) -> HarnessLayer {
+    let binary = crate::adapter::native::NativeAdapter::BINARY;
+    let guard = layer_guard(
+        run_as,
+        &LINKLESS_DIRS,
+        &[binary, POD_INIT_DIR],
+        &[
+            "TRACON_AGENT_[A-Za-z0-9_]*",
+            "LD_PRELOAD",
+            "LD_AUDIT",
+            "LD_LIBRARY_PATH",
+        ],
+        &[],
+    );
+    let probe = format!(
+        "{} && {binary} --version && git --version",
+        resolve_to_themselves(&[binary], run_as)
+    );
+    HarnessLayer {
+        lines: format!("{guard}COPY --from=harness {binary} {binary}\n"),
         probe: match run_as {
             RunAs::Root => probe,
             RunAs::Pod { .. } => format!("{probe} && {POD_INIT} --version"),
@@ -2690,6 +2726,31 @@ mod tests {
             "the harness image sets something the layer does not"
         );
         assert!(harness_layer("pi", &RunAs::Root).is_none());
+    }
+
+    /// The native harness needs one static binary and sets no environment;
+    /// a repository image that would steer its endpoint is refused.
+    #[test]
+    fn the_native_layer_copies_one_binary_and_guards_its_variables() {
+        let image = include_str!("../../containers/harness-native/Containerfile");
+        assert!(image.contains("/usr/local/bin/tracon-agent"));
+        assert!(
+            !image.lines().any(|line| line.starts_with("ENV ")),
+            "the harness image sets something the layer does not"
+        );
+        for run_as in [RunAs::Root, pod()] {
+            let layer = harness_layer("native", &run_as).unwrap();
+            assert!(layer.lines.contains(
+                "COPY --from=harness /usr/local/bin/tracon-agent /usr/local/bin/tracon-agent\n"
+            ));
+            assert!(layer.lines.contains("TRACON_AGENT_[A-Za-z0-9_]*"));
+            assert!(layer
+                .lines
+                .contains("rm -rf /usr/local/bin/tracon-agent /usr/libexec/tracon"));
+            assert!(layer
+                .probe
+                .contains("/usr/local/bin/tracon-agent --version && git --version"));
+        }
     }
 
     const OPENCODE_GUARD: &str = r#"RUN for d in /opt /usr /usr/local /usr/local/bin /usr/libexec /usr/libexec/tracon; do if [ -L "$d" ]; then echo "tracon: the repository's image makes $d a symbolic link, which would let it choose what the harness runs" >&2; exit 1; fi; done && rm -rf /etc/opencode /opt/tracon /usr/local/bin/opencode /usr/libexec/tracon && test ! -e /etc/opencode && if [ -s /etc/ld.so.preload ]; then echo "tracon: the repository's image preloads libraries through /etc/ld.so.preload, which would load them into the harness" >&2; exit 1; fi && found=$(env | sed -n -e 's/^\(OPENCODE_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(BUN_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(LD_PRELOAD\)=.*/\1/p' -e 's/^\(LD_AUDIT\)=.*/\1/p' -e 's/^\(LD_LIBRARY_PATH\)=.*/\1/p' | tr '\n' ' ') && if [ -n "$found" ]; then echo "tracon: the repository's image sets ${found% }, which would reach the harness and change how it is configured or what it loads" >&2; exit 1; fi

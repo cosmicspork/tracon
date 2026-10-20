@@ -6,7 +6,7 @@
 use crate::broker::KIND_OAUTH;
 use crate::config::{SHAPE_ANTHROPIC, SHAPE_OPENAI_CODEX};
 
-use super::{claude::ClaudeAdapter, opencode::OpenCodeAdapter, KNOWN};
+use super::{claude::ClaudeAdapter, native::NativeAdapter, opencode::OpenCodeAdapter, KNOWN};
 
 /// What a model runs on, as far as choosing a harness goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,14 +49,28 @@ impl CredentialClass {
             (Self::CodexSubscription | Self::OtherProvider, ClaudeAdapter::ID) => {
                 Err("Claude Code runs Anthropic models only")
             }
+            (Self::AnthropicSubscription | Self::AnthropicKey, NativeAdapter::ID) => {
+                Err("tracon-agent does not run Anthropic models; Claude Code does")
+            }
+            (Self::CodexSubscription, NativeAdapter::ID) => {
+                Err("tracon-agent does not speak the Codex backend yet")
+            }
+            (Self::BareAlias, NativeAdapter::ID) => {
+                Err("tracon-agent needs a provider-qualified model (`provider/model`)")
+            }
             _ => Ok(()),
         }
     }
 
     /// The supported harnesses this credential runs on, in `KNOWN` order.
     pub fn harnesses(self) -> Vec<&'static str> {
-        KNOWN
-            .iter()
+        self.harnesses_among(KNOWN)
+    }
+
+    /// The harnesses among `ids` this credential runs on, in their order: a
+    /// node passes the ones it runs (`adapter::enabled`).
+    pub fn harnesses_among(self, ids: &[&'static str]) -> Vec<&'static str> {
+        ids.iter()
             .copied()
             .filter(|id| self.fits(id).is_ok())
             .collect()
@@ -102,6 +116,24 @@ mod tests {
             CredentialClass::classify(SHAPE_OPENAI, KIND_API_KEY),
             OtherProvider
         );
+    }
+
+    #[test]
+    fn the_native_harness_runs_only_what_it_speaks() {
+        use CredentialClass::*;
+        let ids = ["opencode", "claude", "native"];
+        assert_eq!(OtherProvider.harnesses_among(&ids), ["opencode", "native"]);
+        for class in [
+            AnthropicSubscription,
+            AnthropicKey,
+            CodexSubscription,
+            BareAlias,
+        ] {
+            assert!(
+                !class.harnesses_among(&ids).contains(&"native"),
+                "{class:?}"
+            );
+        }
     }
 
     #[test]

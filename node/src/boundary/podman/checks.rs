@@ -101,7 +101,7 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
         // An image without the label predates it or was built by hand, and
         // cannot be judged; the next `tracon setup` rebuilds and labels it.
         if let Some(built) = super::setup::image_digest(image).await {
-            if built != super::setup::definitions_digest(dir) {
+            if built != super::setup::expected_digest(cfg, dir) {
                 return CheckResult::fail(
                     CheckId::Runtime,
                     format!(
