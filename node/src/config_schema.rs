@@ -167,6 +167,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("harness.id"),
     restart("harness.tools"),
     restart("harness.version"),
+    restart("harness.experimental"),
+    restart("harness.native_binary"),
     // [boundary]
     restart("boundary.podman").exec(),
     restart("boundary.network"),

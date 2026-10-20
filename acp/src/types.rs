@@ -326,6 +326,11 @@ pub struct RequestPermissionParams {
     pub tool_call: ToolCall,
     #[serde(default)]
     pub options: Vec<PermissionOption>,
+    /// The tool's own name, from harnesses that send it (`tracon-agent`).
+    /// ACP's tool call carries only a display title and a coarse kind; the
+    /// node maps the name and the input to what its policy reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -341,6 +346,11 @@ pub struct PermissionOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestPermissionResult {
     pub outcome: PermissionOutcome,
+    /// Why a call was refused, for harnesses that tell their model
+    /// (`tracon-agent`): the node's policy speaks for itself rather than
+    /// reading as the operator's choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

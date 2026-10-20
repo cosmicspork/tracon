@@ -154,9 +154,11 @@ fn single_message(text: &str) -> Option<Value> {
         .find(|v| v.get("result").is_some() || v.get("error").is_some())
 }
 
-/// `<server>__<tool>`, cut to the characters and length function names allow.
+/// `mcp__<server>__<tool>`, cut to the characters and length function names
+/// allow. Claude Code's spelling, which is the one the node recognises its own
+/// tools by.
 pub fn function_name(server: &str, tool: &str) -> String {
-    let raw = format!("{server}__{tool}");
+    let raw = format!("mcp__{server}__{tool}");
     raw.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -238,9 +240,9 @@ mod tests {
     fn function_names_fit_the_wire() {
         assert_eq!(
             function_name("tracon", "submit_review"),
-            "tracon__submit_review"
+            "mcp__tracon__submit_review"
         );
-        assert_eq!(function_name("my server", "a.b"), "my_server__a_b");
+        assert_eq!(function_name("my server", "a.b"), "mcp__my_server__a_b");
         assert_eq!(function_name("s", &"x".repeat(100)).len(), MAX_NAME);
     }
 
@@ -289,7 +291,7 @@ mod tests {
         .unwrap();
         let tools = server.connect().await.unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), "tracon__echo");
+        assert_eq!(tools[0].name(), "mcp__tracon__echo");
         let dir = tempfile::tempdir().unwrap();
         let cx = Context::new(dir.path()).unwrap();
         assert_eq!(

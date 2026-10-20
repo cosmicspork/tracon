@@ -112,10 +112,10 @@ pub fn apply(cfg: &Config, patch: &Value) -> Result<Patch, String> {
                             if id == crate::adapter::RETIRED {
                                 return Err(crate::adapter::RETIRED_MESSAGE.into());
                             }
-                            if v.is_string() && !crate::adapter::KNOWN.contains(&id) {
+                            if v.is_string() && !crate::adapter::is_enabled(cfg, id) {
                                 return Err(format!(
                                     "`harness.id` must be one of {}",
-                                    crate::adapter::KNOWN.join(", ")
+                                    crate::adapter::enabled(cfg).join(", ")
                                 ));
                             }
                             set_string(&cfg.harness.id, v, "harness.id", &mut out)?

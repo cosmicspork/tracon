@@ -1700,6 +1700,16 @@ pub struct Harness {
     /// the image happens to contain", since the same string is what the image
     /// build fetches and what both checks compare against.
     pub version: String,
+    /// Harnesses outside the supported configuration that this node also
+    /// runs: `["native"]` turns on `tracon-agent`. Off by default, because
+    /// every harness a node runs needs its image before any session starts.
+    #[serde(default)]
+    pub experimental: Vec<String>,
+    /// A Linux `tracon-agent` binary for the native harness image, in place of
+    /// the release asset: one built from this tree (`just native-agent`), for
+    /// a node whose own version has no release yet. Empty: the release.
+    #[serde(default)]
+    pub native_binary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2071,6 +2081,8 @@ impl Default for Config {
                 // runs against is bounded by the boundary and by policy, both
                 // of which hold whatever the harness offers.
                 tools: Vec::new(),
+                experimental: Vec::new(),
+                native_binary: String::new(),
             },
             boundary: Boundary {
                 podman: String::new(),

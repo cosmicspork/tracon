@@ -196,6 +196,7 @@ mod tests {
         let s = encode_response(
             &Id::Num(0),
             Ok(serde_json::to_value(crate::types::RequestPermissionResult {
+                message: None,
                 outcome: crate::types::PermissionOutcome::Selected {
                     option_id: "allow_once".into(),
                 },

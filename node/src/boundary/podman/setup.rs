@@ -16,11 +16,63 @@ use crate::boundary::BoundaryError;
 /// and that directory is embedded — so without this, a 10 MB release artefact
 /// would be compiled into every binary built from that tree, silently, and the
 /// node would carry a second unverified copy of the bundle it already verifies
-/// by digest on disk.
+/// by digest on disk. The native harness's `local/` is where a locally built
+/// `tracon-agent` is staged for its image, and is excluded for the same reason.
 #[derive(Embed)]
 #[folder = "../containers"]
 #[exclude = "opencode-ui/*.tar.gz"]
+#[exclude = "harness-native/local/*"]
 struct Containers;
+
+/// The native harness's definitions directory, and where in it a local
+/// `tracon-agent` is staged (`[harness] native_binary`).
+const NATIVE_DIR: &str = "harness-native";
+const NATIVE_LOCAL: &str = "local/tracon-agent";
+
+/// What an image's label must say for it to be current. For every image, its
+/// definitions; the native harness's also installs a `tracon-agent` that is
+/// not among them — the release asset of this node's version, or the
+/// operator's own build — so that is part of what it was built from.
+pub fn expected_digest(cfg: &Config, dir: &str) -> String {
+    let definitions = definitions_digest(dir);
+    if dir != NATIVE_DIR {
+        return definitions;
+    }
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(definitions.as_bytes());
+    hash.update([0]);
+    hash.update(crate::adapter::native::NativeAdapter::PINNED_VERSION.as_bytes());
+    if !cfg.harness.native_binary.is_empty() {
+        hash.update([0]);
+        match std::fs::read(&cfg.harness.native_binary) {
+            Ok(bytes) => hash.update(Sha256::digest(&bytes)),
+            // Unreadable reads as stale, and the build says why.
+            Err(_) => hash.update(b"unreadable"),
+        }
+    }
+    hex::encode(hash.finalize())
+}
+
+/// Stage what the native harness image installs: the operator's own
+/// `tracon-agent` when one is configured, otherwise nothing, and the image
+/// fetches the release asset.
+fn stage_native(cfg: &Config, ctx: &std::path::Path) -> Result<(), BoundaryError> {
+    let local = ctx.join(NATIVE_LOCAL);
+    if let Some(dir) = local.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let _ = std::fs::remove_file(&local);
+    if !cfg.harness.native_binary.is_empty() {
+        std::fs::copy(&cfg.harness.native_binary, &local).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("[harness] native_binary {}: {e}", cfg.harness.native_binary),
+            )
+        })?;
+    }
+    Ok(())
+}
 
 /// The label a built image carries: a digest of the definitions it was built
 /// from, so a node on a newer binary can tell its images are stale.
@@ -29,7 +81,7 @@ pub const DEFINITIONS_LABEL: &str = "io.tracon.definitions";
 /// The directory the harness image is built from. Each harness has its own
 /// definitions; another harness's under this one's tag would run the wrong CLI.
 ///
-/// Only the two supported harnesses have definitions. An id outside them
+/// Only the harnesses with an adapter have definitions. An id outside them
 /// never reaches here — `adapter_for` refuses it at startup, the retired
 /// `omp` by name — so OpenCode's is the safe answer rather than a panic in
 /// the setup path.
@@ -43,7 +95,7 @@ pub fn harness_dir(cfg: &Config) -> &'static str {
 /// it names; the configured `[harness] id` is only the default.
 pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
     let mut out = vec![(cfg.boundary.gateway_image.clone(), "gateway")];
-    for id in crate::adapter::KNOWN {
+    for id in crate::adapter::enabled(cfg) {
         out.push((cfg.podman_harness_image(id), harness_dir_for(id)));
     }
     out
@@ -54,13 +106,13 @@ pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
 /// the label cannot be judged, which is not the same as stale.
 pub async fn harness_images(cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
     let mut out = Vec::new();
-    for id in crate::adapter::KNOWN {
+    for id in crate::adapter::enabled(cfg) {
         let image = cfg.podman_harness_image(id);
         let state = if podman(&["image", "exists", &image]).await.is_err() {
             "missing"
         } else {
             match image_digest(&image).await {
-                Some(built) if built == definitions_digest(harness_dir_for(id)) => "current",
+                Some(built) if built == expected_digest(cfg, harness_dir_for(id)) => "current",
                 Some(_) => "stale",
                 None => "unknown",
             }
@@ -78,6 +130,7 @@ pub async fn harness_images(cfg: &Config) -> Vec<crate::boundary::HarnessImage> 
 pub fn harness_dir_for(harness_id: &str) -> &'static str {
     match harness_id {
         "claude" => "harness-claude",
+        "native" => "harness-native",
         _ => "harness-opencode",
     }
 }
@@ -146,7 +199,7 @@ async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>
     }
     for (image, dir) in images(cfg) {
         let image = image.as_str();
-        let digest = definitions_digest(dir);
+        let digest = expected_digest(cfg, dir);
         let current = podman(&["image", "exists", image]).await.is_ok()
             && image_digest(image).await.as_deref() == Some(digest.as_str());
         if current && !rebuild {
@@ -155,16 +208,23 @@ async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>
         }
         let ctx = root.join(dir);
         let label = format!("{DEFINITIONS_LABEL}={digest}");
+        let mut args = vec!["build".to_string(), "--label".into(), label];
+        if dir == NATIVE_DIR {
+            stage_native(cfg, &ctx)?;
+            args.push("--build-arg".into());
+            args.push(format!(
+                "TRACON_AGENT_VERSION={}",
+                crate::adapter::native::NativeAdapter::PINNED_VERSION
+            ));
+        }
+        args.extend([
+            "-t".into(),
+            image.into(),
+            ctx.to_string_lossy().into_owned(),
+        ]);
         tracing::info!(image, context = %ctx.display(), "building image");
-        podman(&[
-            "build",
-            "--label",
-            &label,
-            "-t",
-            image,
-            &ctx.to_string_lossy(),
-        ])
-        .await?;
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        podman(&argv).await?;
     }
     Ok(())
 }

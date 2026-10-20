@@ -51,3 +51,6 @@ CLAUDE.md
 # The OpenCode UI bundle: a release artefact, never a git object. An operator
 # doing an offline node-image build drops the tarball here.
 containers/opencode-ui/*.tar.gz
+
+# A locally built tracon-agent staged for the native harness image
+/containers/harness-native/local/tracon-agent

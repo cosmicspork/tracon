@@ -775,10 +775,12 @@ pub async fn carry_on(
         .map(|h| h.trim().to_string())
         .filter(|h| !h.is_empty())
         .or_else(|| {
-            model
-                .is_none()
-                .then(|| old.harness_id.clone())
-                .filter(|h| crate::adapter::KNOWN.contains(&h.as_str()))
+            model.is_none().then(|| old.harness_id.clone()).filter(|h| {
+                crate::adapter::KNOWN
+                    .iter()
+                    .chain(crate::adapter::EXPERIMENTAL)
+                    .any(|id| *id == h.as_str())
+            })
         });
     let plan = match old.work_item_id.as_deref() {
         Some(id) => match store.work_get(id)? {

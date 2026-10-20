@@ -11,6 +11,7 @@ use tracon_agent::agent::{Agent, Outcome, Totals, Unattended};
 use tracon_agent::conversation::{Block, Conversation, Role};
 use tracon_agent::events::Events;
 use tracon_agent::prompt::ORIENTATION;
+use tracon_agent::providers;
 use tracon_agent::server::{self, Settings};
 use tracon_agent::tools::{Context, Registry};
 use tracon_agent::wire::openai_chat::{Client, Sampling};
@@ -26,11 +27,17 @@ struct Cli {
     /// caller vouches for the directory.
     #[arg(long)]
     standalone: bool,
-    /// e.g. http://127.0.0.1:8080/v1
+    /// e.g. http://127.0.0.1:8080/v1. Not needed with `--providers`.
     #[arg(long, env = "TRACON_AGENT_BASE_URL")]
-    base_url: String,
+    base_url: Option<String>,
+    /// With `--providers`, `provider/model`; otherwise the id the endpoint
+    /// knows.
     #[arg(long, env = "TRACON_AGENT_MODEL")]
     model: String,
+    /// The node's providers file for this session: the gateway URL, key
+    /// variable and context window for `--model`.
+    #[arg(long)]
+    providers: Option<PathBuf>,
     /// A file holding the bearer token, if the endpoint needs one.
     #[arg(long, env = "TRACON_AGENT_API_KEY_FILE")]
     api_key_file: Option<PathBuf>,
@@ -84,7 +91,22 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
+    // The node's file is authoritative: an endpoint or key file from the
+    // environment (a repository image's) must not redirect the session.
+    if let Some(path) = &cli.providers {
+        let resolved = providers::resolve(&providers::load(path)?, &cli.model)?;
+        cli.base_url = Some(resolved.base_url);
+        cli.api_key_env = Some(resolved.key_env);
+        cli.api_key_file = None;
+        if cli.context_window.is_none() {
+            cli.context_window = resolved.context_window;
+        }
+        cli.model = resolved.model;
+    }
+    let Some(base_url) = cli.base_url.clone() else {
+        bail!("no endpoint: pass --base-url, or --providers with --model provider/model");
+    };
     let api_key = match (&cli.api_key_file, &cli.api_key_env) {
         (Some(path), _) => Some(
             std::fs::read_to_string(path)
@@ -98,7 +120,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         (None, None) => None,
     };
     let client = Client::new(
-        &cli.base_url,
+        &base_url,
         api_key,
         &cli.model,
         Sampling {
@@ -160,7 +182,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         json!({
             "version": env!("CARGO_PKG_VERSION"),
             "model": cli.model,
-            "base_url": cli.base_url,
+            "base_url": base_url,
             "cwd": cx.root,
             "max_turns": cli.max_turns,
             "tools": tools.names(),

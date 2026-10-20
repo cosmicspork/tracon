@@ -7,6 +7,7 @@
 
 pub mod claude;
 pub mod compat;
+pub mod native;
 pub mod opencode;
 pub mod types;
 
@@ -35,8 +36,32 @@ pub struct Layout {
     pub env: &'static str,
 }
 
-/// The harness ids this node has an adapter for.
+/// The harness ids this node has an adapter for and supports.
 pub const KNOWN: &[&str] = &["opencode", "claude"];
+
+/// Harnesses with an adapter that run only where the operator turns them on
+/// (`[harness] experimental`). Every harness a node runs needs its image
+/// before the boundary passes, so one still being proven must not be able to
+/// stop the supported ones.
+pub const EXPERIMENTAL: &[&str] = &[native::NativeAdapter::ID];
+
+/// The harnesses this node runs: the supported ones, then the experimental
+/// ones it turned on.
+pub fn enabled(cfg: &Config) -> Vec<&'static str> {
+    KNOWN
+        .iter()
+        .chain(
+            EXPERIMENTAL
+                .iter()
+                .filter(|id| cfg.harness.experimental.iter().any(|e| e == *id)),
+        )
+        .copied()
+        .collect()
+}
+
+pub fn is_enabled(cfg: &Config, harness_id: &str) -> bool {
+    enabled(cfg).contains(&harness_id)
+}
 
 /// The harness this node ran until the 2026-09-13 cutover. A `node.toml`
 /// that still names it is migrated to OpenCode as it loads
@@ -65,10 +90,11 @@ pub const RETIRED_MESSAGE: &str = concat!(
 /// unknown id first, so no session ever runs against a layout that is not its
 /// harness's.
 pub fn layout(harness_id: &str) -> Layout {
-    if harness_id == claude::ClaudeAdapter::ID {
-        return claude::ClaudeAdapter::layout();
+    match harness_id {
+        claude::ClaudeAdapter::ID => claude::ClaudeAdapter::layout(),
+        native::NativeAdapter::ID => native::NativeAdapter::layout(),
+        _ => opencode::OpenCodeAdapter::layout(),
     }
-    opencode::OpenCodeAdapter::layout()
 }
 
 /// The adapter for the configured harness. An unknown id fails here, at
@@ -93,6 +119,14 @@ pub fn adapter_for_id(
         opencode::OpenCodeAdapter::ID => Ok(Arc::new(opencode::OpenCodeAdapter::new(
             pinned_version_for(cfg, harness_id),
         ))),
+        native::NativeAdapter::ID if is_enabled(cfg, harness_id) => Ok(Arc::new(
+            native::NativeAdapter::new(pinned_version_for(cfg, harness_id)),
+        )),
+        native::NativeAdapter::ID => Err(AdapterError::Protocol(
+            "the native harness is experimental and off on this node; turn it on with \
+             [harness] experimental = [\"native\"], then run `tracon setup`"
+                .into(),
+        )),
         RETIRED => Err(AdapterError::Protocol(RETIRED_MESSAGE.to_string())),
         other => Err(AdapterError::Protocol(format!(
             "no adapter for harness `{other}`; this node knows {}",
@@ -156,10 +190,10 @@ pub fn baked_plugins(harness_id: &str) -> Vec<String> {
 
 /// The version the harness image for `harness_id` installs.
 pub fn image_version(harness_id: &str) -> &'static str {
-    if harness_id == claude::ClaudeAdapter::ID {
-        claude::ClaudeAdapter::PINNED_VERSION
-    } else {
-        opencode::OpenCodeAdapter::PINNED_VERSION
+    match harness_id {
+        claude::ClaudeAdapter::ID => claude::ClaudeAdapter::PINNED_VERSION,
+        native::NativeAdapter::ID => native::NativeAdapter::PINNED_VERSION,
+        _ => opencode::OpenCodeAdapter::PINNED_VERSION,
     }
 }
 
@@ -744,6 +778,40 @@ mod tests {
         );
     }
 
+    /// The native image fetches release assets by name; the release has to
+    /// publish exactly those names, for both architectures a node's Podman
+    /// may run.
+    #[test]
+    fn the_native_image_fetches_what_the_release_publishes() {
+        let image = include_str!("../../../containers/harness-native/Containerfile");
+        let release = include_str!("../../../.github/workflows/release.yml");
+        for triple in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
+            assert!(image.contains(triple), "the image does not fetch {triple}");
+            assert!(
+                release.contains(&format!("target: {triple}")),
+                "the release builds nothing for {triple}"
+            );
+        }
+        assert!(image.contains("tracon-agent-${triple}"));
+        assert!(image.contains("ARG TRACON_AGENT_VERSION"));
+        assert_eq!(
+            native::NativeAdapter::PINNED_VERSION,
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn the_native_harness_runs_only_where_it_is_turned_on() {
+        let mut cfg = Config::default();
+        assert_eq!(enabled(&cfg), ["opencode", "claude"]);
+        assert!(adapter_for_id(&cfg, "native").is_err());
+        cfg.harness.experimental = vec!["native".into()];
+        assert_eq!(enabled(&cfg), ["opencode", "claude", "native"]);
+        let a = adapter_for_id(&cfg, "native").unwrap();
+        assert_eq!(a.pinned_version(), native::NativeAdapter::PINNED_VERSION);
+        assert_eq!(layout("native").dir, ".tracon-agent");
+    }
+
     /// An unset version is the image's, not "whatever is on PATH": the check
     /// still runs, against the version this node's own image installs.
     #[test]
@@ -765,18 +833,19 @@ mod tests {
         );
     }
 
-    /// Only the two supported images are agreed with. The retired harness had
-    /// a third, `containers/harness`, and it is gone: a build that still
-    /// carried it would be an image nothing can launch.
+    /// Only the harnesses with an adapter have images. The retired harness had
+    /// one, `containers/harness`, and it is gone: a build that still carried
+    /// it would be an image nothing can launch.
     #[test]
     fn only_the_supported_harnesses_have_images() {
         assert_eq!(KNOWN, ["opencode", "claude"]);
+        assert_eq!(EXPERIMENTAL, ["native"]);
         let containers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../containers");
         assert!(
             !containers.join("harness").exists(),
             "the retired harness's image directory is still here"
         );
-        for id in KNOWN {
+        for id in KNOWN.iter().chain(EXPERIMENTAL) {
             assert!(
                 containers
                     .join(format!("harness-{id}"))

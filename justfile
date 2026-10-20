@@ -102,6 +102,23 @@ musl: spa
     cargo $build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub --bin tracon-agent
     file target/x86_64-unknown-linux-musl/release/tracon
 
+# A static Linux `tracon-agent` for the native harness image, for the
+# architecture this host's Podman runs (an Apple Silicon Mac's machine is
+# arm64). Point `[harness] native_binary` at the path it prints, then run
+# `tracon setup`: for a node whose own version has no release yet.
+native-agent:
+    #!/usr/bin/env sh
+    set -e
+    case "$(podman info --format '{{{{.Host.Arch}}')" in
+        amd64) target=x86_64-unknown-linux-musl ;;
+        arm64) target=aarch64-unknown-linux-musl ;;
+        *) echo "unsupported Podman architecture" >&2; exit 1 ;;
+    esac
+    rustup target add "$target"
+    cargo zigbuild --release --target "$target" -p tracon-agent
+    file "target/$target/release/tracon-agent"
+    echo "native_binary = \"$(pwd)/target/$target/release/tracon-agent\""
+
 # The desktop bundle (the AppImage here, the .dmg on a Mac) with the node
 # carried inside it as a sidecar, built in the same container as `wrapper`
 # (plus `nodejs npm librsvg2-devel fuse` there). Builds the node first.

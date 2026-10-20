@@ -8,7 +8,7 @@ subscription later. It is a separate binary that runs inside the boundary, like
 **Status: Phase 1, experimental.** It has two modes:
 
 - **Protocol mode** (the default). The node drives it over stdin and stdout and answers a
-  permission request for every tool call. The node adapter is still to come.
+  permission request for every tool call. The node's adapter is `node/src/adapter/native.rs`.
 - **Standalone** (`--standalone`). It runs one task with no node and no permission gate.
   Run it only in a directory you would let any command loose in.
 
@@ -30,9 +30,13 @@ stdin and stdout carry newline-delimited JSON-RPC 2.0, using the vocabulary in t
 **Usage** follows the gateway's meaning. `inputTokens` is the prompt not read from a cache,
 `cachedReadTokens` is what was, and the node can reconcile the two counts per turn.
 
-**Credentials and the model** come from the command line, never from the session:
-`--base-url`, `--model`, `--api-key-env` (the name of the variable holding the node's
-per-session key), `--context-window` and `--system-prompt-file`.
+**Credentials and the model** come from the command line, never from the session. The
+node passes `--providers`, a file it stages per session listing each `openai`-shaped
+provider's gateway URL, key variable and declared models, with `--model provider/model`.
+The file wins over `--base-url`, `--api-key-file` and their `TRACON_AGENT_*` variables, so
+a repository image cannot redirect a session. Without it, `--base-url`, `--model` and
+`--api-key-env` (the name of the variable holding the key) say the same directly.
+`--context-window` and `--system-prompt-file` complete it.
 
 **The system prompt**, in order:
 1. the built-in orientation;
@@ -113,3 +117,25 @@ Every anchor is checked against the file before anything is written, and one mis
 refuses the whole call. The refusal shows what the line is now. When a model paired one
 line's number with another line's hash, it shows both lines rather than guessing between
 them. A successful edit returns fresh anchors around the change.
+
+## Turning it on for a node
+
+1. Add `"native"` to `[harness] experimental` in `node.toml`.
+2. Give an `openai`-shaped provider some declared models. For the llama.cpp server on this
+   machine, for example:
+
+   ```toml
+   [providers.local]
+   credential = "local"                # an api_key credential holding the server's key
+   upstream = "http://127.0.0.1:8080"  # the node dials it, so host loopback works
+   shape = "openai"
+   models = [{ id = "qwen3-8b", context = 32768 }]
+   ```
+
+   Also add the upstream host to `[gateway] allow_hosts`.
+3. Run `tracon setup`. It builds `tracon-harness-native` from this version's release asset.
+   For a version with no release yet, build a binary with `just native-agent`, set
+   `[harness] native_binary` to the path it prints, and run `tracon setup` again.
+
+Models on that provider then offer a choice of harness, OpenCode or `native`. A model whose
+credential runs only here (none today) would start here directly.

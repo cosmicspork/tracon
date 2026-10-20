@@ -368,12 +368,17 @@ async fn send_in_order(
                     let _ = answer.send(match result {
                         Ok(RequestPermissionResult {
                             outcome: PermissionOutcome::Selected { option_id },
+                            ..
                         }) if option_id == types::OPTION_ALLOW_ONCE => Permit::Allow,
                         Ok(RequestPermissionResult {
                             outcome: PermissionOutcome::Selected { .. },
-                        }) => Permit::Deny("The operator declined this call.".into()),
+                            message,
+                        }) => Permit::Deny(
+                            message.unwrap_or_else(|| "The operator declined this call.".into()),
+                        ),
                         Ok(RequestPermissionResult {
                             outcome: PermissionOutcome::Cancelled,
+                            ..
                         }) => Permit::Cancelled,
                         // An unanswerable ask is a refusal: deny by default.
                         Err(e) => Permit::Deny(format!("permission could not be asked: {e}")),
@@ -462,6 +467,7 @@ impl Hooks for Wired<'_> {
         let (answer, wait) = oneshot::channel();
         let params = RequestPermissionParams {
             session_id: self.session.id.clone(),
+            tool: Some(name.to_string()),
             tool_call: describe(id, name, input, "pending"),
             options: vec![
                 PermissionOption {

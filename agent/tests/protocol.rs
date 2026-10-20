@@ -20,7 +20,7 @@ use tracon_agent::hashline;
 #[derive(Debug, Clone)]
 enum Seen {
     Update(Value),
-    Permission(RequestPermissionParams),
+    Permission(Box<RequestPermissionParams>),
 }
 
 struct Node {
@@ -76,11 +76,15 @@ async fn start(base: &str, events: &std::path::Path) -> Node {
                     } else {
                         "allow_once"
                     };
-                    log.lock().unwrap().push(Seen::Permission(p));
+                    log.lock().unwrap().push(Seen::Permission(Box::new(p)));
+                    // A refusal says why, as the node's policy does.
+                    let message = (option == "reject_once")
+                        .then(|| "the node's policy refused this (rule `no-edits`)".to_string());
                     let _ = reply.send(Ok(json!(RequestPermissionResult {
                         outcome: PermissionOutcome::Selected {
                             option_id: option.into()
                         },
+                        message,
                     })));
                 }
             }
@@ -160,7 +164,7 @@ async fn every_tool_call_is_asked_and_a_declined_edit_never_lands() {
     assert_eq!(declined["tool_call_id"], "c2");
     assert_eq!(
         declined["content"],
-        "ERROR: The operator declined this call."
+        "ERROR: the node's policy refused this (rule `no-edits`)"
     );
 
     let seen = node.seen.lock().unwrap().clone();

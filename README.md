@@ -1243,6 +1243,12 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # port = 9222                       # where the session reaches it
 # ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed
+# experimental = ["native"]         # also run tracon's own harness, `tracon-agent`, for models on
+                                    # an `openai`-shaped provider (a local llama.cpp, say). Off by
+                                    # default: every harness a node runs needs its image before any
+                                    # session starts. See agent/README.md.
+# native_binary = "/path/to/tracon-agent"  # a Linux build for that image (`just native-agent`)
+                                    # in place of this version's release asset
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"

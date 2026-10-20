@@ -21,6 +21,10 @@ path = "src/main.rs"
 name = "fake_claude"
 path = "tests/support/fake_claude.rs"
 
+[[bin]]
+name = "fake_native"
+path = "tests/support/fake_native.rs"
+
 [dependencies]
 anyhow.workspace = true
 tracon-proto.workspace = true
@@ -71,7 +75,8 @@ serde.workspace = true
 serde_json.workspace = true
 sqlparser = "0.59"
 thiserror.workspace = true
-tokio.workspace = true
+# `io-std` for the fake native harness, which speaks over its own stdio.
+tokio = { workspace = true, features = ["io-std"] }
 tokio-stream.workspace = true
 # The client half of the terminal proxy: the browser's WebSocket is axum's,
 # the harness's is this. No TLS features — the upstream is a loopback publish
