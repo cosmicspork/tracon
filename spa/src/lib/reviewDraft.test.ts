@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { ReviewDraftConflict } from './api'
-import { ReviewDraftSync, type DraftState } from './reviewDraft'
+import { draftForRevision, ReviewDraftSync, type DraftState } from './reviewDraft'
 import type { ReviewDraft, ReviewDraftFields } from './types'
 
 /** A node holding one draft, with the same compare-and-set as the real one. */
@@ -83,5 +83,34 @@ describe('review drafts', () => {
     s.stop()
     await new Promise((r) => setTimeout(r, 40))
     expect(n.held()).toBeNull()
+  })
+})
+
+describe('a draft from an earlier revision', () => {
+  const held = (revision_id: string, draft: ReviewDraftFields): ReviewDraft => ({
+    review_id: 'r1',
+    revision_id,
+    draft,
+    version: 1,
+    updated_ms: 0,
+  })
+
+  test("its squash message is a conflict, not applied over the agent's new message", () => {
+    const d = held('v1', { reason: 'tighten it', message: 'fix: the subject only' })
+    const applied = draftForRevision(d, 'v2', 'fix: the subject\n\nand the body')
+    expect(applied.fromEarlier).toBe(true)
+    expect(applied.staleMessage).toBe('fix: the subject only')
+    expect(applied.fields).toEqual({ reason: 'tighten it' })
+  })
+
+  test('a message that agrees with the new proposal is no conflict', () => {
+    const d = held('v1', { message: 'fix: same\n' })
+    expect(draftForRevision(d, 'v2', 'fix: same').staleMessage).toBeNull()
+  })
+
+  test('a draft written against this revision is applied whole', () => {
+    const d = held('v2', { message: 'fix: edited here' })
+    const applied = draftForRevision(d, 'v2', 'fix: proposed')
+    expect(applied).toEqual({ fields: d.draft, fromEarlier: false, staleMessage: null })
   })
 })

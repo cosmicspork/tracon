@@ -33,8 +33,8 @@
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
-  import { ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
-  import { defaultMessage, shipping, shippedMessage } from '../lib/shipping'
+  import { draftForRevision, ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
+  import { proposedMessage as proposedCommitMessage, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, canStartReviewer, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
   import { COVERAGE, FINDING, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
@@ -104,19 +104,14 @@
   let draftFromEarlier = $state(false)
   /** What another device saved, while the two disagree. */
   let draftTheirs = $state<ReviewDraftFields | null>(null)
+  /**
+   * The squash message of a draft written against an earlier revision, held
+   * aside rather than put over this revision's, until the operator chooses.
+   */
+  let draftMessage = $state<string | null>(null)
   /** The route this review was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
   const report = $derived(review && isNarrativeReport(review) ? review : null)
-
-  /**
-   * The message a squash carries when nobody edits it, as the node derives
-   * it: the agent's, else the description's, else the review's own.
-   */
-  function proposedCommitMessage(intent: ReviewIntent, title: string, body: string): string {
-    if (intent.forge.commit !== undefined) return intent.forge.commit
-    const from = intent.forge.description ?? { title, body }
-    return defaultMessage(from.title, from.body)
-  }
 
   /** One of the agent's commits' messages, as it wrote it. */
   function writtenMessage(c: ReviewCommit): string {
@@ -154,6 +149,7 @@
     draftState = 'clean'
     draftFromEarlier = false
     draftTheirs = null
+    draftMessage = null
     Promise.all([api.review(id), api.reviewDraft(id).catch(() => ({ draft: null }))])
       .then(([d, held]) => {
         review = d.review
@@ -182,7 +178,7 @@
         descBody = intent.forge.description?.body ?? ''
         commenting = intent.forge.comment !== undefined
         comment = intent.forge.comment ?? ''
-        proposedMessage = proposedCommitMessage(intent, d.review.title, d.review.body)
+        proposedMessage = proposedCommitMessage(intent)
         message = proposedMessage
         commitMessages = {}
         try {
@@ -193,8 +189,10 @@
         // What the operator left here, on this device or another, comes back
         // over what the agent submitted.
         if (held.draft) {
-          applyDraft(held.draft.draft)
-          draftFromEarlier = !!held.draft.revision_id && held.draft.revision_id !== d.revision?.id
+          const applied = draftForRevision(held.draft, d.revision?.id, proposedMessage)
+          applyDraft(applied.fields)
+          draftFromEarlier = applied.fromEarlier
+          draftMessage = squashing ? applied.staleMessage : null
         }
         draftSync = new ReviewDraftSync(id, d.revision?.id, (state) => {
           draftState = state
@@ -266,6 +264,12 @@
 
   function keepMine() {
     void draftSync?.keepMine(draftFields())
+  }
+
+  /** Settle a squash message drafted against an earlier revision. */
+  function settleDraftMessage(use: boolean) {
+    if (use && draftMessage !== null) message = draftMessage
+    draftMessage = null
   }
 
   // Editing the diff, desktop only. The phone directs; it does not edit.
@@ -425,7 +429,7 @@
    * drops, judged by the message the node will squash with: an edited title,
    * body or description changes it as surely as an edited message does.
    */
-  const ships = $derived(shipping(intent, shippedMessage(outputs, title, body), reworded))
+  const ships = $derived(shipping(intent, shippedMessage(outputs, intent), reworded))
   const files = $derived.by(() => {
     try {
       return JSON.parse(review?.files ?? '[]') as { path: string; blob: string }[]
@@ -1264,6 +1268,21 @@
         changed on another device <b>· {draftTheirs?.reason ? `it says “${draftTheirs.reason}”` : 'its draft differs from this one'}</b>
         <button class="btn" onclick={takeTheirs}>Use theirs</button>
         <button class="btn" onclick={keepMine}>Keep mine</button>
+      </div>
+    {/if}
+    {#if draftMessage !== null}
+      <div class="banner crit draft-conflict">
+        commit message drafted against an earlier revision <b>· it says “{draftMessage.split('\n')[0]}”; this revision's is in the box</b>
+        <button class="btn" onclick={() => settleDraftMessage(true)}>Use the draft's</button>
+        <button class="btn" onclick={() => settleDraftMessage(false)}>Keep this revision's</button>
+      </div>
+    {/if}
+    {#if review && !ships.own && ships.dropped.length}
+      <div class="banner">
+        signature dropped <b>· approving ships a new, unsigned commit in place of the agent's signed {ships.dropped
+            .map((sha) => sha.slice(0, 8))
+            .join(', ')}</b>
+        {#if squashing && intent.as_written !== undefined}<i>The agent's own message ships its commit as written, signature kept.</i>{/if}
       </div>
     {/if}
     {#if composing}

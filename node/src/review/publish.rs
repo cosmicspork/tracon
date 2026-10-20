@@ -222,6 +222,12 @@ pub struct Intent {
     /// commit ships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_written: Option<String>,
+    /// Under squash, when exactly one of the agent's commits is new to what
+    /// it squashes onto: that commit's own message, trimmed. The squash
+    /// carries it when no message was written for it (#592); a change's
+    /// title and description never become a commit message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_message: Option<String>,
     /// Those of `commits` that carry a signature and that a commit made in
     /// publication would replace: under squash, those not already on what
     /// it squashes onto. A commit made in publication is never signed.
@@ -1276,6 +1282,15 @@ pub fn as_written(raw: &[u8], onto: &str, merges: Option<&str>) -> Option<String
     (!message.is_empty() && message.trim() == message).then(|| message.to_string())
 }
 
+/// A raw commit object's message, trimmed: what follows its headers, a
+/// signature's included. None when it has none.
+pub fn message_of(raw: &[u8]) -> Option<String> {
+    let raw = unsigned(raw);
+    let at = raw.windows(2).position(|w| w == b"\n\n")?;
+    let message = String::from_utf8_lossy(&raw[at + 2..]).trim().to_string();
+    (!message.is_empty()).then_some(message)
+}
+
 /// Whether a raw commit object carries a signature.
 pub fn is_signed(raw: &[u8]) -> bool {
     unsigned(raw).len() != raw.len()
@@ -1918,6 +1933,13 @@ gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\
     /// The message a squash must carry to remake a commit is its own, and
     /// only for a commit the squash could make at all: on those parents, with
     /// no header the squash never writes.
+    #[test]
+    fn a_commit_message_is_read_past_its_signature() {
+        let signed = b"tree t\nparent p\nauthor a\ncommitter c\ngpgsig -----BEGIN-----\n \n sig\n                        -----END-----\n\nfix: subject\n\nbody\n\n";
+        assert_eq!(message_of(signed).as_deref(), Some("fix: subject\n\nbody"));
+        assert_eq!(message_of(b"tree t\nauthor a\ncommitter c\n\n\n"), None);
+    }
+
     #[test]
     fn a_commit_ships_as_written_only_on_the_squash_parents() {
         let one = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\
