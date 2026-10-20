@@ -251,6 +251,17 @@ impl Mirror {
         if self.store.put_node(&row).is_err() {
             return Applied::Malformed;
         }
+        // The peer's own signed word on the bundle it runs confirms a rollout
+        // of that bundle even when its receipt was lost, which also ends the
+        // resending of it.
+        if let (Some(sha256), Some(identity)) = (&row.policy_sha256, &row.policy_identity) {
+            if let Err(error) = self
+                .store
+                .confirm_policy_rollout_by_hello(&row.id, sha256, identity)
+            {
+                tracing::warn!(%error, node = %row.id, "policy rollout not confirmed from a hello");
+            }
+        }
         self.bus.publish_untapped(Frame::Node(row.to_json()));
         Applied::Stored
     }

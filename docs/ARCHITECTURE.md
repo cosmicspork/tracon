@@ -873,10 +873,24 @@ running hash. Initialization refuses any existing or partial signing installatio
 
 **Sending a policy is not installing it.** Durable rollout targets become applied
 only on an authenticated receipt matching sender, target, rollout, and exact
-bundle hash. Offline, sent, and legacy targets remain unconfirmed; retry uses the
+bundle hash, or on the peer's own signed hello naming that bundle and signing
+identity. Offline, sent, and legacy targets remain unconfirmed; retry uses the
 stored signed bytes. Optional application/wire/policy metadata is additive to
 node advertisements without changing the wire contract. Missing metadata stays
 unknown; neither a receipt nor an upgrade silently replaces a trust root.
+
+**The signing node owns redelivery; the hub stays a relay.** A rollout is queued
+for every target whose sealing key is known, reachable or not, and the hub's
+retention holds it until the peer pulls. The signer reconciles each peer's newest
+live rollout when the peer comes back, when the signer reconnects to the hub, and
+every tenth heartbeat (which also picks up rollouts `tracon policy push` wrote to
+the shared database): what was never queued is queued, and what was queued over
+`POLICY_RESEND_AFTER` ago without confirmation is queued again while the peer is
+reachable, covering pruned and lost frames. A new rollout supersedes every
+unconfirmed target of older ones, so an older bundle is never pushed again, and a
+receiver refuses a redelivered bundle older than the one it has installed (or a
+different one for the same version) and answers its own bundle, offered again, as
+applied without writing anything.
 
 ### Authority grants
 

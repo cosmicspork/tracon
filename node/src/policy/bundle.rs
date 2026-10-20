@@ -292,6 +292,52 @@ pub fn install(
     Ok(policy)
 }
 
+/// What a bundle offered over the mesh is to the one installed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Offer {
+    /// Newer than what is installed, or nothing is: [`install`] decides.
+    Install,
+    /// Exactly the installed bundle. Redelivery writes nothing and is
+    /// answered as applied.
+    AlreadyInstalled,
+    /// Refused, with why: a mesh redelivery never moves this node back to an
+    /// older bundle, nor swaps one version's bundle for another.
+    Refuse(String),
+}
+
+/// Judge an offered bundle against `installed` (its version and hash).
+pub fn judge_offer(installed: Option<(u32, &str)>, version: u32, sha256: &str) -> Offer {
+    match installed {
+        None => Offer::Install,
+        Some((current, _)) if version < current => {
+            Offer::Refuse(format!("older than installed v{current}"))
+        }
+        Some((current, hash)) if version == current && hash == sha256 => Offer::AlreadyInstalled,
+        Some((current, _)) if version == current => {
+            Offer::Refuse(format!("conflicting bundle for v{current}"))
+        }
+        Some(_) => Offer::Install,
+    }
+}
+
+/// [`judge_offer`] against the verified bundle on disk. Only the mesh receive
+/// paths ask: an operator applying or signing locally is acting directly.
+/// A bundle that does not parse, or a node whose installed files do not
+/// verify, is left to [`install`], as before this check existed.
+pub fn offer(bundle: &str) -> Offer {
+    let Ok(offered) = toml::from_str::<Policy>(bundle) else {
+        return Offer::Install;
+    };
+    let installed = current().ok();
+    judge_offer(
+        installed
+            .as_ref()
+            .map(|b| (b.policy.version, b.sha256.as_str())),
+        offered.version,
+        &sha256(bundle),
+    )
+}
+
 /// The bundle, signature, and public key as this node holds them, for handing
 /// to a peer. `None` when this node has no bundle.
 pub fn export() -> Option<(String, String, String)> {
@@ -360,6 +406,36 @@ mod tests {
                 "{sig}"
             );
         }
+    }
+
+    #[test]
+    fn an_older_offer_is_refused_and_names_the_installed_version() {
+        assert_eq!(
+            judge_offer(Some((21, "new")), 18, "old"),
+            Offer::Refuse("older than installed v21".into())
+        );
+    }
+
+    #[test]
+    fn the_installed_bundle_offered_again_is_already_installed() {
+        assert_eq!(
+            judge_offer(Some((21, "same")), 21, "same"),
+            Offer::AlreadyInstalled
+        );
+    }
+
+    #[test]
+    fn another_bundle_for_the_installed_version_is_refused() {
+        assert_eq!(
+            judge_offer(Some((21, "mine")), 21, "theirs"),
+            Offer::Refuse("conflicting bundle for v21".into())
+        );
+    }
+
+    #[test]
+    fn a_newer_offer_or_a_first_one_goes_to_install() {
+        assert_eq!(judge_offer(Some((21, "a")), 22, "b"), Offer::Install);
+        assert_eq!(judge_offer(None, 1, "b"), Offer::Install);
     }
 
     #[test]

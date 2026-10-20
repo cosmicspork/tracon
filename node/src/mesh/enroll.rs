@@ -520,38 +520,207 @@ pub async fn rehand_channel(
     Ok(n)
 }
 
-/// Hand this node's policy bundle to every member of the hub.
-pub async fn push_policy(identity: &Identity, hub_url: &str) -> Result<usize, EnrollError> {
+/// One peer `tracon policy push` hands the bundle to, as it found it.
+#[derive(Debug, Clone)]
+pub struct PolicyPushTarget {
+    pub node_id: String,
+    /// The node's name, else the hub's name for the member, else a short id.
+    pub name: String,
+    /// Its signed sealing key, or why there is none to seal to.
+    pub key: Result<x25519_dalek::PublicKey, String>,
+}
+
+/// What came of handing the bundle to one target.
+#[derive(Debug, Clone)]
+pub struct PolicyPushOutcome {
+    pub node_id: String,
+    pub name: String,
+    /// `Err` names why it was not queued at the hub.
+    pub queued: Result<(), String>,
+}
+
+/// A `tracon policy push`: the durable rollout and each target's outcome.
+#[derive(Debug, Clone)]
+pub struct PolicyPush {
+    pub rollout_id: String,
+    pub targets: Vec<PolicyPushOutcome>,
+}
+
+impl PolicyPush {
+    pub fn all_queued(&self) -> bool {
+        self.targets.iter().all(|t| t.queued.is_ok())
+    }
+}
+
+/// Who a push goes to: every peer in this node's own record of the mesh, and
+/// every other hub member whose sealing key is signed by its id. Never this
+/// node, and never the hub's own member identity, which is a replica and runs
+/// no policy. `members` is the hub's member list, or why it could not be read.
+pub fn policy_push_targets(
+    me: &str,
+    nodes: &[crate::store::NodeRow],
+    members: &Result<Vec<Value>, String>,
+) -> Vec<PolicyPushTarget> {
+    let listed = members.as_ref().map(Vec::as_slice).unwrap_or_default();
+    let member = |id: &str| listed.iter().find(|m| m["node_id"].as_str() == Some(id));
+    let key_of = |id: &str| -> Result<x25519_dalek::PublicKey, String> {
+        let m = match (members, member(id)) {
+            (Err(error), _) => return Err(error.clone()),
+            (Ok(_), None) => return Err("not a member of the hub".into()),
+            (Ok(_), Some(m)) => m,
+        };
+        let x = m["x25519_pub"].as_str().unwrap_or_default();
+        if x.is_empty() {
+            return Err("the hub holds no sealing key for it".into());
+        }
+        if !member_binding_ok(id, x, m) {
+            return Err("its sealing key is not signed by its node id".into());
+        }
+        key32(x)
+            .map(x25519_dalek::PublicKey::from)
+            .ok_or_else(|| "its sealing key is malformed".into())
+    };
+    let hub_member = |m: &Value| m["role"].as_str() == Some("hub");
+    let mut targets: Vec<PolicyPushTarget> = Vec::new();
+    for node in nodes {
+        if node.is_self != 0 || node.id == me || member(&node.id).is_some_and(hub_member) {
+            continue;
+        }
+        let name = match node.name.trim() {
+            "" => member(&node.id)
+                .and_then(|m| m["name"].as_str())
+                .filter(|n| !n.trim().is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| short_id(&node.id)),
+            name => name.to_string(),
+        };
+        targets.push(PolicyPushTarget {
+            key: key_of(&node.id),
+            node_id: node.id.clone(),
+            name,
+        });
+    }
+    for m in listed {
+        let Some(id) = m["node_id"].as_str() else {
+            continue;
+        };
+        if id == me || hub_member(m) || targets.iter().any(|t| t.node_id == id) {
+            continue;
+        }
+        // A member this node has no record of is a target only once its key
+        // checks out: otherwise there is nothing to say it is a node at all.
+        let Ok(key) = key_of(id) else {
+            continue;
+        };
+        targets.push(PolicyPushTarget {
+            node_id: id.to_string(),
+            name: m["name"]
+                .as_str()
+                .filter(|n| !n.trim().is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| short_id(id)),
+            key: Ok(key),
+        });
+    }
+    targets
+}
+
+/// Post to every target in turn, each through `post`, carrying on past any
+/// that fails: one peer's trouble never costs the rest their bundle.
+pub async fn post_each<F, Fut>(
+    targets: Vec<PolicyPushTarget>,
+    mut post: F,
+) -> Vec<PolicyPushOutcome>
+where
+    F: FnMut(String, x25519_dalek::PublicKey) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let mut outcomes = Vec::with_capacity(targets.len());
+    for target in targets {
+        let queued = match target.key {
+            Ok(key) => post(target.node_id.clone(), key).await,
+            Err(why) => Err(why),
+        };
+        outcomes.push(PolicyPushOutcome {
+            node_id: target.node_id,
+            name: target.name,
+            queued,
+        });
+    }
+    outcomes
+}
+
+/// Hand this node's installed policy bundle to every peer as a durable
+/// rollout, recorded in the database the running node shares. Each target is
+/// marked `sent` when the hub took its sealed copy and `offline`, with the
+/// reason, when it did not; the running node retries those when the peer
+/// reconnects, and takes the receipts, because it has this same identity.
+pub async fn push_policy(
+    store: &Store,
+    identity: &Identity,
+    hub_url: &str,
+) -> Result<PolicyPush, EnrollError> {
     let (toml, sig, key) = crate::policy::bundle::export()
         .ok_or_else(|| EnrollError::Local("this node has no policy bundle to push".into()))?;
+    let policy: crate::policy::Policy = toml::from_str(&toml).map_err(|e| {
+        EnrollError::Local(format!("the installed bundle is not valid policy: {e}"))
+    })?;
+    let bundle_sha256 = crate::policy::bundle::sha256(&toml);
+    let members = match send(identity, hub_url, "GET", "/v0/members", None).await {
+        Ok((st, text)) => ok(st, text)
+            .and_then(|v| serde_json::from_value::<Vec<Value>>(v).map_err(local))
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    let me = identity.node_id();
+    let nodes = store.list_nodes().map_err(local)?;
+    let targets = policy_push_targets(&me, &nodes, &members);
+
+    let now = now_ms();
+    let rollout = crate::store::PolicyRolloutRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        bundle_sha256: bundle_sha256.clone(),
+        policy_version: i64::from(policy.version),
+        toml: toml.clone(),
+        sig_hex: sig.clone(),
+        pubkey_hex: key.clone(),
+        source_node: me,
+        created_ms: now,
+        updated_ms: now,
+    };
+    let ids: Vec<String> = targets.iter().map(|t| t.node_id.clone()).collect();
+    store.create_policy_rollout(&rollout, &ids).map_err(local)?;
+
     let payload = Payload::PolicyBundle {
         toml,
         sig_hex: sig,
         pubkey_hex: key,
-        rollout_id: None,
-        bundle_sha256: None,
+        rollout_id: Some(rollout.id.clone()),
+        bundle_sha256: Some(bundle_sha256),
     };
-    let (st, text) = send(identity, hub_url, "GET", "/v0/members", None).await?;
-    let members: Vec<Value> = serde_json::from_value(ok(st, text)?).map_err(local)?;
-    let me = identity.node_id();
-    let mut n = 0;
-    for m in members {
-        let (Some(id), Some(x)) = (m["node_id"].as_str(), m["x25519_pub"].as_str()) else {
-            continue;
-        };
-        if id == me || x.is_empty() {
-            continue;
+    let outcomes = post_each(targets, |id, pk| {
+        let payload = &payload;
+        async move {
+            post_direct(identity, hub_url, &id, &pk, payload)
+                .await
+                .map_err(|e| e.to_string())
         }
-        if !member_binding_ok(id, x, &m) {
-            continue;
-        }
-        let Some(pk) = key32(x).map(x25519_dalek::PublicKey::from) else {
-            continue;
+    })
+    .await;
+    for outcome in &outcomes {
+        let _ = match &outcome.queued {
+            Ok(()) => store.mark_policy_rollout_sent(&rollout.id, &outcome.node_id),
+            Err(why) => store.mark_policy_rollout_offline(
+                &rollout.id,
+                &outcome.node_id,
+                &format!("Not queued: {why}. Retried automatically when the peer is reachable."),
+            ),
         };
-        post_direct(identity, hub_url, id, &pk, &payload).await?;
-        n += 1;
     }
-    Ok(n)
+    Ok(PolicyPush {
+        rollout_id: rollout.id,
+        targets: outcomes,
+    })
 }
 
 // ------------------------------------------------------------------- invitee
@@ -792,6 +961,17 @@ pub async fn accept(
                                     .say("policy bundle refused: rollout metadata does not match");
                                 continue;
                             }
+                            match crate::policy::bundle::offer(&toml) {
+                                crate::policy::bundle::Offer::Install => {}
+                                crate::policy::bundle::Offer::AlreadyInstalled => {
+                                    progress.say("policy bundle already installed");
+                                    continue;
+                                }
+                                crate::policy::bundle::Offer::Refuse(why) => {
+                                    progress.say(&format!("policy bundle refused: {why}"));
+                                    continue;
+                                }
+                            }
                             match crate::policy::bundle::install(&toml, &sig_hex, &pubkey_hex, true)
                             {
                                 Ok(p) => {
@@ -859,4 +1039,124 @@ pub fn qr_svg(url: &str) -> Option<String> {
             .light_color(svg::Color("#ffffff"))
             .build(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::NodeRow;
+
+    fn node(id: &str, name: &str, is_self: bool) -> NodeRow {
+        let mut row = NodeRow::from_json(&json!({ "id": id, "name": name })).unwrap();
+        row.is_self = i64::from(is_self);
+        row
+    }
+
+    fn member(identity: &Identity, name: &str, role: Option<&str>) -> Value {
+        json!({
+            "node_id": identity.node_id(),
+            "x25519_pub": identity.x25519_hex(),
+            "binding_sig": proto::enroll::sign_binding(identity),
+            "name": name,
+            "role": role,
+        })
+    }
+
+    #[test]
+    fn a_push_targets_every_peer_and_never_the_hub_or_this_node() {
+        let me = Identity::from_seed(&[1; 32]);
+        let peer = Identity::from_seed(&[2; 32]);
+        let stranger = Identity::from_seed(&[3; 32]);
+        let hub = Identity::from_seed(&[4; 32]);
+        let unsigned = Identity::from_seed(&[5; 32]);
+        let mut forged = member(&unsigned, "forged", None);
+        forged["binding_sig"] = json!("00");
+        let members = Ok(vec![
+            member(&me, "me", None),
+            member(&peer, "peer", None),
+            member(&stranger, "stranger", None),
+            member(&hub, "hub", Some("hub")),
+            forged,
+        ]);
+        let gone = "f".repeat(64);
+        let nodes = vec![
+            node(&me.node_id(), "me", true),
+            node(&peer.node_id(), "mac", false),
+            node(&gone, "", false),
+        ];
+
+        let targets = policy_push_targets(&me.node_id(), &nodes, &members);
+        let named: Vec<(&str, bool)> = targets
+            .iter()
+            .map(|t| (t.name.as_str(), t.key.is_ok()))
+            .collect();
+        // The forged member is no node of ours, so it is not listed; a node
+        // the hub no longer has is listed, and cannot be queued.
+        assert_eq!(
+            named,
+            vec![
+                ("mac", true),
+                ("ffffffffffffffff", false),
+                ("stranger", true)
+            ]
+        );
+        assert_eq!(
+            targets[1].key.as_ref().err().map(String::as_str),
+            Some("not a member of the hub")
+        );
+    }
+
+    #[test]
+    fn a_push_with_no_member_list_still_lists_every_known_peer_as_not_queued() {
+        let me = Identity::from_seed(&[1; 32]);
+        let nodes = vec![node("peer", "mac", false)];
+        let targets = policy_push_targets(&me.node_id(), &nodes, &Err("hub unreachable".into()));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].key.as_ref().err().map(String::as_str),
+            Some("hub unreachable")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_keeps_going_past_a_failed_post_and_reports_it() {
+        let key = x25519_dalek::PublicKey::from([9; 32]);
+        let target = |id: &str, key: Result<x25519_dalek::PublicKey, String>| PolicyPushTarget {
+            node_id: id.into(),
+            name: id.into(),
+            key,
+        };
+        let targets = vec![
+            target("a", Ok(key)),
+            target("b", Err("no key".into())),
+            target("c", Ok(key)),
+        ];
+        let mut posted = Vec::new();
+        let outcomes = post_each(targets, |id, _| {
+            posted.push(id.clone());
+            async move {
+                if id == "a" {
+                    Err("hub refused (500)".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert_eq!(posted, vec!["a", "c"]);
+        let queued: Vec<_> = outcomes.iter().map(|o| o.queued.clone()).collect();
+        assert_eq!(
+            queued,
+            vec![
+                Err("hub refused (500)".to_string()),
+                Err("no key".to_string()),
+                Ok(())
+            ]
+        );
+        let push = PolicyPush {
+            rollout_id: "r".into(),
+            targets: outcomes,
+        };
+        assert!(!push.all_queued());
+    }
 }

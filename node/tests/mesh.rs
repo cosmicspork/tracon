@@ -17,7 +17,7 @@ use serde_json::json;
 use tracon::config::Config;
 use tracon::mesh::client::MeshClient;
 use tracon::mesh::HubState;
-use tracon::store::{now_ms, NewEvent, Store};
+use tracon::store::{now_ms, NewEvent, PolicyRolloutRow, Store};
 use tracon::stream::{Bus, Frame};
 
 struct Node {
@@ -675,4 +675,229 @@ async fn a_frame_from_another_wire_version_is_refused_with_a_reason() {
     );
     // Refused, not held: no key will ever make this frame readable.
     assert_eq!(s.held, 0);
+}
+
+/// A rollout of `toml` from A to B, signed or not: delivery bookkeeping never
+/// looks at the signature, only the receiver does.
+fn policy_rollout(
+    a: &Node,
+    b: &Node,
+    id: &str,
+    toml: &str,
+    sig_hex: &str,
+    pubkey_hex: &str,
+) -> PolicyRolloutRow {
+    let version: tracon::policy::Policy = toml::from_str(toml).unwrap();
+    let row = PolicyRolloutRow {
+        id: id.into(),
+        bundle_sha256: tracon::policy::bundle::sha256(toml),
+        policy_version: i64::from(version.version),
+        toml: toml.into(),
+        sig_hex: sig_hex.into(),
+        pubkey_hex: pubkey_hex.into(),
+        source_node: a.id.node_id(),
+        created_ms: now_ms(),
+        updated_ms: now_ms(),
+    };
+    a.store
+        .create_policy_rollout(&row, &[b.id.node_id()])
+        .unwrap();
+    row
+}
+
+fn target(node: &Node, rollout: &str) -> tracon::store::PolicyRolloutTargetRow {
+    node.store
+        .policy_rollout_targets(rollout)
+        .unwrap()
+        .remove(0)
+}
+
+#[tokio::test]
+async fn a_rollout_is_queued_for_a_peer_that_is_offline_once_its_key_is_known() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let rollout = policy_rollout(&a, &b, "r1", "version = 7\n", "00", &"11".repeat(32));
+
+    // No sealing key for B yet: nothing can be queued, and it says so.
+    a.client.dispatch_policy_rollout("r1").unwrap();
+    let t = target(&a, "r1");
+    assert_eq!(t.status, "offline");
+    let detail = t.detail.unwrap();
+    assert!(
+        detail.starts_with("Not queued: no sealing key known for")
+            && detail.ends_with("Retried automatically when the peer is reachable."),
+        "{detail}"
+    );
+    assert_eq!(a.client.snapshot().queued, 0);
+
+    // The member list gives A the key, and reaching the hub is itself a
+    // reason to reconcile. B has never said hello, so it is not reachable,
+    // and the bundle is queued for the hub to hold all the same.
+    a.client.refresh_members().await.unwrap();
+    assert!(!a.client.peer_reachable(&b.id.node_id()));
+    let t = target(&a, &rollout.id);
+    assert_eq!(t.status, "sent");
+    assert_eq!(t.attempts, 1);
+    assert_eq!(
+        t.detail.as_deref(),
+        Some(
+            "Queued at the hub; delivered when the peer next connects. Installation not confirmed."
+        )
+    );
+    assert_eq!(a.client.snapshot().queued, 1);
+}
+
+#[tokio::test]
+async fn a_returning_peer_is_sent_what_could_not_be_queued_for_it() {
+    state::isolate();
+    let (a, b) = pair().await;
+    policy_rollout(&a, &b, "r1", "version = 7\n", "00", &"11".repeat(32));
+    a.client.dispatch_policy_rollout("r1").unwrap();
+    assert_eq!(target(&a, "r1").status, "offline");
+
+    // B's hello brings its key and makes it reachable; that is the moment.
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    assert_eq!(target(&a, "r1").status, "sent");
+
+    // Gone quiet, then heard from again: a presence tick that finds it fresh
+    // retries what was left unqueued in between.
+    a.client.presence_tick(now_ms() + 60 * 60_000);
+    assert!(!a.client.peer_reachable(&b.id.node_id()));
+    a.store
+        .mark_policy_rollout_offline("r1", &b.id.node_id(), "outbox error")
+        .unwrap();
+    a.client.presence_tick(now_ms());
+    let t = target(&a, "r1");
+    assert_eq!(t.status, "sent");
+    assert_eq!(t.attempts, 2);
+}
+
+#[tokio::test]
+async fn an_unconfirmed_rollout_is_resent_only_after_the_wait_and_only_to_a_reachable_peer() {
+    state::isolate();
+    let (a, b) = pair().await;
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    let peer = b.id.node_id();
+    assert!(a.client.peer_reachable(&peer));
+    policy_rollout(&a, &b, "r1", "version = 7\n", "00", &"11".repeat(32));
+    a.client.dispatch_policy_rollout("r1").unwrap();
+    assert_eq!(target(&a, "r1").attempts, 1);
+
+    let wait = tracon::mesh::client::POLICY_RESEND_AFTER.as_millis() as i64;
+    let now = now_ms();
+    assert_eq!(
+        a.client
+            .reconcile_policy_rollouts_at(Some(&peer), now + wait / 2),
+        0
+    );
+    assert_eq!(
+        a.client
+            .reconcile_policy_rollouts_at(Some(&peer), now + wait + 1),
+        1
+    );
+    assert_eq!(target(&a, "r1").attempts, 2);
+
+    // An unreachable peer is not sent the same frame over and over: the hub
+    // already holds one for it.
+    a.client.presence_tick(now + 2 * wait);
+    assert!(!a.client.peer_reachable(&peer));
+    assert_eq!(
+        a.client
+            .reconcile_policy_rollouts_at(Some(&peer), now + 3 * wait),
+        0
+    );
+    assert_eq!(target(&a, "r1").attempts, 2);
+}
+
+#[tokio::test]
+async fn a_peers_signed_hello_naming_the_bundle_confirms_the_rollout() {
+    state::isolate();
+    let (a, b) = pair().await;
+    a.client.refresh_members().await.unwrap();
+    let identity = "11".repeat(32);
+    let rollout = policy_rollout(&a, &b, "r1", "version = 7\n", "00", &identity);
+    a.client.dispatch_policy_rollout("r1").unwrap();
+    assert_eq!(target(&a, "r1").status, "sent");
+
+    // B's receipt never arrived; its hello says what it runs.
+    b.store
+        .set_node_policy_metadata(
+            &b.id.node_id(),
+            Some(&identity),
+            Some(&rollout.bundle_sha256),
+            true,
+        )
+        .unwrap();
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    let t = target(&a, "r1");
+    assert_eq!(t.status, "applied");
+    assert!(t.acknowledged_ms.is_some());
+    assert_eq!(
+        t.detail.as_deref(),
+        Some("Confirmed by the peer's signed hello.")
+    );
+    // Confirmed, so nothing is ever resent.
+    assert_eq!(
+        a.client
+            .reconcile_policy_rollouts_at(None, now_ms() + 24 * 60 * 60_000),
+        0
+    );
+}
+
+/// The only test in this file that writes policy files: the state directory
+/// is shared by the whole binary, and both nodes read the one bundle in it.
+#[tokio::test]
+async fn a_receiver_refuses_older_and_conflicting_bundles_and_takes_its_own_again_quietly() {
+    use tracon::policy::bundle;
+    state::isolate();
+    let (a, b) = pair().await;
+    let (signing, _) = bundle::generate_key();
+    bundle::write_key(&signing).unwrap();
+    let identity = bundle::public_identity().unwrap();
+    let installed = "version = 21\n";
+    bundle::install(
+        installed,
+        &bundle::sign(installed).unwrap(),
+        &identity,
+        false,
+    )
+    .unwrap();
+    a.client.refresh_members().await.unwrap();
+    b.client.refresh_members().await.unwrap();
+
+    for (id, toml, applied, detail) in [
+        (
+            "older",
+            "version = 20\n",
+            false,
+            Some("older than installed v21"),
+        ),
+        ("same", installed, true, None),
+        (
+            "conflicting",
+            "version = 21\n# another\n",
+            false,
+            Some("conflicting bundle for v21"),
+        ),
+    ] {
+        policy_rollout(&a, &b, id, toml, &bundle::sign(toml).unwrap(), &identity);
+        a.client.dispatch_policy_rollout(id).unwrap();
+        a.client.drain_once().await.unwrap();
+        b.client.pull_once().await.unwrap();
+        b.client.drain_once().await.unwrap();
+        a.client.pull_once().await.unwrap();
+        let t = target(&a, id);
+        assert_eq!(
+            t.status,
+            if applied { "applied" } else { "rejected" },
+            "{id}"
+        );
+        assert_eq!(t.detail.as_deref(), detail, "{id}");
+    }
+    // Nothing was written: the same bundle is a no-op, the others refusals.
+    assert_eq!(bundle::current().unwrap().toml, installed);
+    assert!(b.store.policy_installation().unwrap().is_none());
 }

@@ -18,10 +18,10 @@ export interface PolicyInstallation {
 
 export interface PolicyRolloutTarget {
   node_id: string
-  /** pending/offline/sent/applied/rejected; sent is not an install confirmation. */
+  /** pending/offline/sent/applied/rejected/superseded; sent is not an install confirmation. */
   status: string
-  /** applied, rejected, or unconfirmed. */
-  confirmation: 'applied' | 'rejected' | 'unconfirmed'
+  /** applied, rejected, superseded, or unconfirmed. */
+  confirmation: 'applied' | 'rejected' | 'superseded' | 'unconfirmed'
   /** receipt_capable only after an authenticated receipt; otherwise unknown_or_legacy. */
   compatibility: 'receipt_capable' | 'unknown_or_legacy'
   detail: string | null
@@ -66,6 +66,25 @@ export function newerShipped(status: PolicyStatus): number | null {
   const shipped = status.shipped?.version
   const installed = status.installed?.policy.version
   return shipped != null && installed != null && shipped > installed ? shipped : null
+}
+
+/** What a rollout target's state means for the operator. Queued is not
+ *  installed: only a receipt or the peer's signed hello confirms it. */
+export function targetLabel(target: PolicyRolloutTarget): string {
+  switch (target.confirmation) {
+    case 'applied': return 'Applied'
+    case 'rejected': return 'Rejected'
+    case 'superseded': return 'Superseded'
+  }
+  if (target.status === 'sent') return 'Queued at hub, unconfirmed'
+  if (target.status === 'offline') return 'Not queued, will retry'
+  return 'Pending'
+}
+
+/** Whether Retry has anything to queue: a target that is neither confirmed,
+ *  refused by its receiver, nor superseded by a newer rollout. */
+export function retryable(rollout: PolicyRollout): boolean {
+  return rollout.targets.some((target) => ['pending', 'sent', 'offline'].includes(target.status))
 }
 
 export const policyAdmin = {

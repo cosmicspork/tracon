@@ -590,7 +590,8 @@ enum PolicyCommand {
     Init,
     /// Sign the current bundle, after editing it.
     Sign,
-    /// Hand the signed bundle to every member of the hub.
+    /// Hand the signed bundle to every peer as a rollout the running node
+    /// keeps delivering. Exits non-zero if any peer's copy was not queued.
     Push,
     /// Verify the bundle and print what it decides. Exits non-zero if the
     /// signature does not check out.
@@ -762,11 +763,27 @@ async fn main() -> Result<()> {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("no hub configured"))?;
             let (id, _) = tracon::mesh::identity::load_or_generate()?;
-            let n = tracon::mesh::enroll::push_policy(&id, &hub).await?;
+            let store = tracon::store::Store::open(&config::Config::db_path())?;
+            let push = tracon::mesh::enroll::push_policy(&store, &id, &hub).await?;
+            let width = push.targets.iter().map(|t| t.name.len()).max().unwrap_or(0);
+            for target in &push.targets {
+                match &target.queued {
+                    Ok(()) => println!("{:<width$}  queued", target.name),
+                    Err(why) => println!("{:<width$}  not queued: {why}", target.name),
+                }
+            }
             println!(
-                "policy bundle handed to {n} member{}",
-                if n == 1 { "" } else { "s" }
+                "rollout {}: the node retries undelivered peers when they reconnect",
+                push.rollout_id
             );
+            let missed = push.targets.iter().filter(|t| t.queued.is_err()).count();
+            if missed > 0 {
+                anyhow::bail!(
+                    "{missed} of {} peer{} not queued",
+                    push.targets.len(),
+                    if push.targets.len() == 1 { "" } else { "s" }
+                );
+            }
             Ok(())
         }
         Command::Policy(cmd) => policy_command(cmd),
