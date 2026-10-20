@@ -681,6 +681,7 @@ impl Tools {
             }
             github::PR_STATUS
             | github::PR_COMMENT
+            | github::ISSUE_COMMENT
             | github::RUN_STATUS
             | github::PR_MERGE
             | github::PR_THREADS
@@ -2052,7 +2053,7 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             with(head, text("summary"))
         }
         jira::ISSUE_COMMENT => with(format!("{name} {}", id("key")), first_line("body")),
-        github::PR_COMMENT | github::PR_REPLY => with(
+        github::PR_COMMENT | github::ISSUE_COMMENT | github::PR_REPLY => with(
             format!("{name} {}#{}", id("repo"), id("number")),
             first_line("body"),
         ),
@@ -2161,6 +2162,10 @@ mod tests {
         assert_eq!(
             summarize(github::PR_COMMENT, &comment),
             "pr_comment o/n#4: Looks good."
+        );
+        assert_eq!(
+            summarize(github::ISSUE_COMMENT, &comment),
+            "github_issue_comment o/n#4: Looks good."
         );
         let note = json!({ "project": "g/p", "iid": 9, "body": "Thanks" });
         assert_eq!(

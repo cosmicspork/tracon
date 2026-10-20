@@ -56,6 +56,7 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (jira::ISSUE_UPDATE, "jira_wiki", &["description"], &[]),
     (jira::ISSUE_COMMENT, "jira_wiki", &["body"], &[]),
     (github::PR_COMMENT, "markdown", &["body"], &[]),
+    (github::ISSUE_COMMENT, "markdown", &["body"], &[]),
     (github::PR_REPLY, "markdown", &["body"], &["thread_id"]),
     (gitlab::MR_COMMENT, "markdown", &["body"], &[]),
     (gitlab::MR_REPLY, "markdown", &["body"], &["discussion_id"]),
@@ -303,6 +304,7 @@ mod tests {
             "issue_update",
             "issue_comment",
             "pr_comment",
+            "github_issue_comment",
             "mr_comment",
             "doc_write",
         ] {

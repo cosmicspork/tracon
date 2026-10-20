@@ -54,7 +54,8 @@ pub fn definitions() -> Vec<Value> {
             "name": ISSUE_COMMENT,
             "description": "Post one comment on a Jira issue. The body is Jira wiki markup \
                             (*bold*, {{code}}, * bullets), not Markdown. Status changes are \
-                            issue_transition, not a comment.",
+                            issue_transition, not a comment. Not for GitHub issues: that is \
+                            github_issue_comment.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -44,6 +44,15 @@ pub const OPERATIONS: &[Operation] = &[
         github::PR_COMMENT,
         gitlab::MR_COMMENT,
     ),
+    Operation {
+        what: "comment on an issue",
+        github: Side::Tool(github::ISSUE_COMMENT),
+        gitlab: Side::None(
+            "the GitLab tools reach merge requests and pipelines, not GitLab's issue tracker; \
+             an issue there is commented on by a person",
+        ),
+        ci_write: false,
+    },
     both(
         "a change's review threads",
         github::PR_THREADS,

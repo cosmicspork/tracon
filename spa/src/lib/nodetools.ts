@@ -28,6 +28,7 @@ export const NODE_TOOLS = new Set([
   // GitHub
   'pr_status',
   'pr_comment',
+  'github_issue_comment',
   'pr_reply',
   'pr_threads',
   'pr_for_branch',
@@ -188,6 +189,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return `Pull request #${pr}`
     case 'pr_comment':
       return `Comment on #${pr}`
+    case 'github_issue_comment':
+      return `Comment on issue #${pr}`
     case 'pr_reply':
       return `Reply on #${pr}`
     case 'pr_threads':
