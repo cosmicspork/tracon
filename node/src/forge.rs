@@ -791,9 +791,8 @@ pub fn git_token_for(
     let host = managed_host(state_dir, repo_path)?;
     let broker = broker.read().unwrap();
     let env_of = |forge: Forge| broker.env_for(forge.credential(), channel, node_id).ok();
-    let forge = resolve_forge(&host, env_of);
-    let env = env_of(forge)?;
-    forge.token(&env).map(|token| (forge, token.clone()))
+    let (forge, token) = forge_and_token(&host, env_of);
+    token.map(|token| (forge, token))
 }
 
 /// The host a managed clone sits under. `None` for a path outside the
@@ -826,6 +825,22 @@ pub fn resolve_forge(
             env_of(*forge).is_some_and(|env| forge.endpoints(&env).1.eq_ignore_ascii_case(host))
         })
         .unwrap_or_else(|| forge_for_host(host))
+}
+
+/// The forge `host` is (`resolve_forge`) and the token git may hand it: only
+/// a credential whose own clone host is `host` answers for it. The host can
+/// come from an identity a peer forwarded, and a guessed forge's credential
+/// belongs to some other host, so anything else is anonymous rather than a
+/// token sent wherever the identity points.
+pub fn forge_and_token(
+    host: &str,
+    env_of: impl Fn(Forge) -> Option<BTreeMap<String, String>>,
+) -> (Forge, Option<String>) {
+    let forge = resolve_forge(host, &env_of);
+    let token = env_of(forge)
+        .filter(|env| forge.endpoints(env).1.eq_ignore_ascii_case(host))
+        .and_then(|env| forge.token(&env).cloned());
+    (forge, token)
 }
 
 /// The forge a host is by its name alone, the last resort when no
@@ -863,6 +878,42 @@ pub fn session_repo(state_dir: &Path, repo: &str) -> Result<PathBuf, String> {
     let dest = root.join(&identity);
     clone_conflict(&root, &dest)?;
     Ok(dest)
+}
+
+/// What a new session's repository is called when it is sent to a peer to
+/// start: a managed clone by its forge identity, which the peer resolves to
+/// its own clone (made with its own forge credential if it has none),
+/// because this node's path means nothing on the peer's disk. Anything else
+/// goes as it was given, for the peer to judge.
+pub fn forwarded_repo(state_dir: &Path, repo: &str) -> String {
+    Some(Path::new(repo))
+        .filter(|path| path.is_absolute())
+        .and_then(|path| managed_identity(state_dir, path))
+        .filter(|identity| crate::mesh::recipe::valid_identity(identity).is_ok())
+        .unwrap_or_else(|| repo.to_string())
+}
+
+/// The forge identity an absolute path names when it is spelled as some
+/// node's managed clone under the default state directory,
+/// `…/tracon/repos/<host>/<owner>/<name>`. A sender older than identity
+/// forwarding sends its own clone's path, which is not on this node's disk;
+/// this is the repository it meant. Only that spelling counts: a host
+/// checkout under some other `repos` directory (`~/repos/github.com/o/r`)
+/// must be refused as one, not quietly swapped for a fresh clone, and a
+/// sender on its own `TRACON_STATE_DIR` is told to name the forge repository
+/// instead. Only ever a name to resolve: nothing at the path is read.
+pub fn identity_in_managed_spelling(repo: &str) -> Option<String> {
+    if !Path::new(repo).is_absolute() {
+        return None;
+    }
+    let root = managed_root(Path::new("/"));
+    let root = root.file_name()?.to_str()?;
+    let segments: Vec<&str> = repo.split('/').collect();
+    segments
+        .windows(2)
+        .rposition(|pair| pair == ["tracon", root])
+        .map(|at| segments[at + 2..].join("/"))
+        .filter(|identity| crate::mesh::recipe::valid_identity(identity).is_ok())
 }
 
 /// An identity with its host in lower case, as hosts are spelled in managed
@@ -999,8 +1050,9 @@ pub async fn ensure_clone(
 /// The managed clone a session starts from, for a repository named by its
 /// forge identity, made now when it is not on disk yet. The forge is the one
 /// the channel's credentials say the host is (`resolve_forge`). A channel
-/// with no credential it may use here clones anonymously, as a sync of the
-/// clone then fetches (`git_token_for`), so a public repository needs none.
+/// with no credential it may use here, or none whose clone host is the
+/// identity's (`forge_and_token`), clones anonymously, as a sync of the clone
+/// then fetches (`git_token_for`), so a public repository needs none.
 pub async fn ensure_clone_of(
     broker: &SharedBroker,
     channel: &str,
@@ -1017,11 +1069,7 @@ pub async fn ensure_clone_of(
     let (forge, token) = {
         let broker = broker.read().unwrap();
         let env_of = |forge: Forge| broker.env_for(forge.credential(), channel, node_id).ok();
-        let forge = resolve_forge(host, env_of);
-        (
-            forge,
-            env_of(forge).and_then(|env| forge.token(&env).cloned()),
-        )
+        forge_and_token(host, env_of)
     };
     make_clone(forge, token.as_deref(), (host, owner, name)).await
 }
@@ -1080,11 +1128,7 @@ pub async fn refresh_for_build(
     let (forge, token) = {
         let broker = broker.read().unwrap();
         let env_of = |forge: Forge| broker.env_for_node(forge.credential(), node_id).ok();
-        let forge = resolve_forge(&host, env_of);
-        (
-            forge,
-            env_of(forge).and_then(|env| forge.token(&env).cloned()),
-        )
+        forge_and_token(&host, env_of)
     };
     let credential = crate::git_remote::brokered(forge.git_user(), token.as_deref());
     // Named under the root but resolving outside it is refused, not taken
@@ -1998,6 +2042,58 @@ mod tests {
         }
     }
 
+    /// A session sent to a peer names a managed clone by its identity, since
+    /// the peer resolves that on its own disk; anything else goes as given.
+    /// The peer reads the repository an older sender meant from the clone
+    /// path it forwards, but only from the `…/tracon/repos/<identity>`
+    /// spelling of one, whichever node's state directory holds it.
+    #[test]
+    fn a_peer_is_sent_the_forge_identity_and_reads_one_from_an_older_senders_path() {
+        let state = tempfile::tempdir().unwrap();
+        let root = managed_root(state.path());
+        std::fs::create_dir_all(root.join("github.com/me/made/.git")).unwrap();
+        for (given, sent) in [
+            (
+                root.join("github.com/me/made")
+                    .to_string_lossy()
+                    .into_owned(),
+                "github.com/me/made".to_string(),
+            ),
+            (
+                root.join("github.com/me/not-yet")
+                    .to_string_lossy()
+                    .into_owned(),
+                "github.com/me/not-yet".to_string(),
+            ),
+            ("github.com/me/proj".into(), "github.com/me/proj".into()),
+            ("/home/me/src/proj".into(), "/home/me/src/proj".into()),
+        ] {
+            assert_eq!(forwarded_repo(state.path(), &given), sent, "{given}");
+        }
+
+        assert_eq!(
+            identity_in_managed_spelling("/home/them/.local/state/tracon/repos/github.com/o/r")
+                .as_deref(),
+            Some("github.com/o/r")
+        );
+        assert_eq!(
+            identity_in_managed_spelling("/srv/x/tracon/repos/gitlab.example/g/sub/r").as_deref(),
+            Some("gitlab.example/g/sub/r")
+        );
+        for unnamed in [
+            "/home/them/src/proj",
+            "/home/them/repos/proj",
+            "/home/them/repos/github.com/o/r",
+            "/srv/repos/state/repos/gitlab.example/g/sub/r",
+            "/state/repos/github.com/o/../../../etc",
+            "/x/tracon/repos/github.com/o/../../etc",
+            "state/repos/github.com/o/r",
+            "github.com/o/r",
+        ] {
+            assert_eq!(identity_in_managed_spelling(unnamed), None, "{unnamed}");
+        }
+    }
+
     /// A checkout outside managed storage with work in it that is not
     /// committed: an edit, an untracked file and an ignored one.
     fn host_checkout(tmp: &Path) -> PathBuf {
@@ -2354,5 +2450,63 @@ mod tests {
         let public = only(Forge::Github, &[]);
         assert_eq!(resolve_forge("github.com", &public), Forge::Github);
         assert_eq!(resolve_forge("git.acme.com", &public), Forge::Gitlab);
+    }
+
+    /// A token goes only to the host its credential clones from. A peer
+    /// that names some other host gets the guessed forge and no token, so
+    /// a gitlab.com token is never handed to whatever host an identity
+    /// points at.
+    #[test]
+    fn a_token_goes_only_to_the_host_its_credential_names() {
+        let both = |github: &[(&str, &str)], gitlab: &[(&str, &str)]| {
+            let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()
+            };
+            let (github, gitlab) = (env(github), env(gitlab));
+            move |forge: Forge| match forge {
+                Forge::Github => Some(github.clone()),
+                Forge::Gitlab => Some(gitlab.clone()),
+            }
+        };
+        let public = both(
+            &[("GH_TOKEN", "fake-github-token")],
+            &[("GITLAB_TOKEN", "fake-gitlab-token")],
+        );
+        assert_eq!(
+            forge_and_token("evil.example", &public),
+            (Forge::Gitlab, None)
+        );
+        assert_eq!(
+            forge_and_token("gitlab.com", &public),
+            (Forge::Gitlab, Some("fake-gitlab-token".into()))
+        );
+        assert_eq!(
+            forge_and_token("GitHub.com", &public),
+            (Forge::Github, Some("fake-github-token".into()))
+        );
+        assert_eq!(
+            forge_and_token("github.evil.example", &public),
+            (Forge::Github, None)
+        );
+
+        let enterprise = both(
+            &[("GH_TOKEN", "fake-ghe-token"), ("GH_HOST", "code.acme.com")],
+            &[("GITLAB_TOKEN", "fake-gitlab-token")],
+        );
+        assert_eq!(
+            forge_and_token("code.acme.com", &enterprise),
+            (Forge::Github, Some("fake-ghe-token".into()))
+        );
+        assert_eq!(
+            forge_and_token("github.com", &enterprise),
+            (Forge::Github, None)
+        );
+        assert_eq!(
+            forge_and_token("evil.example", &enterprise),
+            (Forge::Gitlab, None)
+        );
     }
 }

@@ -128,10 +128,11 @@
       return `No connected provider offers a model for ${channel}.`
     return null
   }
-  function selectLocalRepository(selection: { targetId: string; channel: string; repo: string; workspaceId: string | null }) {
-    if (selectedNode?.id !== selection.targetId || !selectedNode.is_self || channel !== selection.channel) return
+  function selectRepository(selection: { targetId: string; channel: string; repo: string; workspaceId: string | null }) {
+    if (selectedNode?.id !== selection.targetId || channel !== selection.channel) return
     repo = selection.repo
-    workspaceId = selection.workspaceId
+    // An upload stays on this node; a peer is only ever sent a repository.
+    workspaceId = selectedNode.is_self ? selection.workspaceId : null
   }
 
 
@@ -156,8 +157,8 @@
     if (harness && !harnessOptions.includes(harness)) harness = ''
   })
   // A workspace import belongs to the serving node and cannot be forwarded to
-  // a peer. Do not carry a local checkout into a different runner either: a
-  // remote path is only used after the operator enters it for that machine.
+  // a peer. A choice is not carried into a different runner either: the
+  // operator chooses again for the runner and channel they now mean.
   $effect(() => {
     const scope = selectedNode ? `${selectedNode.id}:${channel}` : null
     if (scope === repoScope) return
@@ -182,8 +183,8 @@
       })
     }
   })
-  // The repository this channel worked in last is a local convenience only.
-  // A peer has its own filesystem, so it must receive an explicit path.
+  // The repository this channel worked in last is a local convenience only:
+  // what this node has cloned says nothing about what a peer has.
   let managedRepos = $state<ManagedRepo[] | null>(null)
   $effect(() => {
     if (!node?.is_self || managedRepos !== null) return
@@ -246,8 +247,8 @@
   }
 </script>
 
-<!-- Readiness is this node's answer about its own checkout; a peer's path
-     is not readable from here. A gap is a banner in the main column, above
+<!-- Readiness is this node's answer about its own clone; a peer's is not
+     readable from here. A gap is a banner in the main column, above
      the composer it concerns. -->
 {#if local}
   <ReadinessBanner {channel} {repo} workItem={item?.id ?? null} bind:view={readiness} />
@@ -304,11 +305,24 @@
         {/if}
       </label>
       {#if selectedNode && !selectedNode.is_self}
-        <label>
-          <span>Repository path on {selectedNode.name}</span>
-          <input bind:value={repo} placeholder="Absolute path on {selectedNode.name}" spellcheck="false" />
-          <small>This exact path is sent to {selectedNode.name}. Clones and browser-file uploads on {store.node?.name ?? 'this controller'} are not transferred to a peer.</small>
-        </label>
+        <div class="field">
+          <label>
+            <span>Forge repository</span>
+            <input bind:value={repo} placeholder="github.com/owner/name" spellcheck="false" />
+          </label>
+          <small
+            >{selectedNode.name} starts from its own clone of it, cloning it with its own forge credential when the session
+            starts if it has not yet. Browser-file uploads on {store.node?.name ?? 'this controller'} are not transferred to
+            a peer.</small
+          >
+          <RepoPicker
+            bind:value={repo}
+            {channel}
+            targetId={selectedNode.id}
+            peer={selectedNode.name}
+            onselect={selectRepository}
+          />
+        </div>
       {:else if selectedNode?.is_self}
         <div class="field">
           <span>Repository</span>
@@ -317,7 +331,7 @@
             bind:workspaceId
             {channel}
             targetId={selectedNode.id}
-            onselect={selectLocalRepository}
+            onselect={selectRepository}
           />
           {#if repo && !workspaceId}<PreparationPreview view={preparation} />{/if}
         </div>

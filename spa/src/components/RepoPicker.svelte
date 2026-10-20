@@ -3,7 +3,9 @@
   // (`host/owner/name`), and the node clones it when the session starts if it
   // has not yet. Other source enters only as files explicitly selected in the
   // browser and copied into a managed workspace; no operator machine path is
-  // ever sent to the node.
+  // ever sent to the node. For a peer, `peer` names it: the forge identity is
+  // all that is sent, the peer clones it with its own forge credential, and
+  // this node's clones and uploads stay here, so neither is offered.
   import { onDestroy } from 'svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -16,12 +18,14 @@
     workspaceId = $bindable<string | null>(null),
     channel = '',
     targetId = '',
+    peer = null,
     onselect = undefined,
   }: {
     value?: string
     workspaceId?: string | null
     channel?: string
     targetId?: string
+    peer?: string | null
     onselect?: (selection: { targetId: string; channel: string; repo: string; workspaceId: string | null }) => void
   } = $props()
 
@@ -29,6 +33,7 @@
   let managed = $state<ManagedRepo[]>([])
   let allManaged = $state<ManagedRepo[]>([])
   $effect(() => {
+    if (peer !== null) return
     api
       .recentRepos()
       .then((d) => {
@@ -62,8 +67,8 @@
     selectionGeneration += 1
   })
   // A picker result is valid only for the node and channel it started under.
-  // The parent destroys this component for a peer target, but an in-flight
-  // browser request can still settle afterwards.
+  // The parent may keep this component across a change of either, and an
+  // in-flight browser request can still settle afterwards.
   $effect(() => {
     void targetId
     void channel
@@ -200,9 +205,13 @@
   <small>Asking the forges…</small>
 {:else if forges !== null && forges.length === 0}
   <small>
-    No forge credential is bound to {channel || 'this channel'}.
+    No forge credential is bound to {channel || 'this channel'} here, so no repositories are listed.
     <a href="/settings#connections">Add a GitHub or GitLab token in Settings › Connections.</a>
-    Upload a checkout with the file picker below. Managed repositories, if available, are listed under Recently used.
+    {#if peer !== null}
+      Name the repository above; {peer} clones it with its own credential, or anonymously.
+    {:else}
+      Upload a checkout with the file picker below. Managed repositories, if available, are listed under Recently used.
+    {/if}
   </small>
 {:else if forges !== null}
   {#if searchable}
@@ -303,15 +312,24 @@
   </div>
 {:else if chosenUncloned}
   <div class="chosen">
-    <span>{chosenUncloned.full_name} <small>{chosenUncloned.host} · cloned on this node when the session starts</small></span>
+    <span
+      >{chosenUncloned.full_name}
+      <small
+        >{chosenUncloned.host} · {peer === null
+          ? 'cloned on this node when the session starts'
+          : `cloned on ${peer} when the session starts, if it has not yet`}</small
+      ></span
+    >
     <button type="button" class="lnk" onclick={() => (value = '')}>change</button>
   </div>
 {/if}
 
-<label class="upload">
-  <span>{uploading ? 'Copying selected files…' : 'Copy files or folder into managed workspace'}</span>
-  <input type="file" multiple webkitdirectory onchange={importFiles} disabled={uploading} />
-</label>
+{#if peer === null}
+  <label class="upload">
+    <span>{uploading ? 'Copying selected files…' : 'Copy files or folder into managed workspace'}</span>
+    <input type="file" multiple webkitdirectory onchange={importFiles} disabled={uploading} />
+  </label>
+{/if}
 
 <style>
   .picker {

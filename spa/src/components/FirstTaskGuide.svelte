@@ -104,7 +104,7 @@
           {#if selected.node.is_self}
             Choose a forge repository, which {selected.node.name} clones if it has not yet, or copy files into a workspace there.
           {:else}
-            Enter a repository path on {selected.node.name}. Local imports are not sent to a peer.
+            Choose or name a forge repository (github.com/owner/name); {selected.node.name} clones it with its own forge credential if it has not yet. Local imports are not sent to a peer.
           {/if}
         </li>
         <li>Start the task, then open its session for progress and permission requests.</li>

@@ -361,8 +361,10 @@ declared, not discovered: **Settings → Connections → Declared models** edits
 provider's model list (id, picker name, context and output limits, reasoning,
 attachments) and writes it to `node.toml`; sessions started after the next restart
 see the change.
-When a peer runs the task, enter a repository path on that peer: local clones and
-browser imports are not transferred. Changing runner or channel clears the old
+When a peer runs the task, choose or name the forge repository
+(`github.com/owner/name`) the same way: the peer starts from its own clone of it,
+cloning it with its own channel forge credential (or anonymously) if it has none.
+This node's clones and browser imports are not transferred. Changing runner or channel clears the old
 repository selection; changing model scope clears stale model and budget overrides.
 
 **Repositories come from a forge.** Give the broker a `gh` or `glab` credential
