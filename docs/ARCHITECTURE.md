@@ -1385,7 +1385,7 @@ operator's own checkout is not a session source and is refused at create. A sess
 started on a peer is sent the identity, never the sender's path to its clone: the peer
 resolves it to its own managed clone and clones it with its own channel forge credential,
 refusing what it would refuse from its own operator (in words that name it) before
-anything is written. An older sender's absolute clone path (`…/repos/<identity>`) is read
+anything is written. An older sender's absolute clone path (`…/tracon/repos/<identity>`) is read
 as the identity it spells. Files
 uploaded in the browser seed a workspace of their own, and a harness the operator
 runs submits its worktree through `submit_review`. The seed is copied, never

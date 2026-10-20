@@ -6570,11 +6570,12 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     if spec.workspace_id.is_none() {
                         let state_dir = Config::state_dir();
                         let named = spec.repo_path.trim();
-                        let path = std::path::Path::new(named);
-                        let here = path.starts_with(crate::forge::managed_root(&state_dir))
-                            || crate::forge::managed_identity(&state_dir, path).is_some();
-                        if let Some(identity) =
-                            crate::forge::identity_in_managed_spelling(named).filter(|_| !here)
+                        if let Some(identity) = crate::forge::identity_in_managed_spelling(named)
+                            .filter(|_| {
+                                let path = std::path::Path::new(named);
+                                !path.starts_with(crate::forge::managed_root(&state_dir))
+                                    && crate::forge::managed_identity(&state_dir, path).is_none()
+                            })
                         {
                             spec.repo_path = identity;
                         }

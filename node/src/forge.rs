@@ -879,11 +879,14 @@ pub fn forwarded_repo(state_dir: &Path, repo: &str) -> String {
 }
 
 /// The forge identity an absolute path names when it is spelled as some
-/// node's managed clone, `<state>/repos/<host>/<owner>/<name>`, whatever
-/// that node's state directory is. A sender older than identity forwarding
-/// sends its own clone's path, which is not on this node's disk; this is the
-/// repository it meant. Only ever a name to resolve: nothing at the path is
-/// read.
+/// node's managed clone under the default state directory,
+/// `…/tracon/repos/<host>/<owner>/<name>`. A sender older than identity
+/// forwarding sends its own clone's path, which is not on this node's disk;
+/// this is the repository it meant. Only that spelling counts: a host
+/// checkout under some other `repos` directory (`~/repos/github.com/o/r`)
+/// must be refused as one, not quietly swapped for a fresh clone, and a
+/// sender on its own `TRACON_STATE_DIR` is told to name the forge repository
+/// instead. Only ever a name to resolve: nothing at the path is read.
 pub fn identity_in_managed_spelling(repo: &str) -> Option<String> {
     if !Path::new(repo).is_absolute() {
         return None;
@@ -892,11 +895,10 @@ pub fn identity_in_managed_spelling(repo: &str) -> Option<String> {
     let root = root.file_name()?.to_str()?;
     let segments: Vec<&str> = repo.split('/').collect();
     segments
-        .iter()
-        .enumerate()
-        .filter(|(_, segment)| **segment == root)
-        .map(|(at, _)| segments[at + 1..].join("/"))
-        .find(|identity| crate::mesh::recipe::valid_identity(identity).is_ok())
+        .windows(2)
+        .rposition(|pair| pair == ["tracon", root])
+        .map(|at| segments[at + 2..].join("/"))
+        .filter(|identity| crate::mesh::recipe::valid_identity(identity).is_ok())
 }
 
 /// An identity with its host in lower case, as hosts are spelled in managed
@@ -2066,13 +2068,14 @@ mod tests {
             Some("github.com/o/r")
         );
         assert_eq!(
-            identity_in_managed_spelling("/srv/repos/state/repos/gitlab.example/g/sub/r")
-                .as_deref(),
+            identity_in_managed_spelling("/srv/x/tracon/repos/gitlab.example/g/sub/r").as_deref(),
             Some("gitlab.example/g/sub/r")
         );
         for unnamed in [
             "/home/them/src/proj",
             "/home/them/repos/proj",
+            "/home/them/repos/github.com/o/r",
+            "/srv/repos/state/repos/gitlab.example/g/sub/r",
             "/state/repos/github.com/o/../../../etc",
             "state/repos/github.com/o/r",
             "github.com/o/r",
