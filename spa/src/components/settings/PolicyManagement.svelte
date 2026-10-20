@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { ApiError } from '../../lib/api'
-  import { newerShipped, policyAdmin, type PolicyRollout, type PolicyStatus, type SignedPolicyBundle } from '../../lib/policy-admin'
+  import { newerShipped, policyAdmin, retryable, targetLabel, type PolicyRollout, type PolicyStatus, type SignedPolicyBundle } from '../../lib/policy-admin'
   import { store } from '../../lib/store.svelte'
   import Card from './Card.svelte'
 
@@ -313,22 +313,24 @@
             <strong>Policy {short(rollout.bundle_sha256)}</strong>
             <small>v{rollout.policy_version} · created {when(rollout.created_ms)}</small>
           </div>
-          <button class="lnk" onclick={() => retry(rollout)} disabled={retrying === rollout.id}>
-            {retrying === rollout.id ? 'Retrying…' : 'Retry unconfirmed'}
-          </button>
+          {#if retryable(rollout)}
+            <button class="lnk" onclick={() => retry(rollout)} disabled={retrying === rollout.id}>
+              {retrying === rollout.id ? 'Retrying…' : 'Retry unconfirmed'}
+            </button>
+          {/if}
         </header>
         <ul>
           {#each rollout.targets as target (target.node_id)}
             {@const node = peers.find((candidate) => candidate.id === target.node_id)}
-            <li class:applied={target.confirmation === 'applied'} class:rejected={target.confirmation === 'rejected'}>
+            <li class:applied={target.confirmation === 'applied'} class:rejected={target.confirmation === 'rejected'} class:superseded={target.confirmation === 'superseded'}>
               <div>
                 <strong>{node?.name || short(target.node_id)}</strong>
                 <small>{short(target.node_id)} · attempts {target.attempts} · last sent {when(target.last_sent_ms)}</small>
               </div>
               <div class="receipt">
-                <span>{target.confirmation === 'applied' ? 'Applied' : target.confirmation === 'rejected' ? 'Rejected' : target.status === 'offline' ? 'Offline / unconfirmed' : 'Sent / unconfirmed'}</span>
-                <small>{target.compatibility === 'receipt_capable' ? 'Receipt-capable peer' : 'Legacy or unknown peer — no authenticated receipt yet.'}</small>
+                <span>{targetLabel(target)}</span>
                 {#if target.detail}<small>{target.detail}</small>{/if}
+                <small>{target.compatibility === 'receipt_capable' ? 'Receipt-capable peer' : 'Legacy or unknown peer — no authenticated receipt yet.'}</small>
               </div>
             </li>
           {/each}
@@ -380,6 +382,7 @@
   .rollouts li { display: flex; justify-content: space-between; gap: 1rem; border-left: 3px solid var(--ink2); padding: .4rem .6rem; }
   .rollouts li.applied { border-color: var(--ok); }
   .rollouts li.rejected { border-color: var(--crit); }
+  .rollouts li.superseded { opacity: .7; }
   .rollouts li div { display: grid; }
   .receipt { text-align: right; max-width: 30rem; }
   @media (max-width: 42rem) { .rollouts li { align-items: stretch; flex-direction: column; } .receipt { text-align: left; } }

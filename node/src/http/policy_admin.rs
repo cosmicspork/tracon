@@ -204,6 +204,13 @@ pub async fn apply(
         state.store().create_policy_rollout(&rollout, &targets)?;
         Some(rollout)
     };
+    if rollout.is_none() {
+        // Nothing above superseded the older rollouts, but their bundles are
+        // older than this one all the same and are never delivered again.
+        state.store().supersede_policy_rollouts(&format!(
+            "Superseded by v{policy_version}, installed here without a rollout."
+        ))?;
+    }
     state.store().record_policy_installation(
         &request.bundle_sha256,
         Some(&state.node_id),
@@ -229,6 +236,27 @@ pub async fn retry(
     let mesh = state.mesh.as_ref().ok_or_else(|| {
         ApiError::new(StatusCode::CONFLICT, "this node is not connected to a mesh")
     })?;
+    let remaining: Vec<_> = state
+        .store()
+        .policy_rollout_targets(&id)?
+        .into_iter()
+        .filter(|target| target.status != "applied")
+        .collect();
+    if !remaining.is_empty() && remaining.iter().all(|target| target.status == "superseded") {
+        let newest = state
+            .store()
+            .policy_rollouts()?
+            .into_iter()
+            .next()
+            .filter(|newest| newest.id != id);
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            match newest {
+                Some(newest) => format!("superseded by rollout {}", newest.id),
+                None => "superseded by a newer policy installed here".to_string(),
+            },
+        ));
+    }
     mesh.dispatch_policy_rollout(&id)
         .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?;
     let rollout = state
@@ -331,6 +359,7 @@ fn rollout_json(store: &crate::store::Store, rollout: PolicyRolloutRow) -> Resul
             let confirmation = match target.status.as_str() {
                 "applied" => "applied",
                 "rejected" => "rejected",
+                "superseded" => "superseded",
                 _ => "unconfirmed",
             };
             let compatibility = if matches!(confirmation, "applied" | "rejected") {

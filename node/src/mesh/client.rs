@@ -28,6 +28,31 @@ const PULL_LIMIT: usize = 200;
 const SEEN_RETENTION_MS: i64 = 30 * 86_400_000;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+/// How long a reachable peer may go without confirming a queued policy bundle
+/// before it is queued again: long enough for a pull and a receipt, and what
+/// catches a frame the hub pruned or lost.
+pub const POLICY_RESEND_AFTER: Duration = Duration::from_secs(30 * 60);
+
+/// Whether a delivery to one peer is due again, from its durable record:
+/// one never queued always is; one queued and unconfirmed is once the peer is
+/// reachable and `resend_after` has passed since it was queued. Anything else
+/// (confirmed, refused by the receiver, or superseded) is not.
+pub fn redelivery_due(
+    status: &str,
+    last_sent_ms: Option<i64>,
+    reachable: bool,
+    now: i64,
+    resend_after: Duration,
+) -> bool {
+    match status {
+        "pending" | "offline" => true,
+        "sent" => {
+            reachable && last_sent_ms.is_none_or(|at| now - at > resend_after.as_millis() as i64)
+        }
+        _ => false,
+    }
+}
+
 /// What opening and applying one verified envelope came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Opened {
@@ -248,8 +273,11 @@ impl MeshClient {
     }
 
     /// Queue the exact immutable bundle retained for a rollout to every target
-    /// that has not authenticated its installation. Queuing is recorded as
-    /// `sent`, never as `applied`; only [`Payload::PolicyReceipt`] changes that.
+    /// that has not authenticated its installation, been refused by it, or
+    /// been superseded. Queuing is recorded as `sent`, never as `applied`;
+    /// only [`Payload::PolicyReceipt`] or a matching signed hello changes that.
+    /// A peer that is offline still gets the frame: the hub keeps it until
+    /// the peer next pulls.
     pub fn dispatch_policy_rollout(&self, rollout_id: &str) -> Result<(), HubError> {
         let rollout = self
             .store
@@ -261,37 +289,90 @@ impl MeshClient {
             .policy_rollout_retry_targets(rollout_id)
             .map_err(|e| HubError::Local(e.to_string()))?
         {
-            if !self.peer_reachable(&target.node_id) {
-                let _ = self.store.mark_policy_rollout_offline(
-                    rollout_id,
-                    &target.node_id,
-                    "Peer is offline or the mesh is not connected; retry when it is reachable.",
-                );
-                continue;
-            }
-            let payload = Payload::PolicyBundle {
-                toml: rollout.toml.clone(),
-                sig_hex: rollout.sig_hex.clone(),
-                pubkey_hex: rollout.pubkey_hex.clone(),
-                rollout_id: Some(rollout.id.clone()),
-                bundle_sha256: Some(rollout.bundle_sha256.clone()),
-            };
-            match self.enqueue_direct(MESH_CHANNEL, &target.node_id, &payload) {
-                Ok(()) => {
-                    let _ = self
-                        .store
-                        .mark_policy_rollout_sent(rollout_id, &target.node_id);
-                }
-                Err(error) => {
-                    let _ = self.store.mark_policy_rollout_offline(
-                        rollout_id,
-                        &target.node_id,
-                        &format!("Could not queue direct delivery: {error}"),
-                    );
-                }
+            if target.status != "rejected" {
+                self.queue_policy_bundle(&rollout, &target.node_id);
             }
         }
         Ok(())
+    }
+
+    /// Seal a rollout's bundle to one target and record what came of it.
+    /// `true` when it was queued.
+    fn queue_policy_bundle(&self, rollout: &crate::store::PolicyRolloutRow, node_id: &str) -> bool {
+        let payload = Payload::PolicyBundle {
+            toml: rollout.toml.clone(),
+            sig_hex: rollout.sig_hex.clone(),
+            pubkey_hex: rollout.pubkey_hex.clone(),
+            rollout_id: Some(rollout.id.clone()),
+            bundle_sha256: Some(rollout.bundle_sha256.clone()),
+        };
+        match self.enqueue_direct(MESH_CHANNEL, node_id, &payload) {
+            Ok(()) => {
+                let _ = self.store.mark_policy_rollout_sent(&rollout.id, node_id);
+                true
+            }
+            Err(error) => {
+                let _ = self.store.mark_policy_rollout_offline(
+                    &rollout.id,
+                    node_id,
+                    &format!(
+                        "Not queued: {error}. Retried automatically when the peer is reachable."
+                    ),
+                );
+                false
+            }
+        }
+    }
+
+    /// Bring every peer's newest live rollout up to date (or one peer's, with
+    /// `only`): queue it where it never was, and again where it was queued
+    /// [`POLICY_RESEND_AFTER`] ago, the peer is reachable now, and nothing has
+    /// confirmed it. Returns how many were queued.
+    pub fn reconcile_policy_rollouts(&self, only: Option<&str>) -> usize {
+        self.reconcile_policy_rollouts_at(only, now_ms())
+    }
+
+    /// [`reconcile_policy_rollouts`](Self::reconcile_policy_rollouts) as of
+    /// `now`.
+    pub fn reconcile_policy_rollouts_at(&self, only: Option<&str>, now: i64) -> usize {
+        let targets = match self.store.policy_rollout_reconcile_targets(only) {
+            Ok(targets) => targets,
+            Err(error) => {
+                tracing::warn!(%error, "policy rollouts not reconciled");
+                return 0;
+            }
+        };
+        let mut rollouts: HashMap<String, Option<crate::store::PolicyRolloutRow>> = HashMap::new();
+        let mut queued = 0;
+        for target in targets {
+            let reachable = self.peer_reachable(&target.node_id);
+            if !redelivery_due(
+                &target.status,
+                target.last_sent_ms,
+                reachable,
+                now,
+                POLICY_RESEND_AFTER,
+            ) {
+                continue;
+            }
+            let rollout = rollouts
+                .entry(target.rollout_id.clone())
+                .or_insert_with(|| self.store.policy_rollout(&target.rollout_id).ok().flatten());
+            if let Some(rollout) = rollout {
+                if self.queue_policy_bundle(rollout, &target.node_id) {
+                    tracing::info!(to = %target.node_id, rollout = %rollout.id, "policy bundle queued again");
+                    queued += 1;
+                }
+            }
+        }
+        queued
+    }
+
+    /// Everything this node delivers to peers on its own and keeps a durable
+    /// record of, brought up to date: for one peer that has just come back,
+    /// or for all of them.
+    fn reconcile_deliveries(&self, only: Option<&str>) {
+        self.reconcile_policy_rollouts(only);
     }
 
     /// Send an authenticated receiver result back to the node that sent a
@@ -719,36 +800,44 @@ impl MeshClient {
                 // Keep the policy cache locked across the on-disk compare and
                 // install: policy administration holds the same lock, so
                 // neither path can leave a newer file paired with stale rules.
+                // Redelivery is routine, so the bundle already installed is
+                // answered without a write, and an older one is refused.
                 let installed = {
                     let mut cached = self.policy.write();
-                    match crate::policy::bundle::install(toml, sig_hex, pubkey_hex, false) {
-                        Ok(policy) => {
-                            tracing::info!(from = %sender, rules = policy.rules.len(), "policy bundle installed");
-                            *cached = policy;
-                            let sha256 = crate::policy::bundle::sha256(toml);
-                            let identity = pubkey_hex.trim().to_ascii_lowercase();
-                            if let Err(error) = self.store.record_policy_installation(
-                                &sha256,
-                                Some(sender),
-                                rollout_id.as_deref(),
-                            ) {
-                                tracing::error!(error = %error, "installed policy provenance was not recorded");
+                    match crate::policy::bundle::offer(toml, pubkey_hex) {
+                        crate::policy::bundle::Offer::AlreadyInstalled => Ok(false),
+                        crate::policy::bundle::Offer::Refuse(why) => Err(why),
+                        crate::policy::bundle::Offer::Install => {
+                            match crate::policy::bundle::install(toml, sig_hex, pubkey_hex, false) {
+                                Ok(policy) => {
+                                    tracing::info!(from = %sender, rules = policy.rules.len(), "policy bundle installed");
+                                    *cached = policy;
+                                    let sha256 = crate::policy::bundle::sha256(toml);
+                                    let identity = pubkey_hex.trim().to_ascii_lowercase();
+                                    if let Err(error) = self.store.record_policy_installation(
+                                        &sha256,
+                                        Some(sender),
+                                        rollout_id.as_deref(),
+                                    ) {
+                                        tracing::error!(error = %error, "installed policy provenance was not recorded");
+                                    }
+                                    if let Err(error) = self.store.set_node_policy_metadata(
+                                        &self.node_id(),
+                                        Some(&identity),
+                                        Some(&sha256),
+                                        true,
+                                    ) {
+                                        tracing::error!(error = %error, "installed policy compatibility was not recorded");
+                                    }
+                                    Ok(true)
+                                }
+                                Err(error) => Err(error.to_string()),
                             }
-                            if let Err(error) = self.store.set_node_policy_metadata(
-                                &self.node_id(),
-                                Some(&identity),
-                                Some(&sha256),
-                                true,
-                            ) {
-                                tracing::error!(error = %error, "installed policy compatibility was not recorded");
-                            }
-                            Ok(())
                         }
-                        Err(error) => Err(error),
                     }
                 };
                 match installed {
-                    Ok(()) => {
+                    Ok(written) => {
                         self.send_policy_receipt(
                             &env.channel,
                             sender,
@@ -757,7 +846,7 @@ impl MeshClient {
                             true,
                             None,
                         );
-                        return Opened::Applied;
+                        return Opened::from(written);
                     }
                     Err(error) => {
                         tracing::warn!(from = %sender, error = %error, "policy bundle refused");
@@ -767,7 +856,7 @@ impl MeshClient {
                             rollout_id.as_deref(),
                             bundle_sha256.as_deref(),
                             false,
-                            Some(error.to_string()),
+                            Some(error.clone()),
                         );
                         self.note_refusal(format!("policy from {sender}: {error}"));
                         return Opened::Ignored;
@@ -861,8 +950,22 @@ impl MeshClient {
             }
             _ => {}
         }
+        // A peer heard from again after going quiet gets what was held back
+        // for it; its hello is what marks it reachable, so this is the moment.
+        let returning = matches!(payload, Payload::Hello { .. } | Payload::Node(_))
+            && !self
+                .store
+                .get_node(sender)
+                .ok()
+                .flatten()
+                .is_some_and(|n| n.reachable != 0);
         match self.mirror.apply(sender, &env.channel, payload) {
-            Applied::Stored => Opened::Applied,
+            Applied::Stored => {
+                if returning {
+                    self.reconcile_deliveries(Some(sender));
+                }
+                Opened::Applied
+            }
             Applied::Duplicate => Opened::Ignored,
             Applied::Impersonation => {
                 tracing::warn!(sender = %sender, "peer spoke for another node; dropped");
@@ -1118,6 +1221,9 @@ impl MeshClient {
                 if let Ok(Some(row)) = self.store.get_node(&n.id) {
                     self.bus.publish_untapped(Frame::Node(row.to_json()));
                 }
+                if reachable {
+                    self.reconcile_deliveries(Some(&n.id));
+                }
             }
         }
     }
@@ -1227,6 +1333,9 @@ impl MeshClient {
             if self.hello().await.is_ok() && n.is_multiple_of(10) {
                 self.send_snapshots();
                 self.send_rollups();
+                // Also what picks up a rollout `tracon policy push` wrote to
+                // the shared database.
+                self.reconcile_deliveries(None);
             }
             n += 1;
             tokio::time::sleep(every).await;
@@ -1365,6 +1474,7 @@ impl MeshClient {
                 .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot())));
             self.pull_wake.notify_one();
             self.drain_wake.notify_one();
+            self.reconcile_deliveries(None);
         }
     }
 

@@ -1396,7 +1396,10 @@ the shipped one (`node/src/policy/working-agreements.toml`) and signs it, replac
 whatever was there; to keep rules of your own, edit the file and run
 `tracon policy sign` instead. The node reads it at startup, so restart it
 (`tracon service restart`) after either, and `tracon policy push` hands it to the
-rest of the mesh. A bundle that is missing, unsigned or malformed has no rules, and
+rest of the mesh: it lists each peer as queued or not, and the running node
+delivers to any peer that was offline when it comes back. A peer that refused the
+bundle is not sent it again; once you have fixed that peer, run `tracon policy push`
+again to resend. A bundle that is missing, unsigned or malformed has no rules, and
 no rules means everything is asked.
 
 A rule allows, denies, or is left to ask. Deny wins over allow whatever the order,

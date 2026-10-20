@@ -1582,6 +1582,30 @@ const MIGRATIONS: &[&str] = &[
         created_ms  INTEGER NOT NULL
     );
     "#,
+    // 68: a rollout target can be superseded by a newer rollout, after which
+    // the signer never pushes its older bundle again. SQLite cannot alter a
+    // CHECK, so the table is rebuilt with every row it held. Nothing
+    // references it, so the copy-and-rename needs no foreign-key pause.
+    r#"
+    CREATE TABLE policy_rollout_target_next (
+        rollout_id      TEXT NOT NULL REFERENCES policy_rollout(id) ON DELETE CASCADE,
+        node_id         TEXT NOT NULL,
+        status          TEXT NOT NULL CHECK(status IN ('pending','sent','offline','applied','rejected','superseded')),
+        detail          TEXT,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        last_sent_ms    INTEGER,
+        acknowledged_ms INTEGER,
+        PRIMARY KEY (rollout_id, node_id)
+    );
+    INSERT INTO policy_rollout_target_next
+        (rollout_id, node_id, status, detail, attempts, last_sent_ms, acknowledged_ms)
+        SELECT rollout_id, node_id, status, detail, attempts, last_sent_ms, acknowledged_ms
+        FROM policy_rollout_target;
+    DROP TABLE policy_rollout_target;
+    ALTER TABLE policy_rollout_target_next RENAME TO policy_rollout_target;
+    CREATE INDEX policy_rollout_target_status ON policy_rollout_target(rollout_id, status);
+    CREATE INDEX policy_rollout_target_node ON policy_rollout_target(node_id, status);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered
