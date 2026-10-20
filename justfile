@@ -99,7 +99,7 @@ musl: spa
     if ! command -v x86_64-linux-musl-gcc >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
         build=zigbuild
     fi
-    cargo $build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub
+    cargo $build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub --bin tracon-agent
     file target/x86_64-unknown-linux-musl/release/tracon
 
 # The desktop bundle (the AppImage here, the .dmg on a Mac) with the node
