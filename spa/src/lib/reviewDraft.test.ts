@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { ReviewDraftConflict } from './api'
-import { draftForRevision, ReviewDraftSync, type DraftState } from './reviewDraft'
+import { draftedMessage, draftForRevision, ReviewDraftSync, type DraftState } from './reviewDraft'
 import type { ReviewDraft, ReviewDraftFields } from './types'
 
 /** A node holding one draft, with the same compare-and-set as the real one. */
@@ -112,5 +112,16 @@ describe('a draft from an earlier revision', () => {
     const d = held('v2', { message: 'fix: edited here' })
     const applied = draftForRevision(d, 'v2', 'fix: proposed')
     expect(applied).toEqual({ fields: d.draft, fromEarlier: false, staleMessage: null })
+  })
+
+  test('an untouched squash message is not drafted, so it meets no new proposal', () => {
+    // A reason typed on v1, the message left as the agent proposed it.
+    expect(draftedMessage('fix: proposed', 'fix: proposed')).toBeUndefined()
+    expect(draftedMessage('fix: proposed\n', 'fix: proposed')).toBeUndefined()
+    const d = held('v1', { reason: 'tighten it', message: draftedMessage('fix: proposed', 'fix: proposed') })
+    const applied = draftForRevision(d, 'v2', 'fix: resubmitted')
+    expect(applied.staleMessage).toBeNull()
+    expect(applied.fields.message).toBeUndefined()
+    expect(draftedMessage('fix: edited', 'fix: proposed')).toBe('fix: edited')
   })
 })

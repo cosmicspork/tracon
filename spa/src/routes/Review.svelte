@@ -33,7 +33,7 @@
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
-  import { draftForRevision, ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
+  import { draftedMessage, draftForRevision, ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
   import { proposedMessage as proposedCommitMessage, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import { CLOSED_STATES, canStartReviewer, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
@@ -225,7 +225,7 @@
       descBody,
       commenting,
       comment,
-      message,
+      message: draftedMessage(message, proposedMessage),
       branch: branchName,
       messages: editedMessages(),
     }
@@ -426,8 +426,8 @@
   })
   /**
    * Whether the agent's own commit ships, and which signatures a new one
-   * drops, judged by the message the node will squash with: an edited title,
-   * body or description changes it as surely as an edited message does.
+   * drops, judged by the message the node will squash with: only an edited
+   * commit message changes it.
    */
   const ships = $derived(shipping(intent, shippedMessage(outputs, intent), reworded))
   const files = $derived.by(() => {

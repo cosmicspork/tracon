@@ -42,6 +42,16 @@ export function draftForRevision(held: ReviewDraft, revisionId: string | undefin
   return { fields: rest, fromEarlier, staleMessage: message }
 }
 
+/**
+ * The squash message as a draft keeps it: only when the operator changed it
+ * from the proposal. An untouched one is left out, so a later revision's new
+ * proposal is not met by a "drafted against an earlier revision" message
+ * nobody wrote.
+ */
+export function draftedMessage(message: string, proposed: string): string | undefined {
+  return message.trim() !== proposed ? message : undefined
+}
+
 type Save = typeof api.saveReviewDraft
 
 export class ReviewDraftSync {

@@ -1930,9 +1930,7 @@ gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\
         assert!(!is_signed(bare));
     }
 
-    /// The message a squash must carry to remake a commit is its own, and
-    /// only for a commit the squash could make at all: on those parents, with
-    /// no header the squash never writes.
+    /// A commit's message starts past its headers, a signature's continuation lines and all.
     #[test]
     fn a_commit_message_is_read_past_its_signature() {
         let signed = b"tree t\nparent p\nauthor a\ncommitter c\ngpgsig -----BEGIN-----\n \n sig\n                        -----END-----\n\nfix: subject\n\nbody\n\n";
@@ -1940,6 +1938,9 @@ gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\
         assert_eq!(message_of(b"tree t\nauthor a\ncommitter c\n\n\n"), None);
     }
 
+    /// The message a squash must carry to remake a commit is its own, and
+    /// only for a commit the squash could make at all: on those parents, with
+    /// no header the squash never writes.
     #[test]
     fn a_commit_ships_as_written_only_on_the_squash_parents() {
         let one = b"tree t\nparent p\nauthor a <a@e> 1 +0000\ncommitter a <a@e> 1 +0000\n\

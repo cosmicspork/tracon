@@ -49,7 +49,7 @@ test('under keep, an edited commit and the ones after it are remade', () => {
   expect(shipping(keep, '', { bbbb2222: 'two, said again' })).toEqual({ own: false, dropped: ['cccc3333'] })
 })
 
-test("with no message written, the agent's own commit ships whatever the title says", () => {
+test("with no message written the agent's own commit ships; a written different message drops its signature", () => {
   const titled: ReviewIntent = { ...one, as_written: 'work\n\nthe detail', own_message: 'work\n\nthe detail' }
   expect(shipping(titled, shippedMessage({}, titled), {})).toEqual({ own: true, dropped: [] })
   expect(shipping(titled, shippedMessage({ commit: 'work, retitled' }, titled), {})).toEqual({
