@@ -778,6 +778,11 @@ export interface ReviewIntent {
    * for its signature, so the head itself ships. Absent when none would.
    */
   as_written?: string
+  /**
+   * Under squash, when it combines exactly one of the agent's commits: that
+   * commit's message, which the squash carries when nobody writes one.
+   */
+  own_message?: string
   /** Of `commits`, the signed ones a commit made in publication would replace. */
   signed?: string[]
 }

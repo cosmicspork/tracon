@@ -307,25 +307,24 @@ pub fn placeholder_branch(branch: &str) -> bool {
     })
 }
 
-/// The commit message a squash carries when nobody wrote one: the change's
-/// title, then its description.
-pub fn default_message(title: &str, body: &str) -> String {
-    let body = body.trim();
-    if body.is_empty() {
-        title.trim().to_string()
-    } else {
-        format!("{}\n\n{body}", title.trim())
-    }
-}
-
-/// The message a squash carries: the one written for it, else the forge
-/// description's, else the review's own title and body.
-pub fn message_for(outputs: &super::publish::Outputs, title: &str, body: &str) -> String {
-    match (&outputs.commit, &outputs.description) {
-        (Some(message), _) => message.trim().to_string(),
-        (None, Some(description)) => default_message(&description.title, &description.body),
-        (None, None) => default_message(title, body),
-    }
+/// The message a squash carries: the one written for it, else the message
+/// of the one commit of the agent's it combines. None when nobody wrote one
+/// and it combines several commits, or none: a change's title and
+/// description are prose for the forge and never become a commit message
+/// (#592). `as_written` stands in for the agent's own message on a revision
+/// submitted before that was kept.
+pub fn message_for(
+    outputs: &super::publish::Outputs,
+    intent: &super::publish::Intent,
+) -> Option<String> {
+    outputs
+        .commit
+        .as_deref()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .or(intent.own_message.as_deref())
+        .or(intent.as_written.as_deref())
+        .map(str::to_string)
 }
 
 /// How commits ship and what they are held to, for a repository on a
@@ -404,6 +403,43 @@ mod tests {
         assert_eq!(
             style.check_message("")[0],
             "the commit message has no subject line"
+        );
+    }
+
+    #[test]
+    fn the_squash_message_is_the_one_written_else_the_agents_own_never_the_description() {
+        use super::super::publish::{Description, Intent, Outputs};
+        let described = Outputs {
+            description: Some(Description {
+                title: "fix: described".into(),
+                body: "## Why\n\nbecause".into(),
+            }),
+            ..Outputs::default()
+        };
+        let intent = Intent {
+            own_message: Some("fix: the agent's own".into()),
+            ..Intent::default()
+        };
+        let written = Outputs {
+            commit: Some(" fix: written\n".into()),
+            ..described.clone()
+        };
+        assert_eq!(
+            message_for(&written, &intent).as_deref(),
+            Some("fix: written")
+        );
+        assert_eq!(
+            message_for(&described, &intent).as_deref(),
+            Some("fix: the agent's own")
+        );
+        assert_eq!(message_for(&described, &Intent::default()), None);
+        let legacy = Intent {
+            as_written: Some("fix: as written".into()),
+            ..Intent::default()
+        };
+        assert_eq!(
+            message_for(&described, &legacy).as_deref(),
+            Some("fix: as written")
         );
     }
 

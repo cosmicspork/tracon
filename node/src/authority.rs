@@ -620,10 +620,18 @@ pub async fn publish_review(
         broken.extend(style.check_branch(branch));
         target.branch = branch.to_string();
     }
-    let message = intent
-        .squash_onto
-        .as_ref()
-        .map(|_| crate::review::prose::message_for(&outputs, title, body));
+    let message = match intent.squash_onto {
+        Some(_) => Some(
+            crate::review::prose::message_for(&outputs, &intent).ok_or_else(|| {
+                PublishError::Conflict(
+                    "nothing says what message the squashed commit carries; write one here, or \
+                     have the agent resubmit with `message`"
+                        .into(),
+                )
+            })?,
+        ),
+        None => None,
+    };
     if let Some(message) = &message {
         broken.extend(style.check_message(message));
     }

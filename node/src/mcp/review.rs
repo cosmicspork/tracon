@@ -113,7 +113,7 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                             "draft": { "type": "boolean", "description": "Open the new change as a draft. Not for an existing change." },
                         },
                     },
-                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message (else the description's, else title and body); a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it. To ship your own signed commit as written, with its SHA and signature, make it the one commit on the base (or on what the change's branch holds) and pass its exact message here; otherwise a new, unsigned commit ships." },
+                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message; a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it. Omitted, the squash carries the message of your one commit beyond the base (or beyond what the change's branch holds), and that commit itself ships, with its SHA and signature, when it sits directly on it; with several such commits `message` is required. The title, body and forge description never become the commit message. A message other than your commit's own ships a new, unsigned commit. The result says what ships: `ships` (\"own\" or \"new\"), `commit_message`, and `drops_signatures`, the signed commits a new commit replaces; resubmit with `message` to change it before the operator decides." },
                     "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title when that is the node's placeholder. Fixed by the first submit of a review. An existing change is pushed to its own branch whatever your worktree's is called." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds: the change's head, or for a branch pushed before its change opened, whatever the branch holds now. Forced only over what it held at submit, and always approved by the operator." },
                 },
@@ -575,30 +575,6 @@ async fn submit(
     let commits = review::commits(&worktree, &range_base)
         .await
         .map_err(|e| e.to_string())?;
-    // A message or branch that breaks the rules fails here, before the card
-    // reaches the operator.
-    let mut broken = Vec::new();
-    if squash {
-        broken.extend(style.check_message(&review::prose::message_for(&forge, &title, &body)));
-    } else {
-        for commit in &commits {
-            broken.extend(
-                style
-                    .check_message(&commit.subject)
-                    .into_iter()
-                    .map(|finding| format!("{:.8}: {finding}", commit.sha)),
-            );
-        }
-    }
-    if target.change.is_none() {
-        broken.extend(style.check_branch(&target.branch));
-    }
-    if !broken.is_empty() {
-        return Err(format!(
-            "what would ship breaks this repository's commit rules: {}",
-            broken.join("; ")
-        ));
-    }
     let rewrite = args
         .get("rewrite")
         .and_then(Value::as_bool)
@@ -661,9 +637,53 @@ async fn submit(
             _ => intent.squash_onto = Some(leaves),
         }
     }
-    shipping(&worktree, &capture.head_sha, &mut intent)
+    let combined = shipping(&worktree, &capture.head_sha, &mut intent)
         .await
         .map_err(|e| e.to_string())?;
+    // A message or branch that breaks the rules fails here, before the card
+    // reaches the operator. So does a squash with no message to carry: only
+    // the agent's own commit, when there is exactly one, speaks for it.
+    let mut broken = Vec::new();
+    if squash {
+        match review::prose::message_for(&intent.forge, &intent) {
+            Some(message) => broken.extend(style.check_message(&message)),
+            None if combined > 1 => {
+                return Err(format!(
+                    "this squashes {combined} of your commits into one, so it needs the message \
+                     that commit carries: pass `message`, or make your work one commit"
+                ))
+            }
+            None if combined == 1 => {
+                return Err("your commit has no message to ship: pass `message`".into())
+            }
+            None => {
+                return Err(
+                    "none of your commits is new to what this squashes onto, so there is no \
+                     message of yours to ship: pass `message`"
+                        .into(),
+                )
+            }
+        }
+    } else {
+        for commit in &intent.commits {
+            broken.extend(
+                style
+                    .check_message(&commit.subject)
+                    .into_iter()
+                    .map(|finding| format!("{:.8}: {finding}", commit.sha)),
+            );
+        }
+    }
+    if target.change.is_none() {
+        broken.extend(style.check_branch(&target.branch));
+    }
+    if !broken.is_empty() {
+        return Err(format!(
+            "what would ship breaks this repository's commit rules: {}",
+            broken.join("; ")
+        ));
+    }
+    let ships = what_ships(&intent);
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     let max_snapshot_bytes = manager.cfg().live().supervision.max_snapshot_bytes;
     // Capture the committed candidate before any check can execute. The
@@ -710,6 +730,7 @@ async fn submit(
         candidate,
         max_snapshot_bytes,
         authorship,
+        ships,
     };
     // The operator's own toolchain is where an external harness's checks
     // run, never this node's container: nothing here can execute a command
@@ -757,6 +778,7 @@ async fn submit(
         "uncommitted": submission.capture.uncommitted,
         "authorship": submission.authorship,
     });
+    with_ships(&mut extras, &submission.ships);
     let running = tokio::spawn({
         let store = store.clone();
         let manager = manager.clone();
@@ -855,6 +877,8 @@ struct Submission {
     candidate: CandidateRow,
     max_snapshot_bytes: u64,
     authorship: Option<Value>,
+    /// What an approval as submitted ships, from `what_ships`.
+    ships: Value,
 }
 
 impl Submission {
@@ -883,6 +907,7 @@ impl Submission {
             candidate,
             max_snapshot_bytes,
             authorship,
+            ships,
         } = self;
         let external = session.is_none();
         let checks_json = (!external)
@@ -944,7 +969,7 @@ impl Submission {
             manager.publish_queue().await;
             let reviewer =
                 spawn_review_session_when_kept(store, manager, &id, &ctx.channel, retained).await;
-            return Ok(json!({
+            let mut resubmitted = json!({
                 "review_id": id,
                 "state": "new",
                 "message": "Resubmitted. Call review_status to wait for the verdict.",
@@ -956,7 +981,9 @@ impl Submission {
                 "candidate_id": candidate.id,
                 "checks_reused": checks.reused,
                 "authorship": authorship,
-            }));
+            });
+            with_ships(&mut resubmitted, &ships);
+            return Ok(resubmitted);
         }
 
         let row = ReviewRow {
@@ -1020,7 +1047,7 @@ impl Submission {
         let reviewer =
             spawn_review_session_when_kept(store, manager, &id, &ctx.channel, retained).await;
 
-        Ok(json!({
+        let mut submitted = json!({
             "review_id": id,
             "state": "new",
             "message": "Submitted for review. Nothing is published until a human approves. \
@@ -1033,7 +1060,16 @@ impl Submission {
             "candidate_id": candidate.id,
             "checks_reused": checks.reused,
             "authorship": authorship,
-        }))
+        });
+        with_ships(&mut submitted, &ships);
+        Ok(submitted)
+    }
+}
+
+/// `what_ships`'s fields, added to a submission's result.
+fn with_ships(result: &mut Value, ships: &Value) {
+    if let (Some(result), Some(ships)) = (result.as_object_mut(), ships.as_object()) {
+        result.extend(ships.clone());
     }
 }
 
@@ -1327,20 +1363,34 @@ fn stored_target(store: &Store, review: &ReviewRow) -> Result<Target, String> {
 /// Which of the agent's commits a commit made in publication would replace
 /// with their signatures, and under squash the message that ships the head
 /// itself, so the operator sees before approving whether what ships is the
-/// agent's commit or a new one (#551).
+/// agent's commit or a new one (#551). Under squash, also how many of the
+/// agent's commits the squash combines, and when that is one, its message,
+/// which the squash carries when nobody wrote one (#592).
 async fn shipping(
     worktree: &str,
     head_sha: &str,
     intent: &mut review::publish::Intent,
-) -> Result<(), review::ReviewError> {
+) -> Result<usize, review::ReviewError> {
+    let mut combined = Vec::new();
     for commit in &intent.commits {
         let raw = review::raw_commit(worktree, &commit.sha).await?;
+        // Under squash, a commit already on what the squash sits on is not
+        // replaced, and neither is one in what this worktree holds of it.
         let replaced = match &intent.squash_onto {
-            Some(onto) => !review::descends_from(worktree, onto, &commit.sha).await,
+            Some(onto) => {
+                let held = match intent.held.as_deref().filter(|_| !intent.rewrite) {
+                    Some(held) => review::descends_from(worktree, held, &commit.sha).await,
+                    None => false,
+                };
+                !held && !review::descends_from(worktree, onto, &commit.sha).await
+            }
             None => true,
         };
         if replaced && review::publish::is_signed(&raw) {
             intent.signed.push(commit.sha.clone());
+        }
+        if replaced && intent.squash_onto.is_some() {
+            combined.push(review::publish::message_of(&raw));
         }
         let Some(onto) = intent
             .squash_onto
@@ -1359,7 +1409,28 @@ async fn shipping(
         intent.as_written =
             review::publish::as_written(&raw, onto, intent.squash_merges.as_deref());
     }
-    Ok(())
+    if let [Some(message)] = &combined[..] {
+        intent.own_message = Some(message.clone());
+    }
+    Ok(combined.len())
+}
+
+/// What an approval of this revision as submitted ships, told to the agent
+/// in the submission's result so it can resubmit with `message` before the
+/// operator decides (#592): `own` when its commits are pushed as they are,
+/// `new` when publication makes a commit, the message that commit carries,
+/// and the signed commits it replaces, whose signatures are dropped.
+fn what_ships(intent: &review::publish::Intent) -> Value {
+    if intent.squash_onto.is_none() {
+        return json!({ "ships": "own", "commit_message": null, "drops_signatures": [] });
+    }
+    let message = review::prose::message_for(&intent.forge, intent);
+    let own = message.is_some() && message == intent.as_written;
+    json!({
+        "ships": if own { "own" } else { "new" },
+        "commit_message": message,
+        "drops_signatures": if own { Vec::new() } else { intent.signed.clone() },
+    })
 }
 
 /// Settle what this revision may do on the forge, asking the forge rather

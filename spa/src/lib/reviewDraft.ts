@@ -14,6 +14,44 @@ import type { ReviewDraft, ReviewDraftFields } from './types'
  */
 export type DraftState = 'clean' | 'saving' | 'saved' | 'conflict' | 'unsaved'
 
+/** A held draft as it applies to the revision on screen. */
+export interface DraftForRevision {
+  /** What to put back on the screen. */
+  fields: ReviewDraftFields
+  /** The draft was written against an earlier revision. */
+  fromEarlier: boolean
+  /**
+   * The draft's squash message, written against an earlier revision and
+   * different from what this one proposes. It is not applied: the operator
+   * chooses between it and the proposal, as between two devices' drafts.
+   */
+  staleMessage: string | null
+}
+
+/**
+ * Put back what the operator left on a review, except a squash message
+ * written against an earlier revision: this revision's proposal, which may be
+ * the agent's new `message`, is not silently replaced by it (#592).
+ */
+export function draftForRevision(held: ReviewDraft, revisionId: string | undefined, proposed: string): DraftForRevision {
+  const fromEarlier = !!held.revision_id && held.revision_id !== revisionId
+  const { message, ...rest } = held.draft
+  if (!fromEarlier || message === undefined || message.trim() === proposed.trim()) {
+    return { fields: held.draft, fromEarlier, staleMessage: null }
+  }
+  return { fields: rest, fromEarlier, staleMessage: message }
+}
+
+/**
+ * The squash message as a draft keeps it: only when the operator changed it
+ * from the proposal. An untouched one is left out, so a later revision's new
+ * proposal is not met by a "drafted against an earlier revision" message
+ * nobody wrote.
+ */
+export function draftedMessage(message: string, proposed: string): string | undefined {
+  return message.trim() !== proposed ? message : undefined
+}
+
 type Save = typeof api.saveReviewDraft
 
 export class ReviewDraftSync {

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { shipping, shippedMessage } from './shipping'
+import { proposedMessage, shipping, shippedMessage } from './shipping'
 import type { ReviewIntent } from './types'
 
 const one: ReviewIntent = {
@@ -49,18 +49,21 @@ test('under keep, an edited commit and the ones after it are remade', () => {
   expect(shipping(keep, '', { bbbb2222: 'two, said again' })).toEqual({ own: false, dropped: ['cccc3333'] })
 })
 
-test('a changed title with the commit message untouched ships a new commit and drops the signature', () => {
-  const titled: ReviewIntent = { ...one, as_written: 'work\n\nthe detail' }
-  expect(shipping(titled, shippedMessage({}, '  work ', 'the detail\n'), {})).toEqual({ own: true, dropped: [] })
-  expect(shipping(titled, shippedMessage({}, 'work, retitled', 'the detail'), {})).toEqual({
+test("with no message written the agent's own commit ships; a written different message drops its signature", () => {
+  const titled: ReviewIntent = { ...one, as_written: 'work\n\nthe detail', own_message: 'work\n\nthe detail' }
+  expect(shipping(titled, shippedMessage({}, titled), {})).toEqual({ own: true, dropped: [] })
+  expect(shipping(titled, shippedMessage({ commit: 'work, retitled' }, titled), {})).toEqual({
     own: false,
     dropped: ['aaaa1111'],
   })
 })
 
-test('the squash message is the one written, else the description, else the title and body', () => {
-  const description = { title: 'described', body: '' }
-  expect(shippedMessage({ commit: ' written\n', description }, 'title', 'body')).toBe('written')
-  expect(shippedMessage({ description }, 'title', 'body')).toBe('described')
-  expect(shippedMessage({}, 'title', ' body ')).toBe('title\n\nbody')
+test("the squash message is the one written, else the agent's own, never the description", () => {
+  const description = { title: 'described', body: '## Why' }
+  const own: ReviewIntent = { forge: { description }, squash_onto: 'base', own_message: 'fix: own' }
+  expect(shippedMessage({ commit: ' written\n', description }, own)).toBe('written')
+  expect(shippedMessage({ description }, own)).toBe('fix: own')
+  expect(proposedMessage(own)).toBe('fix: own')
+  expect(proposedMessage({ ...own, forge: { description, commit: 'fix: agent' } })).toBe('fix: agent')
+  expect(proposedMessage({ forge: { description }, squash_onto: 'base' })).toBe('')
 })

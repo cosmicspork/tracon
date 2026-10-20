@@ -28,18 +28,22 @@ export function shipping(intent: ReviewIntent, message: string, edited: Record<s
   return { own: false, dropped: commits.slice(first).map((c) => c.sha).filter((sha) => signed.has(sha)) }
 }
 
-/** A squash message from a title and body, trimmed as the node's `default_message` does. */
-export function defaultMessage(title: string, body: string): string {
-  return body.trim() ? `${title.trim()}\n\n${body.trim()}` : title.trim()
+/**
+ * The message a squash carries when nobody edits it, as the node's
+ * `message_for` derives it: the agent's `message`, else the message of the
+ * one commit of its the squash combines. Empty when there is neither: a
+ * change's title and description never become a commit message (#592).
+ */
+export function proposedMessage(intent: ReviewIntent): string {
+  return (intent.forge.commit ?? ownMessage(intent)).trim()
 }
 
-/**
- * The message the node squashes with for an approval sending `outputs`, as
- * its `message_for` derives it: the commit message written, else the
- * description's, else the review's title and body as they now stand.
- */
-export function shippedMessage(outputs: ReviewOutputs, title: string, body: string): string {
-  if (outputs.commit !== undefined) return outputs.commit.trim()
-  const from = outputs.description ?? { title, body }
-  return defaultMessage(from.title, from.body)
+/** The message the node squashes with for an approval sending `outputs`. */
+export function shippedMessage(outputs: ReviewOutputs, intent: ReviewIntent): string {
+  return outputs.commit !== undefined ? outputs.commit.trim() : ownMessage(intent)
+}
+
+/** The agent's own commit message, for a revision whose squash combines one commit. */
+function ownMessage(intent: ReviewIntent): string {
+  return intent.own_message ?? intent.as_written ?? ''
 }

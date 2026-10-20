@@ -1295,8 +1295,13 @@ resumed attempt makes the identical commit. When the agent's own head already
 is that commit but for its signature (one commit whose parents are that commit
 and, for an update that merged its base, the base it merged; the message
 unchanged), its head is pushed instead, so the signature survives; a commit
-the publisher makes is never signed. The review says before approval which
-of the two ships, and which signatures a new commit drops. `keep` pushes the agent's commits
+the publisher makes is never signed. With no `message`, the squash carries
+the message of the agent's one commit beyond what it squashes onto, so that
+commit ships as written by default; a submission that would squash several
+commits with no `message` is refused, and a change's title and description
+never become a commit message. The submission's result (`ships`,
+`commit_message`, `drops_signatures`) and the review screen both say before
+approval which of the two ships, and which signatures a new commit drops. `keep` pushes the agent's commits
 as written, unless the operator edited a commit's message (`messages` in the
 approved outputs, by the commit's sha): then that commit and those after it are
 remade in the publisher with the same trees, authors, committers and dates and

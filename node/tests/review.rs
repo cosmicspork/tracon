@@ -5447,6 +5447,137 @@ async fn a_resumed_publication_finds_the_signed_commit_it_pushed() {
     assert!(signed_on_forge(&f, &signed));
 }
 
+/// A pull request's Markdown, the kind that must never become a commit body.
+const MARKDOWN_BODY: &str = "## Why\n\nThe timestamps lost their mask.\n\n## Verification\n\n\
+                             ```\njust check\n```\n\nGenerated with a tool";
+
+/// With no `message`, the squash carries the agent's own message, so its one
+/// signed commit on the base ships as written, and the submission says so
+/// (#592).
+#[tokio::test]
+async fn with_no_message_the_agents_signed_commit_ships_as_written() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    gh_forge(&f, pull_seven(&base));
+    let signed = sign_head(std::path::Path::new(&f.worktree));
+
+    let mut args = f.submit_args();
+    args["title"] = json!("fix: the thing (KEY-1)");
+    args["body"] = json!(MARKDOWN_BODY);
+    let submitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(submitted["ships"], "own", "{submitted}");
+    assert_eq!(submitted["commit_message"], "work", "{submitted}");
+    assert_eq!(submitted["drops_signatures"], json!([]), "{submitted}");
+    let id = review_id(&submitted);
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shipped = f.forge_branch();
+    assert_eq!(shipped, signed, "the agent's own commit is what ships");
+    assert!(signed_on_forge(&f, &shipped), "its signature is kept");
+}
+
+/// A change's description is prose for the forge. An update that adds one
+/// commit onto a squash the agent never had ships a new commit, and with no
+/// message that commit carries the agent's commit message, never the title
+/// and the Markdown description (#592).
+#[tokio::test]
+async fn a_change_description_never_becomes_the_commit_message() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let mut args = f.submit_args();
+    args["message"] = json!("feat: the first squash");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first = f.forge_branch();
+
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo more >> a.txt && git add -A \
+         && git commit -q -m 'fix: write timestamps with a mask' -m 'The detail.'",
+    );
+    gh_forge(&f, pull_seven(&first));
+    let updated = f
+        .submit_update(json!({
+            "title": "fix: the thing (KEY-1)",
+            "body": MARKDOWN_BODY,
+            "forge": { "description": { "title": "fix: described", "body": MARKDOWN_BODY } },
+        }))
+        .await;
+    assert_eq!(updated["ships"], "new", "{updated}");
+    let (status, body) = f.approve(&review_id(&updated)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let origin = f.dir.join("origin.git");
+    let shipped = f.forge_branch();
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-list --parents -n1 {shipped}")),
+        format!("{shipped} {first}")
+    );
+    assert_eq!(
+        sh_out(&origin, &format!("git log -1 --format=%B {shipped}")),
+        "fix: write timestamps with a mask\n\nThe detail."
+    );
+}
+
+/// Several commits squash to one whose message only the agent can write:
+/// without `message` the submission is refused before the card reaches the
+/// operator (#592).
+#[tokio::test]
+async fn several_commits_with_no_message_are_refused() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm more",
+    );
+
+    let refused = f.tool("s1", "submit_review", f.submit_args()).await;
+    let error = refused["error"].to_string();
+    assert!(error.contains("squashes 2 of your commits"), "{refused}");
+    assert!(error.contains("pass `message`"), "{refused}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+
+    let mut args = f.submit_args();
+    args["message"] = json!("feat: the thing");
+    let submitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(submitted["ships"], "new", "{submitted}");
+    assert_eq!(
+        submitted["commit_message"], "feat: the thing",
+        "{submitted}"
+    );
+}
+
+/// The submission says which commit ships and which signatures a new one
+/// drops, and a resubmission says it again, so the agent can change the
+/// message before the operator decides (#592).
+#[tokio::test]
+async fn the_submission_and_its_resubmission_say_what_ships() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let signed = sign_head(std::path::Path::new(&f.worktree));
+
+    let mut args = f.submit_args();
+    args["message"] = json!("work, said again");
+    let submitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(submitted["ships"], "new", "{submitted}");
+    assert_eq!(submitted["commit_message"], "work, said again");
+    assert_eq!(submitted["drops_signatures"], json!([signed]));
+
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(review_id(&submitted));
+    let again = f.tool("s1", "submit_review", resubmit).await;
+    assert_eq!(again["state"], "new", "{again}");
+    assert_eq!(again["ships"], "own", "{again}");
+    assert_eq!(again["commit_message"], "work");
+    assert_eq!(again["drops_signatures"], json!([]));
+}
+
 /// The next revision of a squashed change adds one more commit on top of
 /// the squash, though the agent never had that commit.
 #[tokio::test]
@@ -5671,7 +5802,9 @@ async fn a_message_that_breaks_the_rules_never_reaches_the_operator() {
     assert!(refused.contains("PROJ-7"), "{refused}");
     assert!(f.store.open_reviews().unwrap().is_empty());
 
-    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let mut args = f.submit_args();
+    args["message"] = json!("feat: add the thing");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
     let (status, body) = f
         .call(
             "POST",
