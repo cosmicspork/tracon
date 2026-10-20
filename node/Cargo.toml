@@ -25,6 +25,7 @@ path = "tests/support/fake_claude.rs"
 anyhow.workspace = true
 tracon-proto.workspace = true
 tracon-sync.workspace = true
+tracon-acp.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["proto", "sync", "node", "hub", "agent"]
+members = ["proto", "sync", "acp", "node", "hub", "agent"]
 # The desktop wrapper is its own workspace: building it needs webkit2gtk and
 # gtk development headers, and the node and hub must stay buildable on a
 # machine that has neither.
@@ -15,6 +15,7 @@ repository = "https://github.com/cosmicspork/tracon"
 [workspace.dependencies]
 tracon-proto = { path = "proto" }
 tracon-sync = { path = "sync" }
+tracon-acp = { path = "acp" }
 base64 = "0.22"
 hex = "0.4"
 sha1 = "0.10"
