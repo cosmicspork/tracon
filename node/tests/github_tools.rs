@@ -275,7 +275,12 @@ async fn the_github_tools_are_offered_to_the_bound_channel() {
         .iter()
         .map(|d| d["name"].as_str().unwrap().to_string())
         .collect();
-    for n in ["pr_status", "pr_comment", "run_status"] {
+    for n in [
+        "pr_status",
+        "pr_comment",
+        "github_issue_comment",
+        "run_status",
+    ] {
         assert!(names.contains(&n.to_string()), "{n} missing from {names:?}");
     }
     assert!(t.list("personal", "n1").is_empty());
@@ -322,6 +327,29 @@ async fn a_comment_waits_on_the_operator_and_then_posts_once() {
 
     t.policy = allowing(r#""pr_comment""#);
     let (err, v) = call(&t, &c, "pr_comment", args).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["id"], 5);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "POST");
+    assert_eq!(seen[0].1, "/repos/owner/name/issues/7/comments");
+}
+
+/// An issue had no comment tool of its own, so an agent had to guess that
+/// `pr_comment` takes an issue number too (#593).
+#[tokio::test]
+async fn an_issue_comment_waits_on_the_operator_and_then_posts_on_the_issue() {
+    state::isolate();
+    let (mut t, seen) = rig().await;
+    let c = ctx("work");
+    let args = json!({ "repo": "owner/name", "number": 7, "body": "blocked on #592" });
+    let (err, v) = call(&t, &c, "github_issue_comment", args.clone()).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+
+    t.policy = allowing(r#""github_issue_comment""#);
+    let (err, v) = call(&t, &c, "github_issue_comment", args).await;
     assert!(!err, "{v}");
     assert_eq!(v["id"], 5);
     let seen = seen.lock().unwrap().clone();
@@ -916,6 +944,7 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
         "submit_review",
         "pr_merge",
         "pr_comment",
+        "github_issue_comment",
         "run_dispatch",
         "repo_setup_draft",
         "request_egress",

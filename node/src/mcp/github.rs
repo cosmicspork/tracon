@@ -1,6 +1,6 @@
 //! GitHub, as narrow tools: a pull request's state with its checks and
-//! reviews, its review threads, one comment on it, one reply to a thread, the
-//! open pull request for a branch, the Actions runs for a branch or an exact
+//! reviews, its review threads, one comment on it, one reply to a thread, one
+//! comment on an issue, the open pull request for a branch, the Actions runs for a branch or an exact
 //! commit with each run's jobs, waiting for a run to move, the end of a job's
 //! log, rerunning a run's failed jobs (asked), and starting a workflow on a
 //! branch (asked, and only a workflow the node's `[github] dispatch` lists).
@@ -19,6 +19,9 @@ use crate::{broker::SharedBroker, forge::Forge, mcp::CallContext};
 pub const CREDENTIAL: &str = "gh";
 pub const PR_STATUS: &str = "pr_status";
 pub const PR_COMMENT: &str = "pr_comment";
+/// Named for the forge, not `gh issue comment`'s `issue_comment`: that is
+/// Jira's tool, and a channel can hold both (#593).
+pub const ISSUE_COMMENT: &str = "github_issue_comment";
 pub const RUN_STATUS: &str = "run_status";
 pub const PR_MERGE: &str = "pr_merge";
 pub const PR_THREADS: &str = "pr_threads";
@@ -33,6 +36,7 @@ pub const RUN_DISPATCH: &str = "run_dispatch";
 pub const TOOLS: &[&str] = &[
     PR_STATUS,
     PR_COMMENT,
+    ISSUE_COMMENT,
     RUN_STATUS,
     PR_MERGE,
     PR_THREADS,
@@ -105,13 +109,28 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": PR_COMMENT,
-            "description": "Post one comment on a GitHub pull request. The operator is asked \
-                            before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+            "description": "Post one comment on a GitHub pull request. For a GitHub issue use \
+                            github_issue_comment. The operator is asked before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string", "description": REPO },
                     "number": { "type": "integer" },
+                    "body": { "type": "string" },
+                },
+                "required": ["repo", "number", "body"],
+            },
+        }),
+        json!({
+            "name": ISSUE_COMMENT,
+            "description": "Post one comment on a GitHub issue (`number` is the issue's number \
+                            in `repo`). Not for Jira issues, and not for pull requests, which are \
+                            pr_comment. The operator is asked before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": REPO },
+                    "number": { "type": "integer", "description": "The issue's number." },
                     "body": { "type": "string" },
                 },
                 "required": ["repo", "number", "body"],
@@ -445,7 +464,9 @@ pub async fn call(
                 .collect();
             Ok(json!({ "branch": branch, "open": open }))
         }
-        PR_COMMENT => {
+        // GitHub comments on an issue and on a pull request through the same
+        // endpoint; the two tools differ in what they tell the agent.
+        PR_COMMENT | ISSUE_COMMENT => {
             let n = number(args)?;
             let body = args
                 .get("body")

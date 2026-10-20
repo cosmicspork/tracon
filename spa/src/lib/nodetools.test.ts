@@ -48,6 +48,7 @@ test('operator calls carry the question, the host or the title', () => {
 test('forge calls name the change, run or pipeline', () => {
   expect(nodeCallText('pr_status', { number: 439 })).toBe('Pull request #439')
   expect(nodeCallText('pr_comment', { number: 439, body: 'b' })).toBe('Comment on #439')
+  expect(nodeCallText('github_issue_comment', { number: 593, body: 'b' })).toBe('Comment on issue #593')
   expect(nodeCallText('pr_for_branch', { branch: 'fix/x' })).toBe('Pull request for fix/x')
   expect(nodeCallText('pr_merge', { number: 12, head_sha: 'abc', operation_id: 'o' })).toBe('Merge #12')
   expect(nodeCallText('run_status', { run_id: 37854905007 })).toBe('CI run 37854905007')

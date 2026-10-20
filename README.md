@@ -695,7 +695,8 @@ review threads (file, line, resolved or outdated) and conversation with
 `pr_threads` / `mr_discussions`, finds a branch's open change with `pr_for_branch` /
 `mr_for_branch`, and sees each reviewer's latest verdict in `pr_status`, all
 unattended. Replying to a thread, and resolving it, is `pr_reply` / `mr_reply`,
-which you are asked about like any other comment. CI reads the same on either
+which you are asked about like any other comment. So is a comment on a GitHub issue,
+`github_issue_comment`, named apart from Jira's `issue_comment`. CI reads the same on either
 forge: a run's jobs and the step that failed (`run_status` with `run_id` /
 `pipeline_status`), the runs at an exact commit (`run_status` with `sha` /
 `pipeline_list_by_sha`), and the end of a job's log (`run_logs` / `job_trace`, 16 KiB

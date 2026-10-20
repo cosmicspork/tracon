@@ -429,6 +429,7 @@ fn prose_fields(action: &str) -> &'static [&'static str] {
         jira::ISSUE_CREATE | jira::ISSUE_UPDATE => &["summary", "description"],
         jira::ISSUE_COMMENT
         | github::PR_COMMENT
+        | github::ISSUE_COMMENT
         | github::PR_REPLY
         | gitlab::MR_COMMENT
         | gitlab::MR_REPLY
@@ -1009,6 +1010,10 @@ mod tests {
                 serde_json::json!({ "repo": "o/r", "number": 1, "body": body }),
             ),
             (
+                "github_issue_comment",
+                serde_json::json!({ "repo": "o/r", "number": 1, "body": body }),
+            ),
+            (
                 "pr_reply",
                 serde_json::json!({ "repo": "o/r", "number": 1, "thread_id": "t", "body": body }),
             ),
@@ -1078,6 +1083,7 @@ mod tests {
             "run_rerun",
             "run_dispatch",
             "pr_comment",
+            "github_issue_comment",
             "mr_comment",
             "pr_reply",
             "mr_reply",
