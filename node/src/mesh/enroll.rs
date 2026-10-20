@@ -552,8 +552,9 @@ impl PolicyPush {
     }
 }
 
-/// Who a push goes to: every peer in this node's own record of the mesh, and
-/// every other hub member whose sealing key is signed by its id. Never this
+/// Who a push goes to: every peer in this node's own record of the mesh that
+/// the hub still lists, and every other hub member whose sealing key is signed
+/// by its id. Never this
 /// node, and never the hub's own member identity, which is a replica and runs
 /// no policy. `members` is the hub's member list, or why it could not be read.
 pub fn policy_push_targets(
@@ -584,6 +585,12 @@ pub fn policy_push_targets(
     let mut targets: Vec<PolicyPushTarget> = Vec::new();
     for node in nodes {
         if node.is_self != 0 || node.id == me || member(&node.id).is_some_and(hub_member) {
+            continue;
+        }
+        // A node row outlives its membership: one the hub no longer lists has
+        // left the mesh, and is no target. Without the list there is no
+        // telling, so every known peer stays in, reported as not queued.
+        if members.is_ok() && member(&node.id).is_none() {
             continue;
         }
         let name = match node.name.trim() {
@@ -961,7 +968,7 @@ pub async fn accept(
                                     .say("policy bundle refused: rollout metadata does not match");
                                 continue;
                             }
-                            match crate::policy::bundle::offer(&toml) {
+                            match crate::policy::bundle::offer(&toml, &pubkey_hex) {
                                 crate::policy::bundle::Offer::Install => {}
                                 crate::policy::bundle::Offer::AlreadyInstalled => {
                                     progress.say("policy bundle already installed");
@@ -1090,20 +1097,9 @@ mod tests {
             .iter()
             .map(|t| (t.name.as_str(), t.key.is_ok()))
             .collect();
-        // The forged member is no node of ours, so it is not listed; a node
-        // the hub no longer has is listed, and cannot be queued.
-        assert_eq!(
-            named,
-            vec![
-                ("mac", true),
-                ("ffffffffffffffff", false),
-                ("stranger", true)
-            ]
-        );
-        assert_eq!(
-            targets[1].key.as_ref().err().map(String::as_str),
-            Some("not a member of the hub")
-        );
+        // The forged member is no node of ours, and a node the hub no longer
+        // has has left the mesh, so neither is listed.
+        assert_eq!(named, vec![("mac", true), ("stranger", true)]);
     }
 
     #[test]

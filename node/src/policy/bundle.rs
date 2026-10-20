@@ -305,15 +305,25 @@ pub enum Offer {
     Refuse(String),
 }
 
-/// Judge an offered bundle against `installed` (its version and hash).
-pub fn judge_offer(installed: Option<(u32, &str)>, version: u32, sha256: &str) -> Offer {
+/// Judge an offered bundle, signed by `key`, against `installed` (its
+/// version, hash and key). The key is checked first, so a bundle from a key
+/// this node does not trust is refused for that, whatever its version says.
+pub fn judge_offer(
+    installed: Option<(u32, &str, &str)>,
+    version: u32,
+    sha256: &str,
+    key: &str,
+) -> Offer {
     match installed {
         None => Offer::Install,
-        Some((current, _)) if version < current => {
+        Some((_, _, trusted)) if !trusted.trim().eq_ignore_ascii_case(key.trim()) => {
+            Offer::Refuse(BundleError::KeyMismatch.to_string())
+        }
+        Some((current, _, _)) if version < current => {
             Offer::Refuse(format!("older than installed v{current}"))
         }
-        Some((current, hash)) if version == current && hash == sha256 => Offer::AlreadyInstalled,
-        Some((current, _)) if version == current => {
+        Some((current, hash, _)) if version == current && hash == sha256 => Offer::AlreadyInstalled,
+        Some((current, _, _)) if version == current => {
             Offer::Refuse(format!("conflicting bundle for v{current}"))
         }
         Some(_) => Offer::Install,
@@ -324,7 +334,7 @@ pub fn judge_offer(installed: Option<(u32, &str)>, version: u32, sha256: &str) -
 /// paths ask: an operator applying or signing locally is acting directly.
 /// A bundle that does not parse, or a node whose installed files do not
 /// verify, is left to [`install`], as before this check existed.
-pub fn offer(bundle: &str) -> Offer {
+pub fn offer(bundle: &str, public_key_hex: &str) -> Offer {
     let Ok(offered) = toml::from_str::<Policy>(bundle) else {
         return Offer::Install;
     };
@@ -332,9 +342,10 @@ pub fn offer(bundle: &str) -> Offer {
     judge_offer(
         installed
             .as_ref()
-            .map(|b| (b.policy.version, b.sha256.as_str())),
+            .map(|b| (b.policy.version, b.sha256.as_str(), b.pubkey_hex.as_str())),
         offered.version,
         &sha256(bundle),
+        public_key_hex,
     )
 }
 
@@ -411,7 +422,7 @@ mod tests {
     #[test]
     fn an_older_offer_is_refused_and_names_the_installed_version() {
         assert_eq!(
-            judge_offer(Some((21, "new")), 18, "old"),
+            judge_offer(Some((21, "new", "k")), 18, "old", "k"),
             Offer::Refuse("older than installed v21".into())
         );
     }
@@ -419,7 +430,7 @@ mod tests {
     #[test]
     fn the_installed_bundle_offered_again_is_already_installed() {
         assert_eq!(
-            judge_offer(Some((21, "same")), 21, "same"),
+            judge_offer(Some((21, "same", "k")), 21, "same", "k"),
             Offer::AlreadyInstalled
         );
     }
@@ -427,15 +438,42 @@ mod tests {
     #[test]
     fn another_bundle_for_the_installed_version_is_refused() {
         assert_eq!(
-            judge_offer(Some((21, "mine")), 21, "theirs"),
+            judge_offer(Some((21, "mine", "k")), 21, "theirs", "k"),
             Offer::Refuse("conflicting bundle for v21".into())
         );
     }
 
     #[test]
     fn a_newer_offer_or_a_first_one_goes_to_install() {
-        assert_eq!(judge_offer(Some((21, "a")), 22, "b"), Offer::Install);
-        assert_eq!(judge_offer(None, 1, "b"), Offer::Install);
+        assert_eq!(
+            judge_offer(Some((21, "a", "k")), 22, "b", "k"),
+            Offer::Install
+        );
+        assert_eq!(judge_offer(None, 1, "b", "k"), Offer::Install);
+    }
+
+    #[test]
+    fn a_bundle_from_another_key_is_refused_for_the_key_whatever_its_version() {
+        let mismatch = Offer::Refuse(BundleError::KeyMismatch.to_string());
+        assert_eq!(
+            judge_offer(Some((21, "new", "ab")), 18, "old", "cd"),
+            mismatch
+        );
+        assert_eq!(
+            judge_offer(Some((21, "same", "ab")), 21, "same", "cd"),
+            mismatch
+        );
+        assert_eq!(
+            judge_offer(Some((21, "mine", "ab")), 21, "theirs", "cd"),
+            mismatch
+        );
+        assert_eq!(judge_offer(Some((21, "a", "ab")), 22, "b", "cd"), mismatch);
+        // The installed key is held as lowercase hex; an offer's case and
+        // whitespace do not make it another key.
+        assert_eq!(
+            judge_offer(Some((21, "same", "ab")), 21, "same", " AB\n"),
+            Offer::AlreadyInstalled
+        );
     }
 
     #[test]

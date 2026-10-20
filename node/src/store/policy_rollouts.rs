@@ -264,6 +264,9 @@ impl Store {
 
     /// Records only a receipt that names this exact rollout and bundle. The
     /// caller supplies `node_id` from a verified envelope, never frame data.
+    /// A refusal never overwrites an applied or superseded target: redelivery
+    /// is routine, and a late duplicate of an older bundle is refused as
+    /// older than what the peer now runs, which says nothing about this one.
     pub fn record_policy_receipt(
         &self,
         rollout_id: &str,
@@ -278,7 +281,8 @@ impl Store {
             "UPDATE policy_rollout_target
              SET status=?4, detail=?5, acknowledged_ms=?6
              WHERE rollout_id=?1 AND node_id=?2
-               AND EXISTS (SELECT 1 FROM policy_rollout WHERE id=?1 AND bundle_sha256=?3)",
+               AND EXISTS (SELECT 1 FROM policy_rollout WHERE id=?1 AND bundle_sha256=?3)
+               AND NOT (?4 = 'rejected' AND status IN ('applied','superseded'))",
             rusqlite::params![rollout_id, node_id, bundle_sha256, status, detail, now_ms()],
         )? > 0)
     }
@@ -473,6 +477,36 @@ mod tests {
             .mark_policy_rollout_offline("old", "c", "gone")
             .unwrap());
         assert_eq!(status_of(&store, "old", "c"), "superseded");
+    }
+
+    #[test]
+    fn a_refusal_of_a_late_duplicate_leaves_applied_and_superseded_targets_alone() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_policy_rollout(&rollout_at("old", 7, 1), &["a".into(), "b".into()])
+            .unwrap();
+        store
+            .record_policy_receipt("old", "a", "hash-old", true, None)
+            .unwrap();
+        store
+            .create_policy_rollout(&rollout_at("new", 8, 2), &["b".into()])
+            .unwrap();
+        assert_eq!(status_of(&store, "old", "b"), "superseded");
+
+        let refusal = Some("older than installed v8");
+        assert!(!store
+            .record_policy_receipt("old", "a", "hash-old", false, refusal)
+            .unwrap());
+        assert!(!store
+            .record_policy_receipt("old", "b", "hash-old", false, refusal)
+            .unwrap());
+        assert_eq!(status_of(&store, "old", "a"), "applied");
+        assert_eq!(status_of(&store, "old", "b"), "superseded");
+        // A refusal of a target still waiting is recorded as before.
+        assert!(store
+            .record_policy_receipt("new", "b", "hash-new", false, Some("bad"))
+            .unwrap());
+        assert_eq!(status_of(&store, "new", "b"), "rejected");
     }
 
     #[test]

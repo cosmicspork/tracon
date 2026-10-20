@@ -804,7 +804,7 @@ impl MeshClient {
                 // answered without a write, and an older one is refused.
                 let installed = {
                     let mut cached = self.policy.write();
-                    match crate::policy::bundle::offer(toml) {
+                    match crate::policy::bundle::offer(toml, pubkey_hex) {
                         crate::policy::bundle::Offer::AlreadyInstalled => Ok(false),
                         crate::policy::bundle::Offer::Refuse(why) => Err(why),
                         crate::policy::bundle::Offer::Install => {
