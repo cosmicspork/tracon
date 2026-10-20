@@ -13,6 +13,7 @@ pub mod conversation;
 pub mod events;
 pub mod hashline;
 pub mod prompt;
+pub mod server;
 pub mod sse;
 pub mod tools;
 pub mod wire;

@@ -1,79 +1,11 @@
 //! The binary against a scripted fake of an OpenAI-compatible server.
 
-use std::sync::{Arc, Mutex};
+mod support;
 
-use axum::extract::State;
-use axum::http::{header, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::http::StatusCode;
 use serde_json::{json, Value};
+use support::{answer, serve, tool_call, Reply};
 use tracon_agent::hashline;
-
-#[derive(Clone, Default)]
-struct Fake {
-    /// Each request takes the next reply: (status, body).
-    script: Arc<Mutex<Vec<(StatusCode, String)>>>,
-    requests: Arc<Mutex<Vec<Value>>>,
-}
-
-async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> impl IntoResponse {
-    fake.requests.lock().unwrap().push(body);
-    let mut script = fake.script.lock().unwrap();
-    let (status, body) = if script.is_empty() {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "script exhausted".to_string(),
-        )
-    } else {
-        script.remove(0)
-    };
-    (status, [(header::CONTENT_TYPE, "text/event-stream")], body)
-}
-
-async fn serve(script: Vec<(StatusCode, String)>) -> (String, Fake) {
-    let fake = Fake {
-        script: Arc::new(Mutex::new(script)),
-        ..Fake::default()
-    };
-    let app = Router::new()
-        .route("/v1/chat/completions", post(completions))
-        .with_state(fake.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}/v1"), fake)
-}
-
-fn sse(chunks: &[Value]) -> (StatusCode, String) {
-    let mut out = String::new();
-    for c in chunks {
-        out.push_str(&format!("data: {c}\n\n"));
-    }
-    out.push_str("data: [DONE]\n\n");
-    (StatusCode::OK, out)
-}
-
-/// A tool call whose arguments arrive in two fragments, as llama.cpp streams them.
-fn tool_call(id: &str, name: &str, args: Value) -> (StatusCode, String) {
-    let args = args.to_string();
-    let (a, b) = args.split_at(args.len() / 2);
-    sse(&[
-        json!({"id": format!("req-{id}"), "choices": [{"delta": {"tool_calls": [
-            {"index": 0, "id": id, "type": "function", "function": {"name": name, "arguments": a}}
-        ]}}]}),
-        json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": b}}]},
-            "finish_reason": "tool_calls"}]}),
-        json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
-    ])
-}
-
-fn answer(text: &str) -> (StatusCode, String) {
-    sse(&[
-        json!({"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}),
-        json!({"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 3}}),
-    ])
-}
 
 struct Run {
     code: i32,
@@ -224,14 +156,18 @@ async fn the_turn_limit_and_context_overflow_have_their_own_exits() {
 
     let overflow = json!({"error": {"code": 400, "type": "exceed_context_size_error",
         "message": "request (40000 tokens) exceeds the available context size (32768 tokens)"}});
-    let (base, _) = serve(vec![(StatusCode::BAD_REQUEST, overflow.to_string())]).await;
+    let (base, _) = serve(vec![Reply::error(
+        StatusCode::BAD_REQUEST,
+        overflow.to_string(),
+    )])
+    .await;
     let r = run(&base, dir.path(), &[]).await;
     assert_eq!(r.code, 4);
     assert_eq!(r.events.last().unwrap()["outcome"], "context_overflow");
 }
 
 #[tokio::test]
-async fn refuses_to_run_without_standalone() {
+async fn a_prompt_on_the_command_line_needs_standalone() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon-agent"))
         .args([
             "--base-url",

@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 mod edit;
 mod glob;
 mod grep;
+pub mod mcp;
 mod read;
 mod shell;
 mod write;
@@ -122,8 +123,8 @@ impl Context {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     /// JSON Schema for the arguments.
     fn parameters(&self) -> Value;
     async fn run(&self, cx: &Context, input: Value) -> Output;
@@ -162,7 +163,12 @@ impl Registry {
             .map(|t| t.as_ref())
     }
 
-    pub fn names(&self) -> Vec<&'static str> {
+    /// Adds a tool after the built-in ones: node tools over MCP.
+    pub fn add(&mut self, tool: Box<dyn Tool>) {
+        self.tools.push(tool);
+    }
+
+    pub fn names(&self) -> Vec<&str> {
         self.tools.iter().map(|t| t.name()).collect()
     }
 

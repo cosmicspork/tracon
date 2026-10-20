@@ -3512,6 +3512,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracon",
+ "tracon-acp",
  "tracon-hub",
  "tracon-proto",
  "tracon-sync",
@@ -3520,6 +3521,17 @@ dependencies = [
  "webauthn-rs",
  "x25519-dalek",
  "zip",
+]
+
+[[package]]
+name = "tracon-acp"
+version = "0.34.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3543,8 +3555,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "tracon-acp",
 ]
 
 [[package]]

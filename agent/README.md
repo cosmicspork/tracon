@@ -5,11 +5,43 @@ subscription later. It is a separate binary that runs inside the boundary, like
 `claude`. The node supervises it and does no reasoning of its own. The plan is
 `plan-tracon-native-harness` on the personal channel.
 
-**Status: Phase 0, standalone only.** It runs without a node or a permission gate, and
-refuses to start without `--standalone`. Run it only in a directory you would let any
-command loose in.
+**Status: Phase 1, experimental.** It has two modes:
 
-## Running it
+- **Protocol mode** (the default). The node drives it over stdin and stdout and answers a
+  permission request for every tool call. The node adapter is still to come.
+- **Standalone** (`--standalone`). It runs one task with no node and no permission gate.
+  Run it only in a directory you would let any command loose in.
+
+## Under the node: protocol mode
+
+stdin and stdout carry newline-delimited JSON-RPC 2.0, using the vocabulary in the
+`acp` crate. That crate is shared with the node, which used it to drive omp.
+
+| Method | Direction | Meaning |
+|---|---|---|
+| `initialize` | node → agent | Protocol version (1) and agent info. |
+| `session/new` | node → agent | The session's `cwd`, and the `mcpServers` whose tools join the six built-in ones. |
+| `session/prompt` | node → agent | Runs a turn. Answers with `stopReason` (`end_turn`, `max_turn_requests` or `cancelled`) and the turn's `usage`. |
+| `session/cancel` | node → agent (notification) | Ends the running turn. |
+| `session/close` | node → agent | Ends the session. |
+| `session/update` | agent → node (notification) | Message and thought chunks, tool calls and their updates, and context usage. Each carries a monotonic `seq` and is mirrored to `--events`. |
+| `session/request_permission` | agent → node | Sent before every tool call. Only `allow_once` runs it; anything else is a refusal the model is told about. |
+
+**Usage** follows the gateway's meaning. `inputTokens` is the prompt not read from a cache,
+`cachedReadTokens` is what was, and the node can reconcile the two counts per turn.
+
+**Credentials and the model** come from the command line, never from the session:
+`--base-url`, `--model`, `--api-key-env` (the name of the variable holding the node's
+per-session key), `--context-window` and `--system-prompt-file`.
+
+**The system prompt**, in order:
+1. the built-in orientation;
+2. the node's text;
+3. the repository's `AGENTS.md` and `CLAUDE.md`, recorded in the events file as read.
+
+Nothing but the protocol is written to stdout.
+
+## Standalone
 
 ```sh
 cargo build --release -p tracon-agent
@@ -52,7 +84,8 @@ that means `--jinja`, with the server's built-in `--tools` left off.
 - `error`
 - `end`, with the outcome and totals.
 
-Under the node these become `session/update` and per-request `usage`.
+In protocol mode the file also records the session (`session`, with which instruction
+files were read) and each `update` with its `seq`.
 
 ## Tools
 
