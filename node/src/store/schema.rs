@@ -1688,6 +1688,36 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX credential_revoke_target_node ON credential_revoke_target(node_id, status);
     "#,
+    // 72: what a subscription provider said about its own limits on each
+    // gateway call (a ChatGPT/Codex plan's usage windows and credits), beside
+    // the `model_usage` row of that call. `raw_json` keeps the call's
+    // limit-shaped `x-codex-*` headers as they arrived, so a field the
+    // provider renames is not lost. The newest snapshot of the plan's own
+    // limit is read on its own index, so a read never sorts the window.
+    r#"
+    CREATE TABLE provider_limit_snapshot (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        usage_id                 INTEGER REFERENCES model_usage(id),
+        channel                  TEXT NOT NULL,
+        provider                 TEXT NOT NULL,
+        limit_id                 TEXT NOT NULL,
+        at_ms                    INTEGER NOT NULL,
+        primary_used_percent     REAL,
+        primary_window_minutes   INTEGER,
+        primary_resets_at        INTEGER,
+        secondary_used_percent   REAL,
+        secondary_window_minutes INTEGER,
+        secondary_resets_at      INTEGER,
+        credits_has              INTEGER,
+        credits_unlimited        INTEGER,
+        credits_balance          TEXT,
+        limit_name               TEXT,
+        reached_type             TEXT,
+        raw_json                 TEXT NOT NULL
+    );
+    CREATE INDEX provider_limit_snapshot_channel ON provider_limit_snapshot(channel, provider, at_ms);
+    CREATE INDEX provider_limit_snapshot_limit ON provider_limit_snapshot(channel, provider, limit_id, at_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

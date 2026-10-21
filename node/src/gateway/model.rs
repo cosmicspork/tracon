@@ -786,6 +786,13 @@ pub async fn handle(
         }
         out = out.header(k, v);
     }
+    // A subscription says where its plan stands on every answer, refusals
+    // included; read it before the body is consumed.
+    let limits = if p.shape == SHAPE_OPENAI_CODEX {
+        super::codex_limits::parse(upstream.headers())
+    } else {
+        Vec::new()
+    };
     let usage = Arc::new(Mutex::new(UsageRow {
         channel: channel.clone().unwrap_or_default(),
         node_id: s.node_id.clone(),
@@ -837,6 +844,7 @@ pub async fn handle(
         done: false,
         event_stream,
         ended: false,
+        limits,
     };
     out.body(Body::from_stream(counted))
         .unwrap_or_else(|_| refuse(StatusCode::BAD_GATEWAY, "bad upstream response"))
@@ -1177,6 +1185,9 @@ struct Counted {
     /// A streamed answer, which a broken upstream is reported inside of.
     event_stream: bool,
     ended: bool,
+    /// The provider's limit snapshots from this answer's headers, recorded
+    /// beside its usage row.
+    limits: Vec<crate::store::LimitSnapshot>,
 }
 
 /// Said in place of a streamed answer the upstream broke off. Without it the
@@ -1203,8 +1214,21 @@ impl Counted {
         row.cache_read_tokens = self.scanner.cache_read();
         row.cache_write_tokens = self.scanner.cache_write;
         row.request_id = self.scanner.request_id.take();
-        if let Err(e) = self.store.record_usage(&row) {
-            tracing::warn!(error = %e, "usage not recorded");
+        let usage_id = match self.store.record_usage(&row) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "usage not recorded");
+                None
+            }
+        };
+        for mut snap in std::mem::take(&mut self.limits) {
+            snap.usage_id = usage_id;
+            snap.channel = row.channel.clone();
+            snap.provider = row.provider.clone();
+            snap.at_ms = row.at_ms;
+            if let Err(e) = self.store.record_limit_snapshot(&snap) {
+                tracing::warn!(error = %e, "provider limit snapshot not recorded");
+            }
         }
     }
 }
@@ -1322,6 +1346,7 @@ mod tests {
             done: false,
             event_stream: true,
             ended: false,
+            limits: Vec::new(),
         };
         let chunks: Vec<_> = counted.collect().await;
         let body: String = chunks
@@ -1865,5 +1890,49 @@ mod tests {
         s.feed(b"data: {\"usage\":{\"tokens\":7}}\n");
         s.finish();
         assert_eq!((s.input, s.output), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_codex_answer_s_limits_are_recorded_beside_its_usage_row() {
+        use futures_util::StreamExt;
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-codex-primary-used-percent", "61".parse().unwrap());
+        headers.insert("x-codex-credits-balance", "4.20".parse().unwrap());
+        let sse = "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":30,\"output_tokens\":4}}}\n\n";
+        let counted = Counted {
+            inner: Box::pin(tokio_stream::once(Ok(Bytes::from(sse)))),
+            scanner: UsageScanner::new(),
+            usage: Arc::new(Mutex::new(UsageRow {
+                channel: "work".into(),
+                node_id: "n".into(),
+                session_id: None,
+                provider: "codex".into(),
+                model: Some("gpt-5".into()),
+                at_ms: 1_000,
+                input_tokens: 0,
+                output_tokens: 0,
+                requests: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                request_id: None,
+            })),
+            store: store.clone(),
+            done: false,
+            event_stream: true,
+            ended: false,
+            limits: super::super::codex_limits::parse(&headers),
+        };
+        let _: Vec<_> = counted.collect().await;
+        let usage = store.usage_since(Some("work"), 0).unwrap();
+        assert_eq!(usage[0].input_tokens, 30);
+        let snap = store
+            .latest_limit_snapshot("work", "codex", 0, None)
+            .unwrap()
+            .unwrap();
+        assert!(snap.usage_id.is_some(), "linked to the call's usage row");
+        assert_eq!((snap.at_ms, snap.limit_id.as_str()), (1_000, "codex"));
+        assert_eq!(snap.primary.unwrap().used_percent, 61.0);
+        assert_eq!(snap.credits.unwrap().balance.as_deref(), Some("4.20"));
     }
 }

@@ -1,3 +1,5 @@
+import type { CodexLimits, LimitWindow } from './types'
+
 /** Token counts as the interface shows them: 15024 → "15k", 1_240_000 → "1.24M". */
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n)
@@ -65,4 +67,57 @@ export function digits(s: string): number {
 export function externalAgent(clientId: string | null | undefined, lane?: string | null): string {
   if (lane) return lane
   return clientId ? `agent ${clientId.slice(-8)}` : ''
+}
+
+/** A usage window's length: "5h", "7d", "90m". */
+export function formatWindow(minutes: number): string {
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`
+  if (minutes % 60 === 0) return `${minutes / 60}h`
+  return `${minutes}m`
+}
+
+/**
+ * Which limit a snapshot is: the provider alone for the plan's own limit,
+ * else the provider and the other limit's name, so a fallback snapshot does
+ * not pass for the plan's own.
+ */
+export function codexLimitLabel(l: CodexLimits): string {
+  return l.limit_id === 'codex' ? l.provider : `${l.provider} · ${l.limit_name ?? l.limit_id}`
+}
+
+/**
+ * A subscription's limits as lines a person reads: each window as "42% of
+ * 5h used · resets in 2h", the credits when the plan has them, a refusal as
+ * "limit reached (rate_limit_reached)", and when the gateway last heard. A
+ * window whose reset has passed reads as reset, not as still used. A refusal
+ * over a window is no longer shown once every reported window has reset; any
+ * other refusal (credits depleted, say) stands until a newer snapshot says
+ * otherwise, since a window resetting does not change it.
+ */
+/** Refusal reasons a window resetting clears; every other reason outlasts it. */
+const WINDOW_BOUND_REFUSALS = new Set(['rate_limit_reached'])
+
+export function formatCodexLimits(l: CodexLimits, now = Date.now()): string[] {
+  const lines: string[] = []
+  const windows = [l.primary, l.secondary].filter((w): w is LimitWindow => w !== null)
+  const reset = (w: LimitWindow) => w.resets_at !== null && w.resets_at * 1000 <= now
+  const allReset = windows.length > 0 && windows.every(reset)
+  const cleared = allReset && l.reached_type !== null && WINDOW_BOUND_REFUSALS.has(l.reached_type)
+  if (l.reached_type && !cleared) lines.push(`limit reached (${l.reached_type})`)
+  for (const w of windows) {
+    const len = w.window_minutes ? formatWindow(w.window_minutes) : null
+    if (reset(w)) {
+      lines.push(`${len ? `${len} window` : 'window'} reset since (was ${Math.round(w.used_percent)}%)`)
+      continue
+    }
+    const of = len ? ` of ${len}` : ''
+    const resets = w.resets_at === null ? '' : ` · resets in ${formatDuration(w.resets_at * 1000 - now)}`
+    lines.push(`${Math.round(w.used_percent)}%${of} used${resets}`)
+  }
+  const c = l.credits
+  if (c?.unlimited) lines.push('credits unlimited')
+  else if (c?.balance) lines.push(`credits ${c.balance}`)
+  else if (c?.has_credits === false) lines.push('no credits')
+  lines.push(`observed ${formatAge(l.observed_ms, now)} ago`)
+  return lines
 }

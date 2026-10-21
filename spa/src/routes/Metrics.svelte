@@ -1,7 +1,7 @@
 <script lang="ts">
   import LoadGate from '../components/LoadGate.svelte'
   import { api } from '../lib/api'
-  import { formatTokens } from '../lib/format'
+  import { codexLimitLabel, formatCodexLimits, formatTokens } from '../lib/format'
   import { Loader } from '../lib/loader.svelte'
   import { router } from '../lib/router.svelte'
   import { localDate, type UsageView, usageSearch, usageView, usageWindow } from '../lib/routes'
@@ -81,6 +81,12 @@
             <div><dt>Session setup failures</dt><dd>{r.setup_failures}</dd></div>
             <div><dt>Human interventions</dt><dd>{r.interventions}</dd></div>
             <div><dt>Request waiting</dt><dd>{dur(r.human_wait_seconds)}</dd></div>
+            {#if r.codex_limits}
+              <div class="limits">
+                <dt title="What the subscription last reported on an answer through this node's gateway. The ChatGPT workspace admin console remains the authoritative credit ledger.">{r.codex_limits.limit_id === 'codex' ? `${r.codex_limits.provider} plan` : codexLimitLabel(r.codex_limits)}</dt>
+                <dd>{#each formatCodexLimits(r.codex_limits) as line, i (i)}<span class:crit={line.startsWith('limit reached')}>{line}</span>{/each}</dd>
+              </div>
+            {/if}
           </dl>
         </section>
       {/each}
@@ -191,6 +197,14 @@
     padding: 5px 0;
   }
   dt { color: var(--ink2); }
+  .limits dd {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    text-align: right;
+  }
+  .limits .crit { color: var(--crit); }
   dd { margin: 0; font-family: var(--mono); }
   .h4 .r {
     margin-left: auto;

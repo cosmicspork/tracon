@@ -33,6 +33,7 @@ pub mod exhaustion;
 pub mod external;
 pub mod findings;
 pub mod holdings;
+pub mod limits;
 pub mod manifest;
 pub mod metrics;
 pub mod opencode;
@@ -58,6 +59,7 @@ pub use corpus::*;
 pub use credential_revokes::*;
 pub use device::*;
 pub use evidence::*;
+pub use limits::*;
 pub use manifest::*;
 pub use opencode::*;
 pub use opencode_state::*;
@@ -866,7 +868,9 @@ impl Store {
     /// gateway knows the session that made the call, and the session row is
     /// the only durable record of which turn is open. A call from outside a
     /// session (a probe) lands on turn 0, which no settled turn claims.
-    pub fn record_usage(&self, u: &UsageRow) -> Result<()> {
+    /// Returns the row's id, which a provider's limit snapshot from the same
+    /// call points at.
+    pub fn record_usage(&self, u: &UsageRow) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests, cache_read_tokens, cache_write_tokens, request_id, turn)
@@ -887,7 +891,7 @@ impl Store {
                 u.request_id
             ],
         )?;
-        Ok(())
+        Ok(conn.last_insert_rowid())
     }
 
     /// One upstream request as the harness counted it, against the session's

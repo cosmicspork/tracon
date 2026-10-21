@@ -6353,10 +6353,17 @@ pub async fn usage(
     let query = usage_query(&q)?;
     let mut totals = s.store().usage_report(&query)?;
     crate::metrics::price_usage(&s.cfg, &mut totals);
+    // Per channel and subscription provider, the newest limit snapshot in
+    // the window. A bounded window (`until_ms`, exclusive) does not show a
+    // snapshot taken after it.
+    let codex_limits =
+        s.store()
+            .latest_limit_snapshots(query.channel, query.since_ms, query.until_ms)?;
     Ok(Json(json!({
         "since_ms": query.since_ms,
         "until_ms": query.until_ms,
         "totals": totals,
+        "codex_limits": codex_limits,
     })))
 }
 

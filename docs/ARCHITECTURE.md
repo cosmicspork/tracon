@@ -2034,6 +2034,24 @@ whose event names those requests. The id ties a request to the turn it was made 
 since the gateway stamps a call when its stream ends, which can be after the next
 turn opened.
 
+A ChatGPT/Codex subscription (a provider of shape `openai-codex`) is metered in usage
+windows and credits, not per-token prices, so the gateway also keeps what the plan says
+about itself. Every answer from the Codex backend, a refusal included, carries
+`x-codex-*` headers: each window's used percent, length in minutes and reset time, the
+credit balance, the limit's name, and on a refusal why the plan refused (Codex's
+reached type, such as `rate_limit_reached` or `workspace_owner_credits_depleted`). The gateway
+reads them before the body is passed on, the headers still reach the harness, and one
+snapshot per limit is written to `provider_limit_snapshot` beside the call's
+`model_usage` row, with the call's limit-shaped `x-codex-*` headers kept raw once so a
+field the provider renames is not lost (not `x-codex-turn-state`, the server's
+sticky-routing token). A value that does not parse is left out, never guessed, and never
+fails the call; other shapes record nothing. `GET /api/usage` (`codex_limits`) and
+`GET /api/metrics` (per channel) report the newest snapshot in the window (bounded by
+`until_ms` when one is given), preferring the plan's own limit over another, and the
+Usage page and the Usage today card show it. These are the plan's own reports as this
+node saw them, nothing more: no ceiling is enforced from them, and the ChatGPT
+workspace admin console remains the authoritative credit ledger.
+
 Anything checkable deterministically is checked deterministically, between phases,
 in a container with no credentials. Model supervision is reserved for judgment with
 no test: a cheap model watching an expensive one mostly pays twice to learn what
