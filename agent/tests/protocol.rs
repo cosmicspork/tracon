@@ -280,3 +280,26 @@ async fn cancel_ends_the_turn_and_the_session_takes_the_next_prompt() {
         .collect();
     assert_eq!(users, ["think hard", "again"]);
 }
+
+#[tokio::test]
+async fn under_the_node_a_turn_is_not_cut_at_the_standalone_limit() {
+    // Twenty requests ended every turn of the first live session; under the
+    // node a turn runs until the model answers.
+    let dir = tempfile::tempdir().unwrap();
+    let mut script: Vec<_> = (0..24)
+        .map(|i| tool_call(&format!("c{i}"), "glob", json!({"pattern": "*"})))
+        .collect();
+    script.push(answer("done"));
+    let (base, fake) = serve(script).await;
+    let node = start(&base, &dir.path().join(".events.jsonl")).await;
+    let session = new_session(&node, dir.path()).await;
+
+    let result: PromptResult = node
+        .peer
+        .request(methods::SESSION_PROMPT, &prompt(&session, "look around"))
+        .await
+        .unwrap();
+
+    assert_eq!(result.stop_reason, "end_turn");
+    assert_eq!(fake.requests.lock().unwrap().len(), 25);
+}

@@ -390,6 +390,10 @@ pub enum SessionError {
     ModelRequired,
     #[error("budget must not be negative")]
     BadBudget,
+    /// A budget the session has already spent: it would be held again at
+    /// the end of its next turn.
+    #[error("the budget must be more than the {0} tokens already spent, or 0 for none")]
+    BudgetSpent(i64),
     #[error("node refuses to run harnesses: {0}")]
     NodeRefused(String),
     #[error("harness version mismatch: node expects {pinned}, host has {found}")]
@@ -1305,6 +1309,11 @@ impl Manager {
         Self::refuse_legacy(&row)?;
         let state = SessionState::from_stored(&row.state);
         if state == SessionState::Paused {
+            if row.budget_tokens > 0 && row.tokens_used >= row.budget_tokens {
+                return Err(SessionError::Rejected(
+                    "session is paused at its token budget; raise the budget to carry on".into(),
+                ));
+            }
             return Err(SessionError::Rejected("session is paused".into()));
         }
         if state.is_terminal() {
@@ -3453,6 +3462,67 @@ impl Manager {
                 .map(|_| ()),
             Err(e) => Err(e),
         }
+    }
+
+    /// Change a session's token budget; `0` is none. Only the node that runs
+    /// a session changes it, since that node's supervisor is what holds it to
+    /// the budget. A session held at its budget, and by nothing else, is
+    /// resumed once the new budget leaves it room; a running one just has
+    /// more room.
+    pub async fn set_budget(&self, id: &str, budget_tokens: i64) -> Result<(), SessionError> {
+        if budget_tokens < 0 {
+            return Err(SessionError::BadBudget);
+        }
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        Self::refuse_legacy(&row)?;
+        if row.node_id != self.node_id {
+            return Err(SessionError::Rejected(format!(
+                "session runs on node {}; raise its budget on the node that runs it",
+                row.node_id
+            )));
+        }
+        let ended = || SessionError::Rejected(format!("session is {}", row.state));
+        if SessionState::from_stored(&row.state).is_terminal() {
+            return Err(ended());
+        }
+        if budget_tokens > 0 && budget_tokens <= row.tokens_used {
+            return Err(SessionError::BudgetSpent(row.tokens_used));
+        }
+        let changed = self.store.update_session_unless(
+            id,
+            SessionState::TERMINAL,
+            SessionPatch {
+                budget_tokens: Some(budget_tokens),
+                ..Default::default()
+            },
+        )?;
+        if !changed {
+            return Err(ended());
+        }
+        self.record_event(
+            id,
+            ek::BUDGET_CHANGED,
+            json!({ "from": row.budget_tokens, "to": budget_tokens, "tokens_used": row.tokens_used }),
+        );
+        let Some(row) = self.store.get_session(id)? else {
+            return Err(SessionError::NotFound);
+        };
+        self.bus.publish(Frame::Session(Box::new(row.clone())));
+        let held_at_budget = row.state == SessionState::Paused.as_str()
+            && self
+                .store
+                .last_event_payload(id, ek::SESSION_PAUSED)?
+                .is_some_and(|p| p["source"] == supervisor::PauseSource::Budget.as_str());
+        if held_at_budget {
+            self.resume(id, "operator raised the budget".into())
+                .await
+                .map_err(|e| {
+                    SessionError::Rejected(format!(
+                        "the budget is changed, but the session did not resume: {e}"
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     /// The gateway saw this session's provider refuse a call as exhausted.

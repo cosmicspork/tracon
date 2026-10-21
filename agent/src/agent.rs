@@ -71,8 +71,9 @@ pub struct Agent<'a> {
     pub events: &'a Events,
     pub hooks: &'a dyn Hooks,
     pub cancel: &'a CancellationToken,
-    /// Per run: one prompt's worth of model requests.
-    pub max_turns: u32,
+    /// Per run: one prompt's worth of model requests. `None` runs until the
+    /// model answers without a tool call, or the run is cancelled.
+    pub max_turns: Option<u32>,
 }
 
 impl Agent<'_> {
@@ -82,7 +83,12 @@ impl Agent<'_> {
         totals: &mut Totals,
     ) -> Result<Outcome, WireError> {
         let specs = self.tools.specs();
-        for _ in 0..self.max_turns {
+        let mut requests = 0;
+        loop {
+            if self.max_turns.is_some_and(|max| requests >= max) {
+                return Ok(Outcome::MaxTurns);
+            }
+            requests += 1;
             totals.turns += 1;
             let turn = totals.turns;
             self.events.emit(
@@ -235,6 +241,5 @@ impl Agent<'_> {
                 return Ok(Outcome::Cancelled);
             }
         }
-        Ok(Outcome::MaxTurns)
     }
 }

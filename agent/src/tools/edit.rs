@@ -50,7 +50,8 @@ impl Tool for Edit {
 
     fn description(&self) -> &'static str {
         "Edit a file by the `LINE:HASH` anchors that `read` shows. Ops: `replace` lines \
-         start..end (inclusive; end defaults to start) with `text`; `insert_after` or \
+         start..end (inclusive) with `text`, where `end` may be left out only when `text` \
+         is a single line; `insert_after` or \
          `insert_before` the start line; `delete` lines start..end. `text` is the new \
          lines, without anchors. If any anchor is stale the whole edit is refused and \
          nothing is written: read the file again and retry with the new anchors."
@@ -142,6 +143,18 @@ fn plan(text: &Text, ops: &[Op]) -> Result<Vec<Splice>, String> {
         if end < start {
             problems.push(format!(
                 "edit {n}: end line {end} is before start line {start}"
+            ));
+            continue;
+        }
+        // Models read a replace naming only `start` as "replace the block that
+        // starts here" and send the whole new block, which leaves the old one
+        // below it. Seen live on Qwen3-Coder-Next three times in one session.
+        let text_lines = op.text.lines().count();
+        if matches!(op.op, Kind::Replace) && op.end.is_none() && text_lines > 1 {
+            problems.push(format!(
+                "edit {n}: a replace without `end` replaces only line {start}, but `text` \
+                 has {text_lines} lines. Name the last line being replaced in `end`; to \
+                 turn one line into several, give `end` the same anchor as `start`"
             ));
             continue;
         }
@@ -327,6 +340,42 @@ mod tests {
         assert!(out.is_error);
         assert!(out.content.contains("overlap"));
         assert_eq!(file(&dir), "a\nb\nc\n");
+    }
+
+    #[tokio::test]
+    async fn a_block_replace_without_end_is_refused() {
+        let (dir, cx) = setup("def f():\n    return 1\n");
+        let out = Edit
+            .run(
+                &cx,
+                json!({"path": "f.py", "edits": [
+                    {"op": "replace", "start": anchor(1, "def f():"), "text": "def f():\n    return 2"}
+                ]}),
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content
+                .contains("replaces only line 1, but `text` has 2 lines"),
+            "{}",
+            out.content
+        );
+        assert_eq!(file(&dir), "def f():\n    return 1\n");
+    }
+
+    #[tokio::test]
+    async fn one_line_becomes_several_when_end_names_it() {
+        let (dir, cx) = setup("a\nb\nc\n");
+        let out = Edit
+            .run(
+                &cx,
+                json!({"path": "f.py", "edits": [
+                    {"op": "replace", "start": anchor(2, "b"), "end": anchor(2, "b"), "text": "b1\nb2"}
+                ]}),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(file(&dir), "a\nb1\nb2\nc\n");
     }
 
     #[tokio::test]

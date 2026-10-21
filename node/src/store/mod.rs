@@ -953,6 +953,23 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// What the gateway has counted for the session's turn while it is still
+    /// open: spending that `session.tokens_used` does not hold until the turn
+    /// settles. Zero between turns.
+    pub fn open_turn_spend(&self, session_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(m.input_tokens + m.output_tokens), 0)
+             FROM session s
+             JOIN turn_usage t ON t.session_id = s.id AND t.turn = s.turn AND t.state = 'open'
+             JOIN model_usage m ON m.session_id = s.id AND m.turn = s.turn
+             WHERE s.id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     /// Close a turn's ledger row with both sources and the verdict between
     /// them. The row is written whether or not `begin_turn` ran, so a turn
     /// closed by reconciliation after a restart still lands.
@@ -2529,6 +2546,7 @@ mod records {
         pub cost_usd: Option<f64>,
         pub context_used: Option<i64>,
         pub context_size: Option<i64>,
+        pub budget_tokens: Option<i64>,
         pub started_mono_ms: Option<i64>,
         pub ended_mono_ms: Option<i64>,
         /// Written once, at launch, when the manifest the session was staged
@@ -2569,6 +2587,7 @@ mod records {
             push!("cost_usd", self.cost_usd);
             push!("context_used", self.context_used);
             push!("context_size", self.context_size);
+            push!("budget_tokens", self.budget_tokens);
             push!("started_mono_ms", self.started_mono_ms);
             push!("ended_mono_ms", self.ended_mono_ms);
             push!("manifest_digest", self.manifest_digest);

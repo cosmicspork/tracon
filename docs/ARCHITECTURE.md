@@ -1883,9 +1883,15 @@ against it. The answer only reads: it builds no image, calls no forge and starts
 session.
 
 Budgets are denominated in tokens (dollars are derived where a provider binding
-carries a price) and enforced by killing the session, checked at turn end because
-that is when harnesses report usage — a property of the protocol stated honestly in
-the interface rather than papered over. Channels carry daily ceilings enforced at
+carries a price) and checked at turn end because that is when a turn's spend settles
+— a property of the protocol stated honestly in the interface rather than papered
+over; the gateway also refuses a session's model calls once its settled spend plus
+the open turn's count reaches the budget. A session at its budget is held, not
+ended: it is paused (`session_paused`, source `budget`) with its harness and context
+kept, resuming it as it is is refused, and the operator raising the budget
+(`POST /api/sessions/{id}/budget`, recorded as `budget_changed`) resumes it. Only the
+node that runs a session changes its budget. A harness that exits while its session
+is over budget still ends it `killed_budget`. Channels carry daily ceilings enforced at
 two points: session start is refused, and the gateway refuses the model calls of
 sessions already running, so a running session stops spending and the operator
 decides.

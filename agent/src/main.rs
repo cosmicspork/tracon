@@ -16,6 +16,9 @@ use tracon_agent::server::{self, Settings};
 use tracon_agent::tools::{Context, Registry};
 use tracon_agent::wire::openai_chat::{Client, Sampling};
 
+/// A standalone run has no node to stop it, so it stops itself.
+const STANDALONE_MAX_TURNS: u32 = 20;
+
 /// Tracon's harness for models that are not Claude. By default it serves the
 /// node over stdin and stdout (JSON-RPC, the shared ACP vocabulary), asking
 /// the node before every tool call. `--standalone` runs one task with no node
@@ -55,8 +58,11 @@ struct Cli {
     /// The model's context window in tokens, reported with usage.
     #[arg(long)]
     context_window: Option<u64>,
-    #[arg(long, default_value_t = 20)]
-    max_turns: u32,
+    /// Model requests one prompt may make. A standalone run stops at 20
+    /// unless told otherwise; under the node there is no limit unless one is
+    /// given, since the node's budget, cancel and the operator bound a turn.
+    #[arg(long)]
+    max_turns: Option<u32>,
     /// The task. Read from stdin when absent.
     #[arg(long)]
     prompt: Option<String>,
@@ -177,6 +183,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         None => Events::to_stderr(),
     };
     let tools = Registry::default();
+    let max_turns = cli.max_turns.unwrap_or(STANDALONE_MAX_TURNS);
     events.emit(
         "start",
         json!({
@@ -184,7 +191,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
             "model": cli.model,
             "base_url": base_url,
             "cwd": cx.root,
-            "max_turns": cli.max_turns,
+            "max_turns": max_turns,
             "tools": tools.names(),
         }),
     );
@@ -199,7 +206,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         events: &events,
         hooks: &Unattended,
         cancel: &cancel,
-        max_turns: cli.max_turns,
+        max_turns: Some(max_turns),
     };
     let outcome = agent.run(&mut conv, &mut totals).await;
     let (code, end) = match &outcome {

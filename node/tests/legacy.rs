@@ -300,6 +300,10 @@ async fn a_legacy_session_refuses_to_be_put_back_to_work() {
             Some(json!({ "text": "go" })),
         ),
         ("/api/sessions/legacy-1/resume", Some(json!({}))),
+        (
+            "/api/sessions/legacy-1/budget",
+            Some(json!({ "budget_tokens": 5_000 })),
+        ),
     ] {
         let (status, answer) = h.post(route, body).await;
         assert_eq!(status, StatusCode::CONFLICT, "{route}: {answer}");

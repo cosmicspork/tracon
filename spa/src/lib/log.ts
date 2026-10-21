@@ -401,12 +401,21 @@ export function eventLine(e: Event): EventLine | null {
       // The exhaustion line just before says what the provider did and what
       // happens next; repeating its sentence here says it twice.
       if (source === 'exhausted') return line('wait', ['paused', 'its provider is exhausted'])
+      // The node's reason carries the numbers and the way on.
+      if (source === 'budget') return line('wait', ['paused', str(p.reason) || 'it spent its token budget'])
       const who = source === 'watchdog' ? 'paused by the node' : 'paused by the operator'
       return line('wait', [who, ownReason(p.reason)])
     }
     case 'session_resumed': {
       const who = str(p.source) === 'wake' ? 'resumed by the node' : 'resumed by the operator'
       return line('mark', [who, ownReason(p.reason)])
+    }
+    case 'budget_changed': {
+      const from = num(p.from) ?? 0
+      const to = num(p.to) ?? 0
+      const verb = from === 0 ? 'set' : to === 0 ? 'removed' : to > from ? 'raised' : 'lowered'
+      const side = (n: number) => (n === 0 ? 'no budget' : formatTokens(n))
+      return line('sys', [`budget ${verb}`, `${side(from)} → ${side(to)}${to === 0 ? '' : ' tokens'}`])
     }
     case 'workspace_prepared': {
       // The repository's own `prepare`, run on the workspace before the

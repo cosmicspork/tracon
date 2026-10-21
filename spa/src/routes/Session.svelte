@@ -15,6 +15,7 @@
   import { humanizeError } from '../lib/errors'
   import { errorText, isNotFound } from '../lib/load'
   import { exhaustionNote } from '../lib/exhaustion'
+  import { budgetProblem, heldAtBudget, suggestedBudget } from '../lib/budget'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { repetitionHint } from '../lib/log'
   import { composerState, sessionControls } from '../lib/session-actions'
@@ -50,7 +51,9 @@
   const session = $derived(store.sessions.get(id))
   /** Paused by an exhausted provider and left for the operator: the banner carries Resume. */
   const held = $derived(session?.state === 'paused' && exhaustion?.outcome === 'held')
-  const controls = $derived(session ? sessionControls(session, held) : null)
+  /** Held at its token budget: the banner carries the raise, and Resume alone would be refused. */
+  const atBudget = $derived(session ? heldAtBudget(session) : false)
+  const controls = $derived(session ? sessionControls(session, held || atBudget) : null)
   const waiting = $derived(store.waitingFor(id))
   const busy = $derived(session?.turn_active === 1)
   const owner = $derived(session ? nodeById(store.nodes, session.node_id) : undefined)
@@ -115,6 +118,8 @@
     void store.open(id)
     restored = false
     readError = null
+    budgetInput = null
+    editingBudget = false
     // The draft is asked for on its own: it is the one thing a reconnecting
     // client cannot reconstruct, and it should not wait on the rest.
     api
@@ -268,6 +273,36 @@
     }
   }
 
+  // The raise box: what the operator typed, else the suggestion. Opened from
+  // the header's budget on a session that is not held at it.
+  let budgetInput = $state<number | null>(null)
+  let editingBudget = $state(false)
+  let raising = $state(false)
+  const budgetValue = $derived(budgetInput ?? (session ? suggestedBudget(session) : 0))
+  const budgetOpen = $derived(
+    atBudget || (editingBudget && session !== undefined && !isTerminal(session.state) && session.harness_id !== 'external'),
+  )
+  async function raiseBudget(e?: SubmitEvent) {
+    e?.preventDefault()
+    if (!session || raising) return
+    const problem = budgetProblem(budgetValue, session.tokens_used)
+    if (problem) {
+      error = `the budget must be ${problem}`
+      return
+    }
+    raising = true
+    error = null
+    try {
+      await api.setBudget(id, budgetValue)
+      budgetInput = null
+      editingBudget = false
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    } finally {
+      raising = false
+    }
+  }
+
   async function control(action: 'pause' | 'resume') {
     if (controlling) return
     controlling = true
@@ -286,6 +321,7 @@
     // The operator is already talking to this one, in its own terminal.
     if (session.harness_id === 'external') return 'a harness you run yourself'
     if (isTerminal(session.state)) return `session ${session.state.replace('_', ' ')}`
+    if (atBudget) return 'held at its token budget; raise it to carry on'
     if (session.state === 'paused') return 'paused'
     if (session.state === 'suspended') return 'suspended; continue it to carry on'
     if (session.state === 'starting') return 'starting'
@@ -368,7 +404,17 @@
     {#if session.harness_id === 'external'}
       <span class="mono" title="External-agent model use happens outside Tracon's metered runtime.">usage outside Tracon · unknown</span>
     {:else}
-      <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
+      {#if isTerminal(session.state) || atBudget}
+        <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
+      {:else}
+        <button
+          class="lnk mono"
+          onclick={() => (editingBudget = !editingBudget)}
+          disabled={unreachable !== null || remote}
+          title={remote ? 'the budget is changed on the node that runs the session' : 'change the token budget'}
+          >{formatBudget(session.tokens_used, session.budget_tokens)} tok</button
+        >
+      {/if}
       {#if usageNote}
         <span class="mono" class:unsure={usageNote.warn} title={usageNote.title}>{usageNote.text}</span>
       {/if}
@@ -479,6 +525,14 @@
     <div class="banner crit">failed <b>· {humanizeError(session.last_error) ?? 'the harness stopped without saying why'}</b></div>
   {:else if session.state === 'waiting_on_check'}
     <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
+  {:else if atBudget}
+    <div class="banner">
+      held at budget <b
+        >· {formatTokens(session.tokens_used)} of {formatTokens(session.budget_tokens)} tokens · its harness and
+        context are kept; a higher budget lets it carry on</b
+      >
+      {@render budgetForm()}
+    </div>
   {:else if session.state === 'paused' && exhausted}
     <div class="banner dim">
       paused · {exhausted.title} <b>· {exhausted.detail}</b>
@@ -538,6 +592,16 @@
     <div class="banner ok">ended at item close <b>· the work item is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
   {:else if session.end_reason === 'phase_done'}
     <div class="banner ok">{session.phase === 'plan' ? 'plan written' : 'verdict given'} <b>· this {session.phase} session is done</b></div>
+  {/if}
+  {#if budgetOpen && !atBudget}
+    <div class="banner dim">
+      budget <b
+        >· {session.budget_tokens > 0
+          ? `${formatTokens(session.tokens_used)} of ${formatTokens(session.budget_tokens)} tokens spent`
+          : `${formatTokens(session.tokens_used)} tokens spent · no budget`}</b
+      >
+      {@render budgetForm()}
+    </div>
   {/if}
   <!-- Why a running session's turns are failing: the gateway refuses its model
        calls once the channel's counted spend crosses the ceiling. -->
@@ -613,6 +677,29 @@
   {/if}
 {/if}
 
+{#snippet budgetForm()}
+  <form class="budget" onsubmit={raiseBudget}>
+    <input
+      type="number"
+      min="0"
+      step="1"
+      value={budgetValue}
+      oninput={(e) => (budgetInput = e.currentTarget.valueAsNumber)}
+      aria-label="New token budget, 0 for none"
+    />
+    <span
+      >tokens{Number.isFinite(budgetValue)
+        ? budgetValue > 0
+          ? ` · ${formatTokens(budgetValue)}`
+          : ' · no budget'
+        : ''}</span
+    >
+    <button class="lnk" type="submit" disabled={raising || unreachable !== null || remote}
+      >{atBudget ? 'Raise budget' : 'Set budget'}</button
+    >
+  </form>
+{/snippet}
+
 <style>
   .sess {
     display: flex;
@@ -660,6 +747,23 @@
     outline-offset: -1px;
     resize: none;
     cursor: not-allowed;
+  }
+  .budget {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    align-items: baseline;
+    margin-top: 6px;
+    color: var(--ink2);
+  }
+  .budget input {
+    width: 14ch;
+    background: var(--s1);
+    border: 0;
+    border-radius: 4px;
+    color: var(--ink);
+    font: inherit;
+    padding: 3px 6px;
   }
   /* Kept as typed, but wrapped: a long line would widen the page on a phone. */
   .draft {
