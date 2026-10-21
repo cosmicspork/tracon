@@ -1606,6 +1606,42 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX policy_rollout_target_status ON policy_rollout_target(rollout_id, status);
     CREATE INDEX policy_rollout_target_node ON policy_rollout_target(node_id, status);
     "#,
+    // 69: an approval card a peer mirrored here with no session behind it
+    // (an external harness's) is held as a request like any other, so the
+    // session becomes optional, and the request keeps the channel it was
+    // mirrored on: a card on a session takes its channel from the session,
+    // and one without has nothing else to say which channel's list closes
+    // it. SQLite cannot drop a NOT NULL, so the table is rebuilt with every
+    // row it held. Nothing references it.
+    r#"
+    CREATE TABLE permission_request_next (
+        id               TEXT PRIMARY KEY,
+        session_id       TEXT REFERENCES session(id),
+        node_id          TEXT NOT NULL,
+        rpc_id           INTEGER NOT NULL,
+        tool_call_id     TEXT,
+        title            TEXT NOT NULL,
+        kind             TEXT,
+        raw_input        TEXT,
+        options          TEXT NOT NULL,
+        state            TEXT NOT NULL,
+        answer_option_id TEXT,
+        created_ms       INTEGER NOT NULL,
+        created_mono_ms  INTEGER NOT NULL,
+        resolved_mono_ms INTEGER,
+        expires_ms       INTEGER NOT NULL,
+        channel          TEXT
+    );
+    INSERT INTO permission_request_next
+        (id, session_id, node_id, rpc_id, tool_call_id, title, kind, raw_input, options, state,
+         answer_option_id, created_ms, created_mono_ms, resolved_mono_ms, expires_ms)
+        SELECT id, session_id, node_id, rpc_id, tool_call_id, title, kind, raw_input, options,
+               state, answer_option_id, created_ms, created_mono_ms, resolved_mono_ms, expires_ms
+        FROM permission_request;
+    DROP TABLE permission_request;
+    ALTER TABLE permission_request_next RENAME TO permission_request;
+    CREATE INDEX perm_open ON permission_request(state, created_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

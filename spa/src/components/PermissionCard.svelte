@@ -3,8 +3,8 @@
   import { intentLabel } from '../lib/attention'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
-  import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
-  import { editableFields, editedArguments, isApproval, isEgress } from '../lib/permission'
+  import { chipLabel, nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
+  import { editableFields, editedArguments, isApproval, isEgress, withheldOptions } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -14,12 +14,22 @@
   let error = $state<string | null>(null)
   let drafts = $state<Record<string, string>>({})
 
-  const options = $derived(permissionOptions(permission))
+  let notes = $state('')
+  let composing = $state(false)
+
+  const owner = $derived(nodeById(store.nodes, permission.node_id))
+  // A card another node holds is decided there: an answer here is relayed,
+  // and one that node confirms only with its own passkey is left to it. The
+  // Home lane asks the same question, so the two never disagree.
+  const peer = $derived(!owner?.is_self)
+  const withheld = $derived(withheldOptions(store.nodes, permission))
+  const options = $derived(permissionOptions(permission).filter((o) => !withheld.includes(o.option_id)))
+  // Allowing it is the owner's to confirm; turning it down is still yours.
+  const allowElsewhere = $derived(withheld.includes('allow_once'))
   // A host a session asked to reach: its answers say how long it stays open,
   // and there is nothing in it to edit.
   const egress = $derived(isEgress(permission))
-  const fields = $derived(egress ? [] : editableFields(permission))
-  const owner = $derived(nodeById(store.nodes, permission.node_id))
+  const fields = $derived(egress || allowElsewhere ? [] : editableFields(permission))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
   // What the session was started to do. Answering "may I run this" without it
   // means opening the session to find out, which is most of the interruption.
@@ -53,7 +63,9 @@
     error = null
     try {
       const edited = optionId === 'allow_once' && !egress ? editedArguments(permission, drafts) : undefined
-      await api.answer(permission.id, optionId, edited)
+      // A peer's approval has no page here to ask for changes on, so the
+      // notes are written on the card.
+      await api.answer(permission.id, optionId, edited, optionId === 'request_changes' ? { notes: notes.trim() } : {})
       await store.refetch()
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -104,7 +116,7 @@
     {/if}
   </span>
   <span class="act">
-    {#if approval}
+    {#if approval && !peer}
       <a class="lnk" href="/approvals/{permission.id}" title="Read, edit, and decide it on its own page">Open</a>
     {/if}
     {#if held !== null}
@@ -119,6 +131,13 @@
           >{label(o.kind, o.name)}</button
         >
       {/each}
+      {#if peer && approval}
+        {#each options.filter((o) => o.kind === 'request_changes') as o (o.option_id)}
+          <button class="lnk" disabled={busy} aria-expanded={composing} onclick={() => (composing = !composing)}
+            >{o.name}…</button
+          >
+        {/each}
+      {/if}
       {#each options.filter((o) => o.kind === 'allow_repo') as o (o.option_id)}
         <button class="lnk" disabled={busy} title="Opens it for this session and adds it to the repository's egress in node.toml, so later sessions start with it" onclick={() => answer(o.option_id)}
           >{label(o.kind, o.name)}</button
@@ -134,8 +153,24 @@
           >{label(o.kind, o.name)}</button
         >
       {/each}
+      {#if allowElsewhere}
+        <span class="why" data-testid="decide-on-owner" title="Allowing it is an admin action there, confirmed with that node's own passkey"
+          >allow on {nodeLabel(store.nodes, permission.node_id)}</span
+        >
+      {/if}
     {/if}
   </span>
+  {#if composing && held === null && !lapsed}
+    <div class="fields">
+      <label>
+        <span>what to change</span>
+        <textarea bind:value={notes} disabled={busy} spellcheck="true"></textarea>
+      </label>
+      <div class="act">
+        <button class="btn" disabled={busy || !notes.trim()} onclick={() => answer('request_changes')}>Request changes</button>
+      </div>
+    </div>
+  {/if}
   {#if fields.length && held === null && !lapsed}
     <div class="fields">
       {#each fields as f (f.key)}

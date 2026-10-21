@@ -921,6 +921,47 @@ export default [
     }),
   },
   {
+    id: 'home-peer-external-approvals',
+    area: 'home',
+    route: '/',
+    title: "Approvals an external harness raised on a peer",
+    note: "A harness work-pod's operator runs asked with no session. The comment is decided here and the answer goes to work-pod, which runs it; allowing the setup proposal writes work-pod's config, so it can be rejected or sent back with notes here but waits outside this node with \"allow on work-pod\".",
+    since: '#587',
+    api: base({
+      '/api/queue': queue({
+        waiting: [
+          approval({
+            id: 'ap-peer-comment',
+            node_id: PEER,
+            session_id: null,
+            raw_input: JSON.stringify({
+              tool: 'pr_comment',
+              arguments: { repo: 'op/orbit', number: 214, body: 'The export now dedupes on the export id, so a retry that overlaps a run writes each row once. The overlap test is in the PR.' },
+              approval_id: 'ap-peer-comment',
+              lane: 'laptop',
+            }),
+            intent: { channel: 'work' },
+          }),
+          approval({
+            id: 'ap-peer-setup',
+            node_id: PEER,
+            session_id: null,
+            title: 'repo_setup_propose /srv/src/orbit: Tried the draft twice in a fresh container.',
+            raw_input: JSON.stringify({
+              tool: 'repo_setup_propose',
+              arguments: { repo: '/srv/src/orbit', checks: ['cargo nextest run'], why: 'Tried the draft twice in a fresh container.' },
+              approval_id: 'ap-peer-setup',
+              lane: 'laptop',
+            }),
+            intent: { channel: 'work' },
+            created_ms: -120000,
+          }),
+        ],
+        running: [S_RUN],
+      }),
+    }),
+  },
+  {
     id: 'home-issue-discard-open',
     area: 'home',
     route: '/',

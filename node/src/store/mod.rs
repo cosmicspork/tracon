@@ -818,7 +818,7 @@ impl Store {
         // session that explains it, and a missing explanation must not remove
         // the request from the queue.
         let mut stmt = conn.prepare(
-            "SELECT p.*, s.channel AS intent_channel, s.phase AS intent_phase,
+            "SELECT p.*, COALESCE(s.channel, p.channel) AS intent_channel, s.phase AS intent_phase,
                     s.branch AS intent_branch, s.state AS intent_session_state,
                     s.work_item_id AS intent_work_item_id,
                     w.title AS intent_work_item_title
@@ -1593,15 +1593,29 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub fn upsert_permission_mirror(&self, p: &PermissionRow) -> Result<()> {
+    /// Upsert a request a peer listed as waiting on `channel`. The channel is
+    /// kept for a card with no session, which has nothing else to place it.
+    /// An id already held for another node is never rewritten, and nor is
+    /// the id of one of this node's own approvals, which an answer looks up
+    /// first: either is `false`.
+    pub fn upsert_permission_mirror(&self, p: &PermissionRow, channel: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let own: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM approval WHERE id = ?1)",
+            [&p.id],
+            |r| r.get(0),
+        )?;
+        if own {
+            return Ok(false);
+        }
+        let changed = conn.execute(
             "INSERT INTO permission_request (id, session_id, node_id, rpc_id, tool_call_id, title,
                 kind, raw_input, options, state, answer_option_id, created_ms, created_mono_ms,
-                resolved_mono_ms, expires_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                resolved_mono_ms, expires_ms, channel)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
              ON CONFLICT(id) DO UPDATE SET state=?10, answer_option_id=?11, resolved_mono_ms=?14,
-                expires_ms=?15, title=?6, options=?9",
+                expires_ms=?15, title=?6, options=?9
+             WHERE permission_request.node_id=?3",
             rusqlite::params![
                 p.id,
                 p.session_id,
@@ -1617,14 +1631,16 @@ impl Store {
                 p.created_ms,
                 p.created_mono_ms,
                 p.resolved_mono_ms,
-                p.expires_ms
+                p.expires_ms,
+                channel
             ],
         )?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Open permission rows of `node_id` in `channel` not in `keep` are
-    /// expired: the owner no longer lists them as waiting.
+    /// expired: the owner no longer lists them as waiting. A row with no
+    /// session is placed by the channel it was mirrored on.
     pub fn expire_absent_permissions(
         &self,
         node_id: &str,
@@ -1633,8 +1649,8 @@ impl Store {
     ) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT p.id FROM permission_request p JOIN session s ON s.id = p.session_id
-             WHERE p.node_id=?1 AND s.channel=?2 AND p.state='new'",
+            "SELECT p.id FROM permission_request p LEFT JOIN session s ON s.id = p.session_id
+             WHERE p.node_id=?1 AND COALESCE(s.channel, p.channel)=?2 AND p.state='new'",
         )?;
         let open: Vec<String> = stmt
             .query_map([node_id, channel], |r| r.get(0))?

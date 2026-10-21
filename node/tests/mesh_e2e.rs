@@ -755,6 +755,103 @@ async fn a_question_asked_on_b_is_answered_from_a() {
     assert!(a.store.open_operator_questions().unwrap().is_empty());
 }
 
+/// An approval an external harness raised on B, with no session behind it,
+/// shows in A's queue labelled as B's. A's answer goes to B, which decides
+/// it; an answer that is an admin action is still B's own to confirm.
+#[tokio::test]
+async fn a_sessionless_approval_on_b_is_shown_on_a_and_decided_on_b() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+
+    let approval = |id: &str, tool: &str| tracon::store::approvals::ApprovalRow {
+        id: id.into(),
+        channel: "personal".into(),
+        session_id: None,
+        node_id: bi.clone(),
+        lane: Some("laptop".into()),
+        tool: tool.into(),
+        arguments: r#"{"repo":"o/r","number":7,"body":"ship it"}"#.into(),
+        request_key: id.into(),
+        title: format!("{tool} o/r#7"),
+        state: tracon::store::approvals::PENDING.into(),
+        answer_option_id: None,
+        edited_arguments: None,
+        result: None,
+        reason: None,
+        operator_note: None,
+        claimed_ms: None,
+        created_ms: tracon::store::now_ms(),
+        decided_ms: None,
+        finished_ms: None,
+        expires_ms: tracon::store::now_ms() + 600_000,
+    };
+    b.store
+        .insert_approval(&approval("comment", "pr_comment"))
+        .unwrap();
+    b.store
+        .insert_approval(&approval("setup", tracon::mcp::setup::PROPOSE))
+        .unwrap();
+    b.bus.publish(tracon::stream::Frame::Queue {
+        waiting: b.store.open_permission_views().unwrap(),
+    });
+
+    let shown = |id: &'static str| {
+        let store = a.store.clone();
+        move || {
+            store
+                .open_permission_views()
+                .is_ok_and(|open| open.iter().any(|p| p.id == id))
+        }
+    };
+    wait_for("A to show B's approvals", shown("comment")).await;
+    let (st, queue) = call(&a.app, "GET", "/api/queue", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let card = queue["waiting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "comment")
+        .cloned()
+        .unwrap();
+    assert_eq!(card["node_id"], bi, "{card}");
+    assert_eq!(card["session_id"], serde_json::Value::Null);
+    assert_eq!(card["intent"]["channel"], "personal");
+
+    // Allowing a setup proposal writes B's config: A cannot confirm it.
+    wait_for("A to show the setup card", shown("setup")).await;
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        "/api/permissions/setup/answer",
+        Some(json!({ "option_id": "allow_once" })),
+    )
+    .await;
+    assert!(st.is_client_error(), "{st} {v}");
+    assert_eq!(
+        b.store.get_approval("setup").unwrap().unwrap().state,
+        tracon::store::approvals::PENDING
+    );
+
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        "/api/permissions/comment/answer",
+        Some(json!({ "option_id": "reject_once", "reason": "not this PR" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let decided = b.store.get_approval("comment").unwrap().unwrap();
+    assert_eq!(decided.state, tracon::store::approvals::REJECTED);
+    assert_eq!(decided.reason.as_deref(), Some("not this PR"));
+    wait_for("A to stop showing it", || {
+        a.store
+            .open_permission_views()
+            .is_ok_and(|open| open.iter().all(|p| p.id != "comment"))
+    })
+    .await;
+}
+
 /// One sign-in for the pair, and a refresh either node may make but only one
 /// makes per version: A signs in and B receives it; each renews in turn through
 /// the real hub's claims, handing the renewed copy to the other; and when both

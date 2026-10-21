@@ -1,4 +1,5 @@
-import type { Permission } from './types'
+import { nodeById } from './nodes'
+import type { NodeInfo, Permission } from './types'
 
 /**
  * A brokered call held for the operator. Nothing waits on it: allowing it
@@ -61,4 +62,36 @@ export function editedArguments(
   if (!args) return undefined
   const changed = Object.entries(drafts).filter(([k, v]) => args[k] !== v)
   return changed.length ? { ...args, ...Object.fromEntries(changed) } : undefined
+}
+
+/**
+ * The answers to this card that are an admin action on the node holding it,
+ * which that node confirms only with its own passkey (`admin_answer` on the
+ * node): allowing a repository setup proposal or a Dockerfile trial, and
+ * saving an egress host to the repository. A peer showing the card cannot
+ * confirm them, so it leaves them to that node.
+ */
+export function stepUpOptions(p: Pick<Permission, 'raw_input'>): string[] {
+  if (!p.raw_input) return []
+  try {
+    const input = JSON.parse(p.raw_input)
+    if (typeof input?.approval_id !== 'string') return []
+    if (input.tool === 'repo_setup_propose' || input.tool === 'repo_setup_try') return ['allow_once']
+    if (input.tool === 'request_egress') return ['allow_repo']
+    return []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The answers this node leaves to the node holding the card: its step-up
+ * answers, unless the card is this node's own. A card whose owner is not
+ * known to be this node is treated as a peer's, so an answer it would refuse
+ * is never offered. The Home lane and the card both ask this, so a card is
+ * never counted as yours while it offers no Allow, or offers one its owner
+ * then refuses.
+ */
+export function withheldOptions(nodes: NodeInfo[], p: Pick<Permission, 'node_id' | 'raw_input'>): string[] {
+  return nodeById(nodes, p.node_id)?.is_self ? [] : stepUpOptions(p)
 }

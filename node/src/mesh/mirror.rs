@@ -270,12 +270,21 @@ impl Mirror {
         let mut keep = Vec::new();
         for v in rows {
             match serde_json::from_value::<PermissionRow>(v.clone()) {
-                // A session-less caller's approval is answered on the node
-                // that holds it; there is no mirrored session to hang it on.
-                Ok(p) if p.node_id == sender && p.session_id.is_none() => {}
+                // A session-less caller's approval is kept by the channel it
+                // was listed on, so it shows here and an answer to it goes
+                // back to the sender, which decides and runs it.
                 Ok(p) if p.node_id == sender => {
-                    keep.push(p.id.clone());
-                    let _ = self.store.upsert_permission_mirror(&p);
+                    match self.store.upsert_permission_mirror(&p, channel) {
+                        Ok(true) => keep.push(p.id.clone()),
+                        // The id is already bound to another node, or is one
+                        // of this node's own approvals.
+                        Ok(false) => return Applied::Impersonation,
+                        // Its session has not reached us yet, say: the next
+                        // list carries it again.
+                        Err(error) => {
+                            tracing::warn!(%error, permission = %p.id, "mirrored permission not stored")
+                        }
+                    }
                 }
                 Ok(_) => return Applied::Impersonation,
                 Err(_) => return Applied::Malformed,
@@ -493,6 +502,152 @@ mod tests {
             peer.open_reviews().unwrap().is_empty(),
             "terminal reports must not re-enter the operator queue"
         );
+    }
+
+    /// A pending `pr_comment` approval held by `node` with no session behind
+    /// it, as an external harness raises one.
+    fn sessionless_approval(id: &str, node: &str) -> crate::store::approvals::ApprovalRow {
+        crate::store::approvals::ApprovalRow {
+            id: id.into(),
+            channel: "personal".into(),
+            session_id: None,
+            node_id: node.into(),
+            lane: Some("laptop".into()),
+            tool: "pr_comment".into(),
+            arguments: r#"{"body":"ship it"}"#.into(),
+            request_key: "comment".into(),
+            title: "pr_comment".into(),
+            state: crate::store::approvals::PENDING.into(),
+            answer_option_id: None,
+            edited_arguments: None,
+            result: None,
+            reason: None,
+            operator_note: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            decided_ms: None,
+            finished_ms: None,
+            expires_ms: now_ms() + 60_000,
+        }
+    }
+
+    /// A peer that learned the id of one of this node's own approvals cannot
+    /// list a harmless card under it: an answer looks the id up among this
+    /// node's approvals first, so allowing the card would run this node's
+    /// call.
+    #[test]
+    fn a_peer_cannot_list_a_card_under_one_of_this_nodes_own_approval_ids() {
+        let peer = Store::open_in_memory().unwrap();
+        peer.ensure_peer_node("peer").unwrap();
+        peer.node_channel_add("peer", "personal").unwrap();
+        peer.insert_approval(&sessionless_approval("approval", "peer"))
+            .unwrap();
+        let disguised = crate::mesh::frames::snapshots(&peer, "peer")
+            .into_iter()
+            .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
+            .unwrap();
+
+        let here = Arc::new(Store::open_in_memory().unwrap());
+        here.insert_approval(&sessionless_approval("approval", "here"))
+            .unwrap();
+        let mirror = Mirror {
+            store: here.clone(),
+            bus: Bus::new(),
+            self_id: "here".into(),
+        };
+
+        assert_eq!(
+            mirror.apply("peer", "personal", disguised),
+            Applied::Impersonation
+        );
+        // The queue holds this node's own card once, and nothing of the peer's.
+        let open = here.open_permission_views().unwrap();
+        assert_eq!(open.len(), 1, "{open:?}");
+        assert_eq!(open[0].node_id, "here");
+        assert!(here.get_permission("approval").unwrap().is_none());
+    }
+
+    /// An external harness's approval has no session to place it: the
+    /// snapshot that lists it places it by channel, and the snapshot that no
+    /// longer lists it closes it. Its id stays the owner's.
+    #[test]
+    fn a_sessionless_approval_is_mirrored_by_channel_and_expired_once_unlisted() {
+        let owner = Store::open_in_memory().unwrap();
+        owner.ensure_peer_node("owner").unwrap();
+        owner.node_channel_add("owner", "personal").unwrap();
+        owner
+            .insert_approval(&sessionless_approval("approval", "owner"))
+            .unwrap();
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus: Bus::new(),
+            self_id: "peer".into(),
+        };
+        let snapshot = |store: &Store| {
+            crate::mesh::frames::snapshots(store, "owner")
+                .into_iter()
+                .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
+                .unwrap()
+        };
+
+        assert_eq!(
+            mirror.apply("owner", "personal", snapshot(&owner)),
+            Applied::Stored
+        );
+        let open = peer.open_permission_views().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].node_id, "owner");
+        assert_eq!(open[0].session_id, None);
+        assert_eq!(open[0].intent.channel.as_deref(), Some("personal"));
+
+        // A third node cannot list the owner's card as its own.
+        let mut stolen = serde_json::to_value(&open[0]).unwrap();
+        stolen["node_id"] = "third".into();
+        assert_eq!(
+            mirror.apply(
+                "third",
+                "personal",
+                Payload::Queue {
+                    waiting: vec![stolen]
+                }
+            ),
+            Applied::Impersonation
+        );
+        assert_eq!(peer.open_permission_views().unwrap()[0].node_id, "owner");
+
+        // Nor does this node relay it as its own.
+        peer.node_channel_add("peer", "personal").unwrap();
+        let relayed = crate::mesh::frames::to_payloads(
+            &Frame::Queue {
+                waiting: peer.open_permission_views().unwrap(),
+            },
+            &peer,
+            "peer",
+        );
+        assert!(
+            relayed.iter().all(|(_, payload)| matches!(
+                payload,
+                Payload::Queue { waiting } if waiting.is_empty()
+            )),
+            "{relayed:?}"
+        );
+
+        assert!(owner
+            .decide_approval(
+                "approval",
+                &crate::store::approvals::Decision {
+                    state: crate::store::approvals::REJECTED,
+                    option_id: "reject_once",
+                    ..Default::default()
+                }
+            )
+            .unwrap());
+        assert_eq!(
+            mirror.apply("owner", "personal", snapshot(&owner)),
+            Applied::Stored
+        );
+        assert!(peer.open_permission_views().unwrap().is_empty());
     }
 
     #[test]

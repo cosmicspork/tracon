@@ -46,8 +46,11 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
         }
         Frame::Queue { waiting } => {
             // One payload per member channel, possibly empty: an empty list is
-            // how a peer learns a request it mirrored has been answered.
-            grouped(store, self_id, waiting, |p: &PermissionView| {
+            // how a peer learns a request it mirrored has been answered. A
+            // peer's request mirrored here is never relayed as ours.
+            let mine: Vec<&PermissionView> =
+                waiting.iter().filter(|p| p.node_id == self_id).collect();
+            grouped(store, self_id, &mine, |p: &&PermissionView| {
                 match p.request.session_id.as_deref() {
                     Some(id) => channel_of(store, id),
                     // A session-less caller's card carries its channel.
@@ -154,7 +157,7 @@ fn push_change_batch(
 /// reopening that session.
 pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
     let sessions = store.sessions_of_node(self_id).unwrap_or_default();
-    let waiting = store.open_permissions().unwrap_or_default();
+    let waiting = store.open_permission_views().unwrap_or_default();
     let reviews = store.mirrored_reviews().unwrap_or_default();
     let questions = store.open_operator_questions().unwrap_or_default();
     let mut out = Vec::new();
@@ -176,19 +179,11 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             })
             .map(|s| json!(s))
             .collect();
-        let session_ids: Vec<&str> = sessions
-            .iter()
-            .filter(|s| s.channel == c)
-            .map(|s| s.id.as_str())
-            .collect();
+        // Every card the queue lists, approvals and a session-less caller's
+        // among them: a peer expires what a snapshot leaves out.
         let w: Vec<Value> = waiting
             .iter()
-            .filter(|p| {
-                p.node_id == self_id
-                    && p.session_id
-                        .as_deref()
-                        .is_some_and(|id| session_ids.contains(&id))
-            })
+            .filter(|p| p.node_id == self_id && p.intent.channel.as_deref() == Some(c.as_str()))
             .map(|p| json!(p))
             .collect();
         let q: Vec<Value> = questions
