@@ -172,6 +172,10 @@ impl Mirror {
             Payload::PolicyBundle { .. } => Applied::Unhandled("policy_bundle"),
             Payload::PolicyReceipt { .. } => Applied::Unhandled("policy_receipt"),
             Payload::CredentialHandoff { .. } => Applied::Unhandled("credential_handoff"),
+            Payload::CredentialRevoke { .. } => Applied::Unhandled("credential_revoke"),
+            Payload::CredentialRevokeReceipt { .. } => {
+                Applied::Unhandled("credential_revoke_receipt")
+            }
             // These are handled before the generic mirror path: a hub stores
             // rollups separately and a direct transfer only stages a package.
             Payload::Rollup { .. } => Applied::Unhandled("rollup"),
@@ -248,8 +252,25 @@ impl Mirror {
         row.is_self = 0;
         row.reachable = 1;
         row.last_seen_ms = Some(now_ms());
+        let known = self.store.get_node(sender).ok().flatten();
         if self.store.put_node(&row).is_err() {
             return Applied::Malformed;
+        }
+        // A peer that now runs another build may read a revoke it never
+        // answered, even one restarted too quickly to be seen going quiet:
+        // what was abandoned for it goes out again at the next reconcile.
+        if known.is_some_and(|known| {
+            known.app_version != row.app_version || known.wire_contract != row.wire_contract
+        }) {
+            match self.store.rearm_credential_revokes(sender) {
+                Ok(0) => {}
+                Ok(n) => {
+                    tracing::info!(node = %sender, revokes = n, "abandoned credential revokes re-armed for a peer on a new build")
+                }
+                Err(error) => {
+                    tracing::warn!(%error, node = %sender, "abandoned credential revokes not re-armed")
+                }
+            }
         }
         // The peer's own signed word on the bundle it runs confirms a rollout
         // of that bundle even when its receipt was lost, which also ends the
@@ -529,6 +550,45 @@ mod tests {
             finished_ms: None,
             expires_ms: now_ms() + 60_000,
         }
+    }
+
+    /// Fourth review of #608, nit 4: a peer upgraded with a restart too quick
+    /// to be seen going quiet still announces its new build, and what was
+    /// abandoned for it is re-armed then. The same build again re-arms
+    /// nothing.
+    #[test]
+    fn a_peer_announcing_another_build_has_its_abandoned_revokes_re_armed() {
+        let here = Arc::new(Store::open_in_memory().unwrap());
+        here.ensure_peer_node("peer").unwrap();
+        let mirror = Mirror {
+            store: here.clone(),
+            bus: Bus::new(),
+            self_id: "here".into(),
+        };
+        let announce = |version: &str| {
+            let mut row = here.get_node("peer").unwrap().unwrap();
+            row.app_version = Some(version.into());
+            Payload::Node(row.to_json())
+        };
+        assert_eq!(
+            mirror.apply("peer", proto::frame::MESH_CHANNEL, announce("1.0.0")),
+            Applied::Stored
+        );
+        let id = here
+            .create_credential_revoke("glab", Some("0190-a"), 0, &["peer".into()])
+            .unwrap();
+        assert!(here.abandon_credential_revoke(&id, "peer").unwrap());
+        let status = || {
+            here.credential_revoke_targets(&id).unwrap()[0]
+                .status
+                .clone()
+        };
+
+        mirror.apply("peer", proto::frame::MESH_CHANNEL, announce("1.0.0"));
+        assert_eq!(status(), "abandoned");
+        mirror.apply("peer", proto::frame::MESH_CHANNEL, announce("1.1.0"));
+        assert_eq!(status(), "pending");
+        assert_eq!(here.credential_revoke_targets(&id).unwrap()[0].attempts, 0);
     }
 
     /// A peer that learned the id of one of this node's own approvals cannot

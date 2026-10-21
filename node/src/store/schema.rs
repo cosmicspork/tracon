@@ -1664,6 +1664,30 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE turn_usage ADD COLUMN requests_matched INTEGER;
     ALTER TABLE turn_usage ADD COLUMN requests_unmatched INTEGER;
     "#,
+    // 71: credentials removed here that peers are owed a revoke for, which
+    // peers have confirmed theirs and what each did with its copy. Delivered
+    // as policy rollouts are, but abandoned after a bounded number of sends.
+    r#"
+    CREATE TABLE credential_revoke (
+        id            TEXT PRIMARY KEY,
+        name          TEXT NOT NULL,
+        grant_id      TEXT,
+        grant_version INTEGER NOT NULL DEFAULT 0,
+        created_ms    INTEGER NOT NULL
+    );
+    CREATE TABLE credential_revoke_target (
+        revoke_id       TEXT NOT NULL REFERENCES credential_revoke(id) ON DELETE CASCADE,
+        node_id         TEXT NOT NULL,
+        status          TEXT NOT NULL CHECK(status IN ('pending','sent','offline','confirmed','abandoned')),
+        outcome         TEXT CHECK(outcome IN ('dropped','kept','not_held','unknown')),
+        detail          TEXT,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        last_sent_ms    INTEGER,
+        acknowledged_ms INTEGER,
+        PRIMARY KEY (revoke_id, node_id)
+    );
+    CREATE INDEX credential_revoke_target_node ON credential_revoke_target(node_id, status);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

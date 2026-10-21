@@ -5757,13 +5757,26 @@ pub async fn share_credential(
             StatusCode::NOT_FOUND,
             format!("no credential named {name}"),
         ))?;
-        if !cred.nodes.iter().any(|n| n == &to) {
+        if let Some(origin) = cred.shared_from(&s.node_id) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "{name} is a copy of {origin}'s sign-in; only that node can share it, so that its revoke reaches every copy"
+                ),
+            ));
+        }
+        // A share names its sign-in, and this node as its origin, so a
+        // revoke and a tombstone can tell it from a later one.
+        let minted = cred.ensure_grant(&s.node_id);
+        if minted || !cred.nodes.iter().any(|n| n == &to) {
             // An empty list means "the node holding the file": pinning the
             // target without also pinning this node would lock it out here.
             if cred.nodes.is_empty() {
                 cred.nodes.push(s.node_id.clone());
             }
-            cred.nodes.push(to.clone());
+            if !cred.nodes.iter().any(|n| n == &to) {
+                cred.nodes.push(to.clone());
+            }
             broker.put(&name, cred.clone());
             broker
                 .save(&identity.credential_store_key())
@@ -7031,20 +7044,34 @@ pub async fn import_credentials(
     let identity = crate::mesh::identity::load_or_generate()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .0;
-    let names: Vec<String> = {
+    let (names, shared) = {
         let mut broker = s.tools.broker.write().unwrap();
+        let mut staged = broker.clone();
         let mut names = Vec::new();
+        let mut shared = serde_json::Map::new();
         for (name, cred) in parsed.iter() {
-            broker.put(name, cred.clone());
+            let carried = staged.import(name, cred.clone(), &s.node_id);
+            if !carried.is_empty() {
+                shared.insert(name.to_string(), json!(carried));
+            }
             names.push(name.to_string());
         }
-        broker
+        staged
             .save(&identity.credential_store_key())
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        names
+        *broker = staged;
+        (names, shared)
     };
-    // Names only: a value that went in never comes back out.
-    Ok(Json(json!({ "imported": names })))
+    for (name, nodes) in &shared {
+        tracing::warn!(
+            credential = %name,
+            holders = %nodes,
+            "import replaced a shared credential; its holders keep the old value until it is shared again, and a later rm still revokes their copies"
+        );
+    }
+    // Names only: a value that went in never comes back out. `shared` names
+    // the nodes still holding a copy of what each import replaced.
+    Ok(Json(json!({ "imported": names, "shared": shared })))
 }
 
 /// Remove one sealed credential from the running broker and its store. An
@@ -7068,30 +7095,59 @@ pub async fn delete_credential_named_import(
     remove_credential(&s, "import").map(Json)
 }
 
-/// Staged, saved, then swapped in, as a forge token's removal is. The removal
-/// is this node's alone: the mesh has no revocation, so the other nodes the
-/// credential lists keep the copies they were handed, and the answer names
-/// them.
+/// `DELETE /api/credentials/revokes`, for the same reason.
+pub async fn delete_credential_named_revokes(
+    State(s): State<AppState>,
+    super::auth::AdminAction(()): super::auth::AdminAction,
+) -> ApiResult<Json<serde_json::Value>> {
+    remove_credential(&s, "revokes").map(Json)
+}
+
+/// Staged, saved, then swapped in, as a forge token's removal is. The store
+/// keeps a tombstone, so a peer handing the credential back does not restore
+/// it. When this node is the origin of the credential's sign-in, every other
+/// node it lists is owed a revoke, recorded before the store loses the
+/// credential (a removal saved without it would never be sent), queued at
+/// the hub, and redelivered until it is answered; the answer names those
+/// peers, all pending, and `GET /api/credentials/revokes` follows them. A
+/// copy another node signed in or shared is this node's to drop and no
+/// more: nothing is sent, and the answer names that origin.
 fn remove_credential(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
     let key = crate::mesh::identity::load_or_generate()
         .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
         .0
         .credential_store_key();
-    let removed = {
+    let (removed, revoke_id) = {
         let mut broker = s.tools.broker.write().unwrap();
         let mut staged = broker.clone();
-        let Some(removed) = staged.get(name).cloned() else {
+        let Some(removed) = staged.revoke(name) else {
             return Err(ApiError(
                 StatusCode::NOT_FOUND,
                 format!("no credential named {name}"),
             ));
         };
-        staged.remove(name);
-        staged
-            .save(&key)
-            .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        let peers = removed.revoke_targets(&s.node_id);
+        let revoke_id = match peers.is_empty() {
+            true => None,
+            false => Some(s.store().create_credential_revoke(
+                name,
+                removed.grant_id.as_deref(),
+                removed.grant_version,
+                &peers,
+            )?),
+        };
+        if let Err(error) = staged.save(&key) {
+            // Still held here, so owed to no one.
+            if let Some(id) = &revoke_id {
+                let _ = s.store().cancel_credential_revoke(id);
+            }
+            return Err(ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            ));
+        }
         *broker = staged;
-        removed
+        (removed, revoke_id)
     };
     // A provider's credential goes the way a disconnect takes it, so the
     // providers frame and what peers are told catch up now rather than at
@@ -7100,12 +7156,65 @@ fn remove_credential(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
     if let (Some(provider), Some(providers)) = (&removed.provider, s.manager.providers()) {
         providers.credential_removed(provider);
     }
-    let still_held_by: Vec<&String> = removed
-        .nodes
-        .iter()
-        .filter(|node| **node != s.node_id)
-        .collect();
-    Ok(json!({ "removed": name, "still_held_by": still_held_by }))
+    let Some(revoke_id) = revoke_id else {
+        let origin = (!removed.originates_at(&s.node_id)).then(|| removed.origin());
+        return Ok(json!({ "removed": name, "revoke": null, "origin": origin.flatten() }));
+    };
+    // Without a hub the record waits: the node delivers it once one is
+    // configured and reached.
+    if let Some(mesh) = &s.mesh {
+        if let Err(error) = mesh.dispatch_credential_revoke(&revoke_id) {
+            tracing::warn!(%error, credential = %name, "credential revoke not queued; reconciled later");
+        }
+    }
+    let targets = s.store().credential_revoke_targets(&revoke_id)?;
+    Ok(json!({ "removed": name, "revoke": revoke_json(&revoke_id, name, &targets) }))
+}
+
+/// One revoke as the CLI and the interface read it: the peers that dropped
+/// their copy or held none, those that answered they kept theirs, those
+/// still pending, and those given up on, each with what was last recorded.
+fn revoke_json(
+    revoke_id: &str,
+    name: &str,
+    targets: &[crate::store::CredentialRevokeTargetRow],
+) -> serde_json::Value {
+    let ids = |keep: fn(&crate::store::CredentialRevokeTargetRow) -> bool| -> Vec<String> {
+        targets
+            .iter()
+            .filter(|t| keep(t))
+            .map(|t| t.node_id.clone())
+            .collect()
+    };
+    json!({
+        "id": revoke_id,
+        "name": name,
+        "confirmed": ids(|t| t.confirmed() && !t.kept()),
+        "kept": ids(|t| t.kept()),
+        "pending": ids(|t| !t.confirmed() && !t.abandoned()),
+        "abandoned": ids(|t| t.abandoned()),
+        "targets": targets,
+    })
+}
+
+/// `GET /api/credentials/revokes`: every revoke this node owes, newest first,
+/// with which peers have confirmed it.
+pub async fn list_credential_revokes(
+    State(s): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rows = s.store().credential_revokes()?;
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let id = rows[i].revoke_id.clone();
+        let end = rows[i..]
+            .iter()
+            .position(|t| t.revoke_id != id)
+            .map_or(rows.len(), |n| i + n);
+        out.push(revoke_json(&id, &rows[i].name, &rows[i..end]));
+        i = end;
+    }
+    Ok(Json(json!(out)))
 }
 
 #[derive(Deserialize)]

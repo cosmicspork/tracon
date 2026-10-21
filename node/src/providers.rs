@@ -964,6 +964,26 @@ impl Providers {
         self.publish();
     }
 
+    /// Credentials a peer's revoke dropped here: each provider that used one
+    /// forgets its note and the new state is published, so what this node
+    /// publishes stops showing the connection. Unlike
+    /// [`Self::credential_removed`], a sign-in in flight here is left to
+    /// finish: it is this node's operator connecting again, and what it
+    /// stores is a sign-in of their own.
+    pub fn credentials_revoked(&self, credential_names: &[String]) {
+        let mut notes = self.notes.lock();
+        for (name, _) in self
+            .cfg
+            .providers
+            .iter()
+            .filter(|(_, provider)| credential_names.contains(&provider.credential))
+        {
+            notes.remove(name);
+        }
+        drop(notes);
+        self.publish();
+    }
+
     /// Change the channels a connected provider's credential serves, keeping
     /// its tokens. A shared credential also goes to the members of any added
     /// channel; a node that already holds it keeps its copy for a channel
@@ -1161,6 +1181,7 @@ impl Providers {
                 channels,
                 nodes,
                 grant_id: Some(uuid::Uuid::now_v7().to_string()),
+                grant_origin: Some(self.node_id.clone()),
                 ..Default::default()
             },
             // A refresh keeps where the credential may be used and who it was
@@ -1180,9 +1201,7 @@ impl Providers {
                 // A credential from before sign-ins were tracked gets its
                 // identity at its first renewal, from the one node that may
                 // renew it then.
-                if credential.grant_id.is_none() {
-                    credential.grant_id = Some(uuid::Uuid::now_v7().to_string());
-                }
+                credential.ensure_grant(&self.node_id);
                 credential.grant_version += 1;
                 credential
             }
@@ -1440,5 +1459,23 @@ mod tests {
         assert_eq!(p.confirmed_login("openai-codex", &a, now), None);
         p.inflight.lock().get_mut("openai-codex").unwrap().confirmed = Some("peer a".into());
         assert_eq!(p.confirmed_login("openai-codex", &a, now), None);
+    }
+
+    /// A peer's revoke landing while this node's operator is signing in
+    /// again leaves that sign-in to finish; a removal here stops it.
+    #[test]
+    fn a_revoke_from_a_peer_leaves_a_sign_in_in_flight_alone() {
+        let p = providers();
+        let credential = p.credential_name("anthropic").unwrap();
+        p.inflight
+            .lock()
+            .insert("anthropic".into(), slot(LoginOwner::Local, now_ms(), true));
+        p.credentials_revoked(std::slice::from_ref(&credential));
+        let cancel = p.inflight.lock()["anthropic"].cancel.clone();
+        assert!(!cancel.is_cancelled());
+
+        p.credential_removed("anthropic");
+        assert!(cancel.is_cancelled());
+        assert!(p.inflight.lock().get("anthropic").is_none());
     }
 }

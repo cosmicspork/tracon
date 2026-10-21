@@ -29,9 +29,9 @@ const SEEN_RETENTION_MS: i64 = 30 * 86_400_000;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// How long a reachable peer may go without confirming a queued policy bundle
-/// before it is queued again: long enough for a pull and a receipt, and what
-/// catches a frame the hub pruned or lost.
-pub const POLICY_RESEND_AFTER: Duration = Duration::from_secs(30 * 60);
+/// or credential revoke before it is queued again: long enough for a pull and
+/// a receipt, and what catches a frame the hub pruned or lost.
+pub const RESEND_AFTER: Duration = Duration::from_secs(30 * 60);
 
 /// Whether a delivery to one peer is due again, from its durable record:
 /// one never queued always is; one queued and unconfirmed is once the peer is
@@ -120,6 +120,9 @@ pub struct MeshClient {
     /// Told the names of the credentials a handoff stored, so what the node
     /// publishes about its providers follows.
     on_handoff: std::sync::OnceLock<OnHandoff>,
+    /// Told the names of the credentials a peer's revoke dropped, for the
+    /// same reason.
+    on_revoke: std::sync::OnceLock<OnHandoff>,
     /// The non-durable half: bounded owner streams relayed by the hub.
     pub(super) streams: Arc<super::stream::StreamRouter>,
     /// When the member list was last read again for a sender's refused key
@@ -179,6 +182,7 @@ impl MeshClient {
             executor: std::sync::OnceLock::new(),
             broker: std::sync::OnceLock::new(),
             on_handoff: std::sync::OnceLock::new(),
+            on_revoke: std::sync::OnceLock::new(),
             streams: Arc::new(super::stream::StreamRouter::new(weak.clone())),
             handoff_refresh: Mutex::new(HashMap::new()),
         })
@@ -191,6 +195,10 @@ impl MeshClient {
 
     pub fn set_on_handoff(&self, f: OnHandoff) {
         let _ = self.on_handoff.set(f);
+    }
+
+    pub fn set_on_revoke(&self, f: OnHandoff) {
+        let _ = self.on_revoke.set(f);
     }
 
     pub fn set_executor(&self, executor: Arc<dyn super::forward::CommandExecutor>) {
@@ -326,7 +334,7 @@ impl MeshClient {
 
     /// Bring every peer's newest live rollout up to date (or one peer's, with
     /// `only`): queue it where it never was, and again where it was queued
-    /// [`POLICY_RESEND_AFTER`] ago, the peer is reachable now, and nothing has
+    /// [`RESEND_AFTER`] ago, the peer is reachable now, and nothing has
     /// confirmed it. Returns how many were queued.
     pub fn reconcile_policy_rollouts(&self, only: Option<&str>) -> usize {
         self.reconcile_policy_rollouts_at(only, now_ms())
@@ -351,7 +359,7 @@ impl MeshClient {
                 target.last_sent_ms,
                 reachable,
                 now,
-                POLICY_RESEND_AFTER,
+                RESEND_AFTER,
             ) {
                 continue;
             }
@@ -368,11 +376,122 @@ impl MeshClient {
         queued
     }
 
+    /// Queue a revoke to every peer it names that has not confirmed it.
+    /// Like a rollout, a peer that is offline still gets the frame: the hub
+    /// keeps it until the peer next pulls.
+    pub fn dispatch_credential_revoke(&self, revoke_id: &str) -> Result<(), HubError> {
+        for target in self
+            .store
+            .credential_revoke_targets(revoke_id)
+            .map_err(|e| HubError::Local(e.to_string()))?
+        {
+            if !target.confirmed() {
+                self.queue_credential_revoke(&target);
+            }
+        }
+        Ok(())
+    }
+
+    /// Seal one peer's revoke and record what came of it. `true` when it was
+    /// queued.
+    fn queue_credential_revoke(&self, target: &crate::store::CredentialRevokeTargetRow) -> bool {
+        let payload = Payload::CredentialRevoke {
+            revoke_id: target.revoke_id.clone(),
+            name: target.name.clone(),
+            grant_id: target.grant_id.clone(),
+            grant_version: target.grant_version.max(0) as u64,
+        };
+        match self.enqueue_direct(MESH_CHANNEL, &target.node_id, &payload) {
+            Ok(()) => {
+                let _ = self
+                    .store
+                    .mark_credential_revoke_sent(&target.revoke_id, &target.node_id);
+                true
+            }
+            Err(error) => {
+                let _ = self.store.mark_credential_revoke_offline(
+                    &target.revoke_id,
+                    &target.node_id,
+                    &format!(
+                        "Not queued: {error}. Retried automatically when the peer is reachable."
+                    ),
+                );
+                false
+            }
+        }
+    }
+
+    /// Bring every unconfirmed revoke up to date (or one peer's, with
+    /// `only`), by the rules rollouts follow: queue it where it never was,
+    /// and again where it was queued [`RESEND_AFTER`] ago and the peer is
+    /// reachable now. Unlike a rollout nothing supersedes a revoke, so one
+    /// sent [`crate::store::REVOKE_MAX_ATTEMPTS`] times unanswered is
+    /// abandoned instead. Returns how many were queued.
+    pub fn reconcile_credential_revokes(&self, only: Option<&str>) -> usize {
+        self.reconcile_credential_revokes_at(only, now_ms())
+    }
+
+    /// [`reconcile_credential_revokes`](Self::reconcile_credential_revokes)
+    /// as of `now`.
+    pub fn reconcile_credential_revokes_at(&self, only: Option<&str>, now: i64) -> usize {
+        let targets = match self.store.credential_revoke_reconcile_targets(only) {
+            Ok(targets) => targets,
+            Err(error) => {
+                tracing::warn!(%error, "credential revokes not reconciled");
+                return 0;
+            }
+        };
+        let mut queued = 0;
+        for target in targets {
+            let reachable = self.peer_reachable(&target.node_id);
+            if !redelivery_due(
+                &target.status,
+                target.last_sent_ms,
+                reachable,
+                now,
+                RESEND_AFTER,
+            ) {
+                continue;
+            }
+            // A peer that never answers, one that cannot read the frame
+            // among them, is not sent it forever.
+            if target.attempts >= crate::store::REVOKE_MAX_ATTEMPTS {
+                if let Ok(true) = self
+                    .store
+                    .abandon_credential_revoke(&target.revoke_id, &target.node_id)
+                {
+                    tracing::warn!(to = %target.node_id, credential = %target.name, attempts = target.attempts, "credential revoke abandoned unanswered");
+                }
+                continue;
+            }
+            if self.queue_credential_revoke(&target) {
+                tracing::info!(to = %target.node_id, credential = %target.name, "credential revoke queued again");
+                queued += 1;
+            }
+        }
+        queued
+    }
+
     /// Everything this node delivers to peers on its own and keeps a durable
     /// record of, brought up to date: for one peer that has just come back,
     /// or for all of them.
     fn reconcile_deliveries(&self, only: Option<&str>) {
         self.reconcile_policy_rollouts(only);
+        // A peer that comes back may run a build that reads a revoke it
+        // never answered, and the removal cannot be made again here, since
+        // the credential is gone: what was abandoned for it is sent anew.
+        if let Some(peer) = only {
+            match self.store.rearm_credential_revokes(peer) {
+                Ok(0) => {}
+                Ok(n) => {
+                    tracing::info!(to = %peer, revokes = n, "abandoned credential revokes sent again to a returning peer")
+                }
+                Err(error) => {
+                    tracing::warn!(%error, to = %peer, "abandoned credential revokes not re-armed")
+                }
+            }
+        }
+        self.reconcile_credential_revokes(only);
     }
 
     /// Send an authenticated receiver result back to the node that sent a
@@ -755,7 +874,7 @@ impl MeshClient {
                 };
                 let stored = {
                     let mut b = broker.write().unwrap();
-                    let stored = b.apply_handoff(&self.node_id(), credentials);
+                    let stored = b.apply_handoff(&self.node_id(), sender, credentials);
                     if !stored.is_empty() {
                         if let Err(e) = b.save_at(path, &self.identity.credential_store_key()) {
                             tracing::error!(error = %e, "credential store could not be written");
@@ -770,6 +889,73 @@ impl MeshClient {
                     }
                 }
                 return Opened::from(!stored.is_empty());
+            }
+            Payload::CredentialRevoke {
+                revoke_id,
+                name,
+                grant_id,
+                grant_version,
+            } if env.is_direct() => {
+                let Some((broker, path)) = self.broker.get() else {
+                    // Unanswered, so the sender queues it again later.
+                    tracing::warn!(from = %sender, "credential revoke before the broker exists; dropped");
+                    return Opened::Ignored;
+                };
+                let outcome = {
+                    let mut b = broker.write().unwrap();
+                    let mut staged = b.clone();
+                    let outcome =
+                        staged.apply_revoke(sender, name, grant_id.as_deref(), *grant_version);
+                    // Only what is sealed to disk is confirmed; a store that
+                    // cannot be written leaves the revoke for a resend.
+                    if staged.tombstone(name) != b.tombstone(name)
+                        || outcome == crate::broker::Revoked::Dropped
+                    {
+                        if let Err(e) = staged.save_at(path, &self.identity.credential_store_key())
+                        {
+                            tracing::error!(error = %e, "credential store could not be written; revoke not confirmed");
+                            return Opened::Ignored;
+                        }
+                    }
+                    *b = staged;
+                    outcome
+                };
+                tracing::info!(from = %sender, credential = %name, ?outcome, "credential revoke applied");
+                if outcome == crate::broker::Revoked::Dropped {
+                    if let Some(callback) = self.on_revoke.get() {
+                        callback(std::slice::from_ref(name));
+                    }
+                }
+                let receipt = Payload::CredentialRevokeReceipt {
+                    revoke_id: revoke_id.clone(),
+                    name: name.clone(),
+                    outcome: Some(outcome.outcome()),
+                };
+                if let Err(error) = self.enqueue_direct(&env.channel, sender, &receipt) {
+                    tracing::warn!(to = %sender, error = %error, "credential revoke receipt could not be queued");
+                }
+                return Opened::from(outcome == crate::broker::Revoked::Dropped);
+            }
+            Payload::CredentialRevokeReceipt {
+                revoke_id,
+                name,
+                outcome,
+            } if env.is_direct() => {
+                let outcome = outcome.map(|o| o.as_str());
+                match self
+                    .store
+                    .confirm_credential_revoke(revoke_id, sender, name, outcome)
+                {
+                    Ok(true) => {
+                        tracing::info!(from = %sender, credential = %name, ?outcome, "credential revoke answered");
+                        return Opened::Applied;
+                    }
+                    Ok(false) => return Opened::Ignored,
+                    Err(error) => {
+                        tracing::warn!(from = %sender, error = %error, "credential revoke receipt could not be recorded");
+                        return Opened::Ignored;
+                    }
+                }
             }
             Payload::PolicyBundle {
                 toml,

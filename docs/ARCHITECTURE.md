@@ -866,7 +866,67 @@ Broker invariants:
 - **Widening a pin is explicit.** The CLI refuses to share a credential whose
   `nodes` does not already list the target. The authenticated interface may widen
   the pin — that is the operator deciding — and an empty pin gains the sharing node
-  too, so sharing never locks the sharer out.
+  too, so sharing never locks the sharer out. Either refuses to share a copy whose
+  origin is another node, and names it: the origin's revoke reaches only the
+  nodes the origin lists, so a copy shared on from a holder would outlive it.
+- **A credential's sign-in has one origin.** The node that mints its `grant_id`
+  (a sign-in, a share of a credential that named none, or the first renewal of one
+  from before sign-ins were named) is recorded as `grant_origin`, which every
+  handoff carries, so a renewal handed back by another holder is still the
+  origin's. A credential imported here that names no origin is this node's,
+  whatever `nodes` lists first; an origin the file names is kept. A copy from
+  before origins were recorded reads its first node in `nodes` as its origin,
+  the node that signed in or shared it, for `rm` as for `share`.
+- **Admitting a node hands it what a share would.** The credentials pinned to it
+  go along, less any copy of another node's sign-in, and each that named no
+  sign-in is given one first, minted and sealed here. The CLI's `mesh admit` and
+  `mesh invite`, with a node running, leave a credential that needs one minted
+  for `tracon credential share`, since the running node would write its own
+  store back over the sign-in.
+- **Importing over a shared credential keeps its holders.** When an import
+  replaces a credential this node originated and shared, the nodes listed for
+  the old one stay listed and the import is given a sign-in of its own, later
+  than theirs, so a later `rm` revokes their copies. Those copies keep the old
+  value until it is shared again; the import warns, naming them.
+- **Removing a credential revokes it across the mesh, from its origin only.**
+  `tracon credential rm` and `DELETE /api/credentials/{name}`, which the CLI calls
+  when a node is running, leave a tombstone of the sign-in in the sealed store (the sign-in, its
+  count of renewals, and its origin), and a handoff of that sign-in, such as a
+  peer's refresh handed back, is refused and logged as a warning. Tombstones never
+  expire; a copy of a later sign-in passes one, as does putting the credential here
+  again. A tombstone of a copy that named no sign-in refuses every copy from its
+  origin, since that origin's first renewal mints a sign-in that would sort after
+  it; one left by the origin's own revoke of such a copy names no origin, since the
+  origin holds nothing to renew, so its next share is taken. A re-share is the
+  same sign-in, so a holder's own `rm` stands against the origin sharing it
+  again, and only putting the credential on that holder (an import or a sign-in
+  there) undoes it. Grants are UUIDv7s minted on different nodes, so clock skew between two nodes
+  decides which of their sign-ins is the later; a re-share or reconnect within the
+  skew of a removal can be refused, and putting the credential here again always
+  works. When the remover is the origin, each other node in `nodes` is owed a
+  direct-sealed revoke, recorded before the store loses the credential and
+  delivered as policy rollouts are (queued at the hub, reconciled when the peer
+  comes back, resent until answered). Otherwise the removal is the remover's
+  copy alone, and nothing is sent. A peer obeys a revoke only from the origin of
+  the copy it holds, and only when that copy is not of a later sign-in; it keeps
+  any other, its own included, seals its store, and answers whether it dropped its
+  copy, kept one, or held none. A revoke of a name it holds nothing under records
+  nothing, unless it holds a tombstone of that sender's sign-in, so no member can
+  plant one. A sign-in in progress on the peer is left to finish. `tracon
+  credential revokes` (and `GET /api/credentials/revokes`) shows each peer as
+  dropped, kept, not held, pending, or abandoned. Unlike policy rollouts nothing
+  supersedes or prunes a revoke: a peer that has not answered after
+  `REVOKE_MAX_ATTEMPTS` sends is abandoned. A send the hub could not be given,
+  such as one to a node whose sealing key is gone, counts as one and is tried at
+  every reconcile, so a node that left the mesh is abandoned after as many of
+  those. A peer that goes quiet and comes back, or announces another
+  application version or wire contract, perhaps a build that reads the revoke,
+  is sent what was abandoned for it again from a fresh count; one that never
+  comes back has to have its copy removed on that node. A receipt from a newer peer with an outcome this node does not know
+  still confirms the revoke, shown as confirmed. `tracon credential revokes
+  --cancel <id>` forgets one, for a peer that has left the mesh. A provider's
+  `disconnect`, and removing a forge token in the interface, remove the credential
+  here without a tombstone or a revoke.
 - **Forge tokens reach git through the environment only** — an inline credential
   helper fed by variables — never argv, never `.git/config`, never a remote URL, so
   neither `ps` nor the worktree the harness receives ever holds one.
@@ -926,7 +986,7 @@ retention holds it until the peer pulls. The signer reconciles each peer's newes
 live rollout when the peer comes back, when the signer reconnects to the hub, and
 every tenth heartbeat (which also picks up rollouts `tracon policy push` wrote to
 the shared database): what was never queued is queued, and what was queued over
-`POLICY_RESEND_AFTER` ago without confirmation is queued again while the peer is
+`RESEND_AFTER` ago without confirmation is queued again while the peer is
 reachable, covering pruned and lost frames. A new rollout supersedes every
 unconfirmed target of older ones, so an older bundle is never pushed again, and a
 receiver refuses a redelivered bundle older than the one it has installed (or a

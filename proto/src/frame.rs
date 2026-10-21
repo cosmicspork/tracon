@@ -99,6 +99,34 @@ pub fn valid_channel(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"@._-".contains(&b))
 }
 
+/// What a [`Payload::CredentialRevoke`] came to at the peer that applied it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevokeOutcome {
+    /// Its copy was dropped.
+    Dropped,
+    /// It holds a credential of that name and kept it: another node's
+    /// sign-in, its own among them, or a later one.
+    Kept,
+    /// It holds nothing of that name.
+    NotHeld,
+    /// An outcome a newer peer sent that this build does not know. The
+    /// receipt still confirms the revoke.
+    #[serde(other)]
+    Unknown,
+}
+
+impl RevokeOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dropped => "dropped",
+            Self::Kept => "kept",
+            Self::NotHeld => "not_held",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// The plaintext inside a frame. Rows travel as JSON values so this crate has
 /// no dependency on node types.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -212,6 +240,29 @@ pub enum Payload {
     /// dropped there.
     CredentialHandoff {
         credentials: Vec<Value>,
+    },
+    /// Direct only: the sender removed a credential whose sign-in it is the
+    /// origin of. The receiver drops its copy only when the sender is that
+    /// copy's origin and the copy is not of a newer grant; keeps any other,
+    /// its own among them; and answers with
+    /// [`Payload::CredentialRevokeReceipt`] either way. Redelivery is
+    /// routine, so applying one twice changes nothing.
+    CredentialRevoke {
+        revoke_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant_id: Option<String>,
+        #[serde(default)]
+        grant_version: u64,
+    },
+    /// Direct only. The envelope identity authenticates the node that applied
+    /// the revoke; nothing else confirms one. `outcome` says what it came
+    /// to there; a receipt without one says nothing about it.
+    CredentialRevokeReceipt {
+        revoke_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<RevokeOutcome>,
     },
     /// Record changes on a channel, from one site. Every change's `site` must
     /// be the frame's sender; `channel` is repeated so the applier can hold it
@@ -1045,6 +1096,42 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["kind"], "credential_handoff");
+        let v = serde_json::to_value(Payload::CredentialRevoke {
+            revoke_id: "r".into(),
+            name: "glab".into(),
+            grant_id: None,
+            grant_version: 0,
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "credential_revoke");
+        let v = serde_json::to_value(Payload::CredentialRevokeReceipt {
+            revoke_id: "r".into(),
+            name: "glab".into(),
+            outcome: Some(RevokeOutcome::NotHeld),
+        })
+        .unwrap();
+        assert_eq!(v["outcome"], "not_held");
+        // A receipt from before outcomes were sent still reads.
+        let old: Payload = serde_json::from_value(serde_json::json!({
+            "kind": "credential_revoke_receipt", "revoke_id": "r", "name": "glab",
+        }))
+        .unwrap();
+        assert!(matches!(
+            old,
+            Payload::CredentialRevokeReceipt { outcome: None, .. }
+        ));
+        // One from a newer peer, with an outcome this build does not know,
+        // still reads, and still names its revoke.
+        let newer: Payload = serde_json::from_value(serde_json::json!({
+            "kind": "credential_revoke_receipt", "revoke_id": "r", "name": "glab",
+            "outcome": "quarantined",
+        }))
+        .unwrap();
+        assert!(matches!(
+            newer,
+            Payload::CredentialRevokeReceipt { outcome: Some(RevokeOutcome::Unknown), ref revoke_id, .. }
+                if revoke_id == "r"
+        ));
         let v = serde_json::to_value(Payload::Changes {
             channel: "personal".into(),
             changes: vec![Change {

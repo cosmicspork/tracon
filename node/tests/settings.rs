@@ -319,7 +319,7 @@ fn sealed() -> Broker {
 /// through it, so the node stops brokering it at once rather than at its
 /// next restart; with none running it removes it from the store itself.
 /// Either way the file loses it too, so a restart cannot bring it back, and
-/// the line names the nodes still holding a copy.
+/// the line names the nodes owed a revoke.
 #[tokio::test]
 async fn a_cli_rm_reaches_the_running_node() {
     use std::os::unix::fs::PermissionsExt;
@@ -380,8 +380,38 @@ async fn a_cli_rm_reaches_the_running_node() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("running node"), "{stdout}");
     assert!(stdout.contains("removed vega"), "{stdout}");
-    assert!(stdout.contains("removal is local"), "{stdout}");
+    assert!(stdout.contains("a revoke is pending for"), "{stdout}");
     assert!(stdout.contains("peer-b"), "{stdout}");
+    // Recorded for the node to send when it next runs.
+    let out = here(&["credential", "revokes"]).output().await.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && stdout.contains("vega"), "{stdout}");
+    assert!(stdout.contains("peer-b           pending"), "{stdout}");
+    // A revoke for a peer that has left the mesh can be cancelled by the id
+    // the listing shows, and is gone from it.
+    let short = stdout
+        .split("(revoke ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap()
+        .to_string();
+    let out = here(&["credential", "revokes", "--cancel", &short])
+        .output()
+        .await
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("cancelled revoke"),
+        "{stdout}"
+    );
+    let out = here(&["credential", "revokes"]).output().await.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("no credential revokes"), "{stdout}");
+    let out = here(&["credential", "revokes", "--cancel", &short])
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
     let out = here(&["credential", "ls"]).output().await.unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success() && !stdout.contains("vega"), "{stdout}");
@@ -408,7 +438,7 @@ async fn a_cli_rm_reaches_the_running_node() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("removal is local, and peer-b still hold"),
+        stdout.contains("a revoke is pending for peer-b (queued at the hub"),
         "{stdout}"
     );
     let (_, v) = call(&n, "GET", "/api/credentials", Some(LOCAL), None).await;
@@ -425,7 +455,7 @@ async fn a_cli_rm_reaches_the_running_node() {
 
 /// Removing the credential a provider uses goes the way a disconnect does:
 /// the providers frame says so at once, the file loses it, and the answer
-/// names the other node still holding a copy.
+/// names the other node owed a revoke.
 #[tokio::test]
 async fn removing_a_provider_credential_publishes_the_provider_as_disconnected() {
     let n = node();
@@ -466,7 +496,9 @@ async fn removing_a_provider_credential_publishes_the_provider_as_disconnected()
     let (s, v) = call(&n, "DELETE", "/api/credentials/openai", Some(LOCAL), None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["removed"], "openai");
-    assert_eq!(v["still_held_by"], json!(["peer-b"]));
+    // The other node is owed a revoke; with no hub here it waits, pending.
+    assert_eq!(v["revoke"]["pending"], json!(["peer-b"]), "{v}");
+    assert_eq!(v["revoke"]["confirmed"], json!([]), "{v}");
     let published = std::iter::from_fn(|| frames.try_recv().ok()).find_map(|frame| match frame {
         tracon::stream::Frame::Providers { providers } => Some(providers),
         _ => None,
@@ -476,6 +508,222 @@ async fn removing_a_provider_credential_publishes_the_provider_as_disconnected()
     assert_eq!(openai["state"], "disconnected");
     assert_eq!(state(&providers), "disconnected");
     assert!(sealed().get("openai").is_none());
+}
+
+/// Review of #608, must-fix 1: this node holds a copy of peer-b's sign-in,
+/// as a share from peer-b leaves it. Removing it here drops this node's
+/// copy and owes no one a revoke, so peer-b's own credential and every
+/// other holder's copy stay; the answer names peer-b.
+#[tokio::test]
+async fn removing_a_copy_another_node_shared_revokes_nothing_elsewhere() {
+    let n = node();
+    let toml = "[credentials.glab]\nchannels = [\"personal\"]\n\
+                nodes = [\"peer-b\", \"n1\", \"peer-c\"]\n\
+                grant_id = \"0190-b\"\ngrant_origin = \"peer-b\"\n\
+                [credentials.glab.env]\nGLAB_TOKEN = \"not-a-real-token\"\n";
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": toml })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = call(&n, "DELETE", "/api/credentials/glab", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["revoke"], json!(null), "{v}");
+    assert_eq!(v["origin"], "peer-b", "{v}");
+    let (s, v) = call(&n, "GET", "/api/credentials/revokes", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v, json!([]), "{v}");
+    assert!(sealed().get("glab").is_none());
+    assert!(sealed().tombstone("glab").is_some());
+}
+
+/// Third review of #608, should-fix 2: a copy node-a shared before origins
+/// were recorded lists node-a first and names no sign-in or origin. It came
+/// by handoff, as such a copy does, and is node-a's, so removing it here
+/// sends nothing and names node-a, as a share of it would.
+#[tokio::test]
+async fn removing_a_legacy_copy_revokes_nothing_and_names_its_first_node() {
+    let n = node();
+    let legacy = tracon::broker::Credential {
+        channels: vec!["personal".into()],
+        nodes: vec!["node-a".into(), "n1".into()],
+        ..Default::default()
+    };
+    {
+        let key = tracon::mesh::identity::load_or_generate()
+            .unwrap()
+            .0
+            .credential_store_key();
+        let mut broker = n.broker.write().unwrap();
+        broker.put("glab", legacy);
+        broker.save(&key).unwrap();
+    }
+    assert_eq!(sealed().get("glab").unwrap().origin(), Some("node-a"));
+    let (s, v) = call(&n, "DELETE", "/api/credentials/glab", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["revoke"], json!(null), "{v}");
+    assert_eq!(v["origin"], "node-a", "{v}");
+    let (s, v) = call(&n, "GET", "/api/credentials/revokes", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v, json!([]), "{v}");
+}
+
+/// Fourth review of #608, should-fix 2: an import is the operator putting
+/// the credential here, so it is this node's whichever node its `nodes`
+/// lists first. Removing it owes peer-a a revoke and names no other origin,
+/// and it is this node's to share.
+#[tokio::test]
+async fn an_import_is_this_nodes_whichever_node_it_lists_first() {
+    let n = node();
+    let toml = "[credentials.glab]\nchannels = [\"personal\"]\n\
+                nodes = [\"peer-a\", \"n1\"]\n\
+                [credentials.glab.env]\nGLAB_TOKEN = \"not-a-real-token\"\n";
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": toml })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let held = sealed().get("glab").unwrap().clone();
+    assert_eq!(held.grant_origin.as_deref(), Some("n1"));
+    assert_eq!(held.shared_from("n1"), None);
+    let (handoff, _) = sealed().admission_handoff("n1", "peer-a");
+    assert_eq!(handoff.len(), 1);
+
+    // Without a hub there is nobody to share with, but the refusal is that,
+    // not that the credential is another node's.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/glab/share",
+        Some(LOCAL),
+        Some(json!({ "to": "peer-a" })),
+    )
+    .await;
+    assert!(!v.to_string().contains("sign-in"), "{s} {v}");
+
+    let (s, v) = call(&n, "DELETE", "/api/credentials/glab", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["origin"], json!(null), "{v}");
+    assert_eq!(v["revoke"]["pending"], json!(["peer-a"]), "{v}");
+}
+
+/// Fourth review of #608, nit 3: the offline CLI's import over a credential
+/// this node shared warns in one plain line, naming the holder.
+#[tokio::test]
+async fn an_offline_import_over_a_shared_credential_warns_naming_its_holders() {
+    use std::os::unix::fs::PermissionsExt;
+    let _n = node();
+    let own = private_state("an_offline_import_over_a_shared_credential_warns");
+    let dir = state::scratch("an_offline_import_over_a_shared_credential_warns");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let import = |toml: &str| {
+        let file = dir.join("glab.toml");
+        std::fs::write(&file, toml).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"));
+        cmd.args(["credential", "import"])
+            .arg(&file)
+            .env("TRACON_URL", &url)
+            .env_remove("TRACON_TOKEN")
+            .env("TRACON_STATE_DIR", &own)
+            .env("TRACON_CONFIG_DIR", &own);
+        cmd
+    };
+    let out = import(
+        "[credentials.glab]\nchannels = [\"personal\"]\nnodes = [\"peer-d\"]\n\
+         [credentials.glab.env]\nGLAB_TOKEN = \"not-a-real-token\"\n",
+    )
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = import(
+        "[credentials.glab]\nchannels = [\"personal\"]\n\
+         [credentials.glab.env]\nGLAB_TOKEN = \"another-unreal-token\"\n",
+    )
+    .output()
+    .await
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(
+        stderr.trim_end(),
+        "warning: glab replaced a credential shared with peer-d; they keep the old value \
+         until `tracon credential share` sends this one, and `tracon credential rm glab` \
+         still revokes their copies"
+    );
+    drop(listener);
+}
+
+/// Third review of #608, should-fix 3: this node shared `glab` to peer-d,
+/// then a rotated token is imported from a file that lists no nodes. The
+/// answer names peer-d as still holding a copy, and removing `glab` sends
+/// peer-d a revoke its copy goes with.
+#[tokio::test]
+async fn importing_over_a_shared_credential_keeps_the_holders_a_revoke_reaches() {
+    let n = node();
+    let shared = "[credentials.glab]\nchannels = [\"personal\"]\n\
+                  nodes = [\"n1\", \"peer-d\"]\n\
+                  grant_id = \"0190-n1\"\ngrant_origin = \"n1\"\n\
+                  [credentials.glab.env]\nGLAB_TOKEN = \"not-a-real-token\"\n";
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": shared })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["shared"], json!({}), "{v}");
+    let held = sealed().get("glab").unwrap().clone();
+    let mut peer_d = tracon::broker::Broker::default();
+    let rows = tracon::broker::Broker::handoff_rows(&[("glab".into(), held)]);
+    assert_eq!(peer_d.apply_handoff("peer-d", "n1", &rows), ["glab"]);
+
+    let rotated = "[credentials.glab]\nchannels = [\"personal\"]\n\
+                   [credentials.glab.env]\nGLAB_TOKEN = \"another-unreal-token\"\n";
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/credentials/import",
+        Some(LOCAL),
+        Some(json!({ "toml": rotated })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["shared"], json!({ "glab": ["peer-d"] }), "{v}");
+
+    let (s, v) = call(&n, "DELETE", "/api/credentials/glab", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["revoke"]["pending"], json!(["peer-d"]), "{v}");
+    let grant = v["revoke"]["targets"][0]["grant_id"]
+        .as_str()
+        .map(str::to_string);
+    assert!(grant.is_some(), "{v}");
+    assert_eq!(
+        peer_d.apply_revoke("n1", "glab", grant.as_deref(), 0),
+        tracon::broker::Revoked::Dropped
+    );
 }
 
 /// `import` is a static route beside `/api/credentials/{name}`; a

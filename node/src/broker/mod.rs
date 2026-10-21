@@ -120,6 +120,13 @@ pub struct Credential {
     /// holder of a shared credential keeps the highest it has seen.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub grant_version: u64,
+    /// The node that minted `grant_id`: where it was signed in, shared, or
+    /// first renewed. It travels with every handoff, so each holder knows
+    /// whose sign-in its copy is, and only that node's revoke drops it.
+    /// Absent on a credential put here that was never shared, and on one
+    /// from before origins were recorded: [`Self::origin`] reads those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_origin: Option<String>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -140,6 +147,7 @@ impl std::fmt::Debug for Credential {
             .field("identity", &self.identity)
             .field("grant_id", &self.grant_id)
             .field("grant_version", &self.grant_version)
+            .field("grant_origin", &self.grant_origin)
             .finish()
     }
 }
@@ -161,6 +169,7 @@ impl Default for Credential {
             identity: None,
             grant_id: None,
             grant_version: 0,
+            grant_origin: None,
         }
     }
 }
@@ -176,6 +185,76 @@ impl Credential {
     pub fn supersedes(&self, other: &Credential) -> bool {
         (self.grant_id.as_deref(), self.grant_version)
             > (other.grant_id.as_deref(), other.grant_version)
+    }
+
+    /// Whether this copy is of a later sign-in than `grant_id`: what lets a
+    /// credential past a tombstone or a revoke. The same sign-in refreshed
+    /// is not newer, so a hand-back of a removed credential stays removed.
+    /// Grants are UUIDv7s minted on different nodes, so between two nodes
+    /// whose clocks disagree the skew decides which sign-in is later; a
+    /// re-share or reconnect within that skew of a removal may be refused,
+    /// and putting the credential here again always passes.
+    pub fn newer_grant_than(&self, grant_id: Option<&str>) -> bool {
+        self.grant_id.as_deref() > grant_id
+    }
+
+    /// Whose sign-in this copy is: [`Self::grant_origin`], or for a copy
+    /// from before origins were recorded, the first node `nodes` lists,
+    /// which is the node that signed in or shared it (a share lists the
+    /// sharer first, and renewal without a claim already relies on it).
+    pub fn origin(&self) -> Option<&str> {
+        self.grant_origin
+            .as_deref()
+            .or_else(|| self.nodes.first().map(String::as_str))
+    }
+
+    /// Whether removing this credential at `node_id` is the origin removing
+    /// its sign-in, which revokes every other holder's copy, rather than one
+    /// holder dropping its own. Read through [`Self::origin`], so a copy
+    /// from before origins were recorded is the first listed node's, as the
+    /// share refusal reads it; a copy that names no origin and lists no
+    /// nodes is `node_id`'s.
+    pub fn originates_at(&self, node_id: &str) -> bool {
+        self.origin().is_none_or(|o| o == node_id)
+    }
+
+    /// The origin of a copy held at `node_id`, when that is another node:
+    /// [`Self::origin`], reading the first node `nodes` lists for a copy that
+    /// records none. Such a copy is not `node_id`'s to share. Its origin's
+    /// revoke reaches only the nodes the origin lists, and `node_id`'s is
+    /// obeyed nowhere, so a copy shared on would outlive every revoke; and a
+    /// share minting a sign-in for it would take it from the origin.
+    pub fn shared_from(&self, node_id: &str) -> Option<&str> {
+        self.origin().filter(|origin| *origin != node_id)
+    }
+
+    /// The nodes owed a revoke when `node_id` removes this credential: every
+    /// other node it lists, when `node_id` is its origin, and none when it
+    /// is not, since only the origin's revoke is obeyed.
+    pub fn revoke_targets(&self, node_id: &str) -> Vec<String> {
+        if !self.originates_at(node_id) {
+            return Vec::new();
+        }
+        self.nodes
+            .iter()
+            .filter(|node| *node != node_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Give a credential that names no sign-in one, minted at `node_id`,
+    /// before it is shared, so a revoke and a tombstone can tell this share
+    /// from a later one and every holder knows whose it is. OAuth too: a
+    /// copy shared without one would get its identity at its first renewal,
+    /// which a tombstone of the unnamed copy could not tell from a new
+    /// sign-in. Returns whether it changed.
+    pub fn ensure_grant(&mut self, node_id: &str) -> bool {
+        if self.grant_id.is_some() {
+            return false;
+        }
+        self.grant_id = Some(uuid::Uuid::now_v7().to_string());
+        self.grant_origin = Some(node_id.to_string());
+        true
     }
 
     pub fn allows_node(&self, node_id: &str) -> bool {
@@ -314,12 +393,81 @@ impl std::fmt::Debug for Injection {
     }
 }
 
+/// What a removed credential leaves behind: the sign-in it was, and whose,
+/// so a hand-back of that sign-in is refused. Tombstones never expire; only
+/// a copy of a later sign-in, or the credential put here again, passes one.
+/// A tombstone of a copy that named no sign-in also refuses every copy from
+/// its origin: that origin's first renewal mints a sign-in for it, which
+/// would otherwise pass as a later one. One the origin's own revoke left
+/// names no origin, since nothing of the origin's is left to renew, and
+/// refuses only copies that name no sign-in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tombstone {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub grant_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+impl Tombstone {
+    fn of(credential: &Credential) -> Self {
+        Self {
+            grant_id: credential.grant_id.clone(),
+            grant_version: credential.grant_version,
+            origin: credential.origin().map(str::to_string),
+        }
+    }
+
+    fn key(&self) -> (Option<&str>, u64) {
+        (self.grant_id.as_deref(), self.grant_version)
+    }
+
+    /// Whether a handoff of `copy` is of the sign-in this removed.
+    fn refuses(&self, copy: &Credential) -> bool {
+        !copy.newer_grant_than(self.grant_id.as_deref())
+            || (self.grant_id.is_none()
+                && self.origin.is_some()
+                && copy.origin() == self.origin.as_deref())
+    }
+}
+
+/// What a revoke from a peer came to here. Each one is answered with it, so
+/// the sender can tell a peer that dropped its copy from one that kept it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revoked {
+    /// The copy of that peer's sign-in was dropped.
+    Dropped,
+    /// A credential of that name is held, and kept: it is another node's
+    /// sign-in (this node's own among them), or a later one of the sender's.
+    KeptOwn,
+    /// Nothing of that name is held.
+    NotHeld,
+}
+
+impl Revoked {
+    /// The word a receipt carries.
+    pub fn outcome(self) -> proto::frame::RevokeOutcome {
+        use proto::frame::RevokeOutcome;
+        match self {
+            Self::Dropped => RevokeOutcome::Dropped,
+            Self::KeptOwn => RevokeOutcome::Kept,
+            Self::NotHeld => RevokeOutcome::NotHeld,
+        }
+    }
+}
+
 /// Loaded at startup from a store only the node can open, and written back
 /// whenever a login, an import, or a handoff changes it.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Broker {
     #[serde(default)]
     credentials: BTreeMap<String, Credential>,
+    /// Credentials removed here or revoked by the peer that handed them
+    /// over, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    revoked: BTreeMap<String, Tombstone>,
 }
 
 impl std::fmt::Debug for Broker {
@@ -477,12 +625,138 @@ impl Broker {
     }
 
     /// Add or replace. Returns whether a credential of that name existed.
+    /// Putting one here is the operator bringing it back, so its tombstone
+    /// goes.
     pub fn put(&mut self, name: &str, cred: Credential) -> bool {
+        self.revoked.remove(name);
         self.credentials.insert(name.to_string(), cred).is_some()
+    }
+
+    /// Put a credential the operator imported at `node_id`. An import is
+    /// the operator putting the credential here, so one that records no
+    /// origin is `node_id`'s, whichever node its `nodes` lists first: that
+    /// fallback is for copies that arrived by handoff, not for a list an
+    /// operator wrote. An origin the file names is kept.
+    ///
+    /// When it replaces one this node shared, the nodes holding copies would
+    /// otherwise drop out of `nodes`, or keep a sign-in later than the one a
+    /// later `rm` names, and that `rm` would reach none of them. So those
+    /// nodes are carried over, and the import gets a sign-in of its own,
+    /// later than the copies', which a later revoke names. The copies are
+    /// not re-sent: they hold the old value until it is shared again.
+    /// Returns the nodes carried over, for the caller to warn about.
+    pub fn import(&mut self, name: &str, mut cred: Credential, node_id: &str) -> Vec<String> {
+        let named_elsewhere = cred.grant_origin.as_deref().is_some_and(|o| o != node_id);
+        if cred.grant_origin.is_none() {
+            cred.grant_origin = Some(node_id.to_string());
+        }
+        let holders = self
+            .credentials
+            .get(name)
+            .filter(|_| !named_elsewhere)
+            .map(|held| (held.nodes.clone(), held.revoke_targets(node_id)))
+            .filter(|(_, targets)| !targets.is_empty());
+        let Some((listed, carried)) = holders else {
+            self.put(name, cred);
+            return Vec::new();
+        };
+        // An empty list means "here only", which would lock this node out
+        // once the holders are listed.
+        if cred.nodes.is_empty() {
+            cred.nodes.push(node_id.to_string());
+        }
+        for node in listed {
+            if !cred.nodes.contains(&node) {
+                cred.nodes.push(node);
+            }
+        }
+        cred.grant_id = None;
+        cred.grant_version = 0;
+        cred.ensure_grant(node_id);
+        self.put(name, cred);
+        carried
     }
 
     pub fn remove(&mut self, name: &str) -> bool {
         self.credentials.remove(name).is_some()
+    }
+
+    /// Remove a credential for good: what `tracon credential rm` does. The
+    /// sign-in it was is kept as a tombstone, so a peer handing it back
+    /// after a refresh does not bring it back. Returns what was removed.
+    pub fn revoke(&mut self, name: &str) -> Option<Credential> {
+        let removed = self.credentials.remove(name)?;
+        self.bury(name, Tombstone::of(&removed));
+        Some(removed)
+    }
+
+    /// The tombstone a removed credential left, if any.
+    pub fn tombstone(&self, name: &str) -> Option<&Tombstone> {
+        self.revoked.get(name)
+    }
+
+    /// Record a tombstone, keeping whichever of it and one already here is
+    /// the later grant.
+    fn bury(&mut self, name: &str, tombstone: Tombstone) {
+        match self.revoked.get(name) {
+            Some(held) if held.key() >= tombstone.key() => {}
+            _ => {
+                self.revoked.insert(name.to_string(), tombstone);
+            }
+        }
+    }
+
+    /// Apply a revoke from `from`, a verified sender. Only the origin of the
+    /// copy held here is obeyed ([`Credential::origin`]): a holder that
+    /// removed its own copy drops nothing anywhere else, so neither the
+    /// owner's credential nor another holder's goes with it. The copy stays,
+    /// too, when it is of a later sign-in than the one revoked: a re-share
+    /// since.
+    ///
+    /// With nothing held, nothing is recorded unless a tombstone of the
+    /// sender's sign-in is already here: the sender cannot be shown to be
+    /// any grant's origin otherwise, and a tombstone recorded on its word
+    /// alone would let any member refuse a credential's every later handoff
+    /// here, and grow the store by a name at a time.
+    ///
+    /// A revoke that names no sign-in leaves a tombstone without an origin.
+    /// Refusing the origin's every later copy guards against its renewal of
+    /// a copy it still holds, and its revoke says it holds none, so its next
+    /// share, which names a sign-in, is taken.
+    pub fn apply_revoke(
+        &mut self,
+        from: &str,
+        name: &str,
+        grant_id: Option<&str>,
+        grant_version: u64,
+    ) -> Revoked {
+        let origin = grant_id.map(|_| from.to_string());
+        let revoked = Tombstone {
+            grant_id: grant_id.map(str::to_string),
+            grant_version,
+            origin: origin.clone(),
+        };
+        let Some(held) = self.credentials.get(name) else {
+            if self
+                .revoked
+                .get(name)
+                .is_some_and(|t| t.origin.as_deref() == Some(from))
+            {
+                self.bury(name, revoked);
+            }
+            return Revoked::NotHeld;
+        };
+        if held.origin() != Some(from) || held.newer_grant_than(grant_id) {
+            return Revoked::KeptOwn;
+        }
+        let dropped = self.credentials.remove(name).expect("held above");
+        let mut left = Tombstone::of(&dropped);
+        if origin.is_none() {
+            left.origin = None;
+        }
+        self.bury(name, left);
+        self.bury(name, revoked);
+        Revoked::Dropped
     }
 
     /// What the interface may see of each credential: names, kinds, and
@@ -518,18 +792,56 @@ impl Broker {
             .collect()
     }
 
-    /// Apply a handoff. Each row is `{ "name", "credential" }`; a row not
-    /// pinned to this node is dropped — the sender's bindings are a claim, the
-    /// receiver's are the rule. A tracked sign-in replaces what is here only
-    /// when it supersedes it, so a delayed or replayed copy never undoes a
-    /// refresh. Returns the names stored.
-    pub fn apply_handoff(&mut self, self_id: &str, rows: &[Value]) -> Vec<String> {
+    /// What admitting `to` hands it, by the rules a share follows: the
+    /// credentials pinned to it, less any copy of another node's sign-in,
+    /// which only that origin may pass on, and each named as a sign-in
+    /// minted at `self_id` where it named none, so `to`'s own `rm` of one
+    /// leaves a tombstone of that sign-in rather than one refusing every
+    /// later copy. Returns the rows and the names given a sign-in here, for
+    /// the caller to save before anything is sent.
+    pub fn admission_handoff(
+        &mut self,
+        self_id: &str,
+        to: &str,
+    ) -> (Vec<(String, Credential)>, Vec<String>) {
+        let mut rows = Vec::new();
+        let mut minted = Vec::new();
+        for (name, cred) in self.credentials.iter_mut() {
+            if !cred.nodes.iter().any(|n| n == to) {
+                continue;
+            }
+            if let Some(origin) = cred.shared_from(self_id) {
+                tracing::info!(
+                    credential = %name,
+                    origin,
+                    "not handed over at admission: a copy of another node's sign-in"
+                );
+                continue;
+            }
+            if cred.ensure_grant(self_id) {
+                minted.push(name.clone());
+            }
+            rows.push((name.clone(), cred.clone()));
+        }
+        (rows, minted)
+    }
+
+    /// Apply a handoff from `from`, the envelope's verified sender. Each row
+    /// is `{ "name", "credential" }`; a row not pinned to this node is
+    /// dropped — the sender's bindings are a claim, the receiver's are the
+    /// rule. A tracked sign-in replaces what is here only when it supersedes
+    /// it, so a delayed or replayed copy never undoes a refresh. A name with
+    /// a tombstone takes only a later sign-in than the one removed, so a
+    /// refresh handed back does not undo a removal and a re-share does.
+    /// Returns the names stored.
+    pub fn apply_handoff(&mut self, self_id: &str, from: &str, rows: &[Value]) -> Vec<String> {
         let mut stored = Vec::new();
         for row in rows {
             let Some(name) = row["name"].as_str() else {
                 continue;
             };
-            let Ok(cred) = serde_json::from_value::<Credential>(row["credential"].clone()) else {
+            let Ok(mut cred) = serde_json::from_value::<Credential>(row["credential"].clone())
+            else {
                 tracing::warn!(name, "credential handoff row is malformed; dropped");
                 continue;
             };
@@ -553,6 +865,25 @@ impl Broker {
                 );
                 continue;
             }
+            // A copy from before origins were recorded is the sender's when
+            // it names no sign-in, which only a share mints now; one that
+            // does is its first node's, as [`Credential::origin`] reads it.
+            if cred.grant_origin.is_none() {
+                cred.grant_origin = match cred.grant_id {
+                    Some(_) => cred.nodes.first().cloned(),
+                    None => Some(from.to_string()),
+                };
+            }
+            if let Some(tombstone) = self.revoked.get(name).filter(|t| t.refuses(&cred)) {
+                tracing::warn!(
+                    name,
+                    from,
+                    origin = ?tombstone.origin,
+                    "credential handoff is of a sign-in removed here; refused (put the credential here again to take it back)"
+                );
+                continue;
+            }
+            self.revoked.remove(name);
             self.credentials.insert(name.to_string(), cred);
             stored.push(name.to_string());
         }
@@ -1116,7 +1447,7 @@ mod tests {
             "name": "c",
             "credential": { "nodes": ["node-a"], "repos": ["a/**/b"], "env": { "K": "v" } },
         })];
-        assert!(b.apply_handoff("node-a", &rows).is_empty());
+        assert!(b.apply_handoff("node-a", "node-x", &rows).is_empty());
     }
 
     /// A repository no entry names is refused in words that point at both
@@ -1296,9 +1627,11 @@ mod tests {
             ..Default::default()
         };
         let rows = Broker::handoff_rows(&[("p".into(), pinned), ("l".into(), loose)]);
-        assert_eq!(b.apply_handoff("node-b", &rows), ["p"]);
+        assert_eq!(b.apply_handoff("node-b", "node-a", &rows), ["p"]);
         assert!(b.get("p").is_some() && b.get("l").is_none());
-        assert!(Broker::default().apply_handoff("node-a", &rows).is_empty());
+        assert!(Broker::default()
+            .apply_handoff("node-a", "node-x", &rows)
+            .is_empty());
         assert_eq!(b.bound_to("node-b").len(), 1);
     }
 
@@ -1319,25 +1652,488 @@ mod tests {
         };
         let token = |b: &Broker| b.get("anthropic").unwrap().env["ACCESS_TOKEN"].clone();
         let mut b = Broker::default();
-        assert_eq!(b.apply_handoff("node-b", &copy("0190-a", 2, "v2")).len(), 1);
-        assert!(b
-            .apply_handoff("node-b", &copy("0190-a", 1, "v1"))
-            .is_empty());
-        assert!(b
-            .apply_handoff("node-b", &copy("0190-a", 2, "v2-again"))
-            .is_empty());
-        assert_eq!(token(&b), "v2");
-        assert_eq!(b.apply_handoff("node-b", &copy("0190-a", 3, "v3")).len(), 1);
-        // A new sign-in wins over any refresh of an older one, and an older
-        // sign-in never comes back.
         assert_eq!(
-            b.apply_handoff("node-b", &copy("0191-b", 0, "new")).len(),
+            b.apply_handoff("node-b", "node-a", &copy("0190-a", 2, "v2"))
+                .len(),
             1
         );
         assert!(b
-            .apply_handoff("node-b", &copy("0190-a", 9, "old"))
+            .apply_handoff("node-b", "node-a", &copy("0190-a", 1, "v1"))
+            .is_empty());
+        assert!(b
+            .apply_handoff("node-b", "node-a", &copy("0190-a", 2, "v2-again"))
+            .is_empty());
+        assert_eq!(token(&b), "v2");
+        assert_eq!(
+            b.apply_handoff("node-b", "node-a", &copy("0190-a", 3, "v3"))
+                .len(),
+            1
+        );
+        // A new sign-in wins over any refresh of an older one, and an older
+        // sign-in never comes back.
+        assert_eq!(
+            b.apply_handoff("node-b", "node-a", &copy("0191-b", 0, "new"))
+                .len(),
+            1
+        );
+        assert!(b
+            .apply_handoff("node-b", "node-a", &copy("0190-a", 9, "old"))
             .is_empty());
         assert_eq!(token(&b), "new");
+    }
+
+    /// Node A's sign-in, shared with node B.
+    fn shared(grant: &str, version: u64, token: &str) -> Credential {
+        let mut c = Credential {
+            kind: KIND_OAUTH.into(),
+            nodes: vec!["node-a".into(), "node-b".into()],
+            grant_id: Some(grant.into()),
+            grant_version: version,
+            grant_origin: Some("node-a".into()),
+            ..Default::default()
+        };
+        c.env.insert("ACCESS_TOKEN".into(), token.into());
+        c
+    }
+
+    /// The bug a tombstone closes: a peer refreshes a shared credential and
+    /// hands the renewed copy back to the node that removed it.
+    #[test]
+    fn a_removed_shared_credential_is_refused_when_a_refresh_is_handed_back() {
+        let dir = std::env::temp_dir().join(format!("tracon-broker-tomb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sealed, plain) = (dir.join("credentials.sealed"), dir.join("credentials.toml"));
+        let key = DataKey::generate();
+        let mut b = Broker::default();
+        b.put("anthropic", shared("0190-a", 2, "v2"));
+        assert!(b.revoke("anthropic").is_some());
+        b.save_at(&sealed, &key).unwrap();
+
+        // The tombstone is sealed with the store and outlives a restart.
+        let mut b = Broker::load_at(&sealed, &plain, &key).unwrap();
+        let refreshed = Broker::handoff_rows(&[("anthropic".into(), shared("0190-a", 3, "v3"))]);
+        assert!(b.apply_handoff("node-a", "node-b", &refreshed).is_empty());
+        assert!(b.get("anthropic").is_none());
+
+        // A later sign-in passes it, and the tombstone goes.
+        let again = Broker::handoff_rows(&[("anthropic".into(), shared("0191-b", 0, "new"))]);
+        assert_eq!(b.apply_handoff("node-a", "node-b", &again), ["anthropic"]);
+        assert!(b.tombstone("anthropic").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn importing_a_removed_credential_again_clears_its_tombstone() {
+        let mut b = Broker::default();
+        b.put("anthropic", shared("0190-a", 2, "v2"));
+        b.revoke("anthropic");
+        b.put("anthropic", shared("0190-a", 2, "v2"));
+        assert!(b.tombstone("anthropic").is_none());
+        let refreshed = Broker::handoff_rows(&[("anthropic".into(), shared("0190-a", 3, "v3"))]);
+        assert_eq!(b.apply_handoff("node-a", "node-b", &refreshed).len(), 1);
+    }
+
+    /// Review of #608, must-fix 1: B shares `glab` to A and C, and A's
+    /// operator removes A's copy. That is A's alone to drop: nothing is
+    /// owed, and a revoke from A, were one sent, drops neither B's own
+    /// credential nor C's copy. B's revoke drops C's.
+    #[test]
+    fn a_recipient_removing_its_copy_leaves_the_owner_and_other_holders_theirs() {
+        let mut glab = Credential {
+            nodes: vec!["node-b".into(), "node-a".into(), "node-c".into()],
+            ..Default::default()
+        };
+        assert!(glab.ensure_grant("node-b"));
+        let grant = glab.grant_id.clone();
+        let mut owner = Broker::default();
+        owner.put("glab", glab.clone());
+        let rows = Broker::handoff_rows(&[("glab".into(), glab)]);
+        let (mut a, mut c) = (Broker::default(), Broker::default());
+        assert_eq!(a.apply_handoff("node-a", "node-b", &rows), ["glab"]);
+        assert_eq!(c.apply_handoff("node-c", "node-b", &rows), ["glab"]);
+
+        let removed = a.revoke("glab").unwrap();
+        assert!(!removed.originates_at("node-a"));
+        assert!(removed.revoke_targets("node-a").is_empty());
+        assert_eq!(removed.origin(), Some("node-b"));
+
+        for holder in [&mut owner, &mut c] {
+            assert_eq!(
+                holder.apply_revoke("node-a", "glab", grant.as_deref(), 0),
+                Revoked::KeptOwn
+            );
+            assert!(holder.get("glab").is_some() && holder.tombstone("glab").is_none());
+        }
+        // The origin removing it is what revokes the others.
+        assert_eq!(
+            owner.get("glab").unwrap().revoke_targets("node-b"),
+            ["node-a", "node-c"]
+        );
+        assert_eq!(
+            c.apply_revoke("node-b", "glab", grant.as_deref(), 0),
+            Revoked::Dropped
+        );
+    }
+
+    /// A peer that renewed the owner's OAuth sign-in hands the renewed copy
+    /// back; it is still the owner's, so that peer's revoke leaves it.
+    #[test]
+    fn a_renewal_handed_back_stays_the_owners_sign_in() {
+        let mut owner = Broker::default();
+        owner.put("anthropic", shared("0190-a", 1, "v1"));
+        let renewed = Broker::handoff_rows(&[("anthropic".into(), shared("0190-a", 2, "v2"))]);
+        assert_eq!(owner.apply_handoff("node-a", "node-b", &renewed).len(), 1);
+        assert_eq!(owner.get("anthropic").unwrap().origin(), Some("node-a"));
+        assert!(owner.get("anthropic").unwrap().originates_at("node-a"));
+        assert_eq!(
+            owner.apply_revoke("node-b", "anthropic", Some("0190-a"), 2),
+            Revoked::KeptOwn
+        );
+    }
+
+    /// Review of #608, must-fix 2: A shared `glab` to D before shares named a
+    /// sign-in, so D's copy names none. A's revoke of the sign-in a later
+    /// share minted drops it all the same: D's copy lists A first. B's own
+    /// credential of the name, which lists B first, stays.
+    #[test]
+    fn a_legacy_copy_without_a_sign_in_goes_with_its_origins_revoke() {
+        let legacy = |nodes: &[&str]| Credential {
+            nodes: nodes.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut d = Broker::default();
+        d.put("glab", legacy(&["node-a", "node-d"]));
+        assert_eq!(
+            d.apply_revoke("node-a", "glab", Some("0190-x"), 0),
+            Revoked::Dropped
+        );
+        assert!(d.tombstone("glab").is_some());
+
+        let mut b = Broker::default();
+        b.put("glab", legacy(&["node-b", "node-a"]));
+        assert_eq!(
+            b.apply_revoke("node-a", "glab", Some("0190-x"), 0),
+            Revoked::KeptOwn
+        );
+        assert!(b.get("glab").is_some());
+    }
+
+    /// Review of #608, should-fix 3: a member sends a revoke for a name this
+    /// node holds nothing under. Nothing is recorded, so a real share later
+    /// is taken; only a tombstone of the sender's own sign-in is kept up to
+    /// date by one.
+    #[test]
+    fn a_revoke_for_a_name_not_held_plants_no_tombstone() {
+        let mut b = Broker::default();
+        assert_eq!(
+            b.apply_revoke("node-x", "anthropic", Some("ffffffff-ffff"), 9),
+            Revoked::NotHeld
+        );
+        assert!(b.tombstone("anthropic").is_none());
+        let rows = Broker::handoff_rows(&[("anthropic".into(), shared("0190-a", 0, "v0"))]);
+        assert_eq!(b.apply_handoff("node-b", "node-a", &rows), ["anthropic"]);
+
+        // Dropped by its origin, then that revoke again with a later count:
+        // the tombstone follows the origin and no one else.
+        b.apply_revoke("node-a", "anthropic", Some("0190-a"), 0);
+        b.apply_revoke("node-a", "anthropic", Some("0190-a"), 3);
+        assert_eq!(b.tombstone("anthropic").unwrap().grant_version, 3);
+        b.apply_revoke("node-x", "anthropic", Some("ffffffff-ffff"), 9);
+        assert_eq!(
+            b.tombstone("anthropic").unwrap().grant_id.as_deref(),
+            Some("0190-a")
+        );
+    }
+
+    /// Review of #608, should-fix 4: D removes a copy of A's OAuth sign-in
+    /// from before sign-ins were named. A's first renewal mints one, which
+    /// would sort after the nameless tombstone; it is refused as A's. Another
+    /// node's sign-in of the name is not A's and is taken.
+    #[test]
+    fn a_tombstone_of_a_nameless_copy_refuses_its_origins_first_renewal() {
+        let mut d = Broker::default();
+        d.put(
+            "anthropic",
+            Credential {
+                kind: KIND_OAUTH.into(),
+                nodes: vec!["node-a".into(), "node-d".into()],
+                ..Default::default()
+            },
+        );
+        d.revoke("anthropic");
+        assert_eq!(
+            d.tombstone("anthropic").unwrap().origin.as_deref(),
+            Some("node-a")
+        );
+        let renewed = Broker::handoff_rows(&[("anthropic".into(), shared("0190-a", 1, "v1"))]);
+        assert!(d.apply_handoff("node-d", "node-a", &renewed).is_empty());
+        let mut theirs = shared("0191-c", 0, "c");
+        theirs.grant_origin = Some("node-c".into());
+        theirs.nodes = vec!["node-c".into(), "node-d".into()];
+        let rows = Broker::handoff_rows(&[("anthropic".into(), theirs)]);
+        assert_eq!(d.apply_handoff("node-d", "node-c", &rows), ["anthropic"]);
+    }
+
+    /// Second review of #608, should-fix 2: A shared env `glab` with D before
+    /// shares named a sign-in, and removes it. Its revoke names none, and A
+    /// holds nothing to renew after it, so the tombstone D keeps refuses only
+    /// a copy that names no sign-in: A importing `glab` again and sharing it
+    /// is taken.
+    #[test]
+    fn a_nameless_copy_the_origin_revoked_takes_the_origins_next_share() {
+        let mut d = Broker::default();
+        d.put(
+            "glab",
+            Credential {
+                nodes: vec!["node-a".into(), "node-d".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(d.apply_revoke("node-a", "glab", None, 0), Revoked::Dropped);
+        assert_eq!(d.tombstone("glab").unwrap().origin, None);
+        // The removed copy handed back is refused still.
+        let stale = vec![serde_json::json!({ "name": "glab", "credential": {
+            "nodes": ["node-a", "node-d"],
+        }})];
+        assert!(d.apply_handoff("node-d", "node-a", &stale).is_empty());
+
+        let mut again = Credential {
+            nodes: vec!["node-a".into(), "node-d".into()],
+            ..Default::default()
+        };
+        assert!(again.ensure_grant("node-a"));
+        let rows = Broker::handoff_rows(&[("glab".into(), again)]);
+        assert_eq!(d.apply_handoff("node-d", "node-a", &rows), ["glab"]);
+        assert!(d.tombstone("glab").is_none());
+    }
+
+    /// Second review of #608, should-fix 1: a copy is shared on only by its
+    /// origin. One that records no origin reads its first node as it, so an
+    /// old copy of B's is not A's to share either.
+    #[test]
+    fn a_copy_is_not_shared_from_anywhere_but_its_origin() {
+        let mut held = Credential {
+            nodes: vec!["node-b".into(), "node-a".into()],
+            ..Default::default()
+        };
+        assert_eq!(held.shared_from("node-a"), Some("node-b"));
+        assert_eq!(held.shared_from("node-b"), None);
+        held.grant_origin = Some("node-c".into());
+        assert_eq!(held.shared_from("node-a"), Some("node-c"));
+        assert_eq!(held.shared_from("node-c"), None);
+        assert_eq!(Credential::default().shared_from("node-a"), None);
+    }
+
+    /// Third review of #608, should-fix 2: D holds a copy A shared before
+    /// origins were recorded, so it lists A first and names no sign-in or
+    /// origin. It is A's sign-in to D's `rm` as it is to D's `share`: D's
+    /// removal owes no one a revoke.
+    #[test]
+    fn a_legacy_copy_is_its_first_nodes_to_revoke_as_to_share() {
+        let legacy = Credential {
+            nodes: vec!["node-a".into(), "node-d".into()],
+            ..Default::default()
+        };
+        assert!(!legacy.originates_at("node-d"));
+        assert!(legacy.revoke_targets("node-d").is_empty());
+        assert_eq!(legacy.shared_from("node-d"), Some("node-a"));
+        assert!(legacy.originates_at("node-a"));
+        assert_eq!(legacy.revoke_targets("node-a"), ["node-d"]);
+        assert!(Credential::default().originates_at("node-d"));
+    }
+
+    /// Third review of #608, should-fix 3: A shares `glab` to D, then the
+    /// operator imports a rotated token on A from a file that lists no
+    /// nodes. D stays listed, the import is a later sign-in than D's copy,
+    /// and A's `rm` then drops D's copy.
+    #[test]
+    fn importing_over_a_shared_credential_keeps_its_holders_within_a_revoke() {
+        let token = |value: &str| {
+            let mut c = Credential::default();
+            c.env.insert("GLAB_TOKEN".into(), value.into());
+            c
+        };
+        let mut a = Broker::default();
+        let mut glab = token("v1");
+        glab.nodes = vec!["node-a".into(), "node-d".into()];
+        glab.ensure_grant("node-a");
+        a.put("glab", glab.clone());
+        let mut d = Broker::default();
+        let rows = Broker::handoff_rows(&[("glab".into(), glab.clone())]);
+        assert_eq!(d.apply_handoff("node-d", "node-a", &rows), ["glab"]);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(a.import("glab", token("v2"), "node-a"), ["node-d"]);
+        let imported = a.get("glab").unwrap().clone();
+        assert_eq!(imported.nodes, ["node-a", "node-d"]);
+        assert_eq!(imported.grant_origin.as_deref(), Some("node-a"));
+        assert!(imported.newer_grant_than(glab.grant_id.as_deref()));
+
+        let removed = a.revoke("glab").unwrap();
+        assert_eq!(removed.revoke_targets("node-a"), ["node-d"]);
+        assert_eq!(
+            d.apply_revoke("node-a", "glab", removed.grant_id.as_deref(), 0),
+            Revoked::Dropped
+        );
+        assert!(d.get("glab").is_none());
+
+        // A file that lists D already is the same import.
+        let mut a = Broker::default();
+        a.put("glab", glab.clone());
+        let mut listed = token("v3");
+        listed.nodes = vec!["node-a".into(), "node-d".into()];
+        assert_eq!(a.import("glab", listed, "node-a"), ["node-d"]);
+        assert!(a.get("glab").unwrap().grant_id.is_some());
+
+        // A credential nobody else holds, or one that is another node's
+        // copy, is put as it was imported.
+        let mut a = Broker::default();
+        a.put("mine", token("v1"));
+        assert!(a.import("mine", token("v2"), "node-a").is_empty());
+        assert!(a.get("mine").unwrap().grant_id.is_none());
+        let mut copy = token("v1");
+        copy.nodes = vec!["node-b".into(), "node-a".into()];
+        a.put("theirs", copy);
+        assert!(a.import("theirs", token("v2"), "node-a").is_empty());
+        assert!(a.get("theirs").unwrap().nodes.is_empty());
+    }
+
+    /// Fourth review of #608, should-fix 2: an import is the operator putting
+    /// the credential here, so one that names no origin is this node's,
+    /// whichever node its `nodes` lists first. An origin the file names is
+    /// kept, and is not taken for this node's share.
+    #[test]
+    fn an_import_is_stamped_with_this_node_unless_it_names_an_origin() {
+        let listed = |origin: Option<&str>| Credential {
+            nodes: vec!["laptop".into(), "node-s".into()],
+            grant_origin: origin.map(str::to_string),
+            ..Default::default()
+        };
+        let mut s = Broker::default();
+        assert!(s.import("glab", listed(None), "node-s").is_empty());
+        let glab = s.get("glab").unwrap();
+        assert_eq!(glab.origin(), Some("node-s"));
+        assert_eq!(glab.shared_from("node-s"), None);
+        assert_eq!(glab.revoke_targets("node-s"), ["laptop"]);
+
+        assert!(s
+            .import("glab", listed(Some("laptop")), "node-s")
+            .is_empty());
+        let glab = s.get("glab").unwrap();
+        assert_eq!(glab.origin(), Some("laptop"));
+        assert_eq!(glab.shared_from("node-s"), Some("laptop"));
+        assert!(glab.grant_id.is_none());
+    }
+
+    /// Third review of #608, nit 5: admitting D hands it what a share
+    /// would: this node's credentials pinned to D, each named as a sign-in
+    /// minted here, and never a copy of another node's.
+    #[test]
+    fn admission_hands_over_only_this_nodes_sign_ins_and_names_them() {
+        let pinned = |nodes: &[&str]| Credential {
+            nodes: nodes.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut a = Broker::default();
+        a.put("own", pinned(&["node-a", "node-d"]));
+        a.put("copy", pinned(&["node-b", "node-a", "node-d"]));
+        a.put("elsewhere", pinned(&["node-a", "node-c"]));
+        let mut named = pinned(&["node-a", "node-d"]);
+        named.ensure_grant("node-a");
+        a.put("named", named.clone());
+
+        let (rows, minted) = a.admission_handoff("node-a", "node-d");
+        let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["named", "own"]);
+        assert_eq!(minted, ["own"]);
+        let own = a.get("own").unwrap();
+        assert!(own.grant_id.is_some());
+        assert_eq!(own.grant_origin.as_deref(), Some("node-a"));
+        assert_eq!(rows[1].1.grant_id, own.grant_id);
+        assert_eq!(a.get("named").unwrap().grant_id, named.grant_id);
+        assert!(a.get("copy").unwrap().grant_id.is_none());
+    }
+
+    /// Redelivery, a re-share since, and a copy that came by way of another
+    /// holder's refresh.
+    #[test]
+    fn a_revoke_from_the_origin_drops_its_sign_in_once_and_spares_a_later_one() {
+        let mut b = Broker::default();
+        let env = |grant: &str| Credential {
+            nodes: vec!["node-a".into(), "node-b".into()],
+            grant_id: Some(grant.into()),
+            grant_origin: Some("node-a".into()),
+            ..Default::default()
+        };
+        let rows = Broker::handoff_rows(&[("glab".into(), env("0190-a"))]);
+        b.apply_handoff("node-b", "node-a", &rows);
+        assert_eq!(
+            b.apply_revoke("node-a", "glab", Some("0190-a"), 0),
+            Revoked::Dropped
+        );
+        assert!(b.get("glab").is_none());
+        // Redelivered: nothing left to drop, and the late copy stays out.
+        assert_eq!(
+            b.apply_revoke("node-a", "glab", Some("0190-a"), 0),
+            Revoked::NotHeld
+        );
+        assert!(b.apply_handoff("node-b", "node-a", &rows).is_empty());
+
+        // A re-share since the removal is a later grant, which a revoke
+        // redelivered behind it leaves alone.
+        let reshared = Broker::handoff_rows(&[("glab".into(), env("0193-a"))]);
+        assert_eq!(b.apply_handoff("node-b", "node-a", &reshared), ["glab"]);
+        assert_eq!(
+            b.apply_revoke("node-a", "glab", Some("0190-a"), 0),
+            Revoked::KeptOwn
+        );
+
+        // A copy of the revoked grant that came by way of another holder's
+        // refresh is still the origin's, and goes.
+        let mut c = Broker::default();
+        let via = Broker::handoff_rows(&[("anthropic".into(), shared("0190-a", 4, "v4"))]);
+        c.apply_handoff("node-b", "node-c", &via);
+        assert_eq!(
+            c.apply_revoke("node-a", "anthropic", Some("0190-a"), 2),
+            Revoked::Dropped
+        );
+    }
+
+    /// A handoff carries whose sign-in the copy is. One from before origins
+    /// were recorded is read as its sender's when it names no sign-in, and
+    /// as its first node's when it does.
+    #[test]
+    fn a_handoff_carries_the_origin_and_a_copy_without_one_gets_it() {
+        let rows = Broker::handoff_rows(&[("anthropic".into(), shared("0190-a", 1, "v1"))]);
+        assert_eq!(rows[0]["credential"]["grant_origin"], "node-a");
+
+        let mut b = Broker::default();
+        let old = |grant: Option<&str>| {
+            vec![serde_json::json!({ "name": "c", "credential": {
+                "nodes": ["node-a", "node-b"], "grant_id": grant,
+            }})]
+        };
+        b.apply_handoff("node-b", "node-c", &old(None));
+        assert_eq!(b.get("c").unwrap().grant_origin.as_deref(), Some("node-c"));
+        let mut b = Broker::default();
+        b.apply_handoff("node-b", "node-c", &old(Some("0190-a")));
+        assert_eq!(b.get("c").unwrap().grant_origin.as_deref(), Some("node-a"));
+    }
+
+    #[test]
+    fn a_credential_without_a_sign_in_gets_one_minted_here_to_be_shared() {
+        let mut env = Credential::default();
+        assert!(env.ensure_grant("node-a"));
+        let first = env.grant_id.clone();
+        assert!(!env.ensure_grant("node-b"));
+        assert_eq!(env.grant_id, first);
+        assert_eq!(env.grant_origin.as_deref(), Some("node-a"));
+        let mut oauth = Credential {
+            kind: KIND_OAUTH.into(),
+            ..Default::default()
+        };
+        assert!(oauth.ensure_grant("node-a"));
+        assert_eq!(oauth.origin(), Some("node-a"));
     }
 
     #[cfg(unix)]

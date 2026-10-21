@@ -913,7 +913,7 @@ async fn an_unconfirmed_rollout_is_resent_only_after_the_wait_and_only_to_a_reac
     a.client.dispatch_policy_rollout("r1").unwrap();
     assert_eq!(target(&a, "r1").attempts, 1);
 
-    let wait = tracon::mesh::client::POLICY_RESEND_AFTER.as_millis() as i64;
+    let wait = tracon::mesh::client::RESEND_AFTER.as_millis() as i64;
     let now = now_ms();
     assert_eq!(
         a.client
@@ -1028,4 +1028,249 @@ async fn a_receiver_refuses_older_and_conflicting_bundles_and_takes_its_own_agai
     // Nothing was written: the same bundle is a no-op, the others refusals.
     assert_eq!(bundle::current().unwrap().toml, installed);
     assert!(b.store.policy_installation().unwrap().is_none());
+}
+
+/// B's broker, sealed in a directory of its own, holding `glab` as A handed
+/// it over: the copy a revoke from A is for.
+async fn shared_from_a(
+    a: &Node,
+    b: &Node,
+    tag: &str,
+) -> (tracon::broker::SharedBroker, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("tracon-mesh-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let broker = tracon::broker::Broker::default().shared();
+    b.client
+        .set_broker(broker.clone(), dir.join("credentials.sealed"));
+    // A's hello gives B the key its receipts are sealed to.
+    a.client.hello().await.unwrap();
+    let glab = tracon::broker::Credential {
+        channels: vec!["work".into()],
+        nodes: vec![a.id.node_id(), b.id.node_id()],
+        grant_id: Some("0190-a".into()),
+        ..Default::default()
+    };
+    tracon::mesh::enroll::post_direct(
+        &a.id,
+        a.client.hub_url(),
+        &b.id.node_id(),
+        &b.id.x25519_public(),
+        &Payload::CredentialHandoff {
+            credentials: tracon::broker::Broker::handoff_rows(&[("glab".into(), glab)]),
+        },
+    )
+    .await
+    .unwrap();
+    b.client.pull_once().await.unwrap();
+    assert!(broker.read().unwrap().get("glab").is_some());
+    (broker, dir)
+}
+
+fn revoke_status(node: &Node, revoke_id: &str) -> String {
+    node.store
+        .credential_revoke_targets(revoke_id)
+        .unwrap()
+        .remove(0)
+        .status
+}
+
+#[tokio::test]
+async fn a_revoke_reaches_a_peer_which_drops_its_copy_and_confirms() {
+    state::isolate();
+    let (a, b) = pair().await;
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    let (broker, dir) = shared_from_a(&a, &b, "revoke").await;
+    let dropped = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let told = dropped.clone();
+    b.client.set_on_revoke(Box::new(move |names| {
+        told.lock().unwrap().extend_from_slice(names)
+    }));
+
+    let id = a
+        .store
+        .create_credential_revoke("glab", Some("0190-a"), 0, &[b.id.node_id()])
+        .unwrap();
+    a.client.dispatch_credential_revoke(&id).unwrap();
+    assert_eq!(revoke_status(&a, &id), "sent");
+    a.client.drain_once().await.unwrap();
+    b.client.pull_once().await.unwrap();
+
+    assert!(broker.read().unwrap().get("glab").is_none());
+    assert_eq!(*dropped.lock().unwrap(), ["glab"]);
+    // Sealed without it, and the tombstone with it.
+    let back = tracon::broker::Broker::load_at(
+        &dir.join("credentials.sealed"),
+        &dir.join("credentials.toml"),
+        &b.id.credential_store_key(),
+    )
+    .unwrap();
+    assert!(back.get("glab").is_none());
+    assert!(back.tombstone("glab").is_some());
+
+    b.client.drain_once().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    assert_eq!(revoke_status(&a, &id), "confirmed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_revoke_sent_while_the_peer_was_offline_arrives_when_it_returns() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let (broker, dir) = shared_from_a(&a, &b, "revoke-offline").await;
+
+    // A has never heard from B: nothing can be sealed to it yet.
+    let id = a
+        .store
+        .create_credential_revoke("glab", Some("0190-a"), 0, &[b.id.node_id()])
+        .unwrap();
+    a.client.dispatch_credential_revoke(&id).unwrap();
+    assert_eq!(revoke_status(&a, &id), "offline");
+
+    // B's hello brings its key and makes it reachable; the revoke follows.
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    assert_eq!(revoke_status(&a, &id), "sent");
+    a.client.drain_once().await.unwrap();
+    b.client.pull_once().await.unwrap();
+    assert!(broker.read().unwrap().get("glab").is_none());
+    b.client.drain_once().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    assert_eq!(revoke_status(&a, &id), "confirmed");
+
+    // Confirmed is final: nothing is resent, however long it has been.
+    let wait = tracon::mesh::client::RESEND_AFTER.as_millis() as i64;
+    assert_eq!(
+        a.client
+            .reconcile_credential_revokes_at(None, now_ms() + 3 * wait),
+        0
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Review of #608, must-fix 2: a peer that keeps its copy answers so, and
+/// the revoke shows it as kept rather than confirmed. Here B holds `glab`
+/// under its own sign-in.
+#[tokio::test]
+async fn a_peer_that_keeps_its_own_copy_answers_kept() {
+    state::isolate();
+    let (a, b) = pair().await;
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    a.client.hello().await.unwrap();
+    let dir = std::env::temp_dir().join(format!("tracon-mesh-revoke-kept-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let broker = tracon::broker::Broker::default().shared();
+    let mut own = tracon::broker::Credential {
+        nodes: vec![b.id.node_id(), a.id.node_id()],
+        ..Default::default()
+    };
+    own.ensure_grant(&b.id.node_id());
+    broker.write().unwrap().put("glab", own);
+    b.client
+        .set_broker(broker.clone(), dir.join("credentials.sealed"));
+
+    let id = a
+        .store
+        .create_credential_revoke("glab", Some("0190-a"), 0, &[b.id.node_id()])
+        .unwrap();
+    a.client.dispatch_credential_revoke(&id).unwrap();
+    a.client.drain_once().await.unwrap();
+    b.client.pull_once().await.unwrap();
+    assert!(broker.read().unwrap().get("glab").is_some());
+    b.client.drain_once().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    let target = a.store.credential_revoke_targets(&id).unwrap().remove(0);
+    assert!(target.kept(), "{target:?}");
+    assert_eq!(target.outcome.as_deref(), Some("kept"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A revoke a reachable peer never answers is sent a bounded number of
+/// times and then abandoned, not resent every half hour for good.
+#[tokio::test]
+async fn an_unanswered_revoke_is_abandoned_after_its_last_send() {
+    state::isolate();
+    let (a, b) = pair().await;
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    let id = a
+        .store
+        .create_credential_revoke("glab", Some("0190-a"), 0, &[b.id.node_id()])
+        .unwrap();
+    let wait = tracon::mesh::client::RESEND_AFTER.as_millis() as i64;
+    let mut now = now_ms();
+    for _ in 0..tracon::store::REVOKE_MAX_ATTEMPTS {
+        assert_eq!(a.client.reconcile_credential_revokes_at(None, now), 1);
+        now += 2 * wait;
+    }
+    assert_eq!(a.client.reconcile_credential_revokes_at(None, now), 0);
+    let target = a.store.credential_revoke_targets(&id).unwrap().remove(0);
+    assert!(target.abandoned(), "{target:?}");
+    assert_eq!(target.attempts, tracon::store::REVOKE_MAX_ATTEMPTS);
+    assert_eq!(
+        a.client
+            .reconcile_credential_revokes_at(None, now + 2 * wait),
+        0
+    );
+}
+
+/// Third review of #608, nit 4: a peer abandoned for never answering, say
+/// on a build that could not read the revoke, is sent it again from a fresh
+/// count when it goes quiet and comes back, perhaps upgraded.
+#[tokio::test]
+async fn an_abandoned_revoke_is_sent_again_when_its_peer_comes_back() {
+    state::isolate();
+    let (a, b) = pair().await;
+    b.client.hello().await.unwrap();
+    a.client.pull_once().await.unwrap();
+    let peer = b.id.node_id();
+    let id = a
+        .store
+        .create_credential_revoke("glab", Some("0190-a"), 0, std::slice::from_ref(&peer))
+        .unwrap();
+    assert!(a.store.abandon_credential_revoke(&id, &peer).unwrap());
+
+    // Still reachable: nothing is sent.
+    a.client.presence_tick(now_ms());
+    assert_eq!(revoke_status(&a, &id), "abandoned");
+    a.client.presence_tick(now_ms() + 60 * 60_000);
+    assert!(!a.client.peer_reachable(&peer));
+    assert_eq!(revoke_status(&a, &id), "abandoned");
+
+    // Heard from again: the revoke goes out anew.
+    a.client.presence_tick(now_ms());
+    let target = a.store.credential_revoke_targets(&id).unwrap().remove(0);
+    assert_eq!(target.status, "sent", "{target:?}");
+    assert_eq!(target.attempts, 1);
+}
+
+/// Second review of #608, nit 4: a peer nothing can be sealed to, such as
+/// one that left the mesh, is tried at each reconcile and abandoned after
+/// as many tries as a peer that never answers, not left pending for good.
+#[tokio::test]
+async fn a_revoke_that_can_never_be_sealed_is_abandoned_too() {
+    state::isolate();
+    let (a, b) = pair().await;
+    // A has never heard from B, so it knows no key to seal to.
+    let id = a
+        .store
+        .create_credential_revoke("glab", Some("0190-a"), 0, &[b.id.node_id()])
+        .unwrap();
+    let mut now = now_ms();
+    for _ in 0..tracon::store::REVOKE_MAX_ATTEMPTS {
+        assert_eq!(a.client.reconcile_credential_revokes_at(None, now), 0);
+        assert_eq!(revoke_status(&a, &id), "offline");
+        now += 60_000;
+    }
+    assert_eq!(a.client.reconcile_credential_revokes_at(None, now), 0);
+    let target = a.store.credential_revoke_targets(&id).unwrap().remove(0);
+    assert!(target.abandoned(), "{target:?}");
+    assert_eq!(target.attempts, tracon::store::REVOKE_MAX_ATTEMPTS);
+    assert!(a
+        .store
+        .credential_revoke_reconcile_targets(None)
+        .unwrap()
+        .is_empty());
 }
