@@ -12,6 +12,7 @@ pub mod agent;
 pub mod conversation;
 pub mod events;
 pub mod hashline;
+pub mod journal;
 pub mod prompt;
 pub mod providers;
 pub mod server;

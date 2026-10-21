@@ -90,6 +90,16 @@ pub struct NewSessionParams {
     pub mcp_servers: Vec<Value>,
 }
 
+/// `session/load`: the session to reopen, and the same `cwd` and MCP servers
+/// it was started with, since a new process has to connect to them again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionParams {
+    pub session_id: String,
+    pub cwd: String,
+    pub mcp_servers: Vec<Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionResult {
@@ -303,6 +313,23 @@ pub struct UsageUpdate {
     pub used: Option<u64>,
     #[serde(default)]
     pub cost: Option<Cost>,
+    /// The one upstream request this update follows, when the harness reports
+    /// per request: what the node matches against the gateway's count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RequestUsage>,
+}
+
+/// One upstream model request as the harness counted it. `input_tokens` is the
+/// prompt not read from a cache, as the gateway counts it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cached_read_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,6 +399,8 @@ pub const OPTION_ALLOW_SESSION: &str = "allow_session";
 pub mod methods {
     pub const INITIALIZE: &str = "initialize";
     pub const SESSION_NEW: &str = "session/new";
+    /// Reopen a session the agent journaled, after its process was replaced.
+    pub const SESSION_LOAD: &str = "session/load";
     pub const SESSION_SET_CONFIG_OPTION: &str = "session/set_config_option";
     pub const SESSION_PROMPT: &str = "session/prompt";
     pub const SESSION_CANCEL: &str = "session/cancel";

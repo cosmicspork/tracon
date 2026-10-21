@@ -6,9 +6,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -18,6 +19,9 @@ pub struct Reply {
     pub body: String,
     /// Held this long before answering: a model still thinking.
     pub delay: Duration,
+    pub headers: Vec<(&'static str, String)>,
+    /// Send the body, then drop the connection instead of ending it.
+    pub cut: bool,
 }
 
 impl Reply {
@@ -26,7 +30,27 @@ impl Reply {
             status,
             body: body.into(),
             delay: Duration::ZERO,
+            headers: Vec::new(),
+            cut: false,
         }
+    }
+
+    /// A streamed answer that breaks off after these chunks: no finish, no
+    /// `[DONE]`, and the connection dropped.
+    pub fn cut_after(chunks: &[Value]) -> Self {
+        let mut body = String::new();
+        for c in chunks {
+            body.push_str(&format!("data: {c}\n\n"));
+        }
+        Self {
+            cut: true,
+            ..Self::error(StatusCode::OK, body)
+        }
+    }
+
+    pub fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
+        self
     }
 
     pub fn after(mut self, delay: Duration) -> Self {
@@ -42,7 +66,7 @@ pub struct Fake {
     pub requests: Arc<Mutex<Vec<Value>>>,
 }
 
-async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> impl IntoResponse {
+async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> Response {
     fake.requests.lock().unwrap().push(body);
     let reply = {
         let mut script = fake.script.lock().unwrap();
@@ -53,11 +77,36 @@ async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> impl 
         }
     };
     tokio::time::sleep(reply.delay).await;
-    (
+    let body = if reply.cut {
+        use futures_util::StreamExt;
+        let chunks: Vec<Result<String, std::io::Error>> = vec![
+            Ok(reply.body),
+            Err(std::io::Error::other("connection dropped")),
+        ];
+        // The drop waits a moment, so what came before it reaches the client
+        // rather than being lost with the connection.
+        Body::from_stream(futures_util::stream::iter(chunks).then(|c| async move {
+            if c.is_err() {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            c
+        }))
+    } else {
+        Body::from(reply.body)
+    };
+    let mut response = (
         reply.status,
         [(header::CONTENT_TYPE, "text/event-stream")],
-        reply.body,
+        body,
     )
+        .into_response();
+    for (name, value) in reply.headers {
+        response.headers_mut().insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_str(&value).unwrap(),
+        );
+    }
+    response
 }
 
 pub async fn serve(script: Vec<Reply>) -> (String, Fake) {

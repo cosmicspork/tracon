@@ -6,6 +6,8 @@
 
 pub mod openai_chat;
 
+use std::time::Duration;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -22,11 +24,40 @@ pub enum WireError {
     #[error("context window exceeded: {0}")]
     ContextOverflow(String),
     #[error("upstream answered {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+        /// The upstream's `Retry-After`, in seconds.
+        retry_after: Option<u64>,
+    },
     #[error("upstream reported an error mid-stream: {0}")]
     Stream(String),
     #[error("the stream ended before the response was complete")]
     Incomplete,
     #[error("transport: {0}")]
     Transport(#[from] reqwest::Error),
+}
+
+impl WireError {
+    /// Whether asking again could get a different answer: the upstream was
+    /// busy, briefly broken, or the connection or stream was lost. A refusal
+    /// of the request itself never is.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Http { status, .. } => matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529),
+            Self::Incomplete | Self::Transport(_) => true,
+            Self::ContextOverflow(_) | Self::Stream(_) => false,
+        }
+    }
+
+    /// How long the upstream asked to be left alone, if it said.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Http {
+                retry_after: Some(s),
+                ..
+            } => Some(Duration::from_secs(*s)),
+            _ => None,
+        }
+    }
 }

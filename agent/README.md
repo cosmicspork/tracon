@@ -19,16 +19,47 @@ stdin and stdout carry newline-delimited JSON-RPC 2.0, using the vocabulary in t
 
 | Method | Direction | Meaning |
 |---|---|---|
-| `initialize` | node → agent | Protocol version (1) and agent info. |
-| `session/new` | node → agent | The session's `cwd`, and the `mcpServers` whose tools join the six built-in ones. |
+| `initialize` | node → agent | Protocol version (1), agent info, and `agentCapabilities.loadSession` when sessions are journaled. |
+| `session/new` | node → agent | The session's `cwd`, and the `mcpServers` whose tools join the six built-in ones. Answers with a new session id (a UUID). |
+| `session/load` | node → agent | Carries on a journaled session in this process: the same `sessionId`, `cwd` and `mcpServers`. |
 | `session/prompt` | node → agent | Runs a turn. Answers with `stopReason` (`end_turn`, `max_turn_requests` or `cancelled`) and the turn's `usage`. |
 | `session/cancel` | node → agent (notification) | Ends the running turn. |
 | `session/close` | node → agent | Ends the session. |
-| `session/update` | agent → node (notification) | Message and thought chunks, tool calls and their updates, and context usage. Each carries a monotonic `seq` and is mirrored to `--events`. |
+| `session/update` | agent → node (notification) | Message and thought chunks, tool calls and their updates, context usage with each request's own usage, and retry notices. Each carries a monotonic `seq`, continued across a load, and is mirrored to `--events`. |
 | `session/request_permission` | agent → node | Sent before every tool call. Only `allow_once` runs it; anything else is a refusal the model is told about. |
 
 **Usage** follows the gateway's meaning. `inputTokens` is the prompt not read from a cache,
-`cachedReadTokens` is what was, and the node can reconcile the two counts per turn.
+`cachedReadTokens` is what was, and the node can reconcile the two counts per turn. Each
+`usage_update` also carries `request`: that one upstream request's tokens and `requestId`
+(the response's `id`), for matching against the gateway request by request.
+
+**A turn the agent stops itself** answers with a JSON-RPC error that says why:
+- the model wrote a tool's result itself (`<tool_response>` and the like in its text), so
+  nothing acts on an invented result;
+- the model made two malformed responses in a row. A malformed call (no tool name, an
+  unknown tool, arguments that are not a JSON object, or a call cut off by the output
+  limit) is never asked about: it is shown to the node as failed, and the model gets a
+  result saying what was wrong. A call written into the text instead of made counts too.
+
+**Retries.** A model request that fails with 408, 429, 500, 502, 503, 504 or 529, a lost
+connection, or a stream that breaks off is made again after 1, 2, 4 and 8 seconds, or after
+the upstream's `Retry-After` when that is longer (up to 60 seconds; longer, and the turn
+ends). Each retry is sent as a `session/update` with `subtype: "api_retry"`. Once any
+answer text has reached the node the request is never made again: the text is kept in the
+conversation, so it matches what the operator read, and the turn ends with the error.
+
+**The journal** is what makes a session outlive its process. With `--journal-dir` (by
+default `sessions/` beside `--events`), each session appends `<id>.jsonl`, written before
+each step takes effect: the prompt, the model's response with its tool calls before any of
+them runs, each call's start once it is allowed, and its full result. `session/load`
+rebuilds the conversation from it. A call the last process died around gets a result
+here:
+- one that never started: "not run: the harness restarted before this call ran";
+- one that started and has no result: "outcome unknown", with the model told to check its
+  effects before running it again.
+
+Either is sent to the node as the call's failed update, numbered after the last `seq` the
+dead process sent.
 
 **Credentials and the model** come from the command line, never from the session. The
 node passes `--providers`, a file it stages per session listing each `openai`-shaped
@@ -71,6 +102,7 @@ Exit codes:
 | 1 | Error. |
 | 3 | The turn limit was reached. |
 | 4 | The context window was exceeded. Nothing is truncated; compaction comes in Phase 2. |
+| 5 | The agent stopped the turn itself (see above). |
 
 The endpoint must speak OpenAI Chat Completions with streamed tool calls. For llama.cpp
 that means `--jinja`, with the server's built-in `--tools` left off.
@@ -85,11 +117,14 @@ that means `--jinja`, with the server's built-in `--tools` left off.
   - wall time, time to first token and tokens/s;
   - llama.cpp's own `timings`.
 - `tool_call` and `tool_result`
+- `retry`, with the attempt, the wait and the error
+- `stopped`, with the reason
 - `error`
 - `end`, with the outcome and totals.
 
 In protocol mode the file also records the session (`session`, with which instruction
-files were read) and each `update` with its `seq`.
+files were read, and on a load how much was restored and which calls were left open) and
+each `update` with its `session_id` and `seq`. The file is appended to, never truncated.
 
 ## Tools
 

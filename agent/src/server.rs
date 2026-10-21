@@ -5,18 +5,24 @@
 //! `session/request_permission` before it runs; what may run unasked is the
 //! node's policy, not the harness's. Each `session/update` carries a `seq` and
 //! is mirrored to the events file, so a session's record survives the pipe.
+//!
+//! With a journal directory, each session also writes its journal
+//! (`journal.rs`), and `session/load` carries a session on in a new process:
+//! the node starts one when the last died, and the turn it died in is closed
+//! from the journal.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use acp::codec::RpcError;
 use acp::rpc::{Incoming, Peer, Reader, Writer};
 use acp::types::{
-    self, methods, AgentInfo, Chunk, ContentBlock, InitializeResult, NewSessionParams,
-    NewSessionResult, PermissionOption, PermissionOutcome, PromptParams, PromptResult,
-    RequestPermissionParams, RequestPermissionResult, SessionIdParams, SessionUpdate,
-    SessionUpdateParams, ToolCall, ToolCallUpdate, UsageUpdate,
+    self, methods, AgentInfo, Chunk, ContentBlock, InitializeResult, LoadSessionParams,
+    NewSessionParams, NewSessionResult, PermissionOption, PermissionOutcome, PromptParams,
+    PromptResult, RequestPermissionParams, RequestPermissionResult, RequestUsage, SessionIdParams,
+    SessionUpdate, SessionUpdateParams, ToolCall, ToolCallUpdate, UsageUpdate,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -25,7 +31,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, Hooks, Outcome, Permit, Totals};
 use crate::conversation::{Block, Conversation, Role};
-use crate::events::Events;
+use crate::events::{self, Events};
+use crate::journal::{self, Journal, Record, Restored};
 use crate::prompt::ORIENTATION;
 use crate::tools::{mcp, Context, Output, Registry};
 use crate::wire::openai_chat::{Client, Delta};
@@ -46,6 +53,9 @@ pub struct Settings {
     pub system_extra: Option<String>,
     pub context_window: Option<u64>,
     pub events: Option<PathBuf>,
+    /// Where each session's journal is kept. Without one nothing can be
+    /// carried on, and `session/load` is not offered.
+    pub journal_dir: Option<PathBuf>,
 }
 
 /// Serves one node connection until it closes stdin.
@@ -58,7 +68,6 @@ pub async fn serve(settings: Settings, reader: Reader, writer: Writer) -> anyhow
     let (peer, mut incoming, read) = Peer::new(writer, reader);
     let reading = tokio::spawn(read);
     let mut sessions: HashMap<String, Arc<Session>> = HashMap::new();
-    let mut next_session = 0u32;
     while let Some(message) = incoming.recv().await {
         match message {
             Incoming::Request {
@@ -75,15 +84,29 @@ pub async fn serve(settings: Settings, reader: Reader, writer: Writer) -> anyhow
                             version: env!("CARGO_PKG_VERSION").into(),
                             extra: Default::default(),
                         }),
-                        extra: Default::default(),
+                        extra: [(
+                            "agentCapabilities".to_string(),
+                            json!({"loadSession": settings.journal_dir.is_some()}),
+                        )]
+                        .into_iter()
+                        .collect(),
                     })));
                 }
                 methods::SESSION_NEW => {
                     let result = match serde_json::from_value::<NewSessionParams>(params) {
                         Ok(p) => {
-                            next_session += 1;
-                            let id = format!("native-{next_session}");
-                            match Session::start(&id, p, &settings, &peer, &events).await {
+                            let id = uuid::Uuid::now_v7().to_string();
+                            let opened = Session::start(
+                                &id,
+                                &p.cwd,
+                                &p.mcp_servers,
+                                None,
+                                &settings,
+                                &peer,
+                                &events,
+                            )
+                            .await;
+                            match opened {
                                 Ok(s) => {
                                     sessions.insert(id.clone(), Arc::new(s));
                                     Ok(json!(NewSessionResult {
@@ -95,6 +118,22 @@ pub async fn serve(settings: Settings, reader: Reader, writer: Writer) -> anyhow
                                 Err(e) => Err(invalid(e)),
                             }
                         }
+                        Err(e) => Err(invalid(e.to_string())),
+                    };
+                    let _ = reply.send(result);
+                }
+                methods::SESSION_LOAD => {
+                    let result = match serde_json::from_value::<LoadSessionParams>(params) {
+                        Ok(p) if sessions.contains_key(&p.session_id) => {
+                            Err(invalid(format!("session {} is already open", p.session_id)))
+                        }
+                        Ok(p) => match load(&p, &settings, &peer, &events).await {
+                            Ok(s) => {
+                                sessions.insert(p.session_id, Arc::new(s));
+                                Ok(json!({}))
+                            }
+                            Err(e) => Err(invalid(e)),
+                        },
                         Err(e) => Err(invalid(e.to_string())),
                     };
                     let _ = reply.send(result);
@@ -149,6 +188,32 @@ pub async fn serve(settings: Settings, reader: Reader, writer: Writer) -> anyhow
     Ok(())
 }
 
+/// Reopens a journaled session in this process, closing the turn the last one
+/// died in.
+async fn load(
+    p: &LoadSessionParams,
+    settings: &Settings,
+    peer: &Peer,
+    events: &Arc<Events>,
+) -> Result<Session, String> {
+    let Some(dir) = &settings.journal_dir else {
+        return Err("this agent keeps no journal, so it cannot load a session".into());
+    };
+    let path = Journal::path(dir, &p.session_id);
+    let restored = journal::restore(&path)
+        .map_err(|e| format!("no journal for session {}: {e}", p.session_id))?;
+    Session::start(
+        &p.session_id,
+        &p.cwd,
+        &p.mcp_servers,
+        Some(restored),
+        settings,
+        peer,
+        events,
+    )
+    .await
+}
+
 fn invalid(message: impl Into<String>) -> RpcError {
     RpcError {
         code: -32602,
@@ -162,6 +227,7 @@ struct Session {
     cx: Context,
     tools: Registry,
     events: Arc<Events>,
+    journal: Option<Journal>,
     out: mpsc::UnboundedSender<Out>,
     /// One prompt at a time; the next waits for the conversation.
     state: tokio::sync::Mutex<(Conversation, Totals)>,
@@ -177,23 +243,45 @@ enum Out {
 }
 
 impl Session {
+    /// A new session, or with `restored` one carried on from its journal.
     async fn start(
         id: &str,
-        params: NewSessionParams,
+        cwd: &str,
+        mcp_servers: &[Value],
+        restored: Option<Restored>,
         settings: &Settings,
         peer: &Peer,
         events: &Arc<Events>,
     ) -> Result<Self, String> {
-        let cx = Context::new(std::path::Path::new(&params.cwd))
-            .map_err(|e| format!("cwd {}: {e}", params.cwd))?;
+        let cx = Context::new(std::path::Path::new(cwd)).map_err(|e| format!("cwd {cwd}: {e}"))?;
         let mut tools = Registry::default();
-        for config in &params.mcp_servers {
+        for config in mcp_servers {
             let server = mcp::Server::from_config(config)?;
             for tool in server.connect().await? {
                 tools.add(tool);
             }
         }
+        // Built afresh on a load too: the orientation and instruction files
+        // are today's, while the conversation is the journal's.
         let (system, read) = system_prompt(&cx, settings.system_extra.as_deref());
+        let journal = match &settings.journal_dir {
+            Some(dir) => {
+                Some(Journal::open(dir, id).map_err(|e| format!("journal for session {id}: {e}"))?)
+            }
+            None => None,
+        };
+        let loaded = restored.is_some();
+        let Restored {
+            messages,
+            interrupted,
+            ..
+        } = restored.unwrap_or_default();
+        if let (Some(j), false) = (&journal, loaded) {
+            j.write(&Record::Session {
+                id: id.to_string(),
+                cwd: cwd.to_string(),
+            });
+        }
         events.emit(
             "session",
             json!({
@@ -201,22 +289,57 @@ impl Session {
                 "cwd": cx.root,
                 "tools": tools.names(),
                 "instructions_read": read,
+                "loaded": loaded.then_some(json!({
+                    "messages": messages.len(),
+                    "interrupted": interrupted.iter().map(|i| &i.id).collect::<Vec<_>>(),
+                })),
             }),
         );
+        let first_seq = match (&settings.events, loaded) {
+            (Some(path), true) => events::last_seq(path, id),
+            _ => 0,
+        };
         let (out, rx) = mpsc::unbounded_channel();
         tokio::spawn(send_in_order(
             id.to_string(),
+            first_seq,
             rx,
             peer.clone(),
             events.clone(),
         ));
+        // The node is told how each call the last process left open ends, as
+        // it would have been had that process lived to say so.
+        for call in &interrupted {
+            if let Some(j) = &journal {
+                j.write(&Record::ToolResult {
+                    id: call.id.clone(),
+                    content: call.content.into(),
+                    is_error: true,
+                });
+            }
+            if !call.asked {
+                let _ = out.send(Out::Update(SessionUpdate::ToolCall(describe(
+                    &call.id,
+                    &call.name,
+                    &call.input,
+                    "pending",
+                ))));
+            }
+            let _ = out.send(Out::Update(SessionUpdate::ToolCallUpdate(result_update(
+                &call.id,
+                &Output::error(call.content),
+            ))));
+        }
+        let mut conversation = Conversation::new(system);
+        conversation.messages = messages;
         Ok(Self {
             id: id.to_string(),
             cx,
             tools,
             events: events.clone(),
+            journal,
             out,
-            state: tokio::sync::Mutex::new((Conversation::new(system), Totals::default())),
+            state: tokio::sync::Mutex::new((conversation, Totals::default())),
             turn: Mutex::new(None),
         })
     }
@@ -242,7 +365,14 @@ impl Session {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        conv.push(Role::User, vec![Block::Text(text)]);
+        let blocks = vec![Block::Text(text)];
+        if let Some(j) = &self.journal {
+            j.write(&Record::Message {
+                role: Role::User,
+                blocks: blocks.clone(),
+            });
+        }
+        conv.push(Role::User, blocks);
         let cancel = CancellationToken::new();
         *self.turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
         let before = totals.usage.clone();
@@ -259,6 +389,7 @@ impl Session {
             events: &self.events,
             hooks: &hooks,
             cancel: &cancel,
+            journal: self.journal.as_ref(),
             max_turns: settings.max_turns,
         };
         let outcome = agent.run(conv, totals).await;
@@ -275,6 +406,13 @@ impl Session {
             Ok(Outcome::Finished { .. }) => "end_turn",
             Ok(Outcome::MaxTurns) => "max_turn_requests",
             Ok(Outcome::Cancelled) => "cancelled",
+            Ok(Outcome::Stopped { reason }) => {
+                return Err(RpcError {
+                    code: -32000,
+                    message: reason,
+                    data: None,
+                })
+            }
             Ok(Outcome::ContextOverflow { message }) => {
                 return Err(turn_error(WireError::ContextOverflow(message)))
             }
@@ -338,11 +476,11 @@ fn system_prompt(cx: &Context, extra: Option<&str>) -> (String, Vec<String>) {
 /// through the same queue so they never overtake the tool call they ask about.
 async fn send_in_order(
     session_id: String,
+    mut seq: u64,
     mut rx: mpsc::UnboundedReceiver<Out>,
     peer: Peer,
     events: Arc<Events>,
 ) {
-    let mut seq = 0u64;
     while let Some(out) = rx.recv().await {
         match out {
             Out::Update(update) => {
@@ -352,7 +490,10 @@ async fn send_in_order(
                     update,
                     seq: Some(seq),
                 };
-                events.emit("update", json!({"seq": seq, "update": params.update}));
+                events.emit(
+                    "update",
+                    json!({"session_id": session_id, "seq": seq, "update": params.update}),
+                );
                 if peer.notify(methods::SESSION_UPDATE, &params).await.is_err() {
                     break;
                 }
@@ -510,32 +651,65 @@ impl Hooks for Wired<'_> {
     }
 
     fn tool_result(&self, id: &str, _name: &str, output: &Output) {
-        self.send(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-            tool_call_id: id.into(),
-            status: Some(
-                if output.is_error {
-                    "failed"
-                } else {
-                    "completed"
-                }
-                .into(),
-            ),
-            raw_output: Some(json!({"output": output.content, "is_error": output.is_error})),
-            content: vec![json!({
-                "type": "content",
-                "content": {"type": "text", "text": output.content},
-            })],
-            title: None,
-            kind: None,
-        }));
+        self.send(SessionUpdate::ToolCallUpdate(result_update(id, output)));
     }
 
-    fn usage(&self, _usage: &Usage, context_used: u64) {
+    fn usage(&self, usage: &Usage, request_id: Option<&str>, context_used: u64) {
+        let cache_read = usage.cache_read.min(usage.input);
         self.send(SessionUpdate::UsageUpdate(UsageUpdate {
             size: self.context_window,
             used: Some(context_used),
             cost: None,
+            request: Some(RequestUsage {
+                request_id: request_id.map(str::to_string),
+                input_tokens: usage.input - cache_read,
+                output_tokens: usage.output,
+                cached_read_tokens: cache_read,
+            }),
         }));
+    }
+
+    /// Said the way the node already reads a harness's retry notice.
+    fn retrying(&self, attempt: u32, wait: Duration, error: &WireError) {
+        let status = match error {
+            WireError::Http { status, .. } => Some(*status),
+            _ => None,
+        };
+        self.send(SessionUpdate::Other(json!({
+            "sessionUpdate": "agent_retry",
+            "subtype": "api_retry",
+            "attempt": attempt,
+            "max_retries": MAX_RETRIES,
+            "status": status,
+            "message": error.to_string(),
+            "wait_ms": wait.as_millis() as u64,
+        })));
+    }
+}
+
+/// Retries after a first failed attempt, at most: one per wait in the loop's
+/// backoff.
+const MAX_RETRIES: usize = crate::agent::BACKOFF.len();
+
+/// How a call ended, as the node reads it.
+fn result_update(id: &str, output: &Output) -> ToolCallUpdate {
+    ToolCallUpdate {
+        tool_call_id: id.into(),
+        status: Some(
+            if output.is_error {
+                "failed"
+            } else {
+                "completed"
+            }
+            .into(),
+        ),
+        raw_output: Some(json!({"output": output.content, "is_error": output.is_error})),
+        content: vec![json!({
+            "type": "content",
+            "content": {"type": "text", "text": output.content},
+        })],
+        title: None,
+        kind: None,
     }
 }
 

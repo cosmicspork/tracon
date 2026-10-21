@@ -130,8 +130,15 @@ impl Client {
         let response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
+            // Seconds only: an HTTP-date is rare from model APIs, and the
+            // backoff covers it.
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse().ok());
             let body = response.text().await.unwrap_or_default();
-            return Err(error_from(status.as_u16(), &body));
+            return Err(error_from(status.as_u16(), &body, retry_after));
         }
         let mut decoder = Decoder::default();
         let mut assembler = Assembler::default();
@@ -156,7 +163,7 @@ impl Client {
     }
 }
 
-fn error_from(status: u16, body: &str) -> WireError {
+fn error_from(status: u16, body: &str, retry_after: Option<u64>) -> WireError {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
     let error = parsed.as_ref().map(|v| &v["error"]);
     if let Some(e) = error {
@@ -167,6 +174,7 @@ fn error_from(status: u16, body: &str) -> WireError {
     WireError::Http {
         status,
         body: body.chars().take(2000).collect(),
+        retry_after,
     }
 }
 
@@ -270,6 +278,11 @@ impl Assembler {
                 return Err(WireError::ContextOverflow(
                     e["message"].as_str().unwrap_or_default().to_string(),
                 ));
+            }
+            // The gateway's word that the upstream broke off mid-answer: the
+            // same as the stream simply ending, said out loud.
+            if e["type"] == "stream_incomplete" {
+                return Err(WireError::Incomplete);
             }
             return Err(WireError::Stream(e.to_string()));
         }
@@ -454,10 +467,10 @@ mod tests {
     fn context_overflow_is_recognised() {
         let body = r#"{"error":{"code":400,"message":"request (40000 tokens) exceeds the available context size (32768 tokens)","type":"exceed_context_size_error","n_prompt_tokens":40000,"n_ctx":32768}}"#;
         assert!(
-            matches!(error_from(400, body), WireError::ContextOverflow(m) if m.contains("40000"))
+            matches!(error_from(400, body, None), WireError::ContextOverflow(m) if m.contains("40000"))
         );
         assert!(matches!(
-            error_from(400, "nope"),
+            error_from(400, "nope", None),
             WireError::Http { status: 400, .. }
         ));
         let mut a = Assembler::default();
