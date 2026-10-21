@@ -1964,16 +1964,7 @@ async fn run_checks(
         ));
     }
     if let Some(failed) = report.results.iter().find(|result| !result.ok) {
-        let reason = format!(
-            "check {}: `{}` (exit {}). Fix it and submit again.\n\n{}",
-            failed.outcome,
-            failed.command,
-            failed
-                .exit
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "none".into()),
-            review::output::with_failures(&failed.failures, &failed.tail)
-        );
+        let reason = failed_check_refusal(failed);
         manager.record_event(
             session_id,
             ek::REVIEW_REJECTED,
@@ -1986,6 +1977,32 @@ async fn run_checks(
         return Err(reason);
     }
     Ok(report)
+}
+
+/// The refusal for a check that ran and failed. A reused failure is the
+/// recorded result of an identical earlier run, so "submit again" would only
+/// fetch it again unless the agent asks for a rerun: its advice names
+/// `rerun_checks` as the way past a stale record, and what else would change it.
+fn failed_check_refusal(failed: &review::checks::CheckResult) -> String {
+    let advice = if failed.reused_from.is_some() {
+        "This failure is the recorded result of an identical earlier run of this commit; \
+         submitting the same commit again returns it again unless you pass \
+         `rerun_checks: true`. If you believe the recorded result is stale (a flake, or an \
+         environment since fixed), resubmit with `rerun_checks: true`; otherwise change the \
+         commit, or if the check itself is wrong, say so to the operator."
+    } else {
+        "Fix it and submit again."
+    };
+    format!(
+        "check {}: `{}` (exit {}). {advice}\n\n{}",
+        failed.outcome,
+        failed.command,
+        failed
+            .exit
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "none".into()),
+        review::output::with_failures(&failed.failures, &failed.tail)
+    )
 }
 
 /// One check that could not run, said the way its cause reads. A bare name is
@@ -2723,6 +2740,45 @@ fn str_arg(args: &Value, key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reused_failure_says_resubmitting_the_same_commit_returns_it_again() {
+        let mut failed = review::checks::CheckResult {
+            command: "uv run --no-sync ruff check .".into(),
+            ok: false,
+            exit: Some(2),
+            outcome: "failed".into(),
+            tail: "error: Failed to initialize cache".into(),
+            failures: String::new(),
+            ms: 0,
+            reused_from: None,
+            missing_tool: None,
+        };
+        let fresh = failed_check_refusal(&failed);
+        assert!(
+            fresh.contains("(exit 2). Fix it and submit again."),
+            "{fresh}"
+        );
+        assert!(!fresh.contains("rerun_checks"), "{fresh}");
+
+        failed.outcome = "reused".into();
+        failed.reused_from = Some("run-1".into());
+        let reused = failed_check_refusal(&failed);
+        assert!(reused.starts_with("check reused: `uv run"), "{reused}");
+        assert!(
+            reused.contains(
+                "submitting the same commit again returns it again unless you pass \
+                 `rerun_checks: true`"
+            ),
+            "{reused}"
+        );
+        assert!(
+            reused.contains("resubmit with `rerun_checks: true`"),
+            "{reused}"
+        );
+        assert!(!reused.contains("Fix it and submit again"), "{reused}");
+        assert!(reused.contains("Failed to initialize cache"), "{reused}");
+    }
 
     #[test]
     fn required_arguments_are_named_when_missing() {
