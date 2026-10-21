@@ -361,6 +361,10 @@ pub struct ChannelMetrics {
     pub human_seconds: f64,
     pub agent_seconds: f64,
     pub sessions: i64,
+    /// The newest limit snapshot a subscription provider (a ChatGPT/Codex
+    /// plan) sent on this channel in the window; null when none did.
+    #[serde(default)]
+    pub codex_limits: Option<crate::store::LimitSnapshot>,
     #[serde(flatten)]
     pub workflow: crate::store::metrics::WorkflowMetrics,
 }
@@ -449,6 +453,10 @@ pub fn channel_metrics(
         human_seconds: human_perm + human_reviews,
         agent_seconds,
         sessions: sessions.len() as i64,
+        codex_limits: store
+            .latest_limit_snapshots(Some(channel), since_ms, None)?
+            .into_iter()
+            .max_by_key(|s| s.at_ms),
         workflow,
     })
 }

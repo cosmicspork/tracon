@@ -1,7 +1,21 @@
 <script lang="ts">
-  import { formatTokens } from '../lib/format'
+  import { api } from '../lib/api'
+  import { codexLimitLabel, formatCodexLimits, formatTokens } from '../lib/format'
   import { store } from '../lib/store.svelte'
+  import type { CodexLimits } from '../lib/types'
   import Card from './settings/Card.svelte'
+
+  // What a subscription plan said about its windows today, read once when
+  // the card opens: the plan reports on each answer, not on a clock.
+  let limits = $state<CodexLimits[]>([])
+  $effect(() => {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    api.codexLimits(today.getTime()).then(
+      (l) => (limits = l),
+      () => (limits = []),
+    )
+  })
 
   // An archived channel with nothing spent today is history, not a meter.
   const channels = $derived(
@@ -32,6 +46,11 @@
             >· {c.ceiling.unmetered_turns} unmetered</em
           >{/if}</span
       >
+      {#each limits.filter((l) => l.channel === c.name) as l (l.provider)}
+        <div class="plan" title="What the subscription last reported through this node's gateway. The ChatGPT workspace admin console remains the authoritative credit ledger.">
+          {codexLimitLabel(l)}: {#each formatCodexLimits(l) as line, i (i)}<span class:crit={line.startsWith('limit reached')}>{i ? ' · ' : ''}{line}</span>{/each}
+        </div>
+      {/each}
     </div>
   {/each}
   {#if channels.length === 0}
@@ -58,6 +77,14 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .plan {
+    grid-column: 2 / -1;
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+  .plan .crit {
+    color: var(--crit);
   }
   .track {
     height: 6px;

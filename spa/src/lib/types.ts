@@ -1315,6 +1315,32 @@ export interface SessionUsage {
   turns: TurnUsage[]
 }
 
+/** One usage window of a subscription plan, as its provider last reported it. */
+export interface LimitWindow {
+  used_percent: number
+  window_minutes: number | null
+  /** Unix seconds. */
+  resets_at: number | null
+}
+
+/**
+ * The newest limit snapshot a ChatGPT/Codex subscription sent through the
+ * gateway: its usage windows, its credits, and on a refusal which limit was
+ * reached. The plan's own admin console remains the ledger of record.
+ */
+export interface CodexLimits {
+  channel: string
+  provider: string
+  limit_id: string
+  observed_ms: number
+  usage_id: number | null
+  primary: LimitWindow | null
+  secondary: LimitWindow | null
+  credits: { has_credits: boolean | null; unlimited: boolean | null; balance: string | null } | null
+  limit_name: string | null
+  reached_type: string | null
+}
+
 /** One language server or formatter the harness image was asked for.
  *
  *  Three states, not five: OpenCode publishes no LSP status events and logs
@@ -1417,6 +1443,8 @@ export interface ChannelMetrics {
   human_seconds: number
   agent_seconds: number
   sessions: number
+  /** Null when no subscription provider reported its limits in the window; absent from an older node. */
+  codex_limits?: CodexLimits | null
   setup_failures: number
   verified_sessions: number
   seconds_to_first_verified_candidate: number | null

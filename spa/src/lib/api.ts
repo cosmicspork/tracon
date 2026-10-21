@@ -11,6 +11,7 @@ import type {
   BoundaryResult,
   ChannelInfo,
   ChannelMetrics,
+  CodexLimits,
   CandidateTransfer,
   CeilingInfo as Ceiling,
   CredentialSummary,
@@ -970,6 +971,9 @@ export const api = {
   putWork: (id: string, patch: { title?: string; body?: string; deps?: string[]; priority?: number; state?: 'open' | 'closed' }) =>
     call<WorkItem>('PUT', `/api/work/${id}`, patch),
   deleteWork: (id: string) => call<void>('DELETE', `/api/work/${id}`),
+  /** The newest subscription limit snapshot per channel and provider since `sinceMs`. */
+  codexLimits: (sinceMs: number) =>
+    call<{ codex_limits?: CodexLimits[] }>('GET', `/api/usage?since_ms=${sinceMs}`).then((d) => d.codex_limits ?? []),
   metrics: (sinceMs?: number) =>
     call<{ since_ms: number; node_id: string; note: string; channels: ChannelMetrics[] }>(
       'GET',

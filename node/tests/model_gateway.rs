@@ -17,7 +17,7 @@ use tower::ServiceExt;
 
 use tracon::{
     broker::Broker,
-    config::{Config, Provider, SHAPE_ANTHROPIC},
+    config::{Config, Provider, SHAPE_ANTHROPIC, SHAPE_OPENAI_CODEX},
     http::api::AppState,
     mcp::Tools,
     session::Manager,
@@ -111,6 +111,8 @@ async fn start_upstream(seen: Seen) -> u16 {
 
 struct Harness {
     app: axum::Router,
+    /// The operator's API on the same node.
+    api: axum::Router,
     store: Arc<Store>,
     manager: Manager,
     seen: Seen,
@@ -129,6 +131,18 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
             credential: "stubcred".into(),
             upstream: format!("http://127.0.0.1:{port}"),
             shape: SHAPE_ANTHROPIC.into(),
+            login: None,
+            price: None,
+            models: Vec::new(),
+        },
+    );
+    // A ChatGPT/Codex subscription, answered by the same stub.
+    cfg.providers.insert(
+        "codex".into(),
+        Provider {
+            credential: "stubcred".into(),
+            upstream: format!("http://127.0.0.1:{port}"),
+            shape: SHAPE_OPENAI_CODEX.into(),
             login: None,
             price: None,
             models: Vec::new(),
@@ -163,7 +177,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
         Default::default(),
         Arc::new(tracon::runner::local::LocalBackend),
     );
-    let app = tracon::http::harness_router(AppState {
+    let state = AppState {
         manager: manager.clone(),
         cfg,
         adapter: Arc::new(FakeAdapter {
@@ -175,9 +189,12 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
         mesh: None,
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
         enroll: Default::default(),
-    });
+    };
+    let app = tracon::http::harness_router(state.clone());
+    let api = tracon::http::router(state);
     Harness {
         app,
+        api,
         store,
         manager,
         seen,
@@ -982,4 +999,149 @@ async fn a_provider_that_reports_no_usage_leaves_a_turn_that_settles_unmetered()
     assert_eq!(status, StatusCode::OK);
     let settled = tracon::metrics::settle_turn(&h.store, sid, Some(14), None);
     assert!(!settled.unmetered(), "{settled:?}");
+}
+
+/// A Codex plan's headers on a streamed answer and on a refusal: each call's
+/// snapshot is kept beside its usage row and the newest is what the Usage
+/// API reports. The same headers from any other shape are not read.
+#[tokio::test]
+async fn a_codex_subscription_s_limits_are_recorded_per_call_and_reported() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    let sid = "s-codex";
+    running_session(&h.store, sid);
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    let limits = |used: &str| {
+        vec![
+            ("content-type", "text/event-stream".to_string()),
+            ("x-codex-primary-used-percent", used.to_string()),
+            ("x-codex-primary-window-minutes", "300".to_string()),
+            ("x-codex-primary-reset-at", "1792600000".to_string()),
+            ("x-codex-secondary-used-percent", "12".to_string()),
+            ("x-codex-secondary-window-minutes", "10080".to_string()),
+            ("x-codex-credits-has-credits", "true".to_string()),
+            ("x-codex-credits-balance", "7.5".to_string()),
+            ("x-codex-credits-something-new", "kept".to_string()),
+        ]
+    };
+    *h.seen.answer.lock().unwrap() = Some((
+        200,
+        limits("40"),
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":20,\"output_tokens\":3}}}\n\n",
+    ));
+    let (status, headers, _) = call(
+        &h.app,
+        "POST",
+        "/model/codex/responses",
+        &token,
+        json!({"model": "gpt-5", "input": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header(&headers, "x-codex-primary-used-percent"),
+        Some("40"),
+        "the harness still sees the headers"
+    );
+    let first = h
+        .store
+        .latest_limit_snapshot("work", "codex", 0, None)
+        .unwrap()
+        .unwrap();
+    assert!(first.usage_id.is_some());
+    assert_eq!(first.primary.as_ref().unwrap().used_percent, 40.0);
+    assert_eq!(
+        first.secondary.as_ref().unwrap().window_minutes,
+        Some(10_080)
+    );
+    assert_eq!(
+        first.credits.as_ref().unwrap().balance.as_deref(),
+        Some("7.5")
+    );
+    let raw: Value = serde_json::from_str(&first.raw_json).unwrap();
+    assert_eq!(raw["x-codex-credits-something-new"], "kept");
+
+    // The plan refuses: the refusal's own snapshot says which limit it hit.
+    let mut refused = limits("100");
+    refused[0] = ("content-type", "application/json".to_string());
+    refused.push((
+        "x-codex-rate-limit-reached-type",
+        "rate_limit_reached".to_string(),
+    ));
+    *h.seen.answer.lock().unwrap() = Some((
+        429,
+        refused,
+        r#"{"error":{"type":"usage_limit_reached","message":"limit"}}"#,
+    ));
+    let (status, _, _) = call(
+        &h.app,
+        "POST",
+        "/model/codex/responses",
+        &token,
+        json!({"model": "gpt-5", "input": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let last = h
+        .store
+        .latest_limit_snapshot("work", "codex", 0, None)
+        .unwrap()
+        .unwrap();
+    assert_ne!(last.usage_id, first.usage_id, "one snapshot per call");
+    assert_eq!(last.reached_type.as_deref(), Some("rate_limit_reached"));
+    assert_eq!(last.primary.as_ref().unwrap().used_percent, 100.0);
+
+    let req = Request::builder()
+        .uri("/api/usage?channel=work&since_ms=0")
+        .header("host", "127.0.0.1:7420")
+        .body(Body::empty())
+        .unwrap();
+    let res = h.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v: Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let reported = &v["codex_limits"][0];
+    assert_eq!(reported["provider"], "codex");
+    assert_eq!(reported["primary"]["used_percent"], 100.0);
+    assert_eq!(reported["primary"]["window_minutes"], 300);
+    assert_eq!(reported["primary"]["resets_at"], 1_792_600_000);
+    assert_eq!(reported["credits"]["has_credits"], true);
+    assert_eq!(reported["reached_type"], "rate_limit_reached");
+    assert!(reported["observed_ms"].as_i64().unwrap() > 0);
+    assert_eq!(v["codex_limits"].as_array().unwrap().len(), 1);
+    // A window that ends before the first call shows no snapshot.
+    let req = Request::builder()
+        .uri("/api/usage?channel=work&since_ms=0&until_ms=1")
+        .header("host", "127.0.0.1:7420")
+        .body(Body::empty())
+        .unwrap();
+    let res = h.api.clone().oneshot(req).await.unwrap();
+    let v: Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["codex_limits"], json!([]));
+
+    // An Anthropic-shaped provider sending the same headers records nothing.
+    *h.seen.answer.lock().unwrap() = Some((200, limits("5"), "{}"));
+    let (status, _, _) = call(
+        &h.app,
+        "POST",
+        "/model/stub/v1/messages",
+        &token,
+        json!({"model": "claude-x", "messages": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(h
+        .store
+        .latest_limit_snapshot("work", "stub", 0, None)
+        .unwrap()
+        .is_none());
 }

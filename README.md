@@ -324,6 +324,16 @@ context kept, until the operator raises the budget (on its page, or
 `POST /api/sessions/{id}/budget`) and it carries on. A channel at its daily ceiling
 starts no session at all.
 
+**Usage** shows what the node's model gateway counted, per channel, as seen from this
+node. A ChatGPT/Codex subscription is metered in usage windows and credits rather than
+tokens, so for an `openai-codex` provider the page (and the Usage today card in
+Settings) also shows what the plan last reported on an answer through the gateway:
+each window as "42% of 5h used · resets in 2h", the credit balance when there is one,
+"limit reached (…)" after a refusal, and when it was observed. The gateway records
+those `x-codex-*` headers per call beside the call's token count; it does not poll
+the provider and enforces nothing from them. The ChatGPT workspace admin console
+remains the authoritative credit ledger.
+
 **A work item may carry a brief, and most never will.** It is one document —
 `brief-<item>` on the Documents screen, linked from the item — saying who the work
 is for, what their problem is, what was read to reach that belief, what bounds the
