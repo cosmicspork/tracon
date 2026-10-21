@@ -1,6 +1,7 @@
 <script lang="ts">
   import ReportReview from '../components/ReportReview.svelte'
   import Diff from '../components/Diff.svelte'
+  import CommitMessage from '../components/CommitMessage.svelte'
   import ShownWork from '../components/ShownWork.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
@@ -1115,7 +1116,7 @@
         {#each intent.commits as c (c.sha)}
           <li class:squashed={squashing}>
             <div class="line">
-              <span class="subject"><code>{c.sha.slice(0, 8)}</code> {c.subject}</span>
+              <span class="subject" title={c.subject}><code>{c.sha.slice(0, 8)}</code> {c.subject}</span>
               {#if reworded[c.sha] !== undefined}<span class="chip warn">edited</span>{/if}
               {#if rewordable && commitMessages[c.sha] === undefined}
                 <button class="lnk" disabled={busy || publishing} onclick={() => editCommit(c)}>Edit message</button>
@@ -1126,26 +1127,18 @@
               {/if}
             </div>
             {#if !squashing && commitMessages[c.sha] !== undefined}
-              <textarea
-                class="edit body mono"
-                aria-label={`message of ${c.sha.slice(0, 8)}`}
+              <CommitMessage
+                label={`message of ${c.sha.slice(0, 8)}`}
                 bind:value={commitMessages[c.sha]}
-                use:autogrow={commitMessages[c.sha]}
                 disabled={busy || publishing || !rewordable}
-              ></textarea>
+              />
             {/if}
           </li>
         {/each}
       </ul>
     {/if}
     {#if squashing && !remoteOwner}
-      <textarea
-        class="edit body mono"
-        aria-label="commit message"
-        bind:value={message}
-        use:autogrow={message}
-        disabled={busy || publishing || closed || surface.phone}
-      ></textarea>
+      <CommitMessage label="commit message" bind:value={message} disabled={busy || publishing || closed || surface.phone} />
     {/if}
     {#if change === null && !remoteOwner}
       <label class="branch">
@@ -1887,13 +1880,6 @@
   .commits .chip.warn {
     background: var(--wash-wait);
     color: var(--wait);
-  }
-  .commits textarea {
-    display: block;
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 64px;
-    margin: 6px 0 4px;
   }
   .commits li.squashed {
     color: var(--dim);
