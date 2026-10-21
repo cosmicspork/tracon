@@ -322,6 +322,7 @@ async fn a_sessions_secrets_never_reach_its_pod_spec() {
         secret_env: secret_env.clone(),
         system_prompt_file: None,
         cursor: None,
+        resume: None,
     };
 
     // Neither launch gets past attaching (the fake API has no attach), but

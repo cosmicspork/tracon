@@ -867,8 +867,8 @@ impl Store {
     pub fn record_usage(&self, u: &UsageRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests, cache_read_tokens, cache_write_tokens, turn)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+            "INSERT INTO model_usage (channel, node_id, session_id, provider, model, at_ms, input_tokens, output_tokens, requests, cache_read_tokens, cache_write_tokens, request_id, turn)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                      COALESCE((SELECT turn FROM session WHERE id = ?3), 0))",
             rusqlite::params![
                 u.channel,
@@ -881,9 +881,113 @@ impl Store {
                 u.output_tokens,
                 u.requests,
                 u.cache_read_tokens,
-                u.cache_write_tokens
+                u.cache_write_tokens,
+                u.request_id
             ],
         )?;
+        Ok(())
+    }
+
+    /// One upstream request as the harness counted it, against the session's
+    /// open turn: the turn it was made in, which the gateway's own row of the
+    /// same request may not carry (it is stamped when the stream finishes).
+    pub fn record_harness_request(
+        &self,
+        session_id: &str,
+        request_id: Option<&str>,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO harness_request_usage
+                (session_id, turn, request_id, input_tokens, output_tokens, cache_read_tokens, at_ms)
+             VALUES (?1, COALESCE((SELECT turn FROM session WHERE id = ?1), 0), ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                session_id,
+                request_id,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                now_ms()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The harness's requests for a turn matched to the gateway's by response
+    /// id, or `None` when the harness reported none for it. A harness request
+    /// is looked for among the session's gateway rows of any turn, since the
+    /// gateway may have stamped it on the next; it matches only when the two
+    /// agree on input and output. A gateway request stamped on this turn is
+    /// unmatched when the harness never named it, in this turn or any other.
+    pub fn turn_request_match(&self, session_id: &str, turn: i64) -> Result<Option<RequestMatch>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT h.request_id, h.input_tokens + h.output_tokens,
+                    (SELECT SUM(m.input_tokens + m.output_tokens) FROM model_usage m
+                      WHERE m.session_id = h.session_id AND m.request_id = h.request_id)
+             FROM harness_request_usage h
+             WHERE h.session_id = ?1 AND h.turn = ?2
+             ORDER BY h.at_ms, h.rowid",
+        )?;
+        let harness: Vec<(Option<String>, i64, Option<i64>)> = stmt
+            .query_map(rusqlite::params![session_id, turn], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        if harness.is_empty() {
+            return Ok(None);
+        }
+        let mut out = RequestMatch::default();
+        for (id, tokens, gateway) in harness {
+            if id.is_some() && gateway == Some(tokens) {
+                out.matched += 1;
+            } else {
+                out.harness_only.push(id);
+            }
+        }
+        let mut stmt = conn.prepare(
+            "SELECT m.request_id FROM model_usage m
+             WHERE m.session_id = ?1 AND m.turn = ?2 AND m.request_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM harness_request_usage h
+                                WHERE h.session_id = m.session_id AND h.request_id = m.request_id)
+             ORDER BY m.at_ms, m.rowid",
+        )?;
+        out.gateway_only = stmt
+            .query_map(rusqlite::params![session_id, turn], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(Some(out))
+    }
+
+    /// Match again the settled turns before `turn` that were left with
+    /// unmatched requests. A request whose stream finished after its turn
+    /// settled has its gateway row written only then, on a later turn; once
+    /// it is there the earlier turn's ledger says so. The verdict and charge
+    /// the turn settled with stand: they were what was known when it closed.
+    pub fn rematch_earlier_turns(&self, session_id: &str, turn: i64) -> Result<()> {
+        let turns: Vec<i64> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT turn FROM turn_usage
+                 WHERE session_id = ?1 AND turn < ?2 AND requests_unmatched > 0",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![session_id, turn], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for earlier in turns {
+            let Some(found) = self.turn_request_match(session_id, earlier)? else {
+                continue;
+            };
+            self.conn.lock().unwrap().execute(
+                "UPDATE turn_usage SET requests_matched = ?3, requests_unmatched = ?4
+                 WHERE session_id = ?1 AND turn = ?2",
+                rusqlite::params![session_id, earlier, found.matched, found.unmatched()],
+            )?;
+        }
         Ok(())
     }
 
@@ -984,19 +1088,20 @@ impl Store {
         harness_cost_usd: Option<f64>,
         charged: i64,
         state: &str,
+        requests: Option<&RequestMatch>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO turn_usage
                 (session_id, turn, channel, gateway_input, gateway_output, gateway_requests,
                  harness_tokens, harness_cost_usd, charged_tokens, state, started_ms, settled_ms,
-                 gateway_cache_read)
+                 gateway_cache_read, requests_matched, requests_unmatched)
              VALUES (?1, ?2, COALESCE((SELECT channel FROM session WHERE id = ?1), ''),
-                     ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
+                     ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12, ?13)
              ON CONFLICT(session_id, turn) DO UPDATE SET
                 gateway_input=?3, gateway_output=?4, gateway_requests=?5, harness_tokens=?6,
                 harness_cost_usd=?7, charged_tokens=?8, state=?9, settled_ms=?10,
-                gateway_cache_read=?11",
+                gateway_cache_read=?11, requests_matched=?12, requests_unmatched=?13",
             rusqlite::params![
                 session_id,
                 turn,
@@ -1009,6 +1114,8 @@ impl Store {
                 state,
                 now_ms(),
                 gateway_cache_read,
+                requests.map(|r| r.matched),
+                requests.map(RequestMatch::unmatched),
             ],
         )?;
         Ok(())
@@ -1020,7 +1127,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT turn, gateway_input, gateway_output, gateway_requests, harness_tokens,
                     harness_cost_usd, charged_tokens, state, started_ms, settled_ms,
-                    gateway_cache_read
+                    gateway_cache_read, requests_matched, requests_unmatched
              FROM turn_usage WHERE session_id = ?1 ORDER BY turn DESC LIMIT ?2",
         )?;
         let rows = stmt
@@ -1037,6 +1144,8 @@ impl Store {
                     started_ms: r.get(8)?,
                     settled_ms: r.get(9)?,
                     gateway_cache_read: r.get(10)?,
+                    requests_matched: r.get(11)?,
+                    requests_unmatched: r.get(12)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -1803,6 +1912,9 @@ pub struct UsageRow {
     /// Written to the provider's cache; already inside `input_tokens`.
     #[serde(default)]
     pub cache_write_tokens: i64,
+    /// The provider's id for the response, when it gave one.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 /// `(session_id, provider, input_tokens, output_tokens, requests)`.
@@ -1826,6 +1938,31 @@ pub struct TurnUsageRow {
     /// Read from a cache during the turn: shown, never charged.
     #[serde(default)]
     pub gateway_cache_read: i64,
+    /// The harness's requests matched to the gateway's by id, and those on
+    /// either side that were not. `None` when the harness reported nothing
+    /// per request, as only the native harness does.
+    #[serde(default)]
+    pub requests_matched: Option<i64>,
+    #[serde(default)]
+    pub requests_unmatched: Option<i64>,
+}
+
+/// A turn's requests matched between the two sources by response id. An
+/// unmatched harness request is named by its id, or null when it had none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RequestMatch {
+    pub matched: i64,
+    /// Requests the harness reported that the gateway has no row for, or
+    /// counted differently.
+    pub harness_only: Vec<Option<String>>,
+    /// Requests the gateway counted on this turn the harness never reported.
+    pub gateway_only: Vec<String>,
+}
+
+impl RequestMatch {
+    pub fn unmatched(&self) -> i64 {
+        (self.harness_only.len() + self.gateway_only.len()) as i64
+    }
 }
 
 impl TurnUsageRow {

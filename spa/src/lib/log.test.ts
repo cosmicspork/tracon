@@ -428,3 +428,11 @@ test('a queued message says where it went, or that it is still waiting', () => {
     'your 2 queued messages reached the agent · in the run_wait result',
   )
 })
+
+test('a harness restart says what became of the session', () => {
+  const restored = eventLine(ev('harness_restarted', null, { outcome: 'restored', exit_code: 137, interrupted_turn: true }))
+  expect(restored?.text).toBe('the harness stopped (exit 137) · restarted on this session; the cut turn carries on')
+  const refused = eventLine(ev('harness_restarted', null, { outcome: 'refused', reason: 'the harness died again after 3 restarts; the session ends' }))
+  expect(refused?.tone).toBe('crit')
+  expect(refused?.text).toContain('after 3 restarts')
+})

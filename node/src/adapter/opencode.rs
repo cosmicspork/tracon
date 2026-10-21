@@ -2188,6 +2188,7 @@ mod tests {
             env: Vec::new(),
             system_prompt_file: None,
             cursor: None,
+            resume: None,
         };
         let cmd = OpenCodeAdapter::serve_cmd(&spec, 41234, "pw");
         assert_eq!(

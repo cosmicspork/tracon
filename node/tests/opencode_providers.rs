@@ -1167,6 +1167,7 @@ async fn launch(node: &Node, name: &str, model: &str, env: Vec<(String, String)>
         env,
         system_prompt_file: None,
         cursor: None,
+        resume: None,
     };
     let (handle, _rx) = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION)
         .launch(&runner, spec)

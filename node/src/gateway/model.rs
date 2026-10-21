@@ -798,6 +798,7 @@ pub async fn handle(
         requests: 1,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        request_id: None,
     }));
     // A refused call is the harness's business — it retries inside the turn,
     // with backoff, and says nothing until it gives up, so the
@@ -1069,6 +1070,9 @@ struct UsageScanner {
     cache_write: i64,
     /// OpenAI's, inside `input`.
     cache_read_within: i64,
+    /// The provider's id for the response, which a harness that reports usage
+    /// per request names too: what the two are matched by.
+    request_id: Option<String>,
 }
 
 impl UsageScanner {
@@ -1080,6 +1084,7 @@ impl UsageScanner {
             cache_read_beside: 0,
             cache_write: 0,
             cache_read_within: 0,
+            request_id: None,
         }
     }
 
@@ -1127,6 +1132,13 @@ impl UsageScanner {
         } else {
             return;
         };
+        if self.request_id.is_none() {
+            self.request_id = [&v["id"], &v["message"]["id"], &v["response"]["id"]]
+                .into_iter()
+                .filter_map(Value::as_str)
+                .find(|id| !id.is_empty())
+                .map(str::to_owned);
+        }
         let i = usage["input_tokens"]
             .as_i64()
             .or_else(|| usage["prompt_tokens"].as_i64());
@@ -1190,6 +1202,7 @@ impl Counted {
         row.output_tokens = self.scanner.output;
         row.cache_read_tokens = self.scanner.cache_read();
         row.cache_write_tokens = self.scanner.cache_write;
+        row.request_id = self.scanner.request_id.take();
         if let Err(e) = self.store.record_usage(&row) {
             tracing::warn!(error = %e, "usage not recorded");
         }
@@ -1303,6 +1316,7 @@ mod tests {
                 requests: 1,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                request_id: None,
             })),
             store: Arc::new(crate::store::Store::open_in_memory().unwrap()),
             done: false,
@@ -1801,6 +1815,36 @@ mod tests {
         s.feed(b"data: [DONE]\n");
         s.finish();
         assert_eq!((s.input, s.output), (42, 16));
+    }
+
+    /// The response id is read from the line that carries the usage, in each
+    /// dialect's place for it: what a harness reporting per request is matched
+    /// against.
+    #[test]
+    fn the_scanner_keeps_the_response_id_beside_the_usage() {
+        let mut s = UsageScanner::new();
+        s.feed(b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n");
+        s.feed(b"data: {\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":16}}\n");
+        s.feed(b"data: [DONE]\n");
+        s.finish();
+        assert_eq!(s.request_id.as_deref(), Some("chatcmpl-1"));
+
+        // Anthropic names it once, in message_start; the deltas after carry none.
+        let mut s = UsageScanner::new();
+        s.feed(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\n");
+        s.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n");
+        s.finish();
+        assert_eq!(s.request_id.as_deref(), Some("msg_01"));
+
+        let mut s = UsageScanner::new();
+        s.feed(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_9\",\"usage\":{\"input_tokens\":12,\"output_tokens\":5}}}\n");
+        s.finish();
+        assert_eq!(s.request_id.as_deref(), Some("resp_9"));
+
+        let mut s = UsageScanner::new();
+        s.feed(b"{\"id\":\"\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3}}");
+        s.finish();
+        assert_eq!(s.request_id, None, "an empty id is no id");
     }
 
     /// A provider that reports nothing leaves the count at zero — and the

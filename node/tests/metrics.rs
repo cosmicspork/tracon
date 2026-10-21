@@ -124,6 +124,7 @@ fn usage(session: &str, provider: &str, input: i64, output: i64) -> UsageRow {
         requests: 1,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        request_id: None,
     }
 }
 
@@ -473,4 +474,160 @@ async fn bindings_merge_by_dotted_key_and_the_channel_reports_its_ceiling() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+// ---- per-request reconciliation ------------------------------------------
+
+/// A store with one open session, on its first turn.
+fn turn_store() -> Store {
+    let store = Store::open_in_memory().unwrap();
+    store.ensure_peer_node("n1").unwrap();
+    store
+        .insert_session(&session("s-req", "work", "execute", None))
+        .unwrap();
+    assert_eq!(store.begin_turn("s-req").unwrap(), 1);
+    store
+}
+
+fn gateway(store: &Store, id: &str, input: i64, output: i64) {
+    store
+        .record_usage(&UsageRow {
+            request_id: Some(id.into()),
+            ..usage("s-req", "anthropic", input, output)
+        })
+        .unwrap();
+}
+
+fn harness(store: &Store, id: Option<&str>, input: u64, output: u64) {
+    tracon::metrics::record_harness_request(
+        store,
+        "s-req",
+        &tracon::adapter::types::RequestUsage {
+            request_id: id.map(str::to_string),
+            input_tokens: input,
+            output_tokens: output,
+            cached_read_tokens: 0,
+        },
+    );
+}
+
+#[test]
+fn requests_the_two_sources_both_counted_reconcile_one_by_one() {
+    let store = turn_store();
+    harness(&store, Some("chatcmpl-a"), 400, 100);
+    gateway(&store, "chatcmpl-a", 400, 100);
+    harness(&store, Some("chatcmpl-b"), 300, 50);
+    gateway(&store, "chatcmpl-b", 300, 50);
+    let r = tracon::metrics::settle_turn(&store, "s-req", Some(850), None);
+    assert_eq!(r.state, "reconciled");
+    assert!(r.event_kind().is_none());
+    let ledger = store.turn_ledger("s-req", 10).unwrap();
+    assert_eq!(
+        (ledger[0].requests_matched, ledger[0].requests_unmatched),
+        (Some(2), Some(0))
+    );
+    let usage = tracon::metrics::session_usage(&store, "s-req");
+    assert_eq!(usage["requests_matched"], 2);
+    assert_eq!(usage["requests_unmatched"], 0);
+}
+
+/// The totals agree within tolerance, so turn against turn this would pass;
+/// request by request, one the gateway never saw is named.
+#[test]
+fn a_request_the_gateway_never_saw_is_a_mismatch_that_names_it() {
+    let store = turn_store();
+    harness(&store, Some("chatcmpl-a"), 4_000, 1_000);
+    gateway(&store, "chatcmpl-a", 4_000, 1_000);
+    harness(&store, Some("chatcmpl-ghost"), 60, 20);
+    let r = tracon::metrics::settle_turn(&store, "s-req", Some(5_080), None);
+    assert_eq!(r.state, "mismatch");
+    assert_eq!(r.event_kind(), Some("usage_mismatch"));
+    let detail = r.detail();
+    assert_eq!(detail["requests_matched"], 1);
+    assert_eq!(
+        detail["unmatched_requests"],
+        json!({ "harness_only": ["chatcmpl-ghost"], "gateway_only": [] })
+    );
+    let ledger = store.turn_ledger("s-req", 10).unwrap();
+    assert_eq!(
+        (ledger[0].requests_matched, ledger[0].requests_unmatched),
+        (Some(1), Some(1))
+    );
+}
+
+/// `model_usage.turn` is stamped when the stream finishes, which can be after
+/// the next turn opened. The id still ties the request to the turn it was
+/// made in, and the next turn does not count it as the gateway's alone.
+#[test]
+fn a_request_the_gateway_stamped_on_the_next_turn_still_matches() {
+    let store = turn_store();
+    harness(&store, Some("chatcmpl-a"), 400, 100);
+    gateway(&store, "chatcmpl-a", 400, 100);
+    harness(&store, Some("chatcmpl-late"), 300, 50);
+    let first = tracon::metrics::settle_turn(&store, "s-req", Some(850), None);
+    assert_eq!(first.requests.as_ref().unwrap().matched, 1);
+    assert_eq!(store.begin_turn("s-req").unwrap(), 2);
+    gateway(&store, "chatcmpl-late", 300, 50);
+    harness(&store, Some("chatcmpl-c"), 200, 20);
+    gateway(&store, "chatcmpl-c", 200, 20);
+    let second = tracon::metrics::settle_turn(&store, "s-req", Some(220), None);
+    let requests = second.requests.unwrap();
+    assert_eq!(requests.matched, 1);
+    assert!(
+        requests.gateway_only.is_empty(),
+        "the late row is the first turn's request: {requests:?}"
+    );
+    // The first turn closed before the late row was written, so it settled
+    // with that request unmatched; once the row lands its ledger says so.
+    assert_eq!(
+        first.requests.unwrap().harness_only,
+        [Some("chatcmpl-late".to_string())]
+    );
+    let ledger = store.turn_ledger("s-req", 10).unwrap();
+    assert_eq!(
+        (ledger[0].requests_matched, ledger[0].requests_unmatched),
+        (Some(1), Some(0))
+    );
+    assert_eq!(
+        (ledger[1].requests_matched, ledger[1].requests_unmatched),
+        (Some(2), Some(0))
+    );
+    assert_eq!(
+        ledger[1].state, "mismatch",
+        "the verdict it settled with stands"
+    );
+}
+
+#[test]
+fn a_gateway_request_the_harness_never_reported_is_named() {
+    let store = turn_store();
+    harness(&store, Some("msg_a"), 400, 100);
+    gateway(&store, "msg_a", 400, 100);
+    gateway(&store, "msg_unseen", 30, 10);
+    let r = tracon::metrics::settle_turn(&store, "s-req", Some(540), None);
+    assert_eq!(r.state, "mismatch");
+    assert_eq!(
+        r.detail()["unmatched_requests"]["gateway_only"],
+        json!(["msg_unseen"])
+    );
+}
+
+/// Claude Code and OpenCode report a turn's usage only as a total: their
+/// turns carry no per-request verdict, and the session says null, not zero.
+#[test]
+fn a_harness_that_reports_no_requests_leaves_the_fields_empty() {
+    let store = turn_store();
+    gateway(&store, "msg_a", 400, 100);
+    let r = tracon::metrics::settle_turn(&store, "s-req", Some(500), None);
+    assert_eq!(r.state, "reconciled");
+    assert!(r.requests.is_none());
+    assert!(r.detail().get("unmatched_requests").is_none());
+    let ledger = store.turn_ledger("s-req", 10).unwrap();
+    assert_eq!(
+        (ledger[0].requests_matched, ledger[0].requests_unmatched),
+        (None, None)
+    );
+    let usage = tracon::metrics::session_usage(&store, "s-req");
+    assert!(usage["requests_matched"].is_null());
+    assert!(usage["requests_unmatched"].is_null());
 }

@@ -22,6 +22,9 @@ pub fn label(ev: &HarnessEvent) -> Option<String> {
             format!("tool_update:{}", t.status.clone().unwrap_or_default())
         }
         HarnessEvent::Usage { .. } => "usage".into(),
+        HarnessEvent::RequestUsage(r) => {
+            format!("request:{}", r.request_id.clone().unwrap_or_default())
+        }
         HarnessEvent::Models(m) => format!("models:{}", m.len()),
         HarnessEvent::Exited { .. } => "exited".into(),
         HarnessEvent::Permission { .. } => "permission".into(),

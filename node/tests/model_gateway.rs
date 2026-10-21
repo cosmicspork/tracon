@@ -758,6 +758,7 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
             requests: 1,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            request_id: None,
         })
         .unwrap();
     for _ in 0..2 {
@@ -892,6 +893,7 @@ async fn a_session_over_budget_is_refused_mid_turn() {
         requests: 1,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        request_id: None,
     };
     h.store.record_usage(&usage(400)).unwrap();
     assert_eq!(h.store.get_session(sid).unwrap().unwrap().tokens_used, 600);

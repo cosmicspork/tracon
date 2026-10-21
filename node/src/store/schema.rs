@@ -1642,6 +1642,28 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE permission_request_next RENAME TO permission_request;
     CREATE INDEX perm_open ON permission_request(state, created_ms);
     "#,
+    // 70: a harness that reports each upstream request's usage is matched to
+    // the gateway request by request, by the provider's response id, rather
+    // than only turn against turn. `model_usage.turn` is stamped when the
+    // stream finishes, so a request can land on the next turn; the id is what
+    // ties it back. `requests_matched` and `requests_unmatched` stay NULL for a
+    // turn whose harness reported nothing per request.
+    r#"
+    ALTER TABLE model_usage ADD COLUMN request_id TEXT;
+    CREATE INDEX model_usage_request ON model_usage(session_id, request_id);
+    CREATE TABLE harness_request_usage (
+        session_id        TEXT NOT NULL,
+        turn              INTEGER NOT NULL,
+        request_id        TEXT,
+        input_tokens      INTEGER NOT NULL,
+        output_tokens     INTEGER NOT NULL,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        at_ms             INTEGER NOT NULL
+    );
+    CREATE INDEX harness_request_usage_turn ON harness_request_usage(session_id, turn);
+    ALTER TABLE turn_usage ADD COLUMN requests_matched INTEGER;
+    ALTER TABLE turn_usage ADD COLUMN requests_unmatched INTEGER;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

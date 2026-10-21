@@ -145,6 +145,10 @@ pub mod event_kind {
     /// `source` says which; the state is decisive.
     pub const SESSION_PAUSED: &str = "session_paused";
     pub const SESSION_RESUMED: &str = "session_resumed";
+    /// The harness process died and the node started it again on the same
+    /// session (`outcome`: `restored`, `failed` or `refused`, with the
+    /// `exit_code`, the `attempt`, and whether a turn was cut short).
+    pub const HARNESS_RESTARTED: &str = "harness_restarted";
     /// The operator changed the session's token budget (`from`, `to`, and the
     /// `tokens_used` it was changed against). `0` is no budget.
     pub const BUDGET_CHANGED: &str = "budget_changed";

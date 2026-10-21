@@ -390,6 +390,7 @@ async fn the_pinned_binary_starts_sealed() {
         env: Vec::new(),
         system_prompt_file: None,
         cursor: None,
+        resume: None,
     };
     // A worktree `opencode.json` allowing every tool is planted above. The v1
     // loader the session runs under honours `OPENCODE_DISABLE_PROJECT_CONFIG`

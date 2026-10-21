@@ -1292,6 +1292,11 @@ export interface TurnUsage {
   settled_ms: number | null
   /** Read from a provider's cache: shown, never charged. Absent from an older node. */
   gateway_cache_read?: number
+  /** The turn's requests matched to the gateway's by id, and those either side
+   *  saw alone. Null when the harness reported nothing per request; absent from
+   *  an older node. */
+  requests_matched?: number | null
+  requests_unmatched?: number | null
 }
 
 export interface SessionUsage {
@@ -1304,6 +1309,9 @@ export interface SessionUsage {
   cache_read_tokens?: number
   unmetered_turns: number
   mismatched_turns: number
+  /** Summed over the turns matched request by request; null when none were. */
+  requests_matched?: number | null
+  requests_unmatched?: number | null
   turns: TurnUsage[]
 }
 
