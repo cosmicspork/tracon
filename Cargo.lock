@@ -3559,6 +3559,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracon-acp",
+ "uuid",
 ]
 
 [[package]]

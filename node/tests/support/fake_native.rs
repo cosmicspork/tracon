@@ -171,6 +171,7 @@ async fn turn(peer: &Peer, cancelled: &AtomicBool) -> Value {
             size: Some(32768),
             used: Some(1450),
             cost: None,
+            request: None,
         }),
     )
     .await;

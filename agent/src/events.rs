@@ -2,7 +2,7 @@
 //! usage and speed, each tool call and result, the end. Standalone it is the
 //! measurement; under the node it becomes `session/update` and `usage`.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -15,8 +15,14 @@ pub struct Events {
 }
 
 impl Events {
+    /// Appended to, never truncated: a process that replaces one that died
+    /// carries on the same record.
     pub fn to_file(path: &Path) -> std::io::Result<Self> {
-        Ok(Self::new(Box::new(std::fs::File::create(path)?)))
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self::new(Box::new(file)))
     }
 
     pub fn to_stderr() -> Self {
@@ -43,4 +49,20 @@ impl Events {
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
     }
+}
+
+/// The highest `seq` an events file records for a session's updates, so a
+/// process carrying the session on numbers from there.
+pub fn last_seq(path: &Path, session_id: &str) -> u64 {
+    let Ok(file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .filter(|e| e["event"] == "update" && e["session_id"] == session_id)
+        .filter_map(|e| e["seq"].as_u64())
+        .max()
+        .unwrap_or(0)
 }

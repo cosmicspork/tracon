@@ -770,6 +770,12 @@ pub async fn handle(
     };
     let status = upstream.status();
     let called_model = model.clone();
+    let event_stream = status.is_success()
+        && upstream
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream"));
     let mut out = Response::builder().status(status.as_u16());
     for (k, v) in upstream.headers() {
         if matches!(
@@ -828,6 +834,8 @@ pub async fn handle(
         usage: usage.clone(),
         store: s.manager.store().clone(),
         done: false,
+        event_stream,
+        ended: false,
     };
     out.body(Body::from_stream(counted))
         .unwrap_or_else(|_| refuse(StatusCode::BAD_GATEWAY, "bad upstream response"))
@@ -1154,6 +1162,20 @@ struct Counted {
     usage: Arc<Mutex<UsageRow>>,
     store: Arc<crate::store::Store>,
     done: bool,
+    /// A streamed answer, which a broken upstream is reported inside of.
+    event_stream: bool,
+    ended: bool,
+}
+
+/// Said in place of a streamed answer the upstream broke off. Without it the
+/// harness sees a stream that simply stops, and cannot tell a cut answer from
+/// one a provider ended without its last frame.
+fn stream_incomplete(error: &reqwest::Error) -> Bytes {
+    let frame = json!({"error": {
+        "type": "stream_incomplete",
+        "message": format!("the upstream broke off the answer: {error}"),
+    }});
+    Bytes::from(format!("data: {frame}\n\n"))
 }
 
 impl Counted {
@@ -1177,6 +1199,9 @@ impl Counted {
 impl Stream for Counted {
     type Item = Result<Bytes, std::io::Error>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.ended {
+            return Poll::Ready(None);
+        }
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(b))) => {
                 self.scanner.feed(&b);
@@ -1184,6 +1209,10 @@ impl Stream for Counted {
             }
             Poll::Ready(Some(Err(e))) => {
                 self.record();
+                if self.event_stream && !self.ended {
+                    self.ended = true;
+                    return Poll::Ready(Some(Ok(stream_incomplete(&e))));
+                }
                 Poll::Ready(Some(Err(std::io::Error::other(e))))
             }
             Poll::Ready(None) => {
@@ -1235,6 +1264,61 @@ mod tests {
             }
         });
         (addr, seen)
+    }
+
+    #[tokio::test]
+    async fn a_stream_the_upstream_breaks_off_ends_with_a_frame_saying_so() {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = conn.read(&mut buf).await;
+            // A first chunk of a chunked SSE answer, then the connection drops.
+            let frame = "data: {\"choices\":[{\"delta\":{\"content\":\"Hal\"}}]}\n\n";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                 transfer-encoding: chunked\r\n\r\n{:x}\r\n{frame}\r\n",
+                frame.len()
+            );
+            conn.write_all(head.as_bytes()).await.unwrap();
+        });
+        let upstream = reqwest::get(format!("http://{addr}/v1/chat/completions"))
+            .await
+            .unwrap();
+        let counted = Counted {
+            inner: Box::pin(upstream.bytes_stream()),
+            scanner: UsageScanner::new(),
+            usage: Arc::new(Mutex::new(UsageRow {
+                channel: "c".into(),
+                node_id: "n".into(),
+                session_id: None,
+                provider: "p".into(),
+                model: None,
+                at_ms: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                requests: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            })),
+            store: Arc::new(crate::store::Store::open_in_memory().unwrap()),
+            done: false,
+            event_stream: true,
+            ended: false,
+        };
+        let chunks: Vec<_> = counted.collect().await;
+        let body: String = chunks
+            .iter()
+            .map(|c| String::from_utf8_lossy(c.as_ref().unwrap()).into_owned())
+            .collect();
+        assert!(body.starts_with("data: {\"choices\""), "{body}");
+        assert!(
+            body.trim_end().ends_with("}}") && body.contains("\"type\":\"stream_incomplete\""),
+            "{body}"
+        );
     }
 
     #[tokio::test]

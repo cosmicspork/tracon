@@ -63,6 +63,11 @@ struct Cli {
     /// given, since the node's budget, cancel and the operator bound a turn.
     #[arg(long)]
     max_turns: Option<u32>,
+    /// Where each session's journal is kept, so `session/load` can carry it
+    /// on in a new process. Defaults to `sessions/` beside `--events`; with
+    /// neither, sessions live only as long as this process.
+    #[arg(long)]
+    journal_dir: Option<PathBuf>,
     /// The task. Read from stdin when absent.
     #[arg(long)]
     prompt: Option<String>,
@@ -149,6 +154,12 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
             ),
             None => None,
         };
+        let journal_dir = cli.journal_dir.or_else(|| {
+            cli.events
+                .as_ref()
+                .and_then(|e| e.parent())
+                .map(|dir| dir.join("sessions"))
+        });
         // stdout is the protocol: nothing else may write to it.
         server::serve(
             Settings {
@@ -157,6 +168,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
                 system_extra,
                 context_window: cli.context_window,
                 events: cli.events,
+                journal_dir,
             },
             Box::new(tokio::io::stdin()),
             Box::new(tokio::io::stdout()),
@@ -206,6 +218,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         events: &events,
         hooks: &Unattended,
         cancel: &cancel,
+        journal: None,
         max_turns: Some(max_turns),
     };
     let outcome = agent.run(&mut conv, &mut totals).await;
@@ -217,6 +230,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         Ok(o @ Outcome::MaxTurns) => (3, json!(o)),
         Ok(o @ Outcome::ContextOverflow { .. }) => (4, json!(o)),
         Ok(o @ Outcome::Cancelled) => (1, json!(o)),
+        Ok(o @ Outcome::Stopped { .. }) => (5, json!(o)),
         Err(e) => (1, json!({"outcome": "error", "message": e.to_string()})),
     };
     let mut end = end;
