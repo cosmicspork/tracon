@@ -66,6 +66,11 @@ pub const OPERATIONS: &[Operation] = &[
     ),
     both("merge a change", github::PR_MERGE, gitlab::MR_MERGE),
     both(
+        "mark a change ready, or back to draft",
+        github::PR_READY,
+        gitlab::MR_READY,
+    ),
+    both(
         "a run or pipeline and its jobs",
         github::RUN_STATUS,
         gitlab::PIPELINE_STATUS,

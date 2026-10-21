@@ -132,6 +132,17 @@ only over the lease, and never published unattended by a grant. A new submit
 for a branch that already has an open change is refused with its number rather
 than failing at publication.
 
+**Marking a draft ready was the operator's to do by hand.** A harness asked to
+review draft changes and mark the good ones ready had no tool for the last step,
+and `gh pr ready` from the host is the unbrokered write the working agreement
+rules out, so the operator ran it themselves. `pr_ready` / `mr_ready` take the
+change and `ready` (true unless it says false, which makes it a draft again),
+and are asked like any other forge write. A change already in that state is
+answered with `already: true` and no write; a closed or merged one is refused.
+GitHub's REST API cannot clear `draft`, so the GitHub side goes through the
+GraphQL mutations; GitLab's REST update has no draft field either, so the
+GitLab side rewrites the title's `Draft:` prefix, as GitLab's own button does.
+
 **A resubmission can retarget its base until the change opens.** A stacked
 review whose base branch was squash-merged and deleted pushed its branch, then
 failed to open, and the resubmission against main kept the stale base and

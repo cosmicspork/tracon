@@ -578,6 +578,7 @@ impl Tools {
             gitlab::MR_STATUS
             | gitlab::MR_COMMENT
             | gitlab::MR_MERGE
+            | gitlab::MR_READY
             | gitlab::PIPELINE_STATUS
             | gitlab::PIPELINE_WAIT
             | gitlab::PIPELINE_LIST_BY_SHA
@@ -684,6 +685,7 @@ impl Tools {
             | github::ISSUE_COMMENT
             | github::RUN_STATUS
             | github::PR_MERGE
+            | github::PR_READY
             | github::PR_THREADS
             | github::PR_REPLY
             | github::PR_FOR_BRANCH
@@ -1089,10 +1091,14 @@ impl Tools {
     }
 
     /// What the node's own configuration refuses whatever the policy or the
-    /// operator says: a workflow `[github] dispatch` does not list.
+    /// operator says: a workflow `[github] dispatch` does not list, or a
+    /// `ready` that is not true or false.
     fn refusal_before_asking(&self, name: &str, args: &Value) -> Option<String> {
         match name {
             github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.live().github, args),
+            // The card names the direction, so a `ready` it cannot read is
+            // refused before it is shown.
+            github::PR_READY | gitlab::MR_READY => github::ready_arg(args).err(),
             _ => None,
         }
     }
@@ -2090,6 +2096,18 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             },
             short("head_sha")
         ),
+        github::PR_READY => format!(
+            "{name} {}#{}: {}",
+            id("repo"),
+            id("number"),
+            ready_or_draft(args)
+        ),
+        gitlab::MR_READY => format!(
+            "{name} {}!{}: {}",
+            id("project"),
+            id("iid"),
+            ready_or_draft(args)
+        ),
         gitlab::JOB_PLAY => {
             with_variables(format!("{name} {}: job {}", id("project"), id("job_id")))
         }
@@ -2132,6 +2150,16 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         ),
         _ => return None,
     })
+}
+
+/// What a `pr_ready` or `mr_ready` call asks for, in words: ready unless it
+/// says `ready: false`.
+fn ready_or_draft(args: &Value) -> &'static str {
+    if args.get("ready") == Some(&Value::Bool(false)) {
+        "back to draft"
+    } else {
+        "ready for review"
+    }
 }
 
 fn tool_result(value: &Value, is_error: bool) -> Value {
@@ -2196,6 +2224,16 @@ mod tests {
         assert_eq!(
             summarize(gitlab::MR_MERGE, &mr),
             "mr_merge g/p!9: merge at abcdef1"
+        );
+        let ready = json!({ "repo": "o/n", "number": 595 });
+        assert_eq!(
+            summarize(github::PR_READY, &ready),
+            "pr_ready o/n#595: ready for review"
+        );
+        let draft = json!({ "project": "g/p", "iid": 9, "ready": false });
+        assert_eq!(
+            summarize(gitlab::MR_READY, &draft),
+            "mr_ready g/p!9: back to draft"
         );
         let rerun = json!({ "repo": "o/n", "run_id": 11893472205_u64 });
         assert_eq!(

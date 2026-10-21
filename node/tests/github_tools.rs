@@ -53,7 +53,19 @@ async fn stub(
         let sent: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         bodies.lock().unwrap().push(sent.clone());
         let query = sent["query"].as_str().unwrap_or_default();
-        return ok(if query.contains("addPullRequestReviewThreadReply") {
+        let pull = |field: &str, draft: bool| {
+            json!({ "data": { field: { "pullRequest": {
+                "isDraft": draft, "headRefOid": "def456",
+                "url": "https://github.test/owner/name/pull/8" } } } })
+        };
+        return ok(if sent["variables"]["id"] == "PR_kwDOstuck" {
+            // GitHub answers the mutation and the pull request stays a draft.
+            pull("markPullRequestReadyForReview", true)
+        } else if query.contains("markPullRequestReadyForReview") {
+            pull("markPullRequestReadyForReview", false)
+        } else if query.contains("convertPullRequestToDraft") {
+            pull("convertPullRequestToDraft", true)
+        } else if query.contains("addPullRequestReviewThreadReply") {
             json!({ "data": { "addPullRequestReviewThreadReply": {
                 "comment": { "url": "https://github.test/owner/name/pull/7#r9" } } } })
         } else if query.contains("resolveReviewThread") {
@@ -76,6 +88,38 @@ async fn stub(
         });
     }
     match (method.as_str(), path) {
+        // A draft until a mutation says otherwise: the last one sent decides.
+        ("GET", "/repos/owner/name/pulls/8") => {
+            let draft = bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|b| {
+                    let q = b["query"].as_str().unwrap_or_default();
+                    if q.contains("markPullRequestReadyForReview") {
+                        Some(false)
+                    } else if q.contains("convertPullRequestToDraft") {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(true);
+            ok(json!({
+                "number": 8, "state": "open", "draft": draft, "merged": false,
+                "node_id": "PR_kwDOeight", "head": { "ref": "feat/eight", "sha": "def456" },
+                "html_url": "https://github.test/owner/name/pull/8"
+            }))
+        }
+        ("GET", "/repos/owner/name/pulls/12") => ok(json!({
+            "number": 12, "state": "open", "draft": true, "merged": false,
+            "node_id": "PR_kwDOstuck", "head": { "sha": "def456" }
+        })),
+        ("GET", "/repos/owner/name/pulls/9") => ok(json!({
+            "number": 9, "state": "closed", "draft": true, "merged": true,
+            "node_id": "PR_kwDOnine", "head": { "sha": "987fed" }
+        })),
         ("GET", "/repos/owner/name/pulls/7") => ok(json!({
             "number": 7, "title": "Add thing", "state": "open", "draft": false,
             "merged": false, "mergeable": true, "mergeable_state": "clean",
@@ -356,6 +400,114 @@ async fn an_issue_comment_waits_on_the_operator_and_then_posts_on_the_issue() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0, "POST");
     assert_eq!(seen[0].1, "/repos/owner/name/issues/7/comments");
+}
+
+/// Marking a draft ready was `gh pr ready` on the host, outside the broker
+/// and its log (#600). It is asked like any other write, and turning it back
+/// into a draft goes the same way.
+#[tokio::test]
+async fn pr_ready_waits_on_the_operator_then_marks_the_draft_ready_and_back() {
+    state::isolate();
+    let (mut t, seen, bodies) = rig_with_bodies().await;
+    let c = ctx("work");
+    let args = json!({ "repo": "owner/name", "number": 8 });
+    let (err, v) = call(&t, &c, "pr_ready", args.clone()).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+
+    t.policy = allowing(r#""pr_ready""#);
+    let (err, v) = call(&t, &c, "pr_ready", args.clone()).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["draft"], false);
+    assert_eq!(v["head_sha"], "def456");
+    assert_eq!(v["already"], false);
+    let sent = bodies.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0]["query"]
+        .as_str()
+        .unwrap()
+        .contains("markPullRequestReadyForReview"));
+    assert_eq!(sent[0]["variables"]["id"], "PR_kwDOeight");
+
+    // Ready already: answered as it stands, with no second write.
+    let (err, v) = call(&t, &c, "pr_ready", args).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["already"], true);
+    assert_eq!(v["draft"], false);
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+
+    let back = json!({ "repo": "owner/name", "number": 8, "ready": false });
+    let (err, v) = call(&t, &c, "pr_ready", back.clone()).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["draft"], true);
+    assert_eq!(v["already"], false);
+    assert!(bodies.lock().unwrap()[1]["query"]
+        .as_str()
+        .unwrap()
+        .contains("convertPullRequestToDraft"));
+    let (_, v) = call(&t, &c, "pr_ready", back).await;
+    assert_eq!(v["already"], true, "{v}");
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn pr_ready_refuses_a_merged_pull_request_without_writing() {
+    state::isolate();
+    let (mut t, _, bodies) = rig_with_bodies().await;
+    t.policy = allowing(r#""pr_ready""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work"),
+        "pr_ready",
+        json!({ "repo": "owner/name", "number": 9 }),
+    )
+    .await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("is merged"), "{v}");
+    assert!(bodies.lock().unwrap().is_empty());
+}
+
+/// The card says which way the call turns the pull request, so a `ready` it
+/// cannot read is refused before the operator is asked about it.
+#[tokio::test]
+async fn pr_ready_refuses_a_ready_that_is_not_a_boolean_before_asking() {
+    state::isolate();
+    let (t, seen, _) = rig_with_bodies().await;
+    let (err, v) = call(
+        &t,
+        &ctx("work"),
+        "pr_ready",
+        json!({ "repo": "owner/name", "number": 8, "ready": "false" }),
+    )
+    .await;
+    assert!(err);
+    let said = v.as_str().unwrap_or_default();
+    assert!(said.contains("ready is true or false"), "{v}");
+    assert!(!said.contains("approval"), "{v}");
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+}
+
+#[tokio::test]
+async fn pr_ready_is_an_error_when_github_still_reads_a_draft_after_the_mutation() {
+    state::isolate();
+    let (mut t, _, bodies) = rig_with_bodies().await;
+    t.policy = allowing(r#""pr_ready""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work"),
+        "pr_ready",
+        json!({ "repo": "owner/name", "number": 12 }),
+    )
+    .await;
+    assert!(err);
+    assert!(
+        v.as_str()
+            .unwrap_or_default()
+            .contains("still reads #12 as a draft"),
+        "{v}"
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 1, "the mutation was sent");
 }
 
 #[tokio::test]
@@ -945,6 +1097,7 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
         "pr_merge",
         "pr_comment",
         "github_issue_comment",
+        "pr_ready",
         "run_dispatch",
         "repo_setup_draft",
         "request_egress",

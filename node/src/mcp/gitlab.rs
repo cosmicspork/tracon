@@ -1,11 +1,12 @@
 //! GitLab, as narrow tools: read a merge request's state and its discussions,
-//! comment on it or reply to one discussion, find the open one for a branch,
+//! comment on it or reply to one discussion, mark it ready or back to draft,
+//! find the open one for a branch,
 //! read a pipeline and a job's log, list the pipelines that ran at an exact
 //! commit and play a manual job in one, run a pipeline on a branch, and
 //! retry a pipeline's failed jobs (`super::parity` maps each to GitHub's).
 //! Opening a merge request is the review path (`review::publish`); merging
 //! (`mr_merge`) and playing a deploy job (`deploy`) run only with current
-//! scoped authority. Marking ready is not a tool. A pipeline on a tag, which is how a
+//! scoped authority. A pipeline on a tag, which is how a
 //! production deploy runs, is refused by the tool itself. GitLab's own
 //! pipeline-creation API resolves `ref` only against a branch or tag, never
 //! a bare commit SHA, so an exact-SHA deploy never creates a pipeline: it
@@ -26,6 +27,7 @@ pub const JOB_TRACE: &str = "job_trace";
 pub const JOB_PLAY: &str = "job_play";
 pub const PIPELINE_RUN: &str = "pipeline_run";
 pub const MR_MERGE: &str = "mr_merge";
+pub const MR_READY: &str = "mr_ready";
 pub const DEPLOY: &str = "deploy";
 pub const MR_DISCUSSIONS: &str = "mr_discussions";
 pub const MR_REPLY: &str = "mr_reply";
@@ -43,6 +45,7 @@ pub const TOOLS: &[&str] = &[
     JOB_PLAY,
     PIPELINE_RUN,
     MR_MERGE,
+    MR_READY,
     DEPLOY,
     MR_DISCUSSIONS,
     MR_REPLY,
@@ -247,6 +250,22 @@ pub fn definitions() -> Vec<Value> {
             },
         }),
         json!({
+            "name": MR_READY,
+            "description": "Mark a draft GitLab merge request ready, or with `ready: false` turn \
+                            it back into a draft. A merge request already in that state is left \
+                            as it is (`already: true`); a closed or merged one is refused. The \
+                            operator is asked before it changes: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": PROJECT },
+                    "iid": { "type": "integer" },
+                    "ready": { "type": "boolean", "description": "true (the default) marks it ready; false makes it a draft again." },
+                },
+                "required": ["project", "iid"],
+            },
+        }),
+        json!({
             "name": MR_MERGE,
             "description": "Merge a GitLab merge request only when its source SHA still matches the granted revision.",
             "inputSchema": { "type": "object", "properties": {
@@ -367,6 +386,34 @@ pub async fn call(
                     .all(|n| n["resolved"] == true));
             }
             Ok(out)
+        }
+        MR_READY => {
+            let iid = iid(args)?;
+            let ready = super::github::ready_arg(args)?;
+            let url = format!("{project_url}/merge_requests/{iid}");
+            let mr = get(http, token, &url).await?;
+            let title = match ready_step(&mr, ready)? {
+                ReadyStep::Already(out) => return Ok(out),
+                ReadyStep::Retitle(title) => title,
+            };
+            if let Some(recheck) = before_mutation {
+                recheck()?;
+            }
+            let v = write(http.put(&url), token, &json!({ "title": title })).await?;
+            let draft = is_draft(&v);
+            if draft == ready {
+                return Err(format!(
+                    "gitlab took the new title \"{title}\" but still reads !{iid} as {}",
+                    if ready { "a draft" } else { "ready" }
+                ));
+            }
+            Ok(json!({
+                "iid": iid,
+                "draft": draft,
+                "head_sha": v["sha"],
+                "web_url": v["web_url"],
+                "already": false,
+            }))
         }
         MR_FOR_BRANCH => {
             let branch = args
@@ -720,6 +767,79 @@ pub async fn call(
     }
 }
 
+/// The prefixes GitLab reads a draft by, lowercased: `Draft:`, `[Draft]`
+/// and `(Draft)`.
+const DRAFT_PREFIXES: &[&str] = &["draft:", "[draft]", "(draft)"];
+
+/// The `WIP` prefixes only an older GitLab reads a draft by. A current one
+/// reads them as part of the title, so they are taken off when marking
+/// ready, where an older GitLab would otherwise still see a draft, and left
+/// alone when making a draft.
+const WIP_PREFIXES: &[&str] = &["wip:", "[wip]"];
+
+/// Whether GitLab reads a merge request as a draft: `draft`, or the
+/// `work_in_progress` an older GitLab answers with instead.
+fn is_draft(mr: &Value) -> bool {
+    mr["draft"] == true || mr["work_in_progress"] == true
+}
+
+/// What `mr_ready` does with a merge request as GitLab just read it.
+#[derive(Debug, PartialEq)]
+enum ReadyStep {
+    /// It is already in the state asked for: the answer, with no write.
+    Already(Value),
+    /// The title to set. GitLab's REST API has no draft field to write, so
+    /// on every version a draft is marked by its title's prefix, as GitLab's
+    /// own "Mark as ready" does.
+    Retitle(String),
+}
+
+fn ready_step(mr: &Value, ready: bool) -> Result<ReadyStep, String> {
+    let iid = &mr["iid"];
+    match mr["state"].as_str() {
+        Some("opened") => {}
+        Some(state @ ("merged" | "closed")) => {
+            return Err(format!(
+                "merge request !{iid} is {state}; only an open one is marked ready or made a draft"
+            ))
+        }
+        other => {
+            return Err(format!(
+                "merge request !{iid} is {}; only an open one is marked ready or made a draft",
+                other.unwrap_or("in no state gitlab named")
+            ))
+        }
+    }
+    let draft = is_draft(mr);
+    if draft != ready {
+        return Ok(ReadyStep::Already(json!({
+            "iid": iid,
+            "draft": draft,
+            "head_sha": mr["sha"],
+            "web_url": mr["web_url"],
+            "already": true,
+        })));
+    }
+    let mut title = mr["title"].as_str().unwrap_or_default().trim();
+    let wip: &[&str] = if ready { WIP_PREFIXES } else { &[] };
+    loop {
+        let lower = title.to_ascii_lowercase();
+        let Some(prefix) = DRAFT_PREFIXES
+            .iter()
+            .chain(wip)
+            .find(|p| lower.starts_with(*p))
+        else {
+            break;
+        };
+        title = title[prefix.len()..].trim_start();
+    }
+    Ok(ReadyStep::Retitle(if ready {
+        title.to_string()
+    } else {
+        format!("Draft: {title}")
+    }))
+}
+
 /// How often `pipeline_wait` reads the pipeline while it holds.
 const WAIT_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -1026,6 +1146,65 @@ mod tests {
         assert_eq!(threads[1]["path"], "src/b.rs");
         let (threads, _) = discussions(&all, true);
         assert_eq!(threads.len(), 1, "a resolved thread is left out when asked");
+    }
+
+    #[test]
+    fn ready_rewrites_the_draft_prefix_and_leaves_one_already_there_alone() {
+        let mr = |title: &str, draft: bool| {
+            json!({ "iid": 9, "state": "opened", "title": title, "draft": draft,
+                    "sha": "abc123", "web_url": "https://gitlab.test/g/p/-/merge_requests/9" })
+        };
+        for title in [
+            "Draft: Add thing",
+            "[Draft] Add thing",
+            "(draft)Add thing",
+            "Draft: WIP: Add thing",
+        ] {
+            assert_eq!(
+                ready_step(&mr(title, true), true).unwrap(),
+                ReadyStep::Retitle("Add thing".into()),
+                "{title}"
+            );
+        }
+        assert_eq!(
+            ready_step(&mr("Add thing", false), false).unwrap(),
+            ReadyStep::Retitle("Draft: Add thing".into())
+        );
+        // `WIP` is a draft only to an older GitLab: taken off when marking
+        // ready, kept as the title's own words when making a draft.
+        assert_eq!(
+            ready_step(&mr("[WIP] Add thing", true), true).unwrap(),
+            ReadyStep::Retitle("Add thing".into())
+        );
+        assert_eq!(
+            ready_step(&mr("[WIP] Add thing", false), false).unwrap(),
+            ReadyStep::Retitle("Draft: [WIP] Add thing".into())
+        );
+        let old = json!({ "iid": 9, "state": "opened", "title": "WIP: Add thing",
+                          "work_in_progress": true });
+        assert_eq!(
+            ready_step(&old, true).unwrap(),
+            ReadyStep::Retitle("Add thing".into())
+        );
+        let ReadyStep::Already(already) = ready_step(&mr("Add thing", false), true).unwrap() else {
+            panic!("a ready merge request is written to again");
+        };
+        assert_eq!(already["already"], true);
+        assert_eq!(already["draft"], false);
+        assert_eq!(already["head_sha"], "abc123");
+        assert!(matches!(
+            ready_step(&mr("Draft: x", true), false).unwrap(),
+            ReadyStep::Already(_)
+        ));
+    }
+
+    #[test]
+    fn ready_refuses_a_closed_or_merged_merge_request() {
+        for state in ["closed", "merged"] {
+            let mr = json!({ "iid": 9, "state": state, "title": "Draft: x", "draft": true });
+            let e = ready_step(&mr, true).unwrap_err();
+            assert!(e.contains(&format!("is {state}")), "{e}");
+        }
     }
 
     #[test]

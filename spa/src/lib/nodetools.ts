@@ -33,6 +33,7 @@ export const NODE_TOOLS = new Set([
   'pr_threads',
   'pr_for_branch',
   'pr_merge',
+  'pr_ready',
   'run_status',
   'run_logs',
   'run_rerun',
@@ -45,6 +46,7 @@ export const NODE_TOOLS = new Set([
   'mr_discussions',
   'mr_for_branch',
   'mr_merge',
+  'mr_ready',
   'pipeline_status',
   'pipeline_wait',
   'pipeline_list_by_sha',
@@ -199,6 +201,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return sp('Pull request for', str(a.branch))
     case 'pr_merge':
       return `Merge #${pr}`
+    case 'pr_ready':
+      return a.ready === false ? `Back to draft #${pr}` : `Mark ready #${pr}`
     case 'run_status':
       if (run) return `CI run ${run}`
       if (str(a.sha)) return `CI runs at ${str(a.sha).slice(0, 7)}`
@@ -223,6 +227,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return sp('Merge request for', str(a.branch))
     case 'mr_merge':
       return `Merge !${mr}`
+    case 'mr_ready':
+      return a.ready === false ? `Back to draft !${mr}` : `Mark ready !${mr}`
     case 'pipeline_status':
       return pipeline ? `Pipeline ${pipeline}` : sp('Pipelines', str(a.ref) ? `on ${str(a.ref)}` : '')
     case 'pipeline_wait':

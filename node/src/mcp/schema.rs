@@ -88,6 +88,9 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     ),
     // The title names the status this id leads to, read when it was asked.
     (jira::ISSUE_TRANSITION, "markdown", &[], &["transition_id"]),
+    // The title says which way the call turns it, ready or back to draft.
+    (github::PR_READY, "markdown", &[], &["ready"]),
+    (gitlab::MR_READY, "markdown", &[], &["ready"]),
 ];
 
 pub fn presentation(tool: &str) -> Presentation {
@@ -401,5 +404,15 @@ mod tests {
         let fact = json!({ "kind": "fact", "body": "b" });
         let lesson = json!({ "kind": "lesson", "body": "b" });
         assert_eq!(check_edit("retain", &fact, &lesson)[0].field, "kind");
+    }
+
+    #[test]
+    fn an_edit_may_not_turn_a_ready_call_into_a_draft_one() {
+        let asked = json!({ "repo": "o/n", "number": 8 });
+        let back = json!({ "repo": "o/n", "number": 8, "ready": false });
+        assert_eq!(check_edit("pr_ready", &asked, &back)[0].field, "ready");
+        let asked = json!({ "project": "g/p", "iid": 8, "ready": false });
+        let ready = json!({ "project": "g/p", "iid": 8, "ready": true });
+        assert_eq!(check_edit("mr_ready", &asked, &ready)[0].field, "ready");
     }
 }

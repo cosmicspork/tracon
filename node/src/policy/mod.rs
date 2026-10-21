@@ -1090,6 +1090,8 @@ mod tests {
             "issue_comment",
             "issue_update",
             "issue_create",
+            "pr_ready",
+            "mr_ready",
             "pr_merge",
             "mr_merge",
             "job_play",
