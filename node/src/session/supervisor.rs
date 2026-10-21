@@ -1248,6 +1248,20 @@ impl Supervisor {
                     }
                     self.record(ek::PROVIDER_ERROR, None, payload);
                     let _ = self.watchdog_pause_if_needed().await;
+                } else if v["sessionUpdate"] == "context_compacted" {
+                    self.record(
+                        ek::CONTEXT_COMPACTED,
+                        None,
+                        json!({
+                            "trigger": v["trigger"],
+                            "tokens_before": v["tokensBefore"],
+                            "tokens_after": v["tokensAfter"],
+                            "pruned_results": v["prunedResults"],
+                            "summarised_messages": v["summarisedMessages"],
+                            "summary": v["summary"],
+                            "context_window": v["contextWindow"],
+                        }),
+                    );
                 } else if let Some(message) = step_failure(&v) {
                     self.record(
                         ek::ERROR,

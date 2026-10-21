@@ -61,6 +61,20 @@ here:
 Either is sent to the node as the call's failed update, numbered after the last `seq` the
 dead process sent.
 
+**Compaction** keeps a session inside `--context-window`. Before a request estimated to
+come within 15 % (at least 16k tokens) of it, old tool outputs beyond the newest 40k
+tokens are replaced by `[Output truncated - N tokens]` if that saves 20k. If the
+conversation still does not fit, the same model summarises everything before the last
+20k tokens (never parting a call from its result), and the summary, followed by the
+harness's own record of the tool calls made and how each ended, and the operator's
+messages word for word, replaces it. The record and the operator's words are copied, not
+summarised, so a summariser that guesses cannot change what the agent believes ran or was
+asked for. For a small window those sizes scale
+down. A request the upstream refuses as too long (`exceed_context_size_error`) is
+compacted and made once more, with or without a declared window; a second refusal ends
+the turn. Each step is journaled (`pruned`, `compacted`) and reported to the node as a
+`context_compacted` update.
+
 **Credentials and the model** come from the command line, never from the session. The
 node passes `--providers`, a file it stages per session listing each `openai`-shaped
 provider's gateway URL, key variable and declared models, with `--model provider/model`.
@@ -101,7 +115,7 @@ Exit codes:
 | 0 | The model answered without a tool call. |
 | 1 | Error. |
 | 3 | The turn limit was reached. |
-| 4 | The context window was exceeded. Nothing is truncated; compaction comes in Phase 2. |
+| 4 | The context window was exceeded, and compacting the conversation did not bring it within. Nothing is truncated. |
 | 5 | The agent stopped the turn itself (see above). |
 
 The endpoint must speak OpenAI Chat Completions with streamed tool calls. For llama.cpp

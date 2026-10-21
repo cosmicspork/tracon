@@ -9,6 +9,7 @@
 //! node and no permission gate. See `plan-tracon-native-harness`.
 
 pub mod agent;
+pub mod compact;
 pub mod conversation;
 pub mod events;
 pub mod hashline;

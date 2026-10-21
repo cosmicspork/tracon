@@ -12,6 +12,21 @@ use serde_json::Value;
 pub struct Conversation {
     pub system: String,
     pub messages: Vec<Message>,
+    /// How big the model last said the conversation was, so the next request
+    /// can be sized before it is sent. `None` until a request reports usage.
+    pub measured: Option<Measured>,
+}
+
+/// The model's count of the conversation at some point, and how many bytes it
+/// takes per token, for estimating what has been added since.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Measured {
+    /// Messages counted.
+    pub messages: usize,
+    /// Tokens of the request that held them, its tools and system prompt
+    /// included, plus its answer.
+    pub tokens: u64,
+    pub bytes_per_token: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +66,7 @@ impl Conversation {
         Self {
             system: system.into(),
             messages: Vec::new(),
+            measured: None,
         }
     }
 

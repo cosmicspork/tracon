@@ -149,6 +149,11 @@ pub mod event_kind {
     /// session (`outcome`: `restored`, `failed` or `refused`, with the
     /// `exit_code`, the `attempt`, and whether a turn was cut short).
     pub const HARNESS_RESTARTED: &str = "harness_restarted";
+    /// The harness made its conversation smaller to fit the model's context
+    /// window (`trigger`: `threshold` or `overflow`; `tokens_before`,
+    /// `tokens_after`, both its estimates; `pruned_results`,
+    /// `summarised_messages`, and the `summary` the model now works from).
+    pub const CONTEXT_COMPACTED: &str = "context_compacted";
     /// The operator changed the session's token budget (`from`, `to`, and the
     /// `tokens_used` it was changed against). `0` is no budget.
     pub const BUDGET_CHANGED: &str = "budget_changed";

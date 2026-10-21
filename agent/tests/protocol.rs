@@ -15,7 +15,8 @@ use acp::types::{
 };
 use axum::http::StatusCode;
 use serde_json::{json, Value};
-use support::{answer, serve, sse, tool_call, Reply};
+use support::{answer, measured_call, serve, sse, tool_call, Reply};
+use tracon_agent::compact::SUMMARY_HEADER;
 use tracon_agent::hashline;
 use tracon_agent::journal::OUTCOME_UNKNOWN;
 
@@ -36,6 +37,10 @@ struct Node {
 /// Starts the agent and answers its permission requests: edits are declined,
 /// everything else allowed.
 async fn start(base: &str, events: &std::path::Path) -> Node {
+    start_with(base, events, &[]).await
+}
+
+async fn start_with(base: &str, events: &std::path::Path, extra: &[&str]) -> Node {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon-agent"))
         .args([
             "--base-url",
@@ -47,6 +52,7 @@ async fn start(base: &str, events: &std::path::Path) -> Node {
         ])
         .arg("--events")
         .arg(events)
+        .args(extra)
         .env("FAKE_KEY", "sekrit")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -660,4 +666,80 @@ async fn an_upstream_that_asks_for_a_long_wait_ends_the_turn_instead() {
         .to_string();
     assert!(error.contains("429"), "{error}");
     assert_eq!(fake.requests.lock().unwrap().len(), 1);
+}
+
+/// The node is told of a compaction, and a process that replaces this one
+/// carries on the compacted conversation, not the one before it.
+#[tokio::test]
+async fn a_compaction_is_reported_and_survives_a_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = dir.path().join(".events.jsonl");
+    let big: String = (0..600)
+        .map(|i| format!("line {i:04} {}\n", "x".repeat(90)))
+        .collect();
+    std::fs::write(dir.path().join("big.txt"), big).unwrap();
+    let (base, fake) = serve(vec![
+        measured_call("c1", "read", json!({"path": "big.txt"})),
+        answer("big.txt is 600 numbered lines."),
+        answer("read it"),
+        answer("ok"),
+    ])
+    .await;
+    let window = ["--context-window", "24000"];
+    let mut first = start_with(&base, &events, &window).await;
+    let session = new_session(&first, dir.path()).await;
+    let result: PromptResult = first
+        .peer
+        .request(methods::SESSION_PROMPT, &prompt(&session, "read big.txt"))
+        .await
+        .unwrap();
+    assert_eq!(result.stop_reason, "end_turn");
+    let seen = first.seen.lock().unwrap().clone();
+    let compacted = updates(&seen, "context_compacted");
+    assert_eq!(compacted.len(), 1, "{seen:#?}");
+    let c = &compacted[0]["update"];
+    assert_eq!(c["trigger"], "threshold");
+    assert_eq!(c["summarisedMessages"], 3);
+    assert_eq!(c["summary"], "big.txt is 600 numbered lines.");
+    assert_eq!(c["contextWindow"], 24000);
+    assert!(
+        c["tokensBefore"].as_u64() > c["tokensAfter"].as_u64(),
+        "{c}"
+    );
+    // The summariser's request is reported like any other, by its id.
+    let usage = updates(&seen, "usage_update");
+    assert_eq!(usage.len(), 3);
+    first.child.kill().await.unwrap();
+
+    let second = start_with(&base, &events, &window).await;
+    let _: Value = second
+        .peer
+        .request(
+            methods::SESSION_LOAD,
+            &LoadSessionParams {
+                session_id: session.clone(),
+                cwd: dir.path().display().to_string(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let _: PromptResult = second
+        .peer
+        .request(methods::SESSION_PROMPT, &prompt(&session, "next"))
+        .await
+        .unwrap();
+    let requests = fake.requests.lock().unwrap();
+    let messages = requests[3]["messages"].as_array().unwrap();
+    let roles: Vec<_> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    assert!(messages[1]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with(SUMMARY_HEADER));
+    assert_eq!(messages[2]["content"], "read it");
+    assert_eq!(messages[3]["content"], "next");
 }
