@@ -1134,6 +1134,9 @@ impl MeshClient {
             .map_err(|e| HubError::Local(e.to_string()))?;
         let me = self.node_id();
         let mut n = 0;
+        // A peer's cards on a channel it left are closed here: it lists
+        // nothing there any more to close them by.
+        let mut closed = 0;
         for m in &list {
             let Some(id) = m["node_id"].as_str() else {
                 continue;
@@ -1162,6 +1165,10 @@ impl MeshClient {
                 continue;
             }
             let _ = self.store.node_channels_set(id, &channels);
+            closed += self
+                .store
+                .expire_permissions_off_channels(id)
+                .unwrap_or_default();
             n += 1;
             if self.store.get_node(id).ok().flatten().is_none() {
                 let _ = self.store.put_node(&NodeRow {
@@ -1199,7 +1206,16 @@ impl MeshClient {
         for node in self.store.list_nodes().unwrap_or_default() {
             if node.is_self == 0 && !current.contains(node.id.as_str()) {
                 let _ = self.store.node_channels_set(&node.id, &[]);
+                closed += self
+                    .store
+                    .expire_permissions_off_channels(&node.id)
+                    .unwrap_or_default();
                 self.peers.lock().unwrap().remove(&node.id);
+            }
+        }
+        if closed > 0 {
+            if let Ok(waiting) = self.store.open_permission_views() {
+                self.bus.publish_untapped(Frame::Queue { waiting });
             }
         }
         self.set_state_ok();

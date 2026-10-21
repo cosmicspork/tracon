@@ -167,6 +167,10 @@ channel; an answer that is an admin action there is refused, as for any peer. A
 `snapshot`'s `waiting` lists every card the sender's `queue` would, approvals and
 session-less cards among them, so a peer expires only what the sender no longer holds.
 A listed card whose id is one of the receiver's own approvals is refused as impersonation.
+A sender removed from a channel (today, removed from the hub) lists nothing there again,
+so when the hub's member list no longer has it on that channel the receiver expires the
+cards it mirrored from it there, session-less or not, and refuses a late answer to one
+rather than relaying it.
 
 ## Admin statements (`admin.rs`)
 
