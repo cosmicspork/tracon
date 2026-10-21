@@ -6286,20 +6286,155 @@ pub async fn refresh_models(State(s): State<AppState>) -> ApiResult<Json<serde_j
     Ok(Json(serde_json::json!(models)))
 }
 
-/// `GET /api/usage?channel=&since_ms=`: what the gateway counted. Defaults to
-/// the last 24 hours across every channel.
+/// The window and grouping a usage request asks for, from its query:
+/// `channel`, `since_ms` (default: the last 24 hours), `until_ms`
+/// (exclusive), `provider`, `model`, `session_id` and `group` (`model`,
+/// `day` or `session`) and `tz_offset_minutes` (minutes east of UTC, default:
+/// the node's offset). Unparsable times, and offsets that don't parse or lie
+/// past 18 hours either side of UTC, fall back to their defaults, as they
+/// always have; an unknown grouping is refused.
+///
+/// The offset is the caller's at the window's start, fixed for the whole
+/// window: one that crosses a DST change can put one day's boundary an hour
+/// off from the caller's wall clock.
+fn usage_query(
+    q: &std::collections::HashMap<String, String>,
+) -> ApiResult<crate::store::UsageQuery<'_>> {
+    let since_ms = q
+        .get("since_ms")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or_else(|| crate::store::now_ms() - 24 * 3600 * 1000);
+    let group = match q.get("group").map(String::as_str) {
+        None | Some("") => crate::store::UsageGroup::Model,
+        Some(g) => crate::store::UsageGroup::parse(g).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                "group must be model, day or session".into(),
+            )
+        })?,
+    };
+    let text = |k: &str| q.get(k).map(String::as_str).filter(|v| !v.is_empty());
+    Ok(crate::store::UsageQuery {
+        channel: text("channel"),
+        since_ms,
+        until_ms: q.get("until_ms").and_then(|v| v.parse::<i64>().ok()),
+        provider: text("provider"),
+        model: text("model"),
+        session_id: text("session_id"),
+        group,
+        // Real zones run from UTC-12 to UTC+14.
+        tz_offset_minutes: q
+            .get("tz_offset_minutes")
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|m| (-18 * 60..=18 * 60).contains(m)),
+    })
+}
+
+/// `GET /api/usage?channel=&since_ms=&until_ms=&provider=&model=&session_id=&group=&tz_offset_minutes=`:
+/// what the gateway counted, priced where the provider carries a price.
+/// Defaults to the last 24 hours across every channel, per provider and model.
 pub async fn usage(
     State(s): State<AppState>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let since = q
-        .get("since_ms")
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or_else(|| crate::store::now_ms() - 24 * 3600 * 1000);
-    let totals = s
-        .store()
-        .usage_since(q.get("channel").map(String::as_str), since)?;
-    Ok(Json(json!({ "since_ms": since, "totals": totals })))
+    let query = usage_query(&q)?;
+    let mut totals = s.store().usage_report(&query)?;
+    crate::metrics::price_usage(&s.cfg, &mut totals);
+    Ok(Json(json!({
+        "since_ms": query.since_ms,
+        "until_ms": query.until_ms,
+        "totals": totals,
+    })))
+}
+
+/// `GET /api/usage.csv`: the rows `GET /api/usage` returns for the same
+/// query, as a CSV file to hand to someone outside Tracon.
+pub async fn usage_csv(
+    State(s): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let query = match usage_query(&q) {
+        Ok(query) => query,
+        Err(error) => return error.into_response(),
+    };
+    let mut totals = match s.store().usage_report(&query) {
+        Ok(totals) => totals,
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    crate::metrics::price_usage(&s.cfg, &mut totals);
+    // Named for the days the caller picked, in the caller's zone.
+    let offset = query
+        .tz_offset_minutes
+        .unwrap_or_else(crate::corpus::promote::chrono_free::offset_minutes);
+    let date = |ms| crate::corpus::promote::chrono_free::local_date_at(ms, offset);
+    // The last day the window covers: `until_ms` is exclusive.
+    let to = query.until_ms.map_or_else(crate::store::now_ms, |u| {
+        u.max(query.since_ms.saturating_add(1)).saturating_sub(1)
+    });
+    let name = format!(
+        "tracon-usage-{}-{}-{}.csv",
+        safe_download_name(query.channel.unwrap_or("all")),
+        date(query.since_ms),
+        date(to)
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .header("x-content-type-options", "nosniff")
+        .body(axum::body::Body::from(usage_csv_text(&totals)))
+        .unwrap_or_else(|error| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        })
+}
+
+/// A usage report as CSV: a header line, then one line per row in the
+/// report's own order. Every column is always present, empty where the
+/// grouping does not fill it.
+fn usage_csv_text(rows: &[crate::store::UsageTotal]) -> String {
+    fn field(v: &str) -> String {
+        // A title is an agent's text; a spreadsheet would run one that
+        // starts like a formula, a leading tab or CR included.
+        let v = if v.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+            format!("'{v}")
+        } else {
+            v.to_string()
+        };
+        if v.contains([',', '"', '\n', '\r']) {
+            format!("\"{}\"", v.replace('"', "\"\""))
+        } else {
+            v
+        }
+    }
+    let mut out = String::from(
+        "channel,provider,model,day,session_id,title,work_item_id,review,requests,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,sessions,cost_usd\r\n",
+    );
+    for r in rows {
+        let text = |v: &Option<String>| field(v.as_deref().unwrap_or(""));
+        let line = [
+            field(&r.channel),
+            field(&r.provider),
+            text(&r.model),
+            text(&r.day),
+            text(&r.session_id),
+            text(&r.title),
+            text(&r.work_item_id),
+            text(&r.review),
+            r.requests.to_string(),
+            r.input_tokens.to_string(),
+            r.output_tokens.to_string(),
+            r.cache_read_tokens.to_string(),
+            r.cache_write_tokens.to_string(),
+            r.sessions.to_string(),
+            r.cost_usd.map(|c| format!("{c:.6}")).unwrap_or_default(),
+        ];
+        out.push_str(&line.join(","));
+        out.push_str("\r\n");
+    }
+    out
 }
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -7959,5 +8094,55 @@ mod zip_tests {
 
         std::os::unix::fs::symlink("/etc/passwd", root.join("escape")).unwrap();
         assert!(super::zip_workspace(&root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod usage_csv_tests {
+    #[test]
+    fn a_csv_field_with_commas_quotes_or_a_formula_cannot_break_the_row() {
+        let row = crate::store::UsageTotal {
+            channel: "work".into(),
+            provider: "openai-codex".into(),
+            model: Some("gpt-5".into()),
+            requests: 1,
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            sessions: 1,
+            cost_usd: Some(0.5),
+            day: None,
+            session_id: Some("s1".into()),
+            title: Some("Fix \"it\", then =SUM(A1)".into()),
+            work_item_id: None,
+            review: None,
+        };
+        let mut title_formula = row.clone();
+        title_formula.title = Some("=HYPERLINK(\"x\")".into());
+        let mut after_tab = row.clone();
+        after_tab.title = Some("\t=1+1".into());
+        let mut after_cr = row.clone();
+        after_cr.title = Some("\r=1+1".into());
+        let csv = super::usage_csv_text(&[row, title_formula, after_tab, after_cr]);
+        let lines: Vec<&str> = csv.split("\r\n").collect();
+        assert_eq!(
+            lines[1],
+            "work,openai-codex,gpt-5,,s1,\"Fix \"\"it\"\", then =SUM(A1)\",,,1,2,3,0,0,1,0.500000"
+        );
+        assert_eq!(
+            lines[2],
+            "work,openai-codex,gpt-5,,s1,\"'=HYPERLINK(\"\"x\"\")\",,,1,2,3,0,0,1,0.500000"
+        );
+        // A leading tab or CR is guarded too; the CR also forces quotes.
+        assert_eq!(
+            lines[3],
+            "work,openai-codex,gpt-5,,s1,'\t=1+1,,,1,2,3,0,0,1,0.500000"
+        );
+        assert_eq!(
+            lines[4],
+            "work,openai-codex,gpt-5,,s1,\"'\r=1+1\",,,1,2,3,0,0,1,0.500000"
+        );
+        assert_eq!(lines[5], "", "every line ends in CRLF");
     }
 }

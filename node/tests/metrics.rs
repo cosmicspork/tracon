@@ -631,3 +631,423 @@ fn a_harness_that_reports_no_requests_leaves_the_fields_empty() {
     assert!(usage["requests_matched"].is_null());
     assert!(usage["requests_unmatched"].is_null());
 }
+
+/// Usage at an instant, on a channel, from a provider and model.
+fn usage_at(
+    channel: &str,
+    session: Option<&str>,
+    provider: &str,
+    model: &str,
+    at_ms: i64,
+) -> UsageRow {
+    UsageRow {
+        channel: channel.into(),
+        node_id: "n1".into(),
+        session_id: session.map(str::to_string),
+        provider: provider.into(),
+        model: Some(model.into()),
+        at_ms,
+        input_tokens: 100,
+        output_tokens: 10,
+        requests: 1,
+        cache_read_tokens: 40,
+        cache_write_tokens: 5,
+        request_id: None,
+    }
+}
+
+/// Two days of usage on `work` from two providers, with a call either side
+/// of the window `[day, day + 2 days)`, and a little on `personal`.
+fn seeded_usage(store: &Store) -> i64 {
+    use tracon::corpus::promote::chrono_free::day_start_of;
+    let day = day_start_of(now_ms()) - 3 * 86_400_000;
+    for (channel, session, provider, model, at) in [
+        ("work", Some("e1"), "openai-codex", "gpt-5", day - 1),
+        ("work", Some("e1"), "openai-codex", "gpt-5", day),
+        ("work", Some("e2"), "openai-codex", "gpt-5", day + 3_600_000),
+        (
+            "work",
+            Some("e2"),
+            "openai-codex",
+            "gpt-5-mini",
+            day + 7_200_000,
+        ),
+        ("work", Some("e1"), "anthropic", "claude", day + 86_400_000),
+        ("work", None, "openai-codex", "gpt-5", day + 86_400_000 + 1),
+        (
+            "work",
+            Some("e2"),
+            "openai-codex",
+            "gpt-5",
+            day + 2 * 86_400_000,
+        ),
+        ("personal", Some("p1"), "openai-codex", "gpt-5", day + 1),
+    ] {
+        store
+            .record_usage(&usage_at(channel, session, provider, model, at))
+            .unwrap();
+    }
+    day
+}
+
+#[test]
+fn a_usage_report_groups_by_model_day_or_session_inside_its_window() {
+    use tracon::corpus::promote::chrono_free::local_date;
+    use tracon::store::{UsageGroup, UsageQuery};
+    state::isolate();
+    let store = Store::open_in_memory().unwrap();
+    store.ensure_peer_node("n1").unwrap();
+    let day = seeded_usage(&store);
+    let window = |group| UsageQuery {
+        channel: Some("work"),
+        since_ms: day,
+        until_ms: Some(day + 2 * 86_400_000),
+        group,
+        ..UsageQuery::default()
+    };
+
+    // Per model: the call a millisecond before the window and the one at its
+    // end are both left out, and so is the other channel.
+    let by_model = store.usage_report(&window(UsageGroup::Model)).unwrap();
+    let keys: Vec<_> = by_model
+        .iter()
+        .map(|r| (r.provider.as_str(), r.model.as_deref().unwrap(), r.requests))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("anthropic", "claude", 1),
+            ("openai-codex", "gpt-5", 3),
+            ("openai-codex", "gpt-5-mini", 1)
+        ]
+    );
+    let gpt5 = &by_model[1];
+    assert_eq!((gpt5.input_tokens, gpt5.output_tokens), (300, 30));
+    assert_eq!((gpt5.cache_read_tokens, gpt5.cache_write_tokens), (120, 15));
+    // e1 and e2; the call outside any session counts no session.
+    assert_eq!(gpt5.sessions, 2);
+    assert!(gpt5.day.is_none() && gpt5.session_id.is_none());
+
+    // Per local day, on the same boundary as the ceiling's "today".
+    let by_day = store.usage_report(&window(UsageGroup::Day)).unwrap();
+    let keys: Vec<_> = by_day
+        .iter()
+        .map(|r| (r.day.clone().unwrap(), r.provider.as_str(), r.requests))
+        .collect();
+    let (d0, d1) = (local_date(day), local_date(day + 86_400_000));
+    assert_ne!(d0, d1);
+    assert_eq!(
+        keys,
+        [
+            (d0.clone(), "openai-codex", 3),
+            (d1.clone(), "anthropic", 1),
+            (d1, "openai-codex", 1),
+        ]
+    );
+
+    // Per session, with a provider filter.
+    let by_session = store
+        .usage_report(&UsageQuery {
+            provider: Some("openai-codex"),
+            ..window(UsageGroup::Session)
+        })
+        .unwrap();
+    let keys: Vec<_> = by_session
+        .iter()
+        .map(|r| (r.session_id.as_deref(), r.requests))
+        .collect();
+    assert_eq!(keys, [(None, 1), (Some("e1"), 1), (Some("e2"), 2)]);
+
+    // A model filter and a session filter narrow it further.
+    let one = store
+        .usage_report(&UsageQuery {
+            model: Some("gpt-5"),
+            session_id: Some("e2"),
+            ..window(UsageGroup::Model)
+        })
+        .unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].requests, 1);
+
+    // Without an end the window runs to now and takes the later call in.
+    let open = store
+        .usage_report(&UsageQuery {
+            until_ms: None,
+            provider: Some("openai-codex"),
+            model: Some("gpt-5"),
+            ..window(UsageGroup::Model)
+        })
+        .unwrap();
+    assert_eq!(open[0].requests, 4);
+}
+
+#[test]
+fn a_session_row_says_what_the_session_was_for_and_how_its_change_was_judged() {
+    use tracon::store::{UsageGroup, UsageQuery};
+    state::isolate();
+    let store = Store::open_in_memory().unwrap();
+    store.ensure_peer_node("n1").unwrap();
+    let item = tracon::corpus::work::create(
+        &store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "work".into(),
+            project_id: None,
+            title: "Ship the export".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+        },
+    )
+    .unwrap();
+    store
+        .insert_session(&session("e1", "work", "execute", Some(item.id.as_str())))
+        .unwrap();
+    store
+        .insert_session(&session("e2", "work", "execute", None))
+        .unwrap();
+    store
+        .insert_review(&review("rv1", "e1", "abc1234567890", "approved", None))
+        .unwrap();
+    store
+        .insert_review(&review("rv2", "e2", "def1234567890", "rejected", None))
+        .unwrap();
+    let day = seeded_usage(&store);
+    let rows = store
+        .usage_report(&UsageQuery {
+            channel: Some("work"),
+            since_ms: day,
+            provider: Some("openai-codex"),
+            group: UsageGroup::Session,
+            ..UsageQuery::default()
+        })
+        .unwrap();
+    let e1 = rows
+        .iter()
+        .find(|r| r.session_id.as_deref() == Some("e1"))
+        .unwrap();
+    assert_eq!(e1.title.as_deref(), Some("Ship the export"));
+    assert_eq!(e1.work_item_id.as_deref(), Some(item.id.as_str()));
+    assert_eq!(e1.review.as_deref(), Some("accepted"));
+    // No work item: the review's title stands in.
+    let e2 = rows
+        .iter()
+        .find(|r| r.session_id.as_deref() == Some("e2"))
+        .unwrap();
+    assert_eq!(e2.title.as_deref(), Some("feat: rv2"));
+    assert_eq!(e2.review.as_deref(), Some("rejected"));
+}
+
+/// A GET whose body is text, with its headers.
+async fn get_text(app: &axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    use tower::ServiceExt;
+    let req = axum::http::Request::builder()
+        .uri(uri)
+        .header("host", "127.0.0.1:7420")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let (status, headers) = (res.status(), res.headers().clone());
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn the_usage_api_keeps_its_old_rows_adds_cost_and_exports_the_same_rows_as_csv() {
+    use tracon::corpus::promote::chrono_free::local_date;
+    state::isolate();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.ensure_peer_node("n1").unwrap();
+    let day = seeded_usage(&store);
+    let app = app(store.clone()).await;
+
+    // Only `channel` and `since_ms`, as callers have always asked: one row
+    // per provider and model, with the old fields where they were.
+    let (st, v) = call(
+        &app,
+        "GET",
+        &format!("/api/usage?channel=work&since_ms={day}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let totals = v["totals"].as_array().unwrap();
+    assert_eq!(totals.len(), 3);
+    let claude = &totals[0];
+    assert_eq!(claude["channel"], "work");
+    assert_eq!(claude["provider"], "anthropic");
+    assert_eq!(claude["model"], "claude");
+    assert_eq!(claude["requests"], 1);
+    assert_eq!(claude["input_tokens"], 100);
+    assert_eq!(claude["output_tokens"], 10);
+    assert_eq!(claude["cache_read_tokens"], 40);
+    assert_eq!(claude["sessions"], 1);
+    // Priced as the metrics price it: anthropic at $3 in and $15 out per million.
+    let cost = claude["cost_usd"].as_f64().unwrap();
+    assert!(
+        (cost - (100.0 * 3.0 + 10.0 * 15.0) / 1e6).abs() < 1e-12,
+        "{cost}"
+    );
+    assert!(
+        totals[1]["cost_usd"].is_null(),
+        "openai-codex carries no price"
+    );
+    assert!(
+        claude.get("day").is_none(),
+        "grouping fields appear only when grouped"
+    );
+
+    let (st, v) = call(&app, "GET", "/api/usage?group=week", None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+
+    // The same query as CSV, by day for one provider.
+    let until = day + 2 * 86_400_000;
+    let uri = format!(
+        "/api/usage.csv?channel=work&since_ms={day}&until_ms={until}&provider=openai-codex&group=day"
+    );
+    let (st, headers, body) = get_text(&app, &uri).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers["content-disposition"],
+        format!(
+            "attachment; filename=\"tracon-usage-work-{}-{}.csv\"",
+            local_date(day),
+            local_date(until - 1)
+        )
+    );
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(
+        lines[0],
+        "channel,provider,model,day,session_id,title,work_item_id,review,requests,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,sessions,cost_usd"
+    );
+    assert_eq!(
+        &lines[1..],
+        [
+            format!(
+                "work,openai-codex,,{},,,,,3,300,30,120,15,2,",
+                local_date(day)
+            ),
+            format!(
+                "work,openai-codex,,{},,,,,1,100,10,40,5,0,",
+                local_date(day + 86_400_000)
+            ),
+        ]
+    );
+    // Stable: the same window exports the same bytes.
+    let (_, _, again) = get_text(&app, &uri).await;
+    assert_eq!(body, again);
+    // Every channel, when none is named.
+    let (_, headers, _) = get_text(&app, &format!("/api/usage.csv?since_ms={day}")).await;
+    assert!(headers["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment; filename=\"tracon-usage-all-"));
+}
+
+/// 2026-10-01T00:00Z.
+const OCT_1_UTC: i64 = 1_790_812_800_000;
+
+#[test]
+fn a_day_row_is_the_callers_local_day_not_the_nodes() {
+    use tracon::store::{UsageGroup, UsageQuery};
+    state::isolate();
+    let store = Store::open_in_memory().unwrap();
+    store.ensure_peer_node("n1").unwrap();
+    // 23:30 on 2026-09-30 in CDT (UTC-5), already 04:30 on 10-01 in UTC.
+    let late = OCT_1_UTC + 4 * 3_600_000 + 30 * 60_000;
+    store
+        .record_usage(&usage_at("work", None, "anthropic", "claude", late))
+        .unwrap();
+    let day_in = |tz_offset_minutes| {
+        store
+            .usage_report(&UsageQuery {
+                since_ms: OCT_1_UTC - 86_400_000,
+                group: UsageGroup::Day,
+                tz_offset_minutes,
+                ..UsageQuery::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|r| r.day.unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(day_in(Some(-300)), ["2026-09-30"]);
+    // East of UTC it is the morning of 10-01; with none given, the node's
+    // own offset decides.
+    assert_eq!(day_in(Some(330)), ["2026-10-01"]);
+    assert_eq!(
+        day_in(None),
+        [tracon::corpus::promote::chrono_free::local_date(late)]
+    );
+}
+
+#[tokio::test]
+async fn a_csv_is_named_for_the_days_the_caller_picked_in_the_callers_zone() {
+    state::isolate();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.ensure_peer_node("n1").unwrap();
+    // 23:30 CDT on 10-15, the last evening of the window.
+    let last_evening = OCT_1_UTC + 15 * 86_400_000 + 4 * 3_600_000 + 30 * 60_000;
+    store
+        .record_usage(&usage_at("work", None, "anthropic", "claude", last_evening))
+        .unwrap();
+    let app = app(store.clone()).await;
+    // 2026-10-01 to 2026-10-15 picked in CDT: local midnight to local midnight.
+    let (since, until) = (
+        OCT_1_UTC + 5 * 3_600_000,
+        OCT_1_UTC + 15 * 86_400_000 + 5 * 3_600_000,
+    );
+    let (st, headers, body) = get_text(
+        &app,
+        &format!(
+            "/api/usage.csv?since_ms={since}&until_ms={until}&group=day&tz_offset_minutes=-300"
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=\"tracon-usage-all-2026-10-01-2026-10-15.csv\""
+    );
+    assert_eq!(
+        body.lines().nth(1).unwrap(),
+        "work,anthropic,,2026-10-15,,,,,1,100,10,40,5,0,0.000450"
+    );
+}
+
+#[tokio::test]
+async fn a_hostile_offset_or_window_edge_answers_rather_than_overflowing() {
+    state::isolate();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.ensure_peer_node("n1").unwrap();
+    let day = seeded_usage(&store);
+    let app = app(store.clone()).await;
+    let by_day = |extra: &str| format!("/api/usage?group=day&since_ms={day}{extra}");
+    let (st, plain) = call(&app, "GET", &by_day(""), None).await;
+    assert_eq!(st, StatusCode::OK, "{plain}");
+    // An offset no zone has is ignored: the rows are the node's own.
+    for offset in ["-9223372036854775808", "99999"] {
+        let (st, v) = call(
+            &app,
+            "GET",
+            &by_day(&format!("&tz_offset_minutes={offset}")),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{offset}: {v}");
+        assert_eq!(v["totals"], plain["totals"], "{offset}");
+    }
+    // Window edges at the ends of i64 still name a file.
+    let (st, _, body) = get_text(
+        &app,
+        "/api/usage.csv?since_ms=9223372036854775807&until_ms=1&tz_offset_minutes=840",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+}

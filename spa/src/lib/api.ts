@@ -78,6 +78,7 @@ import type {
   WorkItem,
   WorkView,
   CandidateDetail,
+  UsageTotal,
   ManifestView,
   ToolchainStatus,
 } from './types'
@@ -974,6 +975,9 @@ export const api = {
       'GET',
       `/api/metrics${sinceMs ? `?since_ms=${sinceMs}` : ''}`,
     ),
+  /** What the gateway counted, grouped; `params` is `usageParams`'s query. */
+  usage: (params: URLSearchParams) =>
+    call<{ since_ms: number; until_ms: number | null; totals: UsageTotal[] }>('GET', `/api/usage?${params}`),
   candidateDetail: (candidateId: string, source: { owner?: string; channel?: string } = {}) => {
     const query = new URLSearchParams()
     if (source.owner) query.set('owner', source.owner)

@@ -187,9 +187,26 @@ pub mod chrono_free {
 
     /// The wall-clock millisecond the local day began: the ceiling's "today".
     pub fn day_start_ms() -> i64 {
+        day_start_of(crate::store::now_ms())
+    }
+
+    /// The wall-clock millisecond the local day holding `ms` began.
+    pub fn day_start_of(ms: i64) -> i64 {
         let offset_ms = offset_minutes() * 60_000;
-        let local = crate::store::now_ms() + offset_ms;
+        let local = ms + offset_ms;
         local - local.rem_euclid(86_400_000) - offset_ms
+    }
+
+    /// The local calendar date holding `ms`, as `YYYY-MM-DD`.
+    pub fn local_date(ms: i64) -> String {
+        local_date_at(ms, offset_minutes())
+    }
+
+    /// The `YYYY-MM-DD` holding `ms` in a zone `offset` minutes east of UTC.
+    pub fn local_date_at(ms: i64, offset: i64) -> String {
+        let local =
+            crate::session::exhaustion::utc(ms.saturating_add(offset.saturating_mul(60_000)));
+        local[..10].to_string()
     }
 
     /// UTC, offset by `TZ_OFFSET_MINUTES` if set; a node in a pod has no

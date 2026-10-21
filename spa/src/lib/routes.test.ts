@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { redirect } from './routes'
+import { localDate, redirect, usageSearch, usageView, usageWindow } from './routes'
 
 test('old top-level addresses lead to where the screen moved', () => {
   expect(redirect('/metrics')).toBe('/usage')
@@ -34,4 +34,43 @@ test('a Settings section folded into another opens the one that holds it now', (
 test('a section typed as a path opens as its anchor', () => {
   expect(redirect('/settings/maintenance')).toBe('/settings#system')
   expect(redirect('/settings/mesh/')).toBe('/settings#mesh')
+})
+
+test('the Usage address reads a span of days, a date range, a provider and a grouping', () => {
+  expect(usageView('')).toEqual({ days: 30, from: null, to: null, provider: null, group: 'model' })
+  expect(usageView('?since=7')).toEqual({ days: 7, from: null, to: null, provider: null, group: 'model' })
+  expect(usageView('?since=2026-10-01&until=2026-10-15&provider=openai-codex&group=day')).toEqual({
+    days: null,
+    from: '2026-10-01',
+    to: '2026-10-15',
+    provider: 'openai-codex',
+    group: 'day',
+  })
+  // A start after the end reads as the same days, swapped.
+  expect(usageView('?since=2026-10-15&until=2026-10-01')).toMatchObject({ from: '2026-10-01', to: '2026-10-15' })
+  // Unreadable parts fall back rather than emptying the page.
+  expect(usageView('?since=soon&until=2026-02-30&group=week&provider=')).toEqual({
+    days: 30,
+    from: null,
+    to: null,
+    provider: null,
+    group: 'model',
+  })
+})
+
+test('a Usage view writes back the address it was read from, defaults left out', () => {
+  for (const search of ['', '?since=7', '?since=2026-10-01&until=2026-10-15&provider=openai-codex&group=session'])
+    expect(usageSearch(usageView(search))).toBe(search)
+  expect(usageSearch(usageView('?since=30&group=model'))).toBe('')
+})
+
+test('a Usage window runs from the first local day to the end of the last', () => {
+  const day = (s: string) => new Date(`${s}T00:00:00`).getTime()
+  expect(usageWindow(usageView('?since=2026-10-01&until=2026-10-15'))).toEqual({
+    since: day('2026-10-01'),
+    until: day('2026-10-16'),
+  })
+  const now = day('2026-10-21') + 5_000
+  expect(usageWindow(usageView('?since=7'), now)).toEqual({ since: now - 7 * 86_400_000, until: null })
+  expect(localDate(day('2026-10-21') + 1)).toBe('2026-10-21')
 })
