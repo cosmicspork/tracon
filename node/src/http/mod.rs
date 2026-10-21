@@ -184,6 +184,7 @@ pub fn router(state: AppState) -> Router {
             post(api::import_credentials).delete(api::delete_credential_named_import),
         )
         .route("/api/usage", get(api::usage))
+        .route("/api/usage.csv", get(api::usage_csv))
         .route("/api/metrics", get(api::metrics))
         .route("/api/provenance/{sha}", get(api::provenance))
         .route(

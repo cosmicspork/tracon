@@ -365,6 +365,24 @@ pub struct ChannelMetrics {
     pub workflow: crate::store::metrics::WorkflowMetrics,
 }
 
+/// What `input` and `output` tokens cost on `provider`, or `None` when the
+/// provider carries no price.
+pub fn price_of(cfg: &Config, provider: &str, input: i64, output: i64) -> Option<f64> {
+    cfg.live()
+        .providers
+        .get(provider)
+        .and_then(|p| p.price)
+        .map(|price| price.cost(input, output))
+}
+
+/// Price each row of a usage report the way [`channel_metrics`] prices a
+/// channel: by its provider's price, null when unpriced.
+pub fn price_usage(cfg: &Config, rows: &mut [crate::store::UsageTotal]) {
+    for r in rows {
+        r.cost_usd = price_of(cfg, &r.provider, r.input_tokens, r.output_tokens);
+    }
+}
+
 pub fn channel_metrics(
     store: &Store,
     cfg: &Config,
@@ -386,8 +404,8 @@ pub fn channel_metrics(
     let tokens: i64 = usage.iter().map(|(_, _, i, o, _)| i + o).sum();
     let mut cost = None;
     for (_, provider, i, o, _) in &usage {
-        if let Some(price) = cfg.live().providers.get(provider).and_then(|p| p.price) {
-            *cost.get_or_insert(0.0) += price.cost(*i, *o);
+        if let Some(c) = price_of(cfg, provider, *i, *o) {
+            *cost.get_or_insert(0.0) += c;
         }
     }
     let behind_accepted: std::collections::HashSet<&str> = accepted

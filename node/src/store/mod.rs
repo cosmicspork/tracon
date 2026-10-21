@@ -1328,24 +1328,125 @@ impl Store {
 
     /// Totals per provider and model since `since_ms`, for one channel or all.
     pub fn usage_since(&self, channel: Option<&str>, since_ms: i64) -> Result<Vec<UsageTotal>> {
+        self.usage_report(&UsageQuery {
+            channel,
+            since_ms,
+            ..UsageQuery::default()
+        })
+    }
+
+    /// What the gateway counted in a window, grouped the way `q.group` asks:
+    /// per provider and model, per provider and local day (in the caller's
+    /// zone, `q.tz_offset_minutes`), or per provider and session. Rows come
+    /// back in a fixed order, so two reports of the same window are identical.
+    /// Cost is left unpriced: prices live in the config, not the store
+    /// (`metrics::price_usage`).
+    pub fn usage_report(&self, q: &UsageQuery<'_>) -> Result<Vec<UsageTotal>> {
+        // The caller's day boundary, or else the one the ceiling's "today" uses.
+        let offset = q
+            .tz_offset_minutes
+            .unwrap_or_else(crate::corpus::promote::chrono_free::offset_minutes);
+        let offset_ms = offset.saturating_mul(60_000);
+        let (key, order) = match q.group {
+            UsageGroup::Model => ("u.model", "u.channel, u.provider, u.model"),
+            UsageGroup::Day => (
+                "(u.at_ms + ?7) - ((u.at_ms + ?7) % 86400000) - ?7",
+                "u.channel, k, u.provider",
+            ),
+            UsageGroup::Session => ("u.session_id", "u.channel, u.session_id, u.provider"),
+        };
+        let sql = format!(
+            "SELECT u.channel, u.provider, {key} AS k, SUM(u.requests), SUM(u.input_tokens),
+                    SUM(u.output_tokens), SUM(u.cache_read_tokens), SUM(u.cache_write_tokens),
+                    COUNT(DISTINCT u.session_id)
+             FROM model_usage u
+             WHERE u.at_ms >= ?1 AND (?2 IS NULL OR u.at_ms < ?2)
+               AND (?3 IS NULL OR u.channel = ?3) AND (?4 IS NULL OR u.provider = ?4)
+               AND (?5 IS NULL OR u.model = ?5) AND (?6 IS NULL OR u.session_id = ?6)
+               AND ?7 IS NOT NULL -- the day offset is bound in every grouping
+             GROUP BY u.channel, u.provider, k ORDER BY {order}"
+        );
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT channel, provider, model, SUM(requests), SUM(input_tokens), SUM(output_tokens)
-             FROM model_usage WHERE at_ms >= ?1 AND (?2 IS NULL OR channel = ?2)
-             GROUP BY channel, provider, model ORDER BY channel, provider, model",
-        )?;
-        let rows = stmt
-            .query_map(rusqlite::params![since_ms, channel], |r| {
-                Ok(UsageTotal {
+        let mut stmt = conn.prepare(&sql)?;
+        let params = rusqlite::params![
+            q.since_ms,
+            q.until_ms,
+            q.channel,
+            q.provider,
+            q.model,
+            q.session_id,
+            offset_ms
+        ];
+        let mut rows: Vec<UsageTotal> = stmt
+            .query_map(params, |r| {
+                let mut t = UsageTotal {
                     channel: r.get(0)?,
                     provider: r.get(1)?,
-                    model: r.get(2)?,
+                    model: None,
                     requests: r.get(3)?,
                     input_tokens: r.get(4)?,
                     output_tokens: r.get(5)?,
-                })
+                    cache_read_tokens: r.get(6)?,
+                    cache_write_tokens: r.get(7)?,
+                    sessions: r.get(8)?,
+                    cost_usd: None,
+                    day: None,
+                    session_id: None,
+                    title: None,
+                    work_item_id: None,
+                    review: None,
+                };
+                match q.group {
+                    UsageGroup::Model => t.model = r.get(2)?,
+                    UsageGroup::Day => {
+                        let start: i64 = r.get(2)?;
+                        t.day = Some(crate::corpus::promote::chrono_free::local_date_at(
+                            start, offset,
+                        ));
+                    }
+                    UsageGroup::Session => t.session_id = r.get(2)?,
+                }
+                Ok(t)
             })?
             .collect::<std::result::Result<_, _>>()?;
+        if q.group == UsageGroup::Session {
+            // What the session was for, and how its work was judged: the
+            // newest decided review of the change it made.
+            let mut about = conn.prepare(
+                "SELECT s.work_item_id,
+                        COALESCE(w.title, (SELECT COALESCE(r.edited_title, r.title) FROM review r
+                                           WHERE r.session_id = s.id ORDER BY r.updated_ms DESC LIMIT 1)),
+                        (SELECT r.state FROM review r WHERE r.session_id = s.id
+                           AND r.state IN ('approved', 'rejected') ORDER BY r.updated_ms DESC LIMIT 1)
+                 FROM session s LEFT JOIN work_item w ON w.id = s.work_item_id
+                 WHERE s.id = ?1",
+            )?;
+            for t in rows.iter_mut() {
+                let Some(id) = t.session_id.as_deref() else {
+                    continue;
+                };
+                if let Some((item, title, state)) = about
+                    .query_row([id], |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .optional()?
+                {
+                    t.work_item_id = item;
+                    t.title = title;
+                    t.review = state.map(|s| {
+                        if s == "approved" {
+                            "accepted".to_string()
+                        } else {
+                            s
+                        }
+                    });
+                }
+            }
+        }
         Ok(rows)
     }
 
@@ -2001,6 +2102,8 @@ impl TurnUsageRow {
     }
 }
 
+/// One row of a usage report: what the gateway counted for a channel and
+/// provider, keyed further by model, local day or session (`UsageGroup`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageTotal {
     pub channel: String,
@@ -2009,6 +2112,68 @@ pub struct UsageTotal {
     pub requests: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// Read from the provider's cache: recorded, never charged.
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    /// Written to the provider's cache; already inside `input_tokens`.
+    #[serde(default)]
+    pub cache_write_tokens: i64,
+    /// Distinct sessions behind the row; calls outside a session count none.
+    #[serde(default)]
+    pub sessions: i64,
+    /// Priced where the provider carries a price; null otherwise.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// `YYYY-MM-DD`, the local day, when grouped by day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day: Option<String>,
+    /// When grouped by session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The session's work item title, else its review's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
+    /// `accepted` or `rejected`: the newest decided review of the session's change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+}
+
+/// How a usage report keys its rows, past channel and provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageGroup {
+    #[default]
+    Model,
+    Day,
+    Session,
+}
+
+impl UsageGroup {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "model" => Some(Self::Model),
+            "day" => Some(Self::Day),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
+}
+
+/// Which usage a report covers: `[since_ms, until_ms)`, narrowed by any
+/// filter that is set.
+#[derive(Debug, Clone, Default)]
+pub struct UsageQuery<'a> {
+    pub channel: Option<&'a str>,
+    pub since_ms: i64,
+    pub until_ms: Option<i64>,
+    pub provider: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub group: UsageGroup,
+    /// Minutes east of UTC that a `Day` row's day is reckoned in. `None`
+    /// takes the node's own offset (`TRACON_TZ_OFFSET_MINUTES`).
+    pub tz_offset_minutes: Option<i64>,
 }
 
 /// The kv key holding the SHA-256 of the operator token. The token itself is

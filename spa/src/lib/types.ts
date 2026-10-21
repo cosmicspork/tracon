@@ -1425,6 +1425,33 @@ export interface ChannelMetrics {
   human_wait_seconds: number
 }
 
+/**
+ * One row of `GET /api/usage`: what the gateway counted for a channel and
+ * provider, keyed further by model, local day or session.
+ */
+export interface UsageTotal {
+  channel: string
+  provider: string
+  model: string | null
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  /** Distinct sessions behind the row. */
+  sessions: number
+  /** Null when the provider carries no price. */
+  cost_usd: number | null
+  /** `YYYY-MM-DD`, when grouped by day. */
+  day?: string
+  /** When grouped by session. */
+  session_id?: string
+  title?: string
+  work_item_id?: string
+  /** The newest decided review of the session's change. */
+  review?: 'accepted' | 'rejected'
+}
+
 /** One repository this node has run sessions against. */
 export interface RecentRepo {
   repo_path: string

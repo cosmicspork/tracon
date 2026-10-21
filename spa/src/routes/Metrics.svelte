@@ -3,21 +3,48 @@
   import { api } from '../lib/api'
   import { formatTokens } from '../lib/format'
   import { Loader } from '../lib/loader.svelte'
+  import { router } from '../lib/router.svelte'
+  import { localDate, type UsageView, usageSearch, usageView, usageWindow } from '../lib/routes'
   import { store } from '../lib/store.svelte'
-  import type { ChannelMetrics } from '../lib/types'
+  import type { ChannelMetrics, UsageTotal } from '../lib/types'
+  import { usageCost, usageCsvHref, usageHeading, usageKey, usageParams, usageProviders, usageSpan } from '../lib/usageReport'
 
-  let days = $state(30)
+  // The view lives in the address, so a reload or a shared link shows the same numbers.
+  const view = $derived(usageView(router.search))
   const usage = new Loader<{ rows: ChannelMetrics[]; note: string }>()
+  const breakdown = new Loader<UsageTotal[]>()
 
   $effect(() => {
-    const span = days
-    usage.load(String(span), () =>
-      api.metrics(Date.now() - span * 86_400_000).then((d) => ({ rows: d.channels, note: d.note })),
+    const since = usageWindow(view).since
+    usage.load(String(since), () =>
+      api.metrics(since).then((d) => ({ rows: d.channels, note: d.note })),
     )
+  })
+  $effect(() => {
+    const params = usageParams(view)
+    breakdown.load(usageSearch(view), () => api.usage(params).then((d) => d.totals))
   })
   const rows = $derived(usage.value?.rows ?? [])
   const note = $derived(usage.value?.note ?? '')
+  const totals = $derived(breakdown.value ?? [])
+  const providers = $derived(usageProviders(store.providers.map((p) => p.name), totals, view.provider))
+  const label = $derived(view.days !== null && !view.to ? `last ${view.days} days` : usageSpan(view))
 
+  function show(next: Partial<UsageView>) {
+    router.go(`/usage${usageSearch({ ...view, ...next })}`)
+  }
+  function preset(days: number) {
+    show({ days, from: null, to: null })
+  }
+  /**
+   * A custom range keeps the other end where it is, or today when it had
+   * none. A From after the To swaps the two, so the range is never empty.
+   */
+  function range(from: string, to: string) {
+    const start = from || localDate(usageWindow(view).since)
+    const end = to || localDate(Date.now())
+    show(start <= end ? { days: null, from: start, to: end } : { days: null, from: end, to: start })
+  }
   function num(x: number | null, f: (n: number) => string = (n) => n.toFixed(1)): string {
     return x === null ? '—' : f(x)
   }
@@ -29,12 +56,16 @@
 
 <div class="h4">
   Usage
-  <b>last {days} days · as seen from {store.node?.name ?? 'this node'}</b>
+  <b>{label} · as seen from {store.node?.name ?? 'this node'}</b>
   <span class="r">
-    {#each [7, 30, 90] as d (d)}<button class="lnk" class:on={days === d} type="button" onclick={() => (days = d)}>{d}d</button>{/each}
+    {#each [7, 30, 90] as d (d)}<button class="lnk" class:on={view.days === d && !view.from && !view.to} type="button" onclick={() => preset(d)}>{d}d</button>{/each}
   </span>
 </div>
-<p class="scope">{note || 'Grouped by channel; values are limited to activity this node can observe.'}</p>
+<div class="range">
+  <label>From <input type="date" value={view.from ?? localDate(usageWindow(view).since)} onchange={(e) => range(e.currentTarget.value, view.to ?? '')} /></label>
+  <label>To <input type="date" value={view.to ?? localDate(Date.now())} onchange={(e) => range(view.from ?? '', e.currentTarget.value)} /></label>
+</div>
+<p class="scope">{note || 'Grouped by channel; values are limited to activity this node can observe.'} Only model calls made through this node's gateway are counted: sessions run by an external harness on an external agent lane call their model directly, Tracon never sees those calls, and they are not included. Turns the gateway could not count are shown as unmetered, not as zero.{#if view.to} The channel outcomes below run from the first day to now.{/if}</p>
 
 <LoadGate status={usage} what="usage" onretry={() => usage.retry()} retrying={usage.pending}>
   {#if rows.length === 0}
@@ -80,9 +111,57 @@
   {/if}
 </LoadGate>
 
+<div class="h4 sub">
+  {usageHeading(view)}
+  <span class="r">
+    <label>Provider
+      <select value={view.provider ?? ''} onchange={(e) => show({ provider: e.currentTarget.value || null })}>
+        <option value="">all</option>
+        {#each providers as p (p)}<option value={p}>{p}</option>{/each}
+      </select>
+    </label>
+    <label>Rows
+      <select value={view.group} onchange={(e) => show({ group: e.currentTarget.value as UsageView['group'] })}>
+        <option value="model">per model</option>
+        <option value="day">per day</option>
+        <option value="session">per session</option>
+      </select>
+    </label>
+    <a class="lnk" href={usageCsvHref(view)} download>Download CSV</a>
+  </span>
+</div>
+<LoadGate status={breakdown} what="usage by provider" onretry={() => breakdown.retry()} retrying={breakdown.pending}>
+  {#if totals.length === 0}
+    <div class="empty">The gateway counted no model calls{view.provider ? ` to ${view.provider}` : ''} in this window.</div>
+  {:else}
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Channel</th><th>Provider</th><th>{view.group === 'model' ? 'Model' : view.group === 'day' ? 'Day' : 'Session'}</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache read</th><th>Sessions</th><th>Cost</th></tr>
+        </thead>
+        <tbody>
+          {#each totals as t, i (i)}
+            <tr>
+              <td>{t.channel}</td>
+              <td>{t.provider}</td>
+              <td title={t.session_id ?? undefined}>{#if view.group === 'session' && t.session_id}<a class="lnk" href={`/sessions/${t.session_id}`}>{usageKey(t, view)}</a>{:else}{usageKey(t, view)}{/if}</td>
+              <td>{t.requests}</td>
+              <td>{formatTokens(t.input_tokens)}</td>
+              <td>{formatTokens(t.output_tokens)}</td>
+              <td>{formatTokens(t.cache_read_tokens)}</td>
+              <td>{t.sessions}</td>
+              <td class:u={t.cost_usd === null}>{usageCost(t.cost_usd)}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</LoadGate>
+
 <details class="methodology">
   <summary>How Usage is calculated</summary>
-  <p>Time to verified work is the mean session creation→first candidate with all required checks passing; missing verification is not zero. Setup failures are recorded sessions that failed before their harness started. Interventions include permission answers, review decisions, answered questions and operator pause/resume. Request waiting adds each answered request's delay and review submission→decision; overlapping waits are additive, not human working hours. Tokens per accepted change cover the sessions behind accepted reviews. Cost is shown only for priced providers. Human time in the table uses request→answer and review claim→decision; agent time is session start→end.</p>
+  <p>Time to verified work is the mean session creation→first candidate with all required checks passing; missing verification is not zero. Setup failures are recorded sessions that failed before their harness started. Interventions include permission answers, review decisions, answered questions and operator pause/resume. Request waiting adds each answered request's delay and review submission→decision; overlapping waits are additive, not human working hours. Tokens per accepted change cover the sessions behind accepted reviews. Cost is shown only for priced providers. Human time in the table uses request→answer and review claim→decision; agent time is session start→end. The breakdown by provider counts each model call the gateway forwarded, in local days; input excludes cache reads, which are shown on their own and never charged. Calls a session's harness made around the gateway, as external agents on the external lanes do, are not in these numbers.</p>
 </details>
 
 <style>
@@ -119,6 +198,23 @@
     gap: 10px;
     letter-spacing: 0;
     text-transform: none;
+  }
+  .h4.sub {
+    margin-top: 24px;
+  }
+  .h4 .r label,
+  .range label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font: 12px var(--mono);
+    color: var(--ink2);
+  }
+  .range {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin: -6px 0 14px;
   }
   .h4 .r .lnk.on {
     border-bottom-color: currentColor;
