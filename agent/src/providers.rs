@@ -30,11 +30,15 @@ pub struct Model {
 /// What the client needs for one `provider/model`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Resolved {
+    /// `openai` (Chat Completions) or `openai-codex` (Responses).
+    pub shape: String,
     pub base_url: String,
     pub model: String,
     pub key_env: String,
     pub context_window: Option<u64>,
 }
+
+pub const SHAPES: [&str; 2] = ["openai", "openai-codex"];
 
 pub fn load(path: &Path) -> anyhow::Result<Vec<Provider>> {
     let text = std::fs::read_to_string(path)
@@ -42,9 +46,9 @@ pub fn load(path: &Path) -> anyhow::Result<Vec<Provider>> {
     Ok(serde_json::from_str(&text)?)
 }
 
-/// Finds `provider/model` among the providers. Only the OpenAI shape is
-/// spoken here; a model under another is refused by name, not sent where its
-/// wire is not understood.
+/// Finds `provider/model` among the providers. The OpenAI shape and the
+/// Codex backend are spoken here; a model under another is refused by name,
+/// not sent where its wire is not understood.
 pub fn resolve(providers: &[Provider], model: &str) -> anyhow::Result<Resolved> {
     let (name, id) = model
         .split_once('/')
@@ -53,10 +57,11 @@ pub fn resolve(providers: &[Provider], model: &str) -> anyhow::Result<Resolved> 
         .iter()
         .find(|p| p.name == name)
         .ok_or_else(|| anyhow::anyhow!("no provider `{name}` is wired to this session"))?;
-    if provider.shape != "openai" {
+    if !SHAPES.contains(&provider.shape.as_str()) {
         anyhow::bail!(
-            "provider `{name}` speaks `{}`; tracon-agent speaks the OpenAI shape only",
-            provider.shape
+            "provider `{name}` speaks `{}`; tracon-agent speaks {}",
+            provider.shape,
+            SHAPES.join(" and ")
         );
     }
     let context = provider
@@ -66,6 +71,7 @@ pub fn resolve(providers: &[Provider], model: &str) -> anyhow::Result<Resolved> 
         .map(|m| m.context)
         .filter(|c| *c > 0);
     Ok(Resolved {
+        shape: provider.shape.clone(),
         base_url: format!("{}/v1", provider.base_url.trim_end_matches('/')),
         model: id.to_string(),
         key_env: provider.key_env.clone(),
@@ -81,6 +87,8 @@ mod tests {
         serde_json::from_value(serde_json::json!([
             {"name": "local", "shape": "openai", "base_url": "http://tracon-gw:7421/model/local",
              "key_env": "TRACON_PROVIDER_KEY_LOCAL", "models": [{"id": "qwen3-8b", "context": 32768}]},
+            {"name": "openai-codex", "shape": "openai-codex", "base_url": "http://tracon-gw:7421/model/openai-codex",
+             "key_env": "TRACON_PROVIDER_KEY_OPENAI_CODEX", "models": [{"id": "gpt-6-luna", "context": 400000}]},
             {"name": "anthropic", "shape": "anthropic", "base_url": "http://tracon-gw:7421/model/anthropic",
              "key_env": "TRACON_PROVIDER_KEY_ANTHROPIC"}
         ]))
@@ -92,6 +100,7 @@ mod tests {
         assert_eq!(
             resolve(&providers(), "local/qwen3-8b").unwrap(),
             Resolved {
+                shape: "openai".into(),
                 base_url: "http://tracon-gw:7421/model/local/v1".into(),
                 model: "qwen3-8b".into(),
                 key_env: "TRACON_PROVIDER_KEY_LOCAL".into(),
@@ -112,6 +121,12 @@ mod tests {
         let e = resolve(&providers(), "anthropic/claude")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("OpenAI shape only"), "{e}");
+        assert!(e.contains("speaks openai and openai-codex"), "{e}");
+        let codex = resolve(&providers(), "openai-codex/gpt-6-luna").unwrap();
+        assert_eq!(codex.shape, "openai-codex");
+        assert_eq!(
+            codex.base_url,
+            "http://tracon-gw:7421/model/openai-codex/v1"
+        );
     }
 }

@@ -4,7 +4,9 @@ mod support;
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};
-use support::{answer, measured_call, serve, tool_call, Reply};
+use support::{
+    answer, events, measured_call, responses_answer, responses_call, serve, tool_call, Reply,
+};
 use tracon_agent::compact::{SUMMARISER, SUMMARY_HEADER};
 use tracon_agent::hashline;
 
@@ -278,6 +280,112 @@ async fn a_request_refused_as_too_long_is_compacted_and_asked_again() {
     let compacted = &r.events[at + 3];
     assert_eq!(compacted["trigger"], "overflow");
     assert_eq!(compacted["summarised_messages"], 3);
+}
+
+/// The Codex backend's wire: the system prompt in `instructions`, nothing
+/// stored upstream, and each reasoning item sent back in place, less its id.
+#[tokio::test]
+async fn the_responses_wire_runs_calls_and_carries_reasoning_back() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("greet.py"), "print('hi')\n").unwrap();
+    let (base, fake) = serve(vec![
+        responses_call("c1", "read", json!({"path": "greet.py"}), "E1"),
+        responses_answer("done"),
+    ])
+    .await;
+
+    let r = run(
+        &base,
+        dir.path(),
+        &["--wire", "responses", "--reasoning-effort", "low"],
+    )
+    .await;
+
+    assert_eq!(r.code, 0, "{:#?}", r.events);
+    assert_eq!(r.stdout.trim(), "done");
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first = &requests[0];
+    assert!(first["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You are a coding agent"));
+    assert_eq!(first["store"], false);
+    assert_eq!(first["reasoning"]["effort"], "low");
+    assert_eq!(
+        first["input"],
+        json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix it"}]}])
+    );
+    let tools: Vec<_> = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["read", "edit", "write", "glob", "grep", "shell"]);
+    let input = requests[1]["input"].as_array().unwrap();
+    assert_eq!(
+        input[1],
+        json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}],
+            "encrypted_content": "E1"})
+    );
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[2]["call_id"], "c1");
+    assert!(input[2].get("id").is_none());
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(
+        input[3]["output"],
+        format!("{}|print('hi')\n", hashline::anchor(1, "print('hi')"))
+    );
+    assert_eq!(r.events[2]["request_id"], "resp_c1");
+    let end = r.events.last().unwrap();
+    assert_eq!(end["totals"]["usage"]["input"], 200);
+    assert_eq!(end["totals"]["usage"]["cache_read"], 120);
+}
+
+/// The Codex backend says a prompt is too long its own way; compaction
+/// still hears it.
+#[tokio::test]
+async fn a_responses_overflow_is_compacted_and_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(dir.path().join("big.txt"), "x\n".repeat(20_000)).unwrap();
+    let overflow = json!({"type": "response.failed", "response": {"id": "resp_x", "status": "failed",
+        "error": {"code": "context_length_exceeded",
+            "message": "Your input exceeds the context window of this model."}}});
+    let (base, fake) = serve(vec![
+        responses_call("c1", "read", json!({"path": "big.txt"}), "E1"),
+        responses_call("c2", "read", json!({"path": "a.txt"}), "E2"),
+        events(&[overflow]),
+        responses_answer("read big.txt and a.txt"),
+        responses_answer("done"),
+    ])
+    .await;
+
+    let r = run(&base, dir.path(), &["--wire", "responses"]).await;
+
+    assert_eq!(r.code, 0, "{:#?}", r.events);
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[3]["instructions"], SUMMARISER);
+    assert!(requests[3].get("tools").is_none());
+    let input = requests[4]["input"].as_array().unwrap();
+    let summary = input[0]["content"][0]["text"].as_str().unwrap();
+    assert!(summary.starts_with(SUMMARY_HEADER), "{summary}");
+    // The second call is kept with its reasoning, in place.
+    let kinds: Vec<_> = input.iter().map(|i| i["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+        ]
+    );
+    assert_eq!(input[1]["encrypted_content"], "E2");
+    let compacted = r.events.iter().find(|e| e["event"] == "compacted").unwrap();
+    assert_eq!(compacted["trigger"], "overflow");
 }
 
 #[tokio::test]

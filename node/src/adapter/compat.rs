@@ -52,9 +52,6 @@ impl CredentialClass {
             (Self::AnthropicSubscription | Self::AnthropicKey, NativeAdapter::ID) => {
                 Err("tracon-agent does not run Anthropic models; Claude Code does")
             }
-            (Self::CodexSubscription, NativeAdapter::ID) => {
-                Err("tracon-agent does not speak the Codex backend yet")
-            }
             (Self::BareAlias, NativeAdapter::ID) => {
                 Err("tracon-agent needs a provider-qualified model (`provider/model`)")
             }
@@ -123,12 +120,12 @@ mod tests {
         use CredentialClass::*;
         let ids = ["opencode", "claude", "native"];
         assert_eq!(OtherProvider.harnesses_among(&ids), ["opencode", "native"]);
-        for class in [
-            AnthropicSubscription,
-            AnthropicKey,
-            CodexSubscription,
-            BareAlias,
-        ] {
+        // The Codex backend through its Responses encoder.
+        assert_eq!(
+            CodexSubscription.harnesses_among(&ids),
+            ["opencode", "native"]
+        );
+        for class in [AnthropicSubscription, AnthropicKey, BareAlias] {
             assert!(
                 !class.harnesses_among(&ids).contains(&"native"),
                 "{class:?}"

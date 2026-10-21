@@ -35,7 +35,7 @@ use crate::events::{self, Events};
 use crate::journal::{self, Journal, Record, Restored};
 use crate::prompt::ORIENTATION;
 use crate::tools::{mcp, Context, Output, Registry};
-use crate::wire::openai_chat::{Client, Delta};
+use crate::wire::{Client, Delta};
 use crate::wire::{Usage, WireError};
 
 /// Repository instruction files read into the system prompt, in this order.
@@ -332,6 +332,7 @@ impl Session {
         }
         let mut conversation = Conversation::new(system);
         conversation.messages = messages;
+        conversation.cache_key = Some(id.to_string());
         Ok(Self {
             id: id.to_string(),
             cx,

@@ -5,22 +5,13 @@
 //! tools here are the only ones the model may call.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 
-use super::{Usage, WireError};
+use super::{Completion, Delta, Sampling, Usage, WireError};
 use crate::conversation::{Block, Conversation, Role};
 use crate::sse::{Decoder, Frame};
-
-#[derive(Debug, Clone, Default)]
-pub struct Sampling {
-    pub temperature: Option<f64>,
-    pub min_p: Option<f64>,
-    /// Qwen3's switch, passed to the chat template.
-    pub no_think: bool,
-}
 
 pub struct Client {
     http: reqwest::Client,
@@ -31,24 +22,6 @@ pub struct Client {
     parallel_tools: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Completion {
-    pub blocks: Vec<Block>,
-    pub reasoning: String,
-    pub finish_reason: Option<String>,
-    pub usage: Option<Usage>,
-    pub request_id: Option<String>,
-    /// llama.cpp's own timings (`predicted_per_second` and the rest), as sent.
-    pub timings: Option<Value>,
-}
-
-pub enum Delta<'a> {
-    Text(&'a str),
-    Reasoning(&'a str),
-    /// A fragment of a tool call's arguments.
-    ToolCall(&'a str),
-}
-
 impl Client {
     pub fn new(
         base_url: &str,
@@ -57,14 +30,8 @@ impl Client {
         sampling: Sampling,
         parallel_tools: bool,
     ) -> Result<Self, WireError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            // Prompt processing on a local model can take minutes before the
-            // first byte; a read that stalls this long is a hung server.
-            .read_timeout(Duration::from_secs(600))
-            .build()?;
         Ok(Self {
-            http,
+            http: super::http()?,
             url: format!("{}/chat/completions", base_url.trim_end_matches('/')),
             api_key,
             model: model.to_string(),
@@ -138,13 +105,7 @@ impl Client {
         let response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
-            // Seconds only: an HTTP-date is rare from model APIs, and the
-            // backoff covers it.
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse().ok());
+            let retry_after = super::retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
             return Err(error_from(status.as_u16(), &body, retry_after));
         }
@@ -533,6 +494,7 @@ mod tests {
                 temperature: Some(0.6),
                 min_p: Some(0.01),
                 no_think: true,
+                ..Default::default()
             },
             false,
         )

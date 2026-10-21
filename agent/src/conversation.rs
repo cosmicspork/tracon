@@ -15,6 +15,9 @@ pub struct Conversation {
     /// How big the model last said the conversation was, so the next request
     /// can be sized before it is sent. `None` until a request reports usage.
     pub measured: Option<Measured>,
+    /// What the upstream may group this conversation's requests under for its
+    /// prompt cache: the session's id. Responses only.
+    pub cache_key: Option<String>,
 }
 
 /// The model's count of the conversation at some point, and how many bytes it
@@ -67,6 +70,7 @@ impl Conversation {
             system: system.into(),
             messages: Vec::new(),
             measured: None,
+            cache_key: None,
         }
     }
 
