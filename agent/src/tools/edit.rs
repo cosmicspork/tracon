@@ -31,7 +31,7 @@ struct Op {
     op: Kind,
     start: String,
     end: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::null_as_default")]
     text: String,
 }
 
@@ -278,6 +278,27 @@ mod tests {
 
     fn file(dir: &tempfile::TempDir) -> String {
         std::fs::read_to_string(dir.path().join("f.py")).unwrap()
+    }
+
+    /// A strict call sends every field, the ones it leaves out as `null`.
+    #[tokio::test]
+    async fn nulls_from_a_strict_call_read_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.py"), "a\nb\n").unwrap();
+        let cx = Context::new(dir.path()).unwrap();
+        let out = Edit
+            .run(
+                &cx,
+                json!({"path": "f.py", "edits": [
+                    {"op": "delete", "start": crate::hashline::anchor(2, "b"), "end": null, "text": null}
+                ]}),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.py")).unwrap(),
+            "a\n"
+        );
     }
 
     #[tokio::test]

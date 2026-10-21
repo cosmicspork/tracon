@@ -40,6 +40,7 @@ fn a_custom_providers_empty_models_are_filled_from_the_catalogue() {
             output: 8_000,
             reasoning: false,
             attachment: false,
+            ..Default::default()
         }],
     );
     models_catalogue::install_for_test(Catalogue {

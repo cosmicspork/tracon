@@ -193,6 +193,10 @@ impl Tool for McpTool {
         self.parameters.clone()
     }
 
+    fn own_schema(&self) -> bool {
+        false
+    }
+
     async fn run(&self, _cx: &Context, input: Value) -> Output {
         let result = match self
             .server

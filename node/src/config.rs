@@ -1846,7 +1846,20 @@ pub struct ModelDecl {
     /// Whether it accepts attachments.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attachment: bool,
+    /// Whether the model may make several tool calls in one response. Read
+    /// by the native harness; off, it is asked for one call at a time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parallel_tools: bool,
+    /// A reasoning model's effort (`minimal`, `low`, `medium`, `high`,
+    /// `xhigh`), sent by the native harness on the Responses wire. Absent:
+    /// the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
+
+/// The reasoning efforts a model declaration may name.
+pub const REASONING_EFFORTS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
@@ -1978,6 +1991,24 @@ fn default_models_tiered(provider: &str, catalogue_hit: Option<Vec<ModelDecl>>) 
 /// Tier 2: the fixed list this node falls back to when the catalogue has no
 /// entry for `provider` — either because it names none of these three, or
 /// because the catalogue itself is unavailable.
+/// A model's reasoning effort is one the providers know.
+fn validate_models(providers: &std::collections::BTreeMap<String, Provider>) -> Result<(), String> {
+    for (name, provider) in providers {
+        for m in &provider.models {
+            if let Some(e) = &m.reasoning_effort {
+                if !REASONING_EFFORTS.contains(&e.as_str()) {
+                    return Err(format!(
+                        "providers.{name}: model `{}` has reasoning_effort `{e}`; it is one of {}",
+                        m.id,
+                        REASONING_EFFORTS.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
     let model = |id: &str, name: &str, context: u64, output: u64, attachment: bool| ModelDecl {
         id: id.into(),
@@ -1986,6 +2017,7 @@ fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
         output,
         reasoning: true,
         attachment,
+        ..Default::default()
     };
     match provider {
         "anthropic" => vec![
@@ -2462,6 +2494,8 @@ impl Config {
         validate_doc_kinds(&config.docs.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_admin_peers(&config.mesh.admin_peers)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_models(&config.providers)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         config
             .runtime
@@ -3157,6 +3191,7 @@ models = [{ id = "gpt-6" }]
             output: 8_000,
             reasoning: false,
             attachment: false,
+            ..Default::default()
         }];
         assert_eq!(
             default_models_tiered("openrouter", Some(catalogue.clone())),

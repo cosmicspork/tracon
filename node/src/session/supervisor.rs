@@ -1258,6 +1258,7 @@ impl Supervisor {
                             "tokens_after": v["tokensAfter"],
                             "pruned_results": v["prunedResults"],
                             "summarised_messages": v["summarisedMessages"],
+                            "first_kept_call": v["firstKeptCall"],
                             "summary": v["summary"],
                             "context_window": v["contextWindow"],
                         }),

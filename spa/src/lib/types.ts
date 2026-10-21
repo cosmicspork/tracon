@@ -1665,6 +1665,10 @@ export interface ModelDecl {
   output?: number
   reasoning?: boolean
   attachment?: boolean
+  /** Several tool calls in one response (the native harness). */
+  parallel_tools?: boolean
+  /** A reasoning model's effort, on the Responses wire (the native harness); absent, the provider's default. */
+  reasoning_effort?: string
 }
 
 /** A provider entry as the settings pane sees it: the catalogue is writable, the rest is context. */

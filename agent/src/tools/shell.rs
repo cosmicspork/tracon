@@ -2,6 +2,7 @@
 //! ledger arrive with the node in Phase 1; standalone, a pipe is enough.
 
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,12 +11,33 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use super::{args, Context, Output, Tool};
+use super::{args, Context, Output, Progress, Tool};
 
 const DEFAULT_TIMEOUT: u64 = 120;
 const MAX_TIMEOUT: u64 = 600;
 /// Per stream. The tail is what matters: test failures and errors come last.
 const KEEP: usize = 16 * 1024;
+/// How often a running command's output so far is shown, and how much of it.
+const LIVE_EVERY: Duration = Duration::from_secs(1);
+const LIVE_KEEP: usize = 2 * 1024;
+
+/// Both streams as they arrive, interleaved, for showing a running command;
+/// `seen` counts what was added, so an unchanged tail is not shown again.
+#[derive(Default)]
+struct Live {
+    bytes: Vec<u8>,
+    seen: u64,
+}
+
+impl Live {
+    fn push(&mut self, b: &[u8]) {
+        self.bytes.extend_from_slice(b);
+        if self.bytes.len() > LIVE_KEEP {
+            self.bytes.drain(..self.bytes.len() - LIVE_KEEP);
+        }
+        self.seen += b.len() as u64;
+    }
+}
 
 pub struct Shell;
 
@@ -49,6 +71,10 @@ impl Tool for Shell {
     }
 
     async fn run(&self, cx: &Context, input: Value) -> Output {
+        self.run_live(cx, input, &|_| {}).await
+    }
+
+    async fn run_live(&self, cx: &Context, input: Value, progress: Progress<'_>) -> Output {
         let a: Args = match args(input) {
             Ok(a) => a,
             Err(e) => return e,
@@ -73,9 +99,30 @@ impl Tool for Shell {
             Err(e) => return Output::error(format!("could not start sh: {e}")),
         };
         let pid = child.id();
-        let stdout = tokio::spawn(tail(child.stdout.take().expect("piped")));
-        let stderr = tokio::spawn(tail(child.stderr.take().expect("piped")));
-        let status = tokio::time::timeout(Duration::from_secs(timeout), child.wait()).await;
+        let live = Arc::new(Mutex::new(Live::default()));
+        let stdout = tokio::spawn(tail(child.stdout.take().expect("piped"), live.clone()));
+        let stderr = tokio::spawn(tail(child.stderr.take().expect("piped"), live.clone()));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+        let mut ticker =
+            tokio::time::interval_at(tokio::time::Instant::now() + LIVE_EVERY, LIVE_EVERY);
+        let mut shown = 0;
+        // `Err` is the timeout.
+        let status = loop {
+            tokio::select! {
+                s = child.wait() => break Ok(s),
+                _ = tokio::time::sleep_until(deadline) => break Err(()),
+                _ = ticker.tick() => {
+                    let now = {
+                        let l = live.lock().unwrap_or_else(|e| e.into_inner());
+                        (l.seen != shown).then(|| (l.seen, String::from_utf8_lossy(&l.bytes).into_owned()))
+                    };
+                    if let Some((seen, text)) = now {
+                        shown = seen;
+                        progress(&text);
+                    }
+                }
+            }
+        };
         let timed_out = status.is_err();
         if timed_out {
             if let Some(pid) = pid {
@@ -122,8 +169,8 @@ fn section(text: &mut String, name: &str, kept: &[u8], total: usize) {
 }
 
 /// Reads to the end keeping only the last `KEEP` bytes; returns them and the
-/// total read.
-async fn tail(mut r: impl AsyncRead + Unpin) -> (Vec<u8>, usize) {
+/// total read. What it reads also goes to `live`, for showing.
+async fn tail(mut r: impl AsyncRead + Unpin, live: Arc<Mutex<Live>>) -> (Vec<u8>, usize) {
     let mut kept = Vec::new();
     let mut total = 0;
     let mut buf = [0u8; 8192];
@@ -133,6 +180,9 @@ async fn tail(mut r: impl AsyncRead + Unpin) -> (Vec<u8>, usize) {
         }
         total += n;
         kept.extend_from_slice(&buf[..n]);
+        live.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(&buf[..n]);
         if kept.len() > KEEP {
             kept.drain(..kept.len() - KEEP);
         }
@@ -160,6 +210,29 @@ mod tests {
         assert!(out.content.starts_with("exit code 3\n"), "{}", out.content);
         assert!(out.content.contains(&cx.root.display().to_string()));
         assert!(out.content.contains("--- stderr ---\noops\n"));
+    }
+
+    /// A running command shows what it has printed so far, once a second
+    /// while that changes, and its result is unchanged by it.
+    #[tokio::test]
+    async fn a_running_command_shows_its_output_so_far() {
+        let (_dir, cx) = cx();
+        let seen = Mutex::new(Vec::<String>::new());
+        let out = Shell
+            .run_live(
+                &cx,
+                json!({"command": "echo one; sleep 1.5; echo two >&2; sleep 1.5; echo three"}),
+                &|t| seen.lock().unwrap().push(t.to_string()),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("one\nthree"), "{}", out.content);
+        let seen = seen.into_inner().unwrap();
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert_eq!(seen[0], "one\n");
+        assert!(seen.iter().any(|t| t == "one\ntwo\n"), "{seen:?}");
+        // Nothing new, nothing shown: no two in a row are the same.
+        assert!(seen.windows(2).all(|w| w[0] != w[1]), "{seen:?}");
     }
 
     #[tokio::test]

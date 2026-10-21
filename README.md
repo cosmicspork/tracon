@@ -362,7 +362,8 @@ provider rows, asks the harness again without disconnecting and signing in a sec
 time, and reports what came back per provider. The catalogue itself is
 declared, not discovered: **Settings → Connections → Declared models** edits each
 provider's model list (id, picker name, context and output limits, reasoning,
-attachments) and writes it to `node.toml`; sessions started after the next restart
+attachments, and for the native harness parallel tool calls and reasoning effort) and
+writes it to `node.toml`; sessions started after the next restart
 see the change.
 When a peer runs the task, choose or name the forge repository
 (`github.com/owner/name`) the same way: the peer starts from its own clone of it,
@@ -1267,6 +1268,7 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
 # login = "anthropic"               # the subscription sign-in the node runs: "anthropic", or "openai" for ChatGPT/Codex
 # models = [                        # what the picker offers and OpenCode is told; a built-in provider
 #   { id = "claude-opus-5", name = "Claude Opus 5", context = 200000, output = 64000, reasoning = true, attachment = true },
+#   # parallel_tools = true, reasoning_effort = "high": read by the native harness only
 # ]                                 # left without models gets the current generation; `models = []` declares none
 # [providers.anthropic.price]
 # input_per_mtok = 3.0

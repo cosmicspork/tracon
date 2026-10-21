@@ -16,7 +16,7 @@ struct Args {
     pattern: String,
     path: Option<String>,
     glob: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::null_as_default")]
     case_insensitive: bool,
 }
 

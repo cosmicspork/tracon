@@ -152,7 +152,8 @@ pub mod event_kind {
     /// The harness made its conversation smaller to fit the model's context
     /// window (`trigger`: `threshold` or `overflow`; `tokens_before`,
     /// `tokens_after`, both its estimates; `pruned_results`,
-    /// `summarised_messages`, and the `summary` the model now works from).
+    /// `summarised_messages`, the `first_kept_call` from which the session
+    /// was kept as it was, and the `summary` the model now works from).
     pub const CONTEXT_COMPACTED: &str = "context_compacted";
     /// The operator changed the session's token budget (`from`, `to`, and the
     /// `tokens_used` it was changed against). `0` is no budget.

@@ -68,14 +68,17 @@ impl Client {
             let tools: Vec<Value> = tools
                 .iter()
                 .map(|t| {
+                    // The agent's own tools strictly, so the upstream holds
+                    // the model to them; a node tool's schema as it came.
+                    let strict = (t["own_schema"] == true)
+                        .then(|| super::strict_schema(&t["parameters"]))
+                        .flatten();
                     json!({
                         "type": "function",
                         "name": t["name"],
                         "description": t["description"],
-                        "parameters": t["parameters"],
-                        // The schemas are not written for the strict subset
-                        // (optional fields, open objects).
-                        "strict": false,
+                        "strict": strict.is_some(),
+                        "parameters": strict.unwrap_or_else(|| t["parameters"].clone()),
                     })
                 })
                 .collect();

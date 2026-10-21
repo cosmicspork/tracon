@@ -656,6 +656,19 @@ impl Hooks for Wired<'_> {
         self.send(SessionUpdate::ToolCallUpdate(result_update(id, output)));
     }
 
+    /// Shown while the call runs, never recorded as its result: the node
+    /// reads a running call's `raw_output` as the tail to show.
+    fn tool_progress(&self, id: &str, tail: &str) {
+        self.send(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+            tool_call_id: id.into(),
+            status: Some("in_progress".into()),
+            raw_output: Some(Value::String(tail.to_string())),
+            content: Vec::new(),
+            title: None,
+            kind: None,
+        }));
+    }
+
     fn usage(&self, usage: &Usage, request_id: Option<&str>, context_used: u64) {
         let cache_read = usage.cache_read.min(usage.input);
         self.send(SessionUpdate::UsageUpdate(UsageUpdate {
@@ -696,6 +709,7 @@ impl Hooks for Wired<'_> {
             "tokensAfter": c.tokens_after,
             "prunedResults": c.pruned_results,
             "summarisedMessages": c.summarised_messages,
+            "firstKeptCall": c.first_kept_call,
             "summary": c.summary,
             "contextWindow": self.context_window,
         })));
