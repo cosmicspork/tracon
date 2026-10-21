@@ -561,6 +561,57 @@ async fn a_credential_is_shared_to_a_peer_and_nothing_leaks_on_the_way() {
         assert!(cred.allows_node(&a.id.node_id()));
     }
 
+    // Second review of #608, should-fix 1: B holds A's sign-in, and shares
+    // it no further. A revoke from A reaches only the nodes A lists, and one
+    // from B is obeyed nowhere, so the refusal names A as the node to ask.
+    let ai = a.id.node_id();
+    wait_for("B to know A's sealing key", || {
+        b.store
+            .get_node(&ai)
+            .ok()
+            .flatten()
+            .is_some_and(|n| n.x25519_pub.is_some())
+    })
+    .await;
+    let (st, v) = call_local(
+        &b.app,
+        "POST",
+        "/api/credentials/jira/share",
+        Some(json!({ "to": ai })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("a copy of {ai}'s sign-in")),
+        "{v}"
+    );
+    assert_eq!(
+        b.broker.read().unwrap().get("jira").unwrap().nodes,
+        [ai.clone(), bi.clone()]
+    );
+
+    // Removing it at A revokes B's copy, and B's receipt confirms it there.
+    let (st, v) = call_local(&a.app, "DELETE", "/api/credentials/jira", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["revoke"]["pending"], json!([bi]), "{v}");
+    wait_for("B to drop the credential", || {
+        b.broker.read().unwrap().get("jira").is_none()
+    })
+    .await;
+    wait_for("A to hear B confirm the revoke", || {
+        a.store
+            .credential_revokes()
+            .unwrap()
+            .iter()
+            .all(|t| t.confirmed())
+    })
+    .await;
+    let (st, v) = call_local(&a.app, "GET", "/api/credentials/revokes", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v[0]["confirmed"], json!([bi]), "{v}");
+    assert_eq!(v[0]["pending"], json!([]), "{v}");
+
     // Sharing something that does not exist says so.
     let (st, _) = call_local(
         &a.app,

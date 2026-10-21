@@ -480,16 +480,29 @@ enum CredentialCommand {
     /// this machine is handed them, and uses them at once.
     Import { file: std::path::PathBuf },
     /// Remove one credential from this node. A node running on this machine
-    /// is asked to remove it, and stops brokering it at once. The removal is
-    /// local to this node: other nodes it was shared or handed off to keep
-    /// their copies, and are named.
+    /// is asked to remove it, and stops brokering it at once. A handoff of it
+    /// back to this node is refused from then on. When this node is the
+    /// origin of its sign-in (signed in, shared or first renewed it here),
+    /// every other node it was shared or handed off to is sent a revoke,
+    /// redelivered until that node answers; a copy another node handed here
+    /// is removed here only.
     Rm { name: String },
     /// Hand a credential to another member node, direct-sealed over the hub.
     /// The credential must list that node in `nodes`, or it is refused there.
+    /// A copy another node shared here is that node's to share, and refused.
     Share {
         name: String,
         #[arg(long)]
         to: String,
+    },
+    /// The revokes removed credentials are owed: which peers dropped their
+    /// copy, which kept one, which are still pending, and which were given
+    /// up on.
+    Revokes {
+        /// Stop sending a revoke and forget it, by the id (or its start)
+        /// this listing shows: for a peer that has left the mesh.
+        #[arg(long, value_name = "ID")]
+        cancel: Option<String>,
     },
 }
 
@@ -979,7 +992,7 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
                 m["binding_sig"].as_str().unwrap_or(""),
                 m["name"].as_str().unwrap_or(""),
                 &channels,
-                &tracon::broker::Broker::load(&id.credential_store_key())?.bound_to(&node_id),
+                &admission_handoff(&id, &node_id).await?,
             )
             .await?;
             println!(
@@ -990,6 +1003,35 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// The credentials admitting `to` hands it, by the share rules
+/// ([`tracon::broker::Broker::admission_handoff`]), with any sign-in minted
+/// for them sealed before anything is sent. A running node would write its
+/// own copy of the store back over that, so with one running a credential
+/// that needs a sign-in minted is left for `tracon credential share`.
+async fn admission_handoff(
+    id: &proto::keys::Identity,
+    to: &str,
+) -> Result<Vec<(String, tracon::broker::Credential)>> {
+    let key = id.credential_store_key();
+    let mut broker = tracon::broker::Broker::load(&key)?;
+    let (mut handoff, minted) = broker.admission_handoff(&id.node_id(), to);
+    if minted.is_empty() {
+        return Ok(handoff);
+    }
+    if running_node().await.is_some() {
+        handoff.retain(|(name, _)| !minted.contains(name));
+        eprintln!(
+            "not handed over now: {}; with the node running, share {} with `tracon credential share <name> --to {}`",
+            minted.join(", "),
+            if minted.len() == 1 { "it" } else { "them" },
+            &to[..16.min(to.len())]
+        );
+        return Ok(handoff);
+    }
+    broker.save(&key)?;
+    Ok(handoff)
 }
 
 struct Stderr;
@@ -1108,7 +1150,7 @@ async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()
         &req.binding_sig,
         &req.name,
         &inv.channels,
-        &tracon::broker::Broker::load(&id.credential_store_key())?.bound_to(&req.node_id),
+        &admission_handoff(&id, &req.node_id).await?,
     )
     .await?;
     println!("admitted {} with {}", req.name, inv.channels.join(", "));
@@ -2701,18 +2743,43 @@ async fn memory_command(cmd: MemoryCommand) -> Result<()> {
     }
 }
 
-/// The tail of a `credential rm` line: the mesh has no revocation, so the
-/// other nodes a removed credential listed still hold, and broker, the copies
-/// they were handed.
-fn still_held(others: &[String]) -> String {
-    if others.is_empty() {
+/// The tail of a `credential rm` line: the other nodes a removed credential
+/// listed, each owed a revoke none has confirmed yet, or the origin whose
+/// sign-in a removed copy was, which nothing is sent to.
+fn revoke_pending(others: &[String], origin: Option<&str>, when: &str) -> String {
+    if let Some(origin) = origin {
+        format!(
+            "; this node's copy only: the sign-in is {}'s, and it and any other holders keep theirs",
+            &origin[..16.min(origin.len())]
+        )
+    } else if others.is_empty() {
         String::new()
     } else {
         format!(
-            "; removal is local, and {} still hold their copies",
-            others.join(", ")
+            "; a revoke is pending for {} ({when}; `tracon credential revokes` follows it)",
+            others
+                .iter()
+                .map(|n| &n[..16.min(n.len())])
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
+}
+
+/// The warning a `credential import` gives for each credential it replaced
+/// that this node had shared: the holders keep the old value, and are still
+/// listed, so a later `rm` revokes their copies.
+fn import_replaced_shared(name: &str, nodes: &[String]) -> String {
+    format!(
+        "warning: {name} replaced a credential shared with {}; they keep the old value until \
+         `tracon credential share` sends this one, and `tracon credential rm {name}` still \
+         revokes their copies",
+        nodes
+            .iter()
+            .map(|n| &n[..16.min(n.len())])
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn urlencoding(s: &str) -> String {
@@ -2786,11 +2853,25 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
                     "{n} credential{} imported into the running node at {url}",
                     if n == 1 { "" } else { "s" }
                 );
+                for (name, nodes) in v["shared"].as_object().into_iter().flatten() {
+                    let nodes: Vec<String> = nodes
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|n| n.as_str().map(str::to_string))
+                        .collect();
+                    eprintln!("{}", import_replaced_shared(name, &nodes));
+                }
                 return Ok(());
             }
+            let here = id.node_id();
             let mut n = 0;
+            let mut shared = Vec::new();
             for (name, c) in incoming.iter() {
-                broker.put(name, c.clone());
+                let carried = broker.import(name, c.clone(), &here);
+                if !carried.is_empty() {
+                    shared.push((name.to_string(), carried));
+                }
                 n += 1;
             }
             broker.save(&key)?;
@@ -2799,6 +2880,9 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
                 if n == 1 { "" } else { "s" },
                 Broker::path().display()
             );
+            for (name, nodes) in &shared {
+                eprintln!("{}", import_replaced_shared(name, nodes));
+            }
             Ok(())
         }
         CredentialCommand::Rm { name } => {
@@ -2813,7 +2897,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
                     None,
                 )
                 .await?;
-                let others: Vec<String> = v["still_held_by"]
+                let others: Vec<String> = v["revoke"]["pending"]
                     .as_array()
                     .into_iter()
                     .flatten()
@@ -2821,31 +2905,128 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
                     .collect();
                 println!(
                     "removed {name} from the running node at {url}{}",
-                    still_held(&others)
+                    revoke_pending(&others, v["origin"].as_str(), "queued at the hub")
                 );
                 return Ok(());
             }
-            let Some(removed) = broker.get(&name).cloned() else {
+            let Some(removed) = broker.revoke(&name) else {
                 anyhow::bail!("no credential named {name}");
             };
-            broker.remove(&name);
-            broker.save(&key)?;
             let here = id.node_id();
-            let others: Vec<String> = removed
-                .nodes
-                .into_iter()
-                .filter(|node| *node != here)
-                .collect();
-            println!("removed {name}{}", still_held(&others));
+            let others = removed.revoke_targets(&here);
+            // Recorded before the store loses the credential, for the node
+            // to send when it next runs and reaches the hub: a removal saved
+            // without it would never be sent.
+            let mut recorded = None;
+            if !others.is_empty() {
+                let store = tracon::store::Store::open(&config::Config::db_path())?;
+                let revoke_id = store.create_credential_revoke(
+                    &name,
+                    removed.grant_id.as_deref(),
+                    removed.grant_version,
+                    &others,
+                )?;
+                recorded = Some((store, revoke_id));
+            }
+            if let Err(error) = broker.save(&key) {
+                if let Some((store, revoke_id)) = recorded {
+                    let _ = store.cancel_credential_revoke(&revoke_id);
+                }
+                return Err(error.into());
+            }
+            let origin = (!removed.originates_at(&here))
+                .then(|| removed.origin())
+                .flatten();
+            println!(
+                "removed {name}{}",
+                revoke_pending(&others, origin, "sent when the node next runs")
+            );
+            Ok(())
+        }
+        CredentialCommand::Revokes { cancel } => {
+            let store = tracon::store::Store::open(&config::Config::db_path())?;
+            if let Some(prefix) = cancel {
+                let matching = store.credential_revoke_ids(&prefix)?;
+                if matching.len() > 1 {
+                    anyhow::bail!(
+                        "{prefix} names {} revokes; give more of the id",
+                        matching.len()
+                    );
+                }
+                let Some(gone) = store.cancel_credential_revoke(&prefix)?.pop() else {
+                    anyhow::bail!("no credential revoke {prefix}");
+                };
+                println!(
+                    "cancelled revoke {}; nothing more is sent for it",
+                    &gone[..8.min(gone.len())]
+                );
+                return Ok(());
+            }
+            let rows = store.credential_revokes()?;
+            if rows.is_empty() {
+                println!("no credential revokes");
+            }
+            let mut last = None;
+            for t in rows {
+                if last.as_deref() != Some(t.revoke_id.as_str()) {
+                    println!(
+                        "{} (revoke {})",
+                        t.name,
+                        &t.revoke_id[..8.min(t.revoke_id.len())]
+                    );
+                    last = Some(t.revoke_id.clone());
+                }
+                let state = match t.outcome.as_deref() {
+                    _ if t.abandoned() => "abandoned",
+                    _ if !t.confirmed() => "pending",
+                    Some("dropped") => "dropped",
+                    Some("kept") => "kept",
+                    Some("not_held") => "not held",
+                    _ => "confirmed",
+                };
+                let mut line = format!("  {:<16} {state}", &t.node_id[..16.min(t.node_id.len())]);
+                if !t.confirmed() || t.kept() {
+                    if let Some(detail) = &t.detail {
+                        line.push_str(&format!(" ({detail})"));
+                    }
+                }
+                println!("{line}");
+            }
             Ok(())
         }
         CredentialCommand::Share { name, to } => {
-            let cred = broker
+            let mut cred = broker
                 .get(&name)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no credential named {name}"))?;
             if !cred.nodes.iter().any(|n| n == &to) {
                 anyhow::bail!("{name} does not list {to} in `nodes`; it would be refused there");
+            }
+            if let Some(origin) = cred.shared_from(&id.node_id()) {
+                anyhow::bail!(
+                    "{name} is a copy of {}'s sign-in; only that node can share it, so that its revoke reaches every copy",
+                    &origin[..16.min(origin.len())]
+                );
+            }
+            // A running node holds the store and would write its own copy
+            // over one sealed around it, so it shares; it names the sign-in
+            // this share is, as it would here.
+            if running_node().await.is_some() {
+                node_call(
+                    reqwest::Method::POST,
+                    &format!("/api/credentials/{}/share", urlencoding(&name)),
+                    Some(serde_json::json!({ "to": to })),
+                    None,
+                )
+                .await?;
+                println!("handed {name} to {}", &to[..16.min(to.len())]);
+                return Ok(());
+            }
+            // A share names its sign-in, and this node as its origin, so a
+            // revoke and a tombstone can tell it from a later one.
+            if cred.ensure_grant(&id.node_id()) {
+                broker.put(&name, cred.clone());
+                broker.save(&key)?;
             }
             let cfg = config::Config::load();
             let hub = cfg

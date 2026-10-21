@@ -420,17 +420,25 @@ pub async fn admit_invitation(
             "the other node has not answered this invitation yet",
         )
     })?;
-    let handoff = s
-        .tools
-        .broker
-        .read()
-        .map_err(|_| {
+    // What goes along follows the share rules, and a sign-in minted for
+    // that is saved before anything is sent, as a share's is.
+    let handoff = {
+        let mut broker = s.tools.broker.write().map_err(|_| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "credential store lock failed",
             )
-        })?
-        .bound_to(&request.node_id);
+        })?;
+        let mut staged = broker.clone();
+        let (handoff, minted) = staged.admission_handoff(&s.node_id, &request.node_id);
+        if !minted.is_empty() {
+            staged
+                .save(&mesh.identity().credential_store_key())
+                .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            *broker = staged;
+        }
+        handoff
+    };
     crate::mesh::enroll::admit(
         s.store(),
         mesh.identity(),

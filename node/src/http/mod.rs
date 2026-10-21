@@ -260,6 +260,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/credentials", get(api::list_credentials))
         .route(
+            "/api/credentials/revokes",
+            get(api::list_credential_revokes).delete(api::delete_credential_named_revokes),
+        )
+        .route(
             "/api/credentials/{name}",
             axum::routing::delete(api::delete_credential),
         )
@@ -843,6 +847,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             providers.set_mesh(mesh.clone());
             let receiver = providers.clone();
             mesh.set_on_handoff(Box::new(move |names| receiver.handoff_received(names)));
+            let revoked = providers.clone();
+            mesh.set_on_revoke(Box::new(move |names| revoked.credentials_revoked(names)));
         }
         let probe_state = state.clone();
         let probe_backend = backend.clone();
