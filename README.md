@@ -701,7 +701,9 @@ review threads (file, line, resolved or outdated) and conversation with
 `mr_for_branch`, and sees each reviewer's latest verdict in `pr_status`, all
 unattended. Replying to a thread, and resolving it, is `pr_reply` / `mr_reply`,
 which you are asked about like any other comment. So is a comment on a GitHub issue,
-`github_issue_comment`, named apart from Jira's `issue_comment`. CI reads the same on either
+`github_issue_comment`, named apart from Jira's `issue_comment`. So is marking a draft
+ready for review, or turning it back into a draft with `ready: false` (`pr_ready` /
+`mr_ready`): one already in that state is left alone, and a closed or merged one is refused. CI reads the same on either
 forge: a run's jobs and the step that failed (`run_status` with `run_id` /
 `pipeline_status`), the runs at an exact commit (`run_status` with `sha` /
 `pipeline_list_by_sha`), and the end of a job's log (`run_logs` / `job_trace`, 16 KiB

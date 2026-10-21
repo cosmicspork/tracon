@@ -1,6 +1,7 @@
 //! GitHub, as narrow tools: a pull request's state with its checks and
 //! reviews, its review threads, one comment on it, one reply to a thread, one
-//! comment on an issue, the open pull request for a branch, the Actions runs for a branch or an exact
+//! comment on an issue, marking it ready for review or back to draft (asked),
+//! the open pull request for a branch, the Actions runs for a branch or an exact
 //! commit with each run's jobs, waiting for a run to move, the end of a job's
 //! log, rerunning a run's failed jobs (asked), and starting a workflow on a
 //! branch (asked, and only a workflow the node's `[github] dispatch` lists).
@@ -10,7 +11,7 @@
 //! decision). Opening a
 //! pull request is the review path (`review::publish`); merging is
 //! `pr_merge`, which runs only with current scoped authority for the exact
-//! head SHA. Marking ready is not a tool. The token never leaves the node.
+//! head SHA. The token never leaves the node.
 
 use serde_json::{json, Value};
 
@@ -24,6 +25,7 @@ pub const PR_COMMENT: &str = "pr_comment";
 pub const ISSUE_COMMENT: &str = "github_issue_comment";
 pub const RUN_STATUS: &str = "run_status";
 pub const PR_MERGE: &str = "pr_merge";
+pub const PR_READY: &str = "pr_ready";
 pub const PR_THREADS: &str = "pr_threads";
 pub const PR_REPLY: &str = "pr_reply";
 pub const PR_FOR_BRANCH: &str = "pr_for_branch";
@@ -39,6 +41,7 @@ pub const TOOLS: &[&str] = &[
     ISSUE_COMMENT,
     RUN_STATUS,
     PR_MERGE,
+    PR_READY,
     PR_THREADS,
     PR_REPLY,
     PR_FOR_BRANCH,
@@ -84,6 +87,19 @@ const THREADS_QUERY: &str =
 const REPLY_MUTATION: &str = "mutation($thread: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body }) {
     comment { url }
+  }
+}";
+
+/// REST cannot clear `draft` on a pull request; GraphQL can, both ways.
+const READY_MUTATION: &str = "mutation($id: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $id }) {
+    pullRequest { isDraft headRefOid url }
+  }
+}";
+
+const DRAFT_MUTATION: &str = "mutation($id: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $id }) {
+    pullRequest { isDraft headRefOid url }
   }
 }";
 
@@ -271,6 +287,22 @@ pub fn definitions() -> Vec<Value> {
                     "branch": { "type": "string" },
                 },
                 "required": ["repo", "branch"],
+            },
+        }),
+        json!({
+            "name": PR_READY,
+            "description": "Mark a draft GitHub pull request ready for review, or with `ready: \
+                            false` turn it back into a draft. A pull request already in that \
+                            state is left as it is (`already: true`); a closed or merged one is \
+                            refused. The operator is asked before it changes: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": REPO },
+                    "number": { "type": "integer" },
+                    "ready": { "type": "boolean", "description": "true (the default) marks it ready for review; false makes it a draft again." },
+                },
+                "required": ["repo", "number"],
             },
         }),
         json!({
@@ -481,6 +513,41 @@ pub async fn call(
                 .await?;
             Ok(json!({ "id": v["id"], "url": v["html_url"] }))
         }
+        PR_READY => {
+            let n = number(args)?;
+            let ready = ready_arg(args)?;
+            let pr = gh.get(&format!("{base}/pulls/{n}")).await?;
+            let (mutation, id) = match ready_step(&pr, ready)? {
+                ReadyStep::Already(out) => return Ok(out),
+                ReadyStep::Mutate { mutation, id } => (mutation, id),
+            };
+            if let Some(recheck) = before_mutation {
+                recheck()?;
+            }
+            let v = gh
+                .graphql(&graphql, mutation, json!({ "id": id }))
+                .await
+                .map_err(mutation_outcome_error)?;
+            let field = if ready {
+                "markPullRequestReadyForReview"
+            } else {
+                "convertPullRequestToDraft"
+            };
+            let after = &v["data"][field]["pullRequest"];
+            if after["isDraft"].as_bool() != Some(!ready) {
+                return Err(format!(
+                    "github took the mutation but still reads #{n} as {}",
+                    if ready { "a draft" } else { "ready" }
+                ));
+            }
+            Ok(json!({
+                "number": n,
+                "draft": after["isDraft"],
+                "head_sha": after["headRefOid"],
+                "url": after["url"],
+                "already": false,
+            }))
+        }
         PR_MERGE => {
             let n = number(args)?;
             let head_sha = args
@@ -676,6 +743,61 @@ pub async fn call(
         }
         other => Err(format!("no github tool named {other}")),
     }
+}
+
+/// `ready` as `pr_ready` and `mr_ready` take it: true unless the call says
+/// otherwise, and a boolean when it does.
+pub fn ready_arg(args: &Value) -> Result<bool, String> {
+    match args.get("ready") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err("ready is true or false".into()),
+    }
+}
+
+/// What `pr_ready` does with a pull request as GitHub just read it.
+#[derive(Debug, PartialEq)]
+enum ReadyStep {
+    /// It is already in the state asked for: the answer, with no write.
+    Already(Value),
+    /// The mutation to send, with the pull request's node id.
+    Mutate { mutation: &'static str, id: String },
+}
+
+fn ready_step(pr: &Value, ready: bool) -> Result<ReadyStep, String> {
+    let n = &pr["number"];
+    if pr["merged"] == true || pr["merged_at"].is_string() {
+        return Err(format!(
+            "pull request #{n} is merged; only an open one is marked ready or made a draft"
+        ));
+    }
+    if pr["state"] != "open" {
+        return Err(format!(
+            "pull request #{n} is closed; only an open one is marked ready or made a draft"
+        ));
+    }
+    let draft = pr["draft"] == true;
+    if draft != ready {
+        return Ok(ReadyStep::Already(json!({
+            "number": n,
+            "draft": draft,
+            "head_sha": pr["head"]["sha"],
+            "url": pr["html_url"],
+            "already": true,
+        })));
+    }
+    let id = pr["node_id"]
+        .as_str()
+        .filter(|id| is_node_id(id))
+        .ok_or("github did not give the pull request's node id")?;
+    Ok(ReadyStep::Mutate {
+        mutation: if ready {
+            READY_MUTATION
+        } else {
+            DRAFT_MUTATION
+        },
+        id: id.to_string(),
+    })
 }
 
 /// How many times `pr_merge` tries again after GitHub answers that the base
@@ -1180,6 +1302,54 @@ mod tests {
         assert!(!base_moved(
             "github answered 409 Conflict: \"Head branch was modified\""
         ));
+    }
+
+    #[test]
+    fn ready_marks_a_draft_ready_and_leaves_one_already_there_alone() {
+        let pr = |draft: bool| {
+            json!({ "number": 7, "state": "open", "merged": false, "draft": draft,
+                    "node_id": "PR_kwDO", "head": { "sha": "abc123" },
+                    "html_url": "https://github.test/o/n/pull/7" })
+        };
+        assert_eq!(
+            ready_step(&pr(true), true).unwrap(),
+            ReadyStep::Mutate {
+                mutation: READY_MUTATION,
+                id: "PR_kwDO".into()
+            }
+        );
+        assert_eq!(
+            ready_step(&pr(false), false).unwrap(),
+            ReadyStep::Mutate {
+                mutation: DRAFT_MUTATION,
+                id: "PR_kwDO".into()
+            }
+        );
+        assert!(READY_MUTATION.contains("markPullRequestReadyForReview"));
+        assert!(DRAFT_MUTATION.contains("convertPullRequestToDraft"));
+        let ReadyStep::Already(out) = ready_step(&pr(false), true).unwrap() else {
+            panic!("a ready pull request is written to again");
+        };
+        assert_eq!(out["already"], true);
+        assert_eq!(out["draft"], false);
+        assert_eq!(out["head_sha"], "abc123");
+        assert!(matches!(
+            ready_step(&pr(true), false).unwrap(),
+            ReadyStep::Already(_)
+        ));
+    }
+
+    #[test]
+    fn ready_refuses_a_closed_or_merged_pull_request_and_a_ready_that_is_not_a_boolean() {
+        let closed = json!({ "number": 7, "state": "closed", "merged": false, "draft": true });
+        assert!(ready_step(&closed, true).unwrap_err().contains("is closed"));
+        let merged = json!({ "number": 7, "state": "closed", "merged": true, "draft": false });
+        assert!(ready_step(&merged, false)
+            .unwrap_err()
+            .contains("is merged"));
+        assert_eq!(ready_arg(&json!({})), Ok(true));
+        assert_eq!(ready_arg(&json!({ "ready": false })), Ok(false));
+        assert!(ready_arg(&json!({ "ready": "false" })).is_err());
     }
 
     #[test]

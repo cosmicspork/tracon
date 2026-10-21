@@ -87,6 +87,40 @@ async fn stub(
                 "assignee": { "displayName": "J" }, "parent": { "key": "WRK-100" } } }] })),
         );
     }
+    // A draft by its title, as GitLab reads one: the last title written wins.
+    if path.ends_with("/merge_requests/8") {
+        let title = bodies
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(m, p, _)| m == "PUT" && p.ends_with("/merge_requests/8"))
+            .and_then(|(_, _, b)| b["title"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "Draft: Add eight".into());
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({ "iid": 8, "state": "opened", "title": title,
+                "draft": title.starts_with("Draft: "), "sha": "def456",
+                "web_url": "https://gitlab.example/g/p/-/merge_requests/8" })),
+        );
+    }
+    // GitLab takes the new title and still reads the merge request as a draft.
+    if path.ends_with("/merge_requests/11") {
+        return (
+            axum::http::StatusCode::OK,
+            Json(
+                json!({ "iid": 11, "state": "opened", "title": "Draft: Stuck",
+                "draft": true, "sha": "def456" }),
+            ),
+        );
+    }
+    if path.ends_with("/merge_requests/10") && method == "GET" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({ "iid": 10, "state": "merged", "title": "Draft: x", "draft": true })),
+        );
+    }
     if path.ends_with("/merge_requests/7/discussions") && method == "GET" {
         return (
             axum::http::StatusCode::OK,
@@ -341,6 +375,96 @@ async fn every_offered_tool_is_routed_to_a_handler() {
             "{name} is offered but not routed: {v}"
         );
     }
+}
+
+/// The GitLab half of #600: a draft merge request is marked ready, asked
+/// first, by its title, and turned back the same way.
+#[tokio::test]
+async fn mr_ready_waits_on_the_operator_then_marks_the_draft_ready_and_back() {
+    state::isolate();
+    let (mut t, seen, bodies, _) = rig_with_bodies().await;
+    let c = ctx("work", "n1");
+    let args = json!({ "project": "g/p", "iid": 8 });
+    let (err, v) = call(&t, &c, "mr_ready", args.clone()).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
+    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached GitLab");
+
+    t.policy = allowing(r#""mr_ready""#);
+    let puts = || -> Vec<Value> {
+        bodies
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, ..)| m == "PUT")
+            .map(|(_, _, b)| b.clone())
+            .collect()
+    };
+    let (err, v) = call(&t, &c, "mr_ready", args.clone()).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["draft"], false);
+    assert_eq!(v["head_sha"], "def456");
+    assert_eq!(v["already"], false);
+    assert_eq!(puts(), vec![json!({ "title": "Add eight" })]);
+
+    // Ready already: answered as it stands, with no second write.
+    let (err, v) = call(&t, &c, "mr_ready", args).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["already"], true);
+    assert_eq!(puts().len(), 1);
+
+    let back = json!({ "project": "g/p", "iid": 8, "ready": false });
+    let (err, v) = call(&t, &c, "mr_ready", back.clone()).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["draft"], true);
+    assert_eq!(puts()[1], json!({ "title": "Draft: Add eight" }));
+    let (_, v) = call(&t, &c, "mr_ready", back).await;
+    assert_eq!(v["already"], true, "{v}");
+    assert_eq!(puts().len(), 2);
+
+    let (err, v) = call(&t, &c, "mr_ready", json!({ "project": "g/p", "iid": 10 })).await;
+    assert!(err);
+    assert!(v.as_str().unwrap_or_default().contains("is merged"), "{v}");
+    assert_eq!(puts().len(), 2);
+}
+
+#[tokio::test]
+async fn mr_ready_is_an_error_when_gitlab_still_reads_a_draft_after_the_retitle() {
+    state::isolate();
+    let (mut t, _, bodies, _) = rig_with_bodies().await;
+    let c = ctx("work", "n1");
+    // A `ready` the card cannot name is refused before anyone is asked.
+    let (err, v) = call(
+        &t,
+        &c,
+        "mr_ready",
+        json!({ "project": "g/p", "iid": 11, "ready": "false" }),
+    )
+    .await;
+    assert!(err);
+    let said = v.as_str().unwrap_or_default();
+    assert!(said.contains("ready is true or false"), "{v}");
+    assert!(!said.contains("approval"), "{v}");
+
+    t.policy = allowing(r#""mr_ready""#);
+    let (err, v) = call(&t, &c, "mr_ready", json!({ "project": "g/p", "iid": 11 })).await;
+    assert!(err);
+    assert!(
+        v.as_str()
+            .unwrap_or_default()
+            .contains("but still reads !11 as a draft"),
+        "{v}"
+    );
+    let puts: Vec<Value> = bodies
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, ..)| m == "PUT")
+        .map(|(_, _, b)| b.clone())
+        .collect();
+    assert_eq!(puts, vec![json!({ "title": "Stuck" })]);
 }
 
 #[tokio::test]
