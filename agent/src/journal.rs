@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::compact;
 use crate::conversation::{Block, Message, Role};
 
 /// What the model is told about a call the process died before starting.
@@ -50,6 +51,15 @@ pub enum Record {
         id: String,
         content: String,
         is_error: bool,
+    },
+    /// Old tool results replaced by a note of their size.
+    Pruned {
+        results: Vec<compact::Pruned>,
+    },
+    /// Everything but the last `keep` messages replaced by `summary`.
+    Compacted {
+        summary: String,
+        keep: usize,
     },
 }
 
@@ -167,6 +177,19 @@ pub fn restore(path: &Path) -> std::io::Result<Restored> {
                 if let Some(o) = open.as_mut() {
                     o.results.insert(id, (content, is_error));
                 }
+            }
+            // Compaction runs between requests, with every call answered.
+            Record::Pruned { results } => {
+                if let Some(calls) = open.take() {
+                    calls.close(&mut out);
+                }
+                compact::apply_prune(&mut out.messages, &results);
+            }
+            Record::Compacted { summary, keep } => {
+                if let Some(calls) = open.take() {
+                    calls.close(&mut out);
+                }
+                compact::apply_summary(&mut out.messages, &summary, keep);
             }
         }
     }
@@ -298,6 +321,85 @@ mod tests {
         assert_eq!(
             asked,
             [("running", true), ("asked", true), ("never", false)]
+        );
+    }
+
+    #[test]
+    fn a_compacted_session_comes_back_compacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path(), "s3").unwrap();
+        let message = |role, blocks| Record::Message { role, blocks };
+        j.write(&message(Role::User, vec![Block::Text("go".into())]));
+        for id in ["a", "b"] {
+            j.write(&message(Role::Assistant, vec![call(id)]));
+            j.write(&Record::ToolResult {
+                id: id.into(),
+                content: format!("output of {id}"),
+                is_error: false,
+            });
+        }
+        j.write(&Record::Pruned {
+            results: vec![compact::Pruned {
+                id: "a".into(),
+                content: "[Output truncated - 9 tokens]".into(),
+            }],
+        });
+        j.write(&message(Role::Assistant, vec![call("c")]));
+        j.write(&Record::ToolResult {
+            id: "c".into(),
+            content: "output of c".into(),
+            is_error: false,
+        });
+        j.write(&Record::Compacted {
+            summary: "[harness] summary".into(),
+            keep: 2,
+        });
+        j.write(&message(Role::Assistant, vec![Block::Text("done".into())]));
+
+        let r = restore(&Journal::path(dir.path(), "s3")).unwrap();
+        assert!(r.interrupted.is_empty());
+        let got: Vec<_> = r.messages.iter().map(|m| (m.role, &m.blocks)).collect();
+        let (call_c, result_c) = (
+            vec![call("c")],
+            vec![Block::ToolResult {
+                id: "c".into(),
+                content: "output of c".into(),
+                is_error: false,
+            }],
+        );
+        assert_eq!(
+            got,
+            [
+                (Role::User, &vec![Block::Text("[harness] summary".into())]),
+                (Role::Assistant, &call_c),
+                (Role::User, &result_c),
+                (Role::Assistant, &vec![Block::Text("done".into())]),
+            ]
+        );
+
+        // Pruning before the summary is applied where it was made.
+        let j = Journal::open(dir.path(), "s4").unwrap();
+        j.write(&message(Role::User, vec![Block::Text("go".into())]));
+        j.write(&message(Role::Assistant, vec![call("a")]));
+        j.write(&Record::ToolResult {
+            id: "a".into(),
+            content: "long".into(),
+            is_error: true,
+        });
+        j.write(&Record::Pruned {
+            results: vec![compact::Pruned {
+                id: "a".into(),
+                content: "[Output truncated - 1 tokens]".into(),
+            }],
+        });
+        let r = restore(&Journal::path(dir.path(), "s4")).unwrap();
+        assert_eq!(
+            r.messages[2].blocks,
+            [Block::ToolResult {
+                id: "a".into(),
+                content: "[Output truncated - 1 tokens]".into(),
+                is_error: true,
+            }]
         );
     }
 

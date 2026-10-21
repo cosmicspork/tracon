@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Agent, Hooks, Outcome, Permit, Totals};
+use crate::agent::{Agent, Compaction, Hooks, Outcome, Permit, Totals};
 use crate::conversation::{Block, Conversation, Role};
 use crate::events::{self, Events};
 use crate::journal::{self, Journal, Record, Restored};
@@ -391,6 +391,7 @@ impl Session {
             cancel: &cancel,
             journal: self.journal.as_ref(),
             max_turns: settings.max_turns,
+            context_window: settings.context_window,
         };
         let outcome = agent.run(conv, totals).await;
         hooks.flush_text();
@@ -683,6 +684,19 @@ impl Hooks for Wired<'_> {
             "status": status,
             "message": error.to_string(),
             "wait_ms": wait.as_millis() as u64,
+        })));
+    }
+
+    fn compacted(&self, c: &Compaction) {
+        self.send(SessionUpdate::Other(json!({
+            "sessionUpdate": "context_compacted",
+            "trigger": c.trigger,
+            "tokensBefore": c.tokens_before,
+            "tokensAfter": c.tokens_after,
+            "prunedResults": c.pruned_results,
+            "summarisedMessages": c.summarised_messages,
+            "summary": c.summary,
+            "contextWindow": self.context_window,
         })));
     }
 }

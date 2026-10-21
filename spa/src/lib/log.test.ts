@@ -23,6 +23,7 @@ import {
   worktreeLine,
 } from './log'
 import type { Event } from './types'
+import { formatTokens } from './format'
 
 let seq = 0
 function ev(kind: string, ref_id: string | null = null, payload: Record<string, unknown> = {}): Event {
@@ -435,4 +436,15 @@ test('a harness restart says what became of the session', () => {
   const refused = eventLine(ev('harness_restarted', null, { outcome: 'refused', reason: 'the harness died again after 3 restarts; the session ends' }))
   expect(refused?.tone).toBe('crit')
   expect(refused?.text).toContain('after 3 restarts')
+})
+
+test('a compaction says how much smaller the context got and what went', () => {
+  const summarised = eventLine(
+    ev('context_compacted', null, { trigger: 'threshold', tokens_before: 49_800, tokens_after: 6_200, summarised_messages: 34, pruned_results: 0, summary: 'did things' }),
+  )
+  expect(summarised?.tone).toBe('sys')
+  expect(summarised?.text).toBe(`context compacted · ~${formatTokens(49_800)} → ~${formatTokens(6_200)} tokens · 34 earlier messages summarised`)
+  const pruned = eventLine(ev('context_compacted', null, { trigger: 'overflow', tokens_before: 70_000, tokens_after: 40_000, summarised_messages: 0, pruned_results: 1 }))
+  expect(pruned?.text).toContain('after the model refused it as too long')
+  expect(pruned?.text).toContain('1 old tool output cut')
 })

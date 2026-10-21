@@ -425,6 +425,20 @@ export function eventLine(e: Event): EventLine | null {
           return line('crit', [exited, `could not restart: ${str(p.reason) || 'no reason given'}`])
       }
     }
+    case 'context_compacted': {
+      // The harness's own estimates, so said as roughly.
+      const before = num(p.tokens_before)
+      const after = num(p.tokens_after)
+      const size = before !== null && after !== null ? `~${formatTokens(before)} → ~${formatTokens(after)} tokens` : ''
+      const summarised = num(p.summarised_messages) ?? 0
+      const pruned = num(p.pruned_results) ?? 0
+      const what = [
+        summarised > 0 ? `${summarised} earlier messages summarised` : '',
+        pruned > 0 ? `${pruned} old tool ${pruned === 1 ? 'output' : 'outputs'} cut` : '',
+      ].filter(Boolean)
+      const why = str(p.trigger) === 'overflow' ? 'context compacted after the model refused it as too long' : 'context compacted'
+      return line('sys', [why, size, what.join(', ')])
+    }
     case 'budget_changed': {
       const from = num(p.from) ?? 0
       const to = num(p.to) ?? 0

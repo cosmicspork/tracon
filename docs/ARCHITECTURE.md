@@ -519,6 +519,19 @@ in one piece of work, or three in a session, the next exit ends the session as
 `harness_exit`, as an exit of any other harness does. A node restart still ends the
 session (`node_restart`).
 
+It keeps a long session inside the model's window itself, since no vendor does it for
+it. Before a request that would come within 15 % (at least 16k tokens) of the window
+the provider declares, or after the upstream refuses one as too long, the agent prunes
+old tool outputs to a note of their size, then if that is not enough has the same model
+summarise everything before the last stretch (`agent/src/compact.rs`). The summary
+stands in for the transcript, followed by a record of the tool calls made and the
+operator's own messages, both copied rather than summarised, so neither what ran nor
+what was asked rests on the summariser's paraphrase: a local model asked to summarise a
+task half done has been seen to write the other half as done. Both steps are journaled,
+so a relaunch carries on the compacted conversation. The summariser's request goes
+through the gateway and is counted and matched like any other; the node records the
+compaction as `context_compacted`, with the summary, and never truncates a request.
+
 ### The OpenCode boundary
 
 OpenCode is a *server*, not a pipe, and that changes where the seam is

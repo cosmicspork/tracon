@@ -73,7 +73,8 @@ impl Client {
         })
     }
 
-    pub fn body(&self, conv: &Conversation, tools: &[Value]) -> Value {
+    /// `max_tokens` bounds the answer; `None` leaves it to the server.
+    pub fn body(&self, conv: &Conversation, tools: &[Value], max_tokens: Option<u32>) -> Value {
         let mut body = json!({
             "model": self.model,
             "messages": messages(conv),
@@ -102,6 +103,9 @@ impl Client {
             o.insert("tool_choice".into(), json!("auto"));
             o.insert("parallel_tool_calls".into(), json!(self.parallel_tools));
         }
+        if let Some(n) = max_tokens {
+            o.insert("max_tokens".into(), json!(n));
+        }
         if let Some(t) = self.sampling.temperature {
             o.insert("temperature".into(), json!(t));
         }
@@ -121,9 +125,13 @@ impl Client {
         &self,
         conv: &Conversation,
         tools: &[Value],
+        max_tokens: Option<u32>,
         mut on_delta: impl FnMut(Delta<'_>),
     ) -> Result<Completion, WireError> {
-        let mut request = self.http.post(&self.url).json(&self.body(conv, tools));
+        let mut request = self
+            .http
+            .post(&self.url)
+            .json(&self.body(conv, tools, max_tokens));
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);
         }
@@ -532,7 +540,7 @@ mod tests {
         assert_eq!(client.url, "http://x/v1/chat/completions");
         let tools =
             vec![json!({"name": "read", "description": "d", "parameters": {"type": "object"}})];
-        let b = client.body(&Conversation::new("s"), &tools);
+        let b = client.body(&Conversation::new("s"), &tools, None);
         assert_eq!(b["tools"][0]["function"]["name"], "read");
         assert_eq!(b["parallel_tool_calls"], false);
         assert_eq!(b["min_p"], 0.01);

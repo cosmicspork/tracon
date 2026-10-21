@@ -66,9 +66,14 @@ pub struct Fake {
     pub requests: Arc<Mutex<Vec<Value>>>,
 }
 
+/// In a reply's body, replaced by a quarter of the request's bytes: a prompt
+/// count that grows with the conversation, as a real server's does.
+pub const MEASURED: &str = "\"$measured\"";
+
 async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> Response {
+    let measured = (body.to_string().len() / 4).to_string();
     fake.requests.lock().unwrap().push(body);
-    let reply = {
+    let mut reply = {
         let mut script = fake.script.lock().unwrap();
         if script.is_empty() {
             Reply::error(StatusCode::INTERNAL_SERVER_ERROR, "script exhausted")
@@ -76,6 +81,7 @@ async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> Respo
             script.remove(0)
         }
     };
+    reply.body = reply.body.replace(MEASURED, &measured);
     tokio::time::sleep(reply.delay).await;
     let body = if reply.cut {
         use futures_util::StreamExt;
@@ -144,6 +150,16 @@ pub fn tool_call(id: &str, name: &str, args: Value) -> Reply {
             "finish_reason": "tool_calls"}]}),
         json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
     ])
+}
+
+/// A tool call whose prompt count is the request's size.
+pub fn measured_call(id: &str, name: &str, args: Value) -> Reply {
+    let mut reply = tool_call(id, name, args);
+    reply.body = reply.body.replace(
+        "\"prompt_tokens\":100",
+        &format!("\"prompt_tokens\":{MEASURED}"),
+    );
+    reply
 }
 
 pub fn answer(text: &str) -> Reply {

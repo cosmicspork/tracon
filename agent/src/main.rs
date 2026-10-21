@@ -220,6 +220,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         cancel: &cancel,
         journal: None,
         max_turns: Some(max_turns),
+        context_window: cli.context_window,
     };
     let outcome = agent.run(&mut conv, &mut totals).await;
     let (code, end) = match &outcome {

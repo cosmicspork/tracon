@@ -4,7 +4,8 @@ mod support;
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};
-use support::{answer, serve, tool_call, Reply};
+use support::{answer, measured_call, serve, tool_call, Reply};
+use tracon_agent::compact::{SUMMARISER, SUMMARY_HEADER};
 use tracon_agent::hashline;
 
 struct Run {
@@ -164,6 +165,119 @@ async fn the_turn_limit_and_context_overflow_have_their_own_exits() {
     let r = run(&base, dir.path(), &[]).await;
     assert_eq!(r.code, 4);
     assert_eq!(r.events.last().unwrap()["outcome"], "context_overflow");
+}
+
+/// A read too big for the window: before the next request the conversation is
+/// summarised, and the work carries on from the summary.
+#[tokio::test]
+async fn a_conversation_near_the_window_is_summarised_and_the_work_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let big: String = (0..600)
+        .map(|i| format!("line {i:04} {}\n", "x".repeat(90)))
+        .collect();
+    std::fs::write(dir.path().join("big.txt"), big).unwrap();
+    let (base, fake) = serve(vec![
+        measured_call("c1", "read", json!({"path": "big.txt"})),
+        answer("big.txt is 600 numbered lines of x."),
+        answer("done"),
+    ])
+    .await;
+
+    let r = run(&base, dir.path(), &["--context-window", "24000"]).await;
+
+    assert_eq!(r.code, 0, "{:#?}", r.events);
+    assert_eq!(r.stdout.trim(), "done");
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    // The summariser: the transcript, no tools, a bounded answer.
+    let summariser = &requests[1];
+    assert_eq!(summariser["messages"][0]["content"], SUMMARISER);
+    assert!(summariser.get("tools").is_none());
+    assert_eq!(summariser["max_tokens"], 4096);
+    let transcript = summariser["messages"][1]["content"].as_str().unwrap();
+    assert!(transcript.contains("[operator]\nfix it"), "{transcript}");
+    assert!(transcript.contains("[end of transcript]"), "{transcript}");
+    assert!(transcript.contains("[result of read]"), "{transcript}");
+    assert!(transcript.contains("not shown to you"), "{transcript}");
+    assert!(
+        transcript.contains("\n1\tline 0000 "),
+        "anchors stripped: {transcript}"
+    );
+    // The next request carries the summary and the task, not the read.
+    let messages = requests[2]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{messages:#?}");
+    let summary = messages[1]["content"].as_str().unwrap();
+    assert!(summary.starts_with(SUMMARY_HEADER), "{summary}");
+    assert!(summary.contains("big.txt is 600 numbered lines of x."));
+    assert!(
+        summary.contains("--- operator message 1 ---\nfix it"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("- read {\"path\":\"big.txt\"} → ok"),
+        "{summary}"
+    );
+    assert!(requests[2].to_string().len() < 8_000);
+
+    let compacted = r.events.iter().find(|e| e["event"] == "compacted").unwrap();
+    assert_eq!(compacted["trigger"], "threshold");
+    assert_eq!(compacted["summarised_messages"], 3);
+    assert!(
+        compacted["tokens_before"].as_u64().unwrap() >= 12_000,
+        "{compacted}"
+    );
+    assert!(
+        compacted["tokens_after"].as_u64().unwrap() < 2_000,
+        "{compacted}"
+    );
+    // The summariser's tokens are the session's too.
+    let end = r.events.last().unwrap();
+    assert_eq!(end["outcome"], "finished");
+    assert!(end["totals"]["usage"]["input"].as_u64().unwrap() > 120 + 120);
+}
+
+/// With no window declared, the upstream's refusal is the signal: the
+/// conversation is compacted and the request made once more.
+#[tokio::test]
+async fn a_request_refused_as_too_long_is_compacted_and_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(dir.path().join("big.txt"), "x\n".repeat(20_000)).unwrap();
+    let overflow = json!({"error": {"code": 400, "type": "exceed_context_size_error",
+        "message": "request (70000 tokens) exceeds the available context size (65536 tokens)"}});
+    let (base, fake) = serve(vec![
+        measured_call("c1", "read", json!({"path": "big.txt"})),
+        measured_call("c2", "read", json!({"path": "a.txt"})),
+        Reply::error(StatusCode::BAD_REQUEST, overflow.to_string()),
+        answer("listed and read a.txt"),
+        answer("done"),
+    ])
+    .await;
+
+    let r = run(&base, dir.path(), &[]).await;
+
+    assert_eq!(r.code, 0, "{:#?}", r.events);
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[3]["messages"][0]["content"], SUMMARISER);
+    // Asked again with the summary in place of the first call, and the
+    // second call and its result kept as they were.
+    let messages = requests[4]["messages"].as_array().unwrap();
+    assert!(messages[1]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with(SUMMARY_HEADER));
+    assert_eq!(messages[2]["tool_calls"][0]["id"], "c2");
+    assert_eq!(messages[3]["tool_call_id"], "c2");
+    let names = names(&r.events);
+    let at = names.iter().position(|e| *e == "overflow").unwrap();
+    assert_eq!(
+        names[at + 1..at + 4],
+        ["summarising", "summary", "compacted"]
+    );
+    let compacted = &r.events[at + 3];
+    assert_eq!(compacted["trigger"], "overflow");
+    assert_eq!(compacted["summarised_messages"], 3);
 }
 
 #[tokio::test]

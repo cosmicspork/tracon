@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::compact;
 use crate::conversation::{Block, Conversation, Role};
 use crate::events::Events;
 use crate::journal::{Journal, Record};
@@ -58,6 +59,36 @@ pub enum Outcome {
     },
 }
 
+/// What made the conversation be compacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    /// The next request would have come near the context window.
+    Threshold,
+    /// The upstream refused a request as longer than its context.
+    Overflow,
+}
+
+/// A compaction, as the operator is told of it. Token counts are estimates.
+#[derive(Debug, Clone, Serialize)]
+pub struct Compaction {
+    pub trigger: Trigger,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    /// Old tool results replaced by a note of their size.
+    pub pruned_results: usize,
+    /// Messages replaced by the summary; 0 when pruning was enough.
+    pub summarised_messages: usize,
+    pub summary: Option<String>,
+}
+
+enum Compacting {
+    Done,
+    /// Nothing could be made smaller, or the summary could not be had.
+    Nothing,
+    Cancelled,
+}
+
 /// The answer to asking whether a tool call may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Permit {
@@ -83,6 +114,8 @@ pub trait Hooks: Send + Sync {
     fn usage(&self, _usage: &Usage, _request_id: Option<&str>, _context_used: u64) {}
     /// A model request failed and is about to be made again.
     fn retrying(&self, _attempt: u32, _wait: Duration, _error: &WireError) {}
+    /// The conversation was made smaller to fit the context window.
+    fn compacted(&self, _compaction: &Compaction) {}
 }
 
 /// No one to ask: `--standalone`.
@@ -110,6 +143,10 @@ pub struct Agent<'a> {
     /// Per run: one prompt's worth of model requests. `None` runs until the
     /// model answers without a tool call, or the run is cancelled.
     pub max_turns: Option<u32>,
+    /// The model's window in tokens. Known, the conversation is compacted
+    /// before it reaches it; unknown, only once the upstream refuses a
+    /// request as too long.
+    pub context_window: Option<u64>,
 }
 
 /// A request that failed for good, and any answer text already shown.
@@ -139,12 +176,38 @@ impl Agent<'_> {
         totals: &mut Totals,
     ) -> Result<Outcome, WireError> {
         let specs = self.tools.specs();
+        let overhead = Value::Array(specs.clone()).to_string().len();
         let mut requests = 0;
         // Responses in a row whose calls could not be run as written.
         let mut malformed = 0;
+        // The last request was refused as too long, and the conversation
+        // compacted since: a second refusal ends the turn.
+        let mut overflowed = false;
+        // What the last compaction left, when that was still past the
+        // threshold: compacting again before much is added would only
+        // summarise the summary.
+        let mut stuck_at: Option<u64> = None;
         loop {
             if self.max_turns.is_some_and(|max| requests >= max) {
                 return Ok(Outcome::MaxTurns);
+            }
+            if let Some(window) = self.context_window {
+                let size = compact::estimate(conv, overhead);
+                let threshold = compact::threshold(window);
+                let grown = stuck_at.is_none_or(|at| {
+                    size >= at + compact::Limits::for_window(Some(window)).keep_raw / 2
+                });
+                if size >= threshold && grown {
+                    match self
+                        .compact(conv, totals, Trigger::Threshold, overhead)
+                        .await
+                    {
+                        Compacting::Cancelled => return Ok(Outcome::Cancelled),
+                        Compacting::Done | Compacting::Nothing => {}
+                    }
+                    let after = compact::estimate(conv, overhead);
+                    stuck_at = (after >= threshold).then_some(after);
+                }
             }
             requests += 1;
             totals.turns += 1;
@@ -155,7 +218,11 @@ impl Agent<'_> {
             );
             let started = Instant::now();
             let mut first: Option<Instant> = None;
-            let completion = match self.request(conv, &specs, turn, &mut first).await {
+            let sent = compact::request_bytes(conv, overhead);
+            let completion = match self
+                .request(conv, &specs, None, true, turn, &mut first)
+                .await
+            {
                 Ok(Some(c)) => c,
                 Ok(None) => {
                     self.events
@@ -166,6 +233,22 @@ impl Agent<'_> {
                     error: WireError::ContextOverflow(message),
                     ..
                 }) => {
+                    // Compacted and asked once more; never truncated.
+                    if !overflowed {
+                        self.events
+                            .emit("overflow", json!({"turn": turn, "message": message}));
+                        match self
+                            .compact(conv, totals, Trigger::Overflow, overhead)
+                            .await
+                        {
+                            Compacting::Done => {
+                                overflowed = true;
+                                continue;
+                            }
+                            Compacting::Cancelled => return Ok(Outcome::Cancelled),
+                            Compacting::Nothing => {}
+                        }
+                    }
                     self.events.emit(
                         "error",
                         json!({"turn": turn, "kind": "context_overflow", "message": message}),
@@ -183,15 +266,15 @@ impl Agent<'_> {
                     return Err(error);
                 }
             };
+            overflowed = false;
             let elapsed = started.elapsed();
             let ttft = first.map(|f| f - started);
             if let Some(u) = &completion.usage {
-                totals.usage.input += u.input;
-                totals.usage.output += u.output;
-                totals.usage.cache_read += u.cache_read;
+                add(totals, u);
                 self.hooks
                     .usage(u, completion.request_id.as_deref(), u.input + u.output);
             }
+            let measured = completion.usage.clone();
             // Generation speed over the time after the first token; llama.cpp's
             // own figure is in `timings` when it sends them.
             let tokens_per_s = match (&completion.usage, ttft) {
@@ -200,15 +283,7 @@ impl Agent<'_> {
                 }
                 _ => None,
             };
-            let text: String = completion
-                .blocks
-                .iter()
-                .filter_map(|b| match b {
-                    Block::Text(t) => Some(t.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = text_of(&completion.blocks);
             self.events.emit(
                 "response",
                 json!({
@@ -239,6 +314,9 @@ impl Agent<'_> {
             // is carried on knowing which calls were made.
             if !completion.blocks.is_empty() {
                 self.push(conv, Role::Assistant, completion.blocks);
+            }
+            if let Some(u) = measured {
+                compact::measure(conv, sent, u.input, u.output);
             }
             if let Some(marker) = FABRICATED.iter().find(|m| text.contains(**m)) {
                 let reason = format!(
@@ -372,26 +450,154 @@ impl Agent<'_> {
         }
     }
 
+    /// Makes the conversation smaller: old tool outputs pruned, then, if it
+    /// still does not fit, or the upstream refused it, everything before its
+    /// last stretch summarised by the model. Each step is journaled before
+    /// the conversation changes.
+    async fn compact(
+        &self,
+        conv: &mut Conversation,
+        totals: &mut Totals,
+        trigger: Trigger,
+        overhead: usize,
+    ) -> Compacting {
+        let turn = totals.turns;
+        let before = compact::estimate(conv, overhead);
+        let limits = compact::Limits::for_window(self.context_window);
+        let pruned = compact::prune_plan(conv, limits);
+        if !pruned.is_empty() {
+            self.record(Record::Pruned {
+                results: pruned.clone(),
+            });
+            compact::prune(conv, &pruned, overhead);
+        }
+        let fits = self
+            .context_window
+            .is_some_and(|w| compact::estimate(conv, overhead) < compact::threshold(w));
+        let mut summarised = 0;
+        let mut summary = None;
+        let upto = match trigger {
+            Trigger::Threshold if fits => None,
+            Trigger::Threshold => compact::cut(conv, limits.keep_raw),
+            // The estimate was wrong, so it is no guide to what fits: keep a
+            // quarter of the messages at most.
+            Trigger::Overflow => compact::cut(
+                conv,
+                limits.keep_raw.min(compact::messages_tokens(conv) / 4),
+            ),
+        };
+        if let Some(upto) = upto {
+            // The summariser's own request has to fit, answer included.
+            let budget = self.context_window.map(|w| {
+                compact::threshold(w).saturating_sub(u64::from(compact::SUMMARY_MAX_TOKENS) + 1024)
+            });
+            let request = compact::summary_request(conv, upto, budget);
+            self.events.emit(
+                "summarising",
+                json!({"turn": turn, "trigger": trigger, "messages": upto}),
+            );
+            let started = Instant::now();
+            let mut first = None;
+            let asked = self
+                .request(
+                    &request,
+                    &[],
+                    Some(compact::SUMMARY_MAX_TOKENS),
+                    false,
+                    turn,
+                    &mut first,
+                )
+                .await;
+            let completion = match asked {
+                Ok(Some(c)) => Some(c),
+                Ok(None) => return Compacting::Cancelled,
+                Err(Failed { error, .. }) => {
+                    self.events.emit(
+                        "error",
+                        json!({"turn": turn, "kind": "summary", "message": error.to_string()}),
+                    );
+                    None
+                }
+            };
+            let text = completion.as_ref().map(|c| text_of(&c.blocks));
+            self.events.emit(
+                "summary",
+                json!({
+                    "turn": turn,
+                    "request_id": completion.as_ref().and_then(|c| c.request_id.clone()),
+                    "usage": completion.as_ref().and_then(|c| c.usage.clone()),
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "text": text,
+                }),
+            );
+            if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                let message = compact::summary_message(conv, upto, &text);
+                let keep = conv.messages.len() - upto;
+                self.record(Record::Compacted {
+                    summary: message.clone(),
+                    keep,
+                });
+                compact::summarise(conv, &message, keep, overhead);
+                summarised = upto;
+                summary = Some(text);
+            }
+            // Counted whether or not it was used: the upstream answered it.
+            if let Some(c) = &completion {
+                if let Some(u) = &c.usage {
+                    add(totals, u);
+                    self.hooks.usage(
+                        u,
+                        c.request_id.as_deref(),
+                        compact::estimate(conv, overhead),
+                    );
+                }
+            }
+        }
+        if pruned.is_empty() && summary.is_none() {
+            return Compacting::Nothing;
+        }
+        let compaction = Compaction {
+            trigger,
+            tokens_before: before,
+            tokens_after: compact::estimate(conv, overhead),
+            pruned_results: pruned.len(),
+            summarised_messages: summarised,
+            summary,
+        };
+        let mut event = json!(compaction);
+        event["turn"] = json!(turn);
+        self.events.emit("compacted", event);
+        self.hooks.compacted(&compaction);
+        Compacting::Done
+    }
+
     /// One model request, made again while it fails in a way another attempt
     /// could fix and nothing of an answer has been shown. `Ok(None)` is a
-    /// cancel.
+    /// cancel. `show` streams the answer to the hooks as it comes.
     async fn request(
         &self,
         conv: &Conversation,
         specs: &[Value],
+        max_tokens: Option<u32>,
+        show: bool,
         turn: u32,
         first: &mut Option<Instant>,
     ) -> Result<Option<Completion>, Failed> {
         let mut attempt = 0u32;
         loop {
             let mut shown = String::new();
-            let request = self.client.complete(conv, specs, |d: Delta<'_>| {
-                first.get_or_insert_with(Instant::now);
-                if let Delta::Text(t) = d {
-                    shown.push_str(t);
-                }
-                self.hooks.delta(&d);
-            });
+            let request = self
+                .client
+                .complete(conv, specs, max_tokens, |d: Delta<'_>| {
+                    first.get_or_insert_with(Instant::now);
+                    if !show {
+                        return;
+                    }
+                    if let Delta::Text(t) = d {
+                        shown.push_str(t);
+                    }
+                    self.hooks.delta(&d);
+                });
             let error = tokio::select! {
                 r = request => match r {
                     Ok(c) => return Ok(Some(c)),
@@ -495,4 +701,21 @@ impl Agent<'_> {
         }
         conv.push(Role::User, results);
     }
+}
+
+fn add(totals: &mut Totals, u: &Usage) {
+    totals.usage.input += u.input;
+    totals.usage.output += u.output;
+    totals.usage.cache_read += u.cache_read;
+}
+
+fn text_of(blocks: &[Block]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

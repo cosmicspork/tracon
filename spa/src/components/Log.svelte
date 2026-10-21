@@ -195,6 +195,12 @@
           <summary class="crit">{eventLine(e)?.text}</summary>
           <div>{e.payload.detail}</div>
         </details>
+      {:else if e.kind === 'context_compacted' && e.payload.summary}
+        <!-- What the model now works from in place of the earlier transcript. -->
+        <details class="fold">
+          <summary>{eventLine(e)?.text}</summary>
+          <div>{e.payload.summary}</div>
+        </details>
       {:else if e.kind === 'check_result'}
         <details class="fold" open={e.payload.ok !== true}>
           <summary class={e.payload.ok ? '' : 'crit'}>{e.payload.ok ? '✓' : '✗'} {e.payload.command} · exit {e.payload.exit ?? 'none'} · {Math.round(((e.payload.ms as number) ?? 0) / 1000)}s</summary>

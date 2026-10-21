@@ -437,3 +437,35 @@ async fn a_requests_usage_queued_before_the_turn_ends_is_settled_with_it() {
     assert_eq!(ledger[0].requests_matched, Some(1));
     assert_eq!(ledger[0].requests_unmatched, Some(0));
 }
+
+/// Not a restart, but the same harness's other way of carrying a session on:
+/// a compaction it reports is recorded with the summary it now works from.
+#[tokio::test]
+async fn a_compaction_the_harness_reports_is_recorded() {
+    let rig = Rig::start().await;
+    let tx = rig.adapter.events.lock().unwrap().last().unwrap().clone();
+    tx.send(HarnessEvent::Other(json!({
+        "sessionUpdate": "context_compacted",
+        "trigger": "threshold",
+        "tokensBefore": 49_800,
+        "tokensAfter": 6_200,
+        "prunedResults": 0,
+        "summarisedMessages": 34,
+        "summary": "fixed the validator; tests pass",
+        "contextWindow": 65_536,
+    })))
+    .await
+    .unwrap();
+
+    rig.wait("the compaction", |r| {
+        !r.events("context_compacted").is_empty()
+    })
+    .await;
+    let c = &rig.events("context_compacted")[0];
+    assert_eq!(c["trigger"], "threshold");
+    assert_eq!(c["tokens_before"], 49_800);
+    assert_eq!(c["tokens_after"], 6_200);
+    assert_eq!(c["summarised_messages"], 34);
+    assert_eq!(c["summary"], "fixed the validator; tests pass");
+    assert!(rig.events("error").is_empty());
+}

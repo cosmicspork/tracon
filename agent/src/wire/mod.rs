@@ -19,8 +19,8 @@ pub struct Usage {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
-    /// The prompt no longer fits the model's context. Compaction answers this
-    /// from Phase 2; until then the run stops and says so. Never truncate.
+    /// The prompt no longer fits the model's context. The loop compacts the
+    /// conversation and asks once more; never truncate.
     #[error("context window exceeded: {0}")]
     ContextOverflow(String),
     #[error("upstream answered {status}: {body}")]
