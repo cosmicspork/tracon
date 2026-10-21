@@ -2912,6 +2912,14 @@ impl Manager {
             .store
             .get_permission(id)?
             .ok_or(SessionError::NotFound)?;
+        // A peer's card this node closed (its owner left the channel, or
+        // stopped listing it) is not relayed: the owner would refuse it.
+        if perm.node_id != self.node_id && perm.state != "new" {
+            return Err(SessionError::Rejected(format!(
+                "this approval is no longer waiting ({})",
+                perm.state
+            )));
+        }
         let Some(session_id) = perm.session_id else {
             // A peer's approval card with no session behind it: the peer
             // holds the approval, decides it and runs it.

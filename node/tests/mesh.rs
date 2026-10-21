@@ -635,6 +635,134 @@ async fn a_removed_member_is_refused_visibly_and_is_handed_no_further_keys() {
     let _ = ai;
 }
 
+/// A peer that leaves a channel lists nothing there again, so the cards this
+/// node mirrored from it there stayed open, and an answer went to a peer that
+/// refuses it from a node no longer beside it (#610). The member list that
+/// says it left closes them, with a session or without, and only there.
+#[tokio::test]
+async fn a_peers_cards_on_a_channel_it_left_are_closed_by_the_member_list() {
+    state::isolate();
+    let (a, b, hub) = pair_managed().await;
+    let bi = b.id.node_id();
+    assert_eq!(a.client.refresh_members().await.unwrap(), 1);
+    a.store
+        .upsert_session_mirror(&support::rows::session_row("s-b", &bi, "personal"))
+        .unwrap();
+    let card = |id: &str, session: Option<&str>| tracon::store::PermissionRow {
+        id: id.into(),
+        session_id: session.map(String::from),
+        node_id: bi.clone(),
+        rpc_id: 0,
+        tool_call_id: None,
+        title: "pr_comment o/r#7".into(),
+        kind: None,
+        raw_input: None,
+        options: "[]".into(),
+        state: "new".into(),
+        answer_option_id: None,
+        created_ms: now_ms(),
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        expires_ms: now_ms() + 600_000,
+    };
+    for (id, session, channel) in [
+        ("bound", Some("s-b"), "personal"),
+        ("sessionless", None, "personal"),
+        ("elsewhere", None, "secret"),
+    ] {
+        assert!(a
+            .store
+            .upsert_permission_mirror(&card(id, session), channel)
+            .unwrap());
+    }
+    assert_eq!(a.store.open_permission_views().unwrap().len(), 3);
+
+    let mut rx = a.bus.subscribe();
+    let mut member = hub.members.get(&bi).unwrap().unwrap();
+    member.channels = vec![MESH_CHANNEL.into(), "secret".into()];
+    hub.members.put(&member).unwrap();
+    a.client.refresh_members().await.unwrap();
+
+    let open: Vec<String> = a
+        .store
+        .open_permission_views()
+        .unwrap()
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
+    assert_eq!(open, vec!["elsewhere"]);
+    for id in ["bound", "sessionless"] {
+        assert_eq!(
+            a.store.get_permission(id).unwrap().unwrap().state,
+            "expired"
+        );
+    }
+    // And the interface is told, so the closed cards leave Home.
+    let waiting = loop {
+        if let Frame::Queue { waiting } = next_frame(&mut rx).await {
+            break waiting;
+        }
+    };
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+}
+
+/// A peer the hub removes outright is the only way one leaves a channel today:
+/// the hub merges channels on admit and never takes one away. The departed
+/// loop of the member list closes its cards on every channel, with a session
+/// or without, and tells the interface (#610).
+#[tokio::test]
+async fn a_removed_peers_cards_are_closed_by_the_member_list() {
+    state::isolate();
+    let (a, b, hub) = pair_managed().await;
+    let bi = b.id.node_id();
+    assert_eq!(a.client.refresh_members().await.unwrap(), 1);
+    a.store
+        .upsert_session_mirror(&support::rows::session_row("s-b", &bi, "personal"))
+        .unwrap();
+    let card = |id: &str, session: Option<&str>| tracon::store::PermissionRow {
+        id: id.into(),
+        session_id: session.map(String::from),
+        node_id: bi.clone(),
+        rpc_id: 0,
+        tool_call_id: None,
+        title: "pr_comment o/r#7".into(),
+        kind: None,
+        raw_input: None,
+        options: "[]".into(),
+        state: "new".into(),
+        answer_option_id: None,
+        created_ms: now_ms(),
+        created_mono_ms: 0,
+        resolved_mono_ms: None,
+        expires_ms: now_ms() + 600_000,
+    };
+    for (id, session) in [("bound", Some("s-b")), ("sessionless", None)] {
+        assert!(a
+            .store
+            .upsert_permission_mirror(&card(id, session), "personal")
+            .unwrap());
+    }
+    assert_eq!(a.store.open_permission_views().unwrap().len(), 2);
+
+    let mut rx = a.bus.subscribe();
+    assert!(hub.members.remove(&bi).unwrap());
+    assert_eq!(a.client.refresh_members().await.unwrap(), 0);
+
+    for id in ["bound", "sessionless"] {
+        assert_eq!(
+            a.store.get_permission(id).unwrap().unwrap().state,
+            "expired"
+        );
+    }
+    // And the interface is told, so the closed cards leave Home.
+    let waiting = loop {
+        if let Frame::Queue { waiting } = next_frame(&mut rx).await {
+            break waiting;
+        }
+    };
+    assert!(waiting.is_empty(), "{waiting:?}");
+}
+
 /// A frame from a build on another wire version is refused by name. The hub
 /// never stores one; a node that is handed one anyway says why rather than
 /// opening it or holding it for a key.

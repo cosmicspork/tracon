@@ -852,6 +852,69 @@ async fn a_sessionless_approval_on_b_is_shown_on_a_and_decided_on_b() {
     .await;
 }
 
+/// A card A closed because B left its channel is not relayed when answered
+/// late: B would refuse an answer from a node no longer beside it, and the
+/// operator would be told nothing useful (#610).
+#[tokio::test]
+async fn a_closed_card_of_a_peer_that_left_the_channel_is_not_relayed() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    b.store
+        .insert_approval(&tracon::store::approvals::ApprovalRow {
+            id: "left".into(),
+            channel: "personal".into(),
+            session_id: None,
+            node_id: bi.clone(),
+            lane: Some("laptop".into()),
+            tool: "pr_comment".into(),
+            arguments: r#"{"repo":"o/r","number":7,"body":"ship it"}"#.into(),
+            request_key: "left".into(),
+            title: "pr_comment o/r#7".into(),
+            state: tracon::store::approvals::PENDING.into(),
+            answer_option_id: None,
+            edited_arguments: None,
+            result: None,
+            reason: None,
+            operator_note: None,
+            claimed_ms: None,
+            created_ms: tracon::store::now_ms(),
+            decided_ms: None,
+            finished_ms: None,
+            expires_ms: tracon::store::now_ms() + 600_000,
+        })
+        .unwrap();
+    b.bus.publish(tracon::stream::Frame::Queue {
+        waiting: b.store.open_permission_views().unwrap(),
+    });
+    wait_for("A to show B's approval", || {
+        a.store
+            .open_permission_views()
+            .is_ok_and(|open| open.iter().any(|p| p.id == "left"))
+    })
+    .await;
+
+    // What A's member list does once the hub says B left `personal`.
+    a.store
+        .node_channels_set(&bi, &[MESH_CHANNEL.to_string()])
+        .unwrap();
+    assert_eq!(a.store.expire_permissions_off_channels(&bi).unwrap(), 1);
+
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        "/api/permissions/left/answer",
+        Some(json!({ "option_id": "allow_once" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        b.store.get_approval("left").unwrap().unwrap().state,
+        tracon::store::approvals::PENDING
+    );
+}
+
 /// One sign-in for the pair, and a refresh either node may make but only one
 /// makes per version: A signs in and B receives it; each renews in turn through
 /// the real hub's claims, handing the renewed copy to the other; and when both

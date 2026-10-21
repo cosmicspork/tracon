@@ -1665,6 +1665,34 @@ impl Store {
         Ok(n)
     }
 
+    /// Open permission rows of `node_id` placed on a channel it is no longer
+    /// a member of are expired: an owner that left a channel stops listing
+    /// on it, so [`Self::expire_absent_permissions`] never runs there again,
+    /// and an answer would reach an owner that refuses a non-member's word.
+    /// A row is placed the same way, by its session's channel or else the
+    /// channel it was mirrored on.
+    ///
+    /// A frame the owner queued before it left can still be pulled after
+    /// this runs, since the hub checks only that the reader is on the
+    /// channel, and [`Self::upsert_permission_mirror`] reopens the card until
+    /// the next member list closes it again. That window is by design: an
+    /// answer meanwhile is still refused, and gating mirrored rows on the
+    /// sender's current channels would drop a newly admitted peer's first
+    /// cards, which arrive before the member list that names it.
+    pub fn expire_permissions_off_channels(&self, node_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE permission_request SET state='expired'
+             WHERE state='new' AND id IN (
+                SELECT p.id FROM permission_request p LEFT JOIN session s ON s.id = p.session_id
+                WHERE p.node_id=?1 AND p.state='new'
+                  AND COALESCE(s.channel, p.channel) NOT IN
+                      (SELECT channel FROM node_channel WHERE node_id=?1))",
+            [node_id],
+        )
+        .map_err(Into::into)
+    }
+
     /// Upsert a review an owner mirrored to us. An ID collision from a
     /// different owner/channel never rewrites the existing row.
     ///
