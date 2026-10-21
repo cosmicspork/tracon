@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { editableFields, editedArguments, isEgress } from './permission'
+import { editableFields, editedArguments, isEgress, stepUpOptions, withheldOptions } from './permission'
 
 const card = (args: unknown, kind: string | null = 'tool') => ({
   kind,
@@ -29,4 +29,30 @@ test('an egress ask is told apart from a held call', () => {
   expect(isEgress(ask)).toBe(true)
   expect(isEgress(card({ body: 'x' }))).toBe(false)
   expect(isEgress({ raw_input: null })).toBe(false)
+})
+
+test('a peer leaves the answers that need the owning node’s passkey to that node', () => {
+  const held = (tool: string) => ({ raw_input: JSON.stringify({ tool, arguments: {}, approval_id: 'a1' }) })
+  expect(stepUpOptions(held('repo_setup_propose'))).toEqual(['allow_once'])
+  expect(stepUpOptions(held('repo_setup_try'))).toEqual(['allow_once'])
+  expect(stepUpOptions(held('request_egress'))).toEqual(['allow_repo'])
+  expect(stepUpOptions(held('pr_comment'))).toEqual([])
+  expect(stepUpOptions({ raw_input: JSON.stringify({ tool: 'repo_setup_try' }) })).toEqual([])
+  expect(stepUpOptions({ raw_input: 'not json' })).toEqual([])
+})
+
+test('a card is only this node’s own when its owner is known to be this node', () => {
+  const setup = (node_id: string) => ({
+    node_id,
+    raw_input: JSON.stringify({ tool: 'repo_setup_propose', arguments: {}, approval_id: 'a1' }),
+  })
+  const nodes = [
+    { id: 'self', is_self: true },
+    { id: 'peer', is_self: false },
+  ] as Parameters<typeof withheldOptions>[0]
+  expect(withheldOptions(nodes, setup('self'))).toEqual([])
+  expect(withheldOptions(nodes, setup('peer'))).toEqual(['allow_once'])
+  // Before the node list has loaded, or for an owner it does not name.
+  expect(withheldOptions([], setup('self'))).toEqual(['allow_once'])
+  expect(withheldOptions(nodes, setup('gone'))).toEqual(['allow_once'])
 })

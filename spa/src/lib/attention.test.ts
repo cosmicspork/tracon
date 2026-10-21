@@ -200,6 +200,29 @@ test('an unreachable hub empties the count without emptying the bay', () => {
   expect(bay.external.every((t) => t.reason?.includes('hub unreachable'))).toBe(true)
 })
 
+test("a peer's approval with no session is decided here, unless allowing it needs that peer's passkey", () => {
+  const peer = node({ id: 'peer', name: 'homelab', is_self: false })
+  const held = (id: string, tool: string) =>
+    permission({
+      id,
+      node_id: 'peer',
+      session_id: null,
+      raw_input: JSON.stringify({ tool, arguments: {}, approval_id: id, lane: 'laptop' }),
+    })
+  const bay = attention({
+    permissions: [held('comment', 'pr_comment'), held('setup', 'repo_setup_propose')],
+    nodes: [node(), peer],
+    mesh: mesh({ state: 'connected' }),
+    now: NOW,
+  })
+  expect(bay.decisions.map((t) => t.key)).toEqual(['permission:comment'])
+  expect(bay.external.map((t) => t.key)).toEqual(['permission:setup'])
+  expect(bay.external[0].reason).toContain('allow on homelab')
+  // The same proposal held here is this operator's to confirm.
+  const own = attention({ permissions: [{ ...held('setup', 'repo_setup_propose'), node_id: 'self' }], nodes: [node()], now: NOW })
+  expect(own.decisions).toHaveLength(1)
+})
+
 test('requests are answered before reviews, oldest first within a kind', () => {
   const bay = attention({
     reviews: [review({ id: 'r1' })],

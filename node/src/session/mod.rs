@@ -2903,7 +2903,17 @@ impl Manager {
             .store
             .get_permission(id)?
             .ok_or(SessionError::NotFound)?;
-        let session_id = perm.session_id.ok_or(SessionError::NotFound)?;
+        let Some(session_id) = perm.session_id else {
+            // A peer's approval card with no session behind it: the peer
+            // holds the approval, decides it and runs it.
+            if perm.node_id != self.node_id {
+                return self
+                    .forward(&perm.node_id, answer.into_frame(id), false)
+                    .await
+                    .map(|_| ());
+            }
+            return Err(SessionError::NotFound);
+        };
         let (ack, wait) = oneshot::channel();
         match self
             .send(

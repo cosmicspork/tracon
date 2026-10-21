@@ -308,6 +308,22 @@ impl Gate {
     }
 }
 
+/// Whether allowing this approval card is an admin action on the node that
+/// holds it, which that node confirms only with its own passkey: a repository
+/// setup proposal or a Dockerfile trial. A peer showing the card can turn it
+/// down but not allow it.
+fn allowed_only_on_owner(raw_input: Option<&str>) -> bool {
+    let Some(input) = raw_input.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    else {
+        return false;
+    };
+    input["approval_id"].is_string()
+        && matches!(
+            input["tool"].as_str(),
+            Some(crate::mcp::setup::PROPOSE | crate::mcp::setup::TRY)
+        )
+}
+
 pub struct Notifier {
     store: Arc<Store>,
     cfg: Arc<Config>,
@@ -429,7 +445,13 @@ impl Notifier {
                     (channel, title, "/".to_string())
                 }
             };
-            let path = match self.store.get_approval(&p.id) {
+            let held_here = self.store.get_approval(&p.id);
+            // A peer's card that only its owner can allow is left off the
+            // count here, so it is not worth a buzz here either.
+            if matches!(held_here, Ok(None)) && allowed_only_on_owner(p.raw_input.as_deref()) {
+                continue;
+            }
+            let path = match held_here {
                 Ok(Some(a))
                     if !crate::mcp::schema::presentation(&a.tool)
                         .prose_fields
@@ -963,6 +985,20 @@ mod tests {
         // Seven sessions have no one shell route between them, so the summary
         // lands on the queue rather than guessing one.
         assert_eq!(out[0].path, "/");
+    }
+
+    #[test]
+    fn only_a_setup_card_is_left_for_its_owner_to_allow() {
+        let card =
+            |tool: &str| json!({"tool": tool, "arguments": {}, "approval_id": "a1"}).to_string();
+        assert!(allowed_only_on_owner(Some(&card("repo_setup_propose"))));
+        assert!(allowed_only_on_owner(Some(&card("repo_setup_try"))));
+        assert!(!allowed_only_on_owner(Some(&card("pr_comment"))));
+        // Saving a host to the repository is a step-up, but allowing it once is not.
+        assert!(!allowed_only_on_owner(Some(&card("request_egress"))));
+        assert!(!allowed_only_on_owner(Some(r#"{"tool":"repo_setup_try"}"#)));
+        assert!(!allowed_only_on_owner(Some("not json")));
+        assert!(!allowed_only_on_owner(None));
     }
 
     #[test]

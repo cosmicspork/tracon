@@ -11,8 +11,8 @@
 // each carrying the reason it is not yours, so a thread is never lost to make
 // a number look better.
 
-import { unreachableReason } from './nodes'
-import { isApproval } from './permission'
+import { nodeLabel, unreachableReason } from './nodes'
+import { isApproval, withheldOptions } from './permission'
 import type {
   MeshState,
   NodeInfo,
@@ -91,14 +91,24 @@ const YOURS: Verdict = { lane: 'decision', reason: null }
 
 /**
  * A permission request. `held` is the reason its owning node cannot be
- * reached, or null.
+ * reached, or null. `confirmedOn` names the peer that holds it when allowing
+ * it is an admin action that peer confirms with its own passkey: it can be
+ * turned down here, but not allowed, so it is not counted as yours.
  *
  * Expiry is a denial, not a deferral: once a request lapses the node rejects
  * it once on the operator's behalf, so it stops being a decision at the
  * deadline rather than when the sweep gets to it.
  */
-export function permissionVerdict(p: Permission, held: string | null, now: number): Verdict {
+export function permissionVerdict(
+  p: Permission,
+  held: string | null,
+  now: number,
+  confirmedOn: string | null = null,
+): Verdict {
   if (held !== null) return { lane: 'external', reason: `${held} · cannot be decided until it returns` }
+  if (confirmedOn !== null && p.expires_ms > now) {
+    return { lane: 'external', reason: `allow on ${confirmedOn} · that needs its passkey; rejecting it works here` }
+  }
   const approval = isApproval(p)
   if (p.expires_ms <= now) {
     return {
@@ -155,13 +165,16 @@ export function attention(input: AttentionInput): Attention {
       ...YOURS,
     })
   }
+  // A peer's card whose allow that peer confirms with its own passkey.
+  const confirmedOn = (p: Permission) =>
+    withheldOptions(nodes, p).includes('allow_once') ? nodeLabel(nodes, p.node_id) : null
   for (const permission of input.permissions ?? []) {
     threads.push({
       key: `permission:${permission.id}`,
       kind: 'permission',
       permission,
       created_ms: permission.created_ms,
-      ...permissionVerdict(permission, held(permission.node_id), now),
+      ...permissionVerdict(permission, held(permission.node_id), now, confirmedOn(permission)),
     })
   }
   for (const review of input.reviews ?? []) {
