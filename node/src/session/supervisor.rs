@@ -137,6 +137,9 @@ pub enum PauseSource {
     Exhausted,
     /// The node woke a session its provider's reset had come round for.
     Wake,
+    /// The session spent its token budget. Held rather than ended, so the
+    /// operator can raise the budget and let the same harness carry on.
+    Budget,
 }
 
 impl PauseSource {
@@ -146,6 +149,7 @@ impl PauseSource {
             Self::Watchdog => "watchdog",
             Self::Exhausted => "exhausted",
             Self::Wake => "wake",
+            Self::Budget => "budget",
         }
     }
 }
@@ -490,9 +494,6 @@ impl Supervisor {
                             if self.watchdog_pause_if_needed().await {
                                 continue;
                             }
-                            if self.check_budget().await {
-                                break;
-                            }
                             // A closed item ends the session whatever it
                             // waits on; a finished phase waits with it.
                             if let Some(reason) = self
@@ -502,6 +503,9 @@ impl Supervisor {
                                 killed_by_us = true;
                                 self.shutdown(reason).await;
                                 break;
+                            }
+                            if self.budget_pause_if_needed().await {
+                                continue;
                             }
                             if self.settle_waits().await {
                                 killed_by_us = true;
@@ -676,7 +680,10 @@ impl Supervisor {
             None,
             json!({ "source": source.as_str(), "reason": reason }),
         );
-        if matches!(source, PauseSource::Watchdog | PauseSource::Exhausted) {
+        if matches!(
+            source,
+            PauseSource::Watchdog | PauseSource::Exhausted | PauseSource::Budget
+        ) {
             let _ = self.store.update_session(
                 &self.session_id,
                 SessionPatch {
@@ -716,6 +723,14 @@ impl Supervisor {
         }
         if self.paused_turn.is_some() {
             return Err("waiting for the paused turn to finish".into());
+        }
+        // Whatever paused it, a session over its budget would only be held
+        // again at the end of its next turn.
+        if row.budget_tokens > 0 && row.tokens_used >= row.budget_tokens {
+            return Err(format!(
+                "the session is at its token budget ({} of {}); raise the budget first",
+                row.tokens_used, row.budget_tokens
+            ));
         }
         self.consecutive_failures = 0;
         // The operator resuming an exhausted session takes it over: the node
@@ -1800,20 +1815,29 @@ impl Supervisor {
         ingest.mark_uncertain(&intent, reason);
     }
 
-    /// Budget is checked at turn end: the harness reports usage per turn, so a
-    /// single long turn can overshoot. Enforced by ending the session.
-    async fn check_budget(&mut self) -> bool {
+    /// Budget is checked at turn end, when the turn's spend is settled, so a
+    /// single long turn can overshoot (the gateway refuses its model calls
+    /// once the open turn's count reaches the budget). Enforced by holding the
+    /// session, not ending it: the harness and its context stay, and raising
+    /// the budget lets the same session carry on.
+    async fn budget_pause_if_needed(&mut self) -> bool {
         let Ok(Some(s)) = self.store.get_session(&self.session_id) else {
             return false;
         };
-        if s.budget_tokens > 0
-            && s.tokens_used >= s.budget_tokens
-            && !SessionState::from_stored(&s.state).is_terminal()
+        let state = SessionState::from_stored(&s.state);
+        if s.budget_tokens <= 0
+            || s.tokens_used < s.budget_tokens
+            || state == SessionState::Paused
+            || state.is_terminal()
         {
-            self.shutdown(EndReason::Budget).await;
-            return true;
+            return false;
         }
-        false
+        let reason = format!(
+            "reached its token budget: {} of {} tokens; raise the budget to carry on",
+            s.tokens_used, s.budget_tokens
+        );
+        let _ = self.pause(PauseSource::Budget, &reason).await;
+        true
     }
     async fn remove_container(&self) {
         // The session's services first: they live in its network namespace,

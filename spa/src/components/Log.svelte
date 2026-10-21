@@ -109,6 +109,10 @@
   function turnEnd(e: Event): string {
     const usage = e.payload.usage as { total_tokens?: number } | undefined
     const total = usage?.total_tokens
+    if (e.payload.stop_reason === 'max_turn_requests') {
+      const spent = total !== undefined ? ` · ${formatTokens(total)} tokens` : ''
+      return `turn stopped at the harness's request limit${spent} · a prompt carries on`
+    }
     return total !== undefined
       ? `turn ended · ${formatTokens(total)} tokens`
       : `turn ended · ${e.payload.stop_reason ?? ''}`

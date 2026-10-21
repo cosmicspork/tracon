@@ -449,6 +449,9 @@ export const api = {
     call<{ queued: boolean; message_id?: string; owner?: string }>('POST', `/api/sessions/${id}/prompt`, { text }),
   pause: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/pause`, { reason }),
   resume: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/resume`, { reason }),
+  /** A session's token budget, 0 for none; one held at its budget carries on. */
+  setBudget: (id: string, budgetTokens: number) =>
+    call<void>('POST', `/api/sessions/${id}/budget`, { budget_tokens: budgetTokens }),
   stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),
   kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   /** Refuse every external harness on a channel until started again. */

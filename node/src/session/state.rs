@@ -140,10 +140,14 @@ pub mod event_kind {
     /// What the session was told at start, so the transcript shows it.
     pub const ORIENTATION: &str = "orientation";
     pub const STATE: &str = "state";
-    /// An operator or a failure watchdog fenced this session before it could
-    /// start another turn. `source` is telemetry only; the state is decisive.
+    /// An operator, a failure watchdog, an exhausted provider or a spent
+    /// budget fenced this session before it could start another turn.
+    /// `source` says which; the state is decisive.
     pub const SESSION_PAUSED: &str = "session_paused";
     pub const SESSION_RESUMED: &str = "session_resumed";
+    /// The operator changed the session's token budget (`from`, `to`, and the
+    /// `tokens_used` it was changed against). `0` is no budget.
+    pub const BUDGET_CHANGED: &str = "budget_changed";
     /// The session's work was published (`url`, `review_id`): the change on
     /// the forge it is now answerable for.
     pub const PUBLISHED: &str = "published";

@@ -785,6 +785,77 @@ async fn events_are_readable_after_a_given_seq() {
     assert_eq!(rest.as_array().unwrap().len(), 2);
 }
 
+/// A budget is the owning node's to change, and an ended session has none
+/// left to change.
+#[tokio::test]
+async fn a_budget_is_not_changed_for_another_nodes_session_or_an_ended_one() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let id = insert_running_session(&h.store, 1000);
+    let mut away = h.store.get_session(&id).unwrap().unwrap();
+    away.id = format!("{id}-away");
+    away.node_id = "n2".into();
+    h.store
+        .put_node(&NodeRow {
+            id: "n2".into(),
+            name: "peer".into(),
+            state: "ready".into(),
+            failed_check: None,
+            failed_detail: None,
+            harness_id: "fake".into(),
+            harness_pinned: "1.0.0".into(),
+            harness_found: Some("1.0.0".into()),
+            models_json: None,
+            checked_at_ms: Some(now_ms()),
+            is_self: 0,
+            x25519_pub: None,
+            last_seen_ms: None,
+            reachable: 1,
+            providers_json: None,
+            app_version: None,
+            wire_contract: None,
+            policy_identity: None,
+            policy_sha256: None,
+            policy_receipt_v1: None,
+            harnesses_json: None,
+        })
+        .unwrap();
+    h.store.insert_session(&away).unwrap();
+    let (status, body) = h
+        .call(
+            "POST",
+            &format!("/api/sessions/{}/budget", away.id),
+            Some(json!({ "budget_tokens": 5_000 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("on the node that runs it"));
+
+    h.store
+        .update_session(&id, tracon::store::SessionPatch::state("closed"))
+        .unwrap();
+    let (status, body) = h
+        .call(
+            "POST",
+            &format!("/api/sessions/{id}/budget"),
+            Some(json!({ "budget_tokens": 5_000 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        h.store.get_session(&id).unwrap().unwrap().budget_tokens,
+        1000
+    );
+    assert!(h
+        .store
+        .last_event_payload(&id, "budget_changed")
+        .unwrap()
+        .is_none());
+}
+
 fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
     insert_session_for_item(store, budget, None)
 }
@@ -2097,11 +2168,24 @@ async fn a_same_named_tool_on_another_server_is_still_repetition() {
     );
 }
 
+/// A session that spends its budget is held at the end of the turn that
+/// spent it, not ended: its harness stays up, and nothing starts another turn
+/// or resumes it until the budget is raised.
 #[tokio::test]
-async fn a_session_over_budget_is_killed_at_turn_end() {
+async fn a_session_over_budget_is_held_at_turn_end() {
     state::isolate();
     // The fake handle reports 1500 tokens for the turn, over the 1000 budget.
-    let rig = Rig::start(1000, Duration::from_secs(60)).await;
+    let killed = Arc::new(Mutex::new(false));
+    let rig = Rig::start_with_handle(
+        1000,
+        Duration::from_secs(60),
+        Arc::new(FakeHandle {
+            prompts: Arc::new(Mutex::new(Vec::new())),
+            tokens: Arc::new(Mutex::new(1500)),
+            killed: killed.clone(),
+        }),
+    )
+    .await;
     let (ack, done) = oneshot::channel();
     rig.commands
         .send(Command::Prompt {
@@ -2112,11 +2196,53 @@ async fn a_session_over_budget_is_killed_at_turn_end() {
         .unwrap();
     done.await.unwrap().unwrap();
 
-    assert!(rig.await_state("killed_budget").await);
+    assert!(rig.await_state("paused").await, "{:?}", rig.kinds());
     let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
     assert_eq!(s.tokens_used, 1500);
-    assert_eq!(s.end_reason.as_deref(), Some("budget"));
+    assert_eq!(s.end_reason, None);
     assert_eq!(s.turn_active, 0);
+    assert!(
+        s.last_error.as_deref().unwrap().contains("1500 of 1000"),
+        "{:?}",
+        s.last_error
+    );
+    let paused = rig
+        .store
+        .last_event_payload(&rig.session_id, "session_paused")
+        .unwrap()
+        .unwrap();
+    assert_eq!(paused["source"], "budget");
+    assert!(!*killed.lock().await, "the harness is kept");
+
+    let (ack, done) = oneshot::channel();
+    rig.commands
+        .send(Command::Prompt {
+            text: "and another".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    assert_eq!(done.await.unwrap(), Err("session is over budget".into()));
+
+    let (ack, done) = oneshot::channel();
+    rig.commands
+        .send(Command::Resume {
+            source: tracon::session::supervisor::PauseSource::Operator,
+            reason: "carry on".into(),
+            ack,
+        })
+        .await
+        .unwrap();
+    let refused = done.await.unwrap().unwrap_err();
+    assert!(refused.contains("raise the budget first"), "{refused}");
+    assert_eq!(
+        rig.store
+            .get_session(&rig.session_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "paused"
+    );
 }
 
 // ---- two usage sources, reconciled at turn end ----------------------------
@@ -2278,10 +2404,15 @@ async fn a_ceiling_bites_from_the_gateway_count_even_when_the_harness_says_nothi
     rig.gateway_counted(6_000, 500);
     rig.close_turn(3).await;
 
-    assert!(rig.await_state("killed_budget").await);
+    assert!(rig.await_state("paused").await);
     let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
     assert_eq!(s.tokens_used, 6_500);
-    assert_eq!(s.end_reason.as_deref(), Some("budget"));
+    let paused = rig
+        .store
+        .last_event_payload(&rig.session_id, "session_paused")
+        .unwrap()
+        .unwrap();
+    assert_eq!(paused["source"], "budget");
 }
 
 #[tokio::test]
@@ -5211,6 +5342,129 @@ async fn the_node_wakes_an_exhausted_session_or_carries_it_on() {
     assert_eq!(ex.next_wake_ms, None);
     tracon::session::materialize::remove(&row.id);
     tracon::session::materialize::remove(&next);
+}
+
+/// A session held at its budget, over the API: resuming it as it is and
+/// raising the budget to what it has already spent are both refused; raising
+/// it past that records the change and the same session carries on.
+#[tokio::test]
+async fn raising_the_budget_lets_a_session_held_at_it_carry_on() {
+    let Orientation {
+        store,
+        manager,
+        adapter,
+        cfg,
+        tools,
+        row,
+        ..
+    } = orientation_setup("budget-raise", None, 0, false, &[], Phase::Plan).await;
+    let id = row.id.clone();
+    let session = || store.get_session(&id).unwrap().unwrap();
+    let settled = || async {
+        for _ in 0..300 {
+            let s = session();
+            if s.state != "starting" && s.turn_active == 0 {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{id} never went idle: {:?}", session());
+    };
+    assert_eq!(settled().await.state, "running");
+    let operator = tracon::http::router(AppState {
+        manager: manager.clone(),
+        cfg,
+        adapter: adapter.clone(),
+        node_id: "n1".into(),
+        tools,
+        mesh: None,
+        auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
+    });
+    let call = |method: &'static str, path: &'static str, body: Value| {
+        let operator = operator.clone();
+        let uri = format!("/api/sessions/{id}/{path}");
+        async move { support::http::call(&operator, method, &uri, Some(body)).await }
+    };
+
+    // Raising a running session's budget only raises it.
+    let (status, body) = call("POST", "budget", json!({ "budget_tokens": 1200 })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(session().budget_tokens, 1200);
+    assert_eq!(session().state, "running");
+
+    // One turn spends past it, and the session is held.
+    *adapter.tokens.lock().await = 2_000;
+    let (status, body) = call("POST", "prompt", json!({ "text": "spend it" })).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let held = settled().await;
+    assert_eq!(held.state, "paused", "{held:?}");
+    assert!(held.tokens_used >= 1200, "{held:?}");
+    assert_eq!(
+        store
+            .last_event_payload(&id, "session_paused")
+            .unwrap()
+            .unwrap()["source"],
+        "budget"
+    );
+
+    let (status, body) = call("POST", "resume", json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let refused = body["error"]["message"].as_str().unwrap();
+    assert!(refused.contains("raise the budget first"), "{refused}");
+    let (status, body) = call("POST", "prompt", json!({ "text": "go on" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("token budget"),
+        "{body}"
+    );
+
+    // Not more than it has spent.
+    let used = held.tokens_used;
+    let (status, body) = call("POST", "budget", json!({ "budget_tokens": used })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already spent"),
+        "{body}"
+    );
+    let (status, body) = call("POST", "budget", json!({ "budget_tokens": -1 })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(session().budget_tokens, 1200);
+    assert_eq!(session().state, "paused");
+
+    *adapter.tokens.lock().await = 100;
+    let raised = used + 5_000;
+    let (status, body) = call("POST", "budget", json!({ "budget_tokens": raised })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let s = session();
+    assert_eq!(s.state, "running");
+    assert_eq!(s.budget_tokens, raised);
+    let changed = store
+        .last_event_payload(&id, "budget_changed")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        changed,
+        json!({ "from": 1200, "to": raised, "tokens_used": used })
+    );
+    let resumed = store
+        .last_event_payload(&id, "session_resumed")
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed["source"], "operator");
+    assert_eq!(resumed["reason"], "operator raised the budget");
+
+    let (status, body) = call("POST", "prompt", json!({ "text": "carry on" })).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let after = settled().await;
+    assert_eq!(after.state, "running", "{after:?}");
+    assert_eq!(after.tokens_used, used + 100);
 }
 
 /// A run names its own policy over the channel's; a fallback policy without

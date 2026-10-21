@@ -106,9 +106,10 @@ banner saying what still works. Restored: "reconnected, N items delivered", brie
 **Session** — starting, running (streaming, input enabled, meter moving), waiting on
 you (rises to the queue top, request inline above the input), waiting on a check
 (the command and elapsed time, input disabled with that reason, accent not amber —
-it waits on the node, not on you), over budget (killed with the number; resume is a
-new session, not a button), ended (labelled by what it produced: planned, reviewed,
-item closed), failed (the last harness error, frozen).
+it waits on the node, not on you), held at budget (paused with the number and a box to
+raise it; Resume alone is refused, and raising it resumes the same session), ended
+(labelled by what it produced: planned, reviewed, item closed), failed (the last
+harness error, frozen).
 
 **Review** — new, claimed (timer running), stale ("changed since submit" with the
 files; approve disabled; resubmit is the only path), over the size cap (approve

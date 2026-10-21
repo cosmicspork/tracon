@@ -39,7 +39,8 @@ const MAX_INSTRUCTIONS: usize = 32 * 1024;
 
 pub struct Settings {
     pub client: Client,
-    pub max_turns: u32,
+    /// Model requests one prompt may make; `None` is no limit.
+    pub max_turns: Option<u32>,
     /// Appended to the orientation: the node's operator notes and
     /// customization, from `--system-prompt-file`.
     pub system_extra: Option<String>,

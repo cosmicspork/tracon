@@ -318,8 +318,11 @@ phase bindings are presets, not requirements, supplying a model and budget only 
 the session does not name its own; if neither does, the node falls back to a model
 already in its catalogue and records which source actually won as the session's
 `model_source`. **Adjust** opens repository, phase, model, and node as fields when a
-session needs something other than the usual. The session is killed at its budget,
-checked at each turn's end; a channel at its daily ceiling starts no session at all.
+session needs something other than the usual. A session that spends its budget is
+held, not ended: it is paused at the end of the turn that spent it, with its harness and
+context kept, until the operator raises the budget (on its page, or
+`POST /api/sessions/{id}/budget`) and it carries on. A channel at its daily ceiling
+starts no session at all.
 
 **A work item may carry a brief, and most never will.** It is one document —
 `brief-<item>` on the Documents screen, linked from the item — saying who the work

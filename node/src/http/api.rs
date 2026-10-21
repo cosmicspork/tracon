@@ -69,6 +69,7 @@ impl From<SessionError> for ApiError {
             // A missing model is a malformed request, not a conflict.
             SessionError::ModelRequired
             | SessionError::BadBudget
+            | SessionError::BudgetSpent(_)
             | SessionError::UnknownChannel(_)
             | SessionError::WorkItemRequired
             | SessionError::NotReady(_)
@@ -1699,6 +1700,22 @@ pub async fn resume(
                 .unwrap_or_else(|| "operator resumed the session".into()),
         )
         .await?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub struct BudgetBody {
+    budget_tokens: i64,
+}
+
+/// `POST /api/sessions/{id}/budget`. Raises (or clears, with `0`) a
+/// session's token budget; one held at its budget carries on.
+pub async fn set_budget(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<BudgetBody>,
+) -> ApiResult<StatusCode> {
+    s.manager.set_budget(&id, body.budget_tokens).await?;
     Ok(StatusCode::OK)
 }
 

@@ -850,6 +850,80 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
     assert!(work["ceiling"]["usage_today"].as_i64().unwrap() >= 100);
 }
 
+#[tokio::test]
+async fn a_session_over_budget_is_refused_mid_turn() {
+    state::isolate();
+    let h = harness(STORE, LOOPBACK).await;
+    h.store.ensure_peer_node("n1").unwrap();
+    // 600 of a 1000-token budget already charged by settled turns.
+    let sid = "s-budget";
+    h.store
+        .conn()
+        .execute(
+            "INSERT INTO session (id, node_id, channel, repo_path, branch, harness_id, harness_version, model,
+                budget_tokens, tokens_used, state, turn_active, created_ms, updated_ms)
+             VALUES (?1, 'n1', 'work', '/r', 'b', 'fake', '1', 'm', 1000, 600, 'running', 1, 1, 1)",
+            [sid],
+        )
+        .unwrap();
+    h.store.begin_turn(sid).unwrap();
+    let token = h.manager.register_tool_token_for_test(sid, "work").await;
+    let send = || {
+        call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages",
+            &token,
+            json!({"model": "claude-x", "messages": []}),
+        )
+    };
+    let (status, _, _) = send().await;
+    assert_eq!(status, StatusCode::OK);
+    // The open turn spends the rest; the supervisor has not charged it yet.
+    let usage = |input: i64| tracon::store::UsageRow {
+        channel: "work".into(),
+        node_id: "n1".into(),
+        session_id: Some(sid.into()),
+        provider: "stub".into(),
+        model: None,
+        at_ms: tracon::store::now_ms(),
+        input_tokens: input,
+        output_tokens: 0,
+        requests: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
+    h.store.record_usage(&usage(400)).unwrap();
+    assert_eq!(h.store.get_session(sid).unwrap().unwrap().tokens_used, 600);
+    let (status, _, body) = send().await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(body.contains("over its token budget"), "{body}");
+    let forwarded = h.seen.requests.lock().unwrap().len();
+    assert_eq!(forwarded, 1, "nothing forwarded over budget");
+    let refused: Vec<_> = h
+        .store
+        .events_after(sid, 0, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "gateway_refused")
+        .collect();
+    assert_eq!(refused.len(), 1);
+
+    // Once the turn settles its spend is in `tokens_used`, not counted twice:
+    // a raised budget lets the next turn through.
+    tracon::metrics::settle_turn(&h.store, sid, Some(400), None);
+    h.store
+        .conn()
+        .execute(
+            "UPDATE session SET tokens_used = 1000, budget_tokens = 1500 WHERE id = ?1",
+            [sid],
+        )
+        .unwrap();
+    h.store.begin_turn(sid).unwrap();
+    let (status, _, body) = send().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 /// Finding 10, from the gateway's side. A provider that answers without
 /// reporting usage leaves the count at zero — there is nothing on the wire to
 /// count and no estimator anywhere — but the requests are recorded beside it,

@@ -664,6 +664,15 @@ pub async fn handle(
             );
         }
     }
+    // The session's budget, here as well as at turn end: the supervisor
+    // charges a turn only when it settles, so a turn that never ends on its
+    // own would otherwise spend past its budget for as long as it runs.
+    if let Some(sid) = &session_id {
+        if let Some(reason) = over_budget(&s, sid) {
+            note_refusal(&s, sid, &provider, &method, &reason);
+            return refuse(StatusCode::TOO_MANY_REQUESTS, &reason);
+        }
+    }
     let injection = match decide(&s, &provider, &p, channel.as_deref()) {
         Ok(i) => i,
         Err(reason) => {
@@ -822,6 +831,24 @@ pub async fn handle(
     };
     out.body(Body::from_stream(counted))
         .unwrap_or_else(|_| refuse(StatusCode::BAD_GATEWAY, "bad upstream response"))
+}
+
+/// Why the session may not spend more, if it may not: what its settled turns
+/// were charged plus what the gateway has counted for the open one has
+/// reached its budget. A session with no budget is never refused here.
+fn over_budget(s: &AppState, session_id: &str) -> Option<String> {
+    let store = s.manager.store();
+    let row = store.get_session(session_id).ok().flatten()?;
+    if row.budget_tokens <= 0 {
+        return None;
+    }
+    let spent = row.tokens_used + store.open_turn_spend(session_id).unwrap_or(0);
+    (spent >= row.budget_tokens).then(|| {
+        format!(
+            "session is over its token budget: {spent} of {} tokens spent",
+            row.budget_tokens
+        )
+    })
 }
 
 /// Tell the session — and so the operator reading its log — that a call was
