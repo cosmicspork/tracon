@@ -1221,6 +1221,7 @@ pub fn spec() -> LaunchSpec {
         env: Vec::new(),
         system_prompt_file: None,
         cursor: None,
+        resume: None,
     }
 }
 

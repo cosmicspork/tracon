@@ -2611,25 +2611,30 @@ impl Manager {
             )
         });
 
+        let launch_spec = LaunchSpec {
+            cursor: ingest
+                .clone()
+                .map(|i| i as Arc<dyn crate::adapter::DurableCursor>),
+            cwd_in_runner: "/work".into(),
+            model: spec.model.clone(),
+            container_name: container.clone(),
+            harness_home: self.backend.harness_home(),
+            mcp_servers,
+            tools: self.cfg.harness.tools.clone(),
+            env: harness_env,
+            secret_env: harness_secret_env,
+            system_prompt_file: Some(scratch.orientation_path.clone()),
+            resume: None,
+        };
+        // Kept for a harness that can be started again on this session when
+        // its process dies.
+        let relaunch = adapter.restorable().then(|| supervisor::Relaunch {
+            adapter: adapter.clone(),
+            spec: launch_spec.clone(),
+        });
         let launched = tokio::time::timeout(
             STARTUP_TIMEOUT,
-            adapter.launch(
-                runner.as_ref(),
-                LaunchSpec {
-                    cursor: ingest
-                        .clone()
-                        .map(|i| i as Arc<dyn crate::adapter::DurableCursor>),
-                    cwd_in_runner: "/work".into(),
-                    model: spec.model.clone(),
-                    container_name: container.clone(),
-                    harness_home: self.backend.harness_home(),
-                    mcp_servers,
-                    tools: self.cfg.harness.tools.clone(),
-                    env: harness_env,
-                    secret_env: harness_secret_env,
-                    system_prompt_file: Some(scratch.orientation_path.clone()),
-                },
-            ),
+            adapter.launch(runner.as_ref(), launch_spec),
         )
         .await;
         let (handle, events) = match launched {
@@ -2742,6 +2747,10 @@ impl Manager {
         );
         let sup = match ingest {
             Some(ingest) => sup.with_ingest(ingest),
+            None => sup,
+        };
+        let sup = match relaunch {
+            Some(relaunch) => sup.with_relaunch(relaunch),
             None => sup,
         }
         .with_checks(environment.checks)

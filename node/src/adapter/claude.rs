@@ -1026,6 +1026,7 @@ mod tests {
             )],
             system_prompt_file: Some("/root/.claude/orientation.md".into()),
             cursor: None,
+            resume: None,
         }
     }
 

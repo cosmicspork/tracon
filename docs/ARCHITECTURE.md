@@ -507,6 +507,18 @@ where a node turns it on (`[harness] experimental = ["native"]`), because every 
 node runs needs its image before the boundary passes, and one still being proven must not
 be able to stop the supported ones. See `agent/README.md`.
 
+It is also the one harness whose session outlives its process. The agent journals each
+session ahead of every step, so when its process dies the supervisor starts it again on
+the same session scratch with `session/load` (`HarnessAdapter::restorable`,
+`LaunchSpec::resume`): open permissions expire, a turn it died in is settled as
+interrupted at what the gateway counted, and the node sends one prompt of its own
+(`user_prompt` with `origin: node`) to carry the work on. The agent answers each call
+it was running with "outcome unknown" and each it had not started with "not run", so
+nothing runs twice unasked. Each restart is recorded as `harness_restarted`; after two
+in one piece of work, or three in a session, the next exit ends the session as
+`harness_exit`, as an exit of any other harness does. A node restart still ends the
+session (`node_restart`).
+
 ### The OpenCode boundary
 
 OpenCode is a *server*, not a pipe, and that changes where the seam is
@@ -1937,7 +1949,13 @@ a flag on the turn, and a figure the channel's ceiling reports beside the day's
 counted spend, because a meter that has silently stopped is worse than one reading high.
 A turn the session ends under — stopped, killed, its harness gone — will never be
 reported by the harness, so it is settled `interrupted` from the gateway's count
-alone; it used to stay open and cost nothing.
+alone; it used to stay open and cost nothing. A harness that reports each upstream
+request (the native one) is also matched request by request, by the provider's
+response id, which the gateway records beside its count: a turn whose totals agree but
+that has a request one side saw alone, or the two counted differently, is a mismatch
+whose event names those requests. The id ties a request to the turn it was made in,
+since the gateway stamps a call when its stream ends, which can be after the next
+turn opened.
 
 Anything checkable deterministically is checked deterministically, between phases,
 in a container with no credentials. Model supervision is reserved for judgment with

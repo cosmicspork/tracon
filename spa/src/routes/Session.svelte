@@ -17,6 +17,7 @@
   import { exhaustionNote } from '../lib/exhaustion'
   import { budgetProblem, heldAtBudget, suggestedBudget } from '../lib/budget'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
+  import { usageNote as usageNoteFor } from '../lib/usage'
   import { repetitionHint } from '../lib/log'
   import { composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
@@ -168,30 +169,7 @@
     }
   }
 
-  // Two sources, one ledger: the gateway's on-the-wire count is what the
-  // budget was charged, the harness's own number is shown beside it, and a
-  // turn that disagreed or could not be counted says so rather than reading
-  // as an ordinary one.
-  const usageNote = $derived.by(() => {
-    if (!usage || usage.state === null) return null
-    // Cache reads are the model rereading context it already paid for: shown,
-    // so a long session's context is visible, and never part of the charge.
-    const cached = usage.cache_read_tokens ? ` · ${formatTokens(usage.cache_read_tokens)} cached, not charged` : ''
-    const both = `gw ${formatTokens(usage.gateway_tokens)} · harness ${formatTokens(usage.harness_tokens)}${cached}`
-    if (usage.unmetered_turns > 0)
-      return {
-        warn: true,
-        text: `${both} · ${usage.unmetered_turns} unmetered`,
-        title: `${usage.unmetered_turns} turn(s) spent tokens this node could not count: the provider returned no usage. Not zero — unknown.`,
-      }
-    if (usage.mismatched_turns > 0)
-      return {
-        warn: true,
-        text: `${both} · ${usage.mismatched_turns} mismatched`,
-        title: 'The gateway and the harness disagreed on a turn. The budget was charged the gateway count.',
-      }
-    return { warn: false, text: `${both} · reconciled`, title: 'The two usage sources agree within tolerance.' }
-  })
+  const usageNote = $derived(usageNoteFor(usage))
 
   let controlling = $state(false)
   let confirmingKill = $state(false)

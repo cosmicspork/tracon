@@ -7,13 +7,16 @@
 //! harness in a providers file staged per session; the key itself is in the
 //! session's secret environment.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
-    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport,
+    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport, Resume,
     TurnResult,
 };
 use crate::adapter::types::{self, methods};
@@ -185,6 +188,12 @@ impl HarnessAdapter for NativeAdapter {
         vec![Self::CONFIG_DIR.into()]
     }
 
+    /// The agent journals each session, so a new process carries it on with
+    /// `session/load`.
+    fn restorable(&self) -> bool {
+        true
+    }
+
     /// The repository instruction files it reads into its prompt are the
     /// repository's to have; nothing in a workspace configures this harness.
     fn refused_workspace_entries(&self) -> &'static [&'static str] {
@@ -234,7 +243,12 @@ impl HarnessAdapter for NativeAdapter {
         let child = runner.spawn(Self::cmd(&spec)).await?;
         let session = match tokio::time::timeout(
             START_TIMEOUT,
-            Session::start(child, &spec.cwd_in_runner, spec.mcp_servers.clone()),
+            Session::start(
+                child,
+                &spec.cwd_in_runner,
+                spec.mcp_servers.clone(),
+                spec.resume.as_ref(),
+            ),
         )
         .await
         {
@@ -263,6 +277,7 @@ impl HarnessAdapter for NativeAdapter {
             session_id: session.session_id.clone(),
             barrier_tx,
             compat: session.compat(&self.pinned),
+            last_seq: session.last_seq.clone(),
         };
         tokio::spawn(session.pump(event_tx, barrier_rx));
         Ok((Box::new(handle), event_rx))
@@ -280,6 +295,9 @@ struct Session {
     agent_version: Option<String>,
     agent_name: Option<String>,
     protocol_version: u32,
+    /// The highest update sequence taken: an update at or below it was taken
+    /// already, from this process or the one it replaced.
+    last_seq: Arc<AtomicU64>,
 }
 
 /// Await a handshake request while draining inbound traffic into `buffered`,
@@ -328,6 +346,7 @@ impl Session {
         child: Spawned,
         cwd: &str,
         mcp_servers: Vec<Value>,
+        resume: Option<&Resume>,
     ) -> Result<Self, AdapterError> {
         let (peer, mut incoming, read) = Peer::new(child.stdin, child.stdout);
         let mut startup = StartupTasks {
@@ -359,28 +378,57 @@ impl Session {
                 supported: NativeAdapter::PROTOCOL.versions(),
             });
         }
-        let new: types::NewSessionResult = drain_until(
-            &mut incoming,
-            &mut buffered,
-            peer.request(
-                methods::SESSION_NEW,
-                &types::NewSessionParams {
-                    cwd: cwd.to_string(),
-                    mcp_servers,
-                },
-            ),
-        )
-        .await
-        .map_err(rpc_error)?;
+        let session_id = match resume {
+            Some(resume) => {
+                if init.extra["agentCapabilities"]["loadSession"] != true {
+                    return Err(AdapterError::Protocol(
+                        "tracon-agent cannot load a session, so this one cannot be carried on"
+                            .into(),
+                    ));
+                }
+                let _: Value = drain_until(
+                    &mut incoming,
+                    &mut buffered,
+                    peer.request(
+                        methods::SESSION_LOAD,
+                        &types::LoadSessionParams {
+                            session_id: resume.harness_session_id.clone(),
+                            cwd: cwd.to_string(),
+                            mcp_servers,
+                        },
+                    ),
+                )
+                .await
+                .map_err(rpc_error)?;
+                resume.harness_session_id.clone()
+            }
+            None => {
+                let new: types::NewSessionResult = drain_until(
+                    &mut incoming,
+                    &mut buffered,
+                    peer.request(
+                        methods::SESSION_NEW,
+                        &types::NewSessionParams {
+                            cwd: cwd.to_string(),
+                            mcp_servers,
+                        },
+                    ),
+                )
+                .await
+                .map_err(rpc_error)?;
+                new.session_id
+            }
+        };
         startup.keep();
         Ok(Self {
             peer,
             incoming,
             buffered,
-            session_id: new.session_id,
+            session_id,
             agent_version,
             agent_name,
             protocol_version: init.protocol_version,
+            last_seq: Arc::new(AtomicU64::new(resume.map_or(0, |r| r.last_seq))),
         })
     }
 
@@ -406,7 +454,7 @@ impl Session {
         mut barriers: mpsc::Receiver<oneshot::Sender<()>>,
     ) {
         for msg in std::mem::take(&mut self.buffered) {
-            if !process(msg, &tx).await {
+            if !process(msg, &tx, &self.last_seq).await {
                 return;
             }
         }
@@ -414,7 +462,7 @@ impl Session {
             tokio::select! {
                 msg = self.incoming.recv() => match msg {
                     Some(msg) => {
-                        if !process(msg, &tx).await {
+                        if !process(msg, &tx, &self.last_seq).await {
                             return;
                         }
                     }
@@ -422,7 +470,7 @@ impl Session {
                 },
                 barrier = barriers.recv() => if let Some(done) = barrier {
                     while let Ok(msg) = self.incoming.try_recv() {
-                        if !process(msg, &tx).await {
+                        if !process(msg, &tx, &self.last_seq).await {
                             return;
                         }
                     }
@@ -439,7 +487,7 @@ fn rpc_error(e: acp::rpc::RpcClientError) -> AdapterError {
 }
 
 /// Handle one inbound message. False when the event channel closed.
-async fn process(msg: Incoming, tx: &mpsc::Sender<HarnessEvent>) -> bool {
+async fn process(msg: Incoming, tx: &mpsc::Sender<HarnessEvent>, last_seq: &AtomicU64) -> bool {
     match msg {
         Incoming::Notification { method, params } if method == methods::SESSION_UPDATE => {
             let p: types::SessionUpdateParams = match serde_json::from_value(params) {
@@ -449,8 +497,23 @@ async fn process(msg: Incoming, tx: &mpsc::Sender<HarnessEvent>) -> bool {
                     return true;
                 }
             };
-            match update_to_event(p.update) {
-                Some(ev) => tx.send(ev).await.is_ok(),
+            if let Some(seq) = p.seq {
+                if seq <= last_seq.load(Ordering::SeqCst) {
+                    return true;
+                }
+                last_seq.store(seq, Ordering::SeqCst);
+            }
+            let request = match &p.update {
+                types::SessionUpdate::UsageUpdate(u) => u.request.clone(),
+                _ => None,
+            };
+            if let Some(ev) = update_to_event(p.update) {
+                if tx.send(ev).await.is_err() {
+                    return false;
+                }
+            }
+            match request {
+                Some(r) => tx.send(HarnessEvent::RequestUsage(r)).await.is_ok(),
                 None => true,
             }
         }
@@ -577,6 +640,7 @@ struct NativeHandle {
     session_id: String,
     barrier_tx: mpsc::Sender<oneshot::Sender<()>>,
     compat: HarnessCompat,
+    last_seq: Arc<AtomicU64>,
 }
 
 #[async_trait]
@@ -587,6 +651,13 @@ impl HarnessHandle for NativeHandle {
 
     fn compat(&self) -> HarnessCompat {
         self.compat.clone()
+    }
+
+    fn resume_point(&self) -> Option<Resume> {
+        Some(Resume {
+            harness_session_id: self.session_id.clone(),
+            last_seq: self.last_seq.load(Ordering::SeqCst),
+        })
     }
 
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
@@ -777,6 +848,7 @@ mod tests {
             secret_env: Default::default(),
             system_prompt_file: Some("/root/.tracon/orientation.md".into()),
             cursor: None,
+            resume: None,
         };
         let cmd = NativeAdapter::cmd(&spec);
         assert_eq!(

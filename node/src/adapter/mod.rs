@@ -384,6 +384,9 @@ pub enum HarnessEvent {
         used: Option<u64>,
         cost_usd: Option<f64>,
     },
+    /// One upstream model request as the harness counted it, for matching
+    /// against the gateway's row of the same request.
+    RequestUsage(crate::adapter::types::RequestUsage),
     Permission {
         request: PermissionRequest,
         reply: oneshot::Sender<PermissionReply>,
@@ -405,6 +408,7 @@ pub struct TurnResult {
     pub usage: crate::adapter::types::Usage,
 }
 
+#[derive(Clone)]
 pub struct LaunchSpec {
     pub cwd_in_runner: String,
     pub model: String,
@@ -435,6 +439,18 @@ pub struct LaunchSpec {
     /// a durable, sequenced stream is given the node's own cursor so a restart
     /// resumes where the store says rather than where the process forgot.
     pub cursor: Option<Arc<dyn DurableCursor>>,
+    /// Carry on this harness session instead of starting one: set when the
+    /// node relaunches a harness whose process died (`restorable`).
+    pub resume: Option<Resume>,
+}
+
+/// Where a relaunched harness picks its session up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resume {
+    pub harness_session_id: String,
+    /// The last update sequence the node received, so nothing at or below it
+    /// is taken twice.
+    pub last_seq: u64,
 }
 
 /// The harness's own HTTP surface, narrowed to what reconciliation needs: ask
@@ -585,6 +601,13 @@ pub trait HarnessAdapter: Send + Sync {
         &[]
     }
 
+    /// Whether a session survives its harness process: a new process,
+    /// launched with `LaunchSpec::resume`, carries the session on from where
+    /// the last left it. The supervisor relaunches only a harness that says so.
+    fn restorable(&self) -> bool {
+        false
+    }
+
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError>;
     /// The models this node can run through the harness: probed from it where
     /// it keeps a catalogue, declared by the node where it does not. The
@@ -631,6 +654,11 @@ pub trait HarnessHandle: Send + Sync {
     /// What the handshake that produced this handle reported. Available only
     /// once the handshake succeeded, which is the only time it is true.
     fn compat(&self) -> HarnessCompat;
+    /// Where a new process would carry this session on from, for a harness
+    /// that is `restorable`.
+    fn resume_point(&self) -> Option<Resume> {
+        None
+    }
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError>;
     async fn cancel(&self) -> Result<(), AdapterError>;
     /// Establish an adapter-specific ordering barrier after a turn response.

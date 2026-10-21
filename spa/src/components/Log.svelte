@@ -140,6 +140,9 @@
       {#if e.kind === 'user_prompt' && queuedCount(e) > 0}
         <!-- The text is on the queued lines above, each saying where it went. -->
         <div class="sys">{queuedCount(e) === 1 ? 'your queued message' : `your ${queuedCount(e)} queued messages`} sent as the next prompt</div>
+      {:else if e.kind === 'user_prompt' && e.payload.origin === 'node'}
+        <!-- Not the operator's words: the node carrying a cut turn on. -->
+        <div class="sys">the node carried the turn on after the restart: {text(e)}</div>
       {:else if e.kind === 'user_prompt'}
         <div class="you"><span class="prompt">›</span><div class="md">{@html renderMessage(text(e))}</div></div>
       {:else if e.kind === 'prompt_queued'}

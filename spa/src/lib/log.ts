@@ -410,6 +410,21 @@ export function eventLine(e: Event): EventLine | null {
       const who = str(p.source) === 'wake' ? 'resumed by the node' : 'resumed by the operator'
       return line('mark', [who, ownReason(p.reason)])
     }
+    case 'harness_restarted': {
+      const code = num(p.exit_code)
+      const exited = code === null ? 'the harness stopped' : `the harness stopped (exit ${code})`
+      switch (str(p.outcome)) {
+        case 'restored':
+          return line('wait', [
+            exited,
+            p.interrupted_turn === true ? 'restarted on this session; the cut turn carries on' : 'restarted on this session',
+          ])
+        case 'refused':
+          return line('crit', [exited, str(p.reason) || 'not restarted again'])
+        default:
+          return line('crit', [exited, `could not restart: ${str(p.reason) || 'no reason given'}`])
+      }
+    }
     case 'budget_changed': {
       const from = num(p.from) ?? 0
       const to = num(p.to) ?? 0

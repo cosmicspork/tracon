@@ -12,7 +12,9 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::{
-    adapter::{HarnessEvent, HarnessHandle, PermissionReply, PermissionRequest},
+    adapter::{
+        HarnessAdapter, HarnessEvent, HarnessHandle, LaunchSpec, PermissionReply, PermissionRequest,
+    },
     runner::Runner,
     session::{
         chunks::ChunkBuffer,
@@ -40,6 +42,18 @@ const TURN_MAX: Duration = Duration::from_secs(4 * 60 * 60);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 const PAUSE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_FAILURE_LIMIT: u8 = 3;
+/// Relaunches of a harness whose process died, per piece of work the operator
+/// asked for and per session. Past either, the session ends as it always did:
+/// a harness that keeps dying is not one to keep starting.
+const RELAUNCHES_PER_TURN: u32 = 2;
+const RELAUNCHES_PER_SESSION: u32 = 3;
+/// How long a relaunched harness has to answer its handshake.
+const RELAUNCH_TIMEOUT: Duration = Duration::from_secs(90);
+/// What the session is told when its harness was relaunched mid-turn.
+const CONTINUE_AFTER_RELAUNCH: &str = "The harness process stopped during the last turn and was \
+     restarted; the conversation was restored from its journal. Tool calls that were running or \
+     waiting when it stopped are marked failed, as 'outcome unknown' or 'not run'. Check what \
+     those calls may have changed before repeating them, then carry on with the task.";
 
 /// How many times the same tool call has to arrive back to back before the
 /// run is worth saying out loud. Only an unchanged call repeated with nothing
@@ -216,6 +230,24 @@ pub struct Supervisor {
     /// Why the last decision could not be brought back, so a refusal that
     /// repeats on every tick is recorded once.
     delivery_error: Option<String>,
+    /// How to start this session's harness again, for one that is
+    /// `restorable`; see `with_relaunch`.
+    relaunch: Option<Relaunch>,
+    relaunches: u32,
+    /// Relaunches since the operator last prompted.
+    turn_relaunches: u32,
+    /// A turn whose harness died under it, settled already, waiting for the
+    /// relaunch that carries its work on.
+    died_in_turn: bool,
+    /// Said of the next prompt dispatched: who it is from, when not the operator.
+    next_prompt_origin: Option<&'static str>,
+}
+
+/// What starting a session's harness again takes: the adapter, and the launch
+/// it was first given.
+pub struct Relaunch {
+    pub adapter: Arc<dyn HarnessAdapter>,
+    pub spec: LaunchSpec,
 }
 
 impl Supervisor {
@@ -257,6 +289,11 @@ impl Supervisor {
                 Default::default(),
             ),
             delivery_error: None,
+            relaunch: None,
+            relaunches: 0,
+            turn_relaunches: 0,
+            died_in_turn: false,
+            next_prompt_origin: None,
             self_tx,
             runner,
             container,
@@ -289,6 +326,14 @@ impl Supervisor {
             .map(|c| c.trim().to_string())
             .filter(|c| !c.is_empty())
             .collect();
+        self
+    }
+
+    /// A harness that can be started again when its process dies, carrying
+    /// the session on (`HarnessAdapter::restorable`). Without it a dead
+    /// harness ends the session.
+    pub fn with_relaunch(mut self, relaunch: Relaunch) -> Self {
+        self.relaunch = Some(relaunch);
         self
     }
 
@@ -408,6 +453,9 @@ impl Supervisor {
         mut commands: mpsc::Receiver<Command>,
     ) {
         let mut killed_by_us = false;
+        // An exit found among the events a finished turn drained, handled
+        // once that turn is settled.
+        let mut exit_behind_turn: Option<Option<i32>> = None;
         // Stop can land between the startup handoff's last check and this
         // task's registration in `live`; only a row still `starting` may
         // become the one this task drives, so that race cannot resurrect a
@@ -417,8 +465,28 @@ impl Supervisor {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
+                if let Some(code) = exit_behind_turn.take() {
+                    if self.relaunchable() {
+                        if let Some(next) = self.relaunch(code).await {
+                            events = next;
+                            continue;
+                        }
+                    }
+                    if self.on_harness_event(HarnessEvent::Exited { code }).await {
+                        break;
+                    }
+                }
                 tokio::select! {
                     ev = events.recv() => match ev {
+                        Some(HarnessEvent::Exited { code }) if self.relaunchable() => {
+                            if let Some(next) = self.relaunch(code).await {
+                                events = next;
+                                continue;
+                            }
+                            if self.on_harness_event(HarnessEvent::Exited { code }).await {
+                                break;
+                            }
+                        }
                         Some(ev) => {
                             if self.on_harness_event(ev).await {
                                 break;
@@ -460,9 +528,34 @@ impl Supervisor {
                                 );
                                 continue;
                             }
+                            // The harness died under this turn: its pump stopped
+                            // with the process. Settled as interrupted, and the
+                            // relaunch the exit brings carries the work on.
+                            if kind == ek::ERROR
+                                && self.relaunchable()
+                                && payload["event_barrier_error"]
+                                    .as_str()
+                                    .is_some_and(|e| e.contains("stopped"))
+                            {
+                                self.active_turn = None;
+                                self.died_in_turn = true;
+                                self.settle_interrupted_turn(true);
+                                continue;
+                            }
                             let turn_timeout = payload["turn_timeout"] == true;
                             let paused_completion = self.paused_turn == Some(turn_id);
                             self.active_turn = None;
+                            // The adapter's barrier put everything the turn
+                            // said ahead of its result on the event queue; take
+                            // it before settling, or a request's own usage
+                            // arrives after the turn it belongs to is closed.
+                            while let Ok(ev) = events.try_recv() {
+                                if let HarnessEvent::Exited { code } = ev {
+                                    exit_behind_turn = Some(code);
+                                    break;
+                                }
+                                let _ = self.on_harness_event(ev).await;
+                            }
                             self.on_turn_done(kind, payload, tokens).await;
                             if paused_completion {
                                 // The adapter's barrier drained its inbound reader
@@ -1116,6 +1209,9 @@ impl Supervisor {
                 );
                 self.publish_session();
             }
+            HarnessEvent::RequestUsage(request) => {
+                crate::metrics::record_harness_request(&self.store, &self.session_id, &request);
+            }
             HarnessEvent::Permission { request, reply } => {
                 self.flush_chunks();
                 self.on_permission(request, reply).await;
@@ -1523,6 +1619,7 @@ impl Supervisor {
     /// queues behind it, so what the operator said arrives in the order they
     /// said it.
     async fn on_operator_prompt(&mut self, text: String) -> Result<Prompted, String> {
+        self.turn_relaunches = 0;
         let s = self
             .store
             .get_session(&self.session_id)
@@ -1692,6 +1789,9 @@ impl Supervisor {
         let mut payload = json!({ "text": text });
         if !queued.is_empty() {
             payload["queued"] = json!(queued);
+        }
+        if let Some(origin) = self.next_prompt_origin.take() {
+            payload["origin"] = json!(origin);
         }
         self.record(ek::USER_PROMPT, None, payload);
         self.publish_session();
@@ -1948,6 +2048,102 @@ impl Supervisor {
         self.reject_open_permissions().await;
     }
 
+    /// Whether a harness exit is one this supervisor starts the harness again
+    /// for: a restorable harness, on a session that is still live.
+    fn relaunchable(&self) -> bool {
+        self.relaunch.is_some() && !self.is_fenced()
+    }
+
+    /// Start the harness again on the session it was running, after its
+    /// process died. The turn it died in is settled as interrupted and carried
+    /// on with one prompt from the node. `None` when it may not or could not
+    /// be started, and the exit ends the session as before.
+    async fn relaunch(&mut self, code: Option<i32>) -> Option<mpsc::Receiver<HarnessEvent>> {
+        let in_flight = self.active_turn.take().is_some();
+        let interrupted = in_flight || std::mem::take(&mut self.died_in_turn);
+        // Settled before anything else, so its spend is charged whatever the
+        // relaunch comes to.
+        self.settle_interrupted_turn(in_flight);
+        if self.relaunches >= RELAUNCHES_PER_SESSION || self.turn_relaunches >= RELAUNCHES_PER_TURN
+        {
+            self.record(
+                ek::HARNESS_RESTARTED,
+                None,
+                json!({
+                    "outcome": "refused",
+                    "exit_code": code,
+                    "reason": format!(
+                        "the harness died again after {} restarts; the session ends",
+                        self.relaunches
+                    ),
+                }),
+            );
+            return None;
+        }
+        let resume = self.handle.resume_point()?;
+        self.reject_open_permissions_because("denied: the harness restarted")
+            .await;
+        // The dead process's container may still be on its way out; the new
+        // one takes its name.
+        self.remove_container().await;
+        let relaunch = self.relaunch.as_ref()?;
+        let mut spec = relaunch.spec.clone();
+        spec.resume = Some(resume.clone());
+        let launched = tokio::time::timeout(
+            RELAUNCH_TIMEOUT,
+            relaunch.adapter.launch(self.runner.as_ref(), spec),
+        )
+        .await;
+        let (handle, events) = match launched {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return self.relaunch_failed(code, e.to_string()),
+            Err(_) => return self.relaunch_failed(code, "the handshake timed out".into()),
+        };
+        self.handle = Arc::from(handle);
+        self.relaunches += 1;
+        self.turn_relaunches += 1;
+        self.record(
+            ek::HARNESS_RESTARTED,
+            None,
+            json!({
+                "outcome": "restored",
+                "exit_code": code,
+                "attempt": self.relaunches,
+                "harness_session_id": resume.harness_session_id,
+                "resumed_after_seq": resume.last_seq,
+                "interrupted_turn": interrupted,
+            }),
+        );
+        if interrupted {
+            self.next_prompt_origin = Some("node");
+            if let Err(e) = self
+                .dispatch_prompt(CONTINUE_AFTER_RELAUNCH.into(), Vec::new())
+                .await
+            {
+                self.next_prompt_origin = None;
+                self.record(
+                    ek::ERROR,
+                    None,
+                    json!({ "error": format!("could not carry the turn on after the restart: {e}") }),
+                );
+            }
+        }
+        Some(events)
+    }
+
+    fn relaunch_failed(
+        &mut self,
+        code: Option<i32>,
+        reason: String,
+    ) -> Option<mpsc::Receiver<HarnessEvent>> {
+        self.record(
+            ek::HARNESS_RESTARTED,
+            None,
+            json!({ "outcome": "failed", "exit_code": code, "reason": reason }),
+        );
+        None
+    }
+
     async fn finish_unexpected(&mut self) {
         let Ok(Some(s)) = self.store.get_session(&self.session_id) else {
             return;
@@ -1969,6 +2165,11 @@ impl Supervisor {
     }
 
     async fn reject_open_permissions(&mut self) {
+        self.reject_open_permissions_because("denied: session ended")
+            .await;
+    }
+
+    async fn reject_open_permissions_because(&mut self, reason: &str) {
         let ids: Vec<String> = self.open.lock().await.keys().cloned().collect();
         for id in ids {
             if let Some(sender) = self.open.lock().await.remove(&id) {
@@ -1980,7 +2181,7 @@ impl Supervisor {
             self.record(
                 ek::PERMISSION_EXPIRED,
                 Some(id.clone()),
-                json!({ "permission_id": id, "reason": "denied: session ended" }),
+                json!({ "permission_id": id, "reason": reason }),
             );
         }
         self.publish_queue();

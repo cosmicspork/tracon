@@ -690,6 +690,7 @@ async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
         env: Vec::new(),
         system_prompt_file: None,
         cursor: None,
+        resume: None,
     };
     let (handle, _rx) = adapter
         .launch(&runner, spec)

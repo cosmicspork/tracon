@@ -4,6 +4,11 @@
 //!
 //! - `FAKE_NATIVE_VERSION`: the version it reports (default: this build's);
 //! - `FAKE_NATIVE_PROTOCOL`: the protocol version it answers (default 1).
+//!
+//! A session it is asked to load (`session/load`) answers as `tracon-agent`
+//! does: first an update the node already has (seq 7, to be dropped), then the
+//! interrupted call closed as failed (seq 8), and its turns number from 10 and
+//! report their usage per request.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,8 +17,8 @@ use acp::codec::RpcError;
 use acp::rpc::{Incoming, Peer};
 use acp::types::{
     self, methods, Chunk, ContentBlock, PermissionOption, PermissionOutcome, PromptResult,
-    RequestPermissionParams, RequestPermissionResult, SessionUpdate, SessionUpdateParams, ToolCall,
-    ToolCallUpdate, Usage, UsageUpdate,
+    RequestPermissionParams, RequestPermissionResult, RequestUsage, SessionUpdate,
+    SessionUpdateParams, ToolCall, ToolCallUpdate, Usage, UsageUpdate,
 };
 use serde_json::{json, Value};
 
@@ -36,6 +41,7 @@ async fn main() {
         Peer::new(Box::new(tokio::io::stdout()), Box::new(tokio::io::stdin()));
     tokio::spawn(read);
     let cancelled = Arc::new(AtomicBool::new(false));
+    let loaded = Arc::new(AtomicBool::new(false));
     while let Some(message) = incoming.recv().await {
         match message {
             Incoming::Request {
@@ -48,6 +54,7 @@ async fn main() {
                     let _ = reply.send(Ok(json!({
                         "protocolVersion": protocol,
                         "agentInfo": {"name": "tracon-agent", "version": version()},
+                        "agentCapabilities": {"loadSession": true},
                     })));
                 }
                 methods::SESSION_NEW => {
@@ -58,11 +65,36 @@ async fn main() {
                     );
                     let _ = reply.send(Ok(json!({"sessionId": "native-1"})));
                 }
+                methods::SESSION_LOAD => {
+                    eprintln!("LOAD={}", params["sessionId"].as_str().unwrap_or_default());
+                    loaded.store(true, Ordering::SeqCst);
+                    let _ = reply.send(Ok(json!({})));
+                    update(
+                        &peer,
+                        7,
+                        SessionUpdate::AgentMessageChunk(chunk("already taken")),
+                    )
+                    .await;
+                    update(
+                        &peer,
+                        8,
+                        SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                            tool_call_id: "c1".into(),
+                            status: Some("failed".into()),
+                            raw_output: None,
+                            content: Vec::new(),
+                            title: None,
+                            kind: None,
+                        }),
+                    )
+                    .await;
+                }
                 methods::SESSION_PROMPT => {
                     let peer = peer.clone();
                     let cancelled = cancelled.clone();
+                    let from = if loaded.load(Ordering::SeqCst) { 10 } else { 0 };
                     tokio::spawn(async move {
-                        let _ = reply.send(Ok(turn(&peer, &cancelled).await));
+                        let _ = reply.send(Ok(turn(&peer, &cancelled, from).await));
                     });
                 }
                 methods::SESSION_CLOSE => {
@@ -101,16 +133,16 @@ fn chunk(text: &str) -> Chunk {
     }
 }
 
-async fn turn(peer: &Peer, cancelled: &AtomicBool) -> Value {
+async fn turn(peer: &Peer, cancelled: &AtomicBool, from: u64) -> Value {
     update(
         peer,
-        1,
+        from + 1,
         SessionUpdate::AgentThoughtChunk(chunk("considering it")),
     )
     .await;
     update(
         peer,
-        2,
+        from + 2,
         SessionUpdate::AgentMessageChunk(chunk("working on it")),
     )
     .await;
@@ -123,7 +155,7 @@ async fn turn(peer: &Peer, cancelled: &AtomicBool) -> Value {
         content: Vec::new(),
         locations: Vec::new(),
     };
-    update(peer, 3, SessionUpdate::ToolCall(call.clone())).await;
+    update(peer, from + 3, SessionUpdate::ToolCall(call.clone())).await;
     let answer: Result<RequestPermissionResult, _> = peer
         .request(
             methods::SESSION_REQUEST_PERMISSION,
@@ -153,7 +185,7 @@ async fn turn(peer: &Peer, cancelled: &AtomicBool) -> Value {
     );
     update(
         peer,
-        4,
+        from + 4,
         SessionUpdate::ToolCallUpdate(ToolCallUpdate {
             tool_call_id: "c1".into(),
             status: Some(if allowed { "completed" } else { "failed" }.into()),
@@ -166,12 +198,17 @@ async fn turn(peer: &Peer, cancelled: &AtomicBool) -> Value {
     .await;
     update(
         peer,
-        5,
+        from + 5,
         SessionUpdate::UsageUpdate(UsageUpdate {
             size: Some(32768),
             used: Some(1450),
             cost: None,
-            request: None,
+            request: (from > 0).then(|| RequestUsage {
+                request_id: Some("req-1".into()),
+                input_tokens: 600,
+                output_tokens: 50,
+                cached_read_tokens: 400,
+            }),
         }),
     )
     .await;

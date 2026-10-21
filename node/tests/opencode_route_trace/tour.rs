@@ -546,6 +546,7 @@ async fn launch(node: &Node, binary: &str, cursor: Arc<dyn DurableCursor>) -> Li
         // but its connection frame — which is exactly what this tour found
         // the first time it was run against the synthesised route.
         cursor: Some(cursor),
+        resume: None,
     };
     let (handle, mut rx) = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION)
         .launch(&runner, spec)

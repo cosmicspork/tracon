@@ -223,6 +223,7 @@ async fn an_opencode_session_pod_runs_the_layered_image_with_its_secrets_hidden(
                 secret_env,
                 system_prompt_file: None,
                 cursor: None,
+                resume: None,
             },
         )
         .await;

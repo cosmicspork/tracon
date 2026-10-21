@@ -74,6 +74,7 @@ const KINDS: &[Kind] = &[
             "approval",
             "turn_usage",
             "model_usage",
+            "harness_request_usage",
             "context_receipt",
             "operator_question",
             "operator_issue",

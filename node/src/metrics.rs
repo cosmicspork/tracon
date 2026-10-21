@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::Config;
-use crate::store::{ReviewRow, SessionRow, Store};
+use crate::store::{RequestMatch, ReviewRow, SessionRow, Store};
 
 /// Bindings key for the ceiling: tokens (input + output, as the gateway
 /// counts them) a channel may spend per local day.
@@ -126,6 +126,9 @@ pub struct Reconciled {
     pub harness_cost_usd: Option<f64>,
     /// What the budget is charged: never less than the gateway counted.
     pub charged: i64,
+    /// The turn's requests matched one by one, when the harness reported
+    /// them one by one.
+    pub requests: Option<RequestMatch>,
 }
 
 impl Reconciled {
@@ -148,7 +151,7 @@ impl Reconciled {
 
     /// Both sides, for the event payload and the API.
     pub fn detail(&self) -> Value {
-        json!({
+        let mut detail = json!({
             "turn": self.turn,
             "state": self.state,
             "gateway": {
@@ -163,7 +166,15 @@ impl Reconciled {
                 "cost_usd": self.harness_cost_usd,
             },
             "charged_tokens": self.charged,
-        })
+        });
+        if let Some(requests) = &self.requests {
+            detail["requests_matched"] = json!(requests.matched);
+            detail["unmatched_requests"] = json!({
+                "harness_only": requests.harness_only,
+                "gateway_only": requests.gateway_only,
+            });
+        }
+        detail
     }
 }
 
@@ -203,6 +214,7 @@ pub fn reconcile(
         harness_tokens,
         harness_cost_usd,
         charged,
+        requests: None,
     }
 }
 
@@ -252,6 +264,17 @@ fn settle(
         out.state = state;
     }
     out.gateway_cache_read = store.turn_gateway_cache_read(session_id, turn).unwrap_or(0);
+    out.requests = store
+        .turn_request_match(session_id, turn)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, session_id, turn, "requests not matched");
+            None
+        });
+    // Totals that agree can still hide a request one side never saw and
+    // another the other side over-counted; matched by id, they cannot.
+    if out.agreed() && out.requests.as_ref().is_some_and(|r| r.unmatched() > 0) {
+        out.state = usage_state::MISMATCH;
+    }
     if let Err(e) = store.settle_turn(
         session_id,
         turn,
@@ -261,10 +284,34 @@ fn settle(
         harness_cost_usd,
         out.charged,
         out.state,
+        out.requests.as_ref(),
     ) {
         tracing::warn!(error = %e, session_id, turn, "turn usage not recorded");
     }
+    if let Err(e) = store.rematch_earlier_turns(session_id, turn) {
+        tracing::warn!(error = %e, session_id, turn, "earlier turns not matched again");
+    }
     out
+}
+
+/// Keep what the harness said one upstream request cost, against the turn
+/// it was made in, for `settle` to match against the gateway's row of the same
+/// request.
+pub fn record_harness_request(
+    store: &Store,
+    session_id: &str,
+    request: &crate::adapter::types::RequestUsage,
+) {
+    let tokens = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    if let Err(e) = store.record_harness_request(
+        session_id,
+        request.request_id.as_deref().filter(|id| !id.is_empty()),
+        tokens(request.input_tokens),
+        tokens(request.output_tokens),
+        tokens(request.cached_read_tokens),
+    ) {
+        tracing::warn!(error = %e, session_id, "harness request usage not recorded");
+    }
 }
 
 /// What the session API and the SPA show: the ledger, and the standing state
@@ -275,6 +322,11 @@ pub fn session_usage(store: &Store, session_id: &str) -> Value {
     let gateway_tokens: i64 = turns.iter().map(|t| t.gateway_tokens()).sum();
     let harness_tokens: i64 = turns.iter().filter_map(|t| t.harness_tokens).sum();
     let cache_read_tokens: i64 = turns.iter().map(|t| t.gateway_cache_read).sum();
+    // Only turns whose harness reported per request carry these; a session
+    // with none of them says null rather than "nothing matched".
+    let sum = |field: fn(&crate::store::TurnUsageRow) -> Option<i64>| {
+        turns.iter().filter_map(field).reduce(|a, b| a + b)
+    };
     json!({
         "state": settled.map(|t| t.state.clone()),
         "gateway_tokens": gateway_tokens,
@@ -283,6 +335,8 @@ pub fn session_usage(store: &Store, session_id: &str) -> Value {
         "cache_read_tokens": cache_read_tokens,
         "unmetered_turns": turns.iter().filter(|t| t.state == usage_state::UNMETERED).count(),
         "mismatched_turns": turns.iter().filter(|t| t.state == usage_state::MISMATCH).count(),
+        "requests_matched": sum(|t| t.requests_matched),
+        "requests_unmatched": sum(|t| t.requests_unmatched),
         "turns": turns,
     })
 }

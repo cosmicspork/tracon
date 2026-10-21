@@ -9,6 +9,7 @@ use support::state;
 
 use tracon::adapter::{
     native::NativeAdapter, AdapterError, HarnessAdapter, HarnessEvent, LaunchSpec, PermissionReply,
+    Resume,
 };
 use tracon::runner::{local::LocalRunner, Runner, RunnerCommand};
 
@@ -68,6 +69,7 @@ fn spec() -> LaunchSpec {
         env: Vec::new(),
         system_prompt_file: None,
         cursor: None,
+        resume: None,
     }
 }
 
@@ -205,4 +207,48 @@ async fn a_protocol_outside_the_range_is_refused_before_a_session() {
         Err(other) => panic!("expected an incompatible protocol, got {other}"),
         Ok(_) => panic!("expected an incompatible protocol, got a session"),
     }
+}
+
+#[tokio::test]
+async fn a_relaunch_loads_the_session_and_takes_nothing_twice() {
+    state::isolate();
+    let adapter = adapter();
+    assert!(adapter.restorable());
+    let spec = LaunchSpec {
+        resume: Some(Resume {
+            harness_session_id: "0199-abc".into(),
+            last_seq: 7,
+        }),
+        ..spec()
+    };
+    let (handle, mut rx) = adapter.launch(&runner(), spec).await.unwrap();
+    assert_eq!(handle.harness_session_id(), "0199-abc");
+    let turn = tokio::spawn({
+        let mut seen = Vec::new();
+        async move {
+            let ev = next_permission(&mut rx, &mut seen).await;
+            let HarnessEvent::Permission { reply, .. } = ev else {
+                unreachable!()
+            };
+            reply
+                .send(PermissionReply::Selected("allow_once".into()))
+                .unwrap();
+            drain_until(&mut rx, &mut seen, "request:req-1").await;
+            seen
+        }
+    });
+    let prompt = handle.prompt("carry on".into()).await.unwrap();
+    assert_eq!(prompt.stop_reason, "end_turn");
+    let seen = turn.await.unwrap();
+    // Seq 7 was the node's already: dropped. Seq 8 closes the cut call.
+    assert!(
+        !seen.contains(&"chunk:already taken".to_string()),
+        "{seen:?}"
+    );
+    assert_eq!(seen[0], "tool_update:failed", "{seen:?}");
+    // Each request's own usage reaches the supervisor.
+    assert_eq!(seen.last().unwrap(), "request:req-1");
+    let resume = handle.resume_point().unwrap();
+    assert_eq!(resume.harness_session_id, "0199-abc");
+    assert_eq!(resume.last_seq, 15);
 }
