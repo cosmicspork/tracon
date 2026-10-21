@@ -354,7 +354,9 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       session's history, which the v1 store now holds.
 - [ ] **Codex subscription** signed in through the node's own OAuth flow, by local callback
       and by device code, and with it whether the ChatGPT backend accepts a Codex request
-      whose system prompt stays in the message array.
+      whose system prompt stays in the message array. (The native harness's Responses
+      encoder sends its own system prompt as `instructions`, which the backend accepts,
+      shown live on 2026-10-21.)
 - [ ] **`OPENCODE_SERVER_PASSWORD` refused live**: an unauthenticated probe of a running
       session server, rather than of the fake.
 - [ ] **The model-dependent adversarial cases** on OpenCode: a second identical tool call

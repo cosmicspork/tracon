@@ -13,7 +13,7 @@ use crate::conversation::{Block, Conversation, Role};
 use crate::events::Events;
 use crate::journal::{Journal, Record};
 use crate::tools::{Context, Output, Registry};
-use crate::wire::openai_chat::{Client, Completion, Delta};
+use crate::wire::{Client, Completion, Delta};
 use crate::wire::{Usage, WireError};
 
 /// How much of a tool result goes into the events file.

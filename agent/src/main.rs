@@ -14,7 +14,7 @@ use tracon_agent::prompt::ORIENTATION;
 use tracon_agent::providers;
 use tracon_agent::server::{self, Settings};
 use tracon_agent::tools::{Context, Registry};
-use tracon_agent::wire::openai_chat::{Client, Sampling};
+use tracon_agent::wire::{openai_chat, openai_responses, Client, Sampling};
 
 /// A standalone run has no node to stop it, so it stops itself.
 const STANDALONE_MAX_TURNS: u32 = 20;
@@ -78,12 +78,26 @@ struct Cli {
     /// Ask the chat template not to think (Qwen3's `enable_thinking=false`).
     #[arg(long)]
     no_think: bool,
+    /// A reasoning model's effort (`low`, `medium`, `high`, …), on the
+    /// Responses wire. The upstream's default when absent.
+    #[arg(long)]
+    reasoning_effort: Option<String>,
+    /// Which API the endpoint speaks: `chat` (Chat Completions) or
+    /// `responses`. With `--providers`, the provider's shape decides.
+    #[arg(long, value_enum, default_value_t = Wire::Chat)]
+    wire: Wire,
     /// Allow several tool calls in one response.
     #[arg(long)]
     parallel_tools: bool,
     /// Write JSONL events here instead of stderr.
     #[arg(long)]
     events: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Wire {
+    Chat,
+    Responses,
 }
 
 /// Standalone exit codes: 0 finished, 1 failed, 3 turn limit, 4 context overflow.
@@ -114,6 +128,11 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
             cli.context_window = resolved.context_window;
         }
         cli.model = resolved.model;
+        cli.wire = if resolved.shape == "openai-codex" {
+            Wire::Responses
+        } else {
+            Wire::Chat
+        };
     }
     let Some(base_url) = cli.base_url.clone() else {
         bail!("no endpoint: pass --base-url, or --providers with --model provider/model");
@@ -130,17 +149,28 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         }
         (None, None) => None,
     };
-    let client = Client::new(
-        &base_url,
-        api_key,
-        &cli.model,
-        Sampling {
-            temperature: cli.temperature,
-            min_p: cli.min_p,
-            no_think: cli.no_think,
-        },
-        cli.parallel_tools,
-    )?;
+    let sampling = Sampling {
+        temperature: cli.temperature,
+        min_p: cli.min_p,
+        no_think: cli.no_think,
+        reasoning_effort: cli.reasoning_effort.clone(),
+    };
+    let client = match cli.wire {
+        Wire::Chat => Client::Chat(openai_chat::Client::new(
+            &base_url,
+            api_key,
+            &cli.model,
+            sampling,
+            cli.parallel_tools,
+        )?),
+        Wire::Responses => Client::Responses(openai_responses::Client::new(
+            &base_url,
+            api_key,
+            &cli.model,
+            sampling,
+            cli.parallel_tools,
+        )?),
+    };
     if !cli.standalone {
         if cli.prompt.is_some() {
             bail!(

@@ -505,7 +505,10 @@ so its adapter has nothing to translate: `adapter/native.rs` is the retired omp
 adapter's handshake and pump over that shared vocabulary (the `acp` crate). It runs only
 where a node turns it on (`[harness] experimental = ["native"]`), because every harness a
 node runs needs its image before the boundary passes, and one still being proven must not
-be able to stop the supported ones. See `agent/README.md`.
+be able to stop the supported ones. See `agent/README.md`. It speaks Chat Completions to an
+`openai`-shaped provider and the Responses API to the Codex backend (`openai-codex`). The
+wire is the harness's concern: the gateway forwards either body untouched, adding only the
+credential and, for Codex, the account id.
 
 It is also the one harness whose session outlives its process. The agent journals each
 session ahead of every step, so when its process dies the supervisor starts it again on

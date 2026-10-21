@@ -1,7 +1,7 @@
 # tracon-agent
 
-The harness tracon owns, for models that are not Claude: local llama.cpp now, the Codex
-subscription later. It is a separate binary that runs inside the boundary, like
+The harness tracon owns, for models that are not Claude: local llama.cpp over Chat
+Completions, and the Codex subscription over the Responses API. It is a separate binary that runs inside the boundary, like
 `claude`. The node supervises it and does no reasoning of its own. The plan is
 `plan-tracon-native-harness` on the personal channel.
 
@@ -107,6 +107,9 @@ The prompt can also come from stdin. Other flags:
 - `--temperature` and `--min-p`. llama.cpp's `min_p` default of 0.05 may need 0.01.
 - `--no-think`, which sends Qwen3's `enable_thinking=false`.
 - `--parallel-tools`.
+- `--reasoning-effort` (`low`, `medium`, `high`, …), on the Responses wire.
+- `--wire chat|responses` (default `chat`). With `--providers` the provider's shape
+  decides: `openai` is Chat Completions, `openai-codex` is Responses.
 
 Exit codes:
 
@@ -118,8 +121,15 @@ Exit codes:
 | 4 | The context window was exceeded, and compacting the conversation did not bring it within. Nothing is truncated. |
 | 5 | The agent stopped the turn itself (see above). |
 
-The endpoint must speak OpenAI Chat Completions with streamed tool calls. For llama.cpp
-that means `--jinja`, with the server's built-in `--tools` left off.
+On `chat` the endpoint must speak OpenAI Chat Completions with streamed tool calls. For
+llama.cpp that means `--jinja`, with the server's built-in `--tools` left off.
+
+On `responses` (the Codex backend) nothing is stored upstream (`store: false`), so each
+request replays the conversation. The system prompt goes in `instructions`, which the
+backend accepts as ours. Reasoning comes back as encrypted items, kept in the
+conversation as `Opaque` blocks and sent again in place, without their ids. The session
+id goes as `prompt_cache_key` and the `session_id` header, without which the backend's
+prompt cache rarely hits. No `max_output_tokens` is sent; the backend refuses it.
 
 ## Events
 

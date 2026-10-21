@@ -122,6 +122,7 @@ pub async fn serve(script: Vec<Reply>) -> (String, Fake) {
     };
     let app = Router::new()
         .route("/v1/chat/completions", post(completions))
+        .route("/v1/responses", post(completions))
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -167,5 +168,52 @@ pub fn answer(text: &str) -> Reply {
         json!({"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}),
         json!({"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 3,
             "prompt_tokens_details": {"cached_tokens": 100}}}),
+    ])
+}
+
+/// A Responses stream: these events, each with its `type`, then nothing more.
+pub fn events(events: &[Value]) -> Reply {
+    let mut out = String::new();
+    for e in events {
+        out.push_str(&format!(
+            "event: {}\ndata: {e}\n\n",
+            e["type"].as_str().unwrap_or("")
+        ));
+    }
+    Reply::error(StatusCode::OK, out)
+}
+
+fn completed(id: &str, output: Value) -> Value {
+    json!({"type": "response.completed", "response": {"id": id, "status": "completed",
+        "output": output,
+        "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 60},
+            "output_tokens": 10, "output_tokens_details": {"reasoning_tokens": 4}}}})
+}
+
+/// A Responses turn that thinks, then calls one tool: the reasoning item
+/// carries `encrypted` as its content.
+pub fn responses_call(id: &str, name: &str, args: Value, encrypted: &str) -> Reply {
+    let reasoning = json!({"id": format!("rs_{id}"), "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "thinking"}], "encrypted_content": encrypted});
+    let call = json!({"id": format!("fc_{id}"), "type": "function_call", "status": "completed",
+        "call_id": id, "name": name, "arguments": args.to_string()});
+    events(&[
+        json!({"type": "response.created", "response": {"id": format!("resp_{id}"), "status": "in_progress"}}),
+        json!({"type": "response.reasoning_summary_text.delta", "delta": "thinking"}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": reasoning}),
+        json!({"type": "response.function_call_arguments.delta", "delta": args.to_string()}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+        completed(&format!("resp_{id}"), json!([reasoning, call])),
+    ])
+}
+
+pub fn responses_answer(text: &str) -> Reply {
+    let message = json!({"id": "msg_1", "type": "message", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}]});
+    events(&[
+        json!({"type": "response.created", "response": {"id": "resp_answer", "status": "in_progress"}}),
+        json!({"type": "response.output_text.delta", "delta": text}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": message}),
+        completed("resp_answer", json!([message])),
     ])
 }

@@ -20,7 +20,7 @@ use super::{
     TurnResult,
 };
 use crate::adapter::types::{self, methods};
-use crate::config::SHAPE_OPENAI;
+use crate::config::{SHAPE_OPENAI, SHAPE_OPENAI_CODEX};
 use crate::gateway::model::{key_env_name, Wiring};
 use crate::runner::{Runner, RunnerCommand, Spawned};
 use acp::codec::RpcError;
@@ -99,14 +99,14 @@ impl NativeAdapter {
 }
 
 /// The providers this harness can speak to, as it reads them: the OpenAI
-/// shape only. Anthropic models run on Claude Code, and the Codex backend
-/// waits for the Responses encoder.
+/// shape (Chat Completions) and the Codex backend (Responses). Anthropic
+/// models run on Claude Code.
 fn providers_document(wiring: &Wiring) -> Value {
     Value::Array(
         wiring
             .providers
             .iter()
-            .filter(|p| p.shape == SHAPE_OPENAI)
+            .filter(|p| speaks(&p.shape))
             .map(|p| {
                 json!({
                     "name": p.name,
@@ -118,6 +118,10 @@ fn providers_document(wiring: &Wiring) -> Value {
             })
             .collect(),
     )
+}
+
+fn speaks(shape: &str) -> bool {
+    shape == SHAPE_OPENAI || shape == SHAPE_OPENAI_CODEX
 }
 
 fn parse_version(out: &str) -> String {
@@ -224,7 +228,7 @@ impl HarnessAdapter for NativeAdapter {
         Ok(wiring
             .providers
             .iter()
-            .filter(|p| p.shape == SHAPE_OPENAI)
+            .filter(|p| speaks(&p.shape))
             .flat_map(|p| {
                 p.models.iter().map(|m| ModelOption {
                     value: format!("{}/{}", p.name, m.id),
@@ -826,11 +830,20 @@ mod tests {
             local["models"][0],
             json!({"id": "qwen3-8b", "context": 32768})
         );
-        assert!(doc
+        // The Codex backend is in, by its own shape; Anthropic is not.
+        let shapes: Vec<_> = doc
             .as_array()
             .unwrap()
             .iter()
-            .all(|p| p["shape"] == SHAPE_OPENAI));
+            .map(|p| p["shape"].as_str().unwrap())
+            .collect();
+        assert!(shapes.contains(&SHAPE_OPENAI_CODEX), "{shapes:?}");
+        assert!(
+            shapes
+                .iter()
+                .all(|s| *s == SHAPE_OPENAI || *s == SHAPE_OPENAI_CODEX),
+            "{shapes:?}"
+        );
         // The token is never in the file: it travels as secret environment.
         assert!(!files[0].1.contains("tok\""));
     }
