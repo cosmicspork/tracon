@@ -802,6 +802,23 @@ export default [
     },
   }),
 
+  state('squash-long-line', 'A commit message with a line longer than the box', {
+    note: 'The long body line soft-wraps with no sideways scroll, phone included; the gutter numbers real lines only, the subject past 72 columns is flagged, and the column-72 guide shows where the box is that wide.',
+    since: '#601',
+    detail: raw(
+      details({
+        intent: {
+          forge: {
+            draft: true,
+            commit: `feat(gateway): smooth bursts with a per-channel token bucket refilled on every read\n\n${'A call over per_minute is refused before it counts against the day, so one runaway loop cannot take a whole allowance. '.repeat(3).trim()}\n\nSigned-off-by: Operator <op@example.org>`,
+          },
+          squash_onto: BASE_SHA,
+          commits: COMMITS,
+        },
+      }),
+    ),
+  }),
+
   state('keep-edited', 'Commits pushed as the agent wrote them, one message edited', {
     note: 'Under publish.commits = keep each commit has "Edit message"; the edited one shows its message in the squash editor\'s textarea, an "edited" chip and Undo, and the heading counts the edits.',
     sizes: ['desktop'],
