@@ -1107,10 +1107,11 @@ in the harness image instead. Dependencies arrive by **preparation**: the entry'
 commands run once per run, on a copy of the candidate, with a cache writable and an
 egress grant for exactly the hosts the entry names, revoked again before any check
 starts; every check then runs on its own copy of the prepared tree with the cache
-read-only. That cache is the run's own, copied from the repository's base cache and
-removed with the run. The base is written by one thing only — a preparation of the
-default branch, made when the repository's image is built — so a candidate's install,
-which may run the candidate's own scripts, can reach its own evidence and nobody else's.
+read-only (uv, which cannot start on a read-only cache, is given a temporary one). That
+cache is the run's own, copied from the repository's base cache and removed with the
+run. The base is written by one thing only — a preparation of the default branch, made
+when the repository's image is built — so a candidate's install, which may run the
+candidate's own scripts, can reach its own evidence and nobody else's.
 That warm-up is also the only preparation lent a registry credential: the entry's
 `prepare_credentials` name `env` credentials in the broker, each of which must name the
 repository in its own `repos` (by path, or by a `group/**` prefix matched segment by
@@ -1186,8 +1187,8 @@ replaces the harness proxy in the harness's environment, which OpenCode's shell 
 terminals inherit; the model and the MCP server are on the gateway host, which `NO_PROXY`
 keeps off any proxy. What OpenCode fetches on its own (plugins, `rg`, language servers) is
 still closed by its launch flags and its image's seeds, not by the proxy. A check's evidence is keyed on source
-revision, check definition, execution image, dependency inputs, and the preparation and
-egress it was given, and is reused rather than rerun only when every one of those is
+revision, check definition, execution image, dependency inputs, and the preparation,
+egress and environment it was given, and is reused rather than rerun only when every one of those is
 unchanged — a resubmission that edits only the title,
 description, or ticket prose reuses the same candidate's code evidence, and an explicit
 rerun always makes a new record. Diff size is capped at submit, because complexity

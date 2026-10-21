@@ -354,6 +354,18 @@ pub fn cache_env() -> Vec<(String, String)> {
     .collect()
 }
 
+/// What a check, or a trial of one, runs with: the names preparation used,
+/// over a cache mounted read-only, with nothing fetched. uv opens its cache
+/// for writing on every invocation, even `uv run --no-sync`, and cannot start
+/// on a read-only one, so it is told to keep a temporary cache of its own; the
+/// environment preparation installed is in the tree, not the cache.
+pub fn check_env() -> Vec<(String, String)> {
+    let mut env = cache_env();
+    env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+    env.push(("UV_NO_CACHE".into(), "1".into()));
+    env
+}
+
 /// Environment lent from the broker to one preparation, and what it takes out
 /// of anything that preparation says. Only the default branch's preparation
 /// is lent any (`prepare_credentials`); every other preparation runs with
