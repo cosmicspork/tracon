@@ -859,8 +859,7 @@ async fn run(
                     tail: format!("could not stage the check: {error}"),
                 },
                 Ok(()) => {
-                    let mut env = crate::environment::cache_env();
-                    env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+                    let env = crate::environment::check_env();
                     let name = format!("tracon-t-{}-c{index}", &id[..12]);
                     let running = runner.capture_name(&name);
                     let cmd = RunnerCommand {

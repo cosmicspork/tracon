@@ -25,7 +25,8 @@ use crate::{
     boundary::Backend,
     config::{Config, RuntimeKind},
     environment::{
-        cache_env, environment_for, origin_repo, scoped_egress, PrepareSecrets, RepoEnvironment,
+        cache_env, check_env, environment_for, origin_repo, scoped_egress, PrepareSecrets,
+        RepoEnvironment,
     },
     runner::{Mount, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
@@ -388,8 +389,7 @@ pub async fn run_required(
                     // The check reads what preparation fetched and can add
                     // nothing to it: candidate code runs here, and a cache it
                     // could write is one its own next check would be built on.
-                    env = cache_env();
-                    env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
+                    env = check_env();
                     mounts.push(Mount::volume(ready.cache.clone(), "/cache", true));
                     backend
                         .clone_volume(&ready.work, &scratch_volume)
@@ -1121,6 +1121,10 @@ fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde_json::Valu
     if !environment.prepare.is_empty() {
         inputs["prepare"] = json!(environment.prepare);
         inputs["egress"] = json!(environment.egress);
+        // A prepared check runs with `check_env()`, so what it says is only
+        // true of that environment: evidence recorded under a different one
+        // (a uv check that failed before `UV_NO_CACHE`) is not reused.
+        inputs["env"] = json!(check_env());
     }
     inputs
 }
@@ -1166,6 +1170,35 @@ mod tests {
     fn only_digest_images_can_form_a_reuse_identity() {
         assert!(immutable_image_identity("registry/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_some());
         assert!(immutable_image_identity("registry/image:latest").is_none());
+    }
+
+    /// Evidence is reused only under the environment it was recorded in, so a
+    /// change to what a prepared check runs with reruns it.
+    #[test]
+    fn a_prepared_check_is_identified_by_the_environment_it_runs_with() {
+        let cfg = Config::default();
+        let mut environment = RepoEnvironment {
+            image: "local".into(),
+            image_source: "harness image",
+            checks: Vec::new(),
+            timeout_secs: 60,
+            prepare: Vec::new(),
+            egress: Vec::new(),
+            session_egress: Vec::new(),
+            cache_volume: "tracon-cache-base-unused".into(),
+        };
+        assert!(check_inputs(&cfg, &environment).get("env").is_none());
+
+        environment.prepare = vec!["uv sync --locked".into()];
+        let inputs = check_inputs(&cfg, &environment);
+        assert_eq!(inputs["env"], json!(check_env()));
+        assert!(
+            inputs["env"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(["UV_NO_CACHE", "1"])),
+            "{inputs}"
+        );
     }
 
     #[test]
@@ -1899,6 +1932,9 @@ mod tests {
             assert_eq!(var(check, "HTTPS_PROXY"), None);
             assert_eq!(secret(check, "HTTPS_PROXY"), None);
             assert_eq!(var(check, "CARGO_NET_OFFLINE").as_deref(), Some("true"));
+            // uv cannot open a read-only cache, so a check's is its own.
+            assert_eq!(var(check, "UV_NO_CACHE").as_deref(), Some("1"));
+            assert_eq!(var(prepare, "UV_NO_CACHE"), None);
         }
 
         // The same candidate again borrows the evidence: nothing is prepared
