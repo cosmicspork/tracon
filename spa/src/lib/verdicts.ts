@@ -2,6 +2,8 @@
 // A disabled button with no reason is a puzzle; every action that cannot be
 // taken says so beside it instead.
 
+import type { ReviewerView } from './types'
+
 export type VerdictAction = 'approve' | 'revise' | 'reject'
 
 export interface VerdictConditions {
@@ -62,19 +64,78 @@ export function publishedChange(result: string | null | undefined): { url: strin
   return { url, number: m ? Number(m[1]) : null }
 }
 
+/** What the review page offers of its reviewer, from what happened to the latest revision. */
+export type ReviewerControl =
+  /** Decided, or another node's review: nothing to start here. */
+  | { kind: 'hidden' }
+  /** The channel binds no review model, so no reviewer can start. */
+  | { kind: 'no_model' }
+  /** None has run on this revision: "Start reviewer". `note` says why none did. */
+  | { kind: 'start'; note: string | null }
+  /** One is starting or reading it: no button. */
+  | { kind: 'running'; since: number | null }
+  /** Its verdict on this revision is in: "Review again", which replaces it. */
+  | { kind: 'again' }
+  /** It ended without a verdict: the reason, and "Retry reviewer". */
+  | { kind: 'retry'; reason: string }
+  /** The verdict shown is on an earlier revision: "Review this revision". */
+  | { kind: 'stale'; revision: number | null }
+
 /**
- * Whether a reviewer can be started on a review by hand: one that is still
- * open to a reviewer's verdict (undecided, or with changes requested) and
- * has none reading it now. `reviewer` is the state of the last one started;
+ * The reviewer control for a review in `state`. `reviewer` is the node's
+ * account of the latest revision's reviewer (absent for a mirrored review);
  * `starting` is the node saying one is being started that it has not
  * recorded yet.
  */
-export function canStartReviewer(
+export function reviewerControl(
   state: string,
-  reviewer: string | null | undefined,
+  reviewer: ReviewerView | null | undefined,
   starting = false,
-): boolean {
-  if (!['new', 'claimed', 'revising'].includes(state)) return false
-  if (starting) return false
-  return !reviewer || ['closed', 'killed_budget', 'failed'].includes(reviewer)
+): ReviewerControl {
+  if (!['new', 'claimed', 'revising'].includes(state) || !reviewer) return { kind: 'hidden' }
+  if (!reviewer.bound) return { kind: 'no_model' }
+  if (starting || reviewer.state === 'starting' || reviewer.state === 'running') {
+    return { kind: 'running', since: reviewer.started_ms ?? null }
+  }
+  if (reviewer.state === 'done') return { kind: 'again' }
+  if (reviewer.state === 'failed') return { kind: 'retry', reason: reviewer.reason ?? 'the reviewer ended without a verdict' }
+  if (reviewer.verdict_revision != null) return { kind: 'stale', revision: reviewer.verdict_revision }
+  return { kind: 'start', note: reviewer.reason }
+}
+
+/**
+ * When the review page reads its reviewer again while one is starting or
+ * running: `now` once the very session the node said was reading it has
+ * ended, so its verdict or failure shows at once; otherwise `later`, after
+ * a pause. A session that ended before this one was recorded (the last
+ * reviewer, while a new one starts) is not a reason to read again at once:
+ * the read would find the same, and ask again, as fast as it could.
+ */
+export function rereadReviewer(
+  control: ReviewerControl | null,
+  reviewer: ReviewerView | null | undefined,
+  starting: boolean,
+  live: { id: string; state: string } | null | undefined,
+): 'now' | 'later' | null {
+  if (control?.kind !== 'running') return null
+  const tracking = !starting && (reviewer?.state === 'running' || reviewer?.state === 'starting')
+  const ended = live && ['closed', 'killed_budget', 'failed'].includes(live.state)
+  return tracking && ended && live.id === reviewer?.session_id ? 'now' : 'later'
+}
+
+/**
+ * How long to wait before reading the reviewer again, in ms, after
+ * `failures` reads in a row that failed: at once only when nothing has
+ * failed, then backing off to at most half a minute.
+ */
+export function rereadDelay(when: 'now' | 'later', failures: number): number {
+  if (when === 'now' && failures === 0) return 0
+  return Math.min(3000 * 2 ** Math.max(0, failures - 1), 30000)
+}
+
+/** How the reviewer came to start, for the "Reviewed by" line. */
+export function startedHow(startedBy: string | null | undefined): string | null {
+  if (startedBy === 'submission') return 'started on submission'
+  if (startedBy === 'operator') return 'started by you'
+  return null
 }

@@ -473,7 +473,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/reviews/{id}/release", post(api::release_review))
         .route(
             "/api/reviews/{id}/review-session",
-            post(api::start_review_session),
+            get(api::get_review_session).post(api::start_review_session),
         )
         .route("/api/evidence/candidates", get(evidence::list_candidates))
         .route(

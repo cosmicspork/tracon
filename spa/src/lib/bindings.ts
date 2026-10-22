@@ -2,7 +2,14 @@
 // every start. The node reads the same keys — `phases.<phase>.model` and
 // `phases.<phase>.budget_tokens` — when a session names neither.
 
-import type { ChannelBindings, ExhaustionChoice, ExhaustionPolicy, PhaseBinding } from './types'
+import type {
+  ChannelBindings,
+  ExhaustionChoice,
+  ExhaustionPolicy,
+  PhaseBinding,
+  ReviewTrigger,
+  ReviewTriggers,
+} from './types'
 
 /** The model and budget a channel binds to one phase. */
 export function phaseDefaults(
@@ -52,4 +59,52 @@ export function exhaustionPatch(policy: ExhaustionPolicy, fallback: string | und
   if (policy === 'pause') return { exhaustion: null }
   if (model === '') return null
   return { exhaustion: { policy, fallback: model } }
+}
+
+const TRIGGERS: ReviewTrigger[] = ['auto', 'manual']
+
+/** Where a submission comes from, which a channel sets its review trigger for. */
+export type ReviewSource = 'session' | 'external'
+
+/**
+ * Whether each source's submissions start a reviewer on their own. The node
+ * says, defaults included; from one that predates that, the bindings are
+ * read with the defaults it would have used: a session's submission starts
+ * one, an external harness's waits for you.
+ */
+export function reviewTriggers(channel: {
+  bindings?: ChannelBindings | Record<string, unknown> | null
+  review_trigger?: ReviewTriggers
+}): ReviewTriggers {
+  if (channel.review_trigger) return channel.review_trigger
+  const t = (channel.bindings as ChannelBindings | undefined)?.phases?.review?.trigger
+  const of = (source: ReviewSource, fallback: ReviewTrigger): ReviewTrigger => {
+    if (typeof t === 'string') return TRIGGERS.includes(t) ? t : fallback
+    const v = t?.[source]
+    return v && TRIGGERS.includes(v) ? v : fallback
+  }
+  return { session: of('session', 'auto'), external: of('external', 'manual') }
+}
+
+/**
+ * The patch that sets one source's review trigger. Only that key is
+ * written, so the other keeps following the node's default; a single value
+ * written for both from the command line is split into the two first.
+ */
+export function triggerPatch(
+  bindings: ChannelBindings | Record<string, unknown> | undefined | null,
+  source: ReviewSource,
+  trigger: ReviewTrigger,
+): Record<string, unknown> {
+  const t = (bindings as ChannelBindings | undefined)?.phases?.review?.trigger
+  if (typeof t === 'string' && TRIGGERS.includes(t)) {
+    return { 'phases.review.trigger': { session: t, external: t, [source]: trigger } }
+  }
+  // Anything else that is not an object of the two (a value the node does
+  // not know, as it reads it, is its default) is replaced whole: a key
+  // under it would be written into a string.
+  if (t !== undefined && t !== null && (typeof t !== 'object' || Array.isArray(t))) {
+    return { 'phases.review.trigger': { [source]: trigger } }
+  }
+  return { [`phases.review.trigger.${source}`]: trigger }
 }

@@ -1718,6 +1718,19 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX provider_limit_snapshot_channel ON provider_limit_snapshot(channel, provider, at_ms);
     CREATE INDEX provider_limit_snapshot_limit ON provider_limit_snapshot(channel, provider, limit_id, at_ms);
     "#,
+    // 73: how a review session came to start: on the submission
+    // (`submission`) or by the operator from the review page (`operator`).
+    // Null for one started before this was recorded. And the reviewer
+    // trigger (`auto` or `manual`) that applied when each revision was
+    // submitted, which the channel's binding may since have changed.
+    r#"
+    ALTER TABLE review_session_revision ADD COLUMN started_by TEXT;
+    CREATE TABLE review_revision_trigger (
+        revision_id TEXT PRIMARY KEY,
+        review_id   TEXT NOT NULL,
+        trigger     TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

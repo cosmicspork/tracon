@@ -3386,15 +3386,40 @@ impl Store {
     /// already been decided takes none: a reviewer finishing after the
     /// operator has approved or rejected is late, and writing its opinion
     /// onto a settled card would rewrite the record of what was decided
-    /// against. Returns whether it was recorded.
-    pub fn set_ai_verdict(&self, id: &str, verdict_json: &str) -> Result<bool> {
+    /// against. Nor does a verdict on `revision_id` replace one already
+    /// there on a later revision: a reviewer still reading an earlier one
+    /// that finishes last would otherwise put its stale verdict over the
+    /// current one.
+    pub fn set_ai_verdict(
+        &self,
+        id: &str,
+        verdict_json: &str,
+        revision_id: Option<&str>,
+    ) -> Result<VerdictRecorded> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "UPDATE review SET ai_verdict_json=?2, updated_ms=?3
-             WHERE id=?1 AND state IN ('new','claimed','revising')",
-            rusqlite::params![id, verdict_json, now_ms()],
+             WHERE id=?1 AND state IN ('new','claimed','revising')
+               AND NOT EXISTS (
+                 SELECT 1 FROM review_revision placed, review_revision mine
+                  WHERE mine.id=?4 AND mine.review_id=?1 AND placed.review_id=?1
+                    AND placed.id=json_extract(review.ai_verdict_json, '$.revision_id')
+                    AND (placed.created_ms, placed.id) > (mine.created_ms, mine.id))",
+            rusqlite::params![id, verdict_json, now_ms(), revision_id],
         )?;
-        Ok(n == 1)
+        if n == 1 {
+            return Ok(VerdictRecorded::Recorded);
+        }
+        let state: Option<String> = conn
+            .query_row("SELECT state FROM review WHERE id=?1", [id], |r| r.get(0))
+            .optional()?;
+        Ok(match state {
+            Some(state) if matches!(state.as_str(), "new" | "claimed" | "revising") => {
+                VerdictRecorded::Superseded
+            }
+            Some(state) => VerdictRecorded::Decided(state),
+            None => VerdictRecorded::Gone,
+        })
     }
 
     pub fn get_review(&self, id: &str) -> Result<Option<ReviewRow>> {
@@ -4507,4 +4532,15 @@ mod migration_tests {
             .unwrap();
         assert_eq!(store.all_events_after(-1, 10).unwrap()[0].node_id, "n1");
     }
+}
+
+/// What became of a reviewer's verdict ([`Store::set_ai_verdict`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerdictRecorded {
+    Recorded,
+    /// The review has a verdict on a later revision, which stays.
+    Superseded,
+    /// The review was already decided, in this state.
+    Decided(String),
+    Gone,
 }

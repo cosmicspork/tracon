@@ -70,9 +70,37 @@ impl Wait {
     }
 }
 
-/// What each session has been told, by wait key.
+/// What each session has been told, by wait key; and the reviewer's
+/// verdict on each review as of its last change, so a settle pass does not
+/// read it again for a review that has not changed.
 #[derive(Default)]
-pub struct Told(Mutex<HashSet<(String, String)>>);
+pub struct Told(Mutex<HashSet<(String, String)>>, Verdicts);
+
+/// A review's AI verdict on its latest revision, by review id, as of the
+/// review's `updated_ms`.
+#[derive(Default)]
+struct Verdicts(Mutex<std::collections::HashMap<String, (i64, Option<Value>)>>);
+
+impl Verdicts {
+    fn of(&self, store: &Store, row: &ReviewRow) -> Option<Value> {
+        if let Some((_, verdict)) = self
+            .0
+            .lock()
+            .unwrap()
+            .get(&row.id)
+            .filter(|(updated, _)| *updated == row.updated_ms)
+        {
+            return verdict.clone();
+        }
+        // Read outside the lock: every session's settle pass shares it.
+        let verdict = crate::mcp::review::current_verdict(store, row);
+        self.0
+            .lock()
+            .unwrap()
+            .insert(row.id.clone(), (row.updated_ms, verdict.clone()));
+        verdict
+    }
+}
 
 /// The waits of the sessions this node runs, and what each has been told.
 #[derive(Clone)]
@@ -88,6 +116,12 @@ pub fn question_key(row: &OperatorQuestionRow) -> String {
 
 pub fn review_key(row: &ReviewRow) -> String {
     format!("review:{}:{}:{}", row.id, row.state, row.updated_ms)
+}
+
+/// A reviewer's verdict on a review still waiting on the operator: told
+/// once, by the verdict it is.
+pub fn reviewer_key(review_id: &str, verdict: &Value) -> String {
+    format!("reviewer:{review_id}:{}", verdict["at_ms"])
 }
 
 pub fn approval_key(row: &ApprovalRow) -> String {
@@ -120,7 +154,9 @@ impl Waits {
 
     /// Everything `session_id` waits on or has waited on, open or decided.
     pub fn of(&self, session_id: &str) -> Vec<Wait> {
-        of(&self.store, &self.checking, session_id)
+        collect(&self.store, &self.checking, session_id, |row| {
+            self.told.1.of(&self.store, row)
+        })
     }
 
     /// What `session_id` still waits on the operator for.
@@ -145,6 +181,27 @@ impl Waits {
             .contains(&(session_id.to_string(), key.to_string()))
     }
 
+    /// Let go of what was kept for reviews no longer open (`open` holds
+    /// those that are): their reviewer verdicts are not told again, nor
+    /// read for a settle pass, and an external caller's wait on one is over.
+    pub fn retain_open(&self, open: &HashSet<&str>) {
+        self.told.0.lock().unwrap().retain(|(session, key)| {
+            if let Some(review) = session.strip_prefix("external:") {
+                return open.contains(review);
+            }
+            match key.strip_prefix("reviewer:") {
+                Some(rest) => open.contains(rest.rsplit_once(':').map_or(rest, |(id, _)| id)),
+                None => true,
+            }
+        });
+        self.told
+            .1
+             .0
+            .lock()
+            .unwrap()
+            .retain(|review, _| open.contains(review.as_str()));
+    }
+
     /// The session has ended; nothing more will be told to it.
     pub fn forget(&self, session_id: &str) {
         self.told
@@ -152,12 +209,40 @@ impl Waits {
             .lock()
             .unwrap()
             .retain(|(session, _)| session != session_id);
+        // Nor will its reviews' verdicts be read for it again. An external
+        // caller is told as its one review (`external:{review_id}`).
+        let reviews: Vec<String> = match session_id.strip_prefix("external:") {
+            Some(review_id) => vec![review_id.to_string()],
+            None => self
+                .store
+                .reviews_of_session(session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| row.id)
+                .collect(),
+        };
+        let mut memo = self.told.1 .0.lock().unwrap();
+        for review in &reviews {
+            memo.remove(review);
+        }
     }
 }
 
 /// Everything `session_id` waits on or has waited on, open or decided, as
 /// the store and the node's running checks say.
 pub fn of(store: &Store, checking: &Checking, session_id: &str) -> Vec<Wait> {
+    collect(store, checking, session_id, |row| {
+        crate::mcp::review::current_verdict(store, row)
+    })
+}
+
+/// [`of`], reading a review's AI verdict with `verdict`.
+fn collect(
+    store: &Store,
+    checking: &Checking,
+    session_id: &str,
+    verdict: impl Fn(&ReviewRow) -> Option<Value>,
+) -> Vec<Wait> {
     use crate::mcp::{approvals, operator, review};
     let mut waits = Vec::new();
     for row in store
@@ -205,6 +290,32 @@ pub fn of(store: &Store, checking: &Checking, session_id: &str) -> Vec<Wait> {
         if decided.is_some() && running.contains(&row.id) {
             continue;
         }
+        // A reviewer's verdict on a review still waiting is told on its own:
+        // the submitter can start on it before the operator decides.
+        if let Some(verdict) = (decided.is_none() && !report && !running.contains(&row.id))
+            .then(|| verdict(&row))
+            .flatten()
+        {
+            waits.push(Wait {
+                key: reviewer_key(&row.id, &verdict),
+                tool: review::STATUS,
+                id: row.id.clone(),
+                about: format!("the AI reviewer's verdict on {}", row.title),
+                decided: Some(json!({
+                    "review_id": row.id,
+                    "state": row.state,
+                    "still_waiting": true,
+                    "reviewer": {
+                        "state": "done",
+                        "model": verdict["model"],
+                        "verdict": verdict["verdict"],
+                        "summary": verdict["summary"],
+                        "findings": verdict["findings"],
+                    },
+                    "message": review::reviewer_verdict_says(&verdict),
+                })),
+            });
+        }
         waits.push(Wait {
             key: review_key(&row),
             tool: if report {
@@ -234,7 +345,8 @@ pub fn of(store: &Store, checking: &Checking, session_id: &str) -> Vec<Wait> {
 
 /// What `session_id` still waits on the operator for.
 pub fn open(store: &Store, checking: &Checking, session_id: &str) -> Vec<Wait> {
-    of(store, checking, session_id)
+    // A reviewer's verdict is never an open wait, so it is not read here.
+    collect(store, checking, session_id, |_| None)
         .into_iter()
         .filter(Wait::is_open)
         .collect()
@@ -260,8 +372,14 @@ pub fn decisions(decided: &[Wait]) -> String {
 /// status tool returns it, and what is still open.
 pub fn prompt(decided: &[Wait], open: &[Wait]) -> String {
     let mut text = String::from(
-        "The operator has decided something you were waiting on. Each result below is \
-         what its status tool returns now.\n",
+        if decided.iter().all(|wait| wait.key.starts_with("reviewer:")) {
+            "An AI reviewer has given its verdict on a review you are waiting on. It is \
+             advisory: the operator has not decided yet. Each result below is what its status \
+             tool returns now.\n"
+        } else {
+            "The operator has decided something you were waiting on. Each result below is \
+             what its status tool returns now.\n"
+        },
     );
     text.push_str(&decisions(decided));
     if open.is_empty() {

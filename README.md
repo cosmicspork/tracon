@@ -782,9 +782,37 @@ tracon channel bind work phases.review.model=anthropic/claude-opus-5
 tracon channel bind work phases.review.budget_tokens=400000   # optional; else [session] budget_tokens
 ```
 
-From then on each review a session on that channel submits, and each resubmission,
-starts one. The review page names the model under *Reviewed by*, and the submitting
-agent is told whether a reviewer started and, if not, why.
+Whether a submission starts one on its own is set apart from the model, for each
+place a submission comes from: a session this node runs, or a harness you run
+yourself (which sends only its diff, with no checks or shown work for a reviewer to
+go on). Set it beside the review model in **Settings → Channels**, or:
+
+```sh
+tracon channel bind work phases.review.trigger.session=auto      # the default
+tracon channel bind work phases.review.trigger.external=manual   # the default
+tracon channel bind work phases.review.trigger=manual            # both at once
+```
+
+Under `auto`, each submission from that source, and each resubmission, starts a
+reviewer. Under `manual`, none starts on its own and the review says so; start one
+with **Start reviewer** on the review page. The trigger can be set with no model
+bound, but then neither starts a reviewer, and the settings row and the review page
+say so. The review page names the model under *Reviewed by*, and whether it started
+on submission or by you.
+
+The submitting agent is told too: submit_review's message says whether a reviewer
+is reading the change, under which trigger, and `review_session` carries its
+`trigger` and `model`. While the agent waits, review_status carries `reviewer`
+(`state`: starting, running, done, failed or none, with the model), and once the
+reviewer has given a verdict on the latest revision, its `verdict`, `summary` and
+`findings`. The verdict ends a review_status wait early and is brought back to a
+session that ended its turn waiting, so the agent can start on the findings before
+you decide; your decision still governs.
+
+When the reviewer requests changes, **Request these changes…** on its verdict opens
+the Request changes composer with its summary and findings filled in, one finding a
+line. Edit the text or untick a finding, then send it as your own request; the agent
+receives it like any other, marked as from the AI review.
 
 A review session never decides. It ends by giving one `review_verdict`, approve or
 request changes with a summary and findings, which is shown on the review card;

@@ -1,5 +1,13 @@
 import { expect, test } from 'bun:test'
-import { exhaustionDefaults, exhaustionPatch, modelLabel, modelPatch, phaseDefaults } from './bindings'
+import {
+  exhaustionDefaults,
+  exhaustionPatch,
+  modelLabel,
+  modelPatch,
+  phaseDefaults,
+  reviewTriggers,
+  triggerPatch,
+} from './bindings'
 
 const bound = {
   phases: {
@@ -57,5 +65,72 @@ test('a fallback policy is only written with its model', () => {
   expect(exhaustionPatch('fallback_then_wait', undefined)).toBe(null)
   expect(exhaustionPatch('fallback_then_wait', ' b/m ')).toEqual({
     exhaustion: { policy: 'fallback_then_wait', fallback: 'b/m' },
+  })
+})
+
+/** The node's dotted-path merge (`merge_path`): null removes a key. */
+function merged(bindings: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const out = structuredClone(bindings)
+  for (const [path, value] of Object.entries(patch)) {
+    const parts = path.split('.')
+    let cur = out as Record<string, unknown>
+    for (const part of parts.slice(0, -1)) {
+      if (typeof cur[part] !== 'object' || cur[part] === null) cur[part] = {}
+      cur = cur[part] as Record<string, unknown>
+    }
+    const last = parts.at(-1)!
+    if (value === null) delete cur[last]
+    else cur[last] = value
+  }
+  return out
+}
+
+test('a channel reviews its sessions on submission and external harnesses by hand unless it says otherwise', () => {
+  expect(reviewTriggers({ bindings: {} })).toEqual({ session: 'auto', external: 'manual' })
+  expect(reviewTriggers({ bindings: { phases: { review: { trigger: 'manual' } } } })).toEqual({
+    session: 'manual',
+    external: 'manual',
+  })
+  // What the node reports wins: its defaults are the ones that apply.
+  expect(reviewTriggers({ bindings: {}, review_trigger: { session: 'auto', external: 'auto' } })).toEqual({
+    session: 'auto',
+    external: 'auto',
+  })
+})
+
+test('a review trigger saved from settings reads back as saved', () => {
+  let bindings: Record<string, unknown> = { phases: { review: { model: 'm/r' } } }
+  bindings = merged(bindings, triggerPatch(bindings, 'external', 'auto'))
+  expect(reviewTriggers({ bindings })).toEqual({ session: 'auto', external: 'auto' })
+  bindings = merged(bindings, triggerPatch(bindings, 'session', 'manual'))
+  expect(reviewTriggers({ bindings })).toEqual({ session: 'manual', external: 'auto' })
+  // The model is left as it was, and the trigger saves without one.
+  expect(phaseDefaults(bindings, 'review').model).toBe('m/r')
+  const unbound = merged({}, triggerPatch({}, 'session', 'manual'))
+  expect(reviewTriggers({ bindings: unbound })).toEqual({ session: 'manual', external: 'manual' })
+})
+
+test('one value set for both is split before one source changes', () => {
+  const both = { phases: { review: { trigger: 'manual' } } }
+  expect(triggerPatch(both, 'session', 'auto')).toEqual({
+    'phases.review.trigger': { session: 'auto', external: 'manual' },
+  })
+  expect(reviewTriggers({ bindings: merged(both, triggerPatch(both, 'session', 'auto')) })).toEqual({
+    session: 'auto',
+    external: 'manual',
+  })
+})
+
+test('a trigger value the node does not know is replaced whole, not written into', () => {
+  const odd = { phases: { review: { trigger: 'sometimes' } } }
+  // Read as the defaults, as the node reads it.
+  expect(reviewTriggers({ bindings: odd })).toEqual({ session: 'auto', external: 'manual' })
+  expect(triggerPatch(odd, 'external', 'auto')).toEqual({ 'phases.review.trigger': { external: 'auto' } })
+  expect(reviewTriggers({ bindings: merged(odd, triggerPatch(odd, 'external', 'auto')) })).toEqual({
+    session: 'auto',
+    external: 'auto',
+  })
+  expect(triggerPatch({ phases: { review: { trigger: 3 } } }, 'session', 'manual')).toEqual({
+    'phases.review.trigger': { session: 'manual' },
   })
 })

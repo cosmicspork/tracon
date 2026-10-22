@@ -82,6 +82,7 @@ import type {
   UsageTotal,
   ManifestView,
   ToolchainStatus,
+  ReviewerView,
 } from './types'
 
 import type { HtmlBundleSelection } from './html-bundle'
@@ -539,6 +540,16 @@ export const api = {
   /** Start a fresh review session on a review: an admin action. */
   startReviewer: (id: string) =>
     call<{ state: string; session_id: string }>('POST', `/api/reviews/${id}/review-session`),
+  /** What became of a review's reviewer, without the rest of the review: what the page polls while one runs. */
+  reviewSession: (id: string) =>
+    call<{
+      state: string
+      review_session_id: string | null
+      ai_verdict_json: string | null
+      review_session_reason: string | null
+      review_session_starting: boolean
+      reviewer: ReviewerView | null
+    }>('GET', `/api/reviews/${id}/review-session`),
   /** `reason` goes back with a rejection, `notes` with a request for changes. */
   answer: (
     permissionId: string,

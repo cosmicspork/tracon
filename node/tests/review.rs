@@ -1744,13 +1744,26 @@ async fn running_reviewer(f: &Fixture, session_id: &str) -> String {
 }
 
 fn bind_review_model(f: &Fixture) {
+    bind_review(f, json!({"model": "m/reviewer"}));
+}
+
+/// Bind `phases.review` on the fixture's channel as given.
+fn bind_review(f: &Fixture, review: Value) {
     f.store
         .channel_put(
             "work",
             b"",
-            &json!({"phases": {"review": {"model": "m/reviewer"}}}).to_string(),
+            &json!({"phases": {"review": review}}).to_string(),
         )
         .unwrap();
+}
+
+/// A model, and a reviewer started on its own for a harness you run too.
+fn bind_review_model_for_external(f: &Fixture) {
+    bind_review(
+        f,
+        json!({"model": "m/reviewer", "trigger": {"external": "auto"}}),
+    );
 }
 
 #[tokio::test]
@@ -1762,7 +1775,7 @@ async fn a_review_from_a_harness_you_run_yourself_gets_a_reviewer_seeded_from_it
         c.external.repo_roots = vec![Config::state_dir()];
     })
     .await;
-    bind_review_model(&f);
+    bind_review_model_for_external(&f);
     let mut args = f.submit_args();
     args["branch"] = json!("feat/x");
     args["worktree"] = json!(f.worktree);
@@ -1954,7 +1967,7 @@ async fn a_candidate_too_large_to_keep_is_why_no_reviewer_started() {
         c.supervision.max_snapshot_bytes = 1;
     })
     .await;
-    bind_review_model(&f);
+    bind_review_model_for_external(&f);
     let mut args = f.submit_args();
     args["branch"] = json!("feat/x");
     args["worktree"] = json!(f.worktree);
@@ -1986,6 +1999,431 @@ async fn a_candidate_too_large_to_keep_is_why_no_reviewer_started() {
         f.store.get_review(&id).unwrap().unwrap().review_session_id,
         None
     );
+}
+
+#[tokio::test]
+async fn a_manual_trigger_starts_no_reviewer_until_the_operator_starts_one() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review(
+        &f,
+        json!({"model": "m/reviewer", "trigger": {"session": "manual"}}),
+    );
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_eq!(v["review_session"]["state"], "none", "{v}");
+    assert_eq!(v["review_session"]["trigger"], "manual", "{v}");
+    assert_eq!(v["review_session"]["model"], "m/reviewer", "{v}");
+    assert_eq!(
+        v["review_session"]["reason"],
+        tracon::mcp::review::MANUAL_REVIEW,
+        "{v}"
+    );
+    let message = v["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("unless the operator starts one")
+            && message.contains("phases.review.trigger.session is manual on work"),
+        "{message}"
+    );
+    assert_eq!(
+        f.store.review_session_reason(&id).unwrap().as_deref(),
+        Some(tracon::mcp::review::MANUAL_REVIEW)
+    );
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().review_session_id,
+        None
+    );
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["reviewer"]["state"], "none", "{detail}");
+    assert_eq!(detail["reviewer"]["trigger"], "manual", "{detail}");
+
+    // The operator starts one, and the review says so.
+    let (status, body) = f
+        .call_at_node("POST", &format!("/api/reviews/{id}/review-session"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["reviewer"]["started_by"], "operator", "{detail}");
+    assert!(
+        ["starting", "running"].contains(&detail["reviewer"]["state"].as_str().unwrap()),
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn an_external_harness_submission_is_reviewed_by_hand_unless_the_channel_says_otherwise() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    bind_review_model(&f);
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let v = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &tracon::mcp::CallContext::external(None, "work", "n1"),
+        "submit_review",
+        &args,
+    )
+    .await
+    .unwrap();
+    assert_eq!(v["review_session"]["state"], "none", "{v}");
+    assert_eq!(v["review_session"]["trigger"], "manual", "{v}");
+    assert_eq!(v["review_session"]["source"], "external", "{v}");
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("phases.review.trigger.external is manual on work"),
+        "{v}"
+    );
+    // Started by hand straight away, it waits for the candidate's files
+    // rather than finding them not kept yet.
+    let id = v["review_id"].as_str().unwrap().to_string();
+    let (status, body) = f
+        .call_at_node("POST", &format!("/api/reviews/{id}/review-session"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "started", "{body}");
+}
+
+#[tokio::test]
+async fn the_submitter_hears_its_reviewer_and_the_verdict_while_it_waits() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review_model(&f);
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_eq!(v["review_session"]["trigger"], "auto", "{v}");
+    assert_eq!(v["review_session"]["model"], "m/reviewer", "{v}");
+    let message = v["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("An AI reviewer (m/reviewer) is reading this")
+            && message.contains("Only the operator's decision publishes")
+            && message.contains("phases.review.trigger.session is auto on work"),
+        "{message}"
+    );
+    let reviewer = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    running_reviewer(&f, &reviewer).await;
+
+    let s = f.status_tool(&id).await;
+    assert_eq!(s["still_waiting"], true, "{s}");
+    assert_eq!(s["reviewer"]["state"], "running", "{s}");
+    assert_eq!(s["reviewer"]["model"], "m/reviewer", "{s}");
+    assert_eq!(s["reviewer"]["verdict"], Value::Null, "{s}");
+
+    // A malformed finding costs the verdict nothing: one that says nothing
+    // is dropped, and a part of one not of its kind is left off. The
+    // reviewer is told what was done.
+    let v = f
+        .tool(
+            &reviewer,
+            "review_verdict",
+            json!({"verdict": "request_changes", "summary": "a.txt grew without a test",
+            "findings": [
+                {"path": "a.txt", "line": 2},
+                {"note": "the summary is long", "severity": "minor", "line": 0},
+                {"path": "a.txt", "line": 2, "severity": "should", "note": "cover it"},
+            ]}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+    let adjusted = v["findings_adjusted"].to_string();
+    assert!(
+        adjusted.contains("finding 1 has no `note`")
+            && adjusted.contains("finding 2's `line`")
+            && adjusted.contains("finding 2's `severity`"),
+        "{v}"
+    );
+    let recorded: Value = serde_json::from_str(
+        &f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .ai_verdict_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        recorded["findings"],
+        json!([
+            {"note": "the summary is long"},
+            {"path": "a.txt", "line": 2, "severity": "should", "note": "cover it"},
+        ]),
+        "{recorded}"
+    );
+
+    let s = f.status_tool(&id).await;
+    assert_eq!(s["still_waiting"], true, "{s}");
+    assert_eq!(s["reviewer"]["state"], "done", "{s}");
+    assert_eq!(s["reviewer"]["verdict"], "request_changes", "{s}");
+    assert_eq!(s["reviewer"]["findings"][1]["note"], "cover it", "{s}");
+    assert!(
+        s["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("has given its verdict"),
+        "{s}"
+    );
+    // A session that ended its turn waiting has it brought back too.
+    let waits = f.manager.waits().of("s1");
+    let told = waits
+        .iter()
+        .find(|w| w.key.starts_with("reviewer:"))
+        .unwrap_or_else(|| panic!("{waits:?}"));
+    assert_eq!(
+        told.decided.as_ref().unwrap()["reviewer"]["verdict"],
+        "request_changes"
+    );
+    assert!(waits.iter().any(|w| w.id == id && w.is_open()), "{waits:?}");
+    // Told once: the next call waits for the operator again.
+    let s = f.status_tool_waiting(&id, 1).await;
+    assert_eq!(s["waited_secs"], 1, "{s}");
+    // The page sees the verdict as this revision's.
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["reviewer"]["started_by"], "submission", "{detail}");
+    assert_eq!(detail["reviewer"]["verdict_revision"], 1, "{detail}");
+    assert_eq!(detail["reviewer"]["revision"], 1, "{detail}");
+}
+
+#[tokio::test]
+async fn a_verdict_on_an_earlier_revision_never_replaces_one_on_a_later_revision() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review_model(&f);
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let first = f.store.latest_review_revision(&id).unwrap().unwrap();
+
+    // Resubmitted while the first reviewer still reads revision 1.
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    resubmit["title"] = json!("feat: rewritten while the first reviewer read");
+    let v = f.tool("s1", "submit_review", resubmit).await;
+    let second = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    running_reviewer(&f, &second).await;
+    let latest = f.store.latest_review_revision(&id).unwrap().unwrap();
+    assert_ne!(first.id, latest.id);
+
+    let v = f
+        .tool(
+            &second,
+            "review_verdict",
+            json!({"verdict": "approve", "summary": "revision 2 is fine"}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+
+    // The first reviewer finishes last, on the revision it read. Straight
+    // at the store, as the write itself sees it: the fake reviewer has
+    // ended its turn by now.
+    let late = json!({"verdict": "request_changes", "summary": "revision 1 lacks a test",
+                      "revision_id": first.id, "at_ms": 1});
+    assert_eq!(
+        f.store
+            .set_ai_verdict(&id, &late.to_string(), Some(&first.id))
+            .unwrap(),
+        tracon::store::VerdictRecorded::Superseded
+    );
+    let kept: Value = serde_json::from_str(
+        &f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .ai_verdict_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept["summary"], "revision 2 is fine", "{kept}");
+    assert_eq!(kept["revision_id"], json!(latest.id), "{kept}");
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["reviewer"]["verdict"], "approve", "{detail}");
+    assert_eq!(detail["reviewer"]["verdict_revision"], 2, "{detail}");
+
+    // A later revision's verdict still replaces an earlier one's, and one
+    // on the same revision replaces it as before.
+    let again = json!({"verdict": "request_changes", "summary": "on second thought",
+                       "revision_id": latest.id, "at_ms": 2});
+    assert_eq!(
+        f.store
+            .set_ai_verdict(&id, &again.to_string(), Some(&latest.id))
+            .unwrap(),
+        tracon::store::VerdictRecorded::Recorded
+    );
+}
+
+#[tokio::test]
+async fn a_verdict_given_between_two_status_calls_ends_the_next_wait_at_once() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review_model(&f);
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let reviewer = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    running_reviewer(&f, &reviewer).await;
+    let s = f.status_tool(&id).await;
+    assert_eq!(s["reviewer"]["verdict"], Value::Null, "{s}");
+
+    // Given after that call returned and before the next one.
+    let v = f
+        .tool(
+            &reviewer,
+            "review_verdict",
+            json!({"verdict": "approve", "summary": "fine"}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+    let s = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.status_tool_waiting(&id, 45),
+    )
+    .await
+    .expect("the wait ends on the verdict, not at its cap");
+    assert_eq!(s["still_waiting"], true, "{s}");
+    // It says what it waited, not what was asked.
+    assert_eq!(s["waited_secs"], 0, "{s}");
+    assert_eq!(s["reviewer"]["verdict"], "approve", "{s}");
+}
+
+/// review_status as a harness outside the node asks it.
+async fn external_status(
+    f: &Fixture,
+    external: &tracon::mcp::CallContext,
+    id: &str,
+    wait: u64,
+) -> Value {
+    tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        external,
+        "review_status",
+        &json!({ "review_id": id, "wait_secs": wait }),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_external_harness_is_told_the_verdict_once_and_forgotten_once_the_review_is_decided() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    bind_review_model_for_external(&f);
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let external = tracon::mcp::CallContext::external(None, "work", "n1");
+    let v = tracon::mcp::review::call(&f.store, &f.manager, &external, "submit_review", &args)
+        .await
+        .unwrap();
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let mut reviewer = None;
+    for _ in 0..600 {
+        reviewer = f.store.get_review(&id).unwrap().unwrap().review_session_id;
+        if reviewer.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let reviewer = reviewer.expect("a reviewer for the external review");
+    running_reviewer(&f, &reviewer).await;
+    let v = f
+        .tool(
+            &reviewer,
+            "review_verdict",
+            json!({"verdict": "approve", "summary": "fine"}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+    let s = external_status(&f, &external, &id, 0).await;
+    assert_eq!(s["reviewer"]["verdict"], "approve", "{s}");
+    // Told as the review's external caller, so the next wait is the operator's.
+    let verdict: Value = serde_json::from_str(
+        &f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .ai_verdict_json
+            .unwrap(),
+    )
+    .unwrap();
+    let key = tracon::session::waits::reviewer_key(&id, &verdict);
+    let caller = format!("external:{id}");
+    assert!(f.manager.waits().was_told(&caller, &key));
+    let s = external_status(&f, &external, &id, 1).await;
+    assert_eq!(s["waited_secs"], 1, "{s}");
+
+    // Decided, and what it was told is let go.
+    let (code, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "not now" })),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert!(!f.manager.waits().was_told(&caller, &key));
+}
+
+#[tokio::test]
+async fn the_page_shows_the_trigger_a_revision_was_submitted_under() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review(
+        &f,
+        json!({"model": "m/reviewer", "trigger": {"session": "manual"}}),
+    );
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    // The binding changes after the submission.
+    bind_review(&f, json!({"model": "m/reviewer", "trigger": "auto"}));
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["reviewer"]["trigger"], "manual", "{detail}");
+    assert_eq!(
+        detail["reviewer"]["reason"],
+        tracon::mcp::review::MANUAL_REVIEW,
+        "{detail}"
+    );
+    // The page's poll reads the same, without the rest of the review.
+    let (status, polled) = f
+        .call("GET", &format!("/api/reviews/{id}/review-session"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{polled}");
+    assert_eq!(polled["reviewer"], detail["reviewer"], "{polled}");
+    // Opening the review claimed it; the poll says so without claiming.
+    assert_eq!(polled["state"], detail["review"]["state"], "{polled}");
 }
 
 #[tokio::test]
