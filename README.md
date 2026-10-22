@@ -772,7 +772,12 @@ that a peer has none.
 A review can also get a second opinion from a **review session**: a fresh session
 that never saw the implementation. It starts from the submitted change with none of
 the implementing session's conversation, reads the item's brief and criteria and the
-diff, and judges the one against the other.
+diff, and judges the one against the other. Beside the diff it is given what the node
+holds about the candidate: the required checks run on it, with the end of their
+output, the work shown at that commit, and what earlier reviewers of the same review
+found. When there is none it is told so. It runs in the repository's image where its
+`[[repo]]` entry names one, so it can run the checks itself, and is told plainly when
+it cannot.
 
 It is off until a channel names its model. Pick one under **Settings → Channels →
 Review model**, beside Plan and Execute, or bind it from the command line:
@@ -815,7 +820,8 @@ line. Edit the text or untick a finding, then send it as your own request; the a
 receives it like any other, marked as from the AI review.
 
 A review session never decides. It ends by giving one `review_verdict`, approve or
-request changes with a summary and findings, which is shown on the review card;
+request changes with a summary and findings, and what it rests on (`ran_checks`,
+`cited_evidence` or `diff_only`), which is shown on the review card;
 only your decision publishes or sends the work back. Its tools are read-only:
 `recall`, `doc_read`, `doc_search`, `brief_read`, `criteria_read`, and
 `review_verdict`.
@@ -904,7 +910,9 @@ node's documents and memory, the ledger, and review. `submit_review` takes the
 path of your worktree; its repository must live under `[external] repo_roots`
 (`~/src` unless you say otherwise), so a linked worktree in a scratch directory
 is fine. The node captures the diff from it, skips the container checks (you
-ran them where your toolchain is), and on approval pushes that branch and opens
+ran them where your toolchain is) unless `[external] run_checks` asks it to run them
+behind the submission for the reviewer (the card says they are running until they
+land, and a reviewer, whether the trigger starts it or you do, waits for them), and on approval pushes that branch and opens
 the change — or updates the one named by `change` — with the brokered
 credential, exactly as for a session it started.
 `work_close` takes the item's id, and refuses one a running session holds. A
@@ -1364,6 +1372,8 @@ max_files = 200
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
+run_checks = false                  # true: run the repository's checks on the node's copy of each submission,
+                                    # in its image, as evidence for the reviewer; never gates the submission
 
 [docs]
 # export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/;

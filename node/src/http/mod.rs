@@ -825,6 +825,13 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         // runs through the very handler a local one reaches.
         m.streams().set_executor(Arc::new(state.clone()));
     }
+    // External candidates' checks a restart interrupted, and the reviewers
+    // that were waiting on them.
+    tokio::spawn({
+        let store = store.clone();
+        let manager = state.manager.clone();
+        async move { crate::mcp::review::reconcile_interrupted_checks(&store, &manager).await }
+    });
     // The nightly batch, for channels this node processes.
     tokio::spawn(crate::corpus::promote::nightly(
         store.clone(),

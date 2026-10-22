@@ -218,23 +218,99 @@ impl RepoEnvironment {
 /// path — bounded, because a store is not trusted to be acyclic. `None` for a
 /// session the store no longer has, or one with no repository (a harness the
 /// operator runs themselves).
+///
+/// A workspace no session imported, such as a review session's (its review's
+/// candidate), answers with the repository the node recorded for it when it
+/// built it (`Store::record_workspace_origin`), so that session gets the image
+/// and toolchain a session on that repository gets.
 pub fn origin_repo(store: &Store, session_id: Option<&str>) -> Result<Option<PathBuf>, String> {
     let Some(session_id) = session_id else {
         return Ok(None);
     };
     let mut id = session_id.to_string();
+    let mut followed = false;
     for _ in 0..8 {
         let Some(session) = store.get_session(&id).map_err(|error| error.to_string())? else {
-            return Ok(None);
+            if !followed {
+                return Ok(None);
+            }
+            return Ok(store
+                .workspace_origin(&id)
+                .map_err(|error| error.to_string())?
+                .flatten()
+                .filter(|repo| !repo.trim().is_empty())
+                .map(PathBuf::from));
         };
         match session.repo_path.strip_prefix("workspace://") {
-            Some(workspace) if workspace != id => id = workspace.to_string(),
+            Some(workspace) if workspace != id => {
+                id = workspace.to_string();
+                followed = true;
+            }
             Some(_) => return Ok(None),
             None if session.repo_path.trim().is_empty() => return Ok(None),
             None => return Ok(Some(session.repo_path.into())),
         }
     }
     Ok(None)
+}
+
+/// The repository a review is of: the one its submitting session worked in,
+/// or for a harness the operator runs, the one recorded on its target
+/// (`external_review_repo`). `None` for neither.
+pub fn review_repo(
+    store: &Store,
+    review: &crate::store::ReviewRow,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(session_id) = review.session_id.as_deref() {
+        return origin_repo(store, Some(session_id));
+    }
+    Ok(
+        serde_json::from_str::<crate::review::publish::Target>(&review.target)
+            .ok()
+            .and_then(|target| target.repo)
+            .filter(|repo| !repo.trim().is_empty())
+            .map(PathBuf::from),
+    )
+}
+
+/// The repository a review from a harness the operator runs answers to: the
+/// one its worktree belongs to, unless only the node's own clone of its forge
+/// project has a `[[repo]]` entry, so an entry written for the clone serves
+/// the operator's checkout of the same project too. The clone is where the
+/// node would put it: under the forge's clone host as the channel's
+/// credential (`forge_env`) names it (`GH_HOST`, `GITLAB_HOST`), as every
+/// clone and push resolves it.
+pub fn external_review_repo(
+    cfg: &Config,
+    operator_repo: &Path,
+    provider: &str,
+    project: &str,
+    forge_env: &std::collections::BTreeMap<String, String>,
+) -> PathBuf {
+    let repos = cfg.repos();
+    let has_entry = |repo: &Path| repos.iter().any(|entry| entry.matches(repo));
+    if has_entry(operator_repo) {
+        return operator_repo.to_path_buf();
+    }
+    let Some(provider) = crate::review::publish::Provider::parse(provider) else {
+        return operator_repo.to_path_buf();
+    };
+    let host = provider.forge().clone_host(forge_env);
+    let parts: Vec<&str> = project.split('/').collect();
+    let managed = match parts.split_last() {
+        Some((name, owner)) if !owner.is_empty() => crate::forge::clone_dest(
+            &crate::forge::managed_root(&Config::state_dir()),
+            &host,
+            &owner.join("/"),
+            name,
+        )
+        .ok(),
+        _ => None,
+    };
+    match managed {
+        Some(managed) if has_entry(&managed) => managed,
+        _ => operator_repo.to_path_buf(),
+    }
 }
 
 /// The environment of the repository a session is working in. A store that
@@ -994,5 +1070,50 @@ mod tests {
             .iter()
             .all(|(name, value)| value.starts_with("/cache/")
                 && !cache_env().iter().any(|(shared, _)| shared == name)));
+    }
+
+    /// An external review answers to the node's own clone of its project
+    /// when only that has an entry, and the clone is where the channel's
+    /// credential says its forge clones from: a self-hosted GitLab's host, not
+    /// gitlab.com.
+    #[test]
+    fn an_external_review_finds_the_clone_of_its_project_on_its_own_forge_host() {
+        let mut cfg = Config {
+            repo: vec![Repo {
+                path: "git.example.com/group/app".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let operator = Path::new("/home/me/src/app");
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(
+            "GITLAB_HOST".to_string(),
+            "https://git.example.com/".to_string(),
+        );
+        let managed =
+            crate::forge::managed_root(&Config::state_dir()).join("git.example.com/group/app");
+        assert_eq!(
+            external_review_repo(&cfg, operator, "gitlab", "group/app", &env),
+            managed
+        );
+        // Asked of the public forge, nothing has an entry, so it stays the
+        // operator's checkout.
+        assert_eq!(
+            external_review_repo(&cfg, operator, "gitlab", "group/app", &Default::default()),
+            operator
+        );
+        // An entry for the operator's own checkout is the one it answers to.
+        cfg.repo.insert(
+            0,
+            Repo {
+                path: "src/app".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            external_review_repo(&cfg, operator, "gitlab", "group/app", &env),
+            operator
+        );
     }
 }

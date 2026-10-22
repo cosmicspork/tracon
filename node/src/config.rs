@@ -495,6 +495,13 @@ pub struct External {
     /// Where a worktree submitted for review may come from: its repository
     /// must live under one of these. A leading `~/` is the operator's home.
     pub repo_roots: Vec<PathBuf>,
+    /// Run the repository's required checks on the node's own copy of a
+    /// submitted candidate, in the repository's image, as evidence for its
+    /// reviewer. They run behind the submission and never gate it: the
+    /// harness's own checks ran where its toolchain is, and these are what
+    /// the node can say about the same bytes. Off by default, because it runs
+    /// code the node did not watch being written.
+    pub run_checks: bool,
 }
 
 impl Default for External {
@@ -503,6 +510,7 @@ impl Default for External {
             enabled: false,
             idle_timeout_secs: 3600,
             repo_roots: vec![PathBuf::from("~/src")],
+            run_checks: false,
         }
     }
 }

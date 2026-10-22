@@ -1308,6 +1308,7 @@ mod tests {
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            repo: None,
             change: Some(publish::ChangeRef {
                 number: 63,
                 url: String::new(),

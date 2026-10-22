@@ -531,6 +531,7 @@ pub struct Manager {
     /// The reviews a review session is being started for, so that only one
     /// start at a time reads into a review's workspace.
     review_starts: Arc<crate::mcp::review::ReviewStarts>,
+    external_checks: Arc<crate::mcp::review::ExternalChecks>,
     /// What each session has been told of the decisions it waited on.
     told: Arc<waits::Told>,
     /// A restart asked for and waiting: while it waits, new sessions and
@@ -582,6 +583,7 @@ impl Manager {
             egress: Arc::default(),
             checking: Arc::default(),
             review_starts: Arc::default(),
+            external_checks: Arc::default(),
             told: Arc::default(),
             restart: Arc::default(),
         }
@@ -625,6 +627,11 @@ impl Manager {
     /// The review sessions being started here.
     pub fn review_starts(&self) -> &Arc<crate::mcp::review::ReviewStarts> {
         &self.review_starts
+    }
+
+    /// The node's checks of external candidates under way on this node.
+    pub fn external_checks(&self) -> &Arc<crate::mcp::review::ExternalChecks> {
+        &self.external_checks
     }
 
     pub fn backend(&self) -> &Arc<dyn crate::boundary::Backend> {
@@ -2266,10 +2273,10 @@ impl Manager {
         // session has the tools its checks will run with. Resolved from the
         // repository the work came from, which a resumed session's
         // `workspace://` path only leads back to.
-        let image = match crate::environment::origin_repo(&self.store, Some(id))
+        let origin = crate::environment::origin_repo(&self.store, Some(id))
             .ok()
-            .flatten()
-        {
+            .flatten();
+        let image = match origin.clone() {
             Some(origin) => {
                 let announce = || {
                     self.record(NewEvent {
@@ -2445,6 +2452,23 @@ impl Manager {
                 .review_id
                 .as_deref()
                 .and_then(|r| self.store.get_review(r).ok().flatten());
+            // A reviewer told it can run the tests when it cannot spends its
+            // budget finding that out. Why it has no image says what to fix:
+            // a review tied to no repository, or a repository with no image.
+            let no_toolchain = image.image.is_none().then(|| match &origin {
+                None => "no repository was resolved for this review, so no `[[repo]]` image \
+                         could be chosen"
+                    .to_string(),
+                Some(_) => image.note.clone().unwrap_or_else(|| {
+                    "no `[[repo]]` entry for its repository names an image".to_string()
+                }),
+            });
+            // What its workspace holds, not what a resubmission recorded
+            // while it started.
+            let reviewed = session_row
+                .as_ref()
+                .filter(|_| review.is_some())
+                .and_then(|row| self.store.review_session_revision(row).ok().flatten());
             // Resolved from `origin` when the row was created, and read back
             // the way the forge tools read it when they default to it, so
             // what the session is told and what a call without `repo` reaches
@@ -2496,7 +2520,15 @@ impl Manager {
                     item: item.as_ref(),
                     plan_body: plan_body.as_deref(),
                     ready: &ready,
-                    review: review.as_ref(),
+                    review: review
+                        .as_ref()
+                        .map(|row| crate::corpus::orientation::ReviewFacts {
+                            row,
+                            session_id: id,
+                            no_toolchain: no_toolchain.as_deref(),
+                            revision: reviewed.as_ref(),
+                            checks_configured: !environment.checks.is_empty(),
+                        }),
                     manifest: &manifest,
                     context: context.as_ref().map(|(d, r)| (d, r)),
                     egress: egress

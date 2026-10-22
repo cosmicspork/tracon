@@ -23,8 +23,8 @@ pub struct Decided {
 }
 
 /// The review states a continuation takes over: `new`, `claimed` and
-/// `revising`.
-const CARRIED: &str = "'new','claimed','revising'";
+/// `revising`. Undecided, so still open to a verdict and to evidence.
+pub(crate) const CARRIED: &str = "'new','claimed','revising'";
 
 fn placeholders(n: usize) -> String {
     vec!["?"; n].join(",")

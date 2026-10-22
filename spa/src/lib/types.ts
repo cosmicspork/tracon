@@ -813,6 +813,8 @@ export interface CheckResult {
   /** A failed check's lines that say what failed, read from its whole output. */
   failures?: string
   ms: number
+  /** `could_not_run` when the node could not run the checks at all, `running` while it runs an external candidate's. */
+  outcome?: string
 }
 
 export interface AiFinding {
@@ -824,6 +826,8 @@ export interface AiFinding {
 
 export interface AiVerdict {
   verdict: 'approve' | 'request_changes'
+  /** What it rests on; absent on a verdict given before reviewers said. */
+  basis?: 'ran_checks' | 'cited_evidence' | 'diff_only'
   summary: string
   findings: AiFinding[]
   model: string

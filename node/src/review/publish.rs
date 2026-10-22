@@ -72,7 +72,7 @@ impl Provider {
 
     /// The same forge, as the side of the node that already knows how to
     /// authenticate Git against it names it.
-    fn forge(&self) -> crate::forge::Forge {
+    pub fn forge(&self) -> crate::forge::Forge {
         match self {
             Self::Github => crate::forge::Forge::Github,
             Self::Gitlab => crate::forge::Forge::Gitlab,
@@ -90,6 +90,12 @@ pub struct Target {
     /// immutable candidate into a distinct publisher repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// For a worktree a harness the operator runs submitted: the repository
+    /// whose `[[repo]]` entry its review answers to, so its reviewer and the
+    /// checks run on its candidate get that repository's image. Chosen once,
+    /// at first submit (`environment::external_review_repo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     /// The change on the forge this review updates. `None` opens a new one.
     /// Fixed at first submit. Once there is a change its `base` is fixed too,
     /// because moving an opened change is the forge's business; until then a
@@ -2015,6 +2021,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            repo: None,
             change: None,
         };
         let outputs = Outputs {
@@ -2124,6 +2131,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "master".into(),
             branch: "fix/x".into(),
             worktree: None,
+            repo: None,
             change: None,
         };
         let args = open_change_args(Provider::Gitlab, &target, "fix: x", "b".into(), false);
@@ -2168,6 +2176,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            repo: None,
             change: None,
         };
         let err = publish(
@@ -2188,6 +2197,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            repo: None,
             change: None,
         };
         let err = publish(
@@ -2216,6 +2226,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            repo: None,
             change: None,
         };
         let journal = NoJournal;
@@ -2250,6 +2261,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            repo: None,
             change: None,
         };
         let state = ChangeState {

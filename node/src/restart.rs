@@ -274,6 +274,7 @@ pub struct Busy {
     /// Review submissions whose checks have not all run: a review's checks
     /// run one after another, so between two of them none is running, and
     /// the review is still in flight. New ones are refused during a drain.
+    /// The node's own runs of an external candidate's checks count too.
     pub reviews: i64,
 }
 
@@ -303,7 +304,8 @@ pub fn busy(manager: &Manager) -> Busy {
             .running_check_run_ids()
             .map(|ids| ids.len() as i64)
             .unwrap_or(0),
-        reviews: manager.checking().in_flight() as i64,
+        // A submission's checks, and the node's own of an external one.
+        reviews: (manager.checking().in_flight() + manager.external_checks().in_flight()) as i64,
     }
 }
 

@@ -3345,6 +3345,104 @@ impl Store {
         Ok(())
     }
 
+    /// Record checks run on `head_sha` for a review, only while the review is
+    /// still undecided and still of that commit: the check and the write are
+    /// one statement, so a resubmission landing between them never gets
+    /// another commit's results. Whether they were written.
+    pub fn set_checks_at(&self, id: &str, head_sha: &str, checks_json: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            &format!(
+                "UPDATE review SET checks_json=?3, updated_ms=?4
+                 WHERE id=?1 AND head_sha=?2 AND state IN ({})",
+                continuation::CARRIED
+            ),
+            rusqlite::params![id, head_sha, checks_json, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Clear a review's checks record if it is still `checks_json` on
+    /// `head_sha`, whatever the review's state: what was said while checks
+    /// ran, once they stopped without saying anything else. Whether it was.
+    pub fn clear_checks_if(&self, id: &str, head_sha: &str, checks_json: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET checks_json=NULL, updated_ms=?4
+             WHERE id=?1 AND head_sha=?2 AND checks_json=?3",
+            rusqlite::params![id, head_sha, checks_json, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Replace the checks record of every undecided review `node_id` owns
+    /// that still says its checks are running (one entry, outcome `running`)
+    /// with `checks_json`: after a restart nothing is running them. A decided
+    /// review is left as it is. The reviews it replaced.
+    pub fn interrupt_running_checks(
+        &self,
+        node_id: &str,
+        checks_json: &str,
+    ) -> Result<Vec<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT id FROM review
+                 WHERE node_id=?1 AND state IN ({})
+                   AND checks_json IS NOT NULL AND json_valid(checks_json)
+                   AND json_array_length(checks_json)=1
+                   AND json_extract(checks_json, '$[0].outcome')='running'",
+                continuation::CARRIED
+            ))?;
+            let rows = stmt
+                .query_map([node_id], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for id in &ids {
+            tx.execute(
+                "UPDATE review SET checks_json=?2, updated_ms=?3 WHERE id=?1",
+                rusqlite::params![id, checks_json, now_ms()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// The undecided reviews `node_id` owns whose reason for having no
+    /// reviewer yet begins with `waiting`.
+    pub fn undecided_reviews_waiting(&self, node_id: &str, waiting: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id FROM review
+             WHERE node_id=?1 AND state IN ({})
+               AND substr(review_session_reason, 1, length(?2))=?2",
+            continuation::CARRIED
+        ))?;
+        let rows = stmt
+            .query_map(rusqlite::params![node_id, waiting], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Whether a review is still undecided and still of `head_sha`: what
+    /// [`Store::set_checks_at`] would write onto.
+    pub fn review_undecided_at(&self, id: &str, head_sha: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM review WHERE id=?1 AND head_sha=?2 AND state IN ({})",
+                    continuation::CARRIED
+                ),
+                rusqlite::params![id, head_sha],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Attach the review session the node spawned for a review.
     pub fn set_review_session(&self, id: &str, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -4221,6 +4319,76 @@ mod tests {
             .finish_publish("rv1", "t", "b", "https://example.com/pr/1", "{}")
             .unwrap());
         assert!(!store.begin_publish("rv1", Some("revA")).unwrap());
+    }
+
+    /// Checks run on one commit land only while the review is still of that
+    /// commit and undecided: a resubmission to another, or a decision, made
+    /// while they ran keeps what it has.
+    #[test]
+    fn checks_land_only_on_the_commit_they_ran_on() {
+        let store = Store::open_in_memory().unwrap();
+        let nid = node(&store);
+        session(&store, "s1", &nid);
+        let review = ReviewRow {
+            id: "rv1".into(),
+            session_id: Some("s1".into()),
+            node_id: nid,
+            channel: "ch".into(),
+            kind: "pr".into(),
+            title: "t".into(),
+            body: "b".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "github".into(),
+            target: "{}".into(),
+            diff: "d".into(),
+            files: "[]".into(),
+            head_sha: "sha2".into(),
+            base_ref: "main".into(),
+            added: 1,
+            removed: 0,
+            state: "new".into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: now_ms(),
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+            lane: None,
+        };
+        store.insert_review(&review).unwrap();
+        // Run on sha1, which the review was resubmitted away from.
+        assert!(!store.set_checks_at("rv1", "sha1", "[\"sha1\"]").unwrap());
+        assert_eq!(store.get_review("rv1").unwrap().unwrap().checks_json, None);
+        assert!(store.set_checks_at("rv1", "sha2", "[\"sha2\"]").unwrap());
+        assert_eq!(
+            store
+                .get_review("rv1")
+                .unwrap()
+                .unwrap()
+                .checks_json
+                .as_deref(),
+            Some("[\"sha2\"]")
+        );
+        // Decided: nothing more lands, whatever commit it names.
+        assert!(store
+            .resolve_review("rv1", "rejected", Some("no"), None, None, None, 0, None)
+            .unwrap());
+        assert!(!store.set_checks_at("rv1", "sha2", "[]").unwrap());
+        assert_eq!(
+            store
+                .get_review("rv1")
+                .unwrap()
+                .unwrap()
+                .checks_json
+                .as_deref(),
+            Some("[\"sha2\"]")
+        );
     }
 
     #[test]

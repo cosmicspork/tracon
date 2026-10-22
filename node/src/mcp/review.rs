@@ -34,6 +34,10 @@ pub const REPORT_STATUS: &str = "report_status";
 pub const VERDICT: &str = "review_verdict";
 pub const FINDING: &str = "review_finding";
 
+/// What a reviewer's verdict can rest on, most to least: checks it ran
+/// itself, evidence the node gave it, or the diff alone.
+pub const BASES: [&str; 3] = ["ran_checks", "cited_evidence", "diff_only"];
+
 /// `browser`: whether the node's catalogue holds a service by that name, so a
 /// reviewer is pointed at one only where `service_start` can give it one.
 pub fn definitions(browser: bool) -> Vec<Value> {
@@ -190,7 +194,8 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "verdict": { "type": "string", "enum": ["approve", "request_changes"] },
-                    "summary": { "type": "string", "description": "Two or three sentences: what the change does and whether it meets the requirements." },
+                    "basis": { "type": "string", "enum": BASES, "description": "What the verdict rests on: `ran_checks` when you ran the repository's checks or tests yourself, `cited_evidence` when it rests on the node's check results in your orientation (shown work is the submitter's own account, not evidence on its own), `diff_only` when you had nothing but the diff. The operator reads it beside your verdict." },
+                    "summary": { "type": "string", "description": "Two or three sentences: what the change does and whether it meets the requirements. Say so when the verdict is unverified." },
                     "findings": {
                         "type": "array",
                         "items": {
@@ -205,7 +210,7 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                         },
                     },
                 },
-                "required": ["verdict", "summary"],
+                "required": ["verdict", "basis", "summary"],
             },
         }),
         json!({
@@ -509,6 +514,32 @@ async fn submit(
         );
         return Err(review::ReviewError::Rejected(reason).to_string());
     }
+    // The repository an external review answers to, for its reviewer and the
+    // checks the node runs on its candidate.
+    let external_repo = |provider: &str, project: &str| {
+        let repo = repo_path.as_deref().filter(|_| external)?;
+        let forge_env = Provider::parse(provider)
+            .and_then(|forge| {
+                manager
+                    .broker()
+                    .read()
+                    .unwrap()
+                    .env_for(forge.credential(), &ctx.channel, &ctx.node_id)
+                    .ok()
+            })
+            .unwrap_or_default();
+        Some(
+            crate::environment::external_review_repo(
+                manager.cfg(),
+                repo,
+                provider,
+                project,
+                &forge_env,
+            )
+            .to_string_lossy()
+            .into_owned(),
+        )
+    };
     // Where this review publishes. A resubmission keeps the target it was
     // first submitted with, including the change it updates; only the base
     // of a change not yet opened may move.
@@ -521,8 +552,15 @@ async fn submit(
                         .into(),
                 );
             }
+            // A review first submitted before the repository was recorded
+            // gets it now, rather than never.
+            let repo = match target.repo {
+                Some(repo) => Some(repo),
+                None => external_repo(&target.provider, &target.project),
+            };
             Target {
                 base: base.clone(),
+                repo,
                 ..target
             }
         }
@@ -532,6 +570,7 @@ async fn submit(
             base: base.clone(),
             branch: branch.clone(),
             worktree: external.then(|| worktree.clone()),
+            repo: external_repo(&provider, &project),
             change: asked_change.map(|number| ChangeRef {
                 number,
                 url: String::new(),
@@ -976,15 +1015,17 @@ impl Submission {
                      review_status to wait for the verdict"
                 ));
             }
-            let retained = retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
-            let reviewer = spawn_review_session_when_kept(
+            let reviewer = keep_and_review(
                 store,
                 manager,
                 &id,
                 &revision.id,
                 &ctx.channel,
                 source,
-                retained,
+                &worktree,
+                &candidate,
+                max_snapshot_bytes,
+                external,
             )
             .await;
             let mut resubmitted = json!({
@@ -1063,15 +1104,17 @@ impl Submission {
         store
             .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
-        let retained = retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
-        let reviewer = spawn_review_session_when_kept(
+        let reviewer = keep_and_review(
             store,
             manager,
             &id,
             &revision.id,
             &ctx.channel,
             source,
-            retained,
+            &worktree,
+            &candidate,
+            max_snapshot_bytes,
+            external,
         )
         .await;
 
@@ -1314,13 +1357,16 @@ async fn record_candidate(
 /// whole-tree read and its insert. A candidate that already has them is left
 /// alone; one that cannot be read stays unmaterialized, which a transfer
 /// refuses. Returns the read when one was started, for what must wait on it,
-/// which comes to why the files were not kept if they were not.
+/// which comes to why the files were not kept if they were not, and with
+/// `hand_back` the files it read, for a caller about to build the tree from
+/// them that need not read them back out of the store.
 fn retain_candidate_files(
     store: &Arc<Store>,
     worktree: &str,
     candidate: &CandidateRow,
     max_snapshot_bytes: u64,
-) -> Option<tokio::task::JoinHandle<Result<(), String>>> {
+    hand_back: bool,
+) -> Option<Kept> {
     let materialized = serde_json::from_str::<Value>(&candidate.capture_json)
         .ok()
         .and_then(|capture| capture["materialized"].as_bool())
@@ -1337,7 +1383,8 @@ fn retain_candidate_files(
         {
             Ok(tree) => tokio::task::spawn_blocking(move || {
                 store.insert_candidate_files(&id, &tree.files)?;
-                store.record_candidate_materialized(&id)
+                store.record_candidate_materialized(&id)?;
+                Ok::<_, crate::store::StoreError>(hand_back.then_some(tree.files))
             })
             .await
             .map_err(|error| error.to_string())
@@ -1349,6 +1396,437 @@ fn retain_candidate_files(
         }
         retained
     }))
+}
+
+/// A read of a candidate's files under way, and the files when they were
+/// asked for.
+type Kept = tokio::task::JoinHandle<Result<Option<Vec<crate::store::CandidateFile>>, String>>;
+
+/// What follows a submission or a resubmission once its review is recorded:
+/// the candidate's files kept, when they are not yet; the node's checks run on
+/// them, for a harness the operator runs with `[external] run_checks` on; and
+/// a reviewer started once both are done. What became of the reviewer.
+#[allow(clippy::too_many_arguments)]
+async fn keep_and_review(
+    store: &Arc<Store>,
+    manager: &Manager,
+    review_id: &str,
+    revision_id: &str,
+    channel: &str,
+    source: Source,
+    worktree: &str,
+    candidate: &CandidateRow,
+    max_snapshot_bytes: u64,
+    external: bool,
+) -> Value {
+    // The same commit submitted again while its checks run gets those
+    // checks, not a second run of them (`ExternalChecks::begin`).
+    let check = (external && manager.cfg().external.run_checks)
+        .then(|| manager.external_checks().begin(store, review_id, candidate))
+        .flatten();
+    let checking = check.is_some();
+    let retained = retain_candidate_files(store, worktree, candidate, max_snapshot_bytes, checking);
+    let waited = match check {
+        Some(check) => Some(check_external_candidate(
+            store, manager, review_id, candidate, retained, check,
+        )),
+        None => retained,
+    };
+    // Publishes the queue itself, once a start by hand would find what to
+    // wait on.
+    spawn_review_session_when_kept(
+        store,
+        manager,
+        review_id,
+        revision_id,
+        channel,
+        source,
+        candidate,
+        waited,
+        checking,
+    )
+    .await
+}
+
+/// For a review from a harness the operator runs, with `[external]
+/// run_checks` on: the repository's required checks, run on the node's own
+/// copy of the candidate once `retained` has kept its files, as evidence for
+/// the reviewer, who starts once they are done. They run behind the
+/// submission and gate nothing; their results land on the candidate as an
+/// internal session's do, and on the review card, which says they are
+/// running until then. Whether a submission is external is the caller's to
+/// say: a candidate is named by its commit, so its owner is whoever captured
+/// that commit first, not who submitted it now. Returns what a reviewer waits
+/// on, which comes to why the files were not kept if they were not; `running`
+/// is held until the checks are done.
+fn check_external_candidate(
+    store: &Arc<Store>,
+    manager: &Manager,
+    review_id: &str,
+    candidate: &CandidateRow,
+    retained: Option<Kept>,
+    running: ExternalCheck,
+) -> Kept {
+    say_checks_running(store, review_id, &candidate.head_sha);
+    let store = store.clone();
+    let manager = manager.clone();
+    let review_id = review_id.to_string();
+    let candidate = candidate.clone();
+    tokio::spawn(async move {
+        let kept = match retained {
+            Some(retained) => retained
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|kept| kept),
+            None => Ok(None),
+        };
+        let (ran, kept) = match kept {
+            Ok(mut files) => {
+                let ran = loop {
+                    let ran = check_kept_candidate(
+                        &store,
+                        &manager,
+                        &review_id,
+                        &candidate,
+                        files.take(),
+                    )
+                    .await;
+                    // Stopped because the review moved to another commit,
+                    // and back to this one meanwhile: that submission
+                    // attached to this run, so it runs again for it.
+                    let again = matches!(ran, Ok(None))
+                        && running.settle(|| {
+                            store
+                                .review_undecided_at(&review_id, &candidate.head_sha)
+                                .unwrap_or(false)
+                        });
+                    if !again {
+                        break ran;
+                    }
+                };
+                (ran, Ok(None))
+            }
+            Err(why) => (
+                Err(format!("the candidate's files could not be kept: {why}")),
+                Err(why),
+            ),
+        };
+        // Settled before anything is written: a submission attaching from
+        // here on starts its own run, and one that attached before has the
+        // running state it wrote replaced below.
+        running.settle(|| false);
+        match ran {
+            // Written only onto the commit they ran on, in the same
+            // statement that asks: a resubmission landing meanwhile keeps
+            // its own.
+            Ok(Some(results)) => {
+                if let Err(error) = store.set_checks_at(&review_id, &candidate.head_sha, &results) {
+                    tracing::warn!(%error, review_id, "could not record an external candidate's checks");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, review_id, "could not check an external candidate");
+                // Said where the card and the reviewer read checks, so that
+                // the node failing to run them never reads as there being
+                // none.
+                if let Err(error) =
+                    record_unrun_checks(&store, &review_id, &candidate.head_sha, &error)
+                {
+                    tracing::warn!(%error, review_id, "could not record why no check ran");
+                }
+            }
+        }
+        // Checks stopped because the review was decided leave nothing
+        // running on its card.
+        if let Err(error) =
+            store.clear_checks_if(&review_id, &candidate.head_sha, &running_checks())
+        {
+            tracing::warn!(%error, review_id, "could not clear checks that stopped");
+        }
+        manager.publish_queue().await;
+        drop(running);
+        // The reviewer builds its workspace from the store, as ever.
+        kept
+    })
+}
+
+/// What a review's checks record says while the node runs them: one entry,
+/// [`CHECKS_RUNNING`], which its results replace.
+fn running_checks() -> String {
+    let entry = review::checks::CheckResult {
+        command: "required checks".into(),
+        ok: false,
+        exit: None,
+        outcome: CHECKS_RUNNING.into(),
+        tail: "the node is running this candidate's required checks".into(),
+        failures: String::new(),
+        ms: 0,
+        reused_from: None,
+        missing_tool: None,
+    };
+    serde_json::to_string(&[entry]).unwrap_or_default()
+}
+
+/// The outcome [`running_checks`] records.
+pub const CHECKS_RUNNING: &str = "running";
+
+/// Record on the review that its checks are running, on the commit they run
+/// on.
+fn say_checks_running(store: &Store, review_id: &str, head_sha: &str) {
+    if let Err(error) = store.set_checks_at(review_id, head_sha, &running_checks()) {
+        tracing::warn!(%error, review_id, "could not record that checks are running");
+    }
+}
+
+/// The node's checks of external candidates under way on this node, by
+/// review and candidate, so that a second submission of a commit whose
+/// checks are running does not run them again beside the first. Counted in
+/// what a restart would interrupt (`restart::busy`).
+#[derive(Default)]
+pub struct ExternalChecks(std::sync::Mutex<std::collections::HashSet<(String, String)>>);
+
+impl ExternalChecks {
+    /// Begin checking a review's candidate, or `None` when a run of it is
+    /// under way: that run's results are this submission's too, and the
+    /// review says they are running again, which its resubmission cleared.
+    /// Said under the same lock a run settles under, so a run that has
+    /// settled is never said to be running: a submission after it starts
+    /// its own.
+    pub fn begin(
+        self: &Arc<Self>,
+        store: &Store,
+        review_id: &str,
+        candidate: &CandidateRow,
+    ) -> Option<ExternalCheck> {
+        let key = (review_id.to_string(), candidate.id.clone());
+        let mut running = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if running.contains(&key) {
+            say_checks_running(store, review_id, &candidate.head_sha);
+            return None;
+        }
+        running.insert(key.clone());
+        Some(ExternalCheck {
+            checks: self.clone(),
+            key,
+            settled: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Whether a run of a review's candidate is under way.
+    pub fn running(&self, review_id: &str, candidate_id: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(review_id.to_string(), candidate_id.to_string()))
+    }
+
+    /// Runs under way.
+    pub fn in_flight(&self) -> usize {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// A check under way; settling or dropping it lets the next one through.
+pub struct ExternalCheck {
+    checks: Arc<ExternalChecks>,
+    key: (String, String),
+    /// Once settled, the key is no longer this run's: a run of the same
+    /// commit begun since holds it, and nothing this guard does may remove
+    /// it.
+    settled: std::sync::atomic::AtomicBool,
+}
+
+impl ExternalCheck {
+    /// End the run unless `again` says, under the lock submissions attach
+    /// under, that it must run again. Whether it must. Only the first
+    /// settle that ends it does anything.
+    fn settle(&self, again: impl FnOnce() -> bool) -> bool {
+        use std::sync::atomic::Ordering;
+        let mut running = self.checks.0.lock().unwrap_or_else(|e| e.into_inner());
+        if self.settled.load(Ordering::Acquire) {
+            return false;
+        }
+        if again() {
+            return true;
+        }
+        running.remove(&self.key);
+        self.settled.store(true, Ordering::Release);
+        false
+    }
+}
+
+impl Drop for ExternalCheck {
+    fn drop(&mut self) {
+        self.settle(|| false);
+    }
+}
+
+/// [`check_external_candidate`]'s run, on a tree built from `files` as they
+/// were just read, or from the kept files when there are none in hand: the
+/// review's checks record, or `None` when the run stopped because the review
+/// no longer wants it.
+async fn check_kept_candidate(
+    store: &Arc<Store>,
+    manager: &Manager,
+    review_id: &str,
+    candidate: &CandidateRow,
+    files: Option<Vec<crate::store::CandidateFile>>,
+) -> Result<Option<String>, String> {
+    let review = store
+        .get_review(review_id)
+        .map_err(|error| error.to_string())?
+        .ok_or("the review is gone")?;
+    let repo = crate::environment::review_repo(store, &review)?;
+    let files = match files {
+        Some(files) => files,
+        None => store
+            .candidate_files(&candidate.id)
+            .map_err(|error| error.to_string())?,
+    };
+    let snapshot = candidate_tree(candidate, files, false).await?;
+    let report = review::checks::run_required_for(
+        manager.backend().as_ref(),
+        manager.cfg(),
+        store,
+        candidate,
+        // The node's own run, for no session: whoever first captured this
+        // commit did not ask for it.
+        None,
+        repo.as_deref(),
+        &snapshot.root,
+        false,
+        &ReviewStillWants {
+            store: store.clone(),
+            review_id: review_id.to_string(),
+            head_sha: candidate.head_sha.clone(),
+        },
+    )
+    .await;
+    tokio::task::spawn_blocking(move || drop(snapshot));
+    let mut report = report?;
+    if report.cancelled.is_some() {
+        return Ok(None);
+    }
+    // A failed preparation ran no check. Each check it stopped says so in a
+    // line, and what preparation said is told once, as its own entry, the
+    // way a session's refusal says it: not copied under every check.
+    if let Some(failure) = report
+        .prepared
+        .as_ref()
+        .and_then(|prepared| prepared.failure.as_ref())
+    {
+        tracing::info!(review_id, reason = %failure.reason(), "an external candidate's preparation failed");
+        report.results.insert(
+            0,
+            review::checks::CheckResult {
+                command: PREPARE.into(),
+                ok: false,
+                exit: failure.exit,
+                outcome: "prepare_failed".into(),
+                // What preparation said is bounded as a check's output is:
+                // a long log is kept to where it ended.
+                tail: format!(
+                    "{}, in {} ({}).\n\n{}",
+                    failure.reason(),
+                    report.image,
+                    report.image_source,
+                    review::checks::tail(&failure.to_string())
+                ),
+                failures: String::new(),
+                ms: report.prepared.as_ref().map_or(0, |prepared| prepared.ms),
+                reused_from: None,
+                missing_tool: None,
+            },
+        );
+    }
+    serde_json::to_string(&report.results)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// What a review's checks record names preparation by, when it failed and
+/// ran none of them.
+const PREPARE: &str = "prepare";
+
+/// What a review's checks record says when the node could not run them at
+/// all: one entry, `could_not_run`, with why, written onto the commit they
+/// were for. Whether it was written.
+fn record_unrun_checks(
+    store: &Store,
+    review_id: &str,
+    head_sha: &str,
+    why: &str,
+) -> Result<bool, String> {
+    store
+        .set_checks_at(review_id, head_sha, &unrun_checks(why))
+        .map_err(|error| error.to_string())
+}
+
+/// The one-entry checks record [`record_unrun_checks`] writes.
+fn unrun_checks(why: &str) -> String {
+    let entry = review::checks::CheckResult {
+        command: "required checks".into(),
+        ok: false,
+        exit: None,
+        outcome: COULD_NOT_RUN.into(),
+        tail: format!("the node could not run this candidate's checks: {why}"),
+        failures: String::new(),
+        ms: 0,
+        reused_from: None,
+        missing_tool: None,
+    };
+    serde_json::to_string(&[entry]).unwrap_or_default()
+}
+
+/// The outcome [`record_unrun_checks`] records.
+pub const COULD_NOT_RUN: &str = "could_not_run";
+
+/// A candidate's tree on disk, built from its kept `files`, for a check run
+/// or a reviewer's workspace. `writable_top` leaves its top directory
+/// writable, for the repository a session needs there.
+async fn candidate_tree(
+    candidate: &CandidateRow,
+    files: Vec<crate::store::CandidateFile>,
+    writable_top: bool,
+) -> Result<review::CandidateSnapshot, String> {
+    let root = std::env::temp_dir()
+        .join("tracon-candidates")
+        .join(uuid::Uuid::now_v7().to_string());
+    let tree_sha = candidate.tree_sha.clone().unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        let snapshot = review::CandidateSnapshot::materialize(root, tree_sha, files)?;
+        #[cfg(unix)]
+        if writable_top {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&snapshot.root, std::fs::Permissions::from_mode(0o755))?;
+        }
+        #[cfg(not(unix))]
+        let _ = writable_top;
+        Ok::<_, review::ReviewError>(snapshot)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+/// The review an external candidate's checks were started for, as the
+/// authority on whether they should still run: once it is decided, or
+/// resubmitted with another commit, they describe nothing anyone will read.
+struct ReviewStillWants {
+    store: Arc<Store>,
+    review_id: String,
+    head_sha: String,
+}
+
+impl review::checks::Cancel for ReviewStillWants {
+    fn cancelled(&self) -> Option<String> {
+        (!self
+            .store
+            .review_undecided_at(&self.review_id, &self.head_sha)
+            .unwrap_or(false))
+        .then(|| "the review was decided or moved to another commit".to_string())
+    }
 }
 
 fn forge_arg(args: &Value) -> Result<Outputs, String> {
@@ -2067,8 +2545,10 @@ fn not_runnable_line(
 /// tree with no Git history to ask for the rest.
 pub const REVIEW_DIFF: &str = ".tracon/review.diff";
 
-/// A fresh session that reads only the requirements and the diff, when the
-/// channel binds a model for it (`phases.review.model`). Its verdict lands on
+/// A fresh session that reads the requirements, the diff and the evidence the
+/// node holds on the candidate, never how the change was made, when the
+/// channel binds a model for it (`phases.review.model`). It runs in the
+/// review's repository's image (`environment::review_repo`). Its verdict lands on
 /// the review card; the human still decides. Its workspace is the review's
 /// immutable candidate, never the submitting session's workspace, so a review
 /// from a harness the operator runs gets one too. Why none started is kept on
@@ -2088,7 +2568,7 @@ pub(crate) async fn spawn_review_session(
 /// [`spawn_review_session`] under a start already claimed, which ends when
 /// this does. `unkept` is why the candidate's files were not kept, when
 /// keeping them was tried and failed.
-pub(crate) async fn spawn_claimed_review_session(
+pub async fn spawn_claimed_review_session(
     store: &Arc<Store>,
     manager: &Manager,
     start: ReviewStart,
@@ -2096,9 +2576,22 @@ pub(crate) async fn spawn_claimed_review_session(
     started_by: StartedBy,
 ) -> Value {
     let review_id = start.review_id();
-    match start_review_session(store, manager, review_id, unkept.as_deref(), started_by).await {
+    match start_review_session(
+        store,
+        manager,
+        review_id,
+        start.head(),
+        unkept.as_deref(),
+        started_by,
+    )
+    .await
+    {
         Ok(session_id) => json!({ "state": "started", "session_id": session_id }),
         Err((state, reason)) => {
+            // The start for the commit it moved to records its own.
+            if reason == MOVED {
+                return json!({ "state": state, "reason": reason });
+            }
             if let Err(error) = store.set_review_session_reason(review_id, &reason) {
                 tracing::warn!(%error, review_id, "could not record why no reviewer started");
             }
@@ -2117,15 +2610,22 @@ fn already_starting() -> Value {
 pub const ALREADY_STARTING: &str =
     "a review session is already starting on this review; wait for it to start";
 
+/// Why a start for one commit started nothing: the review was resubmitted
+/// with another while it waited, and the start for that one goes ahead.
+const MOVED: &str = "the review moved to another commit before its reviewer started";
+
 /// The reviews a review session is being started for on this node, from
 /// the claim until the session is recorded on the review or found not to
 /// start. Until then `review_session_id` says nothing, and a second start
 /// would import into the same `review-{id}` workspace as the first and
 /// replace it while the first runs. Node-local: only a review's owner
 /// starts one.
+/// Each claim says the commit it is for, when it is for one.
 #[derive(Default)]
 pub struct ReviewStarts {
-    pending: std::sync::Mutex<std::collections::HashSet<String>>,
+    pending: std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+    /// Woken whenever a claim is let go, for a start waiting to take it over.
+    released: tokio::sync::Notify,
     /// Reviews whose latest revision's files are being kept with no start
     /// claimed for them (a manual trigger): a start by hand waits on this
     /// rather than finding them not kept yet. Kept once they were not, so a
@@ -2146,29 +2646,46 @@ struct Keep {
 }
 
 impl ReviewStarts {
-    /// Claim the start for a review, or `None` while another holds it.
+    /// Claim the start for a review, from whatever its latest revision is
+    /// then, or `None` while another holds it.
     pub fn claim(self: &Arc<Self>, review_id: &str) -> Option<ReviewStart> {
+        self.claim_at(review_id, None)
+    }
+
+    /// Claim the start for a review at `head_sha`, which starts nothing once
+    /// the review has moved to another commit; `None` while another holds it.
+    pub fn claim_at(
+        self: &Arc<Self>,
+        review_id: &str,
+        head_sha: Option<&str>,
+    ) -> Option<ReviewStart> {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.insert(review_id.to_string()).then(|| ReviewStart {
+        if pending.contains_key(review_id) {
+            return None;
+        }
+        pending.insert(review_id.to_string(), head_sha.map(str::to_string));
+        Some(ReviewStart {
             starts: self.clone(),
             review_id: review_id.to_string(),
+            head_sha: head_sha.map(str::to_string),
         })
     }
 
     /// Whether a review session is being started for a review.
     pub fn pending(&self, review_id: &str) -> bool {
         let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.contains(review_id)
+        pending.contains_key(review_id)
+    }
+
+    /// Whether the start under way for a review is for `head_sha`.
+    fn starting_at(&self, review_id: &str, head_sha: &str) -> bool {
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.get(review_id).and_then(Option::as_deref) == Some(head_sha)
     }
 
     /// Follow the keeping of a review's files that no start waits on, so a
     /// start by hand can.
-    fn keep(
-        self: &Arc<Self>,
-        review_id: &str,
-        revision_id: &str,
-        retained: tokio::task::JoinHandle<Result<(), String>>,
-    ) {
+    fn keep(self: &Arc<Self>, review_id: &str, revision_id: &str, retained: Kept) {
         let (tx, rx) = tokio::sync::watch::channel(None);
         let keep = self
             .keeps
@@ -2238,9 +2755,9 @@ impl ReviewStarts {
 }
 
 /// Why a candidate's files were not kept, from the task keeping them.
-fn unkept(retained: Result<Result<(), String>, tokio::task::JoinError>) -> Option<String> {
+fn unkept<T>(retained: Result<Result<T, String>, tokio::task::JoinError>) -> Option<String> {
     match retained {
-        Ok(Ok(())) => None,
+        Ok(Ok(_)) => None,
         Ok(Err(why)) => Some(why),
         Err(error) => Some(error.to_string()),
     }
@@ -2250,22 +2767,28 @@ fn unkept(retained: Result<Result<(), String>, tokio::task::JoinError>) -> Optio
 pub struct ReviewStart {
     starts: Arc<ReviewStarts>,
     review_id: String,
+    head_sha: Option<String>,
 }
 
 impl ReviewStart {
     pub fn review_id(&self) -> &str {
         &self.review_id
     }
+
+    /// The commit it is for, when it was claimed for one.
+    pub fn head(&self) -> Option<&str> {
+        self.head_sha.as_deref()
+    }
 }
 
 impl Drop for ReviewStart {
     fn drop(&mut self) {
-        let mut pending = self
-            .starts
+        self.starts
             .pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        pending.remove(&self.review_id);
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.review_id);
+        self.starts.released.notify_waiters();
     }
 }
 
@@ -2274,6 +2797,7 @@ impl Drop for ReviewStart {
 /// result names the trigger and model that applied, for the submitter.
 /// It publishes the queue once a start by hand would find the keep it waits
 /// on, so the review is never on the page before that.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_review_session_when_kept(
     store: &Arc<Store>,
     manager: &Manager,
@@ -2281,7 +2805,9 @@ async fn spawn_review_session_when_kept(
     revision_id: &str,
     channel: &str,
     source: Source,
-    retained: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    candidate: &CandidateRow,
+    retained: Option<Kept>,
+    checking: bool,
 ) -> Value {
     // An earlier revision's keep is nothing to this one.
     manager.review_starts().unkeep(review_id);
@@ -2298,7 +2824,8 @@ async fn spawn_review_session_when_kept(
             tracing::warn!(%error, review_id, "could not record why no reviewer started");
         }
         // The operator may start one before the files are kept; that start
-        // waits for them, as one on submission does.
+        // waits for them, and for any checks the node runs on them, as one
+        // on submission does.
         if let Some(retained) = retained {
             manager
                 .review_starts()
@@ -2308,7 +2835,16 @@ async fn spawn_review_session_when_kept(
         json!({ "state": "none", "reason": MANUAL_REVIEW })
     } else {
         manager.publish_queue().await;
-        spawn_on_submission(store, manager, review_id, binding.model.is_some(), retained).await
+        spawn_on_submission(
+            store,
+            manager,
+            review_id,
+            binding.model.is_some(),
+            candidate,
+            retained,
+            checking,
+        )
+        .await
     };
     started["trigger"] = json!(trigger.as_str());
     started["source"] = json!(source.as_str());
@@ -2318,34 +2854,108 @@ async fn spawn_review_session_when_kept(
 
 /// [`spawn_review_session`] once the candidate's files are kept: they are
 /// what the reviewer's workspace is built from, and an external harness's are
-/// read after its review is recorded (`retain_candidate_files`). The
-/// submitter is not held on that read; it hears that a reviewer is starting.
+/// read after its review is recorded (`retain_candidate_files`). `checking`
+/// says `retained` also runs the checks the node makes its evidence
+/// (`check_external_candidate`). The submitter is not held on either; it
+/// hears that a reviewer is starting.
+///
+/// The start is for `candidate`'s commit. One for an earlier commit, or for
+/// this commit with a run of its checks that has since been replaced by
+/// this submission's, starts nothing once its own wait is over (`MOVED`), so
+/// this one waits on its own and then takes the start over, woken when the
+/// other lets go. One that waited out another start does not start a second
+/// reviewer on the revision that start already started one on.
 async fn spawn_on_submission(
     store: &Arc<Store>,
     manager: &Manager,
     review_id: &str,
     bound: bool,
-    retained: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    candidate: &CandidateRow,
+    retained: Option<Kept>,
+    checking: bool,
 ) -> Value {
+    let head_sha = candidate.head_sha.as_str();
     let Some(retained) = retained.filter(|_| bound) else {
         return spawn_review_session(store, manager, review_id, StartedBy::Submission).await;
     };
+    let starts = manager.review_starts();
     // Claimed now, not once the files are kept: from here until the session
     // is recorded, a start by hand must see this one.
-    let Some(start) = manager.review_starts().claim(review_id) else {
+    let claimed = starts.claim_at(review_id, Some(head_sha));
+    // A start for this commit already under way starts the reviewer this
+    // would, unless this submission's own checks are what it should wait on:
+    // that start gives way to them once its own wait is over.
+    if claimed.is_none() && !checking && starts.starting_at(review_id, head_sha) {
         return already_starting();
+    }
+    let reason = if checking {
+        WAITING_FOR_CHECKS
+    } else {
+        "waiting for the candidate's files to be kept before starting"
     };
-    let reason = "waiting for the candidate's files to be kept before starting";
     if let Err(error) = store.set_review_session_reason(review_id, reason) {
         tracing::warn!(%error, review_id, "could not record why no reviewer started");
     }
     tokio::spawn({
         let store = store.clone();
         let manager = manager.clone();
+        let review_id = review_id.to_string();
+        let head_sha = head_sha.to_string();
+        let candidate_id = candidate.id.clone();
         async move {
             let unkept = unkept(retained.await);
-            spawn_claimed_review_session(&store, &manager, start, unkept, StartedBy::Submission)
+            let starts = manager.review_starts().clone();
+            // Waiting out another start, which may start the very reviewer
+            // this would.
+            let waited_out = claimed.is_none();
+            let mut claimed = claimed;
+            loop {
+                // Resubmitted with another commit, or decided, meanwhile:
+                // the start for that commit is that submission's. So is the
+                // start for this commit submitted again with checks of its
+                // own still running: its reviewer waits on those.
+                if !store
+                    .review_undecided_at(&review_id, &head_sha)
+                    .unwrap_or(false)
+                    || manager.external_checks().running(&review_id, &candidate_id)
+                {
+                    return;
+                }
+                let released = starts.released.notified();
+                tokio::pin!(released);
+                // Woken by a release from here on, even one before the claim
+                // below is tried.
+                released.as_mut().enable();
+                let Some(start) = claimed
+                    .take()
+                    .or_else(|| starts.claim_at(&review_id, Some(&head_sha)))
+                else {
+                    // Held by another start, which lets go once it has
+                    // started its reviewer or seen this commit replace its
+                    // own. The bound is only a backstop.
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), released).await;
+                    continue;
+                };
+                if let Some(reviewer) = waited_out
+                    .then(|| reviewer_started_on_latest(&store, &review_id))
+                    .flatten()
+                {
+                    // Said as started, not as this start still waiting.
+                    if let Err(error) = store.set_review_session(&review_id, &reviewer) {
+                        tracing::warn!(%error, review_id, "could not record the reviewer");
+                    }
+                    return;
+                }
+                spawn_claimed_review_session(
+                    &store,
+                    &manager,
+                    start,
+                    unkept,
+                    StartedBy::Submission,
+                )
                 .await;
+                return;
+            }
         }
     });
     json!({ "state": "starting", "reason": reason })
@@ -2542,6 +3152,85 @@ pub(crate) fn reviewer_verdict_says(verdict: &Value) -> String {
     )
 }
 
+/// The review's latest reviewer, when it was started on the review's latest
+/// revision: what a start that waited out another (one by hand, say, which
+/// reads the latest revision when it runs) would otherwise start a second
+/// time.
+fn reviewer_started_on_latest(store: &Store, review_id: &str) -> Option<String> {
+    let latest = store.latest_review_revision(review_id).ok().flatten()?;
+    let (session_id, revision_id) = store.review_sessions_of(review_id).ok()?.pop()?;
+    (revision_id == latest.id).then_some(session_id)
+}
+
+/// Why a reviewer has not started while the node keeps the candidate's files
+/// and runs its checks; what the review page reads as a reviewer to come.
+pub const WAITING_FOR_CHECKS: &str = "waiting for the candidate's files to be kept, and any \
+                                      checks the node runs on them, before starting";
+
+/// What every reason a start is waiting on begins with.
+const WAITING: &str = "waiting for the candidate's files to be kept";
+
+/// After a restart: the checks of external candidates the node was running
+/// when it stopped never finish, so an undecided review still saying they
+/// are running is told they were interrupted, as their `check_run` rows are
+/// (`Store::reconcile_interrupted_runs`). A reviewer that was waiting, on
+/// those checks or on files whose keeping the restart also ended, is started
+/// now, or says why it cannot be; never on a review decided meanwhile. Only
+/// this node's own reviews: a mirrored one says what its owner is doing.
+pub async fn reconcile_interrupted_checks(store: &Arc<Store>, manager: &Manager) {
+    let interrupted = unrun_checks(
+        "the node restarted while it ran them; resubmit the candidate to run them again",
+    );
+    let mut reviews = match store.interrupt_running_checks(manager.node_id(), &interrupted) {
+        Ok(reviews) => reviews,
+        Err(error) => {
+            tracing::error!(%error, "could not mark interrupted external checks");
+            Vec::new()
+        }
+    };
+    if !reviews.is_empty() {
+        tracing::warn!(
+            reviews = reviews.len(),
+            "marked external checks a restart interrupted"
+        );
+    }
+    // A reviewer whose wait the restart ended, its checks done or not: the
+    // task that would have started it is gone.
+    match store.undecided_reviews_waiting(manager.node_id(), WAITING) {
+        Ok(waiting) => reviews.extend(waiting),
+        Err(error) => tracing::error!(%error, "could not find reviewers a restart left waiting"),
+    }
+    reviews.sort();
+    reviews.dedup();
+    let mut started = false;
+    for review_id in &reviews {
+        let Some(review) = store.get_review(review_id).ok().flatten() else {
+            continue;
+        };
+        let waiting = review_session_waits(store, review_id);
+        // A review decided meanwhile wants no reviewer.
+        let undecided = store
+            .review_undecided_at(review_id, &review.head_sha)
+            .unwrap_or(false);
+        if waiting && undecided {
+            spawn_review_session(store, manager, review_id, StartedBy::Submission).await;
+            started = true;
+        }
+    }
+    if started || !reviews.is_empty() {
+        manager.publish_queue().await;
+    }
+}
+
+/// Whether a review's reviewer is waiting on its files or checks to start.
+fn review_session_waits(store: &Store, review_id: &str) -> bool {
+    store
+        .review_session_reason(review_id)
+        .ok()
+        .flatten()
+        .is_some_and(|reason| reason.starts_with(WAITING))
+}
+
 /// The model a channel binds for review sessions, if any.
 fn review_model(manager: &Manager, channel: &str) -> Option<String> {
     ReviewerBinding::of(&manager.bindings(channel)).model
@@ -2687,6 +3376,7 @@ async fn start_review_session(
     store: &Arc<Store>,
     manager: &Manager,
     review_id: &str,
+    at: Option<&str>,
     unkept: Option<&str>,
     started_by: StartedBy,
 ) -> Result<String, (&'static str, String)> {
@@ -2705,6 +3395,9 @@ async fn start_review_session(
         .latest_review_revision(review_id)
         .map_err(|e| failed(&e))?
         .ok_or_else(|| none("this review has no recorded revision to start a reviewer from"))?;
+    if at.is_some_and(|head| head != revision.head_sha) {
+        return Err(none(MOVED));
+    }
     let candidate = store
         .candidate(&revision.candidate_id)
         .map_err(|e| failed(&e))?
@@ -2735,23 +3428,10 @@ async fn start_review_session(
         mode: 0o100644,
         content: revision.diff.clone().into_bytes(),
     });
-    let root = std::env::temp_dir()
-        .join("tracon-candidates")
-        .join(uuid::Uuid::now_v7().to_string());
-    let tree_sha = candidate.tree_sha.clone().unwrap_or_default();
-    let snapshot = tokio::task::spawn_blocking(move || {
-        let snapshot = review::CandidateSnapshot::materialize(root, tree_sha, files)?;
-        // Writable at its top only, for the repository a session needs.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&snapshot.root, std::fs::Permissions::from_mode(0o755))?;
-        }
-        Ok::<_, review::ReviewError>(snapshot)
-    })
-    .await
-    .map_err(|e| failed(&e))?
-    .map_err(|e| failed(&e))?;
+    // Writable at its top only, for the repository a session needs.
+    let snapshot = candidate_tree(&candidate, files, true)
+        .await
+        .map_err(|e| failed(&e))?;
     let workspace_id = format!("review-{review_id}");
     let short = &review_id[review_id.len().saturating_sub(12)..];
     let branch = format!("review/{short}");
@@ -2769,6 +3449,18 @@ async fn start_review_session(
     };
     tokio::task::spawn_blocking(move || drop(snapshot));
     seeded.map_err(|e| failed(&e))?;
+    // No session imported this workspace, so nothing leads from it back to a
+    // repository: the review's is recorded on it before the session starts,
+    // and the session gets that repository's image and environment from it.
+    let repo = crate::environment::review_repo(store, &r).map_err(|e| failed(&e))?;
+    store
+        .record_workspace_origin(
+            &workspace_id,
+            repo.as_deref()
+                .map(|repo| repo.to_string_lossy())
+                .as_deref(),
+        )
+        .map_err(|e| failed(&e))?;
     let bindings = manager.bindings(&r.channel);
     let spec = crate::session::NewSession {
         channel: r.channel.clone(),
@@ -2834,6 +3526,18 @@ async fn verdict(
     if verdict != "approve" && verdict != "request_changes" {
         return Err(format!("{verdict:?} is not a verdict"));
     }
+    // A reviewer started before verdicts said what they rest on was given
+    // no `basis` to send: its verdict stands, as resting on the diff.
+    let basis = match args.get("basis") {
+        None | Some(Value::Null) => "diff_only".to_string(),
+        Some(_) => str_arg(args, "basis")?,
+    };
+    if !BASES.contains(&basis.as_str()) {
+        return Err(format!(
+            "{basis:?} is not a basis; say what the verdict rests on: {}",
+            BASES.join(", ")
+        ));
+    }
     let summary = str_arg(args, "summary")?;
     let (findings, adjusted) = findings_arg(args);
     // The revision it read, so a resubmission does not wear it. Not finding
@@ -2846,7 +3550,7 @@ async fn verdict(
             None
         });
     let v = json!({
-        "verdict": verdict, "summary": summary, "findings": findings,
+        "verdict": verdict, "basis": basis, "summary": summary, "findings": findings,
         "model": session.model, "session_id": session_id, "at_ms": now_ms(),
         "revision_id": revision_id,
     });
@@ -2902,7 +3606,12 @@ async fn verdict(
     manager.record_event(
         session_id,
         ek::REVIEW_VERDICT,
-        json!({ "review_id": review_id, "verdict": verdict, "summary": summary }),
+        // Whole, so a reviewer of a later revision is told what this one
+        // found (`corpus::orientation`), not only which way it went.
+        json!({
+            "review_id": review_id, "verdict": verdict, "basis": basis,
+            "summary": summary, "findings": findings,
+        }),
     );
     manager.publish_queue().await;
     // A submitter held waiting on this review hears the verdict now, rather
@@ -3458,6 +4167,223 @@ mod tests {
         assert!(reused.contains("Failed to initialize cache"), "{reused}");
     }
 
+    /// The node failing to run an external candidate's checks lands on the
+    /// review as that, on the commit they were for, so the card and the
+    /// reviewer can tell it from there being no checks.
+    /// A review from a harness the operator runs, on node `n`, at `head`.
+    fn review_at(head: &str) -> ReviewRow {
+        ReviewRow {
+            id: "r1".into(),
+            session_id: None,
+            node_id: "n".into(),
+            channel: "work".into(),
+            kind: "pr".into(),
+            title: "t".into(),
+            body: "b".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "github".into(),
+            target: "{}".into(),
+            diff: "d".into(),
+            files: "[]".into(),
+            head_sha: head.into(),
+            base_ref: "main".into(),
+            added: 1,
+            removed: 0,
+            state: "new".into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: 1,
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: 1,
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+            lane: None,
+        }
+    }
+
+    /// A run of an external candidate's checks under way is attached to, and
+    /// one that has ended is not: a submission after it starts its own, and
+    /// nothing says checks are running that nothing is running.
+    #[test]
+    fn a_check_run_that_has_ended_is_not_attached_to() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_review(&review_at("sha1")).unwrap();
+        let candidate = CandidateRow {
+            id: "c1".into(),
+            head_sha: "sha1".into(),
+            tree_sha: None,
+            channel: "work".into(),
+            owner_session_id: None,
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: "{}".into(),
+        };
+        let checks = Arc::new(ExternalChecks::default());
+        let running = checks
+            .begin(&store, "r1", &candidate)
+            .expect("the first run");
+        assert_eq!(checks.in_flight(), 1);
+        // Attached to while it runs, and said to be running again.
+        assert!(checks.begin(&store, "r1", &candidate).is_none());
+        assert_eq!(
+            store
+                .get_review("r1")
+                .unwrap()
+                .unwrap()
+                .checks_json
+                .as_deref(),
+            Some(running_checks().as_str())
+        );
+        // Asked to run again: still under way, still attached to.
+        assert!(running.settle(|| true));
+        assert!(checks.begin(&store, "r1", &candidate).is_none());
+        // Ended: the next submission starts its own run.
+        assert!(!running.settle(|| false));
+        assert_eq!(checks.in_flight(), 0);
+        store.set_checks("r1", None).unwrap();
+        let next = checks.begin(&store, "r1", &candidate);
+        assert!(next.is_some());
+        assert_eq!(store.get_review("r1").unwrap().unwrap().checks_json, None);
+        drop(next);
+        drop(running);
+        assert_eq!(checks.in_flight(), 0);
+    }
+
+    /// A run that has settled no longer owns its key: dropping its guard
+    /// leaves a later run of the same commit counted as running.
+    #[test]
+    fn a_settled_run_leaves_a_later_runs_key_alone() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_review(&review_at("sha1")).unwrap();
+        let candidate = CandidateRow {
+            id: "c1".into(),
+            head_sha: "sha1".into(),
+            tree_sha: None,
+            channel: "work".into(),
+            owner_session_id: None,
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: "{}".into(),
+        };
+        let checks = Arc::new(ExternalChecks::default());
+        let a = checks.begin(&store, "r1", &candidate).expect("run A");
+        assert!(!a.settle(|| false));
+        let b = checks.begin(&store, "r1", &candidate).expect("run B");
+        // A second settle of A, and its drop, are nothing to B.
+        assert!(!a.settle(|| false));
+        drop(a);
+        assert!(checks.running("r1", "c1"));
+        assert_eq!(checks.in_flight(), 1);
+        drop(b);
+        assert!(!checks.running("r1", "c1"));
+    }
+
+    /// After a restart a review still saying its checks are running is told
+    /// they were interrupted; another node's review is its owner's to say.
+    #[test]
+    fn checks_a_restart_interrupted_are_found_on_this_nodes_reviews_only() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_review(&review_at("sha1")).unwrap();
+        assert!(store
+            .set_checks_at("r1", "sha1", &running_checks())
+            .unwrap());
+        let interrupted = unrun_checks("the node restarted");
+        assert!(store
+            .interrupt_running_checks("elsewhere", &interrupted)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.interrupt_running_checks("n", &interrupted).unwrap(),
+            vec!["r1".to_string()]
+        );
+        assert_eq!(
+            store
+                .get_review("r1")
+                .unwrap()
+                .unwrap()
+                .checks_json
+                .as_deref(),
+            Some(interrupted.as_str())
+        );
+        assert!(store
+            .interrupt_running_checks("n", &interrupted)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A review decided while its checks still said they were running is
+    /// left as it is, and is no reviewer's to wait for.
+    #[test]
+    fn a_decided_review_left_running_is_not_reconciled() {
+        let store = Store::open_in_memory().unwrap();
+        let mut decided = review_at("sha1");
+        decided.id = "r2".into();
+        decided.state = "approved".into();
+        decided.checks_json = Some(running_checks());
+        store.insert_review(&decided).unwrap();
+        store
+            .set_review_session_reason("r2", WAITING_FOR_CHECKS)
+            .unwrap();
+        store.insert_review(&review_at("sha1")).unwrap();
+        store
+            .set_review_session_reason("r1", WAITING_FOR_CHECKS)
+            .unwrap();
+        assert!(store
+            .interrupt_running_checks("n", &unrun_checks("the node restarted"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .get_review("r2")
+                .unwrap()
+                .unwrap()
+                .checks_json
+                .as_deref(),
+            Some(running_checks().as_str())
+        );
+        assert_eq!(
+            store.undecided_reviews_waiting("n", WAITING).unwrap(),
+            vec!["r1".to_string()]
+        );
+        assert!(store
+            .undecided_reviews_waiting("elsewhere", WAITING)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn checks_the_node_could_not_run_are_recorded_as_that() {
+        let store = Store::open_in_memory().unwrap();
+        let review = review_at("sha2");
+        store.insert_review(&review).unwrap();
+        // For a commit the review has moved past: nothing lands.
+        assert!(!record_unrun_checks(&store, "r1", "sha1", "the candidate is gone").unwrap());
+        assert_eq!(store.get_review("r1").unwrap().unwrap().checks_json, None);
+        assert!(record_unrun_checks(&store, "r1", "sha2", "no space left on device").unwrap());
+        let checks: Vec<review::checks::CheckResult> = serde_json::from_str(
+            store
+                .get_review("r1")
+                .unwrap()
+                .unwrap()
+                .checks_json
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].outcome, COULD_NOT_RUN);
+        assert!(!checks[0].ok);
+        assert!(
+            checks[0].tail.contains("no space left on device"),
+            "{checks:?}"
+        );
+    }
+
     #[test]
     fn required_arguments_are_named_when_missing() {
         let args = json!({ "title": "  " });
@@ -3594,7 +4520,7 @@ mod tests {
         starts.keep(
             review_id,
             "rev-1",
-            tokio::spawn(async move { kept.await.unwrap_or(Ok(())) }),
+            tokio::spawn(async move { kept.await.unwrap_or(Ok(())).map(|()| None) }),
         );
         release
     }

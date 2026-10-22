@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type { ReviewerView } from './types'
 import {
+  basisLabel,
+  checksState,
   composerLabel,
   publishedChange,
   rereadDelay,
@@ -158,5 +160,31 @@ describe('a reviewer poll that fails', () => {
     expect(rereadDelay('now', 2)).toBe(6000)
     expect(rereadDelay('later', 3)).toBe(12000)
     expect(rereadDelay('now', 20)).toBe(30000)
+  })
+})
+
+describe('what a verdict rests on', () => {
+  test('is said in the card’s words', () => {
+    expect(basisLabel('ran_checks')).toBe('ran the checks')
+    expect(basisLabel('cited_evidence')).toBe('cited evidence')
+    expect(basisLabel('diff_only')).toBe('diff only')
+  })
+
+  test('is left unsaid for a verdict that did not say it', () => {
+    expect(basisLabel(undefined)).toBeNull()
+    expect(basisLabel(null)).toBeNull()
+    expect(basisLabel('vibes')).toBeNull()
+  })
+})
+
+describe('checksState', () => {
+  test('says checks the node is still running as running, not as failed', () => {
+    expect(checksState([{ ok: false, outcome: 'running' }])).toBe('running')
+  })
+  test('says whether every check passed', () => {
+    expect(checksState([])).toBeNull()
+    expect(checksState([{ ok: true }, { ok: true, outcome: 'passed' }])).toBe('passed')
+    expect(checksState([{ ok: true }, { ok: false, outcome: 'failed' }])).toBe('failed')
+    expect(checksState([{ ok: false, outcome: 'could_not_run' }])).toBe('failed')
   })
 })

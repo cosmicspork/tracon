@@ -5,13 +5,14 @@
   import { isNarrativeReport } from '../lib/reports'
   import { store } from '../lib/store.svelte'
   import { reviewChecks, reviewVerdict, type Review } from '../lib/types'
+  import { checksState } from '../lib/verdicts'
   let { review }: { review: Review } = $props()
 
   const noun = $derived(review.provider === 'gitlab' ? 'MR' : 'PR')
   const owner = $derived(nodeById(store.nodes, review.node_id))
   const held = $derived(unreachableReason(store.nodes, store.mesh, review.node_id))
   const verdict = $derived(reviewVerdict(review))
-  const checks = $derived(reviewChecks(review))
+  const checks = $derived(checksState(reviewChecks(review)))
   const files = $derived.by(() => {
     try {
       return (JSON.parse(review.files) as unknown[]).length
@@ -42,7 +43,7 @@
       {:else}
         · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
           ? ' · claimed'
-          : ''}{#if checks.length}{' · '}checks ✓{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}
+          : ''}{#if checks}{' · '}{checks === 'running' ? 'checks running' : checks === 'passed' ? 'checks ✓' : 'checks ✗'}{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}
       {/if}
     </small>
   </span>

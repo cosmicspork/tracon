@@ -41,6 +41,16 @@ export function unavailable(action: VerdictAction, c: VerdictConditions): string
   return null
 }
 
+/**
+ * A review's checks record in a word: the node is still running them (an
+ * external candidate's, which gate nothing), they all passed, or not.
+ */
+export function checksState(checks: { ok: boolean; outcome?: string }[]): 'running' | 'passed' | 'failed' | null {
+  if (!checks.length) return null
+  if (checks.some((c) => c.outcome === 'running')) return 'running'
+  return checks.every((c) => c.ok) ? 'passed' : 'failed'
+}
+
 /** The label of the composer that opens for a verdict needing a reason. */
 export function composerLabel(action: Exclude<VerdictAction, 'approve'>, editedFiles: number): string {
   if (action === 'reject') return 'Why are you rejecting it? The agent reads this.'
@@ -138,4 +148,22 @@ export function startedHow(startedBy: string | null | undefined): string | null 
   if (startedBy === 'submission') return 'started on submission'
   if (startedBy === 'operator') return 'started by you'
   return null
+}
+
+/** What a reviewer's verdict can rest on, as `review_verdict` takes it. */
+export type VerdictBasis = 'ran_checks' | 'cited_evidence' | 'diff_only'
+
+const BASIS: Record<VerdictBasis, string> = {
+  ran_checks: 'ran the checks',
+  cited_evidence: 'cited evidence',
+  diff_only: 'diff only',
+}
+
+/**
+ * What a reviewer's verdict rests on, in the words the card shows beside its
+ * model. Null for a verdict given before reviewers said, or a basis this
+ * screen does not know: nothing is said rather than a guess.
+ */
+export function basisLabel(basis: string | null | undefined): string | null {
+  return basis && basis in BASIS ? BASIS[basis as VerdictBasis] : null
 }
