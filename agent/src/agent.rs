@@ -79,6 +79,9 @@ pub struct Compaction {
     pub pruned_results: usize,
     /// Messages replaced by the summary; 0 when pruning was enough.
     pub summarised_messages: usize,
+    /// The first tool call kept as it was, so the operator can see where in
+    /// the session the summary ends; `None` when no call was kept.
+    pub first_kept_call: Option<String>,
     pub summary: Option<String>,
 }
 
@@ -109,6 +112,8 @@ pub trait Hooks: Send + Sync {
         Permit::Allow
     }
     fn tool_result(&self, _id: &str, _name: &str, _output: &Output) {}
+    /// A running call's output so far: its recent tail, whole.
+    fn tool_progress(&self, _id: &str, _tail: &str) {}
     /// After each model request: its usage and id, and how much of the context
     /// the conversation now fills.
     fn usage(&self, _usage: &Usage, _request_id: Option<&str>, _context_used: u64) {}
@@ -397,7 +402,8 @@ impl Agent<'_> {
                     match self.hooks.permit(&id, &name, &input).await {
                         Permit::Allow => {
                             self.record(Record::ToolStarted { id: id.clone() });
-                            let run = self.tools.run(self.cx, &name, input);
+                            let progress = |tail: &str| self.hooks.tool_progress(&id, tail);
+                            let run = self.tools.run_live(self.cx, &name, input, &progress);
                             tokio::select! {
                                 out = run => out,
                                 _ = self.cancel.cancelled() => {
@@ -475,6 +481,7 @@ impl Agent<'_> {
             .context_window
             .is_some_and(|w| compact::estimate(conv, overhead) < compact::threshold(w));
         let mut summarised = 0;
+        let mut first_kept_call = None;
         let mut summary = None;
         let upto = match trigger {
             Trigger::Threshold if fits => None,
@@ -533,6 +540,13 @@ impl Agent<'_> {
             if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
                 let message = compact::summary_message(conv, upto, &text);
                 let keep = conv.messages.len() - upto;
+                first_kept_call = conv.messages[upto..]
+                    .iter()
+                    .flat_map(|m| &m.blocks)
+                    .find_map(|b| match b {
+                        Block::ToolUse { id, .. } => Some(id.clone()),
+                        _ => None,
+                    });
                 self.record(Record::Compacted {
                     summary: message.clone(),
                     keep,
@@ -562,6 +576,7 @@ impl Agent<'_> {
             tokens_after: compact::estimate(conv, overhead),
             pruned_results: pruned.len(),
             summarised_messages: summarised,
+            first_kept_call,
             summary,
         };
         let mut event = json!(compaction);

@@ -63,7 +63,9 @@ dead process sent.
 
 **Compaction** keeps a session inside `--context-window`. Before a request estimated to
 come within 15 % (at least 16k tokens) of it, old tool outputs beyond the newest 40k
-tokens are replaced by `[Output truncated - N tokens]` if that saves 20k. If the
+tokens are replaced by `[Output truncated - N tokens]` if that saves 20k; a read or edit
+of a file that a later edit or write changed, or a read a later read of the same lines
+repeated, goes whatever its age. If the
 conversation still does not fit, the same model summarises everything before the last
 20k tokens (never parting a call from its result), and the summary, followed by the
 harness's own record of the tool calls made and how each ended, and the operator's
@@ -108,8 +110,12 @@ The prompt can also come from stdin. Other flags:
 - `--no-think`, which sends Qwen3's `enable_thinking=false`.
 - `--parallel-tools`.
 - `--reasoning-effort` (`low`, `medium`, `high`, …), on the Responses wire.
+
 - `--wire chat|responses` (default `chat`). With `--providers` the provider's shape
   decides: `openai` is Chat Completions, `openai-codex` is Responses.
+
+Under the node, a model's `parallel_tools` and `reasoning_effort` in `node.toml` reach
+the agent through the providers file; a flag given on the command line wins.
 
 Exit codes:
 
@@ -129,7 +135,9 @@ request replays the conversation. The system prompt goes in `instructions`, whic
 backend accepts as ours. Reasoning comes back as encrypted items, kept in the
 conversation as `Opaque` blocks and sent again in place, without their ids. The session
 id goes as `prompt_cache_key` and the `session_id` header, without which the backend's
-prompt cache rarely hits. No `max_output_tokens` is sent; the backend refuses it.
+prompt cache rarely hits. No `max_output_tokens` is sent; the backend refuses it. The agent's own tools are sent
+`strict`, with optional fields made nullable, so the upstream holds the model to their
+schemas; a node tool's schema is its server's and goes as it came.
 
 ## Events
 
@@ -155,7 +163,10 @@ each `update` with its `session_id` and `seq`. The file is appended to, never tr
 The tools are `read`, `edit`, `write`, `glob`, `grep` and `shell`, and nothing else.
 Every path is resolved inside `--cwd`: escapes with `..`, absolute paths and symlinks
 are refused. `glob` and `grep` respect `.gitignore`. `shell` runs `sh -c` with piped
-output, a timeout, and its process group killed on timeout. It is not a PTY yet.
+output, a timeout, and its process group killed on timeout. It is not a PTY yet. While a
+command runs, the last 2 KiB of what it has printed goes to the node once a second (a
+running `tool_call_update` whose `rawOutput` is the tail), so the session shows it before
+the result.
 
 ### Hashlines
 

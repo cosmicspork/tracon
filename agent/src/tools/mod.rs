@@ -10,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 mod edit;
@@ -128,6 +129,31 @@ pub trait Tool: Send + Sync {
     /// JSON Schema for the arguments.
     fn parameters(&self) -> Value;
     async fn run(&self, cx: &Context, input: Value) -> Output;
+    /// Whether the schema is this agent's own, so a wire may send it in a
+    /// strict form and the tool reads the `null`s that form sends. A node
+    /// tool's schema is its server's, and is sent as it came.
+    fn own_schema(&self) -> bool {
+        true
+    }
+    /// As `run`, telling `progress` what the call has produced so far while
+    /// it runs. Only a tool whose calls take a while says anything.
+    async fn run_live(&self, cx: &Context, input: Value, _progress: Progress<'_>) -> Output {
+        self.run(cx, input).await
+    }
+}
+
+/// Where a running call's output so far goes: its recent tail, whole each
+/// time.
+pub type Progress<'a> = &'a (dyn Fn(&str) + Send + Sync);
+
+/// A field the model may send as `null`, as a strict schema has it send an
+/// optional field it leaves out: read as the field's default.
+pub(crate) fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + serde::Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// Arguments the schema promised but the model did not keep to come back as a
@@ -181,12 +207,23 @@ impl Registry {
                     "name": t.name(),
                     "description": t.description(),
                     "parameters": t.parameters(),
+                    "own_schema": t.own_schema(),
                 })
             })
             .collect()
     }
 
     pub async fn run(&self, cx: &Context, name: &str, input: Value) -> Output {
+        self.run_live(cx, name, input, &|_| {}).await
+    }
+
+    pub async fn run_live(
+        &self,
+        cx: &Context,
+        name: &str,
+        input: Value,
+        progress: Progress<'_>,
+    ) -> Output {
         let Some(tool) = self.get(name) else {
             return Output::error(format!(
                 "unknown tool `{name}`; the tools are: {}",
@@ -198,7 +235,7 @@ impl Registry {
                 "the arguments were not valid JSON: {raw}\nCall {name} again with a JSON object."
             ));
         }
-        tool.run(cx, input).await
+        tool.run_live(cx, input, progress).await
     }
 }
 

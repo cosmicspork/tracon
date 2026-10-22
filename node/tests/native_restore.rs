@@ -451,6 +451,7 @@ async fn a_compaction_the_harness_reports_is_recorded() {
         "tokensAfter": 6_200,
         "prunedResults": 0,
         "summarisedMessages": 34,
+        "firstKeptCall": "call_9",
         "summary": "fixed the validator; tests pass",
         "contextWindow": 65_536,
     })))
@@ -466,6 +467,7 @@ async fn a_compaction_the_harness_reports_is_recorded() {
     assert_eq!(c["tokens_before"], 49_800);
     assert_eq!(c["tokens_after"], 6_200);
     assert_eq!(c["summarised_messages"], 34);
+    assert_eq!(c["first_kept_call"], "call_9");
     assert_eq!(c["summary"], "fixed the validator; tests pass");
     assert!(rig.events("error").is_empty());
 }

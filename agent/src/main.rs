@@ -127,6 +127,12 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         if cli.context_window.is_none() {
             cli.context_window = resolved.context_window;
         }
+        // The node's declaration of the model, unless the command line says
+        // otherwise.
+        cli.parallel_tools |= resolved.parallel_tools;
+        if cli.reasoning_effort.is_none() {
+            cli.reasoning_effort = resolved.reasoning_effort;
+        }
         cli.model = resolved.model;
         cli.wire = if resolved.shape == "openai-codex" {
             Wire::Responses

@@ -74,6 +74,80 @@ impl Client {
     }
 }
 
+/// `schema` in the strict form OpenAI's function calling enforces: every
+/// property required, those that were optional allowed `null`, and no
+/// properties but those named. `None` for a schema using anything this does
+/// not know how to carry over, which is then sent as it is, not strict.
+pub fn strict_schema(schema: &Value) -> Option<Value> {
+    const LEAF: &[&str] = &["type", "description", "enum"];
+    let o = schema.as_object()?;
+    match o.get("type").and_then(Value::as_str)? {
+        "object" => {
+            if o.keys().any(|k| {
+                !matches!(
+                    k.as_str(),
+                    "type" | "description" | "properties" | "required"
+                )
+            }) {
+                return None;
+            }
+            let properties = o.get("properties")?.as_object()?;
+            let required: Vec<&str> = o
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|r| r.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let mut out = serde_json::Map::new();
+            for (name, p) in properties {
+                let mut p = strict_schema(p)?;
+                if !required.contains(&name.as_str()) {
+                    nullable(&mut p)?;
+                }
+                out.insert(name.clone(), p);
+            }
+            let mut s = serde_json::Map::new();
+            s.insert("type".into(), "object".into());
+            if let Some(d) = o.get("description") {
+                s.insert("description".into(), d.clone());
+            }
+            s.insert(
+                "required".into(),
+                Value::Array(out.keys().cloned().map(Value::String).collect()),
+            );
+            s.insert("properties".into(), Value::Object(out));
+            s.insert("additionalProperties".into(), false.into());
+            Some(Value::Object(s))
+        }
+        "array" => {
+            if o.keys()
+                .any(|k| !matches!(k.as_str(), "type" | "description" | "items"))
+            {
+                return None;
+            }
+            let mut s = o.clone();
+            s.insert("items".into(), strict_schema(o.get("items")?)?);
+            Some(Value::Object(s))
+        }
+        "string" | "integer" | "number" | "boolean" => o
+            .keys()
+            .all(|k| LEAF.contains(&k.as_str()))
+            .then(|| schema.clone()),
+        _ => None,
+    }
+}
+
+/// Lets a strict property be `null`, which is how a strict call leaves an
+/// optional one out.
+fn nullable(p: &mut Value) -> Option<()> {
+    let o = p.as_object_mut()?;
+    let ty = o.get("type")?.as_str()?.to_string();
+    o.insert("type".into(), serde_json::json!([ty, "null"]));
+    if let Some(Value::Array(values)) = o.get_mut("enum") {
+        values.push(Value::Null);
+    }
+    Some(())
+}
+
 pub(crate) fn http() -> Result<reqwest::Client, WireError> {
     Ok(reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -142,5 +216,65 @@ impl WireError {
             } => Some(Duration::from_secs(*s)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Registry;
+    use serde_json::json;
+
+    /// Every object, however deep, names all its properties as required and
+    /// allows no others.
+    fn closed(schema: &Value) -> bool {
+        match schema["type"].as_str() {
+            Some("object") => {
+                let props = schema["properties"].as_object().unwrap();
+                let required: Vec<_> = schema["required"].as_array().unwrap().iter().collect();
+                schema["additionalProperties"] == false
+                    && props.len() == required.len()
+                    && props.values().all(closed)
+            }
+            Some("array") => closed(&schema["items"]),
+            _ => true,
+        }
+    }
+
+    #[test]
+    fn every_built_in_tool_has_a_strict_form() {
+        for spec in Registry::default().specs() {
+            let strict = strict_schema(&spec["parameters"])
+                .unwrap_or_else(|| panic!("{} has no strict form", spec["name"]));
+            assert!(closed(&strict), "{strict:#}");
+        }
+        let edit = Registry::default().specs()[1]["parameters"].clone();
+        let strict = strict_schema(&edit).unwrap();
+        let item = &strict["properties"]["edits"]["items"];
+        // Optional before, nullable now; required stays as it was.
+        assert_eq!(item["properties"]["end"]["type"], json!(["string", "null"]));
+        assert_eq!(item["properties"]["op"]["type"], "string");
+        assert!(!item["properties"]["op"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::Null));
+    }
+
+    #[test]
+    fn a_schema_it_cannot_carry_over_is_left_alone() {
+        for schema in [
+            json!({"type": "object"}),
+            json!({"type": "object", "properties": {"a": {"$ref": "#/defs/a"}}}),
+            json!({"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": true}),
+            json!({"type": "object", "properties": {"a": {"oneOf": [{"type": "string"}]}}}),
+            json!({"type": "object", "properties": {"a": {"type": ["string", "null"]}}}),
+        ] {
+            assert_eq!(strict_schema(&schema), None, "{schema}");
+        }
+        let opt_enum = json!({"type": "object", "properties": {"mode": {"type": "string", "enum": ["a", "b"]}}});
+        assert_eq!(
+            strict_schema(&opt_enum).unwrap()["properties"]["mode"]["enum"],
+            json!(["a", "b", null])
+        );
     }
 }

@@ -8,7 +8,7 @@
 
 use serde_json::{json, Value};
 
-use crate::config::{Config, KeyPath, ModelDecl, Op};
+use crate::config::{Config, KeyPath, ModelDecl, Op, REASONING_EFFORTS};
 
 /// Config as the interface sees it: the writable keys, plus a little context
 /// it needs to explain itself. No secrets — the broker owns those, and none
@@ -367,9 +367,24 @@ fn model_list(v: &Value, key: &str) -> Result<Vec<ModelDecl>, String> {
         if out.iter().any(|m| m.id == id) {
             return Err(format!("`{key}` names `{id}` twice"));
         }
+        let effort = model
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(str::to_string);
+        if let Some(e) = &effort {
+            if !REASONING_EFFORTS.contains(&e.as_str()) {
+                return Err(format!(
+                    "`{key}` gives `{id}` the reasoning effort `{e}`; it is one of {}",
+                    REASONING_EFFORTS.join(", ")
+                ));
+            }
+        }
         out.push(ModelDecl {
             id: id.to_string(),
             name: model.name.trim().to_string(),
+            reasoning_effort: effort,
             ..model
         });
     }
@@ -553,6 +568,32 @@ mod tests {
         assert!(upstream
             .unwrap_err()
             .contains("providers.anthropic.upstream"));
+    }
+
+    /// The native harness's per-model settings are written as given, an
+    /// empty effort is none, and an effort no provider knows is refused.
+    #[test]
+    fn a_models_parallel_calls_and_reasoning_effort_are_kept() {
+        let mut file = File::new();
+        file.apply(&json!({ "providers": { "openai-codex": { "models": [
+            { "id": "gpt-6", "parallel_tools": true, "reasoning_effort": " high " },
+            { "id": "gpt-6-mini", "reasoning_effort": "" }
+        ] } } }))
+        .unwrap();
+        let models = &file.cfg.providers["openai-codex"].models;
+        assert!(models[0].parallel_tools);
+        assert_eq!(models[0].reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(models[1].reasoning_effort, None);
+        assert!(
+            file.text.contains("reasoning_effort = \"high\""),
+            "{}",
+            file.text
+        );
+        assert!(file.text.contains("parallel_tools = true"), "{}", file.text);
+        let wrong = file.apply(&json!({ "providers": { "openai-codex": { "models": [
+            { "id": "gpt-6", "reasoning_effort": "extreme" }
+        ] } } }));
+        assert!(wrong.unwrap_err().contains("one of none, minimal, low"));
     }
 
     #[test]

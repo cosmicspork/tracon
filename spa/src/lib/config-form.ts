@@ -914,6 +914,9 @@ export interface ModelRow {
   model: Record<string, unknown>
 }
 
+/** The reasoning efforts a model declaration may name; the node refuses any other. */
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
 function cleanModel(model: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(model)

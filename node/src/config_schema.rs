@@ -302,6 +302,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("providers.*.models.output"),
     restart("providers.*.models.reasoning"),
     restart("providers.*.models.attachment"),
+    restart("providers.*.models.parallel_tools"),
+    restart("providers.*.models.reasoning_effort"),
     // [memory]
     live("memory.promote_at"),
     // [supervision]

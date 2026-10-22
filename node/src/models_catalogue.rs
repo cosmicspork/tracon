@@ -177,6 +177,8 @@ fn parse_catalogue(text: &str) -> Result<BTreeMap<String, Vec<ModelDecl>>, serde
                     output: m.limit.output,
                     reasoning: m.reasoning,
                     attachment: m.attachment,
+                    // The catalogue says nothing of these; the operator does.
+                    ..Default::default()
                 })
                 .collect();
             models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -314,6 +316,7 @@ mod tests {
                 output: 64_000,
                 reasoning: true,
                 attachment: true,
+                ..Default::default()
             }],
         );
         let catalogue = Catalogue {

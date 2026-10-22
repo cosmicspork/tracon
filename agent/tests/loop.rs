@@ -289,7 +289,12 @@ async fn the_responses_wire_runs_calls_and_carries_reasoning_back() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("greet.py"), "print('hi')\n").unwrap();
     let (base, fake) = serve(vec![
-        responses_call("c1", "read", json!({"path": "greet.py"}), "E1"),
+        responses_call(
+            "c1",
+            "read",
+            json!({"path": "greet.py", "offset": null, "limit": null}),
+            "E1",
+        ),
         responses_answer("done"),
     ])
     .await;
@@ -323,6 +328,14 @@ async fn the_responses_wire_runs_calls_and_carries_reasoning_back() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert_eq!(tools, ["read", "edit", "write", "glob", "grep", "shell"]);
+    // The agent's own tools go strict, optional fields nullable.
+    let read = &first["tools"][0];
+    assert_eq!(read["strict"], true);
+    assert_eq!(read["parameters"]["additionalProperties"], false);
+    assert_eq!(
+        read["parameters"]["properties"]["offset"]["type"],
+        json!(["integer", "null"])
+    );
     let input = requests[1]["input"].as_array().unwrap();
     assert_eq!(
         input[1],
@@ -386,6 +399,8 @@ async fn a_responses_overflow_is_compacted_and_asked_again() {
     assert_eq!(input[1]["encrypted_content"], "E2");
     let compacted = r.events.iter().find(|e| e["event"] == "compacted").unwrap();
     assert_eq!(compacted["trigger"], "overflow");
+    // Where the kept part starts: the second call, kept with its reasoning.
+    assert_eq!(compacted["first_kept_call"], "c2");
 }
 
 #[tokio::test]

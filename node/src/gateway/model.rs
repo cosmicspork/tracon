@@ -1083,6 +1083,12 @@ struct UsageScanner {
     request_id: Option<String>,
 }
 
+/// The longest line the scanner keeps whole. A Responses stream's
+/// `response.completed` repeats the response's whole output, encrypted
+/// reasoning and any long tool-call arguments included, on one line; a line
+/// cut short does not parse, and its usage would go uncounted.
+const MAX_SCANNED_LINE: usize = 16 << 20;
+
 impl UsageScanner {
     fn new() -> Self {
         Self {
@@ -1110,7 +1116,7 @@ impl UsageScanner {
             if b == b'\n' {
                 let line = std::mem::take(&mut self.line);
                 self.scan_line(&line);
-            } else if self.line.len() < 1 << 20 {
+            } else if self.line.len() < MAX_SCANNED_LINE {
                 self.line.push(b);
             }
         }
@@ -1870,6 +1876,22 @@ mod tests {
         s.feed(b"{\"id\":\"\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3}}");
         s.finish();
         assert_eq!(s.request_id, None, "an empty id is no id");
+    }
+
+    /// A `response.completed` carrying megabytes of output is still read.
+    #[test]
+    fn a_long_completed_line_is_still_counted() {
+        let mut s = UsageScanner::new();
+        let output = "x".repeat(3 << 20);
+        let line = format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_big\",\"output\":[{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{output}\"}}]}}],\"usage\":{{\"input_tokens\":12,\"output_tokens\":900000}}}}}}\n"
+        );
+        for chunk in line.as_bytes().chunks(64 << 10) {
+            s.feed(chunk);
+        }
+        s.finish();
+        assert_eq!(s.request_id.as_deref(), Some("resp_big"));
+        assert_eq!(s.output, 900000);
     }
 
     /// A provider that reports nothing leaves the count at zero — and the

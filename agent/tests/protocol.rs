@@ -743,3 +743,39 @@ async fn a_compaction_is_reported_and_survives_a_reload() {
     assert_eq!(messages[2]["content"], "read it");
     assert_eq!(messages[3]["content"], "next");
 }
+
+/// A long command's output reaches the node while it runs, as the call's
+/// running updates, before its result.
+#[tokio::test]
+async fn a_running_commands_output_reaches_the_node_before_its_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _) = serve(vec![
+        tool_call(
+            "c1",
+            "shell",
+            json!({"command": "echo building; sleep 1.5; echo testing; sleep 1.5"}),
+        ),
+        answer("done"),
+    ])
+    .await;
+    let node = start(&base, &dir.path().join(".events.jsonl")).await;
+    let session = new_session(&node, dir.path()).await;
+    let _: PromptResult = node
+        .peer
+        .request(methods::SESSION_PROMPT, &prompt(&session, "build"))
+        .await
+        .unwrap();
+    let seen = node.seen.lock().unwrap().clone();
+    let updates: Vec<_> = updates(&seen, "tool_call_update")
+        .into_iter()
+        .map(|u| u["update"].clone())
+        .collect();
+    let running: Vec<_> = updates
+        .iter()
+        .filter_map(|u| u["rawOutput"].as_str())
+        .collect();
+    assert!(running.contains(&"building\n"), "{updates:#?}");
+    assert!(running.contains(&"building\ntesting\n"), "{updates:#?}");
+    let last = updates.last().unwrap();
+    assert_eq!(last["status"], "completed");
+}

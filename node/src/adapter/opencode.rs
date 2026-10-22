@@ -1852,6 +1852,7 @@ mod tests {
                     output: 64_000,
                     reasoning: true,
                     attachment: true,
+                    ..Default::default()
                 }],
                 ..Default::default()
             },

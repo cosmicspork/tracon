@@ -10,7 +10,10 @@
 //! been added since is estimated from its bytes, at the rate that request came
 //! to.
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::conversation::{Block, Conversation, Measured, Message, Role};
 
@@ -166,14 +169,67 @@ pub struct Pruned {
     pub content: String,
 }
 
-/// Old tool outputs to replace: the results past the newest
-/// `protect_output` tokens of output, oldest last, if together they save at
-/// least `min_prune_saving`. Empty when pruning is not worth it.
+/// The calls whose output nothing still depends on: a read or edit of a
+/// file that a later edit or write changed, whose anchors are stale, and a
+/// read that a later read of the same lines showed again. Mapped to the path.
+fn superseded(conv: &Conversation) -> HashMap<String, String> {
+    let failed: HashSet<&str> = conv
+        .messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .filter_map(|b| match b {
+            Block::ToolResult {
+                id, is_error: true, ..
+            } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    // In order: (id, tool, path, the lines a read showed).
+    let calls: Vec<(&str, &str, String, (Value, Value))> = conv
+        .messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .filter_map(|b| match b {
+            Block::ToolUse { id, name, input }
+                if matches!(name.as_str(), "read" | "edit" | "write")
+                    && !failed.contains(id.as_str()) =>
+            {
+                let path = input["path"].as_str()?;
+                let path = path.trim_start_matches("./").to_string();
+                let lines = (input["offset"].clone(), input["limit"].clone());
+                Some((id.as_str(), name.as_str(), path, lines))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut out = HashMap::new();
+    for (i, (id, tool, path, lines)) in calls.iter().enumerate() {
+        if *tool == "write" {
+            continue;
+        }
+        let later = calls[i + 1..].iter().any(|(_, t, p, l)| {
+            p == path
+                && (matches!(*t, "edit" | "write")
+                    || (*tool == "read" && *t == "read" && l == lines))
+        });
+        if later {
+            out.insert(id.to_string(), path.clone());
+        }
+    }
+    out
+}
+
+/// Tool outputs to replace. Superseded ones always (see [`superseded`]);
+/// then the results past the newest `protect_output` tokens of output, oldest
+/// last, if together they save at least `min_prune_saving`. Empty when
+/// pruning is not worth it.
 pub fn prune_plan(conv: &Conversation, limits: Limits) -> Vec<Pruned> {
     let rate = rate(conv);
+    let stale = superseded(conv);
     let mut newer = 0u64;
     let mut saved = 0u64;
     let mut plan = Vec::new();
+    let mut elided = Vec::new();
     for m in conv.messages.iter().rev() {
         for b in m.blocks.iter().rev() {
             let Block::ToolResult { id, content, .. } = b else {
@@ -182,7 +238,19 @@ pub fn prune_plan(conv: &Conversation, limits: Limits) -> Vec<Pruned> {
             let size = tokens(content.len(), rate);
             let protected = newer < limits.protect_output;
             newer += size;
-            if protected || size < MIN_PRUNE_RESULT || content.starts_with("[Output truncated") {
+            if size < MIN_PRUNE_RESULT || content.starts_with('[') && content.contains(" tokens]") {
+                continue;
+            }
+            if let Some(path) = stale.get(id) {
+                elided.push(Pruned {
+                    id: id.clone(),
+                    content: format!(
+                        "[Superseded by a later read or change of {path} - {size} tokens]"
+                    ),
+                });
+                continue;
+            }
+            if protected {
                 continue;
             }
             let note = format!("[Output truncated - {size} tokens]");
@@ -196,7 +264,8 @@ pub fn prune_plan(conv: &Conversation, limits: Limits) -> Vec<Pruned> {
     if saved < limits.min_prune_saving {
         plan.clear();
     }
-    plan
+    elided.extend(plan);
+    elided
 }
 
 /// Replaces the named results in place; an error stays an error.
@@ -567,7 +636,18 @@ mod tests {
             blocks: vec![Block::ToolUse {
                 id: id.into(),
                 name: "read".into(),
-                input: json!({"path": "a"}),
+                input: json!({"path": id}),
+            }],
+        }
+    }
+
+    fn tool(id: &str, name: &str, input: Value) -> Message {
+        Message {
+            role: Role::Assistant,
+            blocks: vec![Block::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
             }],
         }
     }
@@ -674,6 +754,64 @@ mod tests {
         };
         assert_eq!(content, "[Output truncated - 25000 tokens]");
         // Done once: nothing is left worth pruning.
+        assert!(prune_plan(&c, Limits::for_window(None)).is_empty());
+    }
+
+    #[test]
+    fn a_superseded_read_or_edit_is_elided_whatever_its_age() {
+        let c = conv(vec![
+            text(Role::User, "go"),
+            tool("r1", "read", json!({"path": "a.py"})),
+            result("r1", 2_000),
+            tool("e1", "edit", json!({"path": "./a.py", "edits": []})),
+            result("e1", 500),
+            tool("r2", "read", json!({"path": "a.py"})),
+            result("r2", 2_000),
+            tool(
+                "p1",
+                "read",
+                json!({"path": "b.txt", "offset": 1, "limit": 400}),
+            ),
+            result("p1", 3_000),
+            tool(
+                "p2",
+                "read",
+                json!({"path": "b.txt", "offset": 401, "limit": 400}),
+            ),
+            result("p2", 3_000),
+            tool(
+                "p3",
+                "read",
+                json!({"path": "b.txt", "offset": 1, "limit": 400}),
+            ),
+            result("p3", 3_000),
+        ]);
+        let plan = prune_plan(&c, Limits::for_window(None));
+        // All within the newest 40k, so only what is stale goes: the read
+        // the edit made stale, and the first of two reads of the same lines.
+        // The edit's own output stands: the read after it does not change
+        // the file.
+        let ids: Vec<_> = plan.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["p1", "r1"]);
+        assert_eq!(
+            plan[1].content,
+            "[Superseded by a later read or change of a.py - 2000 tokens]"
+        );
+        // A call that failed changed nothing, so supersedes nothing.
+        let mut c = conv(vec![
+            text(Role::User, "go"),
+            tool("r1", "read", json!({"path": "a.py"})),
+            result("r1", 2_000),
+            tool("w1", "write", json!({"path": "a.py", "content": ""})),
+        ]);
+        c.messages.push(Message {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                id: "w1".into(),
+                content: "refused".into(),
+                is_error: true,
+            }],
+        });
         assert!(prune_plan(&c, Limits::for_window(None)).is_empty());
     }
 
@@ -801,7 +939,7 @@ mod tests {
         let s = summary_message(&c, 5, "notes");
         assert!(
             s.contains(
-                "oldest first:\n- read {\"path\":\"a\"} → ok\n- read {\"path\":\"a\"} → \
+                "oldest first:\n- read {\"path\":\"a\"} → ok\n- read {\"path\":\"b\"} → \
                  error: no such file\n\nThe operator's messages"
             ),
             "{s}"
@@ -809,7 +947,7 @@ mod tests {
         let c = conv(vec![text(Role::User, &s), call("c"), result("c", 10)]);
         let calls = call_record(&c.messages);
         assert_eq!(calls.len(), 3, "{calls:?}");
-        assert_eq!(calls[2], "read {\"path\":\"a\"} → ok");
+        assert_eq!(calls[2], "read {\"path\":\"c\"} → ok");
 
         let mut many = vec![text(Role::User, "go")];
         for i in 0..70 {

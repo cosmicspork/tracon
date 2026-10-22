@@ -113,11 +113,24 @@ fn providers_document(wiring: &Wiring) -> Value {
                     "shape": p.shape,
                     "base_url": p.base_url,
                     "key_env": key_env_name(&p.name),
-                    "models": p.models.iter().map(|m| json!({"id": m.id, "context": m.context})).collect::<Vec<_>>(),
+                    "models": p.models.iter().map(model_entry).collect::<Vec<_>>(),
                 })
             })
             .collect(),
     )
+}
+
+/// What the agent reads of a declared model: its window, and the two
+/// settings it applies per model, written only when set.
+fn model_entry(m: &crate::config::ModelDecl) -> Value {
+    let mut entry = json!({"id": m.id, "context": m.context});
+    if m.parallel_tools {
+        entry["parallel_tools"] = json!(true);
+    }
+    if let Some(effort) = &m.reasoning_effort {
+        entry["reasoning_effort"] = json!(effort);
+    }
+    entry
 }
 
 fn speaks(shape: &str) -> bool {
@@ -803,11 +816,20 @@ mod tests {
                 credential: "local".into(),
                 upstream: "http://127.0.0.1:8080".into(),
                 shape: SHAPE_OPENAI.into(),
-                models: vec![crate::config::ModelDecl {
-                    id: "qwen3-8b".into(),
-                    context: 32768,
-                    ..Default::default()
-                }],
+                models: vec![
+                    crate::config::ModelDecl {
+                        id: "qwen3-8b".into(),
+                        context: 32768,
+                        ..Default::default()
+                    },
+                    crate::config::ModelDecl {
+                        id: "big".into(),
+                        context: 131072,
+                        parallel_tools: true,
+                        reasoning_effort: Some("high".into()),
+                        ..Default::default()
+                    },
+                ],
                 ..Default::default()
             },
         );
@@ -829,6 +851,10 @@ mod tests {
         assert_eq!(
             local["models"][0],
             json!({"id": "qwen3-8b", "context": 32768})
+        );
+        assert_eq!(
+            local["models"][1],
+            json!({"id": "big", "context": 131072, "parallel_tools": true, "reasoning_effort": "high"})
         );
         // The Codex backend is in, by its own shape; Anthropic is not.
         let shapes: Vec<_> = doc

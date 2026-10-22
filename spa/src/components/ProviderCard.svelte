@@ -18,6 +18,7 @@
     fieldFor,
     modelOps,
     rebase,
+    REASONING_EFFORTS,
     sectionOps,
     shown,
     type Clash,
@@ -355,7 +356,7 @@
           <div class="models">
             {#if models.length}
               <div class="mrow mhead" aria-hidden="true">
-                <span>Model id</span><span>Name</span><span>Context</span><span>Output</span><span>Reasons</span><span>Attach</span><span></span>
+                <span>Model id</span><span>Name</span><span>Context</span><span>Output</span><span>Reasons</span><span>Attach</span><span>Parallel</span><span>Effort</span><span></span>
               </div>
               {#each models as m, i (i)}
                 <div class="mrow">
@@ -365,6 +366,11 @@
                   <input type="number" min="0" bind:value={m.output} placeholder="default" aria-label="Output tokens" disabled={!editable} />
                   <input type="checkbox" bind:checked={m.reasoning} aria-label="Reasoning" disabled={!editable} />
                   <input type="checkbox" bind:checked={m.attachment} aria-label="Attachments" disabled={!editable} />
+                  <input type="checkbox" bind:checked={m.parallel_tools} aria-label="Parallel tool calls" disabled={!editable} />
+                  <select bind:value={m.reasoning_effort} aria-label="Reasoning effort" disabled={!editable}>
+                    <option value="">default</option>
+                    {#each REASONING_EFFORTS as effort (effort)}<option value={effort}>{effort}</option>{/each}
+                  </select>
                   <button class="lnk" type="button" onclick={() => removeModel(i)} disabled={!editable} aria-label={`Remove ${m.id || 'model'}`}>Remove</button>
                 </div>
               {/each}
@@ -660,7 +666,7 @@
   }
   .mrow {
     display: grid;
-    grid-template-columns: minmax(9rem, 2fr) minmax(7rem, 2fr) 5.5rem 5.5rem 4rem 5rem auto;
+    grid-template-columns: minmax(9rem, 2fr) minmax(7rem, 2fr) 5.5rem 5.5rem 4rem 4rem 4.5rem 6rem auto;
     gap: 0.4rem;
     align-items: center;
   }
