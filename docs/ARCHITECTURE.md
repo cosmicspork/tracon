@@ -535,6 +535,14 @@ so a relaunch carries on the compacted conversation. The summariser's request go
 through the gateway and is counted and matched like any other; the node records the
 compaction as `context_compacted`, with the summary, and never truncates a request.
 
+It can also hand tasks to subagents (`spawn`): child conversations in the same process
+that work with the same tools, run in parallel when spawned together, and return an
+object in the shape the parent asked for. They reach the gateway with the session's key,
+so the parent's budget pays and every request is matched as usual; each of their calls
+is asked of the node like the parent's, recorded with the spawning call as its `parent`,
+and the session log shows it nested under that call. A child may use another model
+only from the parent's provider. Children are one level deep and are not journaled.
+
 ### The OpenCode boundary
 
 OpenCode is a *server*, not a pipe, and that changes where the seam is

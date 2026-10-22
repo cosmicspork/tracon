@@ -570,18 +570,20 @@ mod tests {
             .contains("providers.anthropic.upstream"));
     }
 
-    /// The native harness's per-model settings are written as given, an
-    /// empty effort is none, and an effort no provider knows is refused.
+    /// The native harness's per-model settings are written as given, parallel
+    /// calls only when turned off, an empty effort is none, and an effort no
+    /// provider knows is refused.
     #[test]
     fn a_models_parallel_calls_and_reasoning_effort_are_kept() {
         let mut file = File::new();
         file.apply(&json!({ "providers": { "openai-codex": { "models": [
-            { "id": "gpt-6", "parallel_tools": true, "reasoning_effort": " high " },
+            { "id": "gpt-6", "parallel_tools": false, "reasoning_effort": " high " },
             { "id": "gpt-6-mini", "reasoning_effort": "" }
         ] } } }))
         .unwrap();
         let models = &file.cfg.providers["openai-codex"].models;
-        assert!(models[0].parallel_tools);
+        assert!(!models[0].parallel_tools);
+        assert!(models[1].parallel_tools);
         assert_eq!(models[0].reasoning_effort.as_deref(), Some("high"));
         assert_eq!(models[1].reasoning_effort, None);
         assert!(
@@ -589,7 +591,17 @@ mod tests {
             "{}",
             file.text
         );
-        assert!(file.text.contains("parallel_tools = true"), "{}", file.text);
+        assert_eq!(
+            file.text.matches("parallel_tools").count(),
+            1,
+            "{}",
+            file.text
+        );
+        assert!(
+            file.text.contains("parallel_tools = false"),
+            "{}",
+            file.text
+        );
         let wrong = file.apply(&json!({ "providers": { "openai-codex": { "models": [
             { "id": "gpt-6", "reasoning_effort": "extreme" }
         ] } } }));

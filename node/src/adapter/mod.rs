@@ -288,6 +288,9 @@ pub struct PermissionRequest {
     pub command: Option<String>,
     pub raw_input: Option<Value>,
     pub options: Vec<crate::adapter::types::PermissionOption>,
+    /// The call this one was made under: a subagent's call names the
+    /// parent's call that spawned it.
+    pub parent_tool_call_id: Option<String>,
 }
 
 impl PermissionRequest {
@@ -310,7 +313,9 @@ impl PermissionRequest {
             "read" | "glob" | "grep" | "list" if resource.is_some() => Some("read"),
             "bash" if command.is_some() => Some("execute"),
             "edit" | "write" | "patch" | "cell_edit" if resource.is_some() => Some("write"),
-            "think" | "todo_write" => Some("think"),
+            // A subagent's own calls are each asked; spawning one only
+            // starts it thinking.
+            "think" | "todo_write" | "spawn" => Some("think"),
             _ => None,
         }
         .map(str::to_string);
@@ -323,6 +328,7 @@ impl PermissionRequest {
             command,
             raw_input,
             options,
+            parent_tool_call_id: None,
         }
     }
 }
@@ -882,6 +888,32 @@ mod tests {
                 "{id} has no Containerfile"
             );
         }
+    }
+
+    /// Spawning a subagent is thinking, which the shipped policy allows:
+    /// what the subagent then does is asked call by call.
+    #[test]
+    fn a_spawn_is_thinking_and_the_shipped_policy_allows_it() {
+        let spawn = PermissionRequest::managed(
+            Some("c1".into()),
+            "subagent: look".into(),
+            "spawn",
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+        assert_eq!(spawn.kind.as_deref(), Some("think"));
+        let decision = crate::policy::Policy::shipped().decide(&crate::policy::Request {
+            channel: "personal",
+            action: &spawn.action,
+            kind: spawn.kind.as_deref(),
+            resource: None,
+            command: None,
+            arguments: None,
+            doc_kinds: None,
+        });
+        assert_eq!(decision.verdict, crate::policy::Verdict::Allow);
     }
 
     #[test]

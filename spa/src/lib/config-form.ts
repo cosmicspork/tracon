@@ -921,9 +921,12 @@ function cleanModel(model: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(model)
       .map(([k, v]) => [k, typeof v === 'string' ? v.trim() : v] as const)
-      .filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false && v !== 0),
+      .filter(([k, v]) => (ON_BY_DEFAULT.has(k) ? v === false : v !== undefined && v !== null && v !== '' && v !== false && v !== 0)),
   )
 }
+
+/** Model settings that are on unless written off, so only `false` is kept. */
+const ON_BY_DEFAULT = new Set(['parallel_tools'])
 
 /**
  * The operations that make a provider declare `rows`. Where node.toml lists

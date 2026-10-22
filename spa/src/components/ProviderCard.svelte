@@ -366,7 +366,7 @@
                   <input type="number" min="0" bind:value={m.output} placeholder="default" aria-label="Output tokens" disabled={!editable} />
                   <input type="checkbox" bind:checked={m.reasoning} aria-label="Reasoning" disabled={!editable} />
                   <input type="checkbox" bind:checked={m.attachment} aria-label="Attachments" disabled={!editable} />
-                  <input type="checkbox" bind:checked={m.parallel_tools} aria-label="Parallel tool calls" disabled={!editable} />
+                  <input type="checkbox" checked={m.parallel_tools !== false} onchange={(e) => (m.parallel_tools = e.currentTarget.checked)} aria-label="Parallel tool calls" disabled={!editable} />
                   <select bind:value={m.reasoning_effort} aria-label="Reasoning effort" disabled={!editable}>
                     <option value="">default</option>
                     {#each REASONING_EFFORTS as effort (effort)}<option value={effort}>{effort}</option>{/each}

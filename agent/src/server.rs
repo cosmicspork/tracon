@@ -34,6 +34,7 @@ use crate::conversation::{Block, Conversation, Role};
 use crate::events::{self, Events};
 use crate::journal::{self, Journal, Record, Restored};
 use crate::prompt::ORIENTATION;
+use crate::subagent::{self, Spawner};
 use crate::tools::{mcp, Context, Output, Registry};
 use crate::wire::{Client, Delta};
 use crate::wire::{Usage, WireError};
@@ -56,6 +57,8 @@ pub struct Settings {
     /// Where each session's journal is kept. Without one nothing can be
     /// carried on, and `session/load` is not offered.
     pub journal_dir: Option<PathBuf>,
+    /// Which models a subagent may be given; `None` turns `spawn` off.
+    pub spawner: Option<Spawner>,
 }
 
 /// Serves one node connection until it closes stdin.
@@ -393,6 +396,9 @@ impl Session {
             journal: self.journal.as_ref(),
             max_turns: settings.max_turns,
             context_window: settings.context_window,
+            spawner: settings.spawner.as_ref(),
+            finish: None,
+            subagent: None,
         };
         let outcome = agent.run(conv, totals).await;
         hooks.flush_text();
@@ -405,7 +411,8 @@ impl Session {
         }
         let usage = turn_usage(&before, &totals.usage);
         let stop_reason = match outcome {
-            Ok(Outcome::Finished { .. }) => "end_turn",
+            // Only a subagent returns; a session's own turn never does.
+            Ok(Outcome::Finished { .. } | Outcome::Returned { .. }) => "end_turn",
             Ok(Outcome::MaxTurns) => "max_turn_requests",
             Ok(Outcome::Cancelled) => "cancelled",
             Ok(Outcome::Stopped { reason }) => {
@@ -571,48 +578,13 @@ impl Wired<'_> {
         }));
     }
 
-    fn text(&self, thought: bool, text: &str) {
-        let switched = {
-            let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            pending.0 != thought && !pending.1.is_empty()
-        };
-        if switched {
-            self.flush_text();
-        }
-        let full = {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            pending.0 = thought;
-            pending.1.push_str(text);
-            pending.1.len() >= CHUNK || text.contains('\n')
-        };
-        if full {
-            self.flush_text();
-        }
-    }
-}
-
-#[async_trait]
-impl Hooks for Wired<'_> {
-    fn delta(&self, delta: &Delta<'_>) {
-        match delta {
-            Delta::Text(t) => self.text(false, t),
-            Delta::Reasoning(t) => self.text(true, t),
-            Delta::ToolCall(_) => {}
-        }
-    }
-
-    fn tool_call(&self, id: &str, name: &str, input: &Value) {
-        self.send(SessionUpdate::ToolCall(describe(
-            id, name, input, "pending",
-        )));
-    }
-
-    async fn permit(&self, id: &str, name: &str, input: &Value) -> Permit {
+    /// Asks the node whether a call may run, as `tool_call` shows it.
+    async fn ask(&self, id: &str, name: &str, tool_call: ToolCall) -> Permit {
         let (answer, wait) = oneshot::channel();
         let params = RequestPermissionParams {
             session_id: self.session.id.clone(),
             tool: Some(name.to_string()),
-            tool_call: describe(id, name, input, "pending"),
+            tool_call,
             options: vec![
                 PermissionOption {
                     option_id: types::OPTION_ALLOW_ONCE.into(),
@@ -650,6 +622,81 @@ impl Hooks for Wired<'_> {
             }));
         }
         permit
+    }
+
+    fn text(&self, thought: bool, text: &str) {
+        let switched = {
+            let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.0 != thought && !pending.1.is_empty()
+        };
+        if switched {
+            self.flush_text();
+        }
+        let full = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.0 = thought;
+            pending.1.push_str(text);
+            pending.1.len() >= CHUNK || text.contains('\n')
+        };
+        if full {
+            self.flush_text();
+        }
+    }
+}
+
+#[async_trait]
+impl Hooks for Wired<'_> {
+    fn delta(&self, delta: &Delta<'_>) {
+        match delta {
+            Delta::Text(t) => self.text(false, t),
+            Delta::Reasoning(t) => self.text(true, t),
+            Delta::ToolCall(_) => {}
+        }
+    }
+
+    fn tool_call(&self, id: &str, name: &str, input: &Value) {
+        self.send(SessionUpdate::ToolCall(describe(
+            id, name, input, "pending",
+        )));
+    }
+
+    async fn permit(&self, id: &str, name: &str, input: &Value) -> Permit {
+        self.ask(id, name, describe(id, name, input, "pending"))
+            .await
+    }
+
+    fn child_tool_call(&self, parent: &str, label: &str, id: &str, name: &str, input: &Value) {
+        self.send(SessionUpdate::ToolCall(child_call(
+            parent, label, id, name, input,
+        )));
+    }
+
+    async fn child_permit(
+        &self,
+        parent: &str,
+        label: &str,
+        id: &str,
+        name: &str,
+        input: &Value,
+    ) -> Permit {
+        self.ask(id, name, child_call(parent, label, id, name, input))
+            .await
+    }
+
+    /// Counted by its id like any request; `used` stays the parent's.
+    fn child_usage(&self, usage: &Usage, request_id: Option<&str>) {
+        let cache_read = usage.cache_read.min(usage.input);
+        self.send(SessionUpdate::UsageUpdate(UsageUpdate {
+            size: None,
+            used: None,
+            cost: None,
+            request: Some(RequestUsage {
+                request_id: request_id.map(str::to_string),
+                input_tokens: usage.input - cache_read,
+                output_tokens: usage.output,
+                cached_read_tokens: cache_read,
+            }),
+        }));
     }
 
     fn tool_result(&self, id: &str, _name: &str, output: &Output) {
@@ -757,6 +804,13 @@ fn describe(id: &str, name: &str, input: &Value, status: &str) -> ToolCall {
             "execute",
             input["command"].as_str().unwrap_or("shell").to_string(),
         ),
+        subagent::SPAWN => (
+            "think",
+            format!(
+                "subagent: {}",
+                subagent::label(input["task"].as_str().unwrap_or_default())
+            ),
+        ),
         _ => ("other", name.to_string()),
     };
     ToolCall {
@@ -767,7 +821,17 @@ fn describe(id: &str, name: &str, input: &Value, status: &str) -> ToolCall {
         raw_input: Some(input.clone()),
         content: Vec::new(),
         locations: path.map(|p| vec![json!({"path": p})]).unwrap_or_default(),
+        parent_tool_call_id: None,
     }
+}
+
+/// A subagent's call as the node sees it: under the spawning call, and
+/// titled with the subagent's task, so its permission card says who asks.
+fn child_call(parent: &str, label: &str, id: &str, name: &str, input: &Value) -> ToolCall {
+    let mut call = describe(id, name, input, "pending");
+    call.title = format!("[{label}] {}", call.title);
+    call.parent_tool_call_id = Some(parent.to_string());
+    call
 }
 
 #[cfg(test)]

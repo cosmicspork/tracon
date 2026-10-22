@@ -13,6 +13,7 @@ use tracon_agent::events::Events;
 use tracon_agent::prompt::ORIENTATION;
 use tracon_agent::providers;
 use tracon_agent::server::{self, Settings};
+use tracon_agent::subagent::Spawner;
 use tracon_agent::tools::{Context, Registry};
 use tracon_agent::wire::{openai_chat, openai_responses, Client, Sampling};
 
@@ -86,9 +87,10 @@ struct Cli {
     /// `responses`. With `--providers`, the provider's shape decides.
     #[arg(long, value_enum, default_value_t = Wire::Chat)]
     wire: Wire,
-    /// Allow several tool calls in one response.
+    /// Whether several tool calls may come in one response (default: true).
+    /// With `--providers`, the node's declaration of the model when absent.
     #[arg(long)]
-    parallel_tools: bool,
+    parallel_tools: Option<bool>,
     /// Write JSONL events here instead of stderr.
     #[arg(long)]
     events: Option<PathBuf>,
@@ -117,6 +119,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
+    let mut siblings = Vec::new();
     // The node's file is authoritative: an endpoint or key file from the
     // environment (a repository image's) must not redirect the session.
     if let Some(path) = &cli.providers {
@@ -129,11 +132,12 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         }
         // The node's declaration of the model, unless the command line says
         // otherwise.
-        cli.parallel_tools |= resolved.parallel_tools;
+        cli.parallel_tools = cli.parallel_tools.or(Some(resolved.parallel_tools));
         if cli.reasoning_effort.is_none() {
             cli.reasoning_effort = resolved.reasoning_effort;
         }
         cli.model = resolved.model;
+        siblings = resolved.models;
         cli.wire = if resolved.shape == "openai-codex" {
             Wire::Responses
         } else {
@@ -161,20 +165,26 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         no_think: cli.no_think,
         reasoning_effort: cli.reasoning_effort.clone(),
     };
+    let spawner = Spawner {
+        model: cli.model.clone(),
+        window: cli.context_window,
+        siblings,
+    };
+    let parallel_tools = cli.parallel_tools.unwrap_or(true);
     let client = match cli.wire {
         Wire::Chat => Client::Chat(openai_chat::Client::new(
             &base_url,
             api_key,
             &cli.model,
             sampling,
-            cli.parallel_tools,
+            parallel_tools,
         )?),
         Wire::Responses => Client::Responses(openai_responses::Client::new(
             &base_url,
             api_key,
             &cli.model,
             sampling,
-            cli.parallel_tools,
+            parallel_tools,
         )?),
     };
     if !cli.standalone {
@@ -205,6 +215,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
                 context_window: cli.context_window,
                 events: cli.events,
                 journal_dir,
+                spawner: Some(spawner.clone()),
             },
             Box::new(tokio::io::stdin()),
             Box::new(tokio::io::stdout()),
@@ -257,9 +268,16 @@ async fn run(mut cli: Cli) -> anyhow::Result<ExitCode> {
         journal: None,
         max_turns: Some(max_turns),
         context_window: cli.context_window,
+        spawner: Some(&spawner),
+        finish: None,
+        subagent: None,
     };
     let outcome = agent.run(&mut conv, &mut totals).await;
     let (code, end) = match &outcome {
+        Ok(o @ Outcome::Returned { value }) => {
+            println!("{value}");
+            (0, json!(o))
+        }
         Ok(o @ Outcome::Finished { text }) => {
             println!("{text}");
             (0, json!(o))

@@ -471,3 +471,61 @@ async fn a_compaction_the_harness_reports_is_recorded() {
     assert_eq!(c["summary"], "fixed the validator; tests pass");
     assert!(rig.events("error").is_empty());
 }
+
+/// A subagent's call is recorded under the spawn that started it, and so is
+/// the request to run it, so the log can nest both.
+#[tokio::test]
+async fn a_subagents_calls_are_recorded_under_its_spawn() {
+    let rig = Rig::start().await;
+    let tx = rig.adapter.events.lock().unwrap().last().unwrap().clone();
+    let call = |id: &str, title: &str, parent: Option<&str>| tracon::adapter::types::ToolCall {
+        tool_call_id: id.into(),
+        title: title.into(),
+        kind: Some("read".into()),
+        status: Some("pending".into()),
+        raw_input: Some(json!({"path": "src/lib.rs"})),
+        content: vec![],
+        locations: vec![],
+        parent_tool_call_id: parent.map(str::to_string),
+    };
+    tx.send(HarnessEvent::ToolCall(call("c1", "subagent: look", None)))
+        .await
+        .unwrap();
+    tx.send(HarnessEvent::ToolCall(call(
+        "c1/c2",
+        "[look] read src/lib.rs",
+        Some("c1"),
+    )))
+    .await
+    .unwrap();
+    // This rig's policy has no rules, so the read is put to the operator.
+    let (reply, _answer) = oneshot::channel();
+    let mut read = tracon::adapter::PermissionRequest::managed(
+        Some("c1/c2".into()),
+        "[look] read src/lib.rs".into(),
+        "read",
+        Some("src/lib.rs".into()),
+        None,
+        None,
+        Vec::new(),
+    );
+    read.parent_tool_call_id = Some("c1".into());
+    tx.send(HarnessEvent::Permission {
+        request: read,
+        reply,
+    })
+    .await
+    .unwrap();
+
+    rig.wait("the child's ask", |r| {
+        !r.events("permission_request").is_empty()
+    })
+    .await;
+    let calls = rig.events("tool_call");
+    assert_eq!(calls[0]["parent"], serde_json::Value::Null);
+    assert_eq!(calls[1]["parent"], "c1");
+    let ask = &rig.events("permission_request")[0];
+    assert_eq!(ask["tool_call_id"], "c1/c2");
+    assert_eq!(ask["parent"], "c1");
+    assert_eq!(ask["title"], "[look] read src/lib.rs");
+}

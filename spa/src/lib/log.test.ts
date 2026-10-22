@@ -448,3 +448,30 @@ test('a compaction says how much smaller the context got and what went', () => {
   expect(pruned?.text).toContain('after the model refused it as too long')
   expect(pruned?.text).toContain('1 old tool output cut')
 })
+
+test("a subagent's calls and asks sit under the spawn, not in the parent's run", () => {
+  const log = groupLog([
+    ev('tool_call', 'c1', { title: 'subagent: look', kind: 'think' }),
+    ev('policy_allowed', null, { kind: 'think', tool_call_id: 'c1' }),
+    ev('tool_call', 'c1/a', { title: '[look] read src/lib.rs', parent: 'c1' }),
+    ev('policy_allowed', null, { kind: 'read', tool_call_id: 'c1/a', parent: 'c1' }),
+    ev('tool_call', 'c1/b', { title: '[look] shell cargo test', parent: 'c1' }),
+    ev('permission_request', 'p1', { title: '[look] shell cargo test', tool_call_id: 'c1/b', parent: 'c1' }),
+    ev('tool_result', 'c1/a', { status: 'completed', output: 'fn main() {}' }),
+    ev('tool_call', 'c2', { title: 'read README.md', kind: 'read' }),
+    ev('tool_result', 'c2', { status: 'completed' }),
+  ])
+  // One run: the child's ask did not break the parent's calls apart.
+  expect(log.map((e) => e.kind)).toEqual(['tools'])
+  const [spawn, read] = log[0].tools!
+  expect(spawn.call.ref_id).toBe('c1')
+  expect(spawn.kind).toBe('think')
+  expect(read.call.ref_id).toBe('c2')
+  const children = spawn.children!
+  expect(children.map((e) => e.kind)).toEqual(['tools', 'leaf'])
+  expect(children[0].tools!.map((t) => [t.call.ref_id, t.result?.payload.status, t.kind])).toEqual([
+    ['c1/a', 'completed', 'read'],
+    ['c1/b', undefined, undefined],
+  ])
+  expect(children[1].event!.kind).toBe('permission_request')
+})

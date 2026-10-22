@@ -1160,7 +1160,8 @@ impl Supervisor {
                     Some(t.tool_call_id.clone()),
                     json!({
                         "title": t.title, "kind": t.kind, "status": t.status,
-                        "raw_input": t.raw_input, "locations": t.locations
+                        "raw_input": t.raw_input, "locations": t.locations,
+                        "parent": t.parent_tool_call_id,
                     }),
                 );
                 self.note_repetition(&t);
@@ -1431,6 +1432,8 @@ impl Supervisor {
                     "command": request.command,
                     "rule": "node-tool",
                     "reason": "The node's own tool; it is decided when the call reaches the node.",
+                    "tool_call_id": request.tool_call_id,
+                    "parent": request.parent_tool_call_id,
                 }),
             );
             return;
@@ -1462,6 +1465,8 @@ impl Supervisor {
                         "command": request.command,
                         "rule": decision.rule_id,
                         "reason": decision.reason,
+                        "tool_call_id": request.tool_call_id,
+                        "parent": request.parent_tool_call_id,
                     }),
                 );
                 return;
@@ -1505,7 +1510,8 @@ impl Supervisor {
                 "permission_id": id, "title": request.title, "action": request.action,
                 "kind": request.kind, "resource": request.resource, "command": request.command,
                 "raw_input": request.raw_input, "options": request.options,
-                "expires_ms": row.expires_ms
+                "expires_ms": row.expires_ms, "tool_call_id": request.tool_call_id,
+                "parent": request.parent_tool_call_id,
             }),
         );
         self.set_state(SessionState::WaitingOnYou, None);

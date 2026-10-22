@@ -1135,6 +1135,7 @@ impl Rig {
                     command: Some(command.into()),
                     raw_input: None,
                     options: vec![],
+                    parent_tool_call_id: None,
                 },
                 reply,
             })
@@ -1322,6 +1323,7 @@ async fn a_brokered_tool_call_the_policy_does_not_cover_waits_on_the_operator() 
                 command: None,
                 raw_input: Some(json!({ "tool": "issue_comment" })),
                 options: vec![],
+                parent_tool_call_id: None,
             },
             reply,
         })
@@ -1365,6 +1367,7 @@ async fn a_brokered_tool_call_can_be_allowed_with_the_operators_edits() {
                 command: None,
                 raw_input: Some(json!({ "tool": "issue_comment" })),
                 options: vec![],
+                parent_tool_call_id: None,
             },
             reply,
         })
@@ -2006,6 +2009,7 @@ async fn identical_tool_calls_in_a_row_are_recorded_without_pausing() {
                 raw_input: Some(json!({ "command": "just test" })),
                 content: vec![],
                 locations: vec![],
+                parent_tool_call_id: None,
             }))
             .await
             .unwrap();
@@ -2067,6 +2071,7 @@ async fn varied_and_interleaved_tool_calls_are_not_repetition() {
                 raw_input: Some(json!({ "command": "just test" })),
                 content: vec![],
                 locations: vec![],
+                parent_tool_call_id: None,
             }
         } else {
             tracon::adapter::types::ToolCall {
@@ -2077,6 +2082,7 @@ async fn varied_and_interleaved_tool_calls_are_not_repetition() {
                 raw_input: Some(json!({ "path": "src/lib.rs", "attempt": i })),
                 content: vec![],
                 locations: vec![],
+                parent_tool_call_id: None,
             }
         };
         rig.events.send(HarnessEvent::ToolCall(call)).await.unwrap();
@@ -2108,6 +2114,7 @@ fn named_call(i: usize, title: &str, input: serde_json::Value) -> HarnessEvent {
         raw_input: Some(input),
         content: vec![],
         locations: vec![],
+        parent_tool_call_id: None,
     })
 }
 
@@ -2797,6 +2804,7 @@ async fn streamed_chunks_are_coalesced_into_one_logged_message() {
             raw_input: None,
             content: vec![],
             locations: vec![],
+            parent_tool_call_id: None,
         }))
         .await
         .unwrap();

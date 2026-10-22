@@ -1,9 +1,12 @@
 //! The loop: ask the model, run the tools it called, hand back the results,
 //! until it answers without a tool call or the turn limit is reached.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -12,6 +15,7 @@ use crate::compact;
 use crate::conversation::{Block, Conversation, Role};
 use crate::events::Events;
 use crate::journal::{Journal, Record};
+use crate::subagent::{self, Spawner};
 use crate::tools::{Context, Output, Registry};
 use crate::wire::{Client, Completion, Delta};
 use crate::wire::{Usage, WireError};
@@ -42,9 +46,13 @@ const FABRICATED: [&str; 4] = [
 /// as a call.
 const UNPARSED_CALL: &str = "<tool_call>";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
+    /// A subagent called `finish` with a result its schema allows.
+    Returned {
+        value: Value,
+    },
     Finished {
         text: String,
     },
@@ -121,6 +129,63 @@ pub trait Hooks: Send + Sync {
     fn retrying(&self, _attempt: u32, _wait: Duration, _error: &WireError) {}
     /// The conversation was made smaller to fit the context window.
     fn compacted(&self, _compaction: &Compaction) {}
+    /// A subagent's call, made under the parent's call `parent` that spawned
+    /// it; `label` names the subagent to the operator.
+    fn child_tool_call(&self, _parent: &str, _label: &str, id: &str, name: &str, input: &Value) {
+        self.tool_call(id, name, input)
+    }
+    async fn child_permit(
+        &self,
+        _parent: &str,
+        _label: &str,
+        id: &str,
+        name: &str,
+        input: &Value,
+    ) -> Permit {
+        self.permit(id, name, input).await
+    }
+    /// A subagent's model request: counted like the parent's, but it says
+    /// nothing of how full the parent's context is.
+    fn child_usage(&self, _usage: &Usage, _request_id: Option<&str>) {}
+}
+
+/// A subagent's hooks: what it does reaches the parent's, its calls named
+/// under the spawning call so they cannot collide with the parent's own.
+struct ChildHooks<'a> {
+    parent: &'a dyn Hooks,
+    call: &'a str,
+    label: String,
+}
+
+impl ChildHooks<'_> {
+    fn id(&self, id: &str) -> String {
+        format!("{}/{id}", self.call)
+    }
+}
+
+#[async_trait]
+impl Hooks for ChildHooks<'_> {
+    fn tool_call(&self, id: &str, name: &str, input: &Value) {
+        self.parent
+            .child_tool_call(self.call, &self.label, &self.id(id), name, input)
+    }
+    async fn permit(&self, id: &str, name: &str, input: &Value) -> Permit {
+        self.parent
+            .child_permit(self.call, &self.label, &self.id(id), name, input)
+            .await
+    }
+    fn tool_result(&self, id: &str, name: &str, output: &Output) {
+        self.parent.tool_result(&self.id(id), name, output)
+    }
+    fn tool_progress(&self, id: &str, tail: &str) {
+        self.parent.tool_progress(&self.id(id), tail)
+    }
+    fn usage(&self, usage: &Usage, request_id: Option<&str>, _context_used: u64) {
+        self.parent.child_usage(usage, request_id)
+    }
+    fn retrying(&self, attempt: u32, wait: Duration, error: &WireError) {
+        self.parent.retrying(attempt, wait, error)
+    }
 }
 
 /// No one to ask: `--standalone`.
@@ -152,6 +217,12 @@ pub struct Agent<'a> {
     /// before it reaches it; unknown, only once the upstream refuses a
     /// request as too long.
     pub context_window: Option<u64>,
+    /// Lets the model hand tasks to subagents; `None` for a subagent itself.
+    pub spawner: Option<&'a Spawner>,
+    /// For a subagent: the shape of the result its `finish` call returns.
+    pub finish: Option<&'a Value>,
+    /// For a subagent: the parent's call that spawned it, in its events.
+    pub subagent: Option<&'a str>,
 }
 
 /// A request that failed for good, and any answer text already shown.
@@ -161,6 +232,13 @@ struct Failed {
 }
 
 impl Agent<'_> {
+    fn emit(&self, event: &str, mut data: Value) {
+        if let Some(call) = self.subagent {
+            data["subagent"] = json!(call);
+        }
+        self.events.emit(event, data);
+    }
+
     fn record(&self, record: Record) {
         if let Some(j) = self.journal {
             j.write(&record);
@@ -175,12 +253,27 @@ impl Agent<'_> {
         conv.push(role, blocks);
     }
 
-    pub async fn run(
+    /// Boxed, so a parent's run can wait on a subagent's.
+    pub fn run<'b>(
+        &'b self,
+        conv: &'b mut Conversation,
+        totals: &'b mut Totals,
+    ) -> Pin<Box<dyn Future<Output = Result<Outcome, WireError>> + Send + 'b>> {
+        Box::pin(self.run_turn(conv, totals))
+    }
+
+    async fn run_turn(
         &self,
         conv: &mut Conversation,
         totals: &mut Totals,
     ) -> Result<Outcome, WireError> {
-        let specs = self.tools.specs();
+        let mut specs = self.tools.specs();
+        if self.spawner.is_some() {
+            specs.push(subagent::spawn_spec());
+        }
+        if let Some(schema) = self.finish {
+            specs.push(subagent::finish_spec(schema));
+        }
         let overhead = Value::Array(specs.clone()).to_string().len();
         let mut requests = 0;
         // Responses in a row whose calls could not be run as written.
@@ -217,7 +310,7 @@ impl Agent<'_> {
             requests += 1;
             totals.turns += 1;
             let turn = totals.turns;
-            self.events.emit(
+            self.emit(
                 "request",
                 json!({"turn": turn, "messages": conv.messages.len() + 1}),
             );
@@ -230,8 +323,7 @@ impl Agent<'_> {
             {
                 Ok(Some(c)) => c,
                 Ok(None) => {
-                    self.events
-                        .emit("cancelled", json!({"turn": turn, "during": "request"}));
+                    self.emit("cancelled", json!({"turn": turn, "during": "request"}));
                     return Ok(Outcome::Cancelled);
                 }
                 Err(Failed {
@@ -240,8 +332,7 @@ impl Agent<'_> {
                 }) => {
                     // Compacted and asked once more; never truncated.
                     if !overflowed {
-                        self.events
-                            .emit("overflow", json!({"turn": turn, "message": message}));
+                        self.emit("overflow", json!({"turn": turn, "message": message}));
                         match self
                             .compact(conv, totals, Trigger::Overflow, overhead)
                             .await
@@ -254,15 +345,14 @@ impl Agent<'_> {
                             Compacting::Nothing => {}
                         }
                     }
-                    self.events.emit(
+                    self.emit(
                         "error",
                         json!({"turn": turn, "kind": "context_overflow", "message": message}),
                     );
                     return Ok(Outcome::ContextOverflow { message });
                 }
                 Err(Failed { error, shown }) => {
-                    self.events
-                        .emit("error", json!({"turn": turn, "message": error.to_string()}));
+                    self.emit("error", json!({"turn": turn, "message": error.to_string()}));
                     // The operator saw this much of an answer; the model's
                     // record says the same, so the next prompt starts from it.
                     if !shown.trim().is_empty() {
@@ -289,7 +379,7 @@ impl Agent<'_> {
                 _ => None,
             };
             let text = text_of(&completion.blocks);
-            self.events.emit(
+            self.emit(
                 "response",
                 json!({
                     "turn": turn,
@@ -328,8 +418,7 @@ impl Agent<'_> {
                     "the model wrote a tool's result itself ({marker}) instead of waiting for \
                      one; the turn was stopped so nothing acts on an invented result"
                 );
-                self.events
-                    .emit("stopped", json!({"turn": turn, "reason": reason}));
+                self.emit("stopped", json!({"turn": turn, "reason": reason}));
                 self.close_unrun(conv, &calls, "not run: the turn was stopped");
                 return Ok(Outcome::Stopped { reason });
             }
@@ -338,6 +427,19 @@ impl Agent<'_> {
                     malformed += 1;
                     let problem = "a tool call was written into the text, where it is not a \
                                    call; nothing ran. Call the tool through the tools interface";
+                    if let Some(stop) = self.malformed_stop(malformed, turn, problem) {
+                        return Ok(stop);
+                    }
+                    self.push(
+                        conv,
+                        Role::User,
+                        vec![Block::Text(format!("[harness] {problem}."))],
+                    );
+                    continue;
+                }
+                if self.finish.is_some() {
+                    malformed += 1;
+                    let problem = "the task ends only by calling `finish` with the result";
                     if let Some(stop) = self.malformed_stop(malformed, turn, problem) {
                         return Ok(stop);
                     }
@@ -386,74 +488,302 @@ impl Agent<'_> {
             malformed = 0;
             let mut results = Vec::new();
             let mut cancelled = false;
-            for (id, name, input) in calls {
-                self.events.emit(
-                    "tool_call",
-                    json!({"turn": turn, "id": id, "name": name, "input": input}),
-                );
-                self.hooks.tool_call(&id, &name, &input);
-                self.record(Record::ToolAsked { id: id.clone() });
-                let started = Instant::now();
-                // Every call has a result, even one never run, so the
-                // conversation stays well formed for the next prompt.
-                let out = if cancelled {
-                    Output::error("not run: the turn was cancelled")
-                } else {
-                    match self.hooks.permit(&id, &name, &input).await {
-                        Permit::Allow => {
-                            self.record(Record::ToolStarted { id: id.clone() });
-                            let progress = |tail: &str| self.hooks.tool_progress(&id, tail);
-                            let run = self.tools.run_live(self.cx, &name, input, &progress);
-                            tokio::select! {
-                                out = run => out,
-                                _ = self.cancel.cancelled() => {
-                                    cancelled = true;
-                                    Output::error("stopped: the turn was cancelled")
-                                }
-                            }
+            let mut i = 0;
+            while i < calls.len() {
+                let (id, name, input) = &calls[i];
+                if let (subagent::FINISH, Some(schema)) = (name.as_str(), self.finish) {
+                    let value = subagent::settle(schema, input);
+                    match subagent::validate(schema, &value) {
+                        // The child's work ends here: calls after it in the
+                        // same response are not run, and no one waits on
+                        // their results.
+                        Ok(()) => {
+                            self.emit("returned", json!({"turn": turn, "value": value}));
+                            return Ok(Outcome::Returned { value });
                         }
-                        Permit::Deny(why) => Output::error(why),
-                        Permit::Cancelled => {
-                            cancelled = true;
-                            Output::error("not run: the turn was cancelled")
-                        }
+                        Err(problem) => results.push(Block::ToolResult {
+                            id: id.clone(),
+                            content: format!(
+                                "not returned: {problem}. Call finish again with a result in \
+                                 the shape it asks for."
+                            ),
+                            is_error: true,
+                        }),
                     }
-                };
-                self.record(Record::ToolResult {
-                    id: id.clone(),
-                    content: out.content.clone(),
-                    is_error: out.is_error,
-                });
-                self.hooks.tool_result(&id, &name, &out);
-                totals.tool_calls += 1;
-                if out.is_error {
-                    totals.tool_errors += 1;
+                    i += 1;
+                    continue;
                 }
-                self.events.emit(
-                    "tool_result",
-                    json!({
-                        "turn": turn,
-                        "id": id,
-                        "name": name,
-                        "is_error": out.is_error,
-                        "elapsed_ms": started.elapsed().as_millis() as u64,
-                        "bytes": out.content.len(),
-                        "content": out.content.chars().take(PREVIEW).collect::<String>(),
-                    }),
-                );
-                results.push(Block::ToolResult {
-                    id,
-                    content: out.content,
-                    is_error: out.is_error,
-                });
+                if let (subagent::SPAWN, Some(spawner)) = (name.as_str(), self.spawner) {
+                    // The spawns of one response together, so they run at once.
+                    let group = calls[i..]
+                        .iter()
+                        .take_while(|(_, n, _)| n == subagent::SPAWN)
+                        .count();
+                    let system = conv.system.clone();
+                    let key = conv.cache_key.clone();
+                    let outs = self
+                        .spawn_group(
+                            spawner,
+                            &calls[i..i + group],
+                            &system,
+                            key.as_deref(),
+                            turn,
+                            totals,
+                            &mut cancelled,
+                        )
+                        .await;
+                    for ((id, name, _), (out, started)) in calls[i..i + group].iter().zip(outs) {
+                        results.push(self.finish_call(id, name, out, started, turn, totals));
+                    }
+                    i += group;
+                    continue;
+                }
+                let started = Instant::now();
+                self.announce(id, name, input, turn);
+                let out = self.run_call(id, name, input.clone(), &mut cancelled).await;
+                results.push(self.finish_call(id, name, out, started, turn, totals));
+                i += 1;
             }
             conv.push(Role::User, results);
             if cancelled || self.cancel.is_cancelled() {
-                self.events
-                    .emit("cancelled", json!({"turn": turn, "during": "tools"}));
+                self.emit("cancelled", json!({"turn": turn, "during": "tools"}));
                 return Ok(Outcome::Cancelled);
             }
         }
+    }
+
+    /// A call is shown to the node and journaled as asked about, before it
+    /// is asked.
+    fn announce(&self, id: &str, name: &str, input: &Value, turn: u32) {
+        self.emit(
+            "tool_call",
+            json!({"turn": turn, "id": id, "name": name, "input": input}),
+        );
+        self.hooks.tool_call(id, name, input);
+        self.record(Record::ToolAsked { id: id.to_string() });
+    }
+
+    /// Asks, and runs the call if allowed. Every call has a result, even one
+    /// never run, so the conversation stays well formed for the next prompt.
+    async fn run_call(&self, id: &str, name: &str, input: Value, cancelled: &mut bool) -> Output {
+        if *cancelled {
+            return Output::error("not run: the turn was cancelled");
+        }
+        match self.hooks.permit(id, name, &input).await {
+            Permit::Allow => {
+                self.record(Record::ToolStarted { id: id.to_string() });
+                let progress = |tail: &str| self.hooks.tool_progress(id, tail);
+                let run = self.tools.run_live(self.cx, name, input, &progress);
+                tokio::select! {
+                    out = run => out,
+                    _ = self.cancel.cancelled() => {
+                        *cancelled = true;
+                        Output::error("stopped: the turn was cancelled")
+                    }
+                }
+            }
+            Permit::Deny(why) => Output::error(why),
+            Permit::Cancelled => {
+                *cancelled = true;
+                Output::error("not run: the turn was cancelled")
+            }
+        }
+    }
+
+    /// Journals and reports a call's result, and returns it for the
+    /// conversation.
+    fn finish_call(
+        &self,
+        id: &str,
+        name: &str,
+        out: Output,
+        started: Instant,
+        turn: u32,
+        totals: &mut Totals,
+    ) -> Block {
+        self.record(Record::ToolResult {
+            id: id.to_string(),
+            content: out.content.clone(),
+            is_error: out.is_error,
+        });
+        self.hooks.tool_result(id, name, &out);
+        totals.tool_calls += 1;
+        if out.is_error {
+            totals.tool_errors += 1;
+        }
+        self.emit(
+            "tool_result",
+            json!({
+                "turn": turn,
+                "id": id,
+                "name": name,
+                "is_error": out.is_error,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "bytes": out.content.len(),
+                "content": out.content.chars().take(PREVIEW).collect::<String>(),
+            }),
+        );
+        Block::ToolResult {
+            id: id.to_string(),
+            content: out.content,
+            is_error: out.is_error,
+        }
+    }
+
+    /// The spawn calls of one response: each asked in turn, then those
+    /// allowed run at once, at most [`subagent::MAX_PARALLEL`] together.
+    /// Their usage is the parent's.
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_group(
+        &self,
+        spawner: &Spawner,
+        calls: &[(String, String, Value)],
+        system: &str,
+        cache_key: Option<&str>,
+        turn: u32,
+        totals: &mut Totals,
+        cancelled: &mut bool,
+    ) -> Vec<(Output, Instant)> {
+        let mut decided = Vec::new();
+        for (id, name, input) in calls {
+            let started = Instant::now();
+            self.announce(id, name, input, turn);
+            let refused = if *cancelled {
+                Some(Output::error("not run: the turn was cancelled"))
+            } else {
+                match self.hooks.permit(id, name, input).await {
+                    Permit::Allow => {
+                        self.record(Record::ToolStarted { id: id.clone() });
+                        None
+                    }
+                    Permit::Deny(why) => Some(Output::error(why)),
+                    Permit::Cancelled => {
+                        *cancelled = true;
+                        Some(Output::error("not run: the turn was cancelled"))
+                    }
+                }
+            };
+            decided.push((id.clone(), input.clone(), started, refused));
+        }
+        // Owned, and boxed as `Send`: what the stream holds names no borrow
+        // of the loop's own.
+        type Run<'r> = Pin<Box<dyn Future<Output = (Output, Instant, Totals)> + Send + 'r>>;
+        let mut runs: Vec<Run<'_>> = Vec::new();
+        for (id, input, started, refused) in decided {
+            runs.push(Box::pin(async move {
+                let (out, child) = match refused {
+                    Some(out) => (out, Totals::default()),
+                    None => {
+                        self.run_child(spawner, &id, &input, system, cache_key)
+                            .await
+                    }
+                };
+                (out, started, child)
+            }));
+        }
+        let done: Vec<_> = futures_util::stream::iter(runs)
+            .buffered(subagent::MAX_PARALLEL)
+            .collect()
+            .await;
+        if self.cancel.is_cancelled() {
+            *cancelled = true;
+        }
+        done.into_iter()
+            .map(|(out, started, child)| {
+                add(totals, &child.usage);
+                totals.turns += child.turns;
+                totals.tool_calls += child.tool_calls;
+                totals.tool_errors += child.tool_errors;
+                (out, started)
+            })
+            .collect()
+    }
+
+    /// One subagent, from its spawn call to the result it returns.
+    async fn run_child(
+        &self,
+        spawner: &Spawner,
+        call: &str,
+        input: &Value,
+        system: &str,
+        cache_key: Option<&str>,
+    ) -> (Output, Totals) {
+        let mut totals = Totals::default();
+        let Some(task) = input["task"].as_str().filter(|t| !t.trim().is_empty()) else {
+            return (Output::error("not run: `task` is empty"), totals);
+        };
+        let schema = match input.get("result_schema") {
+            None | Some(Value::Null) => subagent::default_schema(),
+            Some(s) if s["type"] == "object" => s.clone(),
+            Some(_) => {
+                return (
+                    Output::error("not run: `result_schema` must be a JSON Schema of type object"),
+                    totals,
+                )
+            }
+        };
+        let (other, window) = match input["model"].as_str().filter(|m| !m.is_empty()) {
+            None => (None, self.context_window),
+            Some(m) => match spawner.allows(m) {
+                Some(window) => (Some(self.client.with_model(m)), window),
+                None => {
+                    return (
+                        Output::error(format!(
+                            "not run: `{m}` is not a model this session's provider offers; \
+                             these are: {}",
+                            spawner.models().join(", ")
+                        )),
+                        totals,
+                    )
+                }
+            },
+        };
+        let mut conv = Conversation::new(format!("{}\n\n{system}", subagent::CHILD_ORIENTATION));
+        conv.cache_key = cache_key.map(|k| format!("{k}/{call}"));
+        conv.push(Role::User, vec![Block::Text(task.to_string())]);
+        let hooks = ChildHooks {
+            parent: self.hooks,
+            call,
+            label: subagent::label(task),
+        };
+        let cancel = self.cancel.child_token();
+        let child = Agent {
+            client: other.as_ref().unwrap_or(self.client),
+            tools: self.tools,
+            cx: self.cx,
+            events: self.events,
+            hooks: &hooks,
+            cancel: &cancel,
+            journal: None,
+            max_turns: Some(subagent::CHILD_MAX_TURNS),
+            context_window: window,
+            spawner: None,
+            finish: Some(&schema),
+            subagent: Some(call),
+        };
+        self.emit(
+            "spawned",
+            json!({"id": call, "task": task, "model": input["model"]}),
+        );
+        let out = match child.run(&mut conv, &mut totals).await {
+            Ok(Outcome::Returned { value }) => Output::ok(value.to_string()),
+            Ok(Outcome::Finished { text }) => Output::error(format!(
+                "the subagent stopped without calling finish; it last said: {text}"
+            )),
+            Ok(Outcome::MaxTurns) => Output::error(format!(
+                "the subagent made {} model requests without finishing, and was stopped",
+                subagent::CHILD_MAX_TURNS
+            )),
+            Ok(Outcome::Cancelled) => Output::error("stopped: the turn was cancelled"),
+            Ok(Outcome::Stopped { reason }) => {
+                Output::error(format!("the subagent was stopped: {reason}"))
+            }
+            Ok(Outcome::ContextOverflow { message }) => {
+                Output::error(format!("the subagent's context overflowed: {message}"))
+            }
+            Err(e) => Output::error(format!("the subagent failed: {e}")),
+        };
+        (out, totals)
     }
 
     /// Makes the conversation smaller: old tool outputs pruned, then, if it
@@ -499,7 +829,7 @@ impl Agent<'_> {
                 compact::threshold(w).saturating_sub(u64::from(compact::SUMMARY_MAX_TOKENS) + 1024)
             });
             let request = compact::summary_request(conv, upto, budget);
-            self.events.emit(
+            self.emit(
                 "summarising",
                 json!({"turn": turn, "trigger": trigger, "messages": upto}),
             );
@@ -519,7 +849,7 @@ impl Agent<'_> {
                 Ok(Some(c)) => Some(c),
                 Ok(None) => return Compacting::Cancelled,
                 Err(Failed { error, .. }) => {
-                    self.events.emit(
+                    self.emit(
                         "error",
                         json!({"turn": turn, "kind": "summary", "message": error.to_string()}),
                     );
@@ -527,7 +857,7 @@ impl Agent<'_> {
                 }
             };
             let text = completion.as_ref().map(|c| text_of(&c.blocks));
-            self.events.emit(
+            self.emit(
                 "summary",
                 json!({
                     "turn": turn,
@@ -581,7 +911,7 @@ impl Agent<'_> {
         };
         let mut event = json!(compaction);
         event["turn"] = json!(turn);
-        self.events.emit("compacted", event);
+        self.emit("compacted", event);
         self.hooks.compacted(&compaction);
         Compacting::Done
     }
@@ -634,7 +964,7 @@ impl Agent<'_> {
             };
             attempt += 1;
             *first = None;
-            self.events.emit(
+            self.emit(
                 "retry",
                 json!({
                     "turn": turn,
@@ -663,10 +993,19 @@ impl Agent<'_> {
         if name.trim().is_empty() {
             return Some("not run: the call names no tool".into());
         }
-        if self.tools.get(name).is_none() {
+        let extra = (name == subagent::SPAWN && self.spawner.is_some())
+            || (name == subagent::FINISH && self.finish.is_some());
+        if self.tools.get(name).is_none() && !extra {
+            let mut names = self.tools.names();
+            if self.spawner.is_some() {
+                names.push(subagent::SPAWN);
+            }
+            if self.finish.is_some() {
+                names.push(subagent::FINISH);
+            }
             return Some(format!(
                 "not run: there is no tool `{name}`; the tools are: {}",
-                self.tools.names().join(", ")
+                names.join(", ")
             ));
         }
         match input {

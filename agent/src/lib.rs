@@ -18,5 +18,6 @@ pub mod prompt;
 pub mod providers;
 pub mod server;
 pub mod sse;
+pub mod subagent;
 pub mod tools;
 pub mod wire;

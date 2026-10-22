@@ -501,6 +501,21 @@ test('a provider whose models the file lists edits each model where it is', () =
   ])
 })
 
+test('parallel tool calls are on unless a model turns them off, so only off is written', () => {
+  const written = { providers: { 'my.p': { ...ANTHROPIC, models: [{ id: 'sonnet' }] } } }
+  const c: FieldContext = { keys: PROVIDER_KEYS, document: written, effective: { providers: { 'my.p': { ...ANTHROPIC, models: [{ id: 'sonnet' }] } } }, redacted: '<redacted>', local: false }
+  // Ticking the box the model already shows as ticked writes nothing.
+  expect(modelOps(c, 'my.p', [{ origin: 0, model: { id: 'sonnet', parallel_tools: true } }])).toEqual([])
+  expect(modelOps(c, 'my.p', [{ origin: 0, model: { id: 'sonnet', parallel_tools: false } }])).toEqual([
+    { op: 'set', key: 'providers."my.p".models[0].parallel_tools', value: false },
+  ])
+  const off = { providers: { 'my.p': { ...ANTHROPIC, models: [{ id: 'sonnet', parallel_tools: false }] } } }
+  const c2: FieldContext = { ...c, document: off, effective: off }
+  expect(modelOps(c2, 'my.p', [{ origin: 0, model: { id: 'sonnet', parallel_tools: true } }])).toEqual([
+    { op: 'remove', key: 'providers."my.p".models[0].parallel_tools' },
+  ])
+})
+
 test('a key with no value, in a table the file leaves out, writes nothing until it is given one', () => {
   const keys = [spec('publish.style.max_subject', { kind: 'integer' }), spec('publish.style.imperative', { kind: 'bool' }), spec('publish.style.types', { kind: 'list', item: 'string' })]
   const c: FieldContext = { keys, document: {}, effective: { publish: {} }, redacted: '<redacted>', local: false }

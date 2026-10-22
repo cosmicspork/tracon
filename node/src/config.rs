@@ -1826,7 +1826,7 @@ pub struct Provider {
 /// what is written here and the gateway serves exactly that, which is the
 /// whole point of declaring rather than probing: there is no catalogue to
 /// subtract a denylist from.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelDecl {
     /// The provider's own model id, as the request carries it.
     pub id: String,
@@ -1846,9 +1846,10 @@ pub struct ModelDecl {
     /// Whether it accepts attachments.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attachment: bool,
-    /// Whether the model may make several tool calls in one response. Read
-    /// by the native harness; off, it is asked for one call at a time.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Whether the model may make several tool calls in one response, which
+    /// is what lets subagents run together. Read by the native harness; on
+    /// unless turned off, and off, it is asked for one call at a time.
+    #[serde(default = "on", skip_serializing_if = "is_on")]
     pub parallel_tools: bool,
     /// A reasoning model's effort (`minimal`, `low`, `medium`, `high`,
     /// `xhigh`), sent by the native harness on the Responses wire. Absent:
@@ -1860,6 +1861,29 @@ pub struct ModelDecl {
 /// The reasoning efforts a model declaration may name.
 pub const REASONING_EFFORTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+impl Default for ModelDecl {
+    fn default() -> Self {
+        ModelDecl {
+            id: String::new(),
+            name: String::new(),
+            context: 0,
+            output: 0,
+            reasoning: false,
+            attachment: false,
+            parallel_tools: true,
+            reasoning_effort: None,
+        }
+    }
+}
+
+fn on() -> bool {
+    true
+}
+
+fn is_on(v: &bool) -> bool {
+    *v
+}
 
 fn is_zero(v: &u64) -> bool {
     *v == 0

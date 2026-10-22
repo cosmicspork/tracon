@@ -59,6 +59,15 @@ pub enum Client {
 }
 
 impl Client {
+    /// The same endpoint, wire and settings, for another model under the same
+    /// provider.
+    pub fn with_model(&self, model: &str) -> Self {
+        match self {
+            Self::Chat(c) => Self::Chat(c.with_model(model)),
+            Self::Responses(c) => Self::Responses(c.with_model(model)),
+        }
+    }
+
     /// `max_tokens` bounds the answer where the wire allows it.
     pub async fn complete(
         &self,

@@ -131,6 +131,29 @@
   </details>
   {#if c.error}<div class="err">{c.error}</div>{/if}
   {#if c.tail}<div class="tail">{c.tail}</div>{/if}
+  {#if c.entry.children?.length}
+    <!-- A subagent's own calls and asks, under the call that spawned it. -->
+    <div class="child">
+      {#each c.entry.children as sub, k (sub.event?.seq ?? `sub-${k}`)}
+        {#if sub.kind === 'tools'}
+          {#each transcript(sub.tools!, root, c.state === 'running' ? clock.now : 0) as row, j (j)}
+            {#if row.kind === 'call'}
+              {@render callLine(row.call)}
+            {:else}
+              {#each row.calls as rc (rc.entry.call.seq)}
+                {@render callLine(rc)}
+              {/each}
+            {/if}
+          {/each}
+        {:else if sub.event?.kind === 'permission_request'}
+          <div class="mark wait">permission · {sub.event.payload.title}</div>
+        {:else if sub.event}
+          {@const line = eventLine(sub.event) ?? fallbackLine(sub.event)}
+          <div class={line.tone === 'sys' ? 'sys' : `mark ${line.tone}`}>{line.text}</div>
+        {/if}
+      {/each}
+    </div>
+  {/if}
 {/snippet}
 
 <div class="log" bind:this={el} onscroll={onScroll}>
@@ -627,6 +650,14 @@
   .tail {
     color: var(--dim);
     white-space: pre-wrap;
+  }
+  .child {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-left: 18px;
+    padding-left: 10px;
+    border-left: 2px solid var(--rule);
   }
   .fails {
     color: var(--crit);
