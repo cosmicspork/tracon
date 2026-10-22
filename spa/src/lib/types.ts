@@ -573,6 +573,11 @@ export interface ReviewDetails {
    */
   review_session_starting?: boolean
   /**
+   * What became of the reviewer of the latest revision, and how one starts
+   * here. Null for a mirrored review; absent from a node that predates it.
+   */
+  reviewer?: ReviewerView | null
+  /**
    * What this screen is showing. A verdict names it, and the node refuses one
    * that names a revision the review has moved past — the commit alone cannot
    * say, because a resubmission may carry the same one with different
@@ -810,13 +815,56 @@ export interface CheckResult {
   ms: number
 }
 
+export interface AiFinding {
+  path?: string
+  line?: number
+  severity?: 'blocking' | 'should' | 'nit'
+  note: string
+}
+
 export interface AiVerdict {
   verdict: 'approve' | 'request_changes'
   summary: string
-  findings: { path?: string; line?: number; severity?: 'blocking' | 'should' | 'nit'; note: string }[]
+  findings: AiFinding[]
   model: string
   session_id: string
   at_ms: number
+  /** The revision it read; absent from a verdict recorded before that was kept. */
+  revision_id?: string | null
+}
+
+/** Whether a submission starts a reviewer on its own, or only the operator does. */
+export type ReviewTrigger = 'auto' | 'manual'
+
+/** What a channel's submissions start of a reviewer, defaults included, as the node reads it. */
+export interface ReviewTriggers {
+  session: ReviewTrigger
+  external: ReviewTrigger
+  model?: string | null
+}
+
+/**
+ * The reviewer of a review's latest revision, as the node found it: what it
+ * is doing, how one starts on this review, and the revision its verdict is on.
+ */
+export interface ReviewerView {
+  state: 'starting' | 'running' | 'done' | 'failed' | 'none'
+  model: string | null
+  /** The channel's trigger for where this review came from. */
+  trigger: ReviewTrigger
+  source: 'session' | 'external'
+  /** Whether the channel binds a review model at all. */
+  bound: boolean
+  /** Why it failed, or why none started. */
+  reason: string | null
+  /** The latest revision's number, from 1. */
+  revision: number | null
+  session_id?: string
+  session_state?: string
+  started_ms?: number
+  started_by?: 'submission' | 'operator' | null
+  /** The revision the verdict on the card is on, when there is one. */
+  verdict_revision?: number | null
 }
 
 export function reviewChecks(r: Review): CheckResult[] {
@@ -1386,6 +1434,8 @@ export interface PhaseBinding {
   model?: string
   budget_tokens?: number
   requires_plan?: boolean
+  /** Review only: per source, or one value for both. */
+  trigger?: ReviewTrigger | Partial<Record<'session' | 'external', ReviewTrigger>>
 }
 
 /** Free-form on the wire; these are the keys the node and the interface read. */
@@ -1425,6 +1475,8 @@ export interface ChannelInfo {
   name: string
   nodes: string[]
   bindings: ChannelBindings
+  /** The review triggers in effect, defaults included; absent from a node that predates them. */
+  review_trigger?: ReviewTriggers
   ceiling: CeilingInfo
   /** Set when the channel is archived: it keeps its work and takes no new sessions. */
   archived?: number | null

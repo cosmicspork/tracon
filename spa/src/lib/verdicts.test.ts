@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { canStartReviewer, composerLabel, publishedChange, unavailable } from './verdicts'
+import type { ReviewerView } from './types'
+import {
+  composerLabel,
+  publishedChange,
+  rereadDelay,
+  rereadReviewer,
+  reviewerControl,
+  startedHow,
+  unavailable,
+} from './verdicts'
 
 const ready = { busy: false, publishing: false, stale: [] as string[], reason: '' }
 
@@ -48,26 +57,106 @@ describe('verdict availability', () => {
   })
 })
 
-describe('starting a reviewer by hand', () => {
-  test('is offered on an open review with no reviewer, or one that has finished', () => {
-    expect(canStartReviewer('new', null)).toBe(true)
-    expect(canStartReviewer('revising', 'closed')).toBe(true)
-    expect(canStartReviewer('claimed', 'failed')).toBe(true)
+const view = (over: Partial<ReviewerView> = {}): ReviewerView => ({
+  state: 'none',
+  model: 'm/reviewer',
+  trigger: 'manual',
+  source: 'session',
+  bound: true,
+  reason: null,
+  revision: 1,
+  ...over,
+})
+
+describe('the reviewer control', () => {
+  test('with no review model there is nothing to start', () => {
+    expect(reviewerControl('new', view({ bound: false, model: null }))).toEqual({ kind: 'no_model' })
   })
 
-  test('is not offered while a reviewer is reading it', () => {
-    expect(canStartReviewer('new', 'running')).toBe(false)
-    expect(canStartReviewer('new', 'starting')).toBe(false)
+  test('a manual review never run on this revision offers to start one', () => {
+    const reason = 'manual review: start a reviewer from the review page'
+    expect(reviewerControl('new', view({ reason }))).toEqual({ kind: 'start', note: reason })
   })
 
-  test('is not offered while the node is starting one it has not recorded yet', () => {
-    expect(canStartReviewer('new', null, true)).toBe(false)
-    expect(canStartReviewer('revising', 'closed', true)).toBe(false)
+  test('one starting or reading it offers nothing, and says since when', () => {
+    expect(reviewerControl('new', view({ state: 'running', started_ms: 5 }))).toEqual({ kind: 'running', since: 5 })
+    expect(reviewerControl('new', view({ state: 'starting' }))).toEqual({ kind: 'running', since: null })
+    // The node is starting one it has not recorded yet.
+    expect(reviewerControl('revising', view(), true)).toEqual({ kind: 'running', since: null })
   })
 
-  test('is not offered once the review is decided', () => {
-    expect(canStartReviewer('approved', null)).toBe(false)
-    expect(canStartReviewer('rejected', 'closed')).toBe(false)
-    expect(canStartReviewer('publishing', null)).toBe(false)
+  test('a verdict on this revision offers to review again', () => {
+    expect(reviewerControl('claimed', view({ state: 'done', verdict_revision: 1 }))).toEqual({ kind: 'again' })
+  })
+
+  test('a reviewer that failed or ran out of budget says why and offers a retry', () => {
+    const reason = 'the reviewer used its token budget before giving a verdict'
+    expect(reviewerControl('new', view({ state: 'failed', reason }))).toEqual({ kind: 'retry', reason })
+    expect(reviewerControl('new', view({ state: 'failed' })).kind).toBe('retry')
+  })
+
+  test('a verdict on an earlier revision offers to review this one', () => {
+    expect(reviewerControl('new', view({ revision: 2, verdict_revision: 1 }))).toEqual({ kind: 'stale', revision: 1 })
+  })
+
+  test('a decided or mirrored review offers nothing', () => {
+    expect(reviewerControl('approved', view())).toEqual({ kind: 'hidden' })
+    expect(reviewerControl('publishing', view())).toEqual({ kind: 'hidden' })
+    expect(reviewerControl('new', null)).toEqual({ kind: 'hidden' })
+  })
+
+  test('the reviewed-by line says how the reviewer started', () => {
+    expect(startedHow('submission')).toBe('started on submission')
+    expect(startedHow('operator')).toBe('started by you')
+    expect(startedHow(null)).toBeNull()
+  })
+})
+
+describe('reading the reviewer again', () => {
+  const running = view({ state: 'running', session_id: 'r2', started_ms: 5 })
+
+  test('at once when the session it was reading with has ended', () => {
+    const control = reviewerControl('new', running)
+    expect(rereadReviewer(control, running, false, { id: 'r2', state: 'closed' })).toBe('now')
+    expect(rereadReviewer(control, running, false, { id: 'r2', state: 'killed_budget' })).toBe('now')
+  })
+
+  test('only after a pause while it is still running', () => {
+    const control = reviewerControl('new', running)
+    expect(rereadReviewer(control, running, false, { id: 'r2', state: 'running' })).toBe('later')
+    expect(rereadReviewer(control, running, false, undefined)).toBe('later')
+  })
+
+  test('only after a pause while a new one starts beside the last, ended one', () => {
+    // Retry or Review again, or an external candidate's files still being
+    // kept: the review still names the reviewer that ended.
+    const done = view({ state: 'done', session_id: 'r1', verdict_revision: 1 })
+    const failed = view({ state: 'failed', session_id: 'r1', reason: 'out of budget' })
+    for (const v of [done, failed]) {
+      const control = reviewerControl('new', v, true)
+      expect(control.kind).toBe('running')
+      expect(rereadReviewer(control, v, true, { id: 'r1', state: 'closed' })).toBe('later')
+    }
+    // Nor while the node says one is starting on a reviewer it still names.
+    const starting = view({ state: 'running', session_id: 'r1' })
+    expect(rereadReviewer(reviewerControl('new', starting, true), starting, true, { id: 'r1', state: 'failed' })).toBe(
+      'later',
+    )
+  })
+
+  test('not at all when nothing is starting or running', () => {
+    const done = view({ state: 'done', session_id: 'r1' })
+    expect(rereadReviewer(reviewerControl('new', done), done, false, { id: 'r1', state: 'closed' })).toBeNull()
+  })
+})
+
+describe('a reviewer poll that fails', () => {
+  test('is retried at once only when nothing has failed, then further off each time', () => {
+    expect(rereadDelay('now', 0)).toBe(0)
+    expect(rereadDelay('later', 0)).toBe(3000)
+    expect(rereadDelay('now', 1)).toBe(3000)
+    expect(rereadDelay('now', 2)).toBe(6000)
+    expect(rereadDelay('later', 3)).toBe(12000)
+    expect(rereadDelay('now', 20)).toBe(30000)
   })
 })

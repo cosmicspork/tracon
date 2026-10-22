@@ -1690,7 +1690,7 @@ async fn a_reviewer_started_on_one_candidate_does_not_find_on_the_next() {
     };
     h.store.insert_session(&reviewer("old-reviewer")).unwrap();
     h.store
-        .review_session_revision_record("old-reviewer", "rv1", "revision-1")
+        .review_session_start_record("old-reviewer", "rv1", "revision-1", "submission")
         .unwrap();
     let old_token = h
         .manager
@@ -1760,7 +1760,7 @@ async fn a_reviewer_started_on_one_candidate_does_not_find_on_the_next() {
     h.store.insert_session(&reviewer("new-reviewer")).unwrap();
     h.store.set_review_session("rv1", "new-reviewer").unwrap();
     h.store
-        .review_session_revision_record("new-reviewer", "rv1", "revision-2")
+        .review_session_start_record("new-reviewer", "rv1", "revision-2", "operator")
         .unwrap();
     let refused = tool(
         &h.harness,

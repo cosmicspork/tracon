@@ -297,8 +297,15 @@ pub(crate) fn carried_note(carried: &[ReviewRow]) -> String {
                 "\n\nThe earlier session's {what} `{}` ({}) is still waiting on the \
                  operator. It is yours now, and their decision comes back to you as a \
                  prompt. If you change the work, call `{submit}` with that same {key} \
-                 rather than opening a new {what}.",
-                r.id, r.title,
+                 rather than opening a new {what}.{}",
+                r.id,
+                r.title,
+                if r.kind == crate::store::reports::KIND {
+                    ""
+                } else {
+                    " An AI reviewer's advisory verdict on it, once there is one, is in \
+                     `reviewer` from review_status."
+                },
             ));
             continue;
         }
@@ -883,6 +890,13 @@ impl Manager {
             let key = waits::review_key(review);
             if told.contains(&key) {
                 self.waits().tell(to, &key);
+            }
+            // The handoff points it at the AI reviewer's verdict on a review
+            // still waiting (`carried_note`), so that verdict is not brought
+            // back as a prompt as well; one given after this still is.
+            if let Some(verdict) = crate::mcp::review::current_verdict(&self.store, review) {
+                self.waits()
+                    .tell(to, &waits::reviewer_key(&review.id, &verdict));
             }
             self.record(NewEvent {
                 session_id: to.to_string(),
@@ -1489,10 +1503,17 @@ impl Manager {
 
     /// Republish the waiting bay. Called when a review arrives or is decided,
     /// so the queue updates without the operator refetching.
+    /// It also lets go of what the node kept in memory for reviews no longer
+    /// open, however they were decided: by the operator here, through a
+    /// peer, or withdrawn.
     pub async fn publish_queue(&self) {
         let waiting = self.store.open_permission_views().unwrap_or_default();
         self.bus.publish(Frame::Queue { waiting });
         if let Ok(reviews) = self.store.open_reviews() {
+            let open: std::collections::HashSet<&str> =
+                reviews.iter().map(|r| r.id.as_str()).collect();
+            self.review_starts().retain_open(&open);
+            self.waits().retain_open(&open);
             self.bus.publish(Frame::Reviews { waiting: reviews });
         }
     }

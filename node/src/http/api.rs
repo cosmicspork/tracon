@@ -348,9 +348,11 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
     if rows.is_empty() {
         for name in DEFAULT_CHANNELS.iter().copied() {
             let ceiling = crate::metrics::ceiling(s.store(), &json!({}), name);
-            out.push(
-                json!({ "name": name, "nodes": [s.node_id], "bindings": {}, "ceiling": ceiling }),
-            );
+            let review_trigger = crate::mcp::review::ReviewerBinding::of(&json!({})).view();
+            out.push(json!({
+                "name": name, "nodes": [s.node_id], "bindings": {}, "ceiling": ceiling,
+                "review_trigger": review_trigger,
+            }));
         }
     }
     for c in rows {
@@ -360,8 +362,11 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
         let bindings: serde_json::Value =
             serde_json::from_str(&c.bindings_json).unwrap_or(json!({}));
         let ceiling = crate::metrics::ceiling(s.store(), &bindings, &c.name);
+        // Defaults included, which the bindings leave out.
+        let review_trigger = crate::mcp::review::ReviewerBinding::of(&bindings).view();
         out.push(json!({
             "name": c.name, "nodes": s.store().nodes_in_channel(&c.name)?,
+            "review_trigger": review_trigger,
             // Lifted out of the bindings it lives in, so a screen deciding
             // what to offer does not have to dig for it.
             "archived": bindings.get("archived").cloned(),
@@ -2538,10 +2543,16 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     // A reviewer being started here, which the review row does not show
     // until it has started.
     let review_session_starting = remote_owner.is_none() && s.manager.review_starts().pending(&id);
+    // What became of this revision's reviewer, and how one starts here.
+    let reviewer = match remote_owner {
+        Some(_) => serde_json::Value::Null,
+        None => crate::mcp::review::reviewer_view(s.store(), &s.manager, r),
+    };
     Ok(json!({
         "review": r,
         "review_session_reason": review_session_reason,
         "review_session_starting": review_session_starting,
+        "reviewer": reviewer,
         "remote_owner": remote_owner,
         "revision": revision_ref,
         "intent": intent,
@@ -2919,6 +2930,33 @@ pub async fn release_review(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /api/reviews/{id}/review-session`: what became of a review's
+/// reviewer, without the rest of the review: what the review page polls
+/// while one starts or runs. `reviewer` is null for a review another node
+/// owns, which starts its own.
+pub async fn get_review_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    let local = r.node_id == s.node_id;
+    Ok(Json(json!({
+        "state": r.state,
+        "review_session_id": r.review_session_id,
+        "ai_verdict_json": r.ai_verdict_json,
+        "review_session_reason": if local { s.store().review_session_reason(&id)? } else { None },
+        "review_session_starting": local && s.manager.review_starts().pending(&id),
+        "reviewer": if local {
+            crate::mcp::review::reviewer_view(s.store(), &s.manager, &r)
+        } else {
+            serde_json::Value::Null
+        },
+    })))
+}
+
 /// `POST /api/reviews/{id}/review-session`: start a fresh review session on
 /// a review by hand, on one that never had one or again after changes were
 /// requested. Refused while one is starting or still running, and on a review already
@@ -2946,15 +2984,38 @@ pub async fn start_review_session(
                 .into(),
         ));
     }
-    // Held from before the review is read again until the new reviewer is
-    // recorded. The checks below run on that second read, so they see any
-    // session another start recorded before it let go of its claim, and two
-    // starts cannot both find none running.
-    let Some(start) = s.manager.review_starts().claim(&id) else {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            crate::mcp::review::ALREADY_STARTING.into(),
-        ));
+    // Files still being kept from a submission that started no reviewer
+    // are waited for, not found missing. Waited for before the claim, so a
+    // resubmission meanwhile can claim its own start; and the revision is
+    // read again once claimed, so this one never starts on a later
+    // revision with an earlier one's word on its files.
+    let latest = |s: &AppState| -> ApiResult<String> {
+        Ok(s.store()
+            .review_revision_ids(&id)?
+            .pop()
+            .unwrap_or_default())
+    };
+    let mut revision = latest(&s)?;
+    let mut tries = 0;
+    let (start, unkept) = loop {
+        let unkept = s.manager.review_starts().kept(&id, &revision).await;
+        // Held from before the review is read again until the new reviewer
+        // is recorded. The checks below run on that second read, so they
+        // see any session another start recorded before it let go of its
+        // claim, and two starts cannot both find none running.
+        let Some(start) = s.manager.review_starts().claim(&id) else {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                crate::mcp::review::ALREADY_STARTING.into(),
+            ));
+        };
+        let now = latest(&s)?;
+        tries += 1;
+        if now == revision || tries >= 3 {
+            break (start, (now == revision).then_some(unkept).flatten());
+        }
+        drop(start);
+        revision = now;
     };
     let r = s
         .store()
@@ -2986,8 +3047,14 @@ pub async fn start_review_session(
             ),
         ));
     }
-    let started =
-        crate::mcp::review::spawn_claimed_review_session(s.store(), &s.manager, start, None).await;
+    let started = crate::mcp::review::spawn_claimed_review_session(
+        s.store(),
+        &s.manager,
+        start,
+        unkept,
+        crate::mcp::review::StartedBy::Operator,
+    )
+    .await;
     if started["state"] != "started" {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -3157,6 +3224,7 @@ pub(crate) async fn decide_local(
 ) -> ApiResult<serde_json::Value> {
     let decided = decide_review_here(s, id, b).await;
     if decided.is_ok() {
+        crate::mcp::review::review_decided(&s.manager, id);
         if let Ok(Some(session_id)) = s
             .store()
             .get_review(id)

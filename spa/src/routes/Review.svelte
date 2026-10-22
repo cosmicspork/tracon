@@ -30,6 +30,8 @@
     type SinceReviewed,
     type ShownWork as ShownWorkItem,
     type Verdict,
+    type AiFinding,
+    type ReviewerView,
   } from '../lib/types'
   import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
@@ -37,7 +39,17 @@
   import { draftedMessage, draftForRevision, ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
   import { proposedMessage as proposedCommitMessage, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
-  import { CLOSED_STATES, canStartReviewer, composerLabel, publishedChange, unavailable } from '../lib/verdicts'
+  import {
+    CLOSED_STATES,
+    composerLabel,
+    publishedChange,
+    rereadDelay,
+    rereadReviewer,
+    reviewerControl,
+    startedHow,
+    unavailable,
+  } from '../lib/verdicts'
+  import { openAiRequest, sentReason, withFinding } from '../lib/reviewerChanges'
   import { COVERAGE, FINDING, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
 
   let { id }: { id: string } = $props()
@@ -56,6 +68,8 @@
   /** Why no reviewer is reading it, as the node last found. */
   let reviewerReason = $state<string | null>(null)
   let reviewerStarting = $state(false)
+  /** What became of the latest revision's reviewer, as the node last said. */
+  let reviewerView = $state<ReviewerView | null>(null)
   let requirements = $state<PinnedRequirements | null>(null)
   /** The pinned item's criteria against this revision's candidate, if any. */
   let criteria = $state<Criteria | null>(null)
@@ -164,6 +178,7 @@
         publication = d.publication ?? null
         reviewerReason = d.review_session_reason ?? null
         reviewerStarting = d.review_session_starting ?? false
+        reviewerView = d.reviewer ?? null
         requirements = d.requirements
         criteria = d.criteria
         surroundingCode = d.surrounding_code
@@ -321,6 +336,35 @@
     queueMicrotask(() => reasonInput?.focus())
   }
 
+  /** The AI reviewer's findings in the composer, each ticked while its item is in the text. */
+  let aiFindings = $state<{ finding: AiFinding; on: boolean }[] | null>(null)
+
+  /** Open Request changes on the AI reviewer's summary and findings, for you to edit and send. */
+  function requestTheseChanges() {
+    if (!verdict) return
+    const findings = verdict.findings ?? []
+    const opened = openAiRequest(reason, { summary: verdict.summary, findings, at: verdict.at_ms })
+    reason = opened.text
+    aiFindings = findings.map((finding, i) => ({ finding, on: opened.ticked[i] }))
+    compose('revise')
+  }
+
+  function tickFinding(i: number, on: boolean) {
+    if (!aiFindings) return
+    aiFindings[i].on = on
+    reason = withFinding(
+      reason,
+      aiFindings[i].finding,
+      on,
+      aiFindings.map((f) => f.finding),
+    )
+  }
+
+  function closeComposer() {
+    composing = null
+    aiFindings = null
+  }
+
   /** Fetch each reviewed file as submitted and rebuild what it changed from. */
   async function startEditing() {
     if (!review) return
@@ -442,6 +486,39 @@
   const checks = $derived(review ? reviewChecks(review) : [])
   const session = $derived(review?.session_id ? store.sessions.get(review.session_id) : undefined)
   const reviewer = $derived(review?.review_session_id ? store.sessions.get(review.review_session_id) : undefined)
+  // The reviewer's id and state alone: the session row changes on every
+  // update it streams, and the poll below must not be put off by each one.
+  const liveReviewerId = $derived(reviewer?.id)
+  const liveReviewerState = $derived(reviewer?.state)
+  const control = $derived(review ? reviewerControl(review.state, remoteOwner ? null : reviewerView, reviewerStarting) : null)
+  /** The verdict on the card is on an earlier revision than this one. */
+  const verdictRevision = $derived(
+    reviewerView?.verdict_revision != null && reviewerView.verdict_revision !== reviewerView.revision
+      ? reviewerView.verdict_revision
+      : null,
+  )
+  /** Review again replaces the verdict shown; it asks first. */
+  let confirmingAgain = $state(false)
+  // A reviewer that ends, or one the node had not recorded yet, is read
+  // again, so its verdict or its failure shows without a reload.
+  /** Polls in a row that failed: each schedules the next, further off. */
+  let pollFailures = $state(0)
+  $effect(() => {
+    const when = rereadReviewer(
+      control,
+      reviewerView,
+      reviewerStarting,
+      liveReviewerId && liveReviewerState ? { id: liveReviewerId, state: liveReviewerState } : null,
+    )
+    if (!when) return
+    const delay = rereadDelay(when, pollFailures)
+    if (delay === 0) {
+      void refreshReviewer()
+    } else {
+      const t = setTimeout(() => void refreshReviewer(), delay)
+      return () => clearTimeout(t)
+    }
+  })
   const edited = $derived(
     review !== null &&
       (title !== review.title ||
@@ -517,7 +594,8 @@
       decided = true
       const res = await api.decideReview(id, {
         verdict,
-        reason: verdict === 'approve' ? undefined : reason,
+        // Sent on from the AI review, it stays marked as such.
+        reason: verdict === 'approve' ? undefined : sentReason(reason),
         title: verdict === 'approve' ? title : undefined,
         body: verdict === 'approve' ? body : undefined,
         // A mirrored review's outputs are the owner's revision's own; this
@@ -571,8 +649,26 @@
       publication = d.publication ?? null
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting ?? false
+      reviewerView = d.reviewer ?? null
     } catch {
       /* the error already shown is the one that matters */
+    }
+  }
+
+  /** The reviewer alone, as it stands now: what the page polls while one runs. A review decided meanwhile is read again whole. */
+  async function refreshReviewer() {
+    if (!review) return
+    try {
+      const d = await api.reviewSession(id)
+      if (d.state !== review.state) return await reread()
+      review = { ...review, review_session_id: d.review_session_id, ai_verdict_json: d.ai_verdict_json }
+      reviewerReason = d.review_session_reason ?? null
+      reviewerStarting = d.review_session_starting
+      reviewerView = d.reviewer
+      pollFailures = 0
+    } catch {
+      // Asked again on the next poll, a little later each time.
+      pollFailures++
     }
   }
 
@@ -951,7 +1047,7 @@
     <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
     <div><dt>Item</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
     <div><dt>Policy</dt><dd>{session?.policy_version != null ? `working-agreements v${session.policy_version}` : '—'}</dd></div>
-    <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}</dd></div>
+    <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}{reviewer && startedHow(reviewerView?.started_by) ? ` · ${startedHow(reviewerView?.started_by)}` : ''}</dd></div>
     <div><dt>Commit</dt><dd>{review.head_sha.slice(0, 8)}</dd></div>
   </dl>
 
@@ -959,7 +1055,7 @@
     <div class="verdict" class:rc={verdict.verdict === 'request_changes'}>
       <span class="vbar"></span>
       <div class="in">
-        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b> · {verdict.model} · read only the requirements and the diff{reviewer ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
+        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b>{verdictRevision !== null ? ` · for revision ${verdictRevision}` : ''} · {verdict.model} · read only the requirements and the diff{reviewer && verdictRevision === null ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
         <div class="sum">{verdict.summary}</div>
         {#if verdict.findings?.length}
           <ul class="findings">
@@ -968,16 +1064,47 @@
             {/each}
           </ul>
         {/if}
+        {#if verdict.verdict === 'request_changes' && control?.kind === 'again' && !composing && !publishing}
+          <div class="row"><button class="btn" disabled={busy} onclick={requestTheseChanges}>Request these changes…</button></div>
+        {/if}
       </div>
     </div>
-  {:else if review.review_session_id}
-    <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
   {/if}
 
-  {#if !remoteOwner && canStartReviewer(review.state, review.review_session_id ? (reviewer?.state ?? 'closed') : null, reviewerStarting)}
+  {#if control?.kind === 'running'}
+    <div class="banner dim">
+      a fresh session is reading this review{control.since ? ` · ${formatAge(control.since, clock.now)}` : ''} <b>· its verdict lands here; yours decides</b>
+    </div>
+  {:else if remoteOwner && review.review_session_id && !verdict}
+    <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
+  {:else if control?.kind === 'no_model'}
     <div class="recover">
-      {#if review.review_session_id && reviewerReason}<span class="note">{reviewerReason}</span>{/if}
+      <span class="note">No review model on {review.channel} · <a class="lnk" href="/settings#channels">Settings → Channels</a></span>
+    </div>
+  {:else if control?.kind === 'start'}
+    <div class="recover">
+      {#if control.note}<span class="note">{control.note}</span>{/if}
       <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>
+    </div>
+  {:else if control?.kind === 'retry'}
+    <div class="recover">
+      <span class="note">{control.reason}</span>
+      <button class="btn" disabled={busy} onclick={startReviewer}>Retry reviewer</button>
+    </div>
+  {:else if control?.kind === 'stale'}
+    <div class="recover">
+      <span class="note">the reviewer's verdict is on revision {control.revision ?? 'an earlier one'}; this is revision {reviewerView?.revision ?? 'a later one'}</span>
+      <button class="btn" disabled={busy} onclick={startReviewer}>Review this revision</button>
+    </div>
+  {:else if control?.kind === 'again'}
+    <div class="recover">
+      {#if confirmingAgain}
+        <span class="note">A new reviewer replaces the verdict shown.</span>
+        <button class="btn" disabled={busy} onclick={() => { confirmingAgain = false; void startReviewer() }}>Review again</button>
+        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = false)}>Keep this verdict</button>
+      {:else}
+        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = true)}>Review again…</button>
+      {/if}
     </div>
   {/if}
 
@@ -1279,6 +1406,19 @@
       </div>
     {/if}
     {#if composing}
+      {#if composing === 'revise' && aiFindings?.length}
+        <fieldset class="ai-findings">
+          <legend>From the AI review: untick a finding to leave it out</legend>
+          {#each aiFindings as f, i (i)}
+            <label>
+              <input type="checkbox" checked={f.on} disabled={busy} onchange={(e) => tickFinding(i, e.currentTarget.checked)} />
+              <span class="sev {f.finding.severity ?? 'should'}">{f.finding.severity ?? 'should'}</span>
+              <span class="path">{f.finding.path ?? ''}{f.finding.line ? `:${f.finding.line}` : ''}</span>
+              <span class="fnote">{f.finding.note}</span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
       <label class="composer">
         <span>{composerLabel(composing, editedFiles)}</span>
         <textarea bind:this={reasonInput} bind:value={reason} use:autogrow={reason} disabled={busy || publishing}></textarea>
@@ -1291,7 +1431,7 @@
         >
           {composing === 'reject' ? 'Reject' : editedFiles > 0 ? 'Send edits and request changes' : 'Request changes'}
         </button>
-        <button class="btn" disabled={busy} onclick={() => (composing = null)}>Back</button>
+        <button class="btn" disabled={busy} onclick={closeComposer}>Back</button>
         {#if sendBlocked}<span class="why">{sendBlocked}</span>{/if}
       </div>
     {:else}
@@ -1717,12 +1857,40 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .ai-findings {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border: 0;
+    margin: 0 0 8px;
+    padding: 0;
+    min-width: 0;
+  }
+  .ai-findings legend {
+    font-size: 12px;
+    color: var(--dim);
+    padding: 0;
+    margin-bottom: 4px;
+  }
+  .ai-findings label {
+    display: grid;
+    grid-template-columns: 18px 64px 170px minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+    font-size: 12.5px;
+  }
   @media (max-width: 700px) {
     .evidence-grid {
       grid-template-columns: 1fr;
     }
     .findings li {
       grid-template-columns: 64px 1fr;
+    }
+    .ai-findings label {
+      grid-template-columns: 18px 64px minmax(0, 1fr);
+    }
+    .ai-findings .fnote {
+      grid-column: 2 / -1;
     }
     .path {
       grid-column: 2;

@@ -52,14 +52,22 @@
   import { nodeHarnesses } from '../lib/nodes'
   import { versionLabel } from '../lib/version'
   import type { HarnessState } from '../lib/types'
-  import { exhaustionDefaults, exhaustionPatch, modelPatch, phaseDefaults } from '../lib/bindings'
+  import {
+    exhaustionDefaults,
+    exhaustionPatch,
+    modelPatch,
+    phaseDefaults,
+    reviewTriggers,
+    triggerPatch,
+    type ReviewSource,
+  } from '../lib/bindings'
   import { modelSummary, recentModelValues } from '../lib/models'
   import { hashToken, loginUrl, mintToken } from '../lib/settings'
   import { contextOf, saveOps, type SaveOutcome } from '../lib/config-form'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
-  import type { AuthorityGrant, BoundaryCheck, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule } from '../lib/types'
+  import type { AuthorityGrant, BoundaryCheck, ChannelInfo, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule, ReviewTrigger } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
@@ -361,6 +369,14 @@
       await store.refetch()
       delete exhaustionDraft[channel]
       savedChannel = channel
+    })
+  }
+  function bindTrigger(channel: ChannelInfo, source: ReviewSource, trigger: ReviewTrigger) {
+    return act('binding', async () => {
+      await api.createChannel(channel.name)
+      await api.putChannelBindings(channel.name, triggerPatch(channel.bindings, source, trigger))
+      await store.refetch()
+      savedChannel = channel.name
     })
   }
   function bindModel(channel: string, phase: 'plan' | 'execute' | 'review', model: string) {
@@ -823,6 +839,7 @@
           {@const execute = phaseDefaults(c.bindings, 'execute')}
           {@const review = phaseDefaults(c.bindings, 'review')}
           {@const exh = exhaustionDraft[c.name] ?? exhaustionDefaults(c.bindings)}
+          {@const triggers = reviewTriggers(c)}
           <div class="ch">
             <span class="nm">{c.name}</span>
             {#each [['plan', plan], ['execute', execute], ['review', review]] as const as [ph, b] (ph)}
@@ -841,6 +858,22 @@
             <div class="end">
               {#if savedChannel === c.name}<small>saved · handed to members</small>{/if}
               <button class="lnk" disabled={busy !== ''} onclick={() => archiveChannel(c.name, true)}>Archive</button>
+            </div>
+            <div class="exh">
+              {#each [['session', 'Review submissions from sessions here'], ['external', 'Review submissions from external harnesses']] as const as [source, label] (source)}
+                <label>
+                  <span>{label}</span>
+                  <select
+                    value={triggers[source]}
+                    disabled={busy !== ''}
+                    onchange={(e) => bindTrigger(c, source, e.currentTarget.value as ReviewTrigger)}
+                  >
+                    <option value="auto">auto · a reviewer starts on submission</option>
+                    <option value="manual">manual · you start one from the review</option>
+                  </select>
+                </label>
+              {/each}
+              {#if !review.model}<small class="note">no review model: neither starts a reviewer until one is chosen</small>{/if}
             </div>
             <div class="exh">
               <label>

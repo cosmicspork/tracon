@@ -22,7 +22,9 @@ use crate::{
         publish::{ChangeRef, Intent, Outputs, Provider, Target},
     },
     session::{state::event_kind as ek, Manager},
-    store::{candidate_id, now_ms, CandidateRow, ReviewRevisionRow, ReviewRow, Store},
+    store::{
+        candidate_id, now_ms, CandidateRow, ReviewRevisionRow, ReviewRow, Store, VerdictRecorded,
+    },
 };
 
 pub const SUBMIT: &str = "submit_review";
@@ -145,8 +147,12 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                  still running reads `still_waiting` with `state: \"checking\"` and how long \
                  they have run; if they fail it returns `state: \"submit_failed\"` with the \
                  same message submit_review would have refused with, and nothing was \
-                 submitted. On approval the node publishes the approved text itself and \
-                 returns where it landed. {}",
+                 submitted. While it waits, `reviewer` says what an AI reviewer of the \
+                 latest revision is doing (`state`: starting, running, done, failed or none) \
+                 and, once it has given one, its `verdict`, `summary` and `findings`; a \
+                 verdict arriving ends the wait early. That verdict is advisory: only the \
+                 operator's decision publishes. On approval the node publishes the approved \
+                 text itself and returns where it landed. {}",
                  super::wait::pointer()
             ),
             "inputSchema": {
@@ -910,6 +916,11 @@ impl Submission {
             ships,
         } = self;
         let external = session.is_none();
+        let source = if external {
+            Source::External
+        } else {
+            Source::Session
+        };
         let checks_json = (!external)
             .then(|| serde_json::to_string(&checks.results).unwrap_or_else(|_| "[]".into()));
 
@@ -966,13 +977,23 @@ impl Submission {
                 ));
             }
             let retained = retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
-            manager.publish_queue().await;
-            let reviewer =
-                spawn_review_session_when_kept(store, manager, &id, &ctx.channel, retained).await;
+            let reviewer = spawn_review_session_when_kept(
+                store,
+                manager,
+                &id,
+                &revision.id,
+                &ctx.channel,
+                source,
+                retained,
+            )
+            .await;
             let mut resubmitted = json!({
                 "review_id": id,
                 "state": "new",
-                "message": "Resubmitted. Call review_status to wait for the verdict.",
+                "message": format!(
+                    "Resubmitted. {} Call review_status to wait for the verdict.",
+                    reviewer_says(&reviewer, &ctx.channel)
+                ),
                 "files": capture.files.len(),
                 "added": capture.added,
                 "removed": capture.removed,
@@ -1043,15 +1064,25 @@ impl Submission {
             .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
         let retained = retain_candidate_files(store, &worktree, &candidate, max_snapshot_bytes);
-        manager.publish_queue().await;
-        let reviewer =
-            spawn_review_session_when_kept(store, manager, &id, &ctx.channel, retained).await;
+        let reviewer = spawn_review_session_when_kept(
+            store,
+            manager,
+            &id,
+            &revision.id,
+            &ctx.channel,
+            source,
+            retained,
+        )
+        .await;
 
         let mut submitted = json!({
             "review_id": id,
             "state": "new",
-            "message": "Submitted for review. Nothing is published until a human approves. \
-                        Call review_status to wait for the verdict.",
+            "message": format!(
+                "Submitted for review. Nothing is published until a human approves. {} Call \
+                 review_status to wait for the verdict.",
+                reviewer_says(&reviewer, &ctx.channel)
+            ),
             "files": capture.files.len(),
             "added": row.added,
             "removed": row.removed,
@@ -2046,9 +2077,10 @@ pub(crate) async fn spawn_review_session(
     store: &Arc<Store>,
     manager: &Manager,
     review_id: &str,
+    started_by: StartedBy,
 ) -> Value {
     match manager.review_starts().claim(review_id) {
-        Some(start) => spawn_claimed_review_session(store, manager, start, None).await,
+        Some(start) => spawn_claimed_review_session(store, manager, start, None, started_by).await,
         None => already_starting(),
     }
 }
@@ -2061,9 +2093,10 @@ pub(crate) async fn spawn_claimed_review_session(
     manager: &Manager,
     start: ReviewStart,
     unkept: Option<String>,
+    started_by: StartedBy,
 ) -> Value {
     let review_id = start.review_id();
-    match start_review_session(store, manager, review_id, unkept.as_deref()).await {
+    match start_review_session(store, manager, review_id, unkept.as_deref(), started_by).await {
         Ok(session_id) => json!({ "state": "started", "session_id": session_id }),
         Err((state, reason)) => {
             if let Err(error) = store.set_review_session_reason(review_id, &reason) {
@@ -2091,12 +2124,31 @@ pub const ALREADY_STARTING: &str =
 /// replace it while the first runs. Node-local: only a review's owner
 /// starts one.
 #[derive(Default)]
-pub struct ReviewStarts(std::sync::Mutex<std::collections::HashSet<String>>);
+pub struct ReviewStarts {
+    pending: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Reviews whose latest revision's files are being kept with no start
+    /// claimed for them (a manual trigger): a start by hand waits on this
+    /// rather than finding them not kept yet. Kept once they were not, so a
+    /// later start can say why, until the review is resubmitted or decided.
+    keeping: std::sync::Mutex<std::collections::HashMap<String, Keep>>,
+    /// Numbers each keep, so an earlier submission's that finishes late
+    /// leaves a later one's entry alone.
+    keeps: std::sync::atomic::AtomicU64,
+}
+
+/// One revision's keep: its number, the revision, and whether its files are
+/// kept yet (`None` while they are being kept, then why they were not, if
+/// they were not).
+struct Keep {
+    number: u64,
+    revision_id: String,
+    kept: tokio::sync::watch::Receiver<Option<Option<String>>>,
+}
 
 impl ReviewStarts {
     /// Claim the start for a review, or `None` while another holds it.
     pub fn claim(self: &Arc<Self>, review_id: &str) -> Option<ReviewStart> {
-        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.insert(review_id.to_string()).then(|| ReviewStart {
             starts: self.clone(),
             review_id: review_id.to_string(),
@@ -2105,8 +2157,92 @@ impl ReviewStarts {
 
     /// Whether a review session is being started for a review.
     pub fn pending(&self, review_id: &str) -> bool {
-        let pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.contains(review_id)
+    }
+
+    /// Follow the keeping of a review's files that no start waits on, so a
+    /// start by hand can.
+    fn keep(
+        self: &Arc<Self>,
+        review_id: &str,
+        revision_id: &str,
+        retained: tokio::task::JoinHandle<Result<(), String>>,
+    ) {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let keep = self
+            .keeps
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.keeping
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                review_id.to_string(),
+                Keep {
+                    number: keep,
+                    revision_id: revision_id.to_string(),
+                    kept: rx,
+                },
+            );
+        let starts = self.clone();
+        let review_id = review_id.to_string();
+        tokio::spawn(async move {
+            let unkept = unkept(retained.await);
+            let kept = unkept.is_none();
+            let _ = tx.send(Some(unkept));
+            // Files that were kept need no entry: a start finds them. One
+            // that says why they were not stays for a later start to report.
+            if kept {
+                let mut keeping = starts.keeping.lock().unwrap_or_else(|e| e.into_inner());
+                if keeping.get(&review_id).is_some_and(|k| k.number == keep) {
+                    keeping.remove(&review_id);
+                }
+            }
+        });
+    }
+
+    /// Once a revision's files are kept, if they are being kept now: why
+    /// they were not, if they were not. Another revision's keep says
+    /// nothing of this one's.
+    pub async fn kept(&self, review_id: &str, revision_id: &str) -> Option<String> {
+        let keeping = self
+            .keeping
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(review_id)
+            .filter(|keep| keep.revision_id == revision_id)
+            .map(|keep| keep.kept.clone());
+        let mut keeping = keeping?;
+        let done = keeping.wait_for(Option::is_some).await.ok()?;
+        done.clone().flatten()
+    }
+}
+
+impl ReviewStarts {
+    /// Forget a review's keep: it was resubmitted, or decided.
+    pub fn unkeep(&self, review_id: &str) {
+        self.keeping
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(review_id);
+    }
+
+    /// Forget the keeps of reviews no longer open (`open` holds those that
+    /// are), however they were decided.
+    pub fn retain_open(&self, open: &std::collections::HashSet<&str>) {
+        self.keeping
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|review, _| open.contains(review.as_str()));
+    }
+}
+
+/// Why a candidate's files were not kept, from the task keeping them.
+fn unkept(retained: Result<Result<(), String>, tokio::task::JoinError>) -> Option<String> {
+    match retained {
+        Ok(Ok(())) => None,
+        Ok(Err(why)) => Some(why),
+        Err(error) => Some(error.to_string()),
     }
 }
 
@@ -2124,24 +2260,75 @@ impl ReviewStart {
 
 impl Drop for ReviewStart {
     fn drop(&mut self) {
-        let mut pending = self.starts.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self
+            .starts
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         pending.remove(&self.review_id);
     }
+}
+
+/// What a submission starts of a reviewer, as the channel's trigger for its
+/// source says: under `manual` nothing, and the review records why. The
+/// result names the trigger and model that applied, for the submitter.
+/// It publishes the queue once a start by hand would find the keep it waits
+/// on, so the review is never on the page before that.
+async fn spawn_review_session_when_kept(
+    store: &Arc<Store>,
+    manager: &Manager,
+    review_id: &str,
+    revision_id: &str,
+    channel: &str,
+    source: Source,
+    retained: Option<tokio::task::JoinHandle<Result<(), String>>>,
+) -> Value {
+    // An earlier revision's keep is nothing to this one.
+    manager.review_starts().unkeep(review_id);
+    let binding = ReviewerBinding::of(&manager.bindings(channel));
+    let trigger = binding.trigger(source);
+    // What applied to this revision, whatever the binding says later.
+    if let Err(error) =
+        store.review_revision_trigger_record(review_id, revision_id, trigger.as_str())
+    {
+        tracing::warn!(%error, review_id, "could not record the trigger a revision was submitted under");
+    }
+    let mut started = if binding.model.is_some() && trigger == Trigger::Manual {
+        if let Err(error) = store.set_review_session_reason(review_id, MANUAL_REVIEW) {
+            tracing::warn!(%error, review_id, "could not record why no reviewer started");
+        }
+        // The operator may start one before the files are kept; that start
+        // waits for them, as one on submission does.
+        if let Some(retained) = retained {
+            manager
+                .review_starts()
+                .keep(review_id, revision_id, retained);
+        }
+        manager.publish_queue().await;
+        json!({ "state": "none", "reason": MANUAL_REVIEW })
+    } else {
+        manager.publish_queue().await;
+        spawn_on_submission(store, manager, review_id, binding.model.is_some(), retained).await
+    };
+    started["trigger"] = json!(trigger.as_str());
+    started["source"] = json!(source.as_str());
+    started["model"] = json!(binding.model);
+    started
 }
 
 /// [`spawn_review_session`] once the candidate's files are kept: they are
 /// what the reviewer's workspace is built from, and an external harness's are
 /// read after its review is recorded (`retain_candidate_files`). The
 /// submitter is not held on that read; it hears that a reviewer is starting.
-async fn spawn_review_session_when_kept(
+async fn spawn_on_submission(
     store: &Arc<Store>,
     manager: &Manager,
     review_id: &str,
-    channel: &str,
+    bound: bool,
     retained: Option<tokio::task::JoinHandle<Result<(), String>>>,
 ) -> Value {
-    let Some(retained) = retained.filter(|_| review_model(manager, channel).is_some()) else {
-        return spawn_review_session(store, manager, review_id).await;
+    let Some(retained) = retained.filter(|_| bound) else {
+        return spawn_review_session(store, manager, review_id, StartedBy::Submission).await;
     };
     // Claimed now, not once the files are kept: from here until the session
     // is recorded, a start by hand must see this one.
@@ -2156,23 +2343,341 @@ async fn spawn_review_session_when_kept(
         let store = store.clone();
         let manager = manager.clone();
         async move {
-            let unkept = match retained.await {
-                Ok(Ok(())) => None,
-                Ok(Err(why)) => Some(why),
-                Err(error) => Some(error.to_string()),
-            };
-            spawn_claimed_review_session(&store, &manager, start, unkept).await;
+            let unkept = unkept(retained.await);
+            spawn_claimed_review_session(&store, &manager, start, unkept, StartedBy::Submission)
+                .await;
         }
     });
     json!({ "state": "starting", "reason": reason })
 }
 
+/// What a submission's result says of its reviewer, from what
+/// [`spawn_review_session_when_kept`] returned: whether one is reading it,
+/// and the trigger that decided.
+fn reviewer_says(reviewer: &Value, channel: &str) -> String {
+    let source = reviewer["source"].as_str().unwrap_or("session");
+    let trigger = reviewer["trigger"].as_str().unwrap_or("auto");
+    let binding = format!("phases.review.trigger.{source} is {trigger} on {channel}");
+    match (reviewer["state"].as_str(), reviewer["model"].as_str()) {
+        (Some("started" | "starting"), model) => format!(
+            "An AI reviewer ({}) is reading this; its verdict is advisory and will appear in \
+             review_status. Only the operator's decision publishes. It started because \
+             {binding}.",
+            model.unwrap_or("its review model")
+        ),
+        (_, None) => format!(
+            "No AI reviewer runs: {channel} binds no review model (phases.review.model), so \
+             none runs unless the operator binds one and starts it."
+        ),
+        _ if reviewer["reason"] == MANUAL_REVIEW => format!(
+            "No AI reviewer runs unless the operator starts one from the review page: \
+             {binding}."
+        ),
+        _ => format!(
+            "No AI reviewer started: {}.",
+            reviewer["reason"]
+                .as_str()
+                .unwrap_or("the node did not say why")
+        ),
+    }
+}
+
+/// What became of the reviewer of a review's latest revision, for
+/// `review_status` and the review page: `starting`, `running`, `done` (its
+/// verdict is in), `failed` (it ended without one), or `none`; with the
+/// model, and the verdict once there is one. A verdict on an earlier
+/// revision is not this revision's, and is named only by its revision.
+pub(crate) fn reviewer_view(store: &Store, manager: &Manager, r: &ReviewRow) -> Value {
+    let binding = ReviewerBinding::of(&manager.bindings(&r.channel));
+    let source = Source::of(r);
+    // Ids only: a revision's number is its place among them.
+    let revisions = store.review_revision_ids(&r.id).unwrap_or_default();
+    let number = |id: Option<&str>| {
+        id.and_then(|id| revisions.iter().position(|rev| rev == id))
+            .map(|i| i + 1)
+    };
+    let current = revisions.last().cloned();
+    let placed = placed_verdict(store, r, &revisions);
+    let verdict_current = placed.as_ref().is_some_and(|p| p.current);
+    let verdict_revision = placed.as_ref().and_then(|p| p.revision.clone());
+    let verdict = placed.map(|p| p.verdict);
+    let session = r
+        .review_session_id
+        .as_deref()
+        .and_then(|id| store.get_session(id).ok().flatten());
+    let session_current = session.as_ref().is_some_and(|session| {
+        current.is_some() && store.review_session_revision_id(session).ok().flatten() == current
+    });
+    let ended = |session: &crate::store::SessionRow| {
+        crate::session::state::SessionState::TERMINAL.contains(&session.state.as_str())
+    };
+    let mut reason = None;
+    let state = match &session {
+        _ if manager.review_starts().pending(&r.id) => "starting",
+        // Done once its verdict is in, while its session winds down.
+        Some(session)
+            if session_current
+                && verdict
+                    .as_ref()
+                    .is_some_and(|v| v["session_id"] == session.id) =>
+        {
+            "done"
+        }
+        Some(session) if session_current && !ended(session) => {
+            if session.state == "starting" {
+                "starting"
+            } else {
+                "running"
+            }
+        }
+        Some(session) if session_current => {
+            reason = Some(match session.state.as_str() {
+                "killed_budget" => {
+                    "the reviewer used its token budget before giving a verdict".to_string()
+                }
+                _ => match &session.last_error {
+                    Some(error) => format!("the reviewer ended without a verdict: {error}"),
+                    None => "the reviewer ended without a verdict".to_string(),
+                },
+            });
+            "failed"
+        }
+        _ if verdict_current => "done",
+        _ => {
+            reason = store.review_session_reason(&r.id).ok().flatten();
+            "none"
+        }
+    };
+    let mut view = json!({
+        "state": state,
+        "model": session
+            .as_ref()
+            .filter(|_| session_current)
+            .map(|session| session.model.clone())
+            .or_else(|| binding.model.clone()),
+        // As it applied to this revision; the binding's now for one
+        // submitted before that was recorded.
+        "trigger": current
+            .as_deref()
+            .and_then(|id| store.review_revision_trigger(id).ok().flatten())
+            .unwrap_or_else(|| binding.trigger(source).as_str().to_string()),
+        "source": source.as_str(),
+        "bound": binding.model.is_some(),
+        "reason": reason,
+        "revision": number(current.as_deref()),
+    });
+    if let Some(session) = session.as_ref().filter(|_| session_current) {
+        view["session_id"] = json!(session.id);
+        view["session_state"] = json!(session.state);
+        view["started_ms"] = json!(session.created_ms);
+        view["started_by"] = json!(store.review_session_started_by(&session.id).ok().flatten());
+    }
+    if let Some(verdict) = &verdict {
+        view["verdict_revision"] = json!(number(verdict_revision.as_deref()));
+        if verdict_current {
+            view["verdict"] = verdict["verdict"].clone();
+            view["summary"] = verdict["summary"].clone();
+            view["findings"] = verdict["findings"].clone();
+            view["verdict_at_ms"] = verdict["at_ms"].clone();
+        }
+    }
+    view
+}
+
+/// The revision a reviewer's verdict is about: recorded with it, or, for
+/// one recorded before that was, the revision its session started from.
+fn verdict_revision(store: &Store, verdict: &Value) -> Option<String> {
+    verdict["revision_id"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            let session = store
+                .get_session(verdict["session_id"].as_str()?)
+                .ok()
+                .flatten()?;
+            store.review_session_revision_id(&session).ok().flatten()
+        })
+}
+
+/// A review's AI verdict, the revision it is on, and whether that is the
+/// latest of `revisions` (the review's revision ids, oldest first). The one
+/// place a verdict is judged current, for the page and `review_status` alike.
+struct PlacedVerdict {
+    verdict: Value,
+    revision: Option<String>,
+    current: bool,
+}
+
+fn placed_verdict(store: &Store, r: &ReviewRow, revisions: &[String]) -> Option<PlacedVerdict> {
+    let verdict = serde_json::from_str::<Value>(r.ai_verdict_json.as_deref()?).ok()?;
+    let revision = verdict_revision(store, &verdict);
+    let current = revision.is_some() && revision.as_ref() == revisions.last();
+    Some(PlacedVerdict {
+        verdict,
+        revision,
+        current,
+    })
+}
+
+/// A reviewer's verdict on a review's latest revision, if one is in.
+pub(crate) fn current_verdict(store: &Store, r: &ReviewRow) -> Option<Value> {
+    r.ai_verdict_json.as_ref()?;
+    let revisions = store.review_revision_ids(&r.id).ok()?;
+    placed_verdict(store, r, &revisions)
+        .filter(|placed| placed.current)
+        .map(|placed| placed.verdict)
+}
+
+/// What `review_status` says to a submitter still waiting once a reviewer's
+/// verdict on its latest revision is in: the verdict is advisory, and the
+/// operator's decision is the one that comes back.
+pub(crate) fn reviewer_verdict_says(verdict: &Value) -> String {
+    format!(
+        "The AI reviewer ({}) has given its verdict on this revision: {}. It is advisory; the \
+         operator has not decided yet, and their decision is the one that governs. You may \
+         start on its findings (`reviewer.findings`) now; the operator's decision still comes \
+         back from review_status.",
+        verdict["model"].as_str().unwrap_or("its review model"),
+        verdict["verdict"].as_str().unwrap_or("given"),
+    )
+}
+
 /// The model a channel binds for review sessions, if any.
 fn review_model(manager: &Manager, channel: &str) -> Option<String> {
-    manager.bindings(channel)["phases"]["review"]["model"]
-        .as_str()
-        .filter(|m| !m.trim().is_empty())
-        .map(str::to_string)
+    ReviewerBinding::of(&manager.bindings(channel)).model
+}
+
+/// Why no reviewer started on a submission the channel reviews by hand.
+pub const MANUAL_REVIEW: &str = "manual review: start a reviewer from the review page";
+
+/// Whether a submission starts a reviewer on its own (`auto`), or only the
+/// operator starts one from the review page (`manual`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Auto,
+    Manual,
+}
+
+impl Trigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Trigger::Auto => "auto",
+            Trigger::Manual => "manual",
+        }
+    }
+
+    fn parse(value: &Value) -> Option<Self> {
+        match value.as_str()? {
+            "auto" => Some(Trigger::Auto),
+            "manual" => Some(Trigger::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// Where a submission came from, which the trigger is set for separately:
+/// a session this node runs, whose checks ran and whose work was shown, or
+/// a harness the operator runs, which sends only its diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Session,
+    External,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Session => "session",
+            Source::External => "external",
+        }
+    }
+
+    /// The source of a recorded review: an external harness has no session.
+    pub fn of(review: &ReviewRow) -> Self {
+        if review.session_id.is_some() {
+            Source::Session
+        } else {
+            Source::External
+        }
+    }
+}
+
+/// How a review session came to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartedBy {
+    /// On a submission, under an `auto` trigger.
+    Submission,
+    /// By the operator, from the review page.
+    Operator,
+}
+
+impl StartedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StartedBy::Submission => "submission",
+            StartedBy::Operator => "operator",
+        }
+    }
+}
+
+/// How a reviewer starts for a source when the channel's
+/// `phases.review.trigger` says nothing for it. The one place that default
+/// is decided: an external harness's submission carries no checks or shown
+/// work, so a reviewer on its own would have only the diff to go on.
+pub fn default_trigger(source: Source) -> Trigger {
+    match source {
+        Source::Session => Trigger::Auto,
+        Source::External => Trigger::Manual,
+    }
+}
+
+/// A channel's reviewer: the model it binds (`phases.review.model`) and its
+/// trigger for each source (`phases.review.trigger.session` and
+/// `.external`). A bare `phases.review.trigger = "manual"` sets both. Without
+/// a model no reviewer starts either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerBinding {
+    pub model: Option<String>,
+    pub session: Trigger,
+    pub external: Trigger,
+}
+
+impl ReviewerBinding {
+    pub fn of(bindings: &Value) -> Self {
+        let review = &bindings["phases"]["review"];
+        let model = review["model"]
+            .as_str()
+            .filter(|m| !m.trim().is_empty())
+            .map(str::to_string);
+        let trigger = &review["trigger"];
+        let of = |source: Source| {
+            Trigger::parse(trigger)
+                .or_else(|| Trigger::parse(&trigger[source.as_str()]))
+                .unwrap_or_else(|| default_trigger(source))
+        };
+        ReviewerBinding {
+            model,
+            session: of(Source::Session),
+            external: of(Source::External),
+        }
+    }
+
+    pub fn trigger(&self, source: Source) -> Trigger {
+        match source {
+            Source::Session => self.session,
+            Source::External => self.external,
+        }
+    }
+
+    /// The triggers in effect, defaults included, as the settings screen
+    /// shows them.
+    pub fn view(&self) -> Value {
+        json!({
+            "session": self.session.as_str(),
+            "external": self.external.as_str(),
+            "model": self.model,
+        })
+    }
 }
 
 /// Start a review session from the review's latest candidate: its session
@@ -2183,6 +2688,7 @@ async fn start_review_session(
     manager: &Manager,
     review_id: &str,
     unkept: Option<&str>,
+    started_by: StartedBy,
 ) -> Result<String, (&'static str, String)> {
     let none = |reason: &str| ("none", reason.to_string());
     let failed = |error: &dyn std::fmt::Display| ("failed", error.to_string());
@@ -2291,7 +2797,9 @@ async fn start_review_session(
         .map_err(|e| failed(&e))?;
     // What it shows and finds stays about the revision it was started from,
     // even after a resubmission starts another reviewer beside it.
-    if let Err(error) = store.review_session_revision_record(&row.id, review_id, &revision.id) {
+    if let Err(error) =
+        store.review_session_start_record(&row.id, review_id, &revision.id, started_by.as_str())
+    {
         tracing::warn!(%error, review_id, "could not record the revision a reviewer started from");
     }
     manager.publish_queue().await;
@@ -2327,19 +2835,51 @@ async fn verdict(
         return Err(format!("{verdict:?} is not a verdict"));
     }
     let summary = str_arg(args, "summary")?;
-    let findings = args.get("findings").cloned().unwrap_or_else(|| json!([]));
+    let (findings, adjusted) = findings_arg(args);
+    // The revision it read, so a resubmission does not wear it. Not finding
+    // it is no reason to lose the verdict: one without it is placed by its
+    // session, as a verdict recorded before this was.
+    let revision_id = store
+        .review_session_revision_id(&session)
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, %review_id, "could not read the revision a verdict is on");
+            None
+        });
     let v = json!({
         "verdict": verdict, "summary": summary, "findings": findings,
         "model": session.model, "session_id": session_id, "at_ms": now_ms(),
+        "revision_id": revision_id,
     });
-    if !store
-        .set_ai_verdict(&review_id, &v.to_string())
+    let state = match store
+        .set_ai_verdict(&review_id, &v.to_string(), revision_id.as_deref())
         .map_err(|e| e.to_string())?
     {
-        let state = store
-            .get_review(&review_id)
-            .map_err(|e| e.to_string())?
-            .map(|review| review.state);
+        VerdictRecorded::Recorded => None,
+        VerdictRecorded::Superseded => {
+            // A later revision's reviewer has already given its verdict;
+            // this one is kept as an event, not put over that.
+            manager.record_event(
+                session_id,
+                ek::REVIEW_VERDICT,
+                json!({
+                    "review_id": review_id, "verdict": verdict, "summary": summary,
+                    "revision_id": revision_id, "superseded": true,
+                }),
+            );
+            manager.phase_done(session_id).await;
+            return Ok(json!({
+                "review_id": review_id,
+                "recorded": false,
+                "superseded": true,
+                "message": "The review was resubmitted, and the reviewer of the later revision \
+                            has already given its verdict; yours, on an earlier revision, is \
+                            kept in this session's events and does not replace it.",
+            }));
+        }
+        VerdictRecorded::Decided(state) => Some(Some(state)),
+        VerdictRecorded::Gone => Some(None),
+    };
+    if let Some(state) = state {
         manager.record_event(
             session_id,
             ek::LATE_REFUSED,
@@ -2365,8 +2905,22 @@ async fn verdict(
         json!({ "review_id": review_id, "verdict": verdict, "summary": summary }),
     );
     manager.publish_queue().await;
+    // A submitter held waiting on this review hears the verdict now, rather
+    // than only once the operator decides.
+    if let Some(submitter) = store
+        .get_review(&review_id)
+        .ok()
+        .flatten()
+        .and_then(|review| review.session_id)
+    {
+        manager.wait_moved(&submitter).await;
+    }
     manager.phase_done(session_id).await;
-    Ok(json!({ "review_id": review_id, "recorded": true }))
+    let mut recorded = json!({ "review_id": review_id, "recorded": true });
+    if !adjusted.is_empty() {
+        recorded["findings_adjusted"] = json!(adjusted);
+    }
+    Ok(recorded)
 }
 
 /// `review_finding`: a review session's finding on one criterion, against the
@@ -2660,7 +3214,8 @@ async fn status(
     let id = str_arg(args, "review_id")?;
     let wait = wait_secs(args);
     // tokio's clock, not std's, so the wait is the same thing a test can drive.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let began = tokio::time::Instant::now();
+    let deadline = began + std::time::Duration::from_secs(wait);
 
     // Checks the node is running for this handle come first: until they
     // settle, the review either does not exist yet or is still the revision
@@ -2692,6 +3247,17 @@ async fn status(
         }
     }
 
+    // A verdict this caller has not been told of ends the wait early, so the
+    // submitter can start on it, whether it landed during this call or
+    // between this one and the last. A harness outside the node has no
+    // session to be told as, so it is told as the review's external caller.
+    let caller = match ctx.session_id() {
+        Some(session_id) => session_id.to_string(),
+        None => external_caller(&id),
+    };
+    // The verdict as of the review's last change, read again only when it
+    // changes rather than on every poll.
+    let mut read: Option<(i64, Option<Value>)> = None;
     loop {
         let r = store
             .get_review(&id)
@@ -2707,16 +3273,43 @@ async fn status(
         }
         if let Some(view) = decided_review_view(&r) {
             told_review(manager, ctx, &r);
+            review_decided(manager, &r.id);
             return Ok(view);
         }
-        if tokio::time::Instant::now() >= deadline {
+        if read
+            .as_ref()
+            .is_none_or(|(updated, _)| *updated != r.updated_ms)
+        {
+            read = Some((r.updated_ms, current_verdict(store, &r)));
+        }
+        let verdict = read.as_ref().and_then(|(_, verdict)| verdict.clone());
+        let untold = verdict.as_ref().is_some_and(|verdict| {
+            !manager.waits().was_told(
+                &caller,
+                &crate::session::waits::reviewer_key(&r.id, verdict),
+            )
+        });
+        let now = tokio::time::Instant::now();
+        if untold || now >= deadline {
+            let says = match &verdict {
+                Some(verdict) => {
+                    manager.waits().tell(
+                        &caller,
+                        &crate::session::waits::reviewer_key(&r.id, verdict),
+                    );
+                    format!("{} ", reviewer_verdict_says(verdict))
+                }
+                None => String::new(),
+            };
             return Ok(json!({
                 "review_id": r.id,
                 "state": r.state,
                 "still_waiting": true,
-                "waited_secs": wait,
+                // What it waited, which a verdict can cut short of the wait asked.
+                "waited_secs": if now >= deadline { wait } else { (now - began).as_secs() },
+                "reviewer": reviewer_view(store, manager, &r),
                 "message": format!(
-                    "Still waiting on a human; the review is {}. The wait is capped at \
+                    "{says}Still waiting on a human; the review is {}. The wait is capped at \
                      {MAX_WAIT_SECS} seconds so this call returns before your MCP client \
                      times out — asking for longer will not help. Call review_status again \
                      with the same review_id to keep waiting.{}",
@@ -2727,6 +3320,91 @@ async fn status(
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+}
+
+/// `review_verdict`'s findings, as its schema gives them: each an object
+/// with a non-empty `note`, and a `path`, a `line` and a `severity` only of
+/// the kinds named. What the review page and the submitter read is what
+/// this lets through. One malformed finding does not cost the verdict: a
+/// part of it that is not of its kind is left off, a finding with nothing
+/// saying what was found is dropped, and what was done is said back.
+fn findings_arg(args: &Value) -> (Value, Vec<String>) {
+    let mut adjusted = Vec::new();
+    let list = match args.get("findings") {
+        None | Some(Value::Null) => return (json!([]), adjusted),
+        Some(Value::Array(list)) => list.as_slice(),
+        Some(_) => {
+            adjusted.push("`findings` is not a list, so none were recorded".to_string());
+            return (json!([]), adjusted);
+        }
+    };
+    let mut kept = Vec::new();
+    for (i, finding) in list.iter().enumerate() {
+        let n = i + 1;
+        let mut finding = match finding {
+            Value::Object(finding) => finding.clone(),
+            // A bare string says what was found and nothing else.
+            Value::String(note) => {
+                let mut finding = serde_json::Map::new();
+                finding.insert("note".into(), json!(note));
+                finding
+            }
+            _ => {
+                adjusted.push(format!("finding {n} is not an object, so it was dropped"));
+                continue;
+            }
+        };
+        if !finding
+            .get("note")
+            .and_then(Value::as_str)
+            .is_some_and(|note| !note.trim().is_empty())
+        {
+            adjusted.push(format!(
+                "finding {n} has no `note` saying what was found, so it was dropped"
+            ));
+            continue;
+        }
+        let mut leave_off = |finding: &mut serde_json::Map<String, Value>, key: &str, why: &str| {
+            finding.remove(key);
+            adjusted.push(format!("finding {n}'s `{key}` {why}, so it was left off"));
+        };
+        if finding
+            .get("path")
+            .is_some_and(|p| !(p.is_null() || p.is_string()))
+        {
+            leave_off(&mut finding, "path", "is not a string");
+        }
+        if finding
+            .get("line")
+            .is_some_and(|l| !(l.is_null() || l.as_u64().is_some_and(|l| l > 0)))
+        {
+            leave_off(&mut finding, "line", "is not a line number");
+        }
+        if finding.get("severity").is_some_and(|s| {
+            !(s.is_null() || matches!(s.as_str(), Some("blocking" | "should" | "nit")))
+        }) {
+            leave_off(
+                &mut finding,
+                "severity",
+                "is not one of blocking, should or nit",
+            );
+        }
+        kept.push(Value::Object(finding));
+    }
+    (Value::Array(kept), adjusted)
+}
+
+/// Who a harness outside the node is told a review's AI verdict as: it has
+/// no session, and only the review's submitter may ask about it.
+fn external_caller(review_id: &str) -> String {
+    format!("external:{review_id}")
+}
+
+/// A review was decided: what the node kept for its reviewer's start and
+/// its external caller's wait is no longer needed.
+pub(crate) fn review_decided(manager: &Manager, review_id: &str) {
+    manager.review_starts().unkeep(review_id);
+    manager.waits().forget(&external_caller(review_id));
 }
 
 fn str_arg(args: &Value, key: &str) -> Result<String, String> {
@@ -2829,5 +3507,149 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(body.contains("not the operator"), "{body}");
+    }
+
+    #[test]
+    fn a_channel_reviews_its_own_sessions_on_their_own_and_external_harnesses_by_hand() {
+        let bound = ReviewerBinding::of(&json!({"phases": {"review": {"model": "m/r"}}}));
+        assert_eq!(bound.model.as_deref(), Some("m/r"));
+        assert_eq!(bound.trigger(Source::Session), Trigger::Auto);
+        assert_eq!(bound.trigger(Source::External), Trigger::Manual);
+        // A fresh channel takes the same defaults, with no model to start one.
+        let fresh = ReviewerBinding::of(&json!({}));
+        assert_eq!(fresh.model, None);
+        assert_eq!(
+            fresh.view(),
+            json!({"session": "auto", "external": "manual", "model": null})
+        );
+    }
+
+    #[test]
+    fn a_trigger_is_set_per_source_or_for_both_at_once() {
+        let each = ReviewerBinding::of(&json!({"phases": {"review": {
+            "trigger": {"session": "manual", "external": "auto"}
+        }}}));
+        assert_eq!(
+            (each.session, each.external),
+            (Trigger::Manual, Trigger::Auto)
+        );
+        let both = ReviewerBinding::of(&json!({"phases": {"review": {"trigger": "manual"}}}));
+        assert_eq!(
+            (both.session, both.external),
+            (Trigger::Manual, Trigger::Manual)
+        );
+        // What it does not know is the default, not an error at submit.
+        let odd =
+            ReviewerBinding::of(&json!({"phases": {"review": {"trigger": {"session": "often"}}}}));
+        assert_eq!(odd.session, Trigger::Auto);
+    }
+
+    #[test]
+    fn the_submitter_is_told_whether_a_reviewer_reads_its_change_and_why() {
+        let running = reviewer_says(
+            &json!({"state": "starting", "model": "m/r", "trigger": "auto", "source": "external"}),
+            "work",
+        );
+        assert!(
+            running.contains("An AI reviewer (m/r) is reading this"),
+            "{running}"
+        );
+        assert!(running.contains("advisory"), "{running}");
+        assert!(
+            running.contains("phases.review.trigger.external is auto on work"),
+            "{running}"
+        );
+        let manual = reviewer_says(
+            &json!({"state": "none", "model": "m/r", "trigger": "manual", "source": "session",
+                    "reason": MANUAL_REVIEW}),
+            "work",
+        );
+        assert!(
+            manual.contains("unless the operator starts one"),
+            "{manual}"
+        );
+        let unbound = reviewer_says(
+            &json!({"state": "none", "model": null, "trigger": "auto", "source": "session",
+                    "reason": "no review model bound on this channel (phases.review.model)"}),
+            "work",
+        );
+        assert!(unbound.contains("binds no review model"), "{unbound}");
+        let failed = reviewer_says(
+            &json!({"state": "failed", "model": "m/r", "trigger": "auto", "source": "session",
+                    "reason": "the backend is down"}),
+            "work",
+        );
+        assert!(
+            failed.contains("No AI reviewer started: the backend is down"),
+            "{failed}"
+        );
+    }
+
+    /// A keep whose files arrive when `release` is sent, as `retain_candidate_files` would.
+    fn keeping(
+        starts: &Arc<ReviewStarts>,
+        review_id: &str,
+    ) -> tokio::sync::oneshot::Sender<Result<(), String>> {
+        let (release, kept) = tokio::sync::oneshot::channel();
+        starts.keep(
+            review_id,
+            "rev-1",
+            tokio::spawn(async move { kept.await.unwrap_or(Ok(())) }),
+        );
+        release
+    }
+
+    #[tokio::test]
+    async fn an_earlier_submissions_keep_finishing_late_leaves_the_later_ones_in_place() {
+        let starts = Arc::new(ReviewStarts::default());
+        let first = keeping(&starts, "rv");
+        let second = keeping(&starts, "rv");
+        first.send(Ok(())).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // A start by hand still waits on the second, rather than finding none.
+        let waiting = tokio::spawn({
+            let starts = starts.clone();
+            async move { starts.kept("rv", "rev-1").await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !waiting.is_finished(),
+            "the second keep's entry was removed"
+        );
+        second.send(Err("over the limit".into())).unwrap();
+        assert_eq!(waiting.await.unwrap().as_deref(), Some("over the limit"));
+    }
+
+    #[tokio::test]
+    async fn why_the_files_were_not_kept_is_there_for_a_later_start() {
+        let starts = Arc::new(ReviewStarts::default());
+        keeping(&starts, "rv")
+            .send(Err("the candidate is 9 MB; the operator limit is 1".into()))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            starts.kept("rv", "rev-1").await.as_deref(),
+            Some("the candidate is 9 MB; the operator limit is 1")
+        );
+        // Files that were kept leave nothing to wait on or report.
+        keeping(&starts, "kept").send(Ok(())).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(starts.keeping.lock().unwrap().get("kept").is_none());
+        assert_eq!(starts.kept("kept", "rev-1").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_later_revision_never_hears_an_earlier_ones_keep() {
+        let starts = Arc::new(ReviewStarts::default());
+        keeping(&starts, "rv")
+            .send(Err("over the limit".into()))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // Revision 2 kept no files of its own here (auto, or kept already).
+        assert_eq!(starts.kept("rv", "rev-2").await, None);
+        // And a resubmission or a decision forgets revision 1's.
+        starts.unkeep("rv");
+        assert_eq!(starts.kept("rv", "rev-1").await, None);
     }
 }

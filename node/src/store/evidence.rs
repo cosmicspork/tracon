@@ -1021,6 +1021,21 @@ impl Store {
         Ok(rows)
     }
 
+    /// A review's revision ids, oldest first: the first is revision 1.
+    pub fn review_revision_ids(&self, review_id: &str) -> Result<Vec<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM review_revision WHERE review_id=?1 ORDER BY created_ms ASC, id ASC",
+        )?;
+        let ids = stmt
+            .query_map([review_id], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
+    }
+
     pub fn latest_review_revision(&self, review_id: &str) -> Result<Option<ReviewRevisionRow>> {
         let conn = self
             .conn

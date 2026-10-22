@@ -110,21 +110,85 @@ impl Store {
     }
 
     /// Record the revision a review session was started for: the candidate
-    /// it exercises, whatever the review is resubmitted to later.
-    pub fn review_session_revision_record(
+    /// it exercises, whatever the review is resubmitted to later; and how it
+    /// came to start, `submission` or `operator`.
+    pub fn review_session_start_record(
         &self,
         session_id: &str,
         review_id: &str,
         revision_id: &str,
+        started_by: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO review_session_revision
-                (session_id, review_id, revision_id, created_ms)
-             VALUES (?1,?2,?3,?4)",
-            params![session_id, review_id, revision_id, now_ms()],
+                (session_id, review_id, revision_id, created_ms, started_by)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![session_id, review_id, revision_id, now_ms(), started_by],
         )?;
         Ok(())
+    }
+
+    /// Record the reviewer trigger that applied when a revision was submitted.
+    pub fn review_revision_trigger_record(
+        &self,
+        review_id: &str,
+        revision_id: &str,
+        trigger: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO review_revision_trigger (revision_id, review_id, trigger)
+             VALUES (?1,?2,?3)",
+            params![revision_id, review_id, trigger],
+        )?;
+        Ok(())
+    }
+
+    /// The reviewer trigger that applied when a revision was submitted, when
+    /// that was recorded.
+    pub fn review_revision_trigger(&self, revision_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT trigger FROM review_revision_trigger WHERE revision_id=?1",
+                [revision_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// How a review session came to start, when that was recorded.
+    pub fn review_session_started_by(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT started_by FROM review_session_revision WHERE session_id=?1",
+                [session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// The id of the revision a review session exercises, as
+    /// [`Store::review_session_revision`] finds it, without reading the
+    /// revision itself when it was recorded.
+    pub fn review_session_revision_id(&self, session: &SessionRow) -> Result<Option<String>> {
+        let recorded: Option<String> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT revision_id FROM review_session_revision
+                 WHERE session_id=?1 AND review_id=?2",
+                params![session.id, session.review_id],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        match recorded {
+            Some(id) => Ok(Some(id)),
+            None => Ok(self.review_session_revision(session)?.map(|r| r.id)),
+        }
     }
 
     /// The revision a review session exercises: the one recorded when it was
