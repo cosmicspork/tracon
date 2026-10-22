@@ -23,6 +23,9 @@ export interface ToolEntry {
   /// What the call did, from its policy record: the harness labels every call
   /// `other`, and the policy has already worked out read, edit or execute.
   kind?: string
+  /// A subagent's own log, when this call spawned one: its calls, its asks
+  /// and their answers, grouped as the session's are.
+  children?: LogEntry[]
 }
 
 /// A record that says only that the policy let a call through. One the
@@ -43,17 +46,39 @@ export interface LogEntry {
   tools?: ToolEntry[]
 }
 
+/// The call a subagent's event was made under: its `parent`, or for a
+/// result, which names no parent, the spawning call its id is made under
+/// (`<parent>/<id>`).
+function parentOf(e: Event): string | undefined {
+  if (typeof e.payload.parent === 'string' && e.payload.parent) return e.payload.parent
+  const id = e.ref_id ?? ''
+  if (e.kind === 'tool_result' && id.includes('/')) return id.slice(0, id.lastIndexOf('/'))
+  return undefined
+}
+
 export function groupLog(
   events: Event[],
   progress: Map<string, string> = new Map(),
   tails: Map<string, string> = new Map(),
+  /** The spawning call whose subagent's events these are, when they are. */
+  within?: string,
 ): LogEntry[] {
   const out: LogEntry[] = []
   const openCalls = new Map<string, ToolEntry>()
+  const calls = new Map<string, ToolEntry>()
+  // A subagent's events, kept apart so they neither join nor break the
+  // parent's runs, and grouped under the call that spawned it.
+  const under = new Map<string, Event[]>()
 
   for (const e of events) {
+    const parent = parentOf(e)
+    if (parent && parent !== within) {
+      under.set(parent, [...(under.get(parent) ?? []), e])
+      continue
+    }
     if (e.kind === 'tool_call') {
       const entry: ToolEntry = { call: e, progress: progress.get(e.ref_id ?? ''), tail: tails.get(e.ref_id ?? '') }
+      if (e.ref_id) calls.set(e.ref_id, entry)
       const last = out[out.length - 1]
       if (last?.kind === 'tools') {
         last.tools!.push(entry)
@@ -88,6 +113,12 @@ export function groupLog(
     // Everything else is a leaf and ends any run of tool calls, so the next
     // tool call starts a new group at its true position.
     out.push({ kind: 'leaf', event: e })
+  }
+  for (const [parent, children] of under) {
+    const entry = calls.get(parent)
+    if (entry) entry.children = groupLog(children, progress, tails, parent)
+    // A subagent whose spawn is not in view still shows what it did.
+    else out.push(...groupLog(children, progress, tails, parent))
   }
   return out
 }

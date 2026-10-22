@@ -5,10 +5,12 @@ mod support;
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 use support::{
-    answer, events, measured_call, responses_answer, responses_call, serve, tool_call, Reply,
+    answer, events, measured_call, responses_answer, responses_call, serve, tool_call, tool_calls,
+    Reply,
 };
 use tracon_agent::compact::{SUMMARISER, SUMMARY_HEADER};
 use tracon_agent::hashline;
+use tracon_agent::subagent::CHILD_ORIENTATION;
 
 struct Run {
     code: i32,
@@ -105,15 +107,19 @@ async fn a_stale_anchor_is_refused_and_the_retry_lands() {
         refused.contains("line 1 changed since it was read"),
         "{refused}"
     );
-    // The request names every tool and keeps one call per turn.
+    // The request names every tool and, by default, allows several calls
+    // in one response.
     let tools: Vec<_> = requests[0]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .map(|t| t["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(tools, ["read", "edit", "write", "glob", "grep", "shell"]);
-    assert_eq!(requests[0]["parallel_tool_calls"], false);
+    assert_eq!(
+        tools,
+        ["read", "edit", "write", "glob", "grep", "shell", "spawn"]
+    );
+    assert_eq!(requests[0]["parallel_tool_calls"], true);
 
     assert_eq!(
         names(&r.events),
@@ -327,7 +333,10 @@ async fn the_responses_wire_runs_calls_and_carries_reasoning_back() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(tools, ["read", "edit", "write", "glob", "grep", "shell"]);
+    assert_eq!(
+        tools,
+        ["read", "edit", "write", "glob", "grep", "shell", "spawn"]
+    );
     // The agent's own tools go strict, optional fields nullable.
     let read = &first["tools"][0];
     assert_eq!(read["strict"], true);
@@ -401,6 +410,184 @@ async fn a_responses_overflow_is_compacted_and_asked_again() {
     assert_eq!(compacted["trigger"], "overflow");
     // Where the kept part starts: the second call, kept with its reasoning.
     assert_eq!(compacted["first_kept_call"], "c2");
+}
+
+/// Two spawns in one response run at once, each child returning an object
+/// in the shape asked for, which comes back to the parent as the call's
+/// result.
+#[tokio::test]
+async fn spawned_subagents_run_together_and_return_shaped_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = json!({"type": "object", "properties": {"lines": {"type": "integer"}},
+        "required": ["lines"]});
+    let child = || {
+        tool_call("f", "finish", json!({"lines": 3})).after(std::time::Duration::from_millis(1200))
+    };
+    let (base, fake) = serve(vec![
+        tool_calls(&[
+            (
+                "s1",
+                "spawn",
+                json!({"task": "count the lines of a.txt", "result_schema": schema}),
+            ),
+            (
+                "s2",
+                "spawn",
+                json!({"task": "count the lines of b.txt", "result_schema": schema}),
+            ),
+        ]),
+        child(),
+        child(),
+        answer("both have 3 lines"),
+    ])
+    .await;
+    let started = std::time::Instant::now();
+
+    let r = run(&base, dir.path(), &[]).await;
+
+    assert_eq!(r.code, 0, "{:#?}", r.events);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(2300),
+        "the children ran one after the other: {:?}",
+        started.elapsed()
+    );
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    for child in &requests[1..3] {
+        let messages = child["messages"].as_array().unwrap();
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with(CHILD_ORIENTATION));
+        assert!(messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("count the lines of"));
+        let tools: Vec<_> = child["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        // The parent's tools, finish in the shape asked for, and no spawn.
+        assert_eq!(
+            tools,
+            ["read", "edit", "write", "glob", "grep", "shell", "finish"]
+        );
+        assert_eq!(child["tools"][6]["function"]["parameters"], schema);
+    }
+    let results: Vec<_> = requests[3]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| {
+            (
+                m["tool_call_id"].as_str().unwrap(),
+                m["content"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(results, [("s1", "{\"lines\":3}"), ("s2", "{\"lines\":3}")]);
+    let spawned = r.events.iter().filter(|e| e["event"] == "spawned").count();
+    assert_eq!(spawned, 2);
+    let end = r.events.last().unwrap();
+    // The children's requests are the run's too.
+    assert_eq!(end["totals"]["turns"], 4);
+    assert_eq!(end["totals"]["usage"]["input"], 100 + 100 + 100 + 120);
+}
+
+/// A result in the wrong shape is refused and asked for again; a model the
+/// provider does not offer is never used.
+#[tokio::test]
+async fn a_subagent_keeps_to_its_shape_and_its_providers_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, fake) = serve(vec![
+        tool_calls(&[
+            ("s1", "spawn", json!({"task": "summarise"})),
+            (
+                "s2",
+                "spawn",
+                json!({"task": "elsewhere", "model": "someone-elses"}),
+            ),
+        ]),
+        tool_call("f1", "finish", json!({"note": "wrong key"})),
+        tool_call("f2", "finish", json!({"summary": "right"})),
+        answer("done"),
+    ])
+    .await;
+
+    let r = run(&base, dir.path(), &[]).await;
+
+    assert_eq!(r.code, 0, "{:#?}", r.events);
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4, "the second child never asked a model");
+    let refused = requests[2]["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(refused["tool_call_id"], "f1");
+    assert!(refused["content"]
+        .as_str()
+        .unwrap()
+        .contains("result is missing `summary`"));
+    let results: Vec<_> = requests[3]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(results[0], "{\"summary\":\"right\"}");
+    assert!(
+        results[1].contains("`someone-elses` is not a model this session's provider offers"),
+        "{}",
+        results[1]
+    );
+}
+
+/// On the strict Responses wire a child's `finish` makes every property
+/// required and the optional ones nullable, so the `null` it sends for one
+/// it leaves out is dropped, not refused against the parent's schema.
+#[tokio::test]
+async fn a_subagents_nulls_on_the_strict_wire_are_left_out_of_its_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = json!({"type": "object",
+        "properties": {"verdict": {"type": "string"}, "note": {"type": "string"}},
+        "required": ["verdict"]});
+    let (base, fake) = serve(vec![
+        responses_call(
+            "s1",
+            "spawn",
+            json!({"task": "judge it", "result_schema": schema}),
+            "E1",
+        ),
+        responses_call("f1", "finish", json!({"verdict": "ok", "note": null}), "E2"),
+        responses_answer("done"),
+    ])
+    .await;
+
+    let r = run(&base, dir.path(), &["--wire", "responses"]).await;
+
+    assert_eq!(r.code, 0, "{:#?}", r.events);
+    let requests = fake.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "the child's first finish was taken");
+    let finish = requests[1]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "finish")
+        .unwrap();
+    assert_eq!(finish["strict"], true);
+    assert_eq!(
+        finish["parameters"]["properties"]["note"]["type"],
+        json!(["string", "null"])
+    );
+    let returned = requests[2]["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(returned["call_id"], "s1");
+    assert_eq!(returned["output"], "{\"verdict\":\"ok\"}");
 }
 
 #[tokio::test]

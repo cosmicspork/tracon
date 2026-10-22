@@ -25,7 +25,7 @@ pub struct Model {
     /// Tokens; zero when the node declared none.
     #[serde(default)]
     pub context: u64,
-    #[serde(default)]
+    #[serde(default = "on")]
     pub parallel_tools: bool,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
@@ -43,6 +43,13 @@ pub struct Resolved {
     /// As the node declared them for this model.
     pub parallel_tools: bool,
     pub reasoning_effort: Option<String>,
+    /// Every model the node declares under the same provider, with its
+    /// window: what a subagent may be given.
+    pub models: Vec<(String, Option<u64>)>,
+}
+
+fn on() -> bool {
+    true
 }
 
 pub const SHAPES: [&str; 2] = ["openai", "openai-codex"];
@@ -79,8 +86,14 @@ pub fn resolve(providers: &[Provider], model: &str) -> anyhow::Result<Resolved> 
         model: id.to_string(),
         key_env: provider.key_env.clone(),
         context_window: context,
-        parallel_tools: declared.is_some_and(|m| m.parallel_tools),
+        // On unless the node turned it off for this model.
+        parallel_tools: declared.is_none_or(|m| m.parallel_tools),
         reasoning_effort: declared.and_then(|m| m.reasoning_effort.clone()),
+        models: provider
+            .models
+            .iter()
+            .map(|m| (m.id.clone(), Some(m.context).filter(|c| *c > 0)))
+            .collect(),
     })
 }
 
@@ -93,7 +106,7 @@ mod tests {
             {"name": "local", "shape": "openai", "base_url": "http://tracon-gw:7421/model/local",
              "key_env": "TRACON_PROVIDER_KEY_LOCAL", "models": [{"id": "qwen3-8b", "context": 32768}]},
             {"name": "openai-codex", "shape": "openai-codex", "base_url": "http://tracon-gw:7421/model/openai-codex",
-             "key_env": "TRACON_PROVIDER_KEY_OPENAI_CODEX", "models": [{"id": "gpt-6-luna", "context": 400000, "parallel_tools": true, "reasoning_effort": "low"}]},
+             "key_env": "TRACON_PROVIDER_KEY_OPENAI_CODEX", "models": [{"id": "gpt-6-luna", "context": 400000, "parallel_tools": false, "reasoning_effort": "low"}]},
             {"name": "anthropic", "shape": "anthropic", "base_url": "http://tracon-gw:7421/model/anthropic",
              "key_env": "TRACON_PROVIDER_KEY_ANTHROPIC"}
         ]))
@@ -110,8 +123,9 @@ mod tests {
                 model: "qwen3-8b".into(),
                 key_env: "TRACON_PROVIDER_KEY_LOCAL".into(),
                 context_window: Some(32768),
-                parallel_tools: false,
+                parallel_tools: true,
                 reasoning_effort: None,
+                models: vec![("qwen3-8b".into(), Some(32768))],
             }
         );
         // Undeclared models still run; only the window is unknown.
@@ -119,6 +133,8 @@ mod tests {
             resolve(&providers(), "local/other").unwrap().context_window,
             None
         );
+        // Parallel calls are on unless the node turned them off.
+        assert!(resolve(&providers(), "local/other").unwrap().parallel_tools);
     }
 
     #[test]
@@ -135,7 +151,7 @@ mod tests {
             codex.base_url,
             "http://tracon-gw:7421/model/openai-codex/v1"
         );
-        assert!(codex.parallel_tools);
+        assert!(!codex.parallel_tools);
         assert_eq!(codex.reasoning_effort.as_deref(), Some("low"));
     }
 }

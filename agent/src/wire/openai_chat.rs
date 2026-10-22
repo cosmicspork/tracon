@@ -23,6 +23,18 @@ pub struct Client {
 }
 
 impl Client {
+    /// The same endpoint and settings, for another model.
+    pub fn with_model(&self, model: &str) -> Self {
+        Self {
+            http: self.http.clone(),
+            url: self.url.clone(),
+            api_key: self.api_key.clone(),
+            model: model.to_string(),
+            sampling: self.sampling.clone(),
+            parallel_tools: self.parallel_tools,
+        }
+    }
+
     pub fn new(
         base_url: &str,
         api_key: Option<String>,

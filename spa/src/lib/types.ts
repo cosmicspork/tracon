@@ -1720,7 +1720,7 @@ export interface ModelDecl {
   output?: number
   reasoning?: boolean
   attachment?: boolean
-  /** Several tool calls in one response (the native harness). */
+  /** Several tool calls in one response (the native harness); absent, on. */
   parallel_tools?: boolean
   /** A reasoning model's effort, on the Responses wire (the native harness); absent, the provider's default. */
   reasoning_effort?: string

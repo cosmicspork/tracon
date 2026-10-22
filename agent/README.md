@@ -108,7 +108,8 @@ The prompt can also come from stdin. Other flags:
 - `--max-turns` (default 20).
 - `--temperature` and `--min-p`. llama.cpp's `min_p` default of 0.05 may need 0.01.
 - `--no-think`, which sends Qwen3's `enable_thinking=false`.
-- `--parallel-tools`.
+- `--parallel-tools true|false` (default `true`): whether several calls may come in one
+  response.
 - `--reasoning-effort` (`low`, `medium`, `high`, …), on the Responses wire.
 
 - `--wire chat|responses` (default `chat`). With `--providers` the provider's shape
@@ -160,7 +161,8 @@ each `update` with its `session_id` and `seq`. The file is appended to, never tr
 
 ## Tools
 
-The tools are `read`, `edit`, `write`, `glob`, `grep` and `shell`, and nothing else.
+The tools are `read`, `edit`, `write`, `glob`, `grep` and `shell`, plus `spawn` (see
+Subagents), and nothing else.
 Every path is resolved inside `--cwd`: escapes with `..`, absolute paths and symlinks
 are refused. `glob` and `grep` respect `.gitignore`. `shell` runs `sh -c` with piped
 output, a timeout, and its process group killed on timeout. It is not a PTY yet. While a
@@ -187,6 +189,34 @@ Every anchor is checked against the file before anything is written, and one mis
 refuses the whole call. The refusal shows what the line is now. When a model paired one
 line's number with another line's hash, it shows both lines rather than guessing between
 them. A successful edit returns fresh anchors around the change.
+
+## Subagents
+
+`spawn` hands a task to a subagent: a child conversation in the same process, with the
+same tools (not `spawn`: one level only), its own orientation, and the task as its first
+message. It ends by calling `finish`, a tool whose parameters are the `result_schema`
+the parent gave (default `{summary: string}`); a result that does not fit the schema is
+refused and asked for again, and that object, as JSON, is the spawn call's result. A
+child that answers in prose instead is reminded once, then stopped.
+
+- **Parallel.** The spawn calls in one response are asked about in turn, then those
+  allowed run at once, four at most, and their results come back in the order they were
+  made. Any other call still runs one at a time. A model can only put several calls in
+  one response when its `parallel_tools` is on, as it is unless turned off
+  (`--parallel-tools false`, or `parallel_tools = false` on the model in `node.toml`);
+  off, each spawn comes in a response of its own and the children run one after another.
+- **Model.** `model` may name any model the node declares under the session's provider;
+  by default a child uses the parent's. Nothing outside that provider can be named.
+- **Asked like the parent.** Each of a child's calls goes to the node, which shows it
+  under the spawn call (`parentToolCallId`), with an id of its own (`<spawn id>/<id>`)
+  and a title that starts with the child's task. Spawning itself is kind `think`, which
+  the shipped policy allows.
+- **Paid by the parent.** Children use the session's gateway key, so the session's
+  budget covers them; each of their requests is reported by id like the parent's, and
+  their usage is part of the turn's.
+- **Not journaled.** A child lives only as long as its spawn call; if the process dies
+  during one, the call comes back "outcome unknown" like any other, and the parent may
+  spawn again.
 
 ## Turning it on for a node
 

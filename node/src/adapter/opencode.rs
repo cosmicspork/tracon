@@ -1460,6 +1460,7 @@ impl Pump {
                         raw_input: Some(state["input"].clone()),
                         content: Vec::new(),
                         locations: Vec::new(),
+                        parent_tool_call_id: None,
                     }))
                     .await
                     .is_err()
@@ -1604,6 +1605,7 @@ impl Pump {
                     command: None,
                     raw_input: Some(request.clone()),
                     options: options(),
+                    parent_tool_call_id: None,
                 },
                 reply: reply_tx,
             })

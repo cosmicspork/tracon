@@ -272,6 +272,10 @@ pub struct ToolCall {
     pub content: Vec<Value>,
     #[serde(default)]
     pub locations: Vec<Value>,
+    /// The call this one was made under: a subagent's call names the parent's
+    /// call that spawned it (`tracon-agent`). Absent for a top-level call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,6 +470,7 @@ mod wire_tests {
                 raw_input: Some(json!({"path": "a.py"})),
                 content: Vec::new(),
                 locations: vec![json!({"path": "a.py"})],
+                parent_tool_call_id: None,
             }),
             seq: Some(7),
         };

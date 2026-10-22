@@ -559,6 +559,7 @@ impl Pump {
                                         raw_input: Some(block["input"].clone()),
                                         content: Vec::new(),
                                         locations: Vec::new(),
+                                        parent_tool_call_id: None,
                                     }))
                                     .await;
                             }

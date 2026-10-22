@@ -153,6 +153,23 @@ pub fn tool_call(id: &str, name: &str, args: Value) -> Reply {
     ])
 }
 
+/// Several tool calls in one response, each whole.
+pub fn tool_calls(calls: &[(&str, &str, Value)]) -> Reply {
+    let deltas: Vec<Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, (id, name, args))| {
+            json!({"index": i, "id": id, "type": "function",
+                "function": {"name": name, "arguments": args.to_string()}})
+        })
+        .collect();
+    sse(&[
+        json!({"id": format!("req-{}", calls[0].0), "choices": [{"delta": {"tool_calls": deltas},
+            "finish_reason": "tool_calls"}]}),
+        json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+    ])
+}
+
 /// A tool call whose prompt count is the request's size.
 pub fn measured_call(id: &str, name: &str, args: Value) -> Reply {
     let mut reply = tool_call(id, name, args);

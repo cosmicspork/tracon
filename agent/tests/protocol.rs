@@ -779,3 +779,76 @@ async fn a_running_commands_output_reaches_the_node_before_its_result() {
     let last = updates.last().unwrap();
     assert_eq!(last["status"], "completed");
 }
+
+/// A subagent's calls reach the node under the spawning call, with ids of
+/// their own, and are asked about like the parent's; its requests count.
+#[tokio::test]
+async fn a_subagents_calls_reach_the_node_under_its_spawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, _) = serve(vec![
+        tool_call(
+            "c1",
+            "spawn",
+            json!({"task": "list the files\nand say how many"}),
+        ),
+        tool_call("c2", "glob", json!({"pattern": "*"})),
+        tool_call("c3", "finish", json!({"summary": "no files"})),
+        answer("it found none"),
+    ])
+    .await;
+    let node = start(&base, &dir.path().join(".events.jsonl")).await;
+    let session = new_session(&node, dir.path()).await;
+    let result: PromptResult = node
+        .peer
+        .request(methods::SESSION_PROMPT, &prompt(&session, "delegate"))
+        .await
+        .unwrap();
+    assert_eq!(result.stop_reason, "end_turn");
+    // The turn's usage holds the child's request too.
+    assert_eq!(result.usage.unwrap().total_tokens, 110 * 3 + 123);
+
+    let seen = node.seen.lock().unwrap().clone();
+    let calls: Vec<_> = updates(&seen, "tool_call")
+        .into_iter()
+        .map(|u| u["update"].clone())
+        .collect();
+    assert_eq!(calls[0]["toolCallId"], "c1");
+    assert_eq!(calls[0]["kind"], "think");
+    assert_eq!(calls[0]["title"], "subagent: list the files");
+    assert!(calls[0].get("parentToolCallId").is_none());
+    assert_eq!(calls[1]["toolCallId"], "c1/c2");
+    assert_eq!(calls[1]["parentToolCallId"], "c1");
+    assert_eq!(calls[1]["title"], "[list the files] glob *");
+    // Both asked, the child's under its parent.
+    let asks: Vec<_> = seen
+        .iter()
+        .filter_map(|s| match s {
+            Seen::Permission(p) => Some(p.tool_call.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asks.len(), 2);
+    assert_eq!(asks[1].tool_call_id, "c1/c2");
+    assert_eq!(asks[1].parent_tool_call_id.as_deref(), Some("c1"));
+    let results: Vec<_> = updates(&seen, "tool_call_update")
+        .into_iter()
+        .map(|u| u["update"].clone())
+        .filter(|u| u["status"] == "completed")
+        .collect();
+    assert_eq!(results[0]["toolCallId"], "c1/c2");
+    assert_eq!(results[1]["toolCallId"], "c1");
+    assert_eq!(
+        results[1]["rawOutput"]["output"],
+        "{\"summary\":\"no files\"}"
+    );
+    // Each request reported by its id; the child's say nothing of the
+    // parent's context.
+    let usage: Vec<_> = updates(&seen, "usage_update")
+        .into_iter()
+        .map(|u| u["update"].clone())
+        .collect();
+    assert_eq!(usage.len(), 4);
+    let child: Vec<_> = usage.iter().filter(|u| u["used"].is_null()).collect();
+    assert_eq!(child.len(), 2);
+    assert_eq!(child[0]["request"]["requestId"], "req-c2");
+}

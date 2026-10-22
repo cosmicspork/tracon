@@ -154,6 +154,7 @@ async fn turn(peer: &Peer, cancelled: &AtomicBool, from: u64) -> Value {
         raw_input: Some(json!({"command": "git status"})),
         content: Vec::new(),
         locations: Vec::new(),
+        parent_tool_call_id: None,
     };
     update(peer, from + 3, SessionUpdate::ToolCall(call.clone())).await;
     let answer: Result<RequestPermissionResult, _> = peer

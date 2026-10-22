@@ -121,12 +121,10 @@ fn providers_document(wiring: &Wiring) -> Value {
 }
 
 /// What the agent reads of a declared model: its window, and the two
-/// settings it applies per model, written only when set.
+/// settings it applies per model, parallel calls always and the effort
+/// only when set.
 fn model_entry(m: &crate::config::ModelDecl) -> Value {
-    let mut entry = json!({"id": m.id, "context": m.context});
-    if m.parallel_tools {
-        entry["parallel_tools"] = json!(true);
-    }
+    let mut entry = json!({"id": m.id, "context": m.context, "parallel_tools": m.parallel_tools});
     if let Some(effort) = &m.reasoning_effort {
         entry["reasoning_effort"] = json!(effort);
     }
@@ -559,7 +557,7 @@ async fn process(msg: Incoming, tx: &mpsc::Sender<HarnessEvent>, last_seq: &Atom
             // A request that names no tool names nothing policy can match.
             let tool = rp.tool.clone().unwrap_or_default();
             let (action, resource, command) = permission_target(&tool, &input);
-            let request = PermissionRequest::managed(
+            let mut request = PermissionRequest::managed(
                 Some(rp.tool_call.tool_call_id.clone()),
                 rp.tool_call.title.clone(),
                 &action,
@@ -568,6 +566,7 @@ async fn process(msg: Incoming, tx: &mpsc::Sender<HarnessEvent>, last_seq: &Atom
                 rp.tool_call.raw_input.clone(),
                 rp.options,
             );
+            request.parent_tool_call_id = rp.tool_call.parent_tool_call_id.clone();
             let (answer_tx, answer_rx) = oneshot::channel();
             if tx
                 .send(HarnessEvent::Permission {
@@ -825,7 +824,7 @@ mod tests {
                     crate::config::ModelDecl {
                         id: "big".into(),
                         context: 131072,
-                        parallel_tools: true,
+                        parallel_tools: false,
                         reasoning_effort: Some("high".into()),
                         ..Default::default()
                     },
@@ -850,11 +849,11 @@ mod tests {
         assert_eq!(local["key_env"], "TRACON_PROVIDER_KEY_LOCAL");
         assert_eq!(
             local["models"][0],
-            json!({"id": "qwen3-8b", "context": 32768})
+            json!({"id": "qwen3-8b", "context": 32768, "parallel_tools": true})
         );
         assert_eq!(
             local["models"][1],
-            json!({"id": "big", "context": 131072, "parallel_tools": true, "reasoning_effort": "high"})
+            json!({"id": "big", "context": 131072, "parallel_tools": false, "reasoning_effort": "high"})
         );
         // The Codex backend is in, by its own shape; Anthropic is not.
         let shapes: Vec<_> = doc
