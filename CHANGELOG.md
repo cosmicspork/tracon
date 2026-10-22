@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.35.0](https://github.com/cosmicspork/tracon/compare/v0.34.0...v0.35.0) (2026-10-22)
+
+
+### Features
+
+* **adapter:** run tracon-agent under the node as the experimental native harness ([#604](https://github.com/cosmicspork/tracon/issues/604)) ([b356187](https://github.com/cosmicspork/tracon/commit/b356187138a12857e1255e6e82b31306b0709ffe))
+* **agent:** add tracon-agent, a standalone native harness spike ([#602](https://github.com/cosmicspork/tracon/issues/602)) ([68382d9](https://github.com/cosmicspork/tracon/commit/68382d952951e0e4860a9c34964e4b2804273a52))
+* **agent:** compact a native session's context before it outgrows the model's window ([#620](https://github.com/cosmicspork/tracon/issues/620)) ([12cc701](https://github.com/cosmicspork/tracon/commit/12cc7013feadb89e89f181ca5a1a1783e6e0069d))
+* **agent:** journal sessions so a new process can load them, and retry and guard model requests ([#611](https://github.com/cosmicspork/tracon/issues/611)) ([a24fc71](https://github.com/cosmicspork/tracon/commit/a24fc71da6accc2505000e094dcef0892468d2ee))
+* **agent:** run native sessions on the Codex subscription over the Responses API ([#621](https://github.com/cosmicspork/tracon/issues/621)) ([10c889c](https://github.com/cosmicspork/tracon/commit/10c889c929b465fae1e6b81a9bf632532b458b41))
+* **agent:** serve the node over ACP with a permission gate and node tools ([#603](https://github.com/cosmicspork/tracon/issues/603)) ([ff8cfe9](https://github.com/cosmicspork/tracon/commit/ff8cfe94786e4e65ebe937251a823428321bad44))
+* **credentials:** revoke a removed credential across the mesh and refuse its hand-back ([#608](https://github.com/cosmicspork/tracon/issues/608)) ([7186808](https://github.com/cosmicspork/tracon/commit/71868086fd68d4716136e7822f353104aa30d651))
+* **gateway:** record Codex subscription limit snapshots per call and show them ([#616](https://github.com/cosmicspork/tracon/issues/616)) ([bd313e7](https://github.com/cosmicspork/tracon/commit/bd313e7d224d07b695db631fec2db733b7859b22))
+* **mcp:** add github_issue_comment, an approval-gated GitHub issue comment tool ([#595](https://github.com/cosmicspork/tracon/issues/595)) ([993a34a](https://github.com/cosmicspork/tracon/commit/993a34a98f43b7d25dd25afcc492a1da8a034496))
+* **mcp:** add pr_ready and mr_ready, approval-gated draft toggles ([#617](https://github.com/cosmicspork/tracon/issues/617)) ([0614d18](https://github.com/cosmicspork/tracon/commit/0614d182f39ed525626666c97d22b6af7166da27))
+* **mesh:** send a peer the forge identity and let it clone the repository itself ([#591](https://github.com/cosmicspork/tracon/issues/591)) ([a1b8598](https://github.com/cosmicspork/tracon/commit/a1b8598848f638dec0e9a1ed760b959fc8689356))
+* **mesh:** show and decide a peer's session-less approval cards ([#605](https://github.com/cosmicspork/tracon/issues/605)) ([dfd7cc7](https://github.com/cosmicspork/tracon/commit/dfd7cc754b750ed136ffbb5a759a906894e8cf63))
+* **native:** per-model settings, live command output, superseded-read elision and strict tools ([#622](https://github.com/cosmicspork/tracon/issues/622)) ([43bf6d8](https://github.com/cosmicspork/tracon/commit/43bf6d884b9368d2a51a7fec589e33cf51700964))
+* **native:** subagents that run together and return shaped results ([#624](https://github.com/cosmicspork/tracon/issues/624)) ([3090c7b](https://github.com/cosmicspork/tracon/commit/3090c7b5d64a5e35e136e4a119f1f5ea8dd159c2))
+* **session:** hold a session at its budget and let the operator raise it ([#609](https://github.com/cosmicspork/tracon/issues/609)) ([1aa385a](https://github.com/cosmicspork/tracon/commit/1aa385a2182fc2a1d6a6146964db38098217e665))
+* **session:** name a session's repository by its forge identity and retire host checkouts ([#588](https://github.com/cosmicspork/tracon/issues/588)) ([25cc9ed](https://github.com/cosmicspork/tracon/commit/25cc9ede0d933e24359d737e4ff57e312e6f8832))
+* **session:** restart a native harness that dies and carry its session on, and match usage by request ([#619](https://github.com/cosmicspork/tracon/issues/619)) ([98d0b67](https://github.com/cosmicspork/tracon/commit/98d0b6732e708b5dcd31da32aefb21db02fb97ac))
+* **usage:** break usage down by provider, model, day and session, with CSV export ([#615](https://github.com/cosmicspork/tracon/issues/615)) ([e2d2375](https://github.com/cosmicspork/tracon/commit/e2d2375c378d8b8bc5652c97ff263cb00ec65956))
+
+
+### Bug Fixes
+
+* **mesh:** close a peer's mirrored approval cards when it leaves the channel ([#618](https://github.com/cosmicspork/tracon/issues/618)) ([6af17ed](https://github.com/cosmicspork/tracon/commit/6af17ed702adedaabac6bcc76b709b5e7227c26d))
+* **policy:** deliver policy rollouts to peers that were offline at push time ([#596](https://github.com/cosmicspork/tracon/issues/596)) ([c125251](https://github.com/cosmicspork/tracon/commit/c1252514f4849863a05bec383a7fd8e64fc50f16))
+* **review:** give uv a temporary cache in required checks ([#613](https://github.com/cosmicspork/tracon/issues/613)) ([8924611](https://github.com/cosmicspork/tracon/commit/8924611cd510e40ac3d1179d596523a11f0d9efe))
+* **review:** say a reused failed check returns again unless rerun ([#614](https://github.com/cosmicspork/tracon/issues/614)) ([d5c9ce3](https://github.com/cosmicspork/tracon/commit/d5c9ce3070c506bc998ce4a46cb8e61e330e58c8))
+* **review:** squash with the agent's own message, never the PR description ([#597](https://github.com/cosmicspork/tracon/issues/597)) ([a8d2719](https://github.com/cosmicspork/tracon/commit/a8d271999a956f6ce7f4c57cd2af8a2356b035ce))
+* **spa:** soft-wrap the review screen's commit message boxes ([#612](https://github.com/cosmicspork/tracon/issues/612)) ([4ea06d8](https://github.com/cosmicspork/tracon/commit/4ea06d827831f5bd647a6e1321aebd3b061f1e38))
+* **workspace:** stage a workspace export under /tmp ([#589](https://github.com/cosmicspork/tracon/issues/589)) ([9f469a1](https://github.com/cosmicspork/tracon/commit/9f469a114b2c96d26867e769140987e602fe23eb))
+
 ## [0.34.0](https://github.com/cosmicspork/tracon/compare/v0.33.3...v0.34.0) (2026-10-18)
 
 
