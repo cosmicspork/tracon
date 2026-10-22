@@ -161,22 +161,24 @@ hit on a real task.
 
 **The native harness, experimental**
 
-The Codex subscription and local llama.cpp models cannot be used from tracon today: that
-path runs through the OpenCode adapter, whose v1 routes OpenCode 2.x removed. A
-work-funded Codex pilot is under way and tracon cannot measure it. `tracon-agent` is a
-harness tracon owns for models that are not Claude: a separate binary in the boundary,
-in the same trust position as `claude`. The node still does not reason. Plan:
-`plan-tracon-native-harness` on the personal channel. Development runs on local models
-first so that iterating spends no credits.
+`tracon-agent` is a harness tracon owns for models that are not Claude: the Codex
+subscription and local llama.cpp models, which before it could only be reached through
+the OpenCode adapter, whose v1 routes OpenCode 2.x removed. It is a separate binary in
+the boundary, in the same trust position as `claude`; the node still does not reason.
+Plan: `plan-tracon-native-harness` on the personal channel, done. It stays experimental
+until it has done a week of real work.
 
-- [ ] Phase 0, standalone: the loop, Chat Completions, six tools with hashline anchors,
-      accepted against local models (qwen3-8b here; Qwen3-Coder-Next and a 27B on the
-      Framework).
-- [ ] Phase 1, under the node: `adapter/native.rs`, `containers/harness-native/`, the
+- [x] Phase 0, standalone: the loop, Chat Completions, six tools with hashline anchors,
+      accepted against local models (#602).
+- [x] Phase 1, under the node: `adapter/native.rs`, `containers/harness-native/`, the
       JSON-RPC protocol with `seq`-numbered events, permission requests and per-request
-      `usage` matched against the gateway's count.
-- [ ] Phase 2, reliability: compaction, restore after a kill, retry. Phase 3: the OpenAI
-      API. Phase 4: Codex through the ChatGPT backend with the node's own OAuth.
+      `usage` matched against the gateway's count (#603, #604, #609).
+- [x] Phase 2, reliability: restore after a kill, retry, compaction (#611, #619, #620).
+      Phase 3, the OpenAI API, was dropped: local models and the Codex subscription cover
+      the use.
+- [x] Phase 4: Codex through the ChatGPT backend over the Responses API (#621), then
+      per-model settings, live command output and strict tool schemas (#622).
+- [x] Phase 5: subagents that run together and return results shaped by a schema (#624).
 
 **OpenCode, contingent on the spike above**
 
@@ -357,6 +359,12 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       whose system prompt stays in the message array. (The native harness's Responses
       encoder sends its own system prompt as `instructions`, which the backend accepts,
       shown live on 2026-10-21.)
+- [ ] **Native subagents running together, live**: a native session whose model makes
+      several `spawn` calls in one response, now that parallel tool calls are on by
+      default, with the children's calls overlapping in time in the log and each nested
+      under its spawn. Concurrency is proven by test only; the one live run (on
+      2026-10-21, `openai-codex/gpt-6-luna`, four subagents) had parallel calls off, so
+      its children ran one after another.
 - [ ] **`OPENCODE_SERVER_PASSWORD` refused live**: an unauthenticated probe of a running
       session server, rather than of the fake.
 - [ ] **The model-dependent adversarial cases** on OpenCode: a second identical tool call
