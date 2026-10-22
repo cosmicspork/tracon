@@ -165,8 +165,9 @@ hit on a real task.
 subscription and local llama.cpp models, which before it could only be reached through
 the OpenCode adapter, whose v1 routes OpenCode 2.x removed. It is a separate binary in
 the boundary, in the same trust position as `claude`; the node still does not reason.
-Plan: `plan-tracon-native-harness` on the personal channel, done. It stays experimental
-until it has done a week of real work.
+Every phase of its plan has landed; what was decided along the way and what was left
+unbuilt are in `agent/README.md`. It stays experimental until it has done a week of real
+work.
 
 - [x] Phase 0, standalone: the loop, Chat Completions, six tools with hashline anchors,
       accepted against local models (#602).

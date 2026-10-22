@@ -19,14 +19,16 @@ working; memory is opt-in and waits for your yes before it is kept. A plain prom
 against a repository uses none of them. The goal is useful work completed with
 fewer interruptions, not the largest number of agents running.
 
-The node supervises existing harnesses (OpenCode and Claude Code), rather than
-running its own model loop. Managed agents work in isolated workspaces; credentials stay
-with the node, which decides what it will do on their behalf. Inside that boundary an
-agent edits, builds and runs its tests unasked; what would leave it — network access the
-repository did not open, a credential, a publication — is the node's to decide or to ask
-you about. Proposed publication comes with a diff and revision-bound evidence, not just
-an agent's assurance that it finished. External harnesses can use the broker too, with a deliberately
-narrower guarantee: they never need its credentials, but do not gain its isolation.
+The node supervises harnesses — Claude Code, OpenCode, and `tracon-agent`, tracon's own
+harness for models that are not Claude — rather than running a model loop itself.
+Managed agents work in isolated workspaces; credentials stay with the node, which
+decides what it will do on their behalf. Inside that boundary an agent edits, builds and
+runs its tests unasked; what would leave it — network access the repository did not
+open, a credential, a publication — is the node's to decide or to ask you about.
+Proposed publication comes with a diff and revision-bound evidence, not just an agent's
+assurance that it finished. External harnesses can use the broker too, with a
+deliberately narrower guarantee: they never need its credentials, but do not gain its
+isolation.
 
 Your work should outlive the tool. Workspaces outlive sessions, documents can be
 exported, and candidate packages carry their files and evidence outside the node.
@@ -45,17 +47,20 @@ A single node works without a hub. Optionally, nodes dial out to a small hub tha
 relays end-to-end-encrypted frames so one interface can reach work on other nodes.
 Laptops, servers, and Kubernetes pods run the same binary.
 
-**What it is not.** Not a coding agent — it drives OpenCode over its server API
-and Claude Code over stream-json, and contains no model loop. Not multi-user — one operator holds the keys.
+**What it is not.** Not a coding agent — the node drives Claude Code over stream-json,
+OpenCode over its server API and `tracon-agent` over ACP, and contains no model loop;
+the one tracon ships runs in its own binary inside the boundary, like any other
+harness's. Not multi-user — one operator holds the keys.
 Not an IDE — the diff is the unit of review, and there is deliberately no file tree
 and no editor of its own.
 
-**The harnesses.** Two are supported behind one adapter trait. `tracon setup` builds an
-image for each, and a session's harness follows the credential its model spends: an
-Anthropic subscription runs on Claude Code only (through any other client Anthropic
-bills it as extra usage), ChatGPT/Codex and every other provider on OpenCode, and an
-Anthropic API key on either, where `[harness] id` breaks the tie. A session may name
-its harness, and naming one its credential cannot run on is refused with the reason. The
+**The harnesses.** Two are supported behind one adapter trait, and a third, tracon's
+own, is experimental and opt-in. `tracon setup` builds an image for each, and a session's
+harness follows the credential its model spends: an Anthropic subscription runs on
+Claude Code only (through any other client Anthropic bills it as extra usage),
+ChatGPT/Codex and every other provider on OpenCode or, where a node turns it on, on
+`tracon-agent`, and an Anthropic API key on Claude Code or OpenCode, where `[harness] id`
+breaks the tie. A session may name its harness, and naming one its credential cannot run on is refused with the reason. The
 picker tags each model with the harness it runs on; for a model either runs, the
 composer's Adjust panel offers a Harness field, and Settings lists each harness's
 version and image. **Claude Code**, over the stream-json control
@@ -74,8 +79,14 @@ inside the installed app on a phone — never the way tracon itself is used, and
 without the bundle simply does not offer it. A terminal comes with that view as a
 capability you grant to one session and one workspace: default-denied, revocable, and
 never a general shell on the node. The advanced view, the terminal, and streaming
-either to another node are OpenCode-only. Subscription sign-in does not run in either
-harness: the node speaks the Anthropic and ChatGPT OAuth flows itself.
+either to another node are OpenCode-only. **`tracon-agent`** (`agent/`) is a separate
+binary in the boundary, in the same trust position as `claude`, for local llama.cpp
+models over Chat Completions and the Codex subscription over the Responses API: six
+tools with hash-anchored edits, a journal that lets the node restart a dead process and
+carry its session on, compaction, and subagents that run together. It is experimental
+until it has done a week of real work; [agent/README.md](agent/README.md) says how to turn
+it on. Subscription sign-in does not run in any harness: the node speaks the Anthropic and
+ChatGPT OAuth flows itself.
 
 **The supported configuration** is the desktop app on macOS or Linux, rootless Podman,
 Claude Code, one node. Everything described below beyond that — the Kubernetes runtime,
