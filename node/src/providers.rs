@@ -155,6 +155,18 @@ pub enum Refreshed {
     LeftToAnotherHolder,
 }
 
+/// What replacing or removing a provider's sign-in takes from the node
+/// ([`Providers::displaced`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Displaced {
+    /// The channels that lose the provider on this node.
+    pub channels: Vec<String>,
+    /// The other nodes holding a shared copy of the sign-in. A disconnect
+    /// here leaves their copies; a new sign-in replaces only the copies it
+    /// is shared to.
+    pub peers: Vec<String>,
+}
+
 pub struct Providers {
     cfg: Arc<Config>,
     broker: SharedBroker,
@@ -364,6 +376,18 @@ impl Providers {
                     object.insert(
                         "error".into(),
                         error.map(Value::String).unwrap_or(Value::Null),
+                    );
+                    // The other nodes holding a copy of this sign-in, so the
+                    // card can name them before it is replaced or removed.
+                    object.insert(
+                        "shared_with".into(),
+                        json!(cred
+                            .map(|(_, c)| c
+                                .nodes
+                                .iter()
+                                .filter(|node| **node != self.node_id)
+                                .collect::<Vec<_>>())
+                            .unwrap_or_default()),
                     );
                 }
                 summary
@@ -1123,6 +1147,45 @@ impl Providers {
             .unwrap()
             .get(&credential_name)
             .map(|credential| credential.channels.clone()))
+    }
+
+    /// What signing in for `name` again would take away here, bound to
+    /// `keeps`, or with `None` what disconnecting it would. A provider holds
+    /// one sign-in per node, so a sign-in for one channel replaces the one
+    /// serving every other, and a disconnect takes it from all of them.
+    /// `None` when nothing is lost: this node holds no credential for it, the
+    /// sign-in keeps every channel it serves, or the disconnect only cancels
+    /// a sign-in still in progress.
+    pub fn displaced(
+        &self,
+        name: &str,
+        keeps: Option<&[String]>,
+    ) -> Result<Option<Displaced>, ProviderError> {
+        let credential_name = self.credential_name(name)?;
+        if keeps.is_none() && self.inflight.lock().contains_key(name) {
+            return Ok(None);
+        }
+        let broker = self.broker.read().unwrap();
+        let Some(credential) = broker.get(&credential_name) else {
+            return Ok(None);
+        };
+        let displaced = Displaced {
+            channels: credential
+                .channels
+                .iter()
+                .filter(|channel| keeps.is_none_or(|keeps| !keeps.contains(channel)))
+                .cloned()
+                .collect(),
+            peers: credential
+                .nodes
+                .iter()
+                .filter(|node| **node != self.node_id)
+                .cloned()
+                .collect(),
+        };
+        let loses =
+            !displaced.channels.is_empty() || (keeps.is_none() && !displaced.peers.is_empty());
+        Ok(loses.then_some(displaced))
     }
 
     /// Record that the sign-in for `name` that `owner` has in progress was

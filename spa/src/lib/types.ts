@@ -96,6 +96,9 @@ export interface ProviderInfo {
   expires_ms: number | null
   channels: string[]
   updated_ms: number | null
+  /** The other nodes holding a shared copy of this sign-in, by id. Private
+      to the serving node, and absent from older builds. */
+  shared_with?: string[]
 }
 
 /** What the broker will say about a credential: bindings and key names, never a value. */

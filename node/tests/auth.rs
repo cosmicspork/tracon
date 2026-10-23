@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use tracon::{
-    broker::Broker,
+    broker::{Broker, Credential, SharedBroker, KIND_OAUTH},
     config::Config,
     http::{
         api::AppState,
@@ -32,6 +32,7 @@ use support::fake::FakeAdapter;
 struct Node {
     app: axum::Router,
     store: Arc<Store>,
+    broker: SharedBroker,
 }
 
 /// The router with the guard layered on, as `serve` builds it.
@@ -80,9 +81,10 @@ fn node() -> Node {
         auth: Arc::new(AuthState::load(&store, "127.0.0.1".into())),
         enroll: Default::default(),
     };
+    let broker = state.tools.broker.clone();
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));
-    Node { app, store }
+    Node { app, store, broker }
 }
 
 /// One request, with a peer address the guard can read.
@@ -1464,6 +1466,136 @@ async fn only_a_local_browser_is_offered_the_local_sign_in_callback() {
         assert_eq!(v["completion"], "paste", "{host}: {v}");
         cancel_sign_in(&n).await;
     }
+}
+
+/// A provider holds one sign-in per node. Signing in for other channels
+/// over it, or disconnecting it, is refused with the channels that would
+/// lose it and the peers holding a copy named, and goes ahead once the
+/// caller confirms; a sign-in that keeps every channel, or the cancel of one
+/// in progress, needs no confirmation.
+#[tokio::test]
+async fn replacing_or_removing_a_sign_in_names_what_loses_it_until_confirmed() {
+    state::isolate();
+    let n = node();
+    n.store.channel_put("work", &[], "{}").unwrap();
+    n.store.ensure_peer_node("n2").unwrap();
+    let mut peer = n.store.get_node("n2").unwrap().unwrap();
+    peer.name = "bazzite".into();
+    n.store.put_node(&peer).unwrap();
+    let mut held = Credential {
+        kind: KIND_OAUTH.into(),
+        provider: Some("anthropic".into()),
+        channels: vec!["personal".into()],
+        nodes: vec!["n1".into(), "n2".into()],
+        identity: Some("me@example.com".into()),
+        ..Default::default()
+    };
+    held.env.insert("ACCESS_TOKEN".into(), "access".into());
+    n.broker.write().unwrap().put("anthropic", held);
+    let still_held = || n.broker.read().unwrap().get("anthropic").is_some();
+
+    let (s, _, listed) = call(&n, "GET", "/api/providers", LOCAL, "", &[], None).await;
+    assert_eq!(s, StatusCode::OK, "{listed}");
+    let card = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "anthropic")
+        .unwrap();
+    assert_eq!(card["shared_with"], json!(["n2"]), "{card}");
+
+    for uri in [
+        "/api/providers/anthropic/connect",
+        "/api/nodes/n1/providers/anthropic/connect",
+    ] {
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            uri,
+            LOCAL,
+            "",
+            &[],
+            Some(json!({ "channels": ["work"] })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{uri}: {v}");
+        let message = v["error"]["message"].as_str().unwrap();
+        assert_eq!(
+            message,
+            "anthropic holds one sign-in on this node. Signing in for work replaces the one \
+             serving personal, which loses anthropic here; bazzite holds a shared copy of it. \
+             Send \"confirm\": true to go ahead.",
+        );
+    }
+    assert!(still_held());
+
+    // Keeping the channel it serves loses nothing.
+    let keeps = json!({ "channels": ["personal", "work"] });
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/connect",
+        LOCAL,
+        "",
+        &[],
+        Some(keeps),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    cancel_sign_in(&n).await;
+    let confirmed = json!({ "channels": ["work"], "confirm": true });
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/connect",
+        LOCAL,
+        "",
+        &[],
+        Some(confirmed),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    cancel_sign_in(&n).await;
+    assert!(still_held(), "a cancelled sign-in replaces nothing");
+
+    for uri in [
+        "/api/providers/anthropic/disconnect",
+        "/api/nodes/n1/providers/anthropic/disconnect",
+    ] {
+        let (s, _, v) = call(&n, "POST", uri, LOCAL, "", &[], None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{uri}: {v}");
+        assert_eq!(
+            v["error"]["message"],
+            "anthropic holds one sign-in on this node. Disconnecting takes anthropic from \
+             personal on this node; the shared copies on bazzite stay there. Send \"confirm\": \
+             true to go ahead.",
+        );
+    }
+    assert!(still_held());
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/disconnect",
+        LOCAL,
+        "",
+        &[],
+        Some(json!({ "confirm": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!still_held());
+    // With nothing held, there is nothing to confirm.
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/disconnect",
+        LOCAL,
+        "",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
 }
 
 /// The administrator screens tell the interface whether it is at the node, so
