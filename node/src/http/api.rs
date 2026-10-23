@@ -5953,10 +5953,15 @@ fn confirm_displaced(
         })
         .collect();
     let channels = displaced.channels.join(", ");
+    let lose = if displaced.channels.len() == 1 {
+        "loses"
+    } else {
+        "lose"
+    };
     let mut message = format!("{name} holds one sign-in on this node. ");
     match keeps {
         Some(keeps) => message.push_str(&format!(
-            "Signing in for {} replaces the one serving {channels}, which lose {name} here",
+            "Signing in for {} replaces the one serving {channels}, which {lose} {name} here",
             keeps.join(", ")
         )),
         None if displaced.channels.is_empty() => {

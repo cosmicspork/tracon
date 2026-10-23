@@ -1523,7 +1523,7 @@ async fn replacing_or_removing_a_sign_in_names_what_loses_it_until_confirmed() {
         assert_eq!(
             message,
             "anthropic holds one sign-in on this node. Signing in for work replaces the one \
-             serving personal, which lose anthropic here; bazzite holds a shared copy of it. \
+             serving personal, which loses anthropic here; bazzite holds a shared copy of it. \
              Send \"confirm\": true to go ahead.",
         );
     }

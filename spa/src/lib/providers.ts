@@ -35,7 +35,7 @@ export function displacedSignIn(
   if (keeps !== null) {
     if (!lost.length) return null
     const copies = peers.length ? `; ${peers.join(', ')} ${peers.length === 1 ? 'holds' : 'hold'} a shared copy of it` : ''
-    return `${label} holds one sign-in on this node. Signing in for ${keeps.join(', ')} replaces the one serving ${lost.join(', ')}, which lose it here${copies}.`
+    return `${label} holds one sign-in on this node. Signing in for ${keeps.join(', ')} replaces the one serving ${lost.join(', ')}, which ${lost.length === 1 ? 'loses' : 'lose'} it here${copies}.`
   }
   if (!lost.length && !peers.length) return null
   const taken = lost.length ? `Disconnecting takes ${label} from ${lost.join(', ')} on this node` : `Disconnecting removes ${label} from this node`

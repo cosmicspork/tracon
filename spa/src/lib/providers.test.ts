@@ -90,12 +90,15 @@ test('replacing or removing a sign-in names the channels that lose it and the pe
   const name = (id: string) => names[id] ?? id
 
   expect(displacedSignIn(codex, ['work'], name)).toBe(
-    'OpenAI Codex holds one sign-in on this node. Signing in for work replaces the one serving personal, which lose it here; bazzite, homelab hold a shared copy of it.',
+    'OpenAI Codex holds one sign-in on this node. Signing in for work replaces the one serving personal, which loses it here; bazzite, homelab hold a shared copy of it.',
   )
   expect(displacedSignIn(codex, null, name)).toBe(
     'OpenAI Codex holds one sign-in on this node. Disconnecting takes OpenAI Codex from personal on this node; the shared copies on bazzite, homelab stay there.',
   )
   expect(displacedSignIn({ ...codex, shared_with: ['b0'] }, ['work'], name)).toContain('; bazzite holds a shared copy of it.')
+  expect(displacedSignIn({ ...codex, channels: ['personal', 'ops'] }, ['work'], name)).toContain(
+    'serving personal, ops, which lose it here',
+  )
   // A sign-in that keeps every channel it serves loses nothing.
   expect(displacedSignIn(codex, ['personal', 'work'], name)).toBeNull()
   // An unbound sign-in kept only here is removed without a question.

@@ -295,6 +295,20 @@
     })
   }
 
+  // Go ahead with what the operator was shown. If what it would take has
+  // changed since (other channels picked, a fresher listing), the new text
+  // is what they confirm instead.
+  function goAhead() {
+    if (!confirming) return
+    const { kind, text } = confirming
+    const now = displacedSignIn(p, kind === 'connect' ? picked : null, peerName)
+    if (now !== null && now !== text) {
+      confirming = { kind, text: now }
+      return
+    }
+    return kind === 'connect' ? connect(true) : disconnect(true)
+  }
+
   function disconnect(confirmed = false) {
     const text = isSelf && !confirmed ? displacedSignIn(p, null, peerName) : null
     confirming = text ? { kind: 'disconnect', text } : null
@@ -553,7 +567,7 @@
         <span class="actions">
           <button
             class="btn d"
-            onclick={() => (confirming?.kind === 'connect' ? connect(true) : disconnect(true))}
+            onclick={goAhead}
             disabled={busy}>{confirming.kind === 'connect' ? 'Sign in anyway' : 'Disconnect anyway'}</button
           >
           <button class="lnk" onclick={() => (confirming = null)} disabled={busy}>Cancel</button>
