@@ -2811,7 +2811,7 @@ async fn spawn_review_session_when_kept(
 ) -> Value {
     // An earlier revision's keep is nothing to this one.
     manager.review_starts().unkeep(review_id);
-    let binding = ReviewerBinding::of(&manager.bindings(channel));
+    let binding = ReviewerBinding::for_channel(manager, channel);
     let trigger = binding.trigger(source);
     // What applied to this revision, whatever the binding says later.
     if let Err(error) =
@@ -2998,7 +2998,7 @@ fn reviewer_says(reviewer: &Value, channel: &str) -> String {
 /// model, and the verdict once there is one. A verdict on an earlier
 /// revision is not this revision's, and is named only by its revision.
 pub(crate) fn reviewer_view(store: &Store, manager: &Manager, r: &ReviewRow) -> Value {
-    let binding = ReviewerBinding::of(&manager.bindings(&r.channel));
+    let binding = ReviewerBinding::for_channel(manager, &r.channel);
     let source = Source::of(r);
     // Ids only: a revision's number is its place among them.
     let revisions = store.review_revision_ids(&r.id).unwrap_or_default();
@@ -3233,7 +3233,7 @@ fn review_session_waits(store: &Store, review_id: &str) -> bool {
 
 /// The model a channel binds for review sessions, if any.
 fn review_model(manager: &Manager, channel: &str) -> Option<String> {
-    ReviewerBinding::of(&manager.bindings(channel)).model
+    ReviewerBinding::for_channel(manager, channel).model
 }
 
 /// Why no reviewer started on a submission the channel reviews by hand.
@@ -3312,10 +3312,13 @@ impl StartedBy {
 /// How a reviewer starts for a source when the channel's
 /// `phases.review.trigger` says nothing for it. The one place that default
 /// is decided: an external harness's submission carries no checks or shown
-/// work, so a reviewer on its own would have only the diff to go on.
-pub fn default_trigger(source: Source) -> Trigger {
+/// work, so a reviewer on its own would have only the diff to go on, unless
+/// the node runs the repository's checks on it (`[external] run_checks`),
+/// which the reviewer then waits for and reads.
+pub fn default_trigger(source: Source, external_checks: bool) -> Trigger {
     match source {
         Source::Session => Trigger::Auto,
+        Source::External if external_checks => Trigger::Auto,
         Source::External => Trigger::Manual,
     }
 }
@@ -3323,7 +3326,8 @@ pub fn default_trigger(source: Source) -> Trigger {
 /// A channel's reviewer: the model it binds (`phases.review.model`) and its
 /// trigger for each source (`phases.review.trigger.session` and
 /// `.external`). A bare `phases.review.trigger = "manual"` sets both. Without
-/// a model no reviewer starts either way.
+/// a model no reviewer starts either way. What a binding leaves out is
+/// [`default_trigger`]'s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewerBinding {
     pub model: Option<String>,
@@ -3332,7 +3336,18 @@ pub struct ReviewerBinding {
 }
 
 impl ReviewerBinding {
-    pub fn of(bindings: &Value) -> Self {
+    /// A channel's binding on this node, whose `[external] run_checks` sets
+    /// the default for external submissions.
+    pub fn for_channel(manager: &Manager, channel: &str) -> Self {
+        Self::of(
+            &manager.bindings(channel),
+            manager.cfg().external.run_checks,
+        )
+    }
+
+    /// `bindings` read with the defaults for a node that does, or does not,
+    /// run checks on external submissions (`external_checks`).
+    pub fn of(bindings: &Value, external_checks: bool) -> Self {
         let review = &bindings["phases"]["review"];
         let model = review["model"]
             .as_str()
@@ -3342,7 +3357,7 @@ impl ReviewerBinding {
         let of = |source: Source| {
             Trigger::parse(trigger)
                 .or_else(|| Trigger::parse(&trigger[source.as_str()]))
-                .unwrap_or_else(|| default_trigger(source))
+                .unwrap_or_else(|| default_trigger(source, external_checks))
         };
         ReviewerBinding {
             model,
@@ -4437,12 +4452,12 @@ mod tests {
 
     #[test]
     fn a_channel_reviews_its_own_sessions_on_their_own_and_external_harnesses_by_hand() {
-        let bound = ReviewerBinding::of(&json!({"phases": {"review": {"model": "m/r"}}}));
+        let bound = ReviewerBinding::of(&json!({"phases": {"review": {"model": "m/r"}}}), false);
         assert_eq!(bound.model.as_deref(), Some("m/r"));
         assert_eq!(bound.trigger(Source::Session), Trigger::Auto);
         assert_eq!(bound.trigger(Source::External), Trigger::Manual);
         // A fresh channel takes the same defaults, with no model to start one.
-        let fresh = ReviewerBinding::of(&json!({}));
+        let fresh = ReviewerBinding::of(&json!({}), false);
         assert_eq!(fresh.model, None);
         assert_eq!(
             fresh.view(),
@@ -4450,23 +4465,53 @@ mod tests {
         );
     }
 
+    /// A node that runs the repository's checks on external submissions
+    /// gives its reviewer something to go on, so external submissions start
+    /// one on their own unless the channel says otherwise.
+    #[test]
+    fn a_node_that_checks_external_submissions_reviews_them_on_their_own() {
+        let fresh = ReviewerBinding::of(&json!({}), true);
+        assert_eq!(
+            fresh.view(),
+            json!({"session": "auto", "external": "auto", "model": null})
+        );
+        let manual = ReviewerBinding::of(
+            &json!({"phases": {"review": {"trigger": {"external": "manual"}}}}),
+            true,
+        );
+        assert_eq!(manual.external, Trigger::Manual);
+        let both = ReviewerBinding::of(&json!({"phases": {"review": {"trigger": "manual"}}}), true);
+        assert_eq!(
+            (both.session, both.external),
+            (Trigger::Manual, Trigger::Manual)
+        );
+        assert_eq!(default_trigger(Source::External, true), Trigger::Auto);
+        assert_eq!(default_trigger(Source::External, false), Trigger::Manual);
+    }
+
     #[test]
     fn a_trigger_is_set_per_source_or_for_both_at_once() {
-        let each = ReviewerBinding::of(&json!({"phases": {"review": {
-            "trigger": {"session": "manual", "external": "auto"}
-        }}}));
+        let each = ReviewerBinding::of(
+            &json!({"phases": {"review": {
+                "trigger": {"session": "manual", "external": "auto"}
+            }}}),
+            false,
+        );
         assert_eq!(
             (each.session, each.external),
             (Trigger::Manual, Trigger::Auto)
         );
-        let both = ReviewerBinding::of(&json!({"phases": {"review": {"trigger": "manual"}}}));
+        let both =
+            ReviewerBinding::of(&json!({"phases": {"review": {"trigger": "manual"}}}), false);
         assert_eq!(
             (both.session, both.external),
             (Trigger::Manual, Trigger::Manual)
         );
         // What it does not know is the default, not an error at submit.
-        let odd =
-            ReviewerBinding::of(&json!({"phases": {"review": {"trigger": {"session": "often"}}}}));
+        let odd = ReviewerBinding::of(
+            &json!({"phases": {"review": {"trigger": {"session": "often"}}}}),
+            false,
+        );
         assert_eq!(odd.session, Trigger::Auto);
     }
 

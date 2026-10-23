@@ -500,7 +500,10 @@ pub struct External {
     /// reviewer. They run behind the submission and never gate it: the
     /// harness's own checks ran where its toolchain is, and these are what
     /// the node can say about the same bytes. Off by default, because it runs
-    /// code the node did not watch being written.
+    /// code the node did not watch being written. On, it also makes `auto`
+    /// the reviewer trigger for external submissions on a channel that sets
+    /// none (`phases.review.trigger.external`): the reviewer has the checks
+    /// to go on, and starts once they are done.
     pub run_checks: bool,
 }
 
