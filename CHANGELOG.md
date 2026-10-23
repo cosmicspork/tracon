@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.37.0](https://github.com/cosmicspork/tracon/compare/v0.36.0...v0.37.0) (2026-10-23)
+
+
+### Features
+
+* **providers:** name the channels a sign-in replaces and ask first ([#636](https://github.com/cosmicspork/tracon/issues/636)) ([f7c20e7](https://github.com/cosmicspork/tracon/commit/f7c20e732339cfe3c211b545bb030a01f923c415))
+
+
+### Bug Fixes
+
+* **review:** submit the first commit of an empty repository ([#635](https://github.com/cosmicspork/tracon/issues/635)) ([67e7cb9](https://github.com/cosmicspork/tracon/commit/67e7cb965cea69b6022498507872a70bc0b5b601))
+
 ## [0.36.0](https://github.com/cosmicspork/tracon/compare/v0.35.0...v0.36.0) (2026-10-23)
 
 
