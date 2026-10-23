@@ -493,38 +493,6 @@
       "editable": true,
       "editable_at_node": true,
       "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "session.pty_buffer_frames",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "integer",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "session.pty_capture_output",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
       "exec_path": true,
       "fs_path": false,
       "key": "consulta.command",
@@ -2604,71 +2572,6 @@
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "launch.plugins",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "item": "string",
-        "kind": "list",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "ui.opencode_listen",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "ui.opencode_url",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": true
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": true,
-      "key": "ui.opencode_bundle_dir",
-      "path": "managed_dir",
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": true
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
       "editable_by_peer": false,
       "exec_path": false,
       "fs_path": false,
@@ -2747,7 +2650,7 @@
       "gateway_container": "tracon-gw",
       "gateway_image": "localhost/tracon-gateway",
       "gateway_ip": "10.89.0.2",
-      "harness_image": "localhost/tracon-harness-opencode",
+      "harness_image": "localhost/tracon-harness-claude",
       "network": "tracon-int",
       "podman": "",
       "start_machine": true,
@@ -2812,9 +2715,6 @@
       "tools": [],
       "version": "2.5.0"
     },
-    "launch": {
-      "plugins": []
-    },
     "memory": {
       "promote_at": "02:00"
     },
@@ -2852,7 +2752,7 @@
       "kubernetes": {
         "gateway_host": "tracon-gw",
         "harness_home": "/home/harness",
-        "harness_image": "ghcr.io/cosmicspork/tracon-harness-opencode:0.32.0",
+        "harness_image": "ghcr.io/cosmicspork/tracon-harness-claude:0.32.0",
         "image_pull_secrets": [],
         "internal_cidrs": [],
         "namespace": "",
@@ -2882,8 +2782,6 @@
       "default_channel": "personal",
       "harness_api_timeout_secs": 30,
       "permission_timeout_secs": 900,
-      "pty_buffer_frames": 256,
-      "pty_capture_output": false,
       "suspend_published_after_secs": 1800,
       "worktree_root": "/home/op/.local/state/tracon/worktrees"
     },
@@ -2894,9 +2792,6 @@
       "dependency_inputs": {},
       "max_snapshot_bytes": 536870912,
       "timeout_secs": 900
-    },
-    "ui": {
-      "opencode_listen": "127.0.0.1:7423"
     }
   },
   "toml": "node_name = \"laptop\"\n\n[harness]\nid = \"claude\"\nversion = \"2.5.0\"\n\n[session]\nbudget_tokens = 2000000\ndefault_channel = \"personal\"\n\n[review]\nmax_diff_lines = 4000\nmax_files = 120\n\n[publish]\ngh = \"/usr/bin/gh\"\n\n[github.dispatch]\n\"op/homelab\" = [\"renovate.yaml\"]\n\n[mesh]\nhub_url = \"https://hub.example.net\"\n\n[notify]\ncontact = \"mailto:op@example.com\"\n\n[[service]]\nname = \"browser\"\nimage = \"ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a\"\nport = 9222\nready = \"/json/version\"\n",

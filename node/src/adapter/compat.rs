@@ -1,12 +1,11 @@
 //! Which harness a model's credential can run on. The harness is a
-//! consequence of the credential, not a setting: an Anthropic subscription
-//! is Claude Code's alone, every other provider is OpenCode's, and only an
-//! Anthropic API key runs on either, where `[harness] id` breaks the tie.
+//! consequence of the credential, not a setting: an Anthropic credential is
+//! Claude Code's, and every other provider is tracon-agent's.
 
 use crate::broker::KIND_OAUTH;
 use crate::config::{SHAPE_ANTHROPIC, SHAPE_OPENAI_CODEX};
 
-use super::{claude::ClaudeAdapter, native::NativeAdapter, opencode::OpenCodeAdapter, KNOWN};
+use super::{claude::ClaudeAdapter, native::NativeAdapter, KNOWN};
 
 /// What a model runs on, as far as choosing a harness goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +19,7 @@ pub enum CredentialClass {
     /// Any other provider: an OpenAI key, a self-hosted server.
     OtherProvider,
     /// A model named without a provider (`sonnet`, `claude-opus-5`): Claude
-    /// Code's own spelling, which OpenCode cannot address.
+    /// Code's own spelling.
     BareAlias,
 }
 
@@ -39,17 +38,14 @@ impl CredentialClass {
     /// is not second-guessed.
     pub fn fits(self, harness_id: &str) -> Result<(), &'static str> {
         match (self, harness_id) {
-            (Self::AnthropicSubscription, OpenCodeAdapter::ID) => Err(
-                "an Anthropic subscription runs on Claude Code only; through any other \
-                 client Anthropic bills it as extra usage",
-            ),
-            (Self::BareAlias, OpenCodeAdapter::ID) => {
-                Err("OpenCode needs a provider-qualified model (`provider/model`)")
-            }
             (Self::CodexSubscription | Self::OtherProvider, ClaudeAdapter::ID) => {
                 Err("Claude Code runs Anthropic models only")
             }
-            (Self::AnthropicSubscription | Self::AnthropicKey, NativeAdapter::ID) => {
+            (Self::AnthropicSubscription, NativeAdapter::ID) => Err(
+                "an Anthropic subscription runs on Claude Code only; through any other \
+                 client Anthropic bills it as extra usage",
+            ),
+            (Self::AnthropicKey, NativeAdapter::ID) => {
                 Err("tracon-agent does not run Anthropic models; Claude Code does")
             }
             (Self::BareAlias, NativeAdapter::ID) => {
@@ -81,13 +77,13 @@ mod tests {
     use crate::config::SHAPE_OPENAI;
 
     #[test]
-    fn the_credential_decides_the_harness_except_for_an_anthropic_key() {
+    fn the_credential_decides_the_harness() {
         use CredentialClass::*;
         for (class, harnesses) in [
             (AnthropicSubscription, vec!["claude"]),
-            (AnthropicKey, vec!["opencode", "claude"]),
-            (CodexSubscription, vec!["opencode"]),
-            (OtherProvider, vec!["opencode"]),
+            (AnthropicKey, vec!["claude"]),
+            (CodexSubscription, vec!["native"]),
+            (OtherProvider, vec!["native"]),
             (BareAlias, vec!["claude"]),
         ] {
             assert_eq!(class.harnesses(), harnesses, "{class:?}");
@@ -118,13 +114,10 @@ mod tests {
     #[test]
     fn the_native_harness_runs_only_what_it_speaks() {
         use CredentialClass::*;
-        let ids = ["opencode", "claude", "native"];
-        assert_eq!(OtherProvider.harnesses_among(&ids), ["opencode", "native"]);
+        let ids = ["claude", "native"];
+        assert_eq!(OtherProvider.harnesses_among(&ids), ["native"]);
         // The Codex backend through its Responses encoder.
-        assert_eq!(
-            CodexSubscription.harnesses_among(&ids),
-            ["opencode", "native"]
-        );
+        assert_eq!(CodexSubscription.harnesses_among(&ids), ["native"]);
         for class in [AnthropicSubscription, AnthropicKey, BareAlias] {
             assert!(
                 !class.harnesses_among(&ids).contains(&"native"),

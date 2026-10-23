@@ -401,7 +401,6 @@ mod tests {
              [session]\nworktree_root = \"/state/work\"\n\
              [consulta]\ncommand = \"uv\"\nargs = [\"run\"]\n\
              [auth]\npublic_origin = \"https://tracon.example.com\"\n\
-             [ui]\nopencode_url = \"https://ui.example.com\"\n\
              [docs]\nexport_dir = \"/state/docs\"\n\
              [embed]\nenabled = true\n\
              [mesh]\nhub_url = \"https://hub.example.com\"\n\

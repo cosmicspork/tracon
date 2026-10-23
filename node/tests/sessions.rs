@@ -2120,7 +2120,7 @@ fn named_call(i: usize, title: &str, input: serde_json::Value) -> HarnessEvent {
 
 /// Waiting on a review is calling `review_status` again and again with the
 /// same id, as its description says; the same goes for the node's other
-/// status waits, under either harness's spelling. None of that is a loop, and
+/// status waits. None of that is a loop, and
 /// a wait between two runs of a command is something happening between them.
 #[tokio::test]
 async fn polling_the_node_s_own_waits_is_not_repetition() {
@@ -2132,7 +2132,10 @@ async fn polling_the_node_s_own_waits_is_not_repetition() {
         calls.push(("mcp__tracon__review_status", review.clone()));
     }
     for _ in 0..6 {
-        calls.push(("tracon_question_status", json!({ "question_id": "q-1" })));
+        calls.push((
+            "mcp__tracon__question_status",
+            json!({ "question_id": "q-1" }),
+        ));
     }
     for i in 0..5 {
         calls.push(if i % 2 == 0 {
@@ -2257,7 +2260,7 @@ async fn a_session_over_budget_is_held_at_turn_end() {
 // The gateway counts on the wire; the harness reports its own numbers. Driven
 // through the supervisor here, with the gateway's counts written straight into
 // the ledger the way a model call through `/model/...` writes them (the
-// end-to-end path is `node/tests/opencode_usage.rs`).
+// end-to-end path is `node/tests/usage.rs`).
 
 impl Rig {
     /// One model call as the gateway counted it, attributed to the turn the
@@ -4949,8 +4952,8 @@ async fn a_harness_speaking_an_unsupported_protocol_fails_the_session_with_the_r
 }
 
 /// A harness that would load an entry at the workspace root as its own
-/// configuration. `.git` stands in for `opencode.json` because it is the one
-/// entry every seeded workspace has; the check is the same.
+/// configuration. `.git` stands in for `.claude` because it is the one entry
+/// every seeded workspace has; the check is the same.
 struct ConfiguredByTheRepoAdapter;
 
 #[async_trait]

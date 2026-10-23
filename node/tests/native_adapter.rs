@@ -68,7 +68,6 @@ fn spec() -> LaunchSpec {
         tools: Vec::new(),
         env: Vec::new(),
         system_prompt_file: None,
-        cursor: None,
         resume: None,
     }
 }

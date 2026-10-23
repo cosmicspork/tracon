@@ -70,10 +70,6 @@ pub enum Kind {
     Operator,
     /// An `ask_operator` question waiting for an answer.
     Question,
-    /// A push that belongs in OpenCode's own view rather than tracon's session
-    /// screen. Its own kind, not a flag on another, because it lands somewhere
-    /// else and a burst of them collapses on its own terms.
-    Opencode,
     /// A published request moved on its forge: CI, ready, reviews, comments,
     /// merged or closed.
     Forge,
@@ -88,7 +84,6 @@ impl Kind {
             Kind::Promotion => "promo",
             Kind::Operator => "operator",
             Kind::Question => "question",
-            Kind::Opencode => "opencode",
             Kind::Forge => "forge",
         }
     }
@@ -108,8 +103,6 @@ impl Kind {
             (Kind::Operator, _) => "operator notifications",
             (Kind::Question, 1) => "question",
             (Kind::Question, _) => "questions",
-            (Kind::Opencode, 1) => "OpenCode session",
-            (Kind::Opencode, _) => "OpenCode sessions",
             (Kind::Forge, 1) => "published change moved",
             (Kind::Forge, _) => "published changes moved",
         };
@@ -132,17 +125,6 @@ pub struct Notification {
     pub tag: String,
 }
 
-/// Where a push about an OpenCode session lands: the shell route the installed
-/// app serves the native view from (`spa/src/routes/OpencodeShell.svelte`).
-///
-/// One spelling, in one place, because two things depend on it agreeing with
-/// the interface — the service worker resolves this path against the node's
-/// own origin, and the manifest's `scope` is what decides whether the
-/// installed app opens or the system browser does.
-pub fn opencode_shell_path(session_id: &str) -> String {
-    format!("/sessions/{session_id}/opencode")
-}
-
 impl Notification {
     /// What the service worker is handed once it decrypts the push.
     pub fn payload(&self, now: i64) -> serde_json::Value {
@@ -159,30 +141,10 @@ impl Notification {
     /// An approval is worth nothing after it expires; reports and reviews keep.
     fn ttl_secs(&self) -> u32 {
         match self.kind {
-            Kind::Permission | Kind::Operator | Kind::Opencode => TTL_ITEM_SECS,
+            Kind::Permission | Kind::Operator => TTL_ITEM_SECS,
             Kind::Review | Kind::Report | Kind::Promotion | Kind::Question | Kind::Forge => {
                 TTL_REVIEW_SECS
             }
-        }
-    }
-
-    /// A push that should land in OpenCode's own view.
-    ///
-    /// The path is [`opencode_shell_path`] and nothing else: the deep link is
-    /// the installed app's shell route, so tapping the banner opens the native
-    /// view *inside* the app rather than handing the session to the system
-    /// browser. That it is in the manifest's scope is what makes it open the
-    /// installed app at all, and it is asserted against the manifest itself
-    /// rather than asserted about a string.
-    pub fn opencode(session_id: &str, title: String, body: String) -> Self {
-        Self {
-            kind: Kind::Opencode,
-            title,
-            body,
-            path: opencode_shell_path(session_id),
-            // Per session, not per event: a second nudge about the same
-            // session replaces the first rather than stacking.
-            tag: format!("tracon-opencode-{session_id}"),
         }
     }
 
@@ -757,24 +719,6 @@ pub fn not_sending(cfg: &Config) -> Option<&'static str> {
         .err()
 }
 
-/// Send a push that opens OpenCode's own view for one session.
-///
-/// A sibling of [`send_operator`] rather than a parameter on it: the caller
-/// names the session and the path is computed, so a deep link cannot be
-/// spelled wrong into somewhere outside the installed app's scope.
-pub async fn send_opencode(
-    store: &Arc<Store>,
-    cfg: &Config,
-    notification_id: &str,
-    session_id: &str,
-    title: String,
-    body: String,
-    device_ids: &[String],
-) -> Vec<crate::store::NotificationAttemptRow> {
-    let notification = Notification::opencode(session_id, title, body);
-    fan_out(store, cfg, notification_id, &notification, device_ids).await
-}
-
 /// Send an intentional operator notification. A successful push-service
 /// response is recorded as an attempt, never represented as human receipt.
 pub async fn send_operator(
@@ -936,55 +880,6 @@ mod tests {
         );
         assert!(out.iter().any(|n| n.body == "5 approvals waiting"));
         assert!(out.iter().any(|n| n.tag == "r1"));
-    }
-
-    /// The deep link is only a deep link if the installed app is what opens
-    /// it. That is the manifest's `scope`, so the manifest is what this reads
-    /// — a path this side spelled right against a scope that had moved would
-    /// hand the session to the system browser, which is the one outcome the
-    /// shell route exists to prevent.
-    #[test]
-    fn an_opencode_push_lands_inside_the_installed_apps_scope() {
-        // Compiled in, so the assertion cannot drift from the file the node
-        // actually serves: moving or renaming it fails the build.
-        const MANIFEST: &str = include_str!("../../../spa/public/manifest.webmanifest");
-        let manifest: serde_json::Value = serde_json::from_str(MANIFEST).expect("valid manifest");
-        let scope = manifest["scope"]
-            .as_str()
-            .expect("the manifest has a scope");
-        let start = manifest["start_url"].as_str().expect("a start_url");
-        assert!(start.starts_with(scope), "{start} is outside {scope}");
-
-        let n = Notification::opencode(
-            "ses_7",
-            "OpenCode — feat/x".into(),
-            "The session is waiting in its own view.".into(),
-        );
-        assert_eq!(n.path, "/sessions/ses_7/opencode");
-        assert!(n.path.starts_with(scope), "{} is outside {scope}", n.path);
-        // A path, not a URL: the service worker resolves it against the node's
-        // own origin, and an absolute URL would escape the scope entirely.
-        assert!(!n.path.contains("://"));
-        // Per session, so a second nudge replaces the first rather than
-        // stacking, and distinct from the session screen's own banner.
-        assert_eq!(n.tag, "tracon-opencode-ses_7");
-        assert_ne!(n.tag, "tracon-perm-ses_7");
-        let payload = n.payload(0);
-        assert_eq!(payload["path"], "/sessions/ses_7/opencode");
-        assert_eq!(payload["kind"], "opencode");
-    }
-
-    #[test]
-    fn an_opencode_burst_collapses_onto_the_queue_rather_than_a_session() {
-        let many: Vec<_> = (0..7)
-            .map(|i| Notification::opencode(&format!("ses_{i}"), "t".into(), "b".into()))
-            .collect();
-        let out = Notifier::collapse(many);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].body, "7 OpenCode sessions waiting");
-        // Seven sessions have no one shell route between them, so the summary
-        // lands on the queue rather than guessing one.
-        assert_eq!(out[0].path, "/");
     }
 
     #[test]

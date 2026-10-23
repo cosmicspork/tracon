@@ -36,8 +36,6 @@ pub mod holdings;
 pub mod limits;
 pub mod manifest;
 pub mod metrics;
-pub mod opencode;
-pub mod opencode_state;
 pub mod operator;
 pub mod outcome;
 pub mod passkeys;
@@ -53,7 +51,6 @@ pub mod rollups;
 pub mod services;
 pub mod shown;
 pub mod transfers;
-pub mod ui;
 pub mod vectors;
 pub use corpus::*;
 pub use credential_revokes::*;
@@ -61,8 +58,6 @@ pub use device::*;
 pub use evidence::*;
 pub use limits::*;
 pub use manifest::*;
-pub use opencode::*;
-pub use opencode_state::*;
 pub use operator::*;
 pub use passkeys::*;
 pub use policy_rollouts::*;
@@ -70,7 +65,6 @@ pub use publication::*;
 pub use records::*;
 pub use repo_image::*;
 pub use transfers::*;
-pub use ui::*;
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -808,6 +802,17 @@ impl Store {
         )?;
         let rows = stmt
             .query_map([], PermissionRow::from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every permission request a session raised, resolved or not.
+    pub fn permissions_for_session(&self, session_id: &str) -> Result<Vec<PermissionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT * FROM permission_request WHERE session_id=?1 ORDER BY created_ms")?;
+        let rows = stmt
+            .query_map([session_id], PermissionRow::from_row)?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
@@ -3890,11 +3895,11 @@ mod tests {
         let mut row = store.get_node(&id).unwrap().unwrap();
         let harnesses = vec![
             HarnessState {
-                id: "opencode".into(),
-                pinned: "1.18.30".into(),
-                found: Some("1.18.30".into()),
+                id: "native".into(),
+                pinned: "0.35.0".into(),
+                found: Some("0.35.0".into()),
                 default: true,
-                image: Some("localhost/tracon-harness-opencode".into()),
+                image: Some("localhost/tracon-harness-native".into()),
                 image_state: "current".into(),
             },
             HarnessState {

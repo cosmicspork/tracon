@@ -347,7 +347,7 @@ mod tests {
         json!({
             "HostConfig": {"Privileged": false, "CapAdd": [], "SecurityOpt": ["no-new-privileges"], "Binds": []},
             "EffectiveCaps": [],
-            "Mounts": [{"Source": "/state", "Destination": "/root/.opencode"}],
+            "Mounts": [{"Source": "/state", "Destination": "/root/.claude"}],
             "NetworkSettings": {"Networks": {"tracon-int": {"IPAddress": "10.89.0.5"}}}
         })
     }

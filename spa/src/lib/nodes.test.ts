@@ -148,29 +148,29 @@ test('an older node lists its one configured harness', () => {
 
 test('a node is blocked only when every harness it runs is mismatched', () => {
   const models = [{ value: 'm', name: 'm' }]
-  const opencode = { id: 'opencode', pinned: '1', found: '1', mismatch: false, default: true, image_state: 'current' as const }
+  const native = { id: 'native', pinned: '1', found: '1', mismatch: false, default: true, image_state: 'current' as const }
   const claude = { id: 'claude', pinned: '2', found: '1', mismatch: true, default: false, image_state: 'stale' as const }
-  expect(nodeReadiness(node({ models, harnesses: [opencode, claude] })).canRun).toBe(true)
-  const both = [{ ...opencode, mismatch: true }, claude]
+  expect(nodeReadiness(node({ models, harnesses: [native, claude] })).canRun).toBe(true)
+  const both = [{ ...native, mismatch: true }, claude]
   expect(nodeReadiness(node({ models, harnesses: both })).label).toBe('Runtime mismatch')
 })
 
 test('only a model either harness runs offers a choice', () => {
-  expect(harnessChoice({ value: 'anthropic/k', name: 'k', harnesses: ['opencode', 'claude'] })).toEqual(['opencode', 'claude'])
+  expect(harnessChoice({ value: 'anthropic/k', name: 'k', harnesses: ['native', 'claude'] })).toEqual(['native', 'claude'])
   expect(harnessChoice({ value: 'anthropic/s', name: 's', harnesses: ['claude'] })).toEqual([])
   expect(harnessChoice({ value: 'm', name: 'm' })).toEqual([])
   expect(harnessChoice(undefined)).toEqual([])
   expect(harnessTag({ value: 'a', name: 'a', harnesses: ['claude'] })).toBe('claude')
-  expect(harnessTag({ value: 'b', name: 'b', harnesses: ['opencode', 'claude'] })).toBe('either')
+  expect(harnessTag({ value: 'b', name: 'b', harnesses: ['native', 'claude'] })).toBe('either')
   expect(harnessTag({ value: 'c', name: 'c' })).toBeNull()
 })
 
 test('a harness row shows what was found, never the pinned version in its place', () => {
-  const h = { id: 'opencode', pinned: '1.4.2', default: false, image: null }
-  expect(harnessFact({ ...h, found: '1.4.2', mismatch: false, image_state: 'current' })).toBe('opencode 1.4.2')
-  expect(harnessFact({ ...h, found: '1.3.0', mismatch: true, image_state: 'stale' })).toBe('opencode 1.3.0 (expects 1.4.2)')
-  expect(harnessFact({ ...h, found: null, mismatch: true, image_state: 'missing' })).toBe('opencode not installed')
-  expect(harnessFact({ ...h, found: null, mismatch: false, image_state: 'unknown' })).toBe('opencode not probed')
+  const h = { id: 'native', pinned: '1.4.2', default: false, image: null }
+  expect(harnessFact({ ...h, found: '1.4.2', mismatch: false, image_state: 'current' })).toBe('native 1.4.2')
+  expect(harnessFact({ ...h, found: '1.3.0', mismatch: true, image_state: 'stale' })).toBe('native 1.3.0 (expects 1.4.2)')
+  expect(harnessFact({ ...h, found: null, mismatch: true, image_state: 'missing' })).toBe('native not installed')
+  expect(harnessFact({ ...h, found: null, mismatch: false, image_state: 'unknown' })).toBe('native not probed')
 })
 
 test('a serving node that cannot run says so, unless a ready peer runs instead', () => {

@@ -16,7 +16,6 @@ pub mod recipes;
 pub mod settings;
 mod spa;
 mod stream;
-pub mod ui;
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -56,21 +55,13 @@ pub fn router(state: AppState) -> Router {
         .docs
         .preview_origin()
         .expect("validated preview origin");
-    // The two origins this interface is allowed to frame, and no others. Both
-    // are this node's own listeners, named rather than wildcarded:
-    //
-    //  * the document preview, which is sandboxed untrusted HTML; and
-    //  * OpenCode's native UI, which the installed app hosts at
-    //    `/sessions/{id}/opencode` so a phone never hands the session to the
-    //    system browser. The UI origin's own policy answers the other half of
-    //    that pair — its `frame-ancestors` names this origin alone — so each
-    //    side states the relationship and neither is taken on trust.
-    let opencode_origin = state.cfg.ui.opencode_origin().expect("validated UI origin");
+    // The one origin this interface is allowed to frame: the node's own
+    // document preview listener, which is sandboxed untrusted HTML.
     let security_headers = OperatorSecurityHeaders {
         csp: format!(
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
              img-src 'self' data: https:; connect-src 'self'; \
-             frame-src {preview_origin} {opencode_origin}; \
+             frame-src {preview_origin}; \
              object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
         )
         .parse()
@@ -106,7 +97,6 @@ pub fn router(state: AppState) -> Router {
                 .put(api::put_config)
                 .patch(config_api::patch_config),
         )
-        .route("/api/model-catalogue", get(api::get_model_catalogue))
         // The launch manifest: what an operator customizes a channel's
         // sessions with. Reading it is an ordinary operator read; every write
         // puts code where a harness will run it, so each is an admin action,
@@ -385,40 +375,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/resume", post(api::resume))
         .route("/api/sessions/{id}/budget", post(api::set_budget))
         .route("/api/sessions/{id}/stop", post(api::stop))
-        .route("/api/sessions/{id}/state", get(api::session_state))
-        .route("/api/sessions/{id}/state/backup", post(api::backup_state))
-        .route("/api/sessions/{id}/state/upgrade", post(api::upgrade_state))
-        .route("/api/sessions/{id}/state/restore", post(api::restore_state))
         .route(
             "/api/sessions/{id}/draft",
             get(api::get_draft).put(api::put_draft),
         )
-        // The harness's own API, mediated per session. On the operator router
-        // deliberately: the same cookie, Origin and Host checks as every other
-        // operator route answer first, and the harness credential is injected
-        // on the node so the browser never holds it.
-        // The terminal's WebSocket, ahead of the catch-all because an upgrade
-        // has to be taken from the request before its body is, and the
-        // catch-all buffers the body. It re-asks everything the catch-all
-        // would have: the route table, the session, the capability — and then
-        // the ticket and the origin only an upgrade needs.
-        .route(
-            "/api/opencode/{session_id}/pty/{pty_id}/connect",
-            get(crate::gateway::pty::connect),
-        )
-        .route(
-            "/api/opencode/{session_id}/api/pty/{pty_id}/connect",
-            get(crate::gateway::pty::connect),
-        )
-        .route(
-            "/api/opencode/{session_id}/{*rest}",
-            axum::routing::any(crate::gateway::opencode::handle),
-        )
-        // "Open in OpenCode": a single-use, 60-second capability for the
-        // native UI's own origin. Minted here, behind the operator guard,
-        // because only an operator may open one — and spent there, where no
-        // operator credential is valid at all (`http::ui`).
-        .route("/api/sessions/{id}/opencode-boot", post(ui::open))
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
         .route("/api/approvals/{id}", get(api::get_approval))
         .route("/api/approvals/{id}/release", post(api::release_approval))
@@ -660,13 +620,16 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // Serving does not need them archived — nothing relaunches a session on
     // startup — but until they are, the ones that never ended read as running
     // and hold up anything that waits for the node to be idle.
-    match store.unarchived_legacy_sessions(crate::adapter::RETIRED) {
-        Ok(0) => {}
-        Ok(sessions) => tracing::warn!(
-            sessions,
-            "sessions of the retired `omp` harness are not archived; `tracon session archive-legacy` puts them away read-only"
-        ),
-        Err(e) => tracing::warn!(error = %e, "could not count the retired harness's sessions"),
+    for harness in crate::adapter::RETIRED {
+        match store.unarchived_legacy_sessions(harness) {
+            Ok(0) => {}
+            Ok(sessions) => tracing::warn!(
+                sessions,
+                harness,
+                "sessions of a retired harness are not archived; `tracon session archive-legacy` puts them away read-only"
+            ),
+            Err(e) => tracing::warn!(error = %e, harness, "could not count a retired harness's sessions"),
+        }
     }
     let bus = Bus::new();
     let adapter: Arc<dyn HarnessAdapter> = crate::adapter::adapter_for(&cfg)?;
@@ -821,9 +784,6 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     };
     if let Some(m) = &state.mesh {
         m.set_executor(Arc::new(state.clone()));
-        // The same state answers owner streams, so a remote operator's call
-        // runs through the very handler a local one reaches.
-        m.streams().set_executor(Arc::new(state.clone()));
     }
     // External candidates' checks a restart interrupted, and the reviewers
     // that were waiting on them.
@@ -885,13 +845,6 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         state.manager.set_providers(providers.clone());
         tokio::spawn(providers.refresh_loop());
     }
-    // The OpenCode model catalogue this node's own `default_models` tier 1
-    // draws on. The disk cache is read synchronously on first use — this
-    // spawn only starts the periodic refetch, so a node that has never
-    // reached the network yet still starts on whatever is cached or the
-    // hardcoded fallback tier.
-    tokio::spawn(crate::models_catalogue::refresh_loop(cfg.clone()));
-
     // The harness listener is separate from the operator's: it carries only the
     // MCP surface, and the gateway forwards to it from the internal network.
     // Where no gateway container carries the allowlist proxy, the node does.
@@ -975,19 +928,6 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             tracing::error!(%error, "HTML preview listener stopped");
         }
     });
-
-    // OpenCode's native interface, on an origin of its own: tracon serves the
-    // pinned bundle and answers its API calls through the mediated gateway, so
-    // the harness's own catch-all — and its fallback to `app.opencode.ai` —
-    // is never reached (finding 3).
-    {
-        let ui_state = state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = ui::serve(ui_state, listen).await {
-                tracing::error!(%error, "OpenCode UI listener stopped");
-            }
-        });
-    }
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

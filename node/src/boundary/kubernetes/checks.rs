@@ -28,12 +28,12 @@ pub const HARNESS_POLICY: &str = "tracon-harness";
 /// harness pods on the egress port.
 pub const NODE_POLICY: &str = "tracon-node";
 
-/// Whether the harness policy's ingress admits the node's pod and nothing
-/// else. The OpenCode adapter drives its harness over HTTP on a port the node
-/// picks per launch, so the node pod must reach the harness pod — the one
-/// direction the runner documents — while any other peer (another pod, a
-/// namespace, an address block, or a rule with no `from` at all, which admits
-/// everyone) is refused. No rules at all is the tightest shape and still holds.
+/// Whether the harness policy's ingress admits nothing but the node's pod.
+/// Every harness is driven over its attached stdio, so no rules at all is the
+/// shape shipped; a rule from the node pod, which deployments written when a
+/// harness was driven over HTTP still carry, is accepted. Any other peer
+/// (another pod, a namespace, an address block, or a rule with no `from` at
+/// all, which admits everyone) is refused.
 fn ingress_only_from_node(
     rules: &[k8s_openapi::api::networking::v1::NetworkPolicyIngressRule],
 ) -> Result<(), String> {
@@ -854,7 +854,8 @@ mod tests {
         }
     }
 
-    /// The node must reach an OpenCode harness's server; nothing else may.
+    /// Nothing reaches a harness pod but, in a policy written when a harness
+    /// was driven over HTTP, the node pod.
     #[test]
     fn harness_ingress_admits_the_node_pod_and_nothing_else() {
         assert!(ingress_only_from_node(&[]).is_ok());

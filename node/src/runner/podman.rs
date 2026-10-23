@@ -63,20 +63,6 @@ impl RunSpec {
     /// The argv for `podman run`, minus the trailing command. `detached_probe`
     /// creates the container without starting it, for inspection.
     pub fn podman_args(&self, name: &str, cmd: &RunnerCommand, create_only: bool) -> Vec<String> {
-        self.podman_args_publishing(name, cmd, create_only, None)
-    }
-
-    /// As `podman_args`, publishing the command's exposed port at
-    /// `127.0.0.1:<host_port>`. The bind address is not configurable on
-    /// purpose: a harness server is reachable by this node and by nothing
-    /// else on the network, whatever the container's own network is.
-    pub fn podman_args_publishing(
-        &self,
-        name: &str,
-        cmd: &RunnerCommand,
-        create_only: bool,
-        host_port: Option<u16>,
-    ) -> Vec<String> {
         let proxy = format!("http://{}:{}", self.gateway_host, self.proxy_port);
         let mut a: Vec<String> = vec![
             if create_only { "create" } else { "run" }.into(),
@@ -92,12 +78,10 @@ impl RunSpec {
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
             // A real init as PID 1 of the container's own PID namespace, with
-            // the harness as its child. OpenCode's `serve` installs no signal
-            // handlers and its LSP children are spawned without `detached`, so
-            // nothing upstream reaps them (`config-state.md` §6.7): the
-            // namespace is what does, and the init is what keeps a
-            // double-forked formatter from being reparented to something
-            // outside it in the meantime.
+            // the harness as its child. A harness that installs no signal
+            // handlers and spawns children it never reaps leaves them to the
+            // namespace, and the init is what keeps a double-forked one from
+            // being reparented to something outside it in the meantime.
             "--init".into(),
             // A stop is a SIGTERM to that init and a bounded wait, not an
             // immediate SIGKILL: a harness that can flush gets the chance,
@@ -116,14 +100,9 @@ impl RunSpec {
             a.push("--security-opt".into());
             a.push("label=disable".into());
         }
-        if let (Some(container_port), Some(host_port)) = (cmd.expose, host_port) {
-            a.push("--publish".into());
-            a.push(format!("127.0.0.1:{host_port}:{container_port}"));
-        }
         // The state dir is explicit even though the image sets it: the mount
         // target and the harness's idea of its state directory must agree. A
-        // harness that names no such variable (OpenCode decides by HOME and
-        // XDG, which its adapter sets) gets none invented for it.
+        // harness that names no such variable gets none invented for it.
         let state = format!("{}/{}", self.home, self.state_dir);
         let direct = super::no_proxy(&self.gateway_host);
         for (k, v) in [
@@ -331,17 +310,8 @@ impl Runner for PodmanRunner {
         } else {
             cmd.name.clone()
         };
-        // A harness driven over HTTP gets its port published to this host's
-        // loopback and nowhere else. The port is picked here rather than in
-        // the adapter because it is the host's, not the container's.
-        let host_port = match cmd.expose {
-            Some(_) => Some(super::free_loopback_port()?),
-            None => None,
-        };
         let secrets = secret_env_for(&cmd)?;
-        let args = self
-            .spec
-            .podman_args_publishing(&name, &cmd, false, host_port);
+        let args = self.spec.podman_args(&name, &cmd, false);
         tracing::debug!(container = %name, "podman run");
         let child = self
             .podman()?
@@ -352,7 +322,7 @@ impl Runner for PodmanRunner {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        Ok(Spawned::from_child(child)?.at(host_port.map(|port| format!("127.0.0.1:{port}"))))
+        Spawned::from_child(child)
     }
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
@@ -556,7 +526,7 @@ mod tests {
         let args = spec().podman_args(
             "tracon-h-1",
             &RunnerCommand {
-                argv: vec!["opencode".into(), "serve".into()],
+                argv: vec!["claude".into(), "-p".into()],
                 ..Default::default()
             },
             false,
@@ -578,11 +548,13 @@ mod tests {
                 "{joined}"
             );
         }
-        // OpenCode names no state-directory variable, so the runner sets
-        // none rather than inventing one; where it keeps things is decided by
-        // the HOME and XDG values its adapter passes per session.
-        assert!(!joined.contains("STATE_DIR="));
-        assert!(joined.ends_with("localhost/tracon-harness-opencode opencode serve"));
+        // The state directory is named in the variable the harness reads, so
+        // the mount and the harness agree on where it is.
+        assert!(
+            joined.contains("CLAUDE_CONFIG_DIR=/root/.claude"),
+            "{joined}"
+        );
+        assert!(joined.ends_with("localhost/tracon-harness-claude claude -p"));
         // No SELinux flag unless the host needs it.
         assert!(!joined.contains("label=disable"));
         // Nothing is mounted at /work here, so the image's WORKDIR is used.
@@ -625,7 +597,7 @@ mod tests {
         assert!(line.contains("HTTP_PROXY=http://tracon-gw:8888"), "{line}");
         assert!(line.contains("-e npm_config_cache=/cache/npm"));
         // The image and the command still come last.
-        assert!(line.ends_with("localhost/tracon-harness-opencode sh -c npm ci"));
+        assert!(line.ends_with("localhost/tracon-harness-claude sh -c npm ci"));
 
         let env = secret_env_for(&cmd).unwrap();
         assert!(env.contains(&("NPM_TOKEN".to_string(), token.to_string())));

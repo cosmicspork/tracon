@@ -9,8 +9,6 @@
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
-  import { desktopCanOpenOpencode, openOpencodeWindow } from '../lib/desktop-opencode'
-  import { opencodeShellPath } from '../lib/opencode'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
   import { errorText, isNotFound } from '../lib/load'
@@ -29,7 +27,6 @@
     type SessionExhaustion,
     type SessionUsage,
     type ShownWork as ShownWorkItem,
-    type ToolchainStatus,
   } from '../lib/types'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
@@ -43,7 +40,6 @@
   let error = $state<string | null>(null)
   let usage = $state<SessionUsage | null>(null)
   let ceiling = $state<CeilingInfo | null>(null)
-  let toolchain = $state<ToolchainStatus | null>(null)
   let exhaustion = $state<SessionExhaustion | null>(null)
   const exhausted = $derived(exhaustionNote(exhaustion))
   // The box's timing rules live in lib/draft; the component only holds the text.
@@ -79,40 +75,11 @@
     questions = result.questions
     usage = result.usage
     ceiling = result.ceiling
-    toolchain = result.toolchain
     exhaustion = result.exhaustion ?? null
     shownWork = result.shown_work ?? []
     publications = result.publications ?? []
   }
 
-  /** What the header says about the baked language toolchain. Nothing at all
-   *  for a harness that has none; otherwise the languages this session could
-   *  actually get a server for, and — loudly — the ones it was promised and
-   *  the image did not have. */
-  const toolchainNote = $derived.by(() => {
-    if (!toolchain) return null
-    const named = toolchain.tools.filter((t) => t.state !== 'disabled')
-    if (named.length === 0) return null
-    const missing = named.filter((t) => t.state === 'unavailable')
-    const text = missing.length
-      ? `lsp/fmt · ${missing.length} missing`
-      : `lsp/fmt · ${named.length} ready`
-    return {
-      text,
-      warn: missing.length > 0,
-      title: named
-        .map(
-          (t) =>
-            `${t.kind} ${t.id} ${t.version} ${t.state} (${t.interpreter ? `${t.interpreter} ` : ''}${t.path})`,
-        )
-        .concat(
-          toolchain.image_revision === toolchain.revision
-            ? []
-            : [`image toolchain revision ${toolchain.image_revision ?? 'none'}, node expects ${toolchain.revision}`],
-        )
-        .join('\n'),
-    }
-  })
   const unreachable = $derived(session ? unreachableReason(store.nodes, store.mesh, session.node_id) : null)
 
   $effect(() => {
@@ -310,31 +277,6 @@
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
   // returns; the box stays open and says so.
-  // OpenCode's own interface has two ways in, and which one is offered is a
-  // fact about the client rather than a preference: the desktop app opens a
-  // second window holding none of this one's privileges, and a browser —
-  // installed or not — stays inside the app's own scope. A new tab is never
-  // the answer on a phone: leaving the installed app for Safari or Chrome is
-  // exactly the handover the shell route exists to avoid. Either way it is
-  // this session's own harness, so it is offered for an OpenCode session
-  // running on this machine and nowhere else.
-  const opencodeHere = $derived(session?.harness_id === 'opencode' && !remote)
-  const canOpenOpencode = $derived(desktopCanOpenOpencode() && opencodeHere)
-  const canFrameOpencode = $derived(!desktopCanOpenOpencode() && opencodeHere)
-  let openingOpencode = $state(false)
-  async function openOpencode() {
-    openingOpencode = true
-    error = null
-    try {
-      await openOpencodeWindow(id)
-    } catch (err) {
-      // A Tauri command rejects with the sentence the wrapper wrote.
-      error = err instanceof Error ? err.message : String(err)
-    } finally {
-      openingOpencode = false
-    }
-  }
-
   // A turn or the checks running: the node holds a prompt for the agent
   // rather than refusing it.
   const composer = $derived(composerState(inputReason, busy || session?.state === 'waiting_on_check'))
@@ -365,11 +307,6 @@
         title="the harness this session ran, and the protocol it negotiated (pinned {session.harness_version})"
         >{session.harness_agent ?? session.harness_id} {session.harness_found} ·
         {session.harness_protocol}</span
-      >
-    {/if}
-    {#if toolchainNote}
-      <span class="mono" class:unsure={toolchainNote.warn} title={toolchainNote.title}
-        >{toolchainNote.text}</span
       >
     {/if}
     {#if session.harness_id !== 'external'}
@@ -411,28 +348,12 @@
     {#if session.manifest_digest}
       <span
         class="mono"
-        title="the launch manifest this session was staged from — its skills, instructions, agents and approved plugins. A later revision is for the next session, not this one."
+        title="the launch manifest this session was staged from — its skills, instructions and agents. A later revision is for the next session, not this one."
         >manifest {session.manifest_digest.slice(0, 8)}</span
       >
     {/if}
     {#if session.work_item_id}
       <a class="mono" href="/tasks/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
-    {/if}
-    {#if canOpenOpencode}
-      <button
-        class="lnk"
-        onclick={() => void openOpencode()}
-        disabled={openingOpencode}
-        title="OpenCode's own interface, in a window that can reach nothing but that interface"
-        >OpenCode</button
-      >
-    {:else if canFrameOpencode}
-      <a
-        class="lnk"
-        href={opencodeShellPath(id)}
-        title="OpenCode's own interface, framed here from its own origin — the installed app keeps it"
-        >OpenCode</a
-      >
     {/if}
     {#if controls?.resume}
       <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
@@ -463,7 +384,7 @@
       node no longer has
       <b
         >· readable, never launchable again · its workspace is kept; carry the work forward with
-        <code>tracon session reopen {session.id} --harness opencode</code></b
+        <code>tracon session reopen {session.id} --harness claude</code></b
       >
     </div>
   {/if}

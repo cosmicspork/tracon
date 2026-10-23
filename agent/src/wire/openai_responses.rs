@@ -54,8 +54,8 @@ impl Client {
         })
     }
 
-    /// No `max_output_tokens`: the Codex backend refuses it, as OpenCode's
-    /// Codex plugin found, so an answer is bounded only by the model.
+    /// No `max_output_tokens`: the Codex backend refuses it, so an answer is
+    /// bounded only by the model.
     pub fn body(&self, conv: &Conversation, tools: &[Value]) -> Value {
         let mut reasoning = Map::new();
         if let Some(effort) = &self.sampling.reasoning_effort {

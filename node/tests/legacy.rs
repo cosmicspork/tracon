@@ -1,7 +1,8 @@
 //! Retiring a harness without losing what it did.
 //!
-//! The OpenCode cutover removed the omp adapter, and a node that had run it
-//! still holds its sessions. They are archived read-only rather than deleted —
+//! The OpenCode cutover removed the omp adapter, and tracon-agent's arrival
+//! removed OpenCode's; a node that had run either still holds its sessions.
+//! They are archived read-only rather than deleted —
 //! harness identity, transcript, evidence and workspace all kept — and the way
 //! to carry one forward is a new session, never a relaunch of a harness that
 //! is gone.
@@ -199,7 +200,10 @@ async fn archiving_the_retired_harness_keeps_the_sessions_and_ends_them() {
         .insert_session(&session_row("legacy-2", "omp", "waiting_on_you"))
         .unwrap();
     h.store
-        .insert_session(&session_row("current", "opencode", "running"))
+        .insert_session(&session_row("legacy-3", "opencode", "closed"))
+        .unwrap();
+    h.store
+        .insert_session(&session_row("current", "claude", "running"))
         .unwrap();
     h.store
         .insert_permission(&pending_approval("p1", "legacy-2"))
@@ -207,12 +211,16 @@ async fn archiving_the_retired_harness_keeps_the_sessions_and_ends_them() {
 
     let (status, body) = h.post("/api/sessions/archive-legacy", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["harness"], "omp");
-    assert_eq!(body["archived"], 2);
+    assert_eq!(body["harness"], "omp, opencode");
+    assert_eq!(body["archived"], 3);
     assert_eq!(body["approvals_closed"], 1);
     assert_eq!(
         body["workspaces_retained"],
-        json!(["/state/workspaces/legacy-1", "/state/workspaces/legacy-2"]),
+        json!([
+            "/state/workspaces/legacy-1",
+            "/state/workspaces/legacy-2",
+            "/state/workspaces/legacy-3"
+        ]),
         "workspaces are retained, and the operator is told where they are"
     );
 
@@ -270,7 +278,7 @@ async fn a_supported_harness_cannot_be_archived_as_legacy() {
     let (status, body) = h
         .post(
             "/api/sessions/archive-legacy",
-            Some(json!({ "harness": "opencode" })),
+            Some(json!({ "harness": "claude" })),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -320,8 +328,8 @@ async fn a_legacy_session_refuses_to_be_put_back_to_work() {
 async fn reopening_makes_a_new_session_with_the_workspace_and_the_lineage() {
     state::isolate();
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
-        Arc::new(tracon::adapter::opencode::OpenCodeAdapter::new(
-            tracon::adapter::opencode::OpenCodeAdapter::PINNED_VERSION,
+        Arc::new(tracon::adapter::claude::ClaudeAdapter::new(
+            tracon::adapter::claude::ClaudeAdapter::PINNED_VERSION,
         ));
     let h = Harness::new(adapter).await;
     h.store
@@ -332,13 +340,13 @@ async fn reopening_makes_a_new_session_with_the_workspace_and_the_lineage() {
     let (status, row) = h
         .post(
             "/api/sessions/legacy-1/reopen",
-            Some(json!({ "harness": "opencode" })),
+            Some(json!({ "harness": "claude" })),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{row}");
     let new_id = row["id"].as_str().unwrap().to_string();
     assert_ne!(new_id, "legacy-1", "the legacy id is never reused");
-    assert_eq!(row["harness_id"], "opencode");
+    assert_eq!(row["harness_id"], "claude");
     assert_eq!(row["parent_session"], "legacy-1");
     assert_eq!(row["continued_from"], "legacy-1");
     // The retained workspace and the branch it left off on.
@@ -373,8 +381,8 @@ async fn reopening_makes_a_new_session_with_the_workspace_and_the_lineage() {
 async fn reopening_a_session_seeded_from_a_checkout_resumes_its_own_workspace() {
     state::isolate();
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
-        Arc::new(tracon::adapter::opencode::OpenCodeAdapter::new(
-            tracon::adapter::opencode::OpenCodeAdapter::PINNED_VERSION,
+        Arc::new(tracon::adapter::claude::ClaudeAdapter::new(
+            tracon::adapter::claude::ClaudeAdapter::PINNED_VERSION,
         ));
     let h = Harness::new(adapter).await;
     let mut row = session_row("legacy-2", "omp", "closed");
@@ -385,7 +393,7 @@ async fn reopening_a_session_seeded_from_a_checkout_resumes_its_own_workspace() 
     let (status, row) = h
         .post(
             "/api/sessions/legacy-2/reopen",
-            Some(json!({ "harness": "opencode" })),
+            Some(json!({ "harness": "claude" })),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{row}");
@@ -400,8 +408,8 @@ async fn reopening_a_session_seeded_from_a_checkout_resumes_its_own_workspace() 
 async fn reopening_names_either_harness_and_refuses_an_unknown_one() {
     state::isolate();
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> =
-        Arc::new(tracon::adapter::opencode::OpenCodeAdapter::new(
-            tracon::adapter::opencode::OpenCodeAdapter::PINNED_VERSION,
+        Arc::new(tracon::adapter::claude::ClaudeAdapter::new(
+            tracon::adapter::claude::ClaudeAdapter::PINNED_VERSION,
         ));
     let h = Harness::new(adapter).await;
     h.store
@@ -409,15 +417,16 @@ async fn reopening_names_either_harness_and_refuses_an_unknown_one() {
         .unwrap();
     h.post("/api/sessions/archive-legacy", None).await;
 
-    // The node's default is OpenCode; the other harness is still a valid name.
+    // The node's default is Claude Code; the other harness is still a valid
+    // name.
     let (status, row) = h
         .post(
             "/api/sessions/legacy-1/reopen",
-            Some(json!({ "harness": "claude" })),
+            Some(json!({ "harness": "native" })),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{row}");
-    assert_eq!(row["harness_id"], "claude");
+    assert_eq!(row["harness_id"], "native");
 
     // And a harness that does not exist at all is refused by name.
     let (status, body) = h
@@ -438,7 +447,7 @@ async fn reopening_names_either_harness_and_refuses_an_unknown_one() {
 #[test]
 fn a_node_configured_for_the_retired_harness_refuses_to_start() {
     let mut cfg = Config::default();
-    cfg.harness.id = "omp".into();
+    cfg.harness.id = "opencode".into();
     let error = match tracon::adapter::adapter_for(&cfg) {
         Ok(_) => panic!("the retired harness must not resolve to an adapter"),
         Err(error) => error.to_string(),

@@ -19,16 +19,15 @@ working; memory is opt-in and waits for your yes before it is kept. A plain prom
 against a repository uses none of them. The goal is useful work completed with
 fewer interruptions, not the largest number of agents running.
 
-The node supervises harnesses — Claude Code, OpenCode, and `tracon-agent`, tracon's own
-harness for models that are not Claude — rather than running a model loop itself.
-Managed agents work in isolated workspaces; credentials stay with the node, which
-decides what it will do on their behalf. Inside that boundary an agent edits, builds and
-runs its tests unasked; what would leave it — network access the repository did not
-open, a credential, a publication — is the node's to decide or to ask you about.
-Proposed publication comes with a diff and revision-bound evidence, not just an agent's
-assurance that it finished. External harnesses can use the broker too, with a
-deliberately narrower guarantee: they never need its credentials, but do not gain its
-isolation.
+The node supervises harnesses — Claude Code, and `tracon-agent`, tracon's own harness
+for models that are not Claude — rather than running a model loop itself. Managed agents
+work in isolated workspaces; credentials stay with the node, which decides what it will
+do on their behalf. Inside that boundary an agent edits, builds and runs its tests
+unasked; what would leave it — network access the repository did not open, a credential,
+a publication — is the node's to decide or to ask you about. Proposed publication comes
+with a diff and revision-bound evidence, not just an agent's assurance that it finished.
+External harnesses can use the broker too, with a deliberately narrower guarantee: they
+never need its credentials, but do not gain its isolation.
 
 Your work should outlive the tool. Workspaces outlive sessions, documents can be
 exported, and candidate packages carry their files and evidence outside the node.
@@ -47,49 +46,31 @@ A single node works without a hub. Optionally, nodes dial out to a small hub tha
 relays end-to-end-encrypted frames so one interface can reach work on other nodes.
 Laptops, servers, and Kubernetes pods run the same binary.
 
-**What it is not.** Not a coding agent — the node drives Claude Code over stream-json,
-OpenCode over its server API and `tracon-agent` over ACP, and contains no model loop;
-the one tracon ships runs in its own binary inside the boundary, like any other
-harness's. Not multi-user — one operator holds the keys.
-Not an IDE — the diff is the unit of review, and there is deliberately no file tree
-and no editor of its own.
+**What it is not.** Not a coding agent — the node drives Claude Code over stream-json
+and `tracon-agent` over ACP, and contains no model loop; the one tracon ships runs in its
+own binary inside the boundary, like any other harness's. Not multi-user — one operator
+holds the keys. Not an IDE — the diff is the unit of review, and there is deliberately no
+file tree and no editor of its own.
 
-**The harnesses.** Two are supported behind one adapter trait, and a third, tracon's
-own, is experimental and opt-in. `tracon setup` builds an image for each, and a session's
-harness follows the credential its model spends: an Anthropic subscription runs on
-Claude Code only (through any other client Anthropic bills it as extra usage),
-ChatGPT/Codex and every other provider on OpenCode or, where a node turns it on, on
-`tracon-agent`, and an Anthropic API key on Claude Code or OpenCode, where `[harness] id`
-breaks the tie. A session may name its harness, and naming one its credential cannot run on is refused with the reason. The
-picker tags each model with the harness it runs on; for a model either runs, the
-composer's Adjust panel offers a Harness field, and Settings lists each harness's
-version and image. **Claude Code**, over the stream-json control
-protocol, is the harness daily work runs on today: it reaches the node's tools, its
-permission asks come to the node, and it has no native UI of its own. **OpenCode** is
-driven through its native server API — one isolated `opencode serve` per session,
-every route decided by the node's own gateway, every tool call asked for rather than
-saved as a standing grant, and the session's events synthesised by the node — and is
-*experimental* for now: the node drives its v1 session routes, the ones that offer the
-model the node's MCP tools (its v2 runner offers none), and a real session has yet to
-run that way; the
-[live checklist](docs/ROADMAP.md#live-proofs-still-the-operators) says so.
-OpenCode's native web UI is an *optional advanced view* on a session tracon is
-already supervising — a second, unprivileged window on the desktop, a framed route
-inside the installed app on a phone — never the way tracon itself is used, and a node
-without the bundle simply does not offer it. A terminal comes with that view as a
-capability you grant to one session and one workspace: default-denied, revocable, and
-never a general shell on the node. The advanced view, the terminal, and streaming
-either to another node are OpenCode-only. **`tracon-agent`** (`agent/`) is a separate
-binary in the boundary, in the same trust position as `claude`, for local llama.cpp
-models over Chat Completions and the Codex subscription over the Responses API: six
-tools with hash-anchored edits, a journal that lets the node restart a dead process and
-carry its session on, compaction, and subagents that run together. It is experimental
-until it has done a week of real work; [agent/README.md](agent/README.md) says how to turn
-it on. Subscription sign-in does not run in any harness: the node speaks the Anthropic and
-ChatGPT OAuth flows itself.
+**The harnesses.** Two, behind one adapter trait, and a session's harness follows the
+credential its model spends: an Anthropic credential runs on Claude Code (through any
+other client Anthropic bills a subscription as extra usage), and ChatGPT/Codex and every
+other provider on `tracon-agent`. `tracon setup` builds an image for each. A session may
+name its harness, and naming one its credential cannot run on is refused with the reason.
+The picker tags each model with the harness it runs on, and Settings lists each harness's
+version and image. **Claude Code**, over the stream-json control protocol, is the harness
+daily work runs on today: it reaches the node's tools, its permission asks come to the
+node, and it has no native UI of its own. **`tracon-agent`** (`agent/`) is tracon's own,
+a separate binary in the boundary in the same trust position as `claude`, for local
+llama.cpp models over Chat Completions and the Codex subscription over the Responses API:
+six tools with hash-anchored edits, every call asked of the node, a journal that lets the
+node restart a dead process and carry its session on, compaction, and subagents that run
+together. It is experimental until it has done a week of real work;
+[agent/README.md](agent/README.md) has the details. Subscription sign-in does not run in
+any harness: the node speaks the Anthropic and ChatGPT OAuth flows itself.
 
 **The supported configuration** is the desktop app on macOS or Linux, rootless Podman,
-Claude Code, one node. Everything described below beyond that — the Kubernetes runtime,
+Claude Code, one node. Everything described below beyond that — `tracon-agent`, the Kubernetes runtime,
 the hub and mesh, the installed phone app, handoff between nodes — is built and tested
 but experimental until that configuration is boring; the
 [roadmap](docs/ROADMAP.md#the-supported-configuration) says why.
@@ -115,11 +96,7 @@ the agent runs inside; on a Mac that is `brew install podman`, then
 `podman machine init` once — and then, with one button, installs the `tracon`
 command in `~/.local/bin` and a user service (launchd, or systemd --user) that runs
 the node whether or not the app is open. From then on the window is the node's own
-interface. An OpenCode session can also open that harness's own interface, in a
-second window that holds none of the first one's privileges: it is granted no IPC
-at all, it can navigate only to the node's OpenCode UI origin, a link off that
-origin opens in your browser instead, and the boot token that gets it in travels
-in the URL fragment, which no request carries.
+interface.
 
 The app keeps itself and the node current. It checks GitHub Releases at launch and
 replaces itself from Settings or the tray only after a verifier it carries has
@@ -284,16 +261,6 @@ Any ingress or reverse proxy that terminates TLS works the same way; `localhost`
 counts as secure, which is why the laptop needed no ceremony. Issuing a token again
 rotates it and logs every client out. `tracon auth revoke` returns the node to
 loopback-only.
-
-An OpenCode session's own interface opens on the phone too, at
-`/sessions/{id}/opencode` — inside the installed app, not handed off to Safari or
-Chrome. It is the node's separate OpenCode origin in a frame, so the page you are
-holding lends it nothing: no cookie of yours, no DOM, no command. The capability that
-gets it in is single-use, lives in the URL fragment, and reaches only that frame; the
-cookie it becomes is partitioned to this app, so it works with third-party cookies
-blocked and exists nowhere else. Put the phone down and come back and the shell
-re-checks the session before it trusts what is on the screen: a session that ended
-says so, and an expired capability offers a fresh one.
 
 ### Start on the phone, pick it up on the laptop
 
@@ -511,7 +478,7 @@ writes the entry only when you allow it, and a proposal never opens the reposito
 egress to its sessions. Hosts you opened to the session while it tried are suggested in
 `egress`.
 
-A session runs in that image too, with Claude Code or OpenCode. The node copies the
+A session runs in that image too, with Claude Code or `tracon-agent`. The node copies the
 harness onto the repository's image as one more layer, proves it runs there, and launches
 the session in the result, so the agent has the compiler, the test runner and the formatter its checks
 will be run with instead of the bare harness image. The session's start line says which
@@ -526,31 +493,24 @@ cache, and no check reads it. Two sessions on one repository share it, so a seco
 `cargo build` waits for the first's lock. The layer is root, like every run here, so a tool the Dockerfile installed under
 another user's home has to be readable and executable by others.
 
-OpenCode brings more than its binary: the layer copies `/opt/tracon` too, with the language
-servers and formatters the node configures, the `rg` OpenCode searches with, and a Node of
-its own at `/opt/tracon/bin/node` for the JavaScript ones. That Node is on no `PATH`, so
-`node`, `npm` and `npx` in the agent's shell are still the repository's. A language server
-the image cannot run (the baked Node needs glibc and `libstdc++`) shows as `unavailable` in
-the session header and the session runs without it.
-
 Either harness reads its configuration from the node and nowhere else, so its layer
 deletes what the harness would otherwise read from the image, and refuses an image that
 would configure the harness, or change what it loads, underneath the node.
 
 - **Both layers** refuse an image with a non-empty `/etc/ld.so.preload`, one whose
-  environment sets a `BUN_*` variable, `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH`, and
-  one where `/usr`, `/usr/local`, `/usr/local/bin`, `/usr/libexec` or
-  `/usr/libexec/tracon` is a symbolic link.
-- **OpenCode's layer** deletes `/etc/opencode`, refuses any `OPENCODE_*` variable, and
-  refuses a symbolic link at `/opt` too.
+  environment sets `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH`, and one where `/usr`,
+  `/usr/local`, `/usr/local/bin`, `/usr/libexec` or `/usr/libexec/tracon` is a symbolic
+  link.
+- **`tracon-agent`'s layer** refuses any `TRACON_AGENT_*` variable, which would steer the
+  endpoint or key it reads.
 - **Claude Code's layer** deletes `/etc/claude-code` (its managed settings, which outrank
   everything the node passes) and any `.claude` or `.claude.json` in the harness's home. It
-  refuses any `CLAUDE_*` or `ANTHROPIC_*` variable and `NODE_OPTIONS`, except the three a
+  refuses any `CLAUDE_*`, `ANTHROPIC_*` or `BUN_*` variable and `NODE_OPTIONS`, except the three a
   session always sets for itself: `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL` and
   `ANTHROPIC_API_KEY`.
 
 The session's note names what was found, and the session runs in the harness image. This
-is by design even where the value is harmless (a devcontainer that sets `OPENCODE_THEME` or
+is by design even where the value is harmless (a devcontainer that sets
 `NODE_OPTIONS=--max-old-space-size=4096` for its own user, or `LD_LIBRARY_PATH` for a
 toolkit): unset it in the image, or move it into the tool's own wrapper or the repository's
 `prepare` and `checks` commands. These checks catch an image that would change the harness
@@ -586,8 +546,8 @@ credentials that are the session's own, so "add this dependency and run the test
 ordinary task: `cargo add`, `bun add`, `composer require` work, and a host the entry does
 not name is refused. It is opt-in because a session is long-lived and runs what a model
 decides: a host that accepts uploads accepts them from it, and the `github` and
-`packagist` presets both carry `api.github.com`. This holds for Claude Code and OpenCode
-sessions alike: the grant replaces the harness proxy for the harness and everything its
+`packagist` presets both carry `api.github.com`. This holds for Claude Code and
+`tracon-agent` sessions alike: the grant replaces the harness proxy for the harness and everything its
 shell runs, while the model and the node's tools stay on the gateway, which no proxy
 sits in front of.
 
@@ -1063,7 +1023,7 @@ and revoked the moment the hub loses that key.
 | **hub** | The always-on relay nodes dial out to. Sees ciphertext only. |
 | **mesh** | The nodes enrolled against one hub, under one operator. |
 | **channel** | A context (`personal`, `work`) that is also an encryption key. Bindings hang policy off it. |
-| **harness** | The coding agent a node runs — OpenCode or Claude Code — inside the boundary. |
+| **harness** | The coding agent a node runs — Claude Code or `tracon-agent` — inside the boundary. |
 | **boundary** | The container/network setup that makes the harness's isolation real, proven at startup. |
 | **broker** | The sealed credential store. Agents get tools that use credentials, never the credentials. |
 | **work item / ledger** | The replicated to-do list, optional per session. A session that names one runs one phase of it. |
@@ -1080,7 +1040,7 @@ and revoked the moment the hub loses that key.
 | | |
 |---|---|
 | `tracon serve [--listen]` | run the node |
-| `tracon setup [--rebuild] [--ui-bundle <tarball>]`, `check-boundary [--deep]` | the boundary, and OpenCode's UI bundle — fetched from the release, or installed from a file offline (also on the Settings screen) |
+| `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary: the network, the gateway and the harness images |
 | `tracon service install\|uninstall\|status\|restart` | the platform supervisor (the desktop app runs these for you) |
 | `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
 | `tracon external show\|detach\|stop\|clear <channel>` | a harness you run yourself, using this node's tools |
@@ -1090,7 +1050,6 @@ and revoked the moment the hub loses that key.
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
 | `tracon doc import\|ls\|get\|put\|rm\|export\|reindex` | Markdown documents, and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
-| `tracon session state\|backup [--quiesce]\|upgrade-state --to\|restore` | a session's own harness state: what it is, verified copies of it, a migration on a clone, and putting one back |
 | `tracon session archive-legacy\|reopen --harness` | put sessions from a retired harness away read-only, and carry one forward onto a supported one |
 | `tracon session continue <id>` | carry on a session a node restart cut off, on its workspace and harness (also the session's **Continue** button) |
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
@@ -1119,7 +1078,7 @@ with who made it and which keys it changed, and pushed to your subscribed device
 Keys that name a program the node runs (`podman`, `gh`, `glab`, `git`, `[consulta]`, the
 builder's `buildctl`) or a file or directory it reads, sends on or writes
 (`embed.api_key_file`, the builder's certificate, registry and token paths,
-`docs.export_dir`, `ui.opencode_bundle_dir`, `worktree_root`, `repo_roots`,
+`docs.export_dir`, `worktree_root`, `repo_roots`,
 `state_mount`) are held to a path guard, so neither an agent nor a stolen session can
 point one at something an agent wrote or at a secret. In short:
 
@@ -1137,8 +1096,7 @@ point one at something an agent wrote or at a secret. In short:
   `node.toml`) or `/etc/tracon/`;
 - documents export into the node's own export area (`~/.local/share/tracon/exports` on
   Linux), or into a directory you marked by creating a `.tracon-export` file in it,
-  which must be outside anywhere an agent can write;
-- the UI bundle directory is the node's own, new, or already a bundle.
+  which must be outside anywhere an agent can write.
 
 An edit that breaks a rule is refused with the reason. A file that already breaks one
 still starts, with a warning naming the key; the node refuses to run such a program or
@@ -1172,13 +1130,12 @@ differs from last-good's. The failed one is kept as `node.toml.failed-<ms>`; see
 node_name = "<hostname>"            # how this node is named in the mesh
 
 [harness]
-id = "opencode"                     # "opencode" or "claude" (the supported one today): the harness
-                                    # for a model either runs (an Anthropic API key) or the node
-                                    # cannot classify; the rest follow their credential. An unknown id
-                                    # refuses to start, and a retired one is refused by name with its
-                                    # migration path (docs/RECOVERY.md) rather than a bare
-                                    # unknown-harness error.
-version = "1.18.30"                 # pinned; empty means the version this node's harness image
+id = "claude"                       # "claude" or "native": the harness for a model the node cannot
+                                    # classify; the rest follow their credential. An unknown id
+                                    # refuses to start; a retired one (omp, opencode) is migrated to
+                                    # "claude" as the file loads, with the original kept beside it
+                                    # (docs/RECOVERY.md).
+version = "2.1.295"                 # pinned; empty means the version this node's harness image
                                     # installs. Checked twice — `--version` in the runner, and the
                                     # handshake's own report — and a session whose harness reports
                                     # another version, or a protocol revision this node was not
@@ -1194,7 +1151,7 @@ subnet = "10.89.0.0/24"
 gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
-harness_image = "localhost/tracon-harness-opencode"  # the image for [harness] id; the other
+harness_image = "localhost/tracon-harness-claude"  # the image for [harness] id; the other
                                     # harness runs from localhost/tracon-harness-<id>, which
                                     # setup builds too
 start_machine = true                # macOS: start the podman machine when it is stopped
@@ -1308,12 +1265,8 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # port = 9222                       # where the session reaches it
 # ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed
-# experimental = ["native"]         # also run tracon's own harness, `tracon-agent`, for models on
-                                    # an `openai`-shaped provider (a local llama.cpp, say). Off by
-                                    # default: every harness a node runs needs its image before any
-                                    # session starts. See agent/README.md.
-# native_binary = "/path/to/tracon-agent"  # a Linux build for that image (`just native-agent`)
-                                    # in place of this version's release asset
+# native_binary = "/path/to/tracon-agent"  # a Linux build for tracon-agent's image (`just
+                                    # native-agent`) in place of this version's release asset
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"
@@ -1323,7 +1276,7 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
                                     # inference, token counting, embeddings and the models list,
                                     # never the provider account behind the key
 # login = "anthropic"               # the subscription sign-in the node runs: "anthropic", or "openai" for ChatGPT/Codex
-# models = [                        # what the picker offers and OpenCode is told; a built-in provider
+# models = [                        # what the picker offers and tracon-agent is told; a built-in provider
 #   { id = "claude-opus-5", name = "Claude Opus 5", context = 200000, output = 64000, reasoning = true, attachment = true },
 #   # parallel_tools = false, reasoning_effort = "high": read by the native harness only (parallel is on by default)
 # ]                                 # left without models gets the current generation; `models = []` declares none
@@ -1616,8 +1569,8 @@ written into a pod spec instead. The rights make the node able to read every Sec
 its namespace, so keep nothing else there that a harness should not reach through a
 compromised node.
 
-A session carries secrets too: its token at the node's gateway and MCP server, OpenCode's
-per-launch server password, and its egress grant. They travel the same way, so a session
+A session carries secrets too: its token at the node's gateway and MCP server, and its
+egress grant. They travel the same way, so a session
 on a node without the Secrets rule is refused with the rule to add rather than started
 with them in its pod spec.
 
@@ -1654,7 +1607,7 @@ the configured `registry` here: `localhost/tracon-repo-app-1a2b3c4d5e:0123` is p
 `<registry>/tracon-repo-app-1a2b3c4d5e:0123`. The image serves checks and preparation,
 and a session of either harness runs in it with the harness layered on, as under Podman:
 the layer copies the harness and a static `tini` out of the release's harness image, the
-session's pod runs under that `tini` (and, for OpenCode, its harness entrypoint), and the
+session's pod runs under that `tini`, and the
 session gets its cache at `/cache` and its workspace prepared before the agent arrives.
 Without a builder every session runs in its harness's own image and is told so.
 
@@ -1769,13 +1722,13 @@ out of the tool needed to fix it. The path out is the harness directly, outside
 tracon — nothing in tracon is required for it:
 
 ```sh
-opencode   # or claude: the harness, unsupervised, in any checkout
+claude     # the harness, unsupervised, in any checkout
 git worktree add /tmp/<slug> -b <branch> origin/main
 ```
 
 Recovering a workspace tracon was managing works the same way, in three steps:
 download the workspace (or `podman volume export` it, with the node down), run
-`claude` or `opencode` against it yourself, then import the result back as a new
+`claude` against it yourself, then import the result back as a new
 session and submit through the gate. What you give up while you work that way is
 the boundary, the gateway, policy, and the record — the audit trail, the budget,
 and the check evidence for anything done outside — and none of it can be
@@ -1793,6 +1746,6 @@ the whole of it.
 - [docs/DESIGN.md](docs/DESIGN.md) — the interface: principles, jobs, states.
 - [docs/RECOVERY.md](docs/RECOVERY.md) — working outside tracon when it is down, and rebuilding a node.
 - [docs/reference/external-harness-notes.md](docs/reference/external-harness-notes.md) — the external harness trust boundary and operating guidance.
-- [docs/reference/opencode-migration.md](docs/reference/opencode-migration.md) — the record of the 2026-09 move from omp to OpenCode, gate by gate.
+- [docs/reference/opencode-migration.md](docs/reference/opencode-migration.md) — the record of the 2026-09 move from omp to OpenCode, gate by gate (OpenCode was itself removed later; it is history).
 
 Contributions are welcome — open an issue or a PR.

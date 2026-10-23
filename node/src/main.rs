@@ -20,18 +20,12 @@ enum Command {
         #[arg(long, env = "TRACON_LISTEN", default_value = "127.0.0.1:7420")]
         listen: SocketAddr,
     },
-    /// Create the harness network, gateway, and images this node owns, and
-    /// install the pinned OpenCode UI bundle.
+    /// Create the harness network, gateway, and images this node owns.
     Setup {
-        /// Rebuild the gateway and harness images, and reinstall the OpenCode
-        /// UI bundle, even if they are already current.
+        /// Rebuild the gateway and harness images even if they are already
+        /// current.
         #[arg(long)]
         rebuild: bool,
-        /// Install the OpenCode UI bundle from a local
-        /// `opencode-ui-v<version>.tar.gz` instead of fetching the release
-        /// asset. For a machine with no route to GitHub.
-        #[arg(long, value_name = "PATH")]
-        ui_bundle: Option<std::path::PathBuf>,
     },
     /// Verify the harness boundary and exit non-zero naming the first failed check.
     CheckBoundary {
@@ -273,13 +267,14 @@ enum SessionCommand {
 
     /// Put every session that ran a retired harness away read-only.
     ///
-    /// The migration step for the OpenCode cutover. Each session keeps its
+    /// The migration step when a harness is retired. Each session keeps its
     /// harness identity and version, its transcript, its evidence and its
     /// workspace; what it loses is the ability to run, which it had already
     /// lost when the harness was removed. Pending approvals on them are
     /// closed, because nothing can answer them. Idempotent.
     ArchiveLegacy {
-        /// The retired harness id. Defaults to the one this build removed.
+        /// The retired harness id. Defaults to every harness this build no
+        /// longer has.
         #[arg(long)]
         harness: Option<String>,
     },
@@ -292,41 +287,12 @@ enum SessionCommand {
         id: String,
         /// The harness the new session runs: either supported one, since the
         /// node holds an image for each.
-        #[arg(long, default_value = "opencode")]
+        #[arg(long, default_value = "claude")]
         harness: String,
     },
     /// Carry on a session a node restart cut off: a new session on the same
     /// workspace, branch and harness, opening with a handoff note.
     Continue { id: String },
-
-    /// What a session's harness state is, and every backup of it held here.
-    State { id: String },
-    /// Copy a session's harness state, verified, with a manifest.
-    Backup {
-        id: String,
-        /// Stop a live session first, through the supervisor's pause and stop.
-        /// Without it a running session is refused rather than copied out from
-        /// under its own harness.
-        #[arg(long)]
-        quiesce: bool,
-    },
-    /// Migrate a session's state onto another OpenCode release, on a clone.
-    /// The original is untouched unless the clone comes back intact.
-    UpgradeState {
-        id: String,
-        /// The release to migrate onto. It has to be on this host.
-        #[arg(long)]
-        to: String,
-    },
-    /// Put a backup back, if this node's runtime can read it.
-    Restore {
-        id: String,
-        /// A backup this node holds: its directory name, or its full path.
-        backup: String,
-        /// Accept a workspace that has moved since the backup's checkpoint.
-        #[arg(long)]
-        confirm: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -644,7 +610,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Setup { rebuild, ui_bundle } => {
+        Command::Setup { rebuild } => {
             let cfg = config::Config::load();
             let backend = boundary::backend_for(&cfg).await;
             backend.setup(&cfg, rebuild).await?;
@@ -655,15 +621,6 @@ async fn main() -> Result<()> {
             for artifact in tracon::legacy::retire_credentials() {
                 if artifact.removed {
                     println!("removed {} — {}", artifact.path.display(), artifact.what);
-                }
-            }
-            // The native interface is a separate artefact from the boundary,
-            // and a node without it still serves: it is reported, never fatal.
-            match tracon::ui_bundle::install(&cfg, ui_bundle.as_deref(), rebuild).await {
-                Ok(outcome) => println!("{outcome}"),
-                Err(error) => {
-                    eprintln!("tracon: {error}");
-                    eprintln!("{}", tracon::ui_bundle::absent_advice());
                 }
             }
             Ok(())
@@ -1580,10 +1537,10 @@ async fn node_call(
 /// Two different things live here, and the difference is the point.
 ///
 /// `show` reads a portable package and talks to nothing: an archive stays
-/// readable when there is nothing left running. The state commands are the
-/// opposite — every one of them goes through the running node, because the
-/// node owns the fence, the runtime volume and the store, and a CLI that
-/// reached around it would be the second writer the fence exists to refuse.
+/// readable when there is nothing left running. The others are the opposite
+/// — every one of them goes through the running node, because the node owns
+/// the runtime volume and the store, and a CLI that reached around it would
+/// be a second writer.
 async fn session_command(cmd: SessionCommand) -> Result<()> {
     use reqwest::Method;
     match cmd {
@@ -1675,7 +1632,7 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
             }
             println!(
                 "\nThese sessions stay readable and can never be launched again.\n\
-                 Carry one forward with `tracon session reopen <id> --harness opencode`."
+                 Carry one forward with `tracon session reopen <id> --harness claude` (or `native`)."
             );
             Ok(())
         }
@@ -1721,151 +1678,6 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
                 "\nThe new session opens with a handoff note: it inherits the workspace, \
                  not the interrupted session's context."
             );
-            Ok(())
-        }
-        SessionCommand::State { id } => {
-            let v = node_call(
-                Method::GET,
-                &format!("/api/sessions/{id}/state"),
-                None,
-                None,
-            )
-            .await?;
-            match &v["identity"] {
-                serde_json::Value::Null => println!("no OpenCode state recorded for {id}"),
-                identity => {
-                    println!(
-                        "build    {} (this node pins {})",
-                        identity["build_version"].as_str().unwrap_or("?"),
-                        identity["build_pinned"].as_str().unwrap_or("?")
-                    );
-                    let generation = identity["generation"].as_array().map(Vec::len).unwrap_or(0);
-                    let digest = identity["generation_digest"].as_str().unwrap_or("");
-                    println!(
-                        "state    generation {} migration(s){}",
-                        generation,
-                        if digest.is_empty() {
-                            ", not yet read — the first backup settles it".to_string()
-                        } else {
-                            format!(", digest {}", &digest[..digest.len().min(12)])
-                        }
-                    );
-                    println!(
-                        "manifest {}",
-                        identity["manifest_digest"]
-                            .as_str()
-                            .unwrap_or("not recorded")
-                    );
-                    println!(
-                        "where    {} in {}",
-                        identity["state_path"].as_str().unwrap_or("?"),
-                        identity["state_volume"].as_str().unwrap_or("?")
-                    );
-                }
-            }
-            if v["claimed"] == true {
-                println!("writer   the state is claimed; something is writing it now");
-            }
-            let backups = v["backups"].as_array().cloned().unwrap_or_default();
-            if backups.is_empty() {
-                println!("backups  none");
-            }
-            for backup in backups {
-                let m = &backup["manifest"];
-                println!(
-                    "backup   {}  {} migration(s)  integrity {}  {}",
-                    backup["path"].as_str().unwrap_or(""),
-                    m["generation"].as_array().map(Vec::len).unwrap_or(0),
-                    m["integrity"].as_str().unwrap_or("?"),
-                    if m["quiesced"] == true {
-                        "quiesced"
-                    } else {
-                        "at rest"
-                    }
-                );
-            }
-            Ok(())
-        }
-        SessionCommand::Backup { id, quiesce } => {
-            let v = node_call(
-                Method::POST,
-                &format!("/api/sessions/{id}/state/backup"),
-                Some(serde_json::json!({ "quiesce": quiesce })),
-                None,
-            )
-            .await?;
-            let m = &v["manifest"];
-            println!("backed up to {}", v["path"].as_str().unwrap_or(""));
-            println!(
-                "  database   {} bytes, integrity {}, sha256 {}",
-                m["db_bytes"].as_u64().unwrap_or(0),
-                m["integrity"].as_str().unwrap_or("?"),
-                m["db_sha256"]
-                    .as_str()
-                    .map(|s| &s[..s.len().min(12)])
-                    .unwrap_or("?")
-            );
-            println!(
-                "  generation {} migration(s), digest {}",
-                m["generation"].as_array().map(Vec::len).unwrap_or(0),
-                m["generation_digest"]
-                    .as_str()
-                    .map(|s| &s[..s.len().min(12)])
-                    .unwrap_or("?")
-            );
-            match m["workspace"]["commit"].as_str() {
-                Some(commit) => println!("  workspace  checkpointed at {commit}"),
-                None => println!(
-                    "  workspace  {}",
-                    m["workspace"]["unavailable"]
-                        .as_str()
-                        .unwrap_or("not readable")
-                ),
-            }
-            Ok(())
-        }
-        SessionCommand::UpgradeState { id, to } => {
-            let v = node_call(
-                Method::POST,
-                &format!("/api/sessions/{id}/state/upgrade"),
-                Some(serde_json::json!({ "to": to })),
-                None,
-            )
-            .await?;
-            println!(
-                "migrated {} from {} to {}",
-                id,
-                v["from_version"].as_str().unwrap_or("?"),
-                v["to_version"].as_str().unwrap_or("?")
-            );
-            let applied = v["applied"].as_array().cloned().unwrap_or_default();
-            println!("  {} migration(s) applied on the clone", applied.len());
-            for id in applied.iter().take(10) {
-                println!("    {}", id.as_str().unwrap_or(""));
-            }
-            Ok(())
-        }
-        SessionCommand::Restore {
-            id,
-            backup,
-            confirm,
-        } => {
-            let v = node_call(
-                Method::POST,
-                &format!("/api/sessions/{id}/state/restore"),
-                Some(serde_json::json!({ "backup": backup, "confirm": confirm })),
-                None,
-            )
-            .await?;
-            println!("restored {id} from {}", v["backup"].as_str().unwrap_or(""));
-            println!("preserves:");
-            for line in v["preserves"].as_array().cloned().unwrap_or_default() {
-                println!("  - {}", line.as_str().unwrap_or(""));
-            }
-            println!("does not:");
-            for line in v["loses"].as_array().cloned().unwrap_or_default() {
-                println!("  - {}", line.as_str().unwrap_or(""));
-            }
             Ok(())
         }
     }
@@ -2233,8 +2045,8 @@ async fn skill_command(cmd: SkillCommand) -> Result<()> {
                 println!("  {}", file.as_str().unwrap_or(""));
             }
             // Warnings are printed after the file list, and never suppressed:
-            // a skill's scripts run in the runner and its body is a slash
-            // command OpenCode shell-interpolates.
+            // a skill's scripts run in the runner and a harness may register
+            // its body as a shell-interpolated slash command.
             for warning in v["warnings"].as_array().into_iter().flatten() {
                 println!("! {}", warning.as_str().unwrap_or(""));
             }

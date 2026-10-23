@@ -523,11 +523,11 @@ async fn an_oauth_credential_becomes_a_bearer_with_the_beta_flag_merged() {
     );
 }
 
-/// An Anthropic subscription is Claude Code's alone. An OpenCode session that
-/// reaches for it is refused before anything is forwarded, and the refusal is
+/// An Anthropic subscription is Claude Code's alone. A tracon-agent session
+/// that reaches for it is refused before anything is forwarded, and the refusal is
 /// on its log; a Claude Code session on the same credential goes through.
 #[tokio::test]
-async fn a_subscription_is_lent_to_claude_code_and_refused_to_opencode() {
+async fn a_subscription_is_lent_to_claude_code_and_refused_to_native() {
     state::isolate();
     const OAUTH: &str = r#"
         [credentials.stubcred]
@@ -539,7 +539,7 @@ async fn a_subscription_is_lent_to_claude_code_and_refused_to_opencode() {
         REFRESH_TOKEN = "rt-1"
     "#;
     let h = harness(OAUTH, LOOPBACK).await;
-    running_session_on(&h.store, "s-oc", "opencode");
+    running_session_on(&h.store, "s-oc", "native");
     running_session_on(&h.store, "s-cc", "claude");
 
     let token = h.manager.register_tool_token_for_test("s-oc", "work").await;

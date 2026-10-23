@@ -362,8 +362,9 @@ fn origin_matches(origin: &url::Url, authority: &str) -> bool {
 ///   `127.0.0.1` still sends `Host: evil.example`;
 /// - an `Origin`, when the caller sends one, is an HTTP(S) loopback origin
 ///   with the same host and port the request was addressed to (its `Host`).
-///   A page on another loopback origin, such as the OpenCode UI listener or
-///   any dev server on another port, is another site and is not the operator.
+///   A page on another loopback origin, such as the document preview
+///   listener or any dev server on another port, is another site and is not
+///   the operator.
 ///
 /// The `Host` port is not compared with the port the node is bound to.
 /// `kubectl port-forward 8080:7420` and the Vite dev server (`just dev`,
@@ -413,7 +414,7 @@ pub(crate) fn is_local(peer: Option<IpAddr>, uri: &Uri, headers: &HeaderMap) -> 
             let Some(origin) = origin.to_str().ok().and_then(loopback_origin) else {
                 return false;
             };
-            // Another loopback origin is another site: the OpenCode UI
+            // Another loopback origin is another site: the document preview
             // listener, a dev server on some other port. Its page can send a
             // simple cross-origin POST with no preflight, so a loopback
             // Origin alone would let it drive the node credential-free.
@@ -725,9 +726,7 @@ pub async fn guard(
     Ok(response)
 }
 
-/// `Secure` unless the caller and requested origin are local, matching
-/// `http::ui`'s cookie
-/// (`UiState::secure`, `!cfg.ui.opencode_is_loopback()`): tracon serves plain
+/// `Secure` unless the caller and requested origin are local: tracon serves plain
 /// HTTP on loopback on purpose, and a WKWebView-backed client (the macOS
 /// desktop wrapper) drops a `Secure` cookie set over that connection rather
 /// than accepting it as Chromium/Safari's own "potentially trustworthy
@@ -1074,10 +1073,10 @@ mod tests {
         assert!(local("127.0.0.1", "http://127.0.0.1:7420/api/node", &[]));
     }
 
-    /// Another loopback origin is another site. The OpenCode UI listener
-    /// (`127.0.0.1:7423`) must never drive the node, and a dev server on some
-    /// other port is somebody else's page: either can send a simple
-    /// cross-origin POST with no preflight, so neither may be credential-free.
+    /// Another loopback origin is another site. The document preview listener
+    /// must never drive the node, and a dev server on some other port is
+    /// somebody else's page: either can send a simple cross-origin POST with
+    /// no preflight, so neither may be credential-free.
     #[test]
     fn a_page_on_another_loopback_origin_is_not_local() {
         for origin in [

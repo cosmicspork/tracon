@@ -949,7 +949,6 @@ async fn the_config_is_readable_and_carries_no_secrets() {
             "harness",
             "hash",
             "keys",
-            "launch",
             "node_name",
             "pending_restart",
             "providers",
@@ -1170,19 +1169,6 @@ async fn without_a_token_provider_creation_is_refused_off_the_machine() {
     // No peer address at all is remote: the extractor fails closed.
     let (s, _) = call(&n, "POST", "/api/providers", None, Some(body)).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
-}
-
-/// The model catalogue is an ordinary operator read (a provider is set up
-/// from wherever the operator is). A fresh, isolated node has never
-/// fetched, so the shape comes back empty rather than erroring.
-#[tokio::test]
-async fn the_model_catalogue_starts_empty() {
-    let n = node();
-
-    let (s, v) = call(&n, "GET", "/api/model-catalogue", Some(LOCAL), None).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["fetched_ms"], Value::Null);
-    assert_eq!(v["providers"], json!({}));
 }
 
 /// Without a token the mesh routes answer only the machine; with one, the

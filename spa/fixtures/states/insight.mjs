@@ -68,8 +68,8 @@ const anthropic = (channels, extra = {}) => ({
 })
 
 const models = [
-  { value: 'anthropic/sonnet', name: 'Sonnet', harnesses: ['claude', 'opencode'] },
-  { value: 'anthropic/opus', name: 'Opus', harnesses: ['claude', 'opencode'] },
+  { value: 'anthropic/sonnet', name: 'Sonnet', harnesses: ['claude'] },
+  { value: 'anthropic/opus', name: 'Opus', harnesses: ['claude'] },
 ]
 
 const harness = (id, pinned, found, extra = {}) => ({
@@ -84,7 +84,7 @@ const harness = (id, pinned, found, extra = {}) => ({
 })
 
 const node = (o) => {
-  const harnesses = o.harnesses ?? [harness('claude', '2.5.0', '2.5.0'), harness('opencode', '1.4.2', '1.4.2')]
+  const harnesses = o.harnesses ?? [harness('claude', '2.5.0', '2.5.0'), harness('native', '0.35.0', '0.35.0')]
   const first = harnesses[0] ?? { id: 'claude', pinned: '2.5.0', found: null, mismatch: false }
   return {
     id: o.id,
@@ -731,7 +731,7 @@ export default [
         node({
           id: NAS,
           name: 'nas',
-          harnesses: [harness('claude', '2.5.0', '2.3.1'), harness('opencode', '1.4.2', null, { image_state: 'missing' })],
+          harnesses: [harness('claude', '2.5.0', '2.3.1'), harness('native', '0.35.0', null, { image_state: 'missing' })],
         }),
         node({ id: OLD, name: 'old-mac', state: 'unknown', checked_at_ms: null }),
         node({
@@ -759,7 +759,7 @@ export default [
     api: nodesApi({
       nodes: [
         self,
-        node({ id: POD, name: 'work-pod', harnesses: [harness('claude', '2.5.0', '2.4.9'), harness('opencode', '1.4.2', '1.4.2')] }),
+        node({ id: POD, name: 'work-pod', harnesses: [harness('claude', '2.5.0', '2.4.9'), harness('native', '0.35.0', '0.35.0')] }),
       ],
     }),
   },
@@ -798,7 +798,7 @@ export default [
         node({
           id: POD,
           name: 'kubernetes-pod-tracon-runner-7f9c6d5b8-x2kqz',
-          harnesses: [harness('claude', '2.5.0-beta.20261001+build.4471', '2.5.0-beta.20261001+build.4471'), harness('opencode', '1.4.2', '1.4.2')],
+          harnesses: [harness('claude', '2.5.0-beta.20261001+build.4471', '2.5.0-beta.20261001+build.4471'), harness('native', '0.35.0', '0.35.0')],
           models: Array.from({ length: 17 }, (_, i) => ({ value: `m-${i}`, name: `Model ${i}` })),
         }),
         node({ id: DESK, name: '' }),

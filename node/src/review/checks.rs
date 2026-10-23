@@ -481,7 +481,6 @@ pub async fn run_required_for(
             workdir: Some("/work".into()),
             name: runner_name.clone(),
             image: Some(raw_image.clone()),
-            expose: None,
         };
         let finished = match unprepared {
             Some(stopped) => Err(stopped),
@@ -961,7 +960,6 @@ async fn prepare_steps(
             workdir: Some("/work".into()),
             name,
             image: Some(environment.image.clone()),
-            expose: None,
         };
         let finished: Result<std::process::Output, RunnerError> = until_stopped(
             runner.run_capture(cmd),

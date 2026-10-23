@@ -6,7 +6,6 @@
 
 pub mod events;
 pub mod fake;
-pub mod fake_opencode;
 pub mod harness;
 pub mod http;
 pub mod kube_api;

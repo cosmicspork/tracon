@@ -757,7 +757,6 @@ pub async fn prepare(
             workdir: Some("/work".into()),
             image: Some(image.clone()),
             name: format!("tracon-prepare-{}", workspace.id),
-            expose: None,
         })
         .await;
     drop(egress);
@@ -804,7 +803,6 @@ pub async fn verify(
                 workdir: Some("/work".into()),
                 image: Some(prepared.image.clone()),
                 name: format!("tracon-verify-{}-{n}", workspace.id),
-                expose: None,
             })
             .await
             .map_err(|e| EnvironmentError::Runtime(e.to_string()))?;

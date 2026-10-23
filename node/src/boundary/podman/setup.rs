@@ -11,16 +11,11 @@ use crate::boundary::BoundaryError;
 /// The gateway and harness definitions, carried inside the binary so a host
 /// that only fetched the release can build the images it needs.
 ///
-/// The exclusion is load-bearing. An operator doing an offline `Dockerfile.node`
-/// build drops `opencode-ui-v<version>.tar.gz` into `containers/opencode-ui/`,
-/// and that directory is embedded — so without this, a 10 MB release artefact
-/// would be compiled into every binary built from that tree, silently, and the
-/// node would carry a second unverified copy of the bundle it already verifies
-/// by digest on disk. The native harness's `local/` is where a locally built
-/// `tracon-agent` is staged for its image, and is excluded for the same reason.
+/// The exclusion is load-bearing. The native harness's `local/` is where a
+/// locally built `tracon-agent` is staged for its image; without it a 7 MB
+/// binary would be compiled into every node built from that tree, silently.
 #[derive(Embed)]
 #[folder = "../containers"]
-#[exclude = "opencode-ui/*.tar.gz"]
 #[exclude = "harness-native/local/*"]
 struct Containers;
 
@@ -82,9 +77,9 @@ pub const DEFINITIONS_LABEL: &str = "io.tracon.definitions";
 /// definitions; another harness's under this one's tag would run the wrong CLI.
 ///
 /// Only the harnesses with an adapter have definitions. An id outside them
-/// never reaches here — `adapter_for` refuses it at startup, the retired
-/// `omp` by name — so OpenCode's is the safe answer rather than a panic in
-/// the setup path.
+/// never reaches here — `adapter_for` refuses it at startup, a retired one
+/// by name — so Claude Code's is the safe answer rather than a panic in the
+/// setup path.
 pub fn harness_dir(cfg: &Config) -> &'static str {
     harness_dir_for(&cfg.harness.id)
 }
@@ -131,7 +126,7 @@ pub fn harness_dir_for(harness_id: &str) -> &'static str {
     match harness_id {
         "claude" => "harness-claude",
         "native" => "harness-native",
-        _ => "harness-opencode",
+        _ => "harness-claude",
     }
 }
 
@@ -662,48 +657,27 @@ mod tests {
         let gateway = definitions_digest("gateway");
         assert_eq!(gateway, definitions_digest("gateway"));
         assert_eq!(gateway.len(), 64);
-        assert_ne!(gateway, definitions_digest("harness-opencode"));
+        assert_ne!(gateway, definitions_digest("harness-claude"));
         assert_ne!(
-            definitions_digest("harness-opencode"),
+            definitions_digest("harness-native"),
             definitions_digest("harness-claude")
         );
         assert_ne!(gateway, definitions_digest("nonexistent"));
     }
 
     /// Each harness is built from its own definitions, and there are exactly
-    /// two of them. The retired harness's `containers/harness` is gone; a
-    /// `harness_dir` that still answered with it would name an empty
+    /// two of them. The retired harnesses' directories are gone; a
+    /// `harness_dir` that still answered with one would name an empty
     /// directory and build an image with nothing in it.
     #[test]
     fn each_harness_is_built_from_its_own_definitions() {
         let mut cfg = Config::default();
-        assert_eq!(harness_dir(&cfg), "harness-opencode");
-        cfg.harness.id = "claude".into();
         assert_eq!(harness_dir(&cfg), "harness-claude");
-        assert_eq!(definitions_digest("harness"), definitions_digest("gone"));
-    }
-
-    /// The recipes are carried; the artefact never is.
-    ///
-    /// An offline `Dockerfile.node` build wants the release tarball in
-    /// `containers/opencode-ui/`, and that directory is what this embeds. A
-    /// build from such a tree must not quietly gain 10 MB and a second,
-    /// unverified copy of a bundle the node already pins by digest on disk.
-    #[test]
-    fn the_ui_bundle_recipe_is_embedded_and_the_artefact_is_not() {
-        let paths: Vec<String> = Containers::iter().map(|p| p.to_string()).collect();
-        for wanted in [
-            "opencode-ui/build.sh",
-            "opencode-ui/DIGEST",
-            "opencode-ui/PINNED",
-        ] {
-            assert!(paths.iter().any(|p| p == wanted), "{wanted} is not carried");
+        cfg.harness.id = "native".into();
+        assert_eq!(harness_dir(&cfg), "harness-native");
+        for gone in ["harness", "harness-opencode"] {
+            assert_eq!(definitions_digest(gone), definitions_digest("gone"));
         }
-        let artefacts: Vec<&String> = paths.iter().filter(|p| p.ends_with(".tar.gz")).collect();
-        assert!(
-            artefacts.is_empty(),
-            "a release artefact is compiled into the binary: {artefacts:?}"
-        );
     }
 
     #[test]

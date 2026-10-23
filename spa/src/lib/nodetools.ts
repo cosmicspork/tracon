@@ -1,13 +1,14 @@
 // A call to one of the node's own MCP tools, read as what it does: "Wait for
 // review 01a128ee", "Ask the operator · Which staging database…", "Pull
 // request #439". The harnesses name these tools by their protocol, not for
-// people: Claude Code calls them `mcp__tracon__review_status`, OpenCode
-// `tracon_review_status`. Another MCP server's tools keep their server's name
+// people: `mcp__tracon__review_status`, or `tracon_review_status` in a session
+// the retired OpenCode harness ran. Another MCP server's tools keep their server's name
 // in view, since that is what the operator needs to know about them.
 
 /// Every tool the node offers a session, by the name it is offered under.
-/// OpenCode's `tracon_<tool>` is read as the node's only for these, so that a
-/// harness tool that happens to start with `tracon_` is not taken for one.
+/// An archived OpenCode session's `tracon_<tool>` is read as the node's only
+/// for these, so that a harness tool that happens to start with `tracon_` is
+/// not taken for one.
 export const NODE_TOOLS = new Set([
   // review and reports
   'submit_review',
@@ -93,8 +94,8 @@ export function nodeTool(title: string): string | null {
   const name = title.trim()
   const claude = name.match(/^mcp__tracon__([a-z0-9_]+)$/)
   if (claude) return claude[1]
-  const opencode = name.match(/^tracon_([a-z0-9_]+)$/)
-  return opencode && NODE_TOOLS.has(opencode[1]) ? opencode[1] : null
+  const retired = name.match(/^tracon_([a-z0-9_]+)$/)
+  return retired && NODE_TOOLS.has(retired[1]) ? retired[1] : null
 }
 
 /// Another MCP server's tool as Claude Code names it, `mcp__<server>__<tool>`.

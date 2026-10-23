@@ -71,13 +71,10 @@ impl BoundaryReport {
 /// no route out, so `connect(2)` returns `ENETUNREACH` at once, and a name
 /// with no reachable resolver fails the same way — is finished in
 /// milliseconds. A denial that *drops* is indistinguishable from a slow
-/// network and finishes only when the caller's own timeout does, which for
-/// OpenCode is never: its LSP and formatter downloads pass no `AbortSignal`,
-/// and the `edit` tool awaits them inline, so the first edit of a `.ts` file
-/// blocks for as long as the network takes to say nothing
-/// (`docs/reference/opencode-v1.18.30/config-state.md` §6.5). This bound is
-/// what separates the two, and it is generous: the observed figure is under
-/// 50 ms.
+/// network and finishes only when the caller's own timeout does, which for a
+/// tool that fetches with no timeout of its own is never: it blocks for as
+/// long as the network takes to say nothing. This bound is what separates the
+/// two, and it is generous: the observed figure is under 50 ms.
 pub const REJECT_BOUND_SECS: u64 = 3;
 
 /// The shell script the deep check runs inside the boundary. Six lines: direct
@@ -108,10 +105,8 @@ pub fn egress_script(gateway_host: &str, forward_port: u16) -> String {
 /// a denied connection fails at `connect(2)`. Kubernetes claims
 /// [`Denial::Drops`]: a NetworkPolicy has no reject verb — dropping is what it
 /// is — and no portable CNI option turns one into an RST. A node that cannot
-/// reject still runs, because OpenCode is covered by the download flag and the
-/// explicitly disabled server list; what it must not do is claim the property
-/// it does not have, so the measurement is taken either way and the verdict
-/// says which.
+/// reject still runs; what it must not do is claim the property it does not
+/// have, so the measurement is taken either way and the verdict says which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Denial {
     Rejects,
@@ -224,9 +219,8 @@ mod tests {
     }
 
     /// The point of the bound: a boundary that blackholes a denied
-    /// destination passes every other line of this probe and still hangs the
-    /// first edit of a TypeScript file, because OpenCode's download path has
-    /// no timeout of its own.
+    /// destination passes every other line of this probe and still hangs any
+    /// tool that fetches with no timeout of its own.
     #[test]
     fn a_denial_that_drops_rather_than_rejects_fails_the_check() {
         let dropped = format!(

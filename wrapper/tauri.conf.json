@@ -18,17 +18,6 @@
         "resizable": true,
         "visible": false,
         "backgroundColor": "#141517"
-      },
-      {
-        "label": "opencode",
-        "title": "OpenCode",
-        "create": false,
-        "width": 1280,
-        "height": 900,
-        "resizable": true,
-        "visible": false,
-        "dragDropEnabled": false,
-        "backgroundColor": "#141517"
       }
     ],
     "security": {

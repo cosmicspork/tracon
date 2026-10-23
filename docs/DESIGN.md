@@ -271,11 +271,9 @@ operator's information, not the model's.
 7. **Fixture mode is the screenshot rig.** `TRACON_FIXTURES=1` serves the interface
    against canned state with request-time timestamps, so the README's images
    regenerate without a node and never age.
-8. **The harness's own UI is an advanced view, never the interface.** OpenCode's web
-   app is offered on a session tracon already supervises, on its own origin, in a
-   window or a frame the operator opens deliberately. Nothing in tracon's own screens
-   depends on it: a node without the bundle offers the control and explains its
-   absence, and a Claude Code session is not second-class for having no such view.
+8. **tracon's screens are the only interface.** No harness's own UI is offered on a
+   session tracon supervises; what a session did is read from the node's record of
+   it, whichever harness ran it.
 9. **Every tool call asks, and no grant is ever saved inside a harness.** An "always"
    clicked in the harness's own permission control is answered "once" and the
    attempted broadening is recorded. A grant the node did not make is one it cannot

@@ -221,10 +221,13 @@ child that answers in prose instead is reminded once, then stopped.
   during one, the call comes back "outcome unknown" like any other, and the parent may
   spawn again.
 
-## Turning it on for a node
+## Using it on a node
 
-1. Add `"native"` to `[harness] experimental` in `node.toml`.
-2. Give an `openai`-shaped provider some declared models. For the llama.cpp server on this
+Every node runs it: `tracon setup` builds its image beside Claude Code's, and a model on
+any provider that is not Anthropic's runs on it.
+
+1. Give an `openai`-shaped provider some declared models (an `openai-codex` sign-in has
+   its own by default). For the llama.cpp server on this
    machine, for example:
 
    ```toml
@@ -236,12 +239,11 @@ child that answers in prose instead is reminded once, then stopped.
    ```
 
    Also add the upstream host to `[gateway] allow_hosts`.
-3. Run `tracon setup`. It builds `tracon-harness-native` from this version's release asset.
+2. Run `tracon setup`. It builds `tracon-harness-native` from this version's release asset.
    For a version with no release yet, build a binary with `just native-agent`, set
    `[harness] native_binary` to the path it prints, and run `tracon setup` again.
 
-Models on that provider then offer a choice of harness, OpenCode or `native`. A model whose
-credential runs only here (none today) would start here directly.
+Models on that provider then start on `native` directly.
 
 ## Decisions
 

@@ -10,15 +10,13 @@ use serde_json::Value;
 /// into something it can retry, so the cap sits below the shortest client
 /// timeout with room to spare rather than near it.
 ///
-/// It was 20 s, sized against the retired omp harness's 30 s client. Both
-/// remaining harnesses give a tool call 60 s: OpenCode inherits the MCP TS
-/// SDK's `DEFAULT_REQUEST_TIMEOUT_MSEC` unless told otherwise
-/// (`docs/reference/opencode-v1.18.30/config-state.md` §5.4), and the node
-/// does tell it otherwise — the launch config it writes sets
-/// `experimental.mcp_timeout` explicitly, so 60 s is the floor rather than
-/// the ceiling. 45 s keeps a quarter of the shortest budget in hand, which is
-/// what a slow store read on a busy node needs, and more than doubles how
-/// much of a human's attention one call can cover.
+/// It was 20 s, sized against the retired omp harness's 30 s client. The
+/// shortest budget left is 60 s, the MCP TS SDK's `DEFAULT_REQUEST_TIMEOUT_MSEC`
+/// that a harness run outside the boundary commonly inherits; Claude Code's
+/// is lifted further by its launch (`adapter::claude`), and tracon-agent sets
+/// no read timeout of its own. 45 s keeps a quarter of the shortest budget in
+/// hand, which is what a slow store read on a busy node needs, and more than
+/// doubles how much of a human's attention one call can cover.
 pub const MAX_WAIT_SECS: u64 = 45;
 
 /// How long a status call should block, clamped to [`MAX_WAIT_SECS`].
@@ -127,9 +125,8 @@ mod tests {
     #[test]
     fn the_wait_stays_under_any_mcp_client_timeout() {
         // The cap only earns its keep if it is inside the shortest client
-        // timeout either supported harness gives a tool call: 60 s, the MCP TS
-        // SDK default OpenCode inherits and the node then states explicitly
-        // (`config-state.md` §5.4). A quarter of that stays in hand.
+        // timeout a harness gives a tool call: 60 s, the MCP TS SDK default.
+        // A quarter of that stays in hand.
         const { assert!(MAX_WAIT_SECS <= 45) };
         assert_eq!(wait_secs(&json!({})), MAX_WAIT_SECS);
         assert_eq!(wait_secs(&json!({ "wait_secs": 600 })), MAX_WAIT_SECS);

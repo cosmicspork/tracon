@@ -391,11 +391,10 @@ impl Backend for KubeBackend {
     }
 
     /// As Podman's: the harness's spec with the session image in place of
-    /// the harness image. The session image's own init comes in, and the
-    /// harness's entrypoint stays: `repo_image` copies both into every image
-    /// it layers for a pod, the entrypoint (OpenCode's, which seeds its
-    /// caches) at the path the harness image has it. Only the image changes;
-    /// a check or a preparation naming another image still gets neither.
+    /// the harness image. The session image's own init comes in: `repo_image`
+    /// copies it into every image it layers for a pod. Only the image
+    /// changes; a check or a preparation naming another image does not get
+    /// it.
     fn runner_in(
         &self,
         harness_id: &str,
@@ -405,7 +404,6 @@ impl Backend for KubeBackend {
         self.runner_with(harness_id, extra_mounts, |spec| {
             if spec.image != image {
                 spec.image = image.to_string();
-                spec.entrypoint = crate::runner::toolchain::image_entrypoint(harness_id);
                 spec.init = Some(crate::runner::kube::SESSION_INIT.to_string());
             }
         })

@@ -28,8 +28,7 @@
 //!   there; the embedding key file before every read (the allowlist of
 //!   secret directories aside, so a key file the operator placed by hand
 //!   before this guard existed keeps working until it is moved); the export
-//!   directory before every export; the UI bundle directory before it is
-//!   replaced. A file swapped after the edit that allowed its path is caught
+//!   directory before every export. A file swapped after the edit that allowed its path is caught
 //!   here. What remains is the moment between a check and the `exec` or
 //!   `open` that follows it, which only someone who can write the program's
 //!   directories (root, or the operator inside a package manager's prefix)
@@ -81,7 +80,6 @@ pub const GUARDED: &[(&str, PathKind)] = &[
     ("runtime.kubernetes.state_mount", PathKind::Mount),
     ("embed.api_key_file", PathKind::SecretFile),
     ("docs.export_dir", PathKind::WriteDir),
-    ("ui.opencode_bundle_dir", PathKind::ManagedDir),
     ("session.worktree_root", PathKind::Root),
     ("external.repo_roots", PathKind::Root),
 ];
@@ -588,7 +586,6 @@ pub struct Guard {
     egid: u32,
     state: Place,
     config: Place,
-    data: Place,
     exports: Place,
     homes: Vec<Place>,
     agent_roots: Vec<Place>,
@@ -672,7 +669,6 @@ impl Guard {
                 "the node's export directory",
                 layout.data_dir.join("exports"),
             ),
-            data: Place::new("the node's data directory", layout.data_dir),
             homes: layout
                 .homes
                 .into_iter()
@@ -1024,9 +1020,7 @@ impl Guard {
         };
         let walked = match kind {
             PathKind::SecretFile | PathKind::SecretDir => self.secret(&path, kind, stage),
-            PathKind::WriteDir | PathKind::ManagedDir | PathKind::Root => {
-                self.directory(&path, kind)
-            }
+            PathKind::WriteDir | PathKind::Root => self.directory(&path, kind),
             PathKind::Mount => self.mount(&path),
             PathKind::Executable | PathKind::ExecArgs => return Ok((path, None)),
         }
@@ -1139,17 +1133,16 @@ impl Guard {
         let own = |place: &Place| place.reached_by(&walked, &self.agent_roots);
         let own_area = match kind {
             PathKind::WriteDir => own(&self.exports),
-            PathKind::ManagedDir => own(&self.state) || own(&self.data),
             _ => false,
         };
         if !own_area && forms.iter().any(|p| self.config.holds(p)) {
             return Err(refuse(format!("is inside {}", self.config.shown())));
         }
-        // An agent can write a marker, a bundle or a symbolic link into its
+        // An agent can write a marker or a symbolic link into its
         // own volume as easily as anywhere else it writes. The node's own
         // areas may sit in the state directory or on the claim; nothing else
         // in those may, and no link on the way may be an agent's.
-        if matches!(kind, PathKind::WriteDir | PathKind::ManagedDir) {
+        if matches!(kind, PathKind::WriteDir) {
             self.outside_agent_roots_but(path, &walked, own_area)?;
         }
         for place in [&self.config, &self.state] {
@@ -1177,17 +1170,6 @@ impl Guard {
         self.chains(&walked, Writers::Foreign)?;
         match kind {
             PathKind::WriteDir => self.export_allowed(path, &walked).map(|()| walked),
-            PathKind::ManagedDir => {
-                let allowed = own_area || !walked.exists || crate::ui_bundle::recognised(resolved);
-                match allowed {
-                    true => Ok(walked),
-                    false => Err(refuse(format!(
-                        "is a directory that already exists, holds no UI bundle and is outside {} and {}; the node replaces this directory whole",
-                        self.state.shown(),
-                        self.data.shown()
-                    ))),
-                }
-            }
             _ => Ok(walked),
         }
     }
@@ -1585,9 +1567,6 @@ fn values(cfg: &Config) -> Vec<(&'static str, String)> {
     if let Some(dir) = &cfg.docs.export_dir {
         out.push(("docs.export_dir", shown(dir)));
     }
-    if let Some(dir) = &cfg.ui.opencode_bundle_dir {
-        out.push(("ui.opencode_bundle_dir", shown(dir)));
-    }
     for root in &cfg.external.repo_roots {
         out.push(("external.repo_roots", shown(root)));
     }
@@ -1887,7 +1866,7 @@ pub fn install_for_serve(cfg: &Config) {
             true => tracing::debug!(%refusal, "node.toml names a path that does not exist"),
             false => tracing::warn!(
                 %refusal,
-                "node.toml names a value the path guard refuses, so no edit could write it. The node still starts. At use it refuses a program, an export or bundle directory, or a secret file or directory that breaks a rule; a secret file that is only outside the secrets directories is still read until it is moved; a root or the state mount is reported here and nowhere else"
+                "node.toml names a value the path guard refuses, so no edit could write it. The node still starts. At use it refuses a program, an export directory, or a secret file or directory that breaks a rule; a secret file that is only outside the secrets directories is still read until it is moved; a root or the state mount is reported here and nowhere else"
             ),
         }
     }
@@ -2520,26 +2499,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ui_bundle_directory_is_the_nodes_own_or_does_not_exist_yet() {
-        let node = Node::new();
-        let guard = node.guard();
-        let src = node.dir("home/src");
-        let refusal = guard
-            .path("ui.opencode_bundle_dir", &shown(&src), Stage::Edit)
-            .unwrap_err();
-        assert!(refusal.reason.contains("already exists"), "{refusal}");
-        for ok in [
-            node.at("state/opencode-ui"),
-            node.dir("data/opencode-ui"),
-            node.at("home/new-ui"),
-        ] {
-            guard
-                .path("ui.opencode_bundle_dir", &shown(&ok), Stage::Edit)
-                .unwrap();
-        }
-    }
-
-    #[test]
     fn a_worktree_root_may_not_be_slash_or_hold_the_state_or_config() {
         let node = Node::new();
         let guard = node.guard();
@@ -2757,7 +2716,6 @@ mod tests {
             .do_token_file = Some("/x".into());
         cfg.embed.api_key_file = Some("/x".into());
         cfg.docs.export_dir = Some("/x".into());
-        cfg.ui.opencode_bundle_dir = Some("/x".into());
         let listed: BTreeSet<&str> = values(&cfg).into_iter().map(|(key, _)| key).collect();
         let keys: BTreeSet<&str> = GUARDED.iter().map(|(key, _)| *key).collect();
         assert_eq!(listed, keys);
@@ -2795,7 +2753,7 @@ mod tests {
     }
 
     /// macOS keeps `node.toml` in the state directory, so the secrets
-    /// directory, the export area and the bundle's default all sit there.
+    /// directory and the export area both sit there.
     #[test]
     fn a_layout_whose_configuration_is_its_state_still_has_its_own_areas() {
         for node in [Node::new(), Node::behind_link()] {
@@ -2819,13 +2777,6 @@ mod tests {
                 Stage::Edit,
             )
             .unwrap();
-        guard
-            .path(
-                "ui.opencode_bundle_dir",
-                &shown(&node.at("state/opencode-ui")),
-                Stage::Edit,
-            )
-            .unwrap();
         // Elsewhere in it is still the state directory.
         let staged = node.file("state/workspaces/x/token", "x");
         assert!(guard
@@ -2840,10 +2791,10 @@ mod tests {
             .is_err());
     }
 
-    /// The reviewer's probe: an agent writes the marker (and a bundle) into
-    /// its own Podman volume; neither directory may then be named.
+    /// The reviewer's probe: an agent writes the marker into its own Podman
+    /// volume; the directory may then not be named.
     #[test]
-    fn an_agents_volume_is_never_an_export_or_bundle_directory() {
+    fn an_agents_volume_is_never_an_export_directory() {
         let node = Node::new();
         let mut layout = node.layout();
         layout
@@ -2857,17 +2808,6 @@ mod tests {
         );
         let refusal = guard
             .path("docs.export_dir", &shown(&volume), Stage::Use)
-            .unwrap_err();
-        assert!(
-            refusal.reason.contains("which an agent can write"),
-            "{refusal}"
-        );
-        let refusal = guard
-            .path(
-                "ui.opencode_bundle_dir",
-                &shown(&volume.join("ui")),
-                Stage::Edit,
-            )
             .unwrap_err();
         assert!(
             refusal.reason.contains("which an agent can write"),
@@ -2981,8 +2921,8 @@ mod tests {
 
     /// The final re-review's probe: an export directory spelled inside an
     /// agent's volume, reaching the export area (or a marked directory)
-    /// through a link the agent made, is refused; so is a bundle directory
-    /// reaching the state directory that way.
+    /// through a link the agent made, is refused; so is one reaching the
+    /// state directory that way.
     #[test]
     fn a_link_an_agent_made_into_an_own_area_does_not_bring_its_path_along() {
         for node in [Node::new(), Node::behind_link()] {
@@ -3007,7 +2947,7 @@ mod tests {
             ("docs.export_dir", volume.join("l/sub")),
             ("docs.export_dir", volume.join("l")),
             ("docs.export_dir", volume.join("m")),
-            ("ui.opencode_bundle_dir", volume.join("s/opencode-ui")),
+            ("docs.export_dir", volume.join("s/exports")),
         ] {
             for stage in [Stage::Edit, Stage::Use] {
                 let refusal = guard.path(key, &shown(&value), stage).unwrap_err();

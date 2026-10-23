@@ -462,7 +462,6 @@ struct HarnessLayer {
 fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
     match harness_id {
         crate::adapter::claude::ClaudeAdapter::ID => Some(claude_layer(run_as)),
-        crate::adapter::opencode::OpenCodeAdapter::ID => Some(opencode_layer(run_as)),
         crate::adapter::native::NativeAdapter::ID => Some(native_layer(run_as)),
         _ => None,
     }
@@ -471,7 +470,7 @@ fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
 /// Claude Code over a repository's image: the one binary, and the
 /// environment the harness image sets.
 ///
-/// Like OpenCode's, it first refuses an image that would configure the
+/// Like the native harness's, it first refuses an image that would configure the
 /// harness, or change what it loads, underneath the node, and removes what
 /// such an image could have put where Claude Code looks (`layer_guard`):
 ///
@@ -661,73 +660,6 @@ fn resolve_to_themselves(paths: &[&str], run_as: &RunAs) -> String {
         all.join(" ")
     )
 }
-
-/// OpenCode over a repository's image: the binary, and `/opt/tracon` whole,
-/// which holds the entrypoint that seeds its package caches, the language
-/// servers and formatters its configuration names, the `node` those run on
-/// and the `rg` its search tools use.
-///
-/// Nothing goes on the repository's `PATH` and nothing replaces what it
-/// installed: the baked `node` is `/opt/tracon/bin/node`, which the toolchain
-/// profile names in front of each JavaScript tool, so the agent's shell keeps
-/// the repository's own Node and the tools keep theirs.
-///
-/// `layer_guard` first refuses an image that would configure OpenCode, or
-/// change what it loads, underneath the node, and removes what OpenCode would
-/// otherwise read:
-///
-/// - `/etc/opencode`, which OpenCode reads whatever its environment says, and
-///   anything already at `/opt/tracon` (whose seed the entrypoint copies into
-///   the configuration directory), at the binary's path or at the init's;
-/// - an environment that sets an `OPENCODE_*` or `BUN_*` variable,
-///   `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH`: each reaches the harness
-///   wherever the launch sets no value of its own. Refused, naming them, even
-///   where the value is harmless.
-///
-/// The probe then checks the paths that matter resolve to themselves.
-fn opencode_layer(run_as: &RunAs) -> HarnessLayer {
-    use crate::adapter::opencode::OpenCodeAdapter;
-    use crate::runner::toolchain::IMAGE_ENTRYPOINT;
-    let binary = OpenCodeAdapter::BINARY;
-    let mut dirs = vec!["/opt"];
-    dirs.extend(LINKLESS_DIRS);
-    let guard = layer_guard(
-        run_as,
-        &dirs,
-        &["/etc/opencode", "/opt/tracon", binary, POD_INIT_DIR],
-        &[
-            "OPENCODE_[A-Za-z0-9_]*",
-            "BUN_[A-Za-z0-9_]*",
-            "LD_PRELOAD",
-            "LD_AUDIT",
-            "LD_LIBRARY_PATH",
-        ],
-        &[],
-    );
-    let node = OPENCODE_NODE;
-    let probe = format!(
-        "{} && test -x {node} && test -x {OPENCODE_RG} \
-         && {IMAGE_ENTRYPOINT} {binary} --version && git --version",
-        resolve_to_themselves(&[IMAGE_ENTRYPOINT, binary, node], run_as)
-    );
-    HarnessLayer {
-        lines: format!(
-            "{guard}\
-             COPY --from=harness {binary} {binary}\n\
-             COPY --from=harness /opt/tracon /opt/tracon\n\
-             ENTRYPOINT [\"{IMAGE_ENTRYPOINT}\"]\n"
-        ),
-        probe: match run_as {
-            RunAs::Root => probe,
-            RunAs::Pod { .. } => format!("{probe} && {POD_INIT} --version"),
-        },
-    }
-}
-
-/// The node the OpenCode layer brings for its JavaScript tools, and the
-/// `rg` its entrypoint links into OpenCode's cache.
-const OPENCODE_NODE: &str = "/opt/tracon/bin/node";
-const OPENCODE_RG: &str = "/opt/tracon/bin/rg";
 
 /// How a refusal the node's own layer prints begins, so a failed build says
 /// that and not only that the build exited.
@@ -2594,7 +2526,7 @@ mod tests {
         let other = ask("/src/app", "pi").await;
         assert!(other.image.is_none());
         assert!(other.note.unwrap().contains("runs in its own image"));
-        for harness in ["claude", "opencode"] {
+        for harness in ["claude", "native"] {
             let unbuildable = ask("/src/app", harness).await;
             assert!(
                 unbuildable.note.unwrap().contains("cannot build images"),
@@ -2753,11 +2685,6 @@ mod tests {
         }
     }
 
-    const OPENCODE_GUARD: &str = r#"RUN for d in /opt /usr /usr/local /usr/local/bin /usr/libexec /usr/libexec/tracon; do if [ -L "$d" ]; then echo "tracon: the repository's image makes $d a symbolic link, which would let it choose what the harness runs" >&2; exit 1; fi; done && rm -rf /etc/opencode /opt/tracon /usr/local/bin/opencode /usr/libexec/tracon && test ! -e /etc/opencode && if [ -s /etc/ld.so.preload ]; then echo "tracon: the repository's image preloads libraries through /etc/ld.so.preload, which would load them into the harness" >&2; exit 1; fi && found=$(env | sed -n -e 's/^\(OPENCODE_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(BUN_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(LD_PRELOAD\)=.*/\1/p' -e 's/^\(LD_AUDIT\)=.*/\1/p' -e 's/^\(LD_LIBRARY_PATH\)=.*/\1/p' | tr '\n' ' ') && if [ -n "$found" ]; then echo "tracon: the repository's image sets ${found% }, which would reach the harness and change how it is configured or what it loads" >&2; exit 1; fi
-"#;
-
-    const OPENCODE_PROBE: &str = r#"for p in /opt/tracon/bin/harness-entrypoint /usr/local/bin/opencode /opt/tracon/bin/node; do if [ "$(readlink -f "$p")" != "$p" ]; then echo "$p is not the file the layer put there"; exit 1; fi; done && test -x /opt/tracon/bin/node && test -x /opt/tracon/bin/rg && /opt/tracon/bin/harness-entrypoint /usr/local/bin/opencode --version && git --version"#;
-
     /// Claude Code's guard, for a harness whose home is `home`.
     fn claude_guard(home: &str) -> String {
         r#"RUN for d in /usr /usr/local /usr/local/bin /usr/libexec /usr/libexec/tracon; do if [ -L "$d" ]; then echo "tracon: the repository's image makes $d a symbolic link, which would let it choose what the harness runs" >&2; exit 1; fi; done && rm -rf /etc/claude-code /usr/local/bin/claude HOME/.claude HOME/.claude.json /usr/libexec/tracon && test ! -e /etc/claude-code && if [ -s /etc/ld.so.preload ]; then echo "tracon: the repository's image preloads libraries through /etc/ld.so.preload, which would load them into the harness" >&2; exit 1; fi && found=$(env | sed -n -e 's/^\(CLAUDE_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(ANTHROPIC_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(NODE_OPTIONS\)=.*/\1/p' -e 's/^\(BUN_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(LD_PRELOAD\)=.*/\1/p' -e 's/^\(LD_AUDIT\)=.*/\1/p' -e 's/^\(LD_LIBRARY_PATH\)=.*/\1/p' | grep -v -x -e CLAUDE_CONFIG_DIR -e ANTHROPIC_BASE_URL -e ANTHROPIC_API_KEY | tr '\n' ' ') && if [ -n "$found" ]; then echo "tracon: the repository's image sets ${found% }, which would reach the harness and change how it is configured or what it loads" >&2; exit 1; fi
@@ -2767,79 +2694,12 @@ mod tests {
 
     const CLAUDE_PROBE: &str = r#"for p in /usr/local/bin/claude; do if [ "$(readlink -f "$p")" != "$p" ]; then echo "$p is not the file the layer put there"; exit 1; fi; done && /usr/local/bin/claude --version && git --version"#;
 
-    const OPENCODE_COPY: &str = r#"COPY --from=harness /usr/local/bin/opencode /usr/local/bin/opencode
-COPY --from=harness /opt/tracon /opt/tracon
-ENTRYPOINT ["/opt/tracon/bin/harness-entrypoint"]
-"#;
-
-    /// OpenCode's layer, pinned per runtime: the binary and `/opt/tracon`
-    /// copied in, the configuration a repository's image could slip under
-    /// the node's removed or refused first, and the harness entrypoint as the
-    /// image's own. A pod's does the root part as root and ends as the
-    /// harness uid.
-    #[test]
-    fn the_opencode_layer_is_pinned_per_runtime() {
-        let root = harness_layer("opencode", &RunAs::Root).unwrap();
-        assert_eq!(root.lines, format!("{OPENCODE_GUARD}{OPENCODE_COPY}"));
-        assert_eq!(root.probe, OPENCODE_PROBE);
-        assert_eq!(
-            layered(
-                "localhost/app@sha256:abc",
-                "localhost/h@sha256:def",
-                &root,
-                &RunAs::Root
-            ),
-            format!(
-                "FROM localhost/h@sha256:def AS harness\n{}{OPENCODE_GUARD}{OPENCODE_COPY}",
-                normalised("localhost/app@sha256:abc", &RunAs::Root)
-            )
-        );
-
-        let pod_layer = harness_layer("opencode", &pod()).unwrap();
-        assert_eq!(
-            pod_layer.lines,
-            format!("USER 0:0\n{OPENCODE_GUARD}USER 65532:65532\n{OPENCODE_COPY}")
-        );
-        assert_eq!(
-            pod_layer.probe,
-            format!(
-                "{} && /usr/libexec/tracon/tini --version",
-                OPENCODE_PROBE.replace(
-                    "/opt/tracon/bin/node; do",
-                    "/opt/tracon/bin/node /usr/libexec/tracon/tini; do"
-                )
-            )
-        );
-        let text = layered(
-            "ghcr.io/app@sha256:abc",
-            "ghcr.io/h@sha256:def",
-            &pod_layer,
-            &pod(),
-        );
-        assert!(text.ends_with(&format!(
-            "{OPENCODE_COPY}COPY --from=harness /usr/bin/tini-static /usr/libexec/tracon/tini\n"
-        )));
-        // Nothing after the last `USER` makes the harness root again.
-        let last_user = text.rfind("\nUSER ").unwrap();
-        assert!(text[last_user..].starts_with("\nUSER 65532:65532\n"));
-        assert!(!text[last_user..].contains("RUN "), "{text}");
-        assert!(!text.contains("/root"), "{text}");
-
-        // The paths are the ones the launch and the pod name.
-        assert!(root
-            .lines
-            .contains(crate::adapter::opencode::OpenCodeAdapter::BINARY));
-        assert!(root
-            .lines
-            .contains(crate::runner::toolchain::IMAGE_ENTRYPOINT));
-    }
-
-    /// An image the OpenCode layer refuses says why in the session's note, not
+    /// An image a harness layer refuses says why in the session's note, not
     /// only that the build failed, from either builder's log; the reason is
     /// what the next session on the same images is told too.
     #[tokio::test]
     async fn a_refused_layer_names_the_variable_in_the_note() {
-        let says = "tracon: the repository's image sets OPENCODE_PERMISSION, which would \
+        let says = "tracon: the repository's image sets TRACON_AGENT_BASE_URL, which would \
                     reach the harness and change how it is configured or what it loads";
         assert_eq!(
             layer_refusal(&format!("STEP 9/12: RUN rm -rf ...\n{says}\nError: exit 1")).as_deref(),
@@ -2870,10 +2730,10 @@ ENTRYPOINT ["/opt/tracon/bin/harness-entrypoint"]
             Some(format!("STEP 9/12: RUN ...\n{says}\nError: exit 1"));
         let runner = ProbeRunner::saying("unused", 0);
         let harness = SessionHarness {
-            id: "opencode",
-            version: crate::adapter::opencode::OpenCodeAdapter::PINNED_VERSION,
-            image: "localhost/tracon-harness-opencode".into(),
-            layer: harness_layer("opencode", &RunAs::Root).unwrap(),
+            id: "native",
+            version: crate::adapter::native::NativeAdapter::PINNED_VERSION,
+            image: "localhost/tracon-harness-native".into(),
+            layer: harness_layer("native", &RunAs::Root).unwrap(),
             run_as: RunAs::Root,
         };
         for _ in 0..2 {
@@ -2884,7 +2744,7 @@ ENTRYPOINT ["/opt/tracon/bin/harness-entrypoint"]
         }
         // The second session was told from the recorded failure.
         let row = store
-            .latest_repo_image("/src/app", "session:opencode")
+            .latest_repo_image("/src/app", "session:native")
             .unwrap()
             .unwrap();
         assert!(row.log_tail.contains(says));
@@ -2898,85 +2758,6 @@ ENTRYPOINT ["/opt/tracon/bin/harness-entrypoint"]
         let got = ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &claude).await;
         assert_eq!(got.image, None);
         assert_eq!(got.note.as_deref(), Some(&says["tracon: ".len()..]));
-    }
-
-    /// The layer writes `/usr/local/bin/opencode` and `/opt/tracon`, and
-    /// nothing a repository installs its own tools to: its `node`, `npm` and
-    /// `rg` stay what its Dockerfile made them. The baked node is
-    /// `/opt/tracon/bin/node`, where only the toolchain profile names it.
-    #[test]
-    fn the_opencode_layer_leaves_the_repositorys_own_tools_alone() {
-        for run_as in [RunAs::Root, pod()] {
-            let layer = harness_layer("opencode", &run_as).unwrap();
-            let written: Vec<&str> = layer
-                .lines
-                .lines()
-                .filter_map(|line| line.strip_prefix("COPY --from=harness "))
-                .filter_map(|copy| copy.split_whitespace().last())
-                .collect();
-            assert_eq!(written, ["/usr/local/bin/opencode", "/opt/tracon"]);
-            assert!(!layer.lines.contains("ENV "), "nothing changes PATH");
-            for theirs in ["/usr/local/bin/node", "/usr/local/bin/npm", "/usr/bin/node"] {
-                assert!(!layer.lines.contains(theirs), "{theirs}");
-            }
-        }
-        let image = include_str!("../../containers/harness-opencode/Containerfile");
-        assert!(image.contains("COPY --from=toolchain /usr/local/bin/node /opt/tracon/bin/node"));
-        assert!(image.contains("install -m 0755 /tmp/rg/rg /opt/tracon/bin/rg"));
-        assert!(image.contains("/usr/bin/tini-static --version"));
-        // Every tool that needs a node names the baked one.
-        let profile = crate::runner::toolchain::profile();
-        for tool in profile.lsp.iter().chain(profile.formatter.iter()) {
-            if let Some(interpreter) = tool.interpreter() {
-                assert_eq!(interpreter, "/opt/tracon/bin/node", "{}", tool.id);
-            }
-        }
-    }
-
-    /// An OpenCode layer that builds and runs is what the session gets, in
-    /// its own row and key, and its probe is held to the pinned release.
-    #[tokio::test]
-    async fn an_opencode_session_is_layered_and_probed_against_its_pin() {
-        let repo = Path::new("/src/app");
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        let pinned = crate::adapter::opencode::OpenCodeAdapter::PINNED_VERSION;
-        let harness = |run_as: RunAs| SessionHarness {
-            id: "opencode",
-            version: pinned,
-            image: "localhost/tracon-harness-opencode".into(),
-            layer: harness_layer("opencode", &run_as).unwrap(),
-            run_as,
-        };
-        let says = Box::leak(format!("{pinned}\ngit version 2.50").into_boxed_str());
-        let runner = ProbeRunner::saying(says, 0);
-        let got = ensure_session_with(
-            &builder,
-            &runner,
-            &store,
-            repo,
-            BASE_IMAGE,
-            &harness(RunAs::Root),
-        )
-        .await;
-        let image = got.image.clone().expect("the layered image");
-        assert!(image.contains("-opencode@sha256:"), "{image}");
-        assert_eq!(got.toolchain_image.as_deref(), Some(BASE_IMAGE));
-        assert!(store
-            .ready_repo_image("/src/app", "session:opencode")
-            .unwrap()
-            .is_some());
-        assert!(builder.builds.lock().unwrap()[0]
-            .1
-            .contains("ENTRYPOINT [\"/opt/tracon/bin/harness-entrypoint\"]"));
-
-        // Another release in the image is not the pinned one.
-        let store = Store::open_in_memory().unwrap();
-        let runner = ProbeRunner::saying("1.0.0\ngit version 2.50", 0);
-        let got =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness(pod())).await;
-        assert_eq!(got.image, None);
-        assert!(got.note.unwrap().contains("does not run"));
     }
 
     #[test]

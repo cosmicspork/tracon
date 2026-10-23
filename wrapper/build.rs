@@ -12,7 +12,6 @@ fn main() {
             "desktop_preferences",
             "desktop_set_preferences",
             "desktop_open_node",
-            "desktop_open_opencode",
         ]),
     ))
     .expect("building Tauri permissions");

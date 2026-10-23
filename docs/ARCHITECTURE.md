@@ -148,7 +148,7 @@ reports the restart-only keys that differ from it now (`GET /api/restart`, and a
 into the file the caller read; a file that changed since, or that would not load, is
 refused, and the file is read again just before the restart, so one edited while the
 restart waited is not restarted into. `when_idle`, the default, refuses new sessions and
-turns (OpenCode commands and compactions included) and new `submit_review` calls, waits
+turns and new `submit_review` calls, waits
 (30 minutes unless the request says otherwise) for running turns, running required checks
 and every review submission whose checks have not all run (they run one after another,
 so a review between two checks is still in flight), then restarts; if they have not finished it gives up, takes work again and
@@ -234,11 +234,10 @@ paths, secrets (named, value not shown), host-only keys, keys the node does not 
 `auth`, `mesh`, `runtime`, `boundary`, `consulta`, `[harness]`, the gateway's allowlist
 and socket, a provider's upstream, credential and sign-in, a repository's path,
 preparation, lent credentials, egress, image, Dockerfile, context and checks, a
-service's name, image and command, the checks run on submissions, plugins, the embedding
-switch, endpoint, key and provider, the GitHub dispatch list, the OpenCode UI and
-preview origins and listeners, the gateway's forward port, external harnesses, the
-default and export channels, the push contact, how commits reach the forge, and
-whether a terminal's output is captured. A value is never cut: a list shows the
+service's name, image and command, the checks run on submissions, the embedding
+switch, endpoint, key and provider, the GitHub dispatch list, the preview origin and
+listener, the gateway's forward port, external harnesses, the default and export
+channels, the push contact, and how commits reach the forge. A value is never cut: a list shows the
 elements it gains and loses, counted as a multiset so a second copy shows (`gateway.allow_hosts: + "evil.example"`),
 a key the file did not write is compared with its default ("(from the default)"), a
 value shows its old and new (`repo[0] ("/src/app").path: "/src/app" -> "/src/other"`),
@@ -396,14 +395,6 @@ runs. `config::path_guard` holds each such key to rules for what it names
   new file with `O_EXCL | O_NOFOLLOW` and renamed with `renameat`, stale ones removed
   with `unlinkat` after an `lstat`). A link where a document goes is refused, and no
   link repointed after the check can move the export somewhere else.
-- **The UI bundle directory** (`ui.opencode_bundle_dir`), which `setup` replaces whole:
-  as the export directory for what it may not be, outside every place an agent can
-  write unless it is in the node's own state or data directory, and only inside those,
-  a directory that does not exist yet, or one already holding a bundle (one the node
-  would serve, or one tracon installed, which it marks with a file beside it).
-  Separately, `setup` never moves aside or deletes a directory that holds anything but a
-  bundle, whichever key or variable named it, and makes its staging directory fresh and
-  writes the marker without following a link.
 - **Roots** (`session.worktree_root`, `external.repo_roots`): never `/`, a system
   directory, inside the configuration directory, a directory holding the configuration or
   state directory, or inside or holding a package manager's prefix.
@@ -451,8 +442,7 @@ key file, the builder's token file and the registry's `config.json` are opened, 
 checked, then compared by identity with what the check's own walk found, and read from
 what was opened; the builder's certificate directory is checked with every `buildctl`
 spawn, which reads it itself; the export directory is checked and opened as described
-above before every export, and the bundle directory is checked before `setup` replaces
-it. At use a secret file outside the
+above before every export. At use a secret file outside the
 dedicated directories is still read, so a key file placed by hand before the guard
 existed keeps working (with the start's warning) until it is moved; every other rule
 holds there.
@@ -475,37 +465,36 @@ admin save needs, the audit row and the push.
 ## Harness control
 
 **The adapter trait is the interface**, and each harness reaches it over its own
-protocol: OpenCode over its native server API, Claude Code over the stream-json
-control protocol. They are functionally equivalent at the permission gate, which is
-the only place that has to be true. The trait is the part of the system that rots:
+protocol: Claude Code over the stream-json control protocol, `tracon-agent` over ACP.
+They are functionally equivalent at the permission gate, which is the only place that
+has to be true. The trait is the part of the system that rots:
 version-pin harnesses per node, record the version on every session, check
 compatibility at session start, and let an unknown harness id refuse to start rather
 than fall back. A harness declares its own state layout and config files; nothing
 outside the trait may spell a harness's name.
 
 Which harness daily work runs on is a roadmap decision, not an architectural one:
-Claude Code today; OpenCode is driven over its v1 session routes because the v2 runner
-offers the model none of the node's MCP tools (`reference/opencode-v1.18.30/README.md`,
-findings 22 and 23), and has a real session still to run that way. The gate below is
-the same for both. That last rule is what made the 2026-09-13 cutover cheap. tracon's first harness was
-omp, driven over the Agent Client Protocol; removing it took the adapter, its image,
-its provider wiring and its catalogue workarounds, and nothing else. What survived is
-the shared vocabulary the adapters translate into (`node/src/adapter/types.rs` — tool
-calls, permission options, usage), because both remaining harnesses have the same
-things to say. Sessions the retired harness ran are archived read-only rather than
-deleted; see `tracon session archive-legacy` in RECOVERY.md. A few concrete adapters
-behind one trait is the whole ambition; a plugin system for harnesses is not.
+Claude Code today. The gate below is the same for both. That last rule is what made
+each retirement cheap. tracon's first harness was omp, driven over the Agent Client
+Protocol; removing it at the 2026-09-13 cutover to OpenCode took the adapter, its image,
+its provider wiring and its catalogue workarounds, and nothing else. OpenCode, driven
+over its server API, went the same way once `tracon-agent` covered the models it ran,
+taking its gateway mount, its web interface, its terminal and the owner streams that
+relayed them to other nodes. What survived both is the shared vocabulary the adapters
+translate into (`node/src/adapter/types.rs` — tool calls, permission options, usage).
+Sessions a retired harness ran are archived read-only rather than deleted; see
+`tracon session archive-legacy` in RECOVERY.md. A few concrete adapters behind one
+trait is the whole ambition; a plugin system for harnesses is not.
 
-The third, experimental, is tracon's own: `tracon-agent` (`agent/`), for models that
-are not Claude (local llama.cpp, the Codex subscription). It is a harness like the
-others, not part of the node: a separate binary in the boundary that holds no
-credential, catalogue or settings, reaches models through the gateway, and asks the
-node at the permission gate. Its wire protocol is meant to be `adapter/types.rs` itself,
-so its adapter has nothing to translate: `adapter/native.rs` is the retired omp
-adapter's handshake and pump over that shared vocabulary (the `acp` crate). It runs only
-where a node turns it on (`[harness] experimental = ["native"]`), because every harness a
-node runs needs its image before the boundary passes, and one still being proven must not
-be able to stop the supported ones. See `agent/README.md`. It speaks Chat Completions to an
+The second is tracon's own: `tracon-agent` (`agent/`), for models that are not Claude
+(local llama.cpp, the Codex subscription, any OpenAI-compatible provider). It is a
+harness like the other, not part of the node: a separate binary in the boundary that
+holds no credential, catalogue or settings, reaches models through the gateway, and asks
+the node at the permission gate. Its wire protocol is `adapter/types.rs` itself, so its
+adapter has nothing to translate: `adapter/native.rs` is the retired omp adapter's
+handshake and pump over that shared vocabulary (the `acp` crate). Every node runs it,
+since a model that is not Claude has no other harness, and it stays experimental until
+it has done a week of real work. See `agent/README.md`. It speaks Chat Completions to an
 `openai`-shaped provider and the Responses API to the Codex backend (`openai-codex`). The
 wire is the harness's concern: the gateway forwards either body untouched, adding only the
 credential and, for Codex, the account id.
@@ -543,63 +532,9 @@ is asked of the node like the parent's, recorded with the spawning call as its `
 and the session log shows it nested under that call. A child may use another model
 only from the parent's provider. Children are one level deep and are not journaled.
 
-### The OpenCode boundary
+### Rules learned against real harnesses
 
-OpenCode is a *server*, not a pipe, and that changes where the seam is
-rather than what it guarantees. A supervised session is one `opencode serve` in its
-own runner, and everything between it and anyone else is node-owned. In order:
-
-- **The adapter owns the process and its environment.** One server per session, bound
-  to loopback with mDNS off, a per-session `HOME`, all four XDG directories and its own
-  database, a read-only config the node wrote outside the worktree, and a server
-  password the node asserts is set. Nothing is discovered: the image carries no ambient
-  config, the model catalogue is declared rather than fetched, and the gateway's URL is
-  written into the provider entry, the catalogue provider and every catalogue model —
-  the session path resolves a model's host from the catalogue, so naming the gateway in
-  one place only leaves a silent way around it.
-- **Every route is classified before it moves.** The API a browser or another node
-  reaches is a mount on the operator router, so the operator's own guard answers first;
-  behind it a matrix derived from the release's own route table decides read, mediate,
-  refuse, or synthesise, and denies by default anything unlisted. The workspace
-  directory is pinned on every request — query, header and body — and the harness
-  credential is injected on the node, so it never reaches a client.
-- **Permissions are all-`ask`, and the node answers them.** No server-side hook gates a
-  tool before it runs, so enforcement is containment plus a ruleset the node writes that
-  asks for every tool class. Policy is evaluated on the node and the reply is always
-  `once`; an `always` is rewritten and the attempted broadening recorded, and the route
-  that would edit the ruleset is refused.
-  Adapters normalize each request into a canonical action, semantic kind and resource
-  or command before that policy decision. Display titles never participate in policy;
-  an unknown action or a known action without its required target has no exempt kind
-  and therefore remains an operator decision unless an explicit deny matches.
-- **Session events are synthesised, not proxied.** The harness's server-wide stream
-  has no durable replay and no scoping, so the node never opens one on a browser's
-  behalf: it serves that route itself from its own bus, filtered to the one session the
-  caller's cookie names and numbered so a client resumes rather than restarts.
-  Correctness does not rest on the stream at all: the adapter drives the v1 session
-  routes (the ones that offer the model the node's MCP tools, finding 23), claims each
-  part's milestone in the store exactly once, and after any drop re-reads the harness's
-  own message list, so a repeat is dropped and a gap is filled from the record the
-  harness keeps. The synthesised stream is a view of the same reading.
-- **State is the node's to fence.** Two processes can open the same harness database,
-  and an older build opens a newer one silently, so each session's state directory has a
-  single writer, its identity is recorded at launch, and backup, upgrade and restore are
-  the three verbs under "Data lifecycle".
-- **What a session was launched with is a manifest**, not a directory the harness
-  discovered; see below.
-- **The native UI is a client of that boundary, not a hole in it.** It is served from a
-  second origin under tracon's own CSP, entered through a single-use capability the page
-  exchanges for a cookie, and it can reach only the mediated mount for the one session
-  that capability named. The window and frame rules are under "Clients".
-- **A terminal is an authority grant**, bound to one session and its workspace,
-  default-`ask` and revocable, with the spawn rewritten rather than forwarded and a
-  node-minted, owner-bound, single-use ticket for the socket. What is recorded is that a
-  terminal was opened, with what shell and where: a terminal is not a per-command ledger,
-  and saying so is better than implying one.
-- **Another node's operator reaches all of it over an owner stream**, decided again by
-  the owner's own gateway, policy and intent row; see "Owner streams".
-
-Rules learned against real harnesses, kept as rules:
+Kept as rules:
 
 - **Deny-by-default is correct.** A permission request the client cannot answer is
   denied, not silently approved. This is how local-first and fail-closed coexist:
@@ -610,59 +545,29 @@ Rules learned against real harnesses, kept as rules:
 - Budget accounting charges the prompt tokens a call actually processed — fresh input
   and cache writes — and the output, not the cached context a long session rereads on
   every step; cache reads are recorded beside the charge.
-- A harness that runs a server is inventoried before it is trusted: the recorded
-  cautions in `docs/reference/opencode-v1.18.30/` are the upgrade checklist, not a
-  one-time read, because a release that moves which stack resolves a request moves
-  this boundary silently.
-- **A harness's language tooling is part of its image, named by absolute path.**
-  Left to itself a harness downloads its language servers and formatters on first
-  use, from a network that is denied — and the three formatters that install
-  themselves have no flag that stops them, so naming the command is the only lever.
-  The image bakes a small, explicit profile (the languages this project's own work
-  uses), records it with digests at a fixed path, and the node renders the harness's
-  server and formatter configuration from the same committed profile, disabling by
-  name every builtin the image does not carry. Overriding a builtin's command
-  discards the builtin's initialization, so each override carries its own copy.
-  Anything a harness resolves for itself at run time — a plugin package, a search
-  binary — is pre-populated in the image and copied into the session's own tree
-  before the harness starts, so resolution succeeds offline instead of failing
-  slowly.
-- **Status is what can be observed, and no more.** OpenCode publishes no
-  language-server status and logs nothing when one fails to spawn, so a session
-  records what its configuration named and whether the image had it —
-  configured, unavailable, or disabled — and the header says that rather than
-  inventing a lifecycle. Anything richer is an upstream contribution.
-
 ### The launch manifest
 
 **Customization is a node-owned object, not a directory the harness discovers.**
-Skills, standing instructions, agents, the approved plugin list, the language
-servers and formatters turned on, the effective provider set and the policy
+Skills, standing instructions, agents, the effective provider set and the policy
 revision are built into one per-channel manifest with a content digest and a
 revision number, and every session records the digest it launched under. The image a
 session runs in is not part of it: that is the repository's, resolved at launch and
 recorded on the session's start event with the repository image under it. A new
 revision never changes a running session: the files were staged at launch, and
 the next launch is what picks the change up. The node builds the manifest rather
-than letting the harness resolve one because upstream's own resolution is not
-safe to inherit — a duplicate skill name is resolved by overwriting one of them
-nondeterministically, a `skills.urls` entry is fetched over plain HTTP before any
-interaction with nothing that disables it, and a plugin resolves by a bare
-existence check with no integrity verification. So duplicates are refused at
-build, URL sources are refused outright, paths are validated and symlinks are
-never followed, and a plugin name the harness *image* did not bake is refused
-with the cache path it would have needed. Skill content is treated as code: a
-`SKILL.md` body is also registered as a slash command whose template is
-shell-interpolated, so an import records that plainly rather than implying the
-package is inert data.
+than letting the harness resolve one because a harness's own resolution is not safe
+to inherit: which of two same-named skills it loads, a skill fetched from a URL, a
+symlink followed out of a package. So duplicates are refused at build, URL sources
+are refused outright, and paths are validated and symlinks never followed. Skill
+content is treated as code: a harness may register a `SKILL.md` body as a slash
+command whose template is shell-interpolated, so an import records that plainly
+rather than implying the package is inert data.
 
-**Nested `AGENTS.md` and `CLAUDE.md` are read, and that is accepted.** OpenCode's
-`read` tool attaches instruction files it encounters anywhere under the worktree,
-with no flag that gates it — `OPENCODE_DISABLE_PROJECT_CONFIG` covers the project
-config, the project's `.opencode/` directories and the top-level `AGENTS.md` used
-for the system prompt, but not this. It matches what today's harnesses already
-do: they read the repository, and the repository is allowed to contain
-instructions about itself. The position that makes it safe is the one that has
+**`AGENTS.md` and `CLAUDE.md` are read, and that is accepted.** Claude Code loads
+the repository's `CLAUDE.md` files, and `tracon-agent` puts the worktree's
+`AGENTS.md` and `CLAUDE.md` in its system prompt and records that it did. Harnesses
+read the repository, and the repository is allowed to contain instructions about
+itself. The position that makes it safe is the one that has
 always applied here — instruction content grants no permission. Every tool class
 is `ask`, policy runs on the node, and a file in the worktree can ask for
 something but cannot approve it. Nothing about the manifest, the orientation, or
@@ -672,13 +577,13 @@ the gate changes if a repository adds one.
 `--setting-sources project` because that is what loads the repository's
 `CLAUDE.md`, and the same source loads `.claude/settings.json`: permission rules
 that allow a tool before the node hears the ask, and hooks and a status line that
-run commands. So a workspace carrying one is refused at launch, as one carrying
-`opencode.json` is for OpenCode, and the shipped policy refuses a write to any
+run commands. So a workspace carrying one is refused at launch, and the shipped
+policy refuses a write to any
 `.claude/settings…` path or into `.git/` mid-session. Ignored files never reach a
 workspace, so a checkout's own gitignored settings are unaffected.
 
 **The ledger records a decision for every tool call, whichever harness asked.**
-OpenCode asks the node before each call; Claude Code lets reads and searches through
+`tracon-agent` asks the node before each call; Claude Code lets reads and searches through
 on its own rules and never sends a `can_use_tool` for them. The Claude adapter notices
 a call whose result arrives without an ask and reports it, normalized exactly as an
 ask would have been, and the supervisor records the `policy_allowed` the node's policy
@@ -715,7 +620,7 @@ ChatGPT — and the node speaks those flows directly (`node/src/oauth/`): PKCE, 
 loopback listener the node opens when the operator's browser is on its host, and
 otherwise Anthropic's hosted code page for a paste or OpenAI's device code. Nothing
 runs in a container and nothing is scraped from a terminal. The client ids and
-endpoints were read out of Claude Code 2.1.247 and OpenCode 1.18.30 and confirmed
+endpoints were read out of Claude Code 2.1.247 and the Codex CLI and confirmed
 against the live services; they are the providers' to change.
 
 Anthropic tokens are the refreshable kind asking only for `user:inference`: an
@@ -776,10 +681,9 @@ Three things collapse the boundary and must be verified per environment:
 3. **Direct egress.** Image build may use network; execution may not.
 
 **Denied egress rejects; it does not drop.** A blackholed destination and a working
-but slow one are the same thing to a caller, and the harness has callers that never
-give up: OpenCode's language-server and npm installs pass no abort signal, and its
-`edit` and `write` tools await the language-server touch inline, so one dropped
-packet is an edit that never returns. Podman's internal network has no route out at
+but slow one are the same thing to a caller, and a harness or a tool it runs may
+fetch with no timeout of its own, so one dropped packet is a call that never
+returns. Podman's internal network has no route out at
 all, so a denied connection fails at `connect(2)` and a denied name fails at
 resolution, both in milliseconds; the gateway refuses an unlisted host with a status
 rather than silence. `--deep` measures this rather than assuming it, and fails a
@@ -788,13 +692,11 @@ NetworkPolicy drops by nature and there is no portable way to make it reject, so
 there the bound has to come from a cluster that can express one, and until it does
 that runtime is honest about it rather than claiming the property.
 
-**A harness container is a PID namespace with an init at its head.** Nothing in
-OpenCode reaps what it starts — `serve` installs no signal handler, so a stop runs
-no finalizer at all; its stop of a language server is a bare single-pid SIGTERM with
-no escalation and no wait; and even a clean exit calls `process.exit()` before
-pending finalizers run. So the runner stops the container rather than the process:
-the init takes the signal, the stop timeout bounds the wait, and tearing the
-namespace down is what actually collects the language servers and formatters. A pod
+**A harness container is a PID namespace with an init at its head.** A harness
+need not reap what it and its tools start, and a stop that signals one process
+leaves the rest. So the runner stops the container rather than the process: the init
+takes the signal, the stop timeout bounds the wait, and tearing the namespace down is
+what actually collects whatever was left running. A pod
 gets the same number as its termination grace period and needs no shared process
 namespace, because the container carries its own init.
 
@@ -1015,35 +917,6 @@ and, for merge, publish, and deploy, the one revision it covers; the target
 moving to a later sha drops the grant rather than carrying it forward silently.
 Grants are made and revoked one at a time in Settings → Permissions & policies.
 
-One grant is not a side effect but a surface: **`terminal`**, an interactive PTY
-inside one session's workspace. The harness's `POST /pty` spawns an arbitrary
-command in an arbitrary directory with no permission check of its own, so the
-grant is the only thing between a browser and a shell; it is therefore bound to
-a session *and* to that session's workspace path (`terminal:<session>:<path>`),
-requires a session binding to be an `allow` at all, and is refused if the
-session is not active. With it, the gateway still rewrites rather than forwards:
-the working directory is pinned to the workspace or a normalised subdirectory of
-it, the caller's environment is reduced to variables that decide only how a
-terminal *looks* (`PATH` and `HOME` come from the harness, never from the
-request), and the command must be one of the shells the image itself lists at
-`GET /pty/shells`. The WebSocket is reached with a ticket the node mints after
-taking the harness's own server-side: bound to the operator, the session, the
-PTY and the exact origin it will be presented from, for thirty seconds, once.
-The proxy carries bytes both ways with a bounded queue in each direction and
-closes with a stated reason rather than buffering for a client that has stopped
-reading; input is never replayed across a reconnect, and the display is
-reconstructed by the app rather than by tracon.
-
-**A terminal grant is not a per-command ledger, and the node says so wherever it
-is offered.** Once the shell is open, everything typed at its prompt runs with
-no further decision and raises no tool call, because the harness raises none for
-a PTY. What is recorded is the shape of the thing: that a terminal was opened,
-with which shell, in which directory, under which grant, and how many bytes and
-how long the connection lasted — not the transcript. Capturing a bounded tail of
-the output to the session log is a deliberate configuration (`pty_capture_output`),
-off by default, and labelled as what it is: a record of what the operator
-happened to run, not of what tracon decided.
-
 ### Explaining authority
 
 The question behind most low-value interruptions is not "may this call go
@@ -1141,37 +1014,26 @@ image's static `tini` to `/usr/libexec/tracon/tini`, which the session's pod run
 `tini --` in front of the harness: a pod's first process is PID 1, which ignores
 signals it does not handle and inherits orphans, and Kubernetes has nothing like
 Podman's `--init`. The probe runs in a pod as the harness uid. Both harnesses are
-layered. Claude Code is one binary and the environment its image sets. OpenCode is its
-binary and the whole of `/opt/tracon`: the entrypoint that seeds its package caches (now
-the layered image's `ENTRYPOINT`, and named in front of the harness in a pod), the
-language servers and formatters its configuration names, a statically linked `rg` that
-the entrypoint links into OpenCode's cache so it never downloads one, and its own Node at
-`/opt/tracon/bin/node`. That Node is on no `PATH`: the toolchain profile names it in front
-of each JavaScript tool, so the agent's shell keeps the repository's `node` and the tools
-keep theirs, and a tool whose interpreter does not run on the image is reported
-`unavailable` in the session's launch status rather than failing the session. Claude Code's layer now begins the same way OpenCode's does (`repo_image::layer_guard`).
-It removes `/etc/claude-code`, the managed-settings directory Claude Code reads on Linux
-whatever its environment says, whose policy outranks the node's flags, and any `.claude` or
-`.claude.json` in the harness's home. It refuses `CLAUDE_*` and `ANTHROPIC_*` variables
-other than the three every session sets for itself, as well as `NODE_OPTIONS` and the
-loader and `BUN_*` variables below. The launch states `BUN_OPTIONS` empty, because Claude
-Code's binary is Bun and a `--preload` there runs a script inside it. Its probe checks that
-the binary, and a pod's init, resolve to themselves. The OpenCode layer
-also removes what a repository's image could use to configure OpenCode under the node:
-`/etc/opencode`, which OpenCode reads whatever its environment says, and anything already
-at `/opt/tracon`, whose seed the entrypoint copies into the configuration directory. It
-refuses, naming what it found, an image whose environment sets an `OPENCODE_*` or `BUN_*`
-variable, `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH` (each would reach the harness
-wherever the launch sets no value of its own), one with a non-empty `/etc/ld.so.preload`,
-and one where `/opt`, `/usr`, `/usr/local`, `/usr/local/bin`, `/usr/libexec` or
-`/usr/libexec/tracon` is a symbolic link that would send the copied files somewhere the image chose, such as the
-workspace. The probe then checks that the entrypoint, the binary and the baked node each
-resolve to themselves. The launch sets `BUN_BE_BUN=0`, because the binary is Bun and that
-variable would make it run a `serve` script from the worktree with the server password in
-its environment. The trust model is that the operator's image is trusted as its Dockerfile
-is: it builds with the network and supplies every command the agent runs. So these checks
-catch accidental configuration, not a hostile image; the boundary is the runtime around the
-session. OpenCode is launched as `/usr/local/bin/opencode`, never by a `PATH` lookup. Checks stay on the repository's image, so a harness
+layered. Claude Code is one binary and the environment its image sets; `tracon-agent` is
+one static binary and sets none. Each layer begins by refusing what would configure its
+harness underneath the node (`repo_image::layer_guard`): an image with a non-empty
+`/etc/ld.so.preload`, one whose environment sets `LD_PRELOAD`, `LD_AUDIT` or
+`LD_LIBRARY_PATH` (each would reach the harness wherever the launch sets no value of its
+own), and one where `/usr`, `/usr/local`, `/usr/local/bin`, `/usr/libexec` or
+`/usr/libexec/tracon` is a symbolic link that would send the copied files somewhere the
+image chose, such as the workspace. Claude Code's layer also removes `/etc/claude-code`,
+the managed-settings directory Claude Code reads on Linux whatever its environment says,
+whose policy outranks the node's flags, and any `.claude` or `.claude.json` in the
+harness's home. It refuses `CLAUDE_*` and `ANTHROPIC_*` variables other than the three
+every session sets for itself, as well as `NODE_OPTIONS` and `BUN_*`. The launch states
+`BUN_OPTIONS` empty, because Claude Code's binary is Bun and a `--preload` there runs a
+script inside it. `tracon-agent`'s layer refuses `TRACON_AGENT_*` variables, which would
+steer the endpoint or key it reads. Each probe checks that the binary, and a pod's init,
+resolve to themselves. The trust model is that the operator's image is trusted as its
+Dockerfile is: it builds with the network and supplies every command the agent runs. So
+these checks catch accidental configuration, not a hostile image; the boundary is the
+runtime around the session. Each harness is launched by its absolute path, never by a
+`PATH` lookup. Checks stay on the repository's image, so a harness
 upgrade rebuilds only the layer and no evidence moves. The session's start event
 records the image it ran in, the repository image under it, and the reason when it ran
 in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`
@@ -1203,7 +1065,7 @@ failure, a kill, a dropped caller) deletes it on the way out, and the boundary c
 `reconcile` sweep any a dead node left. The Secrets rights are optional in the `runtime`
 check. A node without them refuses a run carrying secret environment and never
 downgrades it to a plaintext value. A session is such a run everywhere: its token at the
-gateway and the MCP server, OpenCode's per-launch server password and its egress grant
+gateway and the MCP server and its egress grant
 are secret environment, and Claude Code reads its MCP server, whose header carries the
 token, from a staged file rather than its argv. A Kubernetes node without the rights
 refuses every session up front, and issues no egress grant. A private package therefore reaches candidates and
@@ -1245,7 +1107,7 @@ presents the token it was issued as proxy credentials, and each is filtered
 by its own host set — so nothing one may reach is reachable by another, none waits for
 another, and a refusal is known to be that client's. Because that proxy dials from the
 node's process, a granted name that resolves to the machine itself or to its link-local
-range is refused whatever the grant says. A session, Claude Code or OpenCode, holds a
+range is refused whatever the grant says. A session, on either harness, holds a
 grant for its whole life: the hosts every harness may reach, plus its repository's `egress` where the
 entry sets `session_egress`. A refusal under it is an ask, not an end: the node raises
 an approval (`request_egress`, one per session and host) and answers the CONNECT with a
@@ -1254,10 +1116,9 @@ refusal is recorded on the session once per host, and the orientation says the s
 before the first tool call. The operator's answer widens that session's live grant — for
 ten minutes, for its life, or for its life and the repository's `[[repo]]` entry — and
 runs nothing; a declined host is not asked again by a retried connection. The grant
-replaces the harness proxy in the harness's environment, which OpenCode's shell and
-terminals inherit; the model and the MCP server are on the gateway host, which `NO_PROXY`
-keeps off any proxy. What OpenCode fetches on its own (plugins, `rg`, language servers) is
-still closed by its launch flags and its image's seeds, not by the proxy. A check's evidence is keyed on source
+replaces the harness proxy in the harness's environment, which the harness's shell
+inherits; the model and the MCP server are on the gateway host, which `NO_PROXY` keeps
+off any proxy. A check's evidence is keyed on source
 revision, check definition, execution image, dependency inputs, and the preparation,
 egress and environment it was given, and is reused rather than rerun only when every one of those is
 unchanged — a resubmission that edits only the title,
@@ -1696,38 +1557,6 @@ Invariants on top of the wire:
   command still opens it far enough to ack it with "the owner runs an older build",
   so the sender hears why at once instead of timing out.
 
-### Owner streams
-
-A command is one message and one ack, retried until it lands. The native
-harness API is not that shape: it is a request with a body, a response with a
-body, and — for the event stream and the terminal — no end at all. Replaying
-those through the durable outbox would repeat mutations and fill the hub with
-bytes nobody reads again. So a request on one node for a session another node
-owns opens a **stream**: its own frame family, relayed by the hub and stored
-nowhere (`spec/README.md`, "Owner streams").
-
-- **The owner decides, from its own state.** On an open, the owner re-checks
-  that the session is its own, that the stream is on that session's channel,
-  and that the opener still holds the channel *by the owner's own record* —
-  then runs the request through its own gateway, matrix, policy and intent row.
-  An operator the serving node admitted is refused here if this node grants
-  them nothing.
-- **Input is never replayed.** A stream that dies is gone. The serving node
-  re-opens on the next request; it never re-sends a body, and a request with a
-  body is refused rather than retried when the owner's epoch has moved. A
-  mutation whose answer was lost is `uncertain` on the owner (the intent row
-  written before dispatch) and says so on the response head.
-- **Owner fencing is an epoch, not a heartbeat.** Each run of a node mints one;
-  the serving side remembers it per session and names it on the next open. A
-  restart fences every stream held against the run that died.
-- **The hub sees ciphertext and routing metadata.** Channel, sender, recipient,
-  stream id, epoch and sequence are clear because they are what it routes on;
-  the body is sealed under a key derived per stream *and per direction* from
-  the channel epoch key, with a label no durable operation uses. The hub bounds
-  what it carries — per stream, per connection, per member, per minute — and a
-  stream it has to drop is closed at both ends with a reason, in the clear,
-  because it cannot seal a close of its own.
-
 ## Memory and documents
 
 The node owns memory; harness-native memory is disabled. **Bank identity comes from
@@ -2117,41 +1946,14 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   the CLI the unit runs, and after an update moves both onto the version it carries
   once no session is running. A node an earlier version spawned as its child is
   stopped once, before the service takes the port.
-- **Two windows, and only one of them is privileged.** The main window is the node's
-  own interface, and it holds the commands that install the CLI, install updates and
+- **One window, and it is the privileged one.** The main window is the node's own
+  interface, and it holds the commands that install the CLI, install updates and
   restart the node — commands the node itself must never have, because a session
-  inside the boundary would then hold them too. OpenCode's native UI is third-party
-  code driven by an agent, so it gets a second window and its own capability, and
-  that capability grants nothing: no `remote` section, so the origin loaded there can
-  invoke no command at all, of this app's or of any plugin's. The window is created
-  on demand on a boot URL the node mints, never at launch; it may navigate only to
-  the node's OpenCode UI origin, which is a distinct origin from the node's own —
-  same-origin with the operator API is a page that drives the node with no credential
-  — and the app refuses a boot URL that would collapse the two. An `http(s)` link off
-  that origin is handed to the system browser by the app's own navigation handler, in
-  Rust, so reaching the browser is not a capability the window holds; any other scheme
-  is refused. The boot token rides in the URL fragment, which is not sent in requests
-  and is stripped from anything the app logs. Nothing about this depends on the page
-  behaving; it is the window's grants and its navigation handler, both asserted by
-  test against the manifest.
-- **A browser gets the same isolation without a window to put it in.** The desktop
-  app can hand OpenCode's UI a window with its own capability; a phone cannot, and an
-  installed web app that opened the system browser would have given the session away
-  to a context it no longer controls. So the interface hosts the native view itself,
-  at `/sessions/{id}/opencode` — a route inside the app's own `scope`, holding a
-  cross-origin frame on the node's OpenCode UI origin. The isolation is that origin,
-  exactly as it is for the desktop window: no `sandbox` (a sandboxed frame's origin
-  is opaque, which that listener refuses outright), no message bridge, nothing
-  delegated, and a status bar read from tracon's own session API rather than from the
-  frame. Both policies name the other: the interface's `frame-src` names the UI
-  origin, the UI origin's `frame-ancestors` names the interface.
-  Being framed changes one thing on the node. The cookie the view's own bootstrap
-  sets is third-party from the browser's point of view, and third-party cookies are
-  blocked by default on phones — so the bootstrap says whether it is framed, and a
-  framed exchange is answered with a `Partitioned` cookie (CHIPS) instead of
-  `SameSite=Strict`. That keys the cookie to tracon's own site as the page around it,
-  which is stricter than what it replaces rather than looser: the origin guard already
-  required a matching `Origin` on everything that writes.
+  inside the boundary would then hold them too. Its capability names the loopback
+  origins it loads and nothing else, and an `http(s)` link off them is handed to the
+  system browser by the app's own navigation handler, in Rust, so reaching the browser
+  is not a capability the window holds. Both are asserted by test against the
+  manifest.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker. A mirrored review's checks,
@@ -2194,7 +1996,7 @@ Three surfaces, three answers, and the differences are the point.
   CDN, Envoy and Tailscale client headers), its `Host` and any absolute target
   name `localhost`, `127.0.0.0/8` or `::1`, and its `Origin`, if any, is an
   HTTP(S) loopback origin with the same host and port as that `Host`. A page on
-  another loopback origin (the OpenCode UI listener, a dev server on another
+  another loopback origin (the document preview listener, a dev server on another
   port) is another site: it can send a simple cross-origin POST without a
   preflight, so it must not count as the operator. The Host and Origin checks
   are also the DNS-rebinding defence. The `Host` port is not compared with the
@@ -2366,19 +2168,11 @@ running; the vector index is derived and is rebuilt rather than restored.
 `RECOVERY.md` is the operator's copy of this, including the way out through a
 harness run directly and what that costs.
 
-A harness session's own state is a separate lifecycle with its own three verbs,
-because the harness database carries no version and an older build opening a newer
-one writes to it silently. **Backup** refuses a live session unless `--quiesce`
-stops the harness through the supervisor, then checkpoints WAL, `VACUUM INTO`s a
-copy it verifies read-only, archives the rest of the state tree minus caches, and
-records the workspace's commit and dirty digest at the same instant. **Upgrade**
-never touches the original: it migrates a clone under the target build, refuses
-outright when that build is not on the host, and swaps the clone in only if its
-integrity check passes. **Restore** is bounded by what it can honestly put back —
-it refuses a build or a state-schema generation this node's runtime does not cover,
-refuses while the session runs or its state is claimed, and brings back the harness
-database and state tree but never the workspace or any side effect the session had
-outside its own state, which it says before it acts.
+A harness session's own state lives in the session's scratch volume and goes with its
+runtime storage. `tracon-agent`'s journal is the one piece of it the node reads back,
+when it relaunches a harness that died (see Harness control); nothing restores a
+session's state across a node restart, and a session cut off by one is carried on as a
+new session on the same workspace.
 
 ## Open questions
 

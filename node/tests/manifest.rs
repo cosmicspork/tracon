@@ -1,14 +1,10 @@
 //! The launch manifest end to end: importing a skill through the interface,
-//! what the node refuses, what a launch renders, and — against the pinned
-//! binary — what the harness actually loads.
+//! what the node refuses, and what a launch renders.
 //!
-//! The through-line of every case here is that OpenCode's own answers are not
-//! good enough. It resolves a duplicate skill name by overwriting one of them
-//! and which one wins varies run to run; it fetches `skills.urls` over plain
-//! HTTP with no off-switch; it follows symlinks in every scan; it resolves a
-//! plugin by a bare existence check with no integrity verification. Each of
-//! those is refused on the node, before a session exists, and each refusal has
-//! a test.
+//! The through-line of every case here is that a harness's own resolution is
+//! not good enough: which of two same-named skills it loads, a skill fetched
+//! from a URL, a symlink followed out of a package. Each of those is refused
+//! on the node, before a session exists, and each refusal has a test.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -16,7 +12,7 @@ use support::state;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -26,7 +22,7 @@ use tower::ServiceExt;
 
 use support::fake::FakeAdapter;
 use tracon::{
-    adapter::{opencode::OpenCodeAdapter, HarnessAdapter, LaunchSpec},
+    adapter::{claude::ClaudeAdapter, HarnessAdapter},
     broker::Broker,
     config::Config,
     http::{
@@ -35,7 +31,6 @@ use tracon::{
     },
     manifest,
     mcp::Tools,
-    runner::{Runner, RunnerCommand, RunnerError, Spawned},
     session::Manager,
     store::Store,
     stream::Bus,
@@ -257,7 +252,7 @@ async fn a_second_package_claiming_an_imported_name_is_refused() {
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "{v}");
     let message = v["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("nondeterministically"), "{message}");
+    assert!(message.contains("keeps one skill of a name"), "{message}");
 
     // Re-importing the *same* package is an update, not a duplicate: the
     // operator changed a file and wants the change.
@@ -292,7 +287,10 @@ async fn a_url_source_is_refused_at_the_interface() {
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     let message = v["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("plain HTTP"), "{message}");
+    assert!(
+        message.contains("never fetches a skill itself"),
+        "{message}"
+    );
 }
 
 /// A symlink is the only way a validated package can still name bytes outside
@@ -319,47 +317,6 @@ async fn a_package_that_links_out_of_itself_is_refused() {
     assert!(message.contains("symlink"), "{message}");
 }
 
-/// A plugin the image did not bake is refused at build, which the pane shows
-/// as a manifest that will not launch rather than as a session that fails.
-#[tokio::test]
-async fn a_plugin_outside_the_images_cache_makes_the_manifest_refuse_to_build() {
-    let mut cfg = Config::default();
-    cfg.harness.id = "opencode".into();
-    cfg.launch.plugins = vec!["@example/audit@1.0.0".into()];
-    let n = node_with(cfg);
-
-    let (s, v) = call(&n, "GET", "/api/manifest?channel=work", Some(LOCAL), None).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert!(v["next"].is_null(), "{v}");
-    let error = v["error"].as_str().unwrap_or_default();
-    assert!(
-        error.contains("packages/@example/audit@1.0.0/node_modules/@example/audit"),
-        "{error}"
-    );
-    // The image's own list is shown beside it, so the reason is legible — and
-    // it is what the harness image's toolchain profile actually seeds, not a
-    // second list that could disagree with the image.
-    let baked = tracon::adapter::baked_plugins("opencode");
-    assert!(!baked.is_empty(), "the image's profile seeds a plugin");
-    assert_eq!(v["baked_plugins"], json!(baked));
-
-    // And the one the image did bake is approvable.
-    let mut ok = Config::default();
-    ok.harness.id = "opencode".into();
-    ok.launch.plugins = baked.clone();
-    let good = node_with(ok);
-    let (_, v) = call(
-        &good,
-        "GET",
-        "/api/manifest?channel=work",
-        Some(LOCAL),
-        None,
-    )
-    .await;
-    assert!(v["error"].is_null(), "{v}");
-    assert_eq!(v["next"]["plugins"], json!(baked));
-}
-
 /// `node.toml`'s version as `GET /api/config` gives it, which a save names.
 async fn config_hash(n: &Node) -> String {
     let (s, v) = call(n, "GET", "/api/config", Some(LOCAL), None).await;
@@ -367,11 +324,11 @@ async fn config_hash(n: &Node) -> String {
     v["hash"].as_str().unwrap().to_string()
 }
 
-/// `[launch]` is an allowlist like the rest of the settings surface: the one
-/// key it writes round-trips, and anything else is refused by name rather
-/// than dropped.
+/// `[launch]` held the OpenCode harness's plugin approvals, and went with it:
+/// the settings surface refuses it by name rather than writing a key nothing
+/// reads.
 #[tokio::test]
-async fn the_launch_settings_are_an_allowlist() {
+async fn the_retired_launch_settings_are_refused() {
     let n = node();
     let (s, v) = call(
         &n,
@@ -384,23 +341,9 @@ async fn the_launch_settings_are_an_allowlist() {
         })),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["changed"], json!(["launch.plugins"]));
-
-    let (s, v) = call(
-        &n,
-        "PUT",
-        "/api/config",
-        Some(LOCAL),
-        Some(json!({
-            "launch": { "formatters": { "prettier": [] } },
-            "expected_hash": config_hash(&n).await,
-        })),
-    )
-    .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     let message = v["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("launch.formatters"), "{message}");
+    assert!(message.contains("launch"), "{message}");
 }
 
 // ---------------------------------------------------------------------------
@@ -436,10 +379,6 @@ fn built(store: &Store, channel: &str) -> manifest::LaunchManifest {
         skills,
         instructions,
         agents,
-        plugins: &[],
-        baked: &[],
-        lsp: manifest::toolchain_lsp(OpenCodeAdapter::ID),
-        formatters: manifest::toolchain_formatters(OpenCodeAdapter::ID),
         providers: vec!["anthropic".into()],
         policy_revision: "1".into(),
     })
@@ -447,14 +386,17 @@ fn built(store: &Store, channel: &str) -> manifest::LaunchManifest {
 }
 
 fn rendered(wiring: &tracon::gateway::model::Wiring) -> Vec<(String, String)> {
-    OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION).scratch_files(wiring)
+    ClaudeAdapter::new(ClaudeAdapter::PINNED_VERSION).scratch_files(wiring)
 }
 
-/// The config the node writes names no skill path and no URL: the packages sit
-/// in the sealed global config directory, where both halves of OpenCode find
-/// them without one.
+/// Where a skill is staged: inside the plugin the session's harness loads,
+/// sealed read-only.
+const STAGED: &str = "plugin/skills/release-notes/SKILL.md";
+
+/// The skill packages are staged, one per skill, inside the plugin the
+/// harness is pointed at, and nothing names a URL.
 #[tokio::test]
-async fn the_rendered_config_names_no_skill_path_and_no_urls() {
+async fn the_rendered_plugin_stages_the_skills_and_names_no_urls() {
     let n = node();
     let root = state::scratch("manifest-render");
     let dir = package(&root, "release-notes", "Write the notes.");
@@ -470,28 +412,27 @@ async fn the_rendered_config_names_no_skill_path_and_no_urls() {
 
     let wiring = wiring_with(built(&n.store, "work"));
     let files = rendered(&wiring);
-    let config: Value = serde_json::from_str(
+    let plugin: Value = serde_json::from_str(
         &files
             .iter()
-            .find(|(name, _)| name == "opencode.json")
+            .find(|(name, _)| name == "plugin/.claude-plugin/plugin.json")
             .unwrap()
             .1,
     )
     .unwrap();
-    assert!(config["skills"].is_null(), "{config}");
-    assert!(config["plugin"].is_null(), "{config}");
-    // `lsp` and `formatter` come from the image's toolchain profile, merged
-    // in by `scratch_files`: records rather than booleans, so nothing the
-    // image did not bake can spawn or install itself.
-    assert!(config["lsp"].is_object(), "{config}");
-    assert!(config["formatter"].is_object(), "{config}");
+    assert_eq!(plugin["name"], "tracon", "{plugin}");
+    assert!(
+        files
+            .iter()
+            .all(|(_, body)| !body.contains("http://") && !body.contains("https://")),
+        "{files:?}"
+    );
 
     // The package itself is staged in the sealed directory, one per skill.
     assert!(
-        files.iter().any(
-            |(name, body)| name == "xdg/opencode/skills/release-notes/SKILL.md"
-                && body.contains("Write the notes.")
-        ),
+        files
+            .iter()
+            .any(|(name, body)| name == STAGED && body.contains("Write the notes.")),
         "{:?}",
         files.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );
@@ -542,10 +483,9 @@ async fn a_later_revision_does_not_alter_what_a_running_session_was_staged_from(
     // The running session's files are unchanged — they are a function of the
     // manifest it holds, not of the store.
     assert_eq!(staged, rendered(&wiring_with(first.clone())));
-    assert!(staged.iter().any(
-        |(name, body)| name == "xdg/opencode/skills/release-notes/SKILL.md"
-            && body.contains("The first version.")
-    ));
+    assert!(staged
+        .iter()
+        .any(|(name, body)| name == STAGED && body.contains("The first version.")));
 
     // And the digest a session recorded still resolves to those bytes.
     let looked_up = n.store.manifest_by_digest(&first.digest).unwrap().unwrap();
@@ -557,10 +497,7 @@ async fn a_later_revision_does_not_alter_what_a_running_session_was_staged_from(
     // What the next launch would stage is the second version.
     assert!(rendered(&wiring_with(second))
         .iter()
-        .any(
-            |(name, body)| name == "xdg/opencode/skills/release-notes/SKILL.md"
-                && body.contains("The second version.")
-        ));
+        .any(|(name, body)| name == STAGED && body.contains("The second version.")));
 }
 
 /// A session carries the digest it launched under, written once.
@@ -595,244 +532,4 @@ async fn a_session_records_the_manifest_it_launched_under() {
     let (s, v) = call(&n, "GET", "/api/sessions/s-manifest", Some(LOCAL), None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["session"]["manifest_digest"], manifest.digest);
-}
-
-// ---------------------------------------------------------------------------
-// Against the pinned binary
-// ---------------------------------------------------------------------------
-
-/// The live case: the manifest's skill is what the harness lists, and the
-/// project's own `.claude/skills` and `.opencode/tool` are not there at all.
-///
-/// Both halves matter and neither is provable from the config file. Skill
-/// discovery walks six roots and `OPENCODE_PURE` does not cover custom tools
-/// at all — `OPENCODE_DISABLE_PROJECT_CONFIG` is what keeps `.opencode/tool`
-/// out, and the only way to know it worked is to ask a running server.
-#[tokio::test]
-async fn the_manifests_skill_is_listed_and_the_projects_are_not() {
-    state::isolate();
-    let Some(binary) = pinned_binary() else {
-        eprintln!(
-            "skipped: the pinned OpenCode binary is not on this machine. \
-             Put it on PATH as `opencode`, or name it in TRACON_OPENCODE_BINARY."
-        );
-        return;
-    };
-    let root = state::scratch("manifest-live");
-    let work = root.join("work");
-    std::fs::create_dir_all(&work).unwrap();
-
-    // What a repository could put in front of the harness, and must not reach
-    // it: a Claude-compatible skill, an OpenCode project skill, and a custom
-    // tool that `OPENCODE_PURE` would happily have loaded.
-    let planted_skill = work.join(".claude/skills/planted");
-    std::fs::create_dir_all(&planted_skill).unwrap();
-    std::fs::write(
-        planted_skill.join("SKILL.md"),
-        "---\nname: planted\ndescription: Must not be loaded\n---\n\nplanted body\n",
-    )
-    .unwrap();
-    let project_skill = work.join(".opencode/skills/projectskill");
-    std::fs::create_dir_all(&project_skill).unwrap();
-    std::fs::write(
-        project_skill.join("SKILL.md"),
-        "---\nname: projectskill\ndescription: Must not be loaded\n---\n\nproject body\n",
-    )
-    .unwrap();
-    let tool_dir = work.join(".opencode/tool");
-    std::fs::create_dir_all(&tool_dir).unwrap();
-    std::fs::write(
-        tool_dir.join("plantedtool.ts").as_path(),
-        "export default { description: 'planted', args: {}, \
-         async execute() { return 'planted' } }\n",
-    )
-    .unwrap();
-
-    // The node's own skill, through the manifest.
-    let source = package(&root, "release-notes", "The manifest's own body.");
-    let entry = manifest::read_package(&manifest::SkillSource::Dir(source)).unwrap();
-    let built = manifest::build(manifest::Inputs {
-        channel: "work",
-        skills: vec![entry],
-        instructions: Vec::new(),
-        agents: Vec::new(),
-        plugins: &[],
-        baked: &[],
-        lsp: manifest::toolchain_lsp(OpenCodeAdapter::ID),
-        formatters: manifest::toolchain_formatters(OpenCodeAdapter::ID),
-        providers: vec!["anthropic".into()],
-        policy_revision: "1".into(),
-    })
-    .unwrap();
-
-    let adapter = OpenCodeAdapter::new(OpenCodeAdapter::PINNED_VERSION);
-    let state_dir = root.join("home/.opencode");
-    std::fs::create_dir_all(state_dir.join("run")).unwrap();
-    for (name, body) in adapter.scratch_files(&wiring_with(built)) {
-        let staged = state_dir.join(&name);
-        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
-        std::fs::write(staged, body).unwrap();
-    }
-
-    let runner = LiveRunner {
-        binary,
-        launched: Arc::new(Mutex::new(None)),
-    };
-    let container = format!("tracon-manifest-live-{}", std::process::id());
-    let spec = LaunchSpec {
-        secret_env: Default::default(),
-        cwd_in_runner: work.to_string_lossy().into_owned(),
-        model: "anthropic/claude-x".into(),
-        container_name: container.clone(),
-        harness_home: root.join("home").to_string_lossy().into_owned(),
-        mcp_servers: Vec::new(),
-        tools: Vec::new(),
-        env: Vec::new(),
-        system_prompt_file: None,
-        cursor: None,
-        resume: None,
-    };
-    let (handle, _rx) = adapter
-        .launch(&runner, spec)
-        .await
-        .expect("the pinned binary starts");
-    let (endpoint, password) = runner
-        .launched
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("the launch recorded its endpoint");
-
-    let ask = |path: String| {
-        let endpoint = endpoint.clone();
-        let password = password.clone();
-        async move {
-            use base64::Engine;
-            let credential =
-                base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"));
-            reqwest::Client::builder()
-                .no_proxy()
-                .build()
-                .unwrap()
-                .get(format!("http://{endpoint}{path}"))
-                .header("authorization", format!("Basic {credential}"))
-                .send()
-                .await
-                .expect("the server answers")
-                .text()
-                .await
-                .unwrap_or_default()
-        }
-    };
-
-    let directory = urlencode(&work.to_string_lossy());
-    // The v1 list, which is the one the session's turns use (finding 23).
-    // The v2 runner's `/api/skill` has no location to answer for until a v2
-    // session opens one, and this node opens none.
-    let skills = ask(format!("/skill?directory={directory}")).await;
-    let tools = ask(format!("/experimental/tool/ids?directory={directory}")).await;
-    handle.close().await.ok();
-    runner.kill(&container).await.ok();
-
-    assert!(
-        skills.contains("release-notes"),
-        "the manifest's skill is not listed: {skills}"
-    );
-    assert!(
-        !skills.contains("planted"),
-        "a project `.claude/skills` skill reached the harness: {skills}"
-    );
-    assert!(
-        !skills.contains("projectskill"),
-        "a project `.opencode/skills` skill reached the harness: {skills}"
-    );
-    // The negative only means something if the route answered at all: a 404
-    // contains neither the planted tool nor a builtin.
-    assert!(
-        tools.contains("bash"),
-        "the tool listing did not answer with the builtins: {tools}"
-    );
-    assert!(
-        !tools.contains("plantedtool"),
-        "a project `.opencode/tool` custom tool reached the harness: {tools}"
-    );
-}
-
-fn urlencode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                (b as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
-}
-
-/// The pinned binary, when this machine has it. A build at another version
-/// proves nothing about the release this adapter was written against.
-fn pinned_binary() -> Option<String> {
-    let candidate = match std::env::var_os("TRACON_OPENCODE_BINARY") {
-        Some(named) => {
-            let path = PathBuf::from(named);
-            path.is_file()
-                .then(|| path.to_string_lossy().into_owned())?
-        }
-        None => std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|dir| dir.join("opencode"))
-            .find(|candidate| candidate.is_file())
-            .map(|candidate| candidate.to_string_lossy().into_owned())?,
-    };
-    let reported = std::process::Command::new(&candidate)
-        .arg("--version")
-        .output()
-        .ok()?;
-    let reported = String::from_utf8_lossy(&reported.stdout).trim().to_string();
-    if reported != OpenCodeAdapter::PINNED_VERSION {
-        eprintln!(
-            "skipped: {candidate} reports {reported}, not the pinned {}",
-            OpenCodeAdapter::PINNED_VERSION
-        );
-        return None;
-    }
-    Some(candidate)
-}
-
-struct LiveRunner {
-    binary: String,
-    launched: Arc<Mutex<Option<(String, String)>>>,
-}
-
-#[async_trait::async_trait]
-impl Runner for LiveRunner {
-    async fn spawn(&self, mut cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
-        cmd.argv[0] = self.binary.clone();
-        let password = cmd
-            .env
-            .iter()
-            // The adapter hands it over as secret environment.
-            .chain(cmd.secret_env.iter())
-            .find(|(name, _)| name == "OPENCODE_SERVER_PASSWORD")
-            .map(|(_, value)| value.clone())
-            .unwrap_or_default();
-        let spawned = tracon::runner::local::LocalRunner.spawn(cmd).await?;
-        if let Some(endpoint) = spawned.endpoint.clone() {
-            *self.launched.lock().unwrap() = Some((endpoint, password));
-        }
-        Ok(spawned)
-    }
-
-    async fn run_capture(
-        &self,
-        mut cmd: RunnerCommand,
-    ) -> Result<std::process::Output, RunnerError> {
-        cmd.argv[0] = self.binary.clone();
-        cmd.workdir = None;
-        tracon::runner::local::LocalRunner.run_capture(cmd).await
-    }
-
-    async fn kill(&self, name: &str) -> Result<(), RunnerError> {
-        tracon::runner::local::LocalRunner.kill(name).await
-    }
 }

@@ -72,8 +72,8 @@ name the target. A refusal carries the operator's reason, and "request
 changes" settles the approval as `changes_requested` with their notes rather
 than keeping it open the way a review revision does: the agent's revised call
 has new arguments, so it is a new `request_key` and a new approval anyway. Every harness asks this way, the
-boundary harness included; only a harness's own permission prompt (OpenCode
-asking to run a command) still waits, because the harness itself does.
+boundary harness included; only a harness's own permission prompt (an external
+harness asking to run a command) still waits, because the harness itself does.
 
 A `report_issue` draft had the same gap: nothing took its `issue_id` back, so
 an agent learned its draft was published only by searching the repository's

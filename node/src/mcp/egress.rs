@@ -14,7 +14,7 @@
 //! host to the session's own grant — for a few minutes, for the rest of the
 //! session, or for the rest of the session and every later one through the
 //! repository's `egress` — and runs nothing. Wherever the runtime issues
-//! grants, for a Claude Code or an OpenCode session: on Podman, or on
+//! grants, for a Claude Code or a tracon-agent session: on Podman, or on
 //! Kubernetes once the policies open the egress port and the node may keep the
 //! grant in a Secret.
 

@@ -1255,7 +1255,7 @@ async fn a_direct_request_on_the_machine_is_still_local() {
 }
 
 /// A page on another loopback origin is another site, not the operator. The
-/// OpenCode UI listener (`127.0.0.1:7423`) and any other local dev server can
+/// document preview listener and any other local dev server can
 /// send a simple cross-origin POST, which needs no preflight; were a loopback
 /// Origin enough, it could kill sessions with no credential at all.
 #[tokio::test]

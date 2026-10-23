@@ -885,7 +885,6 @@ mod tests {
             env: Vec::new(),
             secret_env: Default::default(),
             system_prompt_file: Some("/root/.tracon/orientation.md".into()),
-            cursor: None,
             resume: None,
         };
         let cmd = NativeAdapter::cmd(&spec);

@@ -1,4 +1,4 @@
-//! What the retired harness left on disk, and getting rid of it deliberately.
+//! What the retired harnesses left on disk, and getting rid of it deliberately.
 //!
 //! Removing an adapter does not remove the state its harness wrote. omp kept
 //! a credential database in the node-owned harness-state directory, and after
@@ -21,16 +21,18 @@
 //! The provider login volumes are no longer used at all; `tracon gc` lists
 //! them for removal.
 //!
-//! `node.toml` is the other thing it left. Versions before the cutover wrote
-//! that file in full, so an operator who never touched `[harness]` still has
-//! `id = "omp"` in it, and a node that refused to start on that turned an app
-//! update into a crash loop nobody chose. So a file that still names omp is
-//! migrated as it is loaded (`migrate_config`): the harness becomes OpenCode,
-//! and the values omp's defaults put beside it become OpenCode's — only values
-//! that are recognisably those defaults, never something the operator chose.
-//! The original is kept beside it. The sessions omp ran are not touched here:
-//! a node serves with them in place, and archiving them stays the explicit
-//! `tracon session archive-legacy`.
+//! `node.toml` is the other thing they left. Versions before the OpenCode
+//! cutover wrote that file in full, so an operator who never touched
+//! `[harness]` may still have `id = "omp"` in it, and an OpenCode node has
+//! `id = "opencode"`; a node that refused to start on either would turn an
+//! app update into a crash loop nobody chose. So a file that still names a
+//! retired harness, or one of their images, is migrated as it is loaded
+//! (`migrate_config`): the harness becomes Claude Code, and the image values
+//! the retired harness's defaults put beside it become the current defaults —
+//! only values that are recognisably those defaults, never something the
+//! operator chose. The original is kept beside it. The sessions a retired
+//! harness ran are not touched here: a node serves with them in place, and
+//! archiving them stays the explicit `tracon session archive-legacy`.
 
 use std::path::{Path, PathBuf};
 
@@ -52,7 +54,7 @@ pub struct Artifact {
 ///
 /// omp's state directory was mounted at the harness's `~/.omp`, and this is
 /// the host side of that mount. Only omp's own subtree is named: the same
-/// directory is now OpenCode's and Claude Code's mount, and removing it whole
+/// directory is now Claude Code's and tracon-agent's mount, and removing it whole
 /// would take state a supported harness is using.
 const ARTIFACTS: &[(&str, &str)] = &[(
     "agent",
@@ -82,38 +84,66 @@ fn retire_credentials_in(harness_state: &Path) -> Vec<Artifact> {
         .collect()
 }
 
-/// What `migrate_config` made of a `node.toml` that still named the retired
+/// What `migrate_config` made of a `node.toml` that still named a retired
 /// harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigMigration {
+    /// The retired harness the file named, by id or by image.
+    pub from: &'static str,
     /// The migrated file, as it is written back and then loaded.
     pub text: String,
     /// The keys it changed, dotted, for the operator reading the warning.
     pub changed: Vec<String>,
 }
 
-/// The repositories omp's image defaults named: the local build, and the
-/// published image the pod runtime pulled at a versioned tag. OpenCode's are
-/// `…-opencode`, which these deliberately do not match.
-const RETIRED_IMAGES: &[&str] = &[
-    "localhost/tracon-harness",
-    "ghcr.io/cosmicspork/tracon-harness",
+/// The repositories each retired harness's image defaults named: the local
+/// build, and the published image the pod runtime pulled at a versioned tag.
+const RETIRED_IMAGES: &[(&str, &[&str])] = &[
+    (
+        "omp",
+        &[
+            "localhost/tracon-harness",
+            "ghcr.io/cosmicspork/tracon-harness",
+        ],
+    ),
+    (
+        "opencode",
+        &[
+            "localhost/tracon-harness-opencode",
+            "ghcr.io/cosmicspork/tracon-harness-opencode",
+        ],
+    ),
 ];
 
-/// The suffix of the untouched original kept beside a migrated `node.toml`.
-pub const CONFIG_BACKUP_SUFFIX: &str = ".pre-opencode";
+/// The retired harness whose default image this is, if it is one.
+fn retired_image(value: &str) -> Option<&'static str> {
+    RETIRED_IMAGES.iter().find_map(|(harness, repos)| {
+        repos
+            .iter()
+            .any(|repo| {
+                value.strip_prefix(repo).is_some_and(|rest| {
+                    rest.is_empty() || rest.starts_with(':') || rest.starts_with('@')
+                })
+            })
+            .then_some(*harness)
+    })
+}
 
 fn is_retired_image(value: &str) -> bool {
-    RETIRED_IMAGES.iter().any(|repo| {
-        value
-            .strip_prefix(repo)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(':') || rest.starts_with('@'))
-    })
+    retired_image(value).is_some()
 }
 
 fn table<'a>(doc: &'a mut toml::Table, path: &[&str]) -> Option<&'a mut toml::Table> {
     path.iter()
         .try_fold(doc, |t, key| t.get_mut(*key)?.as_table_mut())
+}
+
+/// The retired harness the image at `path` names, if it does.
+fn image_retired_by(doc: &mut toml::Table, path: &[&str]) -> Option<&'static str> {
+    table(doc, path)?
+        .get("harness_image")?
+        .as_str()
+        .and_then(retired_image)
 }
 
 fn replace_retired_image(
@@ -131,30 +161,39 @@ fn replace_retired_image(
     }
 }
 
-/// Migrate the text of a `node.toml` whose `[harness] id` is the retired
-/// harness. None for every other file — including one that does not parse,
-/// which the ordinary load reports with its line and column.
+/// Migrate the text of a `node.toml` whose `[harness] id`, or whose harness
+/// image, is a retired harness's. None for every other file — including one
+/// that does not parse, which the ordinary load reports with its line and
+/// column.
 ///
 /// Only keys the file already has are touched, so a key the operator left out
-/// keeps following the defaults; and only values that are omp's own defaults
-/// are replaced, so an image or host the operator chose survives.
+/// keeps following the defaults; and only values that are a retired
+/// harness's own defaults are replaced, so an image or host the operator
+/// chose survives.
 pub fn migrate_config(text: &str) -> Option<ConfigMigration> {
     let mut doc: toml::Table = toml::from_str(text).ok()?;
-    let harness = table(&mut doc, &["harness"])?;
-    if harness.get("id")?.as_str()? != crate::adapter::RETIRED {
-        return None;
-    }
-    let mut changed = vec!["harness.id".to_string()];
-    harness.insert(
-        "id".into(),
-        toml::Value::String(crate::adapter::opencode::OpenCodeAdapter::ID.into()),
-    );
-    // omp's pinned version means nothing to OpenCode; empty is the version
-    // this node's OpenCode image installs.
-    if let Some(version) = harness.get_mut("version") {
-        if version.as_str().is_some_and(|v| !v.is_empty()) {
-            *version = toml::Value::String(String::new());
-            changed.push("harness.version".into());
+    let named = table(&mut doc, &["harness"])
+        .and_then(|h| h.get("id"))
+        .and_then(toml::Value::as_str)
+        .and_then(|id| crate::adapter::RETIRED.iter().find(|r| **r == id).copied());
+    let from = named
+        .or_else(|| image_retired_by(&mut doc, &["boundary"]))
+        .or_else(|| image_retired_by(&mut doc, &["runtime", "kubernetes"]))?;
+    let mut changed = Vec::new();
+    if named.is_some() {
+        let harness = table(&mut doc, &["harness"])?;
+        changed.push("harness.id".to_string());
+        harness.insert(
+            "id".into(),
+            toml::Value::String(crate::adapter::claude::ClaudeAdapter::ID.into()),
+        );
+        // A retired harness's pinned version means nothing to Claude Code;
+        // empty is the version this node's Claude Code image installs.
+        if let Some(version) = harness.get_mut("version") {
+            if version.as_str().is_some_and(|v| !v.is_empty()) {
+                *version = toml::Value::String(String::new());
+                changed.push("harness.version".into());
+            }
         }
     }
 
@@ -172,16 +211,22 @@ pub fn migrate_config(text: &str) -> Option<ConfigMigration> {
         &mut changed,
     );
     let text = toml::to_string_pretty(&doc).ok()?;
-    Some(ConfigMigration { text, changed })
+    Some(ConfigMigration {
+        from,
+        text,
+        changed,
+    })
 }
 
-/// Where the original of a migrated `node.toml` is kept.
-pub fn config_backup_path(path: &Path) -> PathBuf {
+/// Where the original of a `node.toml` migrated off `from` is kept:
+/// `node.toml.pre-<from>`, so a node that has been through both retirements
+/// keeps each original.
+pub fn config_backup_path(path: &Path, from: &str) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "node.toml".into());
-    path.with_file_name(format!("{name}{CONFIG_BACKUP_SUFFIX}"))
+    path.with_file_name(format!("{name}.pre-{from}"))
 }
 
 /// Write a migration back, keeping the original beside it. An existing backup
@@ -191,7 +236,7 @@ pub fn persist_config_migration(
     path: &Path,
     migration: &ConfigMigration,
 ) -> std::io::Result<PathBuf> {
-    let backup = config_backup_path(path);
+    let backup = config_backup_path(path, migration.from);
     if !backup.exists() {
         // A copy, so the backup keeps the original's permissions.
         std::fs::copy(path, &backup)?;
@@ -205,20 +250,21 @@ pub fn persist_config_migration(
 /// on every load until it can be.
 pub fn apply_config_migration(path: &Path, migration: &ConfigMigration) {
     let changed = migration.changed.join(", ");
-    let next = "run `tracon setup` to build the OpenCode image, and \
-                `tracon session archive-legacy` to put omp's sessions away read-only";
+    let from = migration.from;
+    let next = "run `tracon setup` to build the harness images, and \
+                `tracon session archive-legacy` to put the retired harness's sessions away read-only";
     match persist_config_migration(path, migration) {
         Ok(backup) => tracing::warn!(
             path = %path.display(),
             backup = %backup.display(),
             %changed,
-            "node.toml named the retired `omp` harness, so it was migrated to `opencode`; {next}"
+            "node.toml named the retired `{from}` harness, so it was migrated to `claude`; {next}"
         ),
         Err(error) => tracing::warn!(
             path = %path.display(),
             %changed,
             %error,
-            "node.toml names the retired `omp` harness; running as `opencode`, but the migration could not be written back; {next}"
+            "node.toml names the retired `{from}` harness; running as `claude`, but the migration could not be written back; {next}"
         ),
     }
 }
@@ -229,7 +275,7 @@ mod tests {
 
     /// The state a supported harness is using shares the directory, so the
     /// removal has to be by name. Taking the directory whole would delete
-    /// whatever OpenCode or Claude Code keeps there.
+    /// whatever Claude Code or tracon-agent keeps there.
     #[test]
     fn only_the_retired_harnesss_own_subtree_is_removed() {
         let dir = std::env::temp_dir().join(format!("tracon-legacy-{}", uuid::Uuid::now_v7()));
@@ -278,12 +324,13 @@ state_claim = "tracon-state"
 "#;
 
     #[test]
-    fn a_pre_cutover_node_toml_becomes_opencode_and_keeps_what_the_operator_chose() {
+    fn a_pre_cutover_node_toml_becomes_claude_and_keeps_what_the_operator_chose() {
         let migration = migrate_config(PRE_CUTOVER).expect("an omp file migrates");
+        assert_eq!(migration.from, "omp");
         let cfg: Config = toml::from_str(&migration.text).unwrap();
         let defaults = Config::default();
 
-        assert_eq!(cfg.harness.id, "opencode");
+        assert_eq!(cfg.harness.id, "claude");
         assert_eq!(cfg.harness.version, "");
         assert_eq!(cfg.boundary.harness_image, defaults.boundary.harness_image);
         assert_eq!(
@@ -322,28 +369,82 @@ state_claim = "tracon-state"
         assert_eq!(migrate_config(&migration.text), None);
     }
 
+    /// An OpenCode node: the id and its image defaults move to Claude Code's,
+    /// and an image the operator chose stays.
     #[test]
-    fn only_omps_own_image_defaults_are_replaced() {
+    fn an_opencode_node_toml_becomes_claude() {
+        let text = r#"
+[harness]
+id = "opencode"
+version = "1.18.30"
+experimental = ["native"]
+
+[boundary]
+harness_image = "localhost/tracon-harness-opencode"
+
+[runtime.kubernetes]
+harness_image = "registry.example/team/harness:3"
+"#;
+        let migration = migrate_config(text).expect("an opencode file migrates");
+        assert_eq!(migration.from, "opencode");
+        let cfg: Config = toml::from_str(&migration.text).unwrap();
+        assert_eq!(cfg.harness.id, "claude");
+        assert_eq!(cfg.harness.version, "");
+        assert_eq!(cfg.harness.experimental, ["native"]);
+        assert_eq!(
+            cfg.boundary.harness_image,
+            Config::default().boundary.harness_image
+        );
+        assert_eq!(
+            cfg.runtime.kubernetes.harness_image,
+            "registry.example/team/harness:3"
+        );
+        assert!(crate::adapter::adapter_for(&cfg).is_ok());
+        assert_eq!(
+            migration.changed,
+            ["harness.id", "harness.version", "boundary.harness_image"]
+        );
+        assert_eq!(migrate_config(&migration.text), None);
+    }
+
+    /// A node already on Claude Code whose file still names the OpenCode
+    /// image, which an OpenCode-era version wrote in full: the image moves,
+    /// nothing else does.
+    #[test]
+    fn a_retired_image_alone_is_migrated() {
+        let text = r#"
+[harness]
+id = "claude"
+
+[runtime.kubernetes]
+harness_image = "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
+"#;
+        let migration = migrate_config(text).expect("a retired image migrates");
+        assert_eq!(migration.from, "opencode");
+        let cfg: Config = toml::from_str(&migration.text).unwrap();
+        assert_eq!(cfg.harness.id, "claude");
+        assert_eq!(
+            cfg.runtime.kubernetes.harness_image,
+            Config::default().runtime.kubernetes.harness_image
+        );
+        assert_eq!(migration.changed, ["runtime.kubernetes.harness_image"]);
+    }
+
+    #[test]
+    fn only_a_retired_harnesss_own_image_defaults_are_replaced() {
         let text = r#"
 [harness]
 id = "omp"
 
 [boundary]
 harness_image = "registry.example/team/harness:3"
-
-[runtime.kubernetes]
-harness_image = "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
 "#;
         let migration = migrate_config(text).unwrap();
         let cfg: Config = toml::from_str(&migration.text).unwrap();
-        assert_eq!(cfg.harness.id, "opencode");
+        assert_eq!(cfg.harness.id, "claude");
         assert_eq!(
             cfg.boundary.harness_image,
             "registry.example/team/harness:3"
-        );
-        assert_eq!(
-            cfg.runtime.kubernetes.harness_image,
-            "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
         );
         // Keys the file never had keep following the defaults.
         assert_eq!(
@@ -358,14 +459,17 @@ harness_image = "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
             "ghcr.io/cosmicspork/tracon-harness@sha256:abc"
         ));
         assert!(!is_retired_image("localhost/tracon-harness-claude"));
-        assert!(!is_retired_image(
-            "ghcr.io/cosmicspork/tracon-harness-opencode:0.16.0"
-        ));
+        assert!(!is_retired_image("localhost/tracon-harness-native"));
+        assert_eq!(
+            retired_image("ghcr.io/cosmicspork/tracon-harness-opencode:0.16.0"),
+            Some("opencode")
+        );
+        assert_eq!(retired_image("localhost/tracon-harness"), Some("omp"));
     }
 
     #[test]
     fn supported_unknown_and_unparseable_files_are_not_migrated() {
-        assert_eq!(migrate_config("[harness]\nid = \"opencode\"\n"), None);
+        assert_eq!(migrate_config("[harness]\nid = \"native\"\n"), None);
         assert_eq!(
             migrate_config("[harness]\nid = \"claude\"\nversion = \"2.0.0\"\n"),
             None
@@ -380,7 +484,7 @@ harness_image = "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
     /// version wrote onto its state volume. Nobody edits that file by hand,
     /// so the next release has to come up healthy on the migration alone.
     #[test]
-    fn a_pre_cutover_kubernetes_node_comes_up_on_the_published_opencode_image() {
+    fn a_pre_cutover_kubernetes_node_comes_up_on_the_published_claude_image() {
         let dir = std::env::temp_dir().join(format!("tracon-legacy-k8s-{}", uuid::Uuid::now_v7()));
         let path = dir.join("state/config/tracon/node.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -408,23 +512,23 @@ state_claim = "tracon-state"
 
         let cfg = Config::try_load_from(&path).unwrap();
         assert!(crate::adapter::adapter_for(&cfg).is_ok());
-        assert_eq!(cfg.harness.id, "opencode");
+        assert_eq!(cfg.harness.id, "claude");
         assert_eq!(
             crate::adapter::pinned_version(&cfg),
-            crate::adapter::image_version("opencode")
+            crate::adapter::image_version("claude")
         );
         assert_eq!(cfg.runtime.kind, crate::config::RuntimeKind::Kubernetes);
         assert_eq!(
             cfg.runtime.kubernetes.harness_image,
             format!(
-                "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
+                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
                 env!("CARGO_PKG_VERSION")
             )
         );
         assert_eq!(cfg.runtime.kubernetes.state_claim, "tracon-state");
         assert_eq!(
             cfg.boundary.harness_image,
-            "localhost/tracon-harness-opencode"
+            "localhost/tracon-harness-claude"
         );
         assert_eq!(
             cfg.gateway.allow_hosts,
@@ -441,7 +545,7 @@ state_claim = "tracon-state"
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(migrate_config(&written), None);
         assert_eq!(
-            std::fs::read_to_string(path.with_file_name("node.toml.pre-opencode")).unwrap(),
+            std::fs::read_to_string(path.with_file_name("node.toml.pre-omp")).unwrap(),
             original
         );
         let again = Config::try_load_from(&path).unwrap();
@@ -460,21 +564,29 @@ state_claim = "tracon-state"
         std::fs::write(&path, PRE_CUTOVER).unwrap();
 
         let cfg = Config::try_load_from(&path).unwrap();
-        assert_eq!(cfg.harness.id, "opencode");
-        let backup = dir.join("node.toml.pre-opencode");
+        assert_eq!(cfg.harness.id, "claude");
+        let backup = dir.join("node.toml.pre-omp");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), PRE_CUTOVER);
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(migrate_config(&written), None, "{written}");
         assert_eq!(
             toml::from_str::<Config>(&written).unwrap().harness.id,
-            "opencode"
+            "claude"
         );
 
         // Put back to omp by hand and loaded again: migrated again, but the
         // backup is still the real original.
         std::fs::write(&path, "[harness]\nid = \"omp\"\n").unwrap();
-        assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "opencode");
+        assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "claude");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), PRE_CUTOVER);
+
+        // An OpenCode node's file keeps its own original beside it.
+        std::fs::write(&path, "[harness]\nid = \"opencode\"\n").unwrap();
+        assert_eq!(Config::try_load_from(&path).unwrap().harness.id, "claude");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("node.toml.pre-opencode")).unwrap(),
+            "[harness]\nid = \"opencode\"\n"
+        );
 
         // An unknown id is refused when the file loads.
         std::fs::write(&path, "[harness]\nid = \"aider\"\n").unwrap();
