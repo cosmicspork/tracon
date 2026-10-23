@@ -7,6 +7,42 @@ export function providerLabel(name: string): string {
   return name
 }
 
+/** What the card says about a subscription: the node holds one sign-in for
+    it, whichever channels it serves. */
+export function oneSignIn(p: ProviderInfo): string {
+  return `This node holds one ${providerLabel(p.name)} sign-in, for every channel it serves: signing in again replaces it, and disconnecting removes it, for all of them.`
+}
+
+/**
+ * What signing in for `keeps` would take from the sign-in a provider already
+ * holds on the serving node, or with `null` what disconnecting it would, in
+ * the words the card asks the operator to confirm. Null when nothing is lost.
+ * The node refuses the same cases until confirmed (`confirm_displaced`):
+ * channels the new sign-in does not serve lose the provider here, and a
+ * disconnect leaves peers' shared copies where they are.
+ */
+export function displacedSignIn(
+  p: ProviderInfo,
+  keeps: string[] | null,
+  peerName: (id: string) => string = (id) => id,
+): string | null {
+  // Only a held credential is replaced, and a disconnect while a sign-in is
+  // in flight only cancels that sign-in.
+  if (p.kind === null || (keeps === null && p.state === 'pending')) return null
+  const label = providerLabel(p.name)
+  const lost = p.channels.filter((channel) => keeps === null || !keeps.includes(channel))
+  const peers = (p.shared_with ?? []).map(peerName)
+  if (keeps !== null) {
+    if (!lost.length) return null
+    const copies = peers.length ? `; ${peers.join(', ')} ${peers.length === 1 ? 'holds' : 'hold'} a shared copy of it` : ''
+    return `${label} holds one sign-in on this node. Signing in for ${keeps.join(', ')} replaces the one serving ${lost.join(', ')}, which lose it here${copies}.`
+  }
+  if (!lost.length && !peers.length) return null
+  const taken = lost.length ? `Disconnecting takes ${label} from ${lost.join(', ')} on this node` : `Disconnecting removes ${label} from this node`
+  const copies = peers.length ? `; the shared copies on ${peers.join(', ')} stay there` : ''
+  return `${label} holds one sign-in on this node. ${taken}${copies}.`
+}
+
 export function completionInstruction(completion: LoginCompletion | null): string {
   if (completion === 'local_callback') {
     return 'Complete sign-in in your browser; this page will update automatically.'

@@ -850,11 +850,13 @@ export const api = {
     channels: string[],
     localCallback = false,
     share = true,
+    confirm = false,
   ) =>
     call<ProviderConnectResult>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
       channels,
       local_callback: localCallback,
       share,
+      confirm,
     }),
   nodeProviderCode: (nodeId: string, name: string, code: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),
@@ -889,8 +891,14 @@ export const api = {
       'GET',
       '/api/operator/notifications',
     ),
-  nodeDisconnectProvider: (nodeId: string, name: string) =>
-    call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/disconnect`),
+  /** `confirm` goes ahead although channels lose the sign-in (the node
+      refuses otherwise, naming them: see `displacedSignIn`). */
+  nodeDisconnectProvider: (nodeId: string, name: string, confirm = false) =>
+    call<{ ok: boolean }>(
+      'POST',
+      `/api/nodes/${nodeId}/providers/${name}/disconnect`,
+      confirm ? { confirm } : undefined,
+    ),
   // The work ledger.
   work: (channel: string, opts: { project_id?: string; state?: string } = {}) => {
     const q = new URLSearchParams({ channel })

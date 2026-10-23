@@ -3,7 +3,9 @@ import {
   completionInstruction,
   connectableProviders,
   credentialImportToml,
+  displacedSignIn,
   normalizeProviderName,
+  oneSignIn,
   providerLabel,
 } from './providers'
 import type { ProviderInfo } from './types'
@@ -70,4 +72,58 @@ test('the credential import TOML seals the key under env.API_KEY, quoted against
   // JSON.stringify produces for a quote and a backslash.
   expect(toml).toContain('\\"quote\\"')
   expect(toml).toContain('\\\\backslash')
+})
+
+test('replacing or removing a sign-in names the channels that lose it and the peers holding a copy', () => {
+  const codex: ProviderInfo = {
+    name: 'openai-codex',
+    state: 'connected',
+    kind: 'oauth',
+    can_login: true,
+    identity: 'me@example.com',
+    expires_ms: null,
+    channels: ['personal'],
+    updated_ms: null,
+    shared_with: ['b0', 'h0'],
+  }
+  const names: Record<string, string> = { b0: 'bazzite', h0: 'homelab' }
+  const name = (id: string) => names[id] ?? id
+
+  expect(displacedSignIn(codex, ['work'], name)).toBe(
+    'OpenAI Codex holds one sign-in on this node. Signing in for work replaces the one serving personal, which lose it here; bazzite, homelab hold a shared copy of it.',
+  )
+  expect(displacedSignIn(codex, null, name)).toBe(
+    'OpenAI Codex holds one sign-in on this node. Disconnecting takes OpenAI Codex from personal on this node; the shared copies on bazzite, homelab stay there.',
+  )
+  expect(displacedSignIn({ ...codex, shared_with: ['b0'] }, ['work'], name)).toContain('; bazzite holds a shared copy of it.')
+  // A sign-in that keeps every channel it serves loses nothing.
+  expect(displacedSignIn(codex, ['personal', 'work'], name)).toBeNull()
+  // An unbound sign-in kept only here is removed without a question.
+  expect(displacedSignIn({ ...codex, channels: [], shared_with: [] }, null, name)).toBeNull()
+  expect(displacedSignIn({ ...codex, channels: [] }, null, name)).toBe(
+    'OpenAI Codex holds one sign-in on this node. Disconnecting removes OpenAI Codex from this node; the shared copies on bazzite, homelab stay there.',
+  )
+  // Nothing held, or only a sign-in in flight to cancel.
+  expect(displacedSignIn({ ...codex, kind: null, channels: [] }, ['work'], name)).toBeNull()
+  expect(displacedSignIn({ ...codex, state: 'pending' }, null, name)).toBeNull()
+  // An older node says nothing of its peers.
+  expect(displacedSignIn({ ...codex, shared_with: undefined }, null)).toBe(
+    'OpenAI Codex holds one sign-in on this node. Disconnecting takes OpenAI Codex from personal on this node.',
+  )
+})
+
+test('a subscription card says the node holds one sign-in for every channel', () => {
+  const text = oneSignIn({
+    name: 'openai-codex',
+    state: 'connected',
+    kind: 'oauth',
+    can_login: true,
+    identity: null,
+    expires_ms: null,
+    channels: ['personal'],
+    updated_ms: null,
+  })
+  expect(text).toBe(
+    'This node holds one OpenAI Codex sign-in, for every channel it serves: signing in again replaces it, and disconnecting removes it, for all of them.',
+  )
 })

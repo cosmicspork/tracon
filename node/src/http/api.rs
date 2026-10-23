@@ -5751,6 +5751,10 @@ pub struct ConnectBody {
     /// in. On unless asked otherwise.
     #[serde(default = "share_by_default")]
     pub share: bool,
+    /// Go ahead although the sign-in replaces the one serving other channels
+    /// here ([`confirm_displaced`]).
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 fn share_by_default() -> bool {
@@ -5763,6 +5767,7 @@ impl Default for ConnectBody {
             channels: Vec::new(),
             local_callback: false,
             share: share_by_default(),
+            confirm: false,
         }
     }
 }
@@ -5777,9 +5782,16 @@ pub async fn connect_provider(
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let local_callback = callback_allowed(&s, local, body.local_callback);
-    connect_local(&s, &name, body.channels, body.share, local_callback)
-        .await
-        .map(Json)
+    connect_local(
+        &s,
+        &name,
+        body.channels,
+        body.share,
+        local_callback,
+        body.confirm,
+    )
+    .await
+    .map(Json)
 }
 
 /// A login callback on this machine's loopback is only reachable by a browser
@@ -5795,8 +5807,10 @@ async fn connect_local(
     channels: Vec<String>,
     share: bool,
     local_callback: bool,
+    confirm: bool,
 ) -> ApiResult<serde_json::Value> {
     let channels = chosen_channels(s.store(), channels, false)?;
+    confirm_displaced(s, name, Some(&channels), confirm)?;
     let result = providers_of(s)?
         .connect(
             name,
@@ -5884,15 +5898,93 @@ async fn code_local(s: &AppState, name: &str, code: &str) -> ApiResult<serde_jso
     Ok(json!({ "ok": true }))
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DisconnectBody {
+    /// Go ahead although the channels the sign-in serves lose it here
+    /// ([`confirm_displaced`]).
+    #[serde(default)]
+    pub confirm: bool,
+}
+
 pub async fn disconnect_provider(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    super::auth::AdminAction(()): super::auth::AdminAction,
+    super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<DisconnectBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    disconnect_local(&s, &name).await.map(Json)
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    disconnect_local(&s, &name, body.confirm).await.map(Json)
 }
 
-async fn disconnect_local(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
+/// Refuse to replace or remove the sign-in `name` holds here, when that
+/// takes it from channels (or a disconnect leaves shared copies behind),
+/// unless the caller confirmed it. A provider holds one sign-in per node, so
+/// signing in for `keeps` replaces the one serving every other channel, and
+/// a disconnect (`keeps` of `None`) takes it from all of them. The refusal
+/// names what would be lost, which is also what a client shows before it
+/// asks again with `confirm`. The peers are named because their copies
+/// outlive it: a disconnect here revokes nothing.
+fn confirm_displaced(
+    s: &AppState,
+    name: &str,
+    keeps: Option<&[String]>,
+    confirm: bool,
+) -> ApiResult<()> {
+    if confirm {
+        return Ok(());
+    }
+    let Some(displaced) = providers_of(s)?
+        .displaced(name, keeps)
+        .map_err(provider_err)?
+    else {
+        return Ok(());
+    };
+    let peers: Vec<String> = displaced
+        .peers
+        .iter()
+        .map(|id| {
+            s.store()
+                .get_node(id)
+                .ok()
+                .flatten()
+                .map(|node| node.name)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect();
+    let channels = displaced.channels.join(", ");
+    let mut message = format!("{name} holds one sign-in on this node. ");
+    match keeps {
+        Some(keeps) => message.push_str(&format!(
+            "Signing in for {} replaces the one serving {channels}, which lose {name} here",
+            keeps.join(", ")
+        )),
+        None if displaced.channels.is_empty() => {
+            message.push_str(&format!("Disconnecting removes {name} from this node"))
+        }
+        None => message.push_str(&format!(
+            "Disconnecting takes {name} from {channels} on this node"
+        )),
+    }
+    if !peers.is_empty() {
+        // A disconnect revokes nothing; a new sign-in replaces only the
+        // copies it is shared to, so which of these keep the old one
+        // depends on the channels their nodes are in.
+        message.push_str(&match keeps {
+            Some(_) => format!(
+                "; {} hold{} a shared copy of it",
+                peers.join(", "),
+                if peers.len() == 1 { "s" } else { "" }
+            ),
+            None => format!("; the shared copies on {} stay there", peers.join(", ")),
+        });
+    }
+    message.push_str(". Send \"confirm\": true to go ahead.");
+    Err(ApiError(StatusCode::CONFLICT, message))
+}
+
+async fn disconnect_local(s: &AppState, name: &str, confirm: bool) -> ApiResult<serde_json::Value> {
+    confirm_displaced(s, name, None, confirm)?;
     providers_of(s)?
         .disconnect(name, &crate::providers::LoginOwner::Local)
         .await
@@ -5990,10 +6082,17 @@ pub async fn node_connect_provider(
             .await
             .map_err(super::peer_admin::refused)?;
         let local_callback = callback_allowed(&s, local, body.local_callback);
-        return connect_local(&s, &name, body.channels, body.share, local_callback)
-            .await
-            .map(Json)
-            .map_err(super::peer_admin::refused);
+        return connect_local(
+            &s,
+            &name,
+            body.channels,
+            body.share,
+            local_callback,
+            body.confirm,
+        )
+        .await
+        .map(Json)
+        .map_err(super::peer_admin::refused);
     }
     admin_on_peer(
         &s,
@@ -6073,12 +6172,11 @@ pub async fn node_disconnect_provider(
     bytes: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
     if node_id == s.node_id {
-        super::passkey::json_or_empty(&parts.headers, &bytes)
-            .map_err(super::peer_admin::refused)?;
+        let body: DisconnectBody = admin_body(&parts, &bytes)?;
         super::passkey::authorize(&s, &parts, &bytes)
             .await
             .map_err(super::peer_admin::refused)?;
-        return disconnect_local(&s, &name)
+        return disconnect_local(&s, &name, body.confirm)
             .await
             .map(Json)
             .map_err(super::peer_admin::refused);

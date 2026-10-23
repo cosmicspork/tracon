@@ -11,7 +11,7 @@
     prepareExternalOpen,
   } from '../lib/external'
   import { formatDuration } from '../lib/format'
-  import { completionInstruction, providerLabel } from '../lib/providers'
+  import { completionInstruction, displacedSignIn, oneSignIn, providerLabel } from '../lib/providers'
   import { store } from '../lib/store.svelte'
   import {
     declareOps,
@@ -63,6 +63,9 @@
   // The operator's pick, once they touch the boxes; until then the seed.
   let chosen = $state<string[] | null>(null)
   let editingChannels = $state(false)
+  // A sign-in or disconnect that takes the provider from channels, waiting
+  // for the operator to confirm what it names.
+  let confirming = $state<{ kind: 'connect' | 'disconnect'; text: string } | null>(null)
 
   // The declared-models editor's own local copy: edited freely, saved on
   // request. Re-seeded whenever the node's own config changes under it
@@ -221,7 +224,16 @@
     }
   }
 
-  function connect() {
+  const peerName = (id: string) => store.nodes.find((node) => node.id === id)?.name ?? id.slice(0, 8)
+
+  // The serving node holds one sign-in per provider: one that would take it
+  // from channels is confirmed first, naming them. A peer's card has no
+  // such list to name, and the peer refuses replacing what its sender
+  // does not share.
+  function connect(confirmed = false) {
+    const text = isSelf && !confirmed ? displacedSignIn(p, picked, peerName) : null
+    confirming = text ? { kind: 'connect', text } : null
+    if (text) return
     return act(async () => {
       justResult = await api.nodeConnectProvider(
         nodeId,
@@ -229,6 +241,7 @@
         picked,
         managedLocal || sameHostBrowser,
         shareSignIn,
+        confirmed,
       )
     })
   }
@@ -282,9 +295,12 @@
     })
   }
 
-  function disconnect() {
+  function disconnect(confirmed = false) {
+    const text = isSelf && !confirmed ? displacedSignIn(p, null, peerName) : null
+    confirming = text ? { kind: 'disconnect', text } : null
+    if (text) return
     return act(async () => {
-      await api.nodeDisconnectProvider(nodeId, p.name)
+      await api.nodeDisconnectProvider(nodeId, p.name, confirmed)
       justResult = null
     })
   }
@@ -338,10 +354,13 @@
           <button class="lnk" onclick={cancelChannels} disabled={busy}>Cancel</button>
         </span>
       {/if}
+      {#if isSelf && p.kind === 'oauth'}
+        <span class="l off">{oneSignIn(p)}</span>
+      {/if}
       {#if isSelf}
-        <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect</button></span>
+        <span><button class="lnk d" onclick={() => disconnect()} disabled={busy}>Disconnect</button></span>
       {:else}
-        <span><button class="lnk d" onclick={disconnect} disabled={busy}>Disconnect on {nodeName}</button></span>
+        <span><button class="lnk d" onclick={() => disconnect()} disabled={busy}>Disconnect on {nodeName}</button></span>
       {/if}
       {#if config}
         <span class="meta">
@@ -442,7 +461,7 @@
         {/if}
         <span class="actions">
           <button class="lnk" onclick={openAgain} disabled={busy}>Open sign-in</button>
-          <button class="lnk d" onclick={disconnect} disabled={busy}>Cancel</button>
+          <button class="lnk d" onclick={() => disconnect()} disabled={busy}>Cancel</button>
         </span>
         {#if completion === 'local_callback'}
           <details class="alternate">
@@ -470,7 +489,7 @@
         {/if}
       {:else}
         <span class="l warn"><span class="chip warn">connect</span> · This sign-in belongs to your connection to that node.</span>
-        <span><button class="lnk" onclick={connect} disabled={busy}>Resume sign-in</button></span>
+        <span><button class="lnk" onclick={() => connect()} disabled={busy}>Resume sign-in</button></span>
       {/if}
     {:else}
       <span class="l off" class:bad={p.state === 'failed'}
@@ -498,7 +517,8 @@
             Share this sign-in with every node in its channels
           </label>
         {/if}
-        <span><button class="lnk" onclick={connect} disabled={busy || picked.length === 0}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
+        {#if isSelf}<span class="l off">{oneSignIn(p)}</span>{/if}
+        <span><button class="lnk" onclick={() => connect()} disabled={busy || picked.length === 0}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
       {:else if isSelf}
         {#if channelChoices.length > 1}
           <ChannelChoice
@@ -526,6 +546,19 @@
       {:else}
         <span>Add the key while managing {nodeName}; it never crosses the mesh to this browser.</span>
       {/if}
+    {/if}
+    {#if confirming}
+      <span class="confirm" role="alert">
+        <span class="l warn">{confirming.text}</span>
+        <span class="actions">
+          <button
+            class="btn d"
+            onclick={() => (confirming?.kind === 'connect' ? connect(true) : disconnect(true))}
+            disabled={busy}>{confirming.kind === 'connect' ? 'Sign in anyway' : 'Disconnect anyway'}</button
+          >
+          <button class="lnk" onclick={() => (confirming = null)} disabled={busy}>Cancel</button>
+        </span>
+      </span>
     {/if}
     {#if error}<span class="l bad" role="alert">{error}</span>{/if}
   </span>
@@ -595,6 +628,11 @@
   }
   .pst .l.bad {
     color: var(--crit);
+  }
+  .confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
   }
   .actions,
   .paste {
