@@ -478,9 +478,13 @@ async fn submit(
             .map_err(|e| e.to_string())?,
     };
     // Diff against the remote-tracking ref, so the review shows exactly what the
-    // change introduces over what it will merge into.
-    let range_base = format!("origin/{base}");
-    let capture = review::capture(&worktree, &range_base, &branch)
+    // change introduces over what it will merge into. A repository with nothing
+    // on the forge yet has no such ref, and everything the worktree holds is
+    // the change.
+    let range_base = review::range_base(&worktree, &base)
+        .await
+        .map_err(|e| e.to_string())?;
+    let capture = review::capture_over(&worktree, range_base.as_deref(), &branch)
         .await
         .map_err(|e| e.to_string())?;
     let asked_change = match args.get("change") {
@@ -575,6 +579,7 @@ async fn submit(
                 number,
                 url: String::new(),
             }),
+            initial: false,
         },
     };
     let mut forge = forge_arg(args)?;
@@ -610,14 +615,22 @@ async fn submit(
             target.branch = named;
         }
     }
+    // With no base on the forge there is nothing for a change to merge into:
+    // the only thing approval can do is push the base itself, as the
+    // repository's first commit.
+    target.initial = range_base.is_none();
+    if target.initial {
+        initial_push(manager, ctx, &target).await?;
+    }
     let (commit_mode, style) = review::prose::rules(
         &manager.cfg().live(),
         store,
         &ctx.channel,
         repo_path.as_deref(),
     );
-    let squash = commit_mode == crate::config::Commits::Squash;
-    let commits = review::commits(&worktree, &range_base)
+    // A first commit has nothing to be squashed onto, so it ships as written.
+    let squash = commit_mode == crate::config::Commits::Squash && !target.initial;
+    let commits = review::commits(&worktree, range_base.as_deref())
         .await
         .map_err(|e| e.to_string())?;
     let rewrite = args
@@ -656,7 +669,7 @@ async fn submit(
         &ctx.channel,
         &ctx.node_id,
         &worktree,
-        &range_base,
+        range_base.as_deref(),
         &capture.head_sha,
         review::OnChange::of(&target, &intent).as_ref(),
     )
@@ -669,7 +682,8 @@ async fn submit(
         // branch already has it: a revision that merged its base to resolve
         // a conflict ships that merge. The lease may be an earlier squash
         // this worktree never had; publication settles that case.
-        let leaves = review::merge_base(&worktree, &range_base, &capture.head_sha)
+        let range_base = range_base.as_deref().expect("a squash has a base");
+        let leaves = review::merge_base(&worktree, range_base, &capture.head_sha)
             .await
             .map_err(|e| e.to_string())?;
         match (&intent.lease, intent.rewrite) {
@@ -1940,6 +1954,48 @@ fn what_ships(intent: &review::publish::Intent) -> Value {
         "commit_message": message,
         "drops_signatures": if own { Vec::new() } else { intent.signed.clone() },
     })
+}
+
+/// Whether a review of a repository with nothing on the forge yet can be
+/// published: only by pushing its base as the repository's first commit,
+/// since a change needs a base that exists to merge into. Where the forge can
+/// be asked, it is also asked whether the base is there after all, which a
+/// worktree cloned before anything was pushed would not know.
+async fn initial_push(manager: &Manager, ctx: &CallContext, target: &Target) -> Result<(), String> {
+    let Some(provider) = Provider::parse(&target.provider) else {
+        return Ok(());
+    };
+    let base = &target.base;
+    if target.change.is_some() || target.branch != *base {
+        return Err(format!(
+            "origin has no {base} yet: the repository is empty, so a {} has no {base} to merge \
+             into. Push an initial commit to {base} on the forge, fetch it and rebase onto it, \
+             then submit again; or submit with branch {base} to push this as the repository's \
+             first commit.",
+            provider.noun()
+        ));
+    }
+    let env =
+        manager
+            .broker()
+            .read()
+            .unwrap()
+            .env_for(provider.credential(), &ctx.channel, &ctx.node_id);
+    let (Ok(env), Ok(dir)) = (env, review::publish::inspection_dir()) else {
+        return Ok(());
+    };
+    let live = manager.cfg().live();
+    match review::publish::branch_head(provider, &live, &dir, &env, target).await {
+        Ok(Some(held)) => Err(format!(
+            "{base} is on the forge at {held:.8}, but this worktree has no origin/{base}: fetch \
+             it and rebase onto it, then submit again"
+        )),
+        Ok(None) => Ok(()),
+        Err(error) => {
+            tracing::warn!(%error, "could not ask the forge whether the base exists");
+            Ok(())
+        }
+    }
 }
 
 /// Settle what this revision may do on the forge, asking the forge rather

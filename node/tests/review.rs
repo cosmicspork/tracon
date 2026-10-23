@@ -110,19 +110,48 @@ macro_rules! test_name {
 }
 
 async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> Fixture {
+    fixture_cloned(
+        name,
+        credentials,
+        tweak,
+        "git clone -q origin.git wt && cd wt && git checkout -qB main \
+         && git config user.email t@e && git config user.name t \
+         && echo base > a.txt && git add -A && git commit -qm base && git push -q origin main \
+         && git checkout -qb feat/x && echo change >> a.txt && git add -A && git commit -qm work",
+    )
+    .await
+}
+
+/// A worktree cloned from an origin nothing was ever pushed to, with one
+/// commit on a branch of its own: the first work on a brand-new repository.
+async fn fixture_on_empty_origin(name: &str, credentials: &str, tweak: fn(&mut Config)) -> Fixture {
+    fixture_cloned(
+        name,
+        credentials,
+        tweak,
+        "git clone -q origin.git wt 2>/dev/null && cd wt \
+         && git symbolic-ref HEAD refs/heads/feat/x \
+         && git config user.email t@e && git config user.name t \
+         && echo first > a.txt && git add -A && git commit -qm 'feat: first commit'",
+    )
+    .await
+}
+
+/// The fixture, with `clone` run in its directory to make `wt` from the bare
+/// `origin.git`.
+async fn fixture_cloned(
+    name: &str,
+    credentials: &str,
+    tweak: fn(&mut Config),
+    clone: &str,
+) -> Fixture {
     // Per test: these run in parallel and each needs its own repo, its own
     // stub CLI, and its own log to assert against.
     let dir = state::scratch(&format!("review-{name}"));
     // `-b main` and an explicit checkout: git's default branch name is a local
     // setting, and CI does not share this machine's.
     sh(&dir, "git init -q --bare -b main origin.git");
-    sh(
-        &dir,
-        "git clone -q origin.git wt && cd wt && git checkout -qB main \
-         && git config user.email t@e && git config user.name t \
-         && echo base > a.txt && git add -A && git commit -qm base && git push -q origin main \
-         && git checkout -qb feat/x && echo change >> a.txt && git add -A && git commit -qm work",
-    );
+    sh(&dir, clone);
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(
@@ -1022,6 +1051,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         worktree: None,
         repo: None,
         change: None,
+        initial: false,
     };
     // A head_sha that is not the worktree's HEAD stands in for a branch that
     // moved between approval and publish.
@@ -7473,5 +7503,131 @@ async fn an_external_submission_still_names_its_repository() {
     assert_eq!(
         required(&tracon::mcp::CallContext::session("s1", "work", "n1")),
         json!(["title", "body"])
+    );
+}
+
+/// The first commit of a brand-new repository, submitted to land on its base:
+/// the forge has no branches yet, so the whole tree is the change, and
+/// approval pushes the base itself — no pull request, since there is nothing
+/// for one to merge into (#629).
+#[tokio::test]
+async fn the_first_commit_of_an_empty_repository_is_reviewed_whole_and_pushed_as_its_base() {
+    state::isolate();
+    let f = fixture_on_empty_origin(test_name!(), WITH_GH, |_| {}).await;
+    let mut args = f.submit_args();
+    args["branch"] = json!("main");
+    let v = f.tool("s1", "submit_review", args).await;
+    let id = review_id(&v);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert!(review.diff.contains("+first"), "{}", review.diff);
+    assert_eq!((review.added, review.removed), (1, 0));
+    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
+    assert!(target.initial, "{}", review.target);
+    assert_eq!(
+        (target.base.as_str(), target.branch.as_str()),
+        ("main", "main")
+    );
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    let subjects: Vec<_> = intent.commits.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["feat: first commit"]);
+
+    // A rename would push a branch with no base to merge into.
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": { "branch": "feat/elsewhere" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("first commit"), "{body}");
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["published"], "https://github.com/owner/name/tree/main");
+    let origin = f.dir.join("origin.git");
+    assert_eq!(
+        sh_out(&origin, "git rev-parse refs/heads/main"),
+        review.head_sha
+    );
+    assert!(!f.gh_log().contains("pr create"), "{}", f.gh_log());
+}
+
+/// Under squash there is no base commit to squash onto, so a repository's
+/// first commit ships as the agent wrote it.
+#[tokio::test]
+async fn the_first_commit_of_an_empty_repository_ships_as_written_under_squash() {
+    state::isolate();
+    let f = fixture_on_empty_origin(test_name!(), WITH_GH, squashing).await;
+    let mut args = f.submit_args();
+    args["branch"] = json!("main");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    let revision = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let intent = tracon::authority::revision_intent(&f.store, Some(&revision.id)).unwrap();
+    assert_eq!(intent.squash_onto, None);
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    assert_eq!(
+        sh_out(&f.dir.join("origin.git"), "git rev-parse refs/heads/main"),
+        head
+    );
+}
+
+/// A change into a base the forge does not have yet cannot be opened, so it
+/// is refused at submit with what is missing and how to make it, rather than
+/// failing on Git's own words or after the operator approved.
+#[tokio::test]
+async fn a_change_into_the_base_of_an_empty_repository_is_refused_at_submit() {
+    state::isolate();
+    let f = fixture_on_empty_origin(test_name!(), WITH_GH, |_| {}).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let error = v["error"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(error.contains("origin has no main yet"), "{error}");
+    assert!(error.contains("Push an initial commit to main"), "{error}");
+    assert!(!error.contains("ambiguous argument"), "{error}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+}
+
+/// A first commit is reviewed against nothing. If the forge gained its base
+/// after the submit, even one the reviewed head builds on, pushing would land
+/// on a base the operator never saw, so publication refuses.
+#[tokio::test]
+async fn a_first_commit_is_not_pushed_over_a_base_the_forge_gained_since() {
+    state::isolate();
+    let f = fixture_on_empty_origin(test_name!(), WITH_GH, |_| {}).await;
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo second >> a.txt && git add -A && git commit -qm 'feat: second commit'",
+    );
+    let mut args = f.submit_args();
+    args["branch"] = json!("main");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    sh(
+        wt,
+        &format!(
+            "git push -q {} HEAD~1:refs/heads/main",
+            f.dir.join("origin.git").display()
+        ),
+    );
+    let theirs = sh_out(wt, "git rev-parse HEAD~1");
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not the repository's first commit any more"),
+        "{body}"
+    );
+    assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
+    assert_eq!(
+        sh_out(&f.dir.join("origin.git"), "git rev-parse refs/heads/main"),
+        theirs
     );
 }

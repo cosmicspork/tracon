@@ -230,14 +230,17 @@ pub struct CommitAuthor {
 /// Every commit `head` adds over `base`, and over `held` when given, with its
 /// author and committer, newest first. Read with the same hardened Git as the
 /// capture, so a `.mailmap` or a format configured in the repository cannot
-/// change what is reported.
+/// change what is reported. With no base, every commit `head` has is new.
 pub async fn authors(
     worktree: &str,
-    base: &str,
+    base: Option<&str>,
     head: &str,
     held: Option<&str>,
 ) -> Result<Vec<CommitAuthor>, ReviewError> {
-    let range = format!("{base}..{head}");
+    let range = match base {
+        Some(base) => format!("{base}..{head}"),
+        None => head.to_string(),
+    };
     let not = held.map(|held| format!("^{held}"));
     let mut revs = vec![range.as_str()];
     revs.extend(not.as_deref());
@@ -249,13 +252,15 @@ pub async fn authors(
 /// rebase's copies of what was on the change do.
 async fn authors_beyond_rewrite(
     worktree: &str,
-    base: &str,
+    base: Option<&str>,
     head: &str,
     held: &str,
 ) -> Result<Vec<CommitAuthor>, ReviewError> {
     let range = format!("{held}...{head}");
-    let not = format!("^{base}");
-    log_authors(worktree, &["--cherry-pick", "--right-only", &range, &not]).await
+    let not = base.map(|base| format!("^{base}"));
+    let mut revs = vec!["--cherry-pick", "--right-only", range.as_str()];
+    revs.extend(not.as_deref());
+    log_authors(worktree, &revs).await
 }
 
 async fn log_authors(worktree: &str, revs: &[&str]) -> Result<Vec<CommitAuthor>, ReviewError> {
@@ -323,6 +328,9 @@ impl OnChange {
 /// as it. `None` when that identity cannot be resolved (no credential bound,
 /// or the forge did not answer), which is said rather than guessed at.
 ///
+/// `base` is what the commits are new over: the remote-tracking ref of the
+/// branch the change merges into, or none when the forge has no branches yet.
+///
 /// `change` is what an existing change's branch held when the review updates
 /// one. Its commits are already on the change, someone else's to answer for,
 /// so only what this submission adds beyond them is judged. Building on them,
@@ -336,7 +344,7 @@ pub async fn authorship(
     channel: &str,
     node_id: &str,
     worktree: &str,
-    base: &str,
+    base: Option<&str>,
     head: &str,
     change: Option<&OnChange>,
 ) -> Option<serde_json::Value> {
@@ -409,7 +417,7 @@ pub async fn authorship(
                         .all(|c| !earlier.contains(&c.sha))
                 })
                 .map(|oldest| format!("{}^", rewritten[oldest].sha)),
-            None => Some(base.to_string()),
+            None => Some(base.unwrap_or("--root").to_string()),
         };
         let how = match since {
             Some(since) => format!(
@@ -525,11 +533,16 @@ async fn cat_file(
     }
 }
 
-/// The commits `HEAD` has beyond `base_ref`, oldest first.
+/// The commits `HEAD` has beyond `base_ref`, oldest first; with no base, all
+/// of them.
 pub async fn commits(
     worktree: &str,
-    base_ref: &str,
+    base_ref: Option<&str>,
 ) -> Result<Vec<prose::CommitLine>, ReviewError> {
+    let range = match base_ref {
+        Some(base_ref) => format!("{base_ref}..HEAD"),
+        None => "HEAD".to_string(),
+    };
     let listed = git(
         worktree,
         "log",
@@ -538,7 +551,7 @@ pub async fn commits(
             "--reverse",
             "--no-decorate",
             "--format=%H%x1f%s%x1f%b%x1e",
-            &format!("{base_ref}..HEAD"),
+            &range,
         ],
     )
     .await?;
@@ -554,6 +567,17 @@ pub async fn commits(
             })
         })
         .collect())
+}
+
+/// The empty tree in this repository's object format: what a change to a
+/// repository with nothing in it is compared with.
+async fn empty_tree(worktree: &str) -> Result<String, ReviewError> {
+    git(
+        worktree,
+        "hash-object",
+        &["hash-object", "-t", "tree", "/dev/null"],
+    )
+    .await
 }
 
 /// Where `head` leaves `base_ref`: the commit a squash of it sits on.
@@ -576,24 +600,73 @@ pub async fn default_base(worktree: &str) -> Result<String, ReviewError> {
     Ok(head.strip_prefix("origin/").unwrap_or(&head).to_string())
 }
 
+/// What a review of a change into `base` is compared against in `worktree`:
+/// `origin/<base>`, or `None` when the remote has no branches at all — an
+/// empty repository, cloned before anything was pushed to it — so the whole
+/// history of `HEAD` is the change. A base missing from a remote that has
+/// other branches is not that: it is a base this worktree never fetched, or
+/// one the forge does not have, and the review is refused rather than shown
+/// against nothing.
+pub async fn range_base(worktree: &str, base: &str) -> Result<Option<String>, ReviewError> {
+    let tracking = format!("origin/{base}");
+    if resolve(worktree, &format!("refs/remotes/{tracking}"))
+        .await
+        .is_ok()
+    {
+        return Ok(Some(tracking));
+    }
+    let branches = git(
+        worktree,
+        "for-each-ref",
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/",
+        ],
+    )
+    .await?;
+    if branches
+        .lines()
+        .all(|name| name.is_empty() || name == "refs/remotes/origin/HEAD")
+    {
+        return Ok(None);
+    }
+    Err(ReviewError::Rejected(format!(
+        "{tracking} is not in this worktree, though origin has other branches: fetch {base}, or \
+         pass the base the change merges into"
+    )))
+}
+
 /// Capture what the branch contains beyond its base. Three-dot: the changes the
 /// branch introduces, not everything that happened on the base since. `base_ref`
 /// is a ref the worktree can resolve — a remote-tracking ref like `origin/main`,
 /// so the diff is against what the change will actually merge into rather than a
 /// possibly-stale local branch.
 pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Capture, ReviewError> {
-    let range = format!("{base_ref}...HEAD");
+    capture_over(worktree, Some(base_ref), branch).await
+}
+
+/// The same capture, where no base (`range_base` found the repository empty)
+/// compares `HEAD` with the empty tree: everything it holds is the change.
+pub async fn capture_over(
+    worktree: &str,
+    base_ref: Option<&str>,
+    branch: &str,
+) -> Result<Capture, ReviewError> {
+    let range = match base_ref {
+        Some(base_ref) => vec![format!("{base_ref}...HEAD")],
+        None => vec![empty_tree(worktree).await?, "HEAD".to_string()],
+    };
+    let range: Vec<&str> = range.iter().map(String::as_str).collect();
+    let base_ref = base_ref.unwrap_or(range[0]);
     let head_sha = git(worktree, "rev-parse", &["rev-parse", "HEAD"]).await?;
 
     // `--no-ext-diff --no-textconv`: an external diff or textconv driver named
     // by `.gitattributes` would run its configured command; disable both so the
     // capture cannot be turned into a node-side exec.
-    let diff = git(
-        worktree,
-        "diff",
-        &["diff", "--no-ext-diff", "--no-textconv", &range],
-    )
-    .await?;
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv"];
+    args.extend(&range);
+    let diff = git(worktree, "diff", &args).await?;
     if diff.trim().is_empty() {
         return Err(ReviewError::Empty {
             branch: branch.to_string(),
@@ -601,18 +674,9 @@ pub async fn capture(worktree: &str, base_ref: &str, branch: &str) -> Result<Cap
         });
     }
 
-    let numstat = git(
-        worktree,
-        "diff --numstat",
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--numstat",
-            &range,
-        ],
-    )
-    .await?;
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat"];
+    args.extend(&range);
+    let numstat = git(worktree, "diff --numstat", &args).await?;
     let (mut added, mut removed) = (0i64, 0i64);
     let mut paths = Vec::new();
     for line in numstat.lines() {
@@ -1188,7 +1252,7 @@ mod tests {
             forge: "github",
         };
         let dir = dir.to_string_lossy().into_owned();
-        let commits = authors(&dir, "main", "HEAD", None).await.unwrap();
+        let commits = authors(&dir, Some("main"), "HEAD", None).await.unwrap();
         assert_eq!(commits.len(), 2, "{commits:?}");
         let wrong = misattributed(&commits, &identity);
         assert_eq!(wrong.len(), 1, "{wrong:?}");
@@ -1246,7 +1310,7 @@ mod tests {
             "work",
             "n1",
             dir,
-            "main",
+            Some("main"),
             "HEAD",
             Some(change),
         )
@@ -1313,6 +1377,7 @@ mod tests {
                 number: 63,
                 url: String::new(),
             }),
+            initial: false,
         };
         let squash = "5".repeat(40);
         let intent = publish::Intent {
@@ -1415,6 +1480,31 @@ mod tests {
         )
         .await;
         dir
+    }
+
+    #[tokio::test]
+    async fn a_base_is_missing_only_from_a_remote_with_no_branches_at_all() {
+        const FN: &str = "a_base_is_missing_only_from_a_remote_with_no_branches_at_all";
+        let dir = repo(FN).await;
+        let worktree = dir.to_str().unwrap();
+        // Nothing fetched from origin: an empty repository, compared with
+        // nothing, so the whole history is the change.
+        assert_eq!(range_base(worktree, "main").await.unwrap(), None);
+        let c = capture_over(worktree, None, "feat/x").await.unwrap();
+        assert_eq!((c.added, c.removed, c.files.len()), (3, 0, 2));
+        let all = commits(worktree, None).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Other branches but not the base: never fetched, not empty.
+        sh(&dir, "git update-ref refs/remotes/origin/dev HEAD").await;
+        let refused = range_base(worktree, "main").await.unwrap_err().to_string();
+        assert!(refused.contains("fetch main"), "{refused}");
+
+        sh(&dir, "git update-ref refs/remotes/origin/main main").await;
+        assert_eq!(
+            range_base(worktree, "main").await.unwrap().as_deref(),
+            Some("origin/main")
+        );
     }
 
     #[tokio::test]

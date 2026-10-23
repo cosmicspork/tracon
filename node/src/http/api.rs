@@ -2393,17 +2393,23 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     // what its branch held at submit is not this review's to answer for.
     let authorship = match (remote_owner.as_ref(), worktree_of(s, r)) {
         (None, Some(worktree)) => {
-            let change = serde_json::from_str::<crate::review::publish::Target>(&r.target)
-                .ok()
+            let target = serde_json::from_str::<crate::review::publish::Target>(&r.target).ok();
+            let change = target
+                .as_ref()
                 .zip(revision_intent.as_ref())
-                .and_then(|(target, intent)| crate::review::OnChange::of(&target, intent));
+                .and_then(|(target, intent)| crate::review::OnChange::of(target, intent));
+            // A repository's first commit has no base: all its history is new.
+            let base = target
+                .as_ref()
+                .is_none_or(|target| !target.initial)
+                .then(|| format!("origin/{}", r.base_ref));
             crate::review::authorship(
                 &s.tools.broker,
                 &r.provider,
                 &r.channel,
                 &s.node_id,
                 &worktree,
-                &format!("origin/{}", r.base_ref),
+                base.as_deref(),
                 &r.head_sha,
                 change.as_ref(),
             )
