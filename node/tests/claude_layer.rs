@@ -9,11 +9,10 @@
 //! that configuration; an image that would change the harness is refused, and
 //! the session's note says why.
 //!
-//! Needs Podman, the internal network a probe runs on, and a Claude Code
-//! harness image built from this tree's definitions (named in
-//! `TRACON_CLAUDE_IMAGE`, or `localhost/tracon-harness-claude`); each test
-//! skips with a message when one is missing. Every image built here is
-//! removed again.
+//! Runs only with `TRACON_PODMAN_TESTS=1` (`just check-podman`), against a
+//! Claude Code harness image built from this tree's definitions and named in
+//! `TRACON_CLAUDE_IMAGE`, on a network of its own: see `support::podman`.
+//! Every image and network made here is removed again.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -21,6 +20,7 @@ mod support;
 use std::process::Command;
 use std::sync::Arc;
 
+use support::podman::{podman, Network};
 use tracon::adapter::claude::ClaudeAdapter;
 use tracon::boundary::podman::PodmanBackend;
 use tracon::boundary::Backend;
@@ -34,68 +34,47 @@ const DEBIAN: &str = "docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7
 /// What the harness image installs; the probe holds the layer to it.
 const PINNED: &str = ClaudeAdapter::PINNED_VERSION;
 
-fn podman(args: &[&str]) -> Option<String> {
-    let out = Command::new("podman").args(args).output().ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// A Claude Code harness image with the static init a pod's layer copies.
-fn harness_image() -> Option<String> {
-    let mut candidates: Vec<String> = std::env::var("TRACON_CLAUDE_IMAGE")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .into_iter()
-        .collect();
-    candidates.push("localhost/tracon-harness-claude".to_string());
-    candidates.into_iter().find(|image| {
-        podman(&["image", "exists", image]).is_some()
-            && podman(&[
-                "run",
-                "--rm",
-                "--network=none",
-                "--entrypoint",
-                "sh",
-                image,
-                "-c",
-                &format!(
-                    "test -x /usr/bin/tini-static && {} --version | grep -q {PINNED}",
-                    ClaudeAdapter::BINARY
-                ),
-            ])
-            .is_some()
-    })
-}
-
 struct Rig {
     harness: String,
-    network: String,
+    network: Network,
 }
 
 fn rig() -> Option<Rig> {
     support::state::isolate();
-    if podman(&["info", "--format", "{{.Host.Arch}}"]).is_none() {
-        eprintln!("skipped: podman is not usable on this machine");
+    if !support::podman::requested() {
         return None;
     }
-    let network = Config::default().boundary.network;
-    if podman(&["network", "exists", &network]).is_none() {
-        eprintln!("skipped: the internal network is not created on this machine");
-        return None;
-    }
-    if podman(&["image", "exists", DEBIAN]).is_none() {
-        eprintln!("skipped: {DEBIAN} is not in the local store; build a harness image first");
-        return None;
-    }
-    let Some(harness) = harness_image() else {
-        eprintln!(
-            "skipped: no Claude Code harness image at {PINNED} with a static init on this \
-             machine. Build containers/harness-claude and name it in TRACON_CLAUDE_IMAGE."
-        );
-        return None;
-    };
-    Some(Rig { harness, network })
+    assert!(
+        podman(&["info", "--format", "{{.Host.Arch}}"]).is_some(),
+        "podman is not usable on this machine"
+    );
+    let harness = support::podman::named_image("TRACON_CLAUDE_IMAGE");
+    assert!(
+        podman(&[
+            "run",
+            "--rm",
+            "--network=none",
+            "--entrypoint",
+            "sh",
+            &harness,
+            "-c",
+            &format!(
+                "test -x /usr/bin/tini-static && {} --version | grep -q {PINNED}",
+                ClaudeAdapter::BINARY
+            ),
+        ])
+        .is_some(),
+        "{harness} is not a Claude Code harness image at {PINNED} with a static init; build \
+         containers/harness-claude from this tree"
+    );
+    assert!(
+        podman(&["image", "exists", DEBIAN]).is_some(),
+        "{DEBIAN} is not in the local store; building the harness image leaves it there"
+    );
+    Some(Rig {
+        harness,
+        network: Network::create(),
+    })
 }
 
 /// The label every base here carries, and so every image built over one,
@@ -176,7 +155,7 @@ async fn layer(
     let mut cfg = Config::default();
     cfg.harness.id = ClaudeAdapter::ID.into();
     cfg.boundary.harness_image = rig.harness.clone();
-    cfg.boundary.network = rig.network.clone();
+    cfg.boundary.network = rig.network.0.clone();
     cfg.runtime.kind = kind;
     cfg.repo = vec![Repo {
         path: repo.path().to_path_buf(),

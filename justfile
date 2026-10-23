@@ -36,6 +36,13 @@ check:
     if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --no-fail-fast && cargo test --doc; else cargo test; fi
     cd spa && bun run check && bun test
 
+# The tests that build and run real containers, which `check` skips. They use a
+# harness image of their own and a network they remove again, never the node's,
+# though they still share its Podman machine: run them while no session is.
+check-podman:
+    podman build -t localhost/tracon-harness-claude-test containers/harness-claude
+    TRACON_PODMAN_TESTS=1 TRACON_CLAUDE_IMAGE=localhost/tracon-harness-claude-test cargo test -p tracon --test claude_layer
+
 fmt:
     cargo fmt --all
 
