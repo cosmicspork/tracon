@@ -148,26 +148,6 @@ impl From<TransferError> for ApiError {
     }
 }
 
-impl From<crate::session::opencode_state::StateError> for ApiError {
-    fn from(error: crate::session::opencode_state::StateError) -> Self {
-        use crate::session::opencode_state::StateError as E;
-        let status = match &error {
-            E::NotFound(_) => StatusCode::NOT_FOUND,
-            // A live or claimed session, a missing backup and a missing target
-            // binary are all "not now", not "not ever": the request was
-            // well-formed and the node is refusing on state.
-            E::Running { .. } | E::Claimed(_) | E::NoBackup(_) | E::NoBinary(_) => {
-                StatusCode::CONFLICT
-            }
-            E::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            E::Integrity { .. } | E::Io(_) | E::Sqlite(_) | E::Store(_) | E::Json(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        };
-        ApiError::new(status, error.to_string())
-    }
-}
-
 pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 #[derive(Deserialize)]
@@ -245,21 +225,6 @@ pub async fn create_authority_grant(
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "merge, publish, and deploy allow grants must bind an immutable revision",
-        ));
-    }
-    // A terminal grant authorises a shell inside one session's workspace, and
-    // its target names that workspace. An allow grant that named no session
-    // would outlive the workspace it was given for, so it is refused here
-    // rather than filtered at the gateway.
-    if b.verdict == "allow"
-        && action == crate::authority::TERMINAL
-        && b.session_id
-            .as_deref()
-            .is_none_or(|session| session.trim().is_empty())
-    {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "a terminal allow grant must bind the session whose workspace it opens a shell in",
         ));
     }
     if b.expires_ms
@@ -1560,14 +1525,6 @@ pub async fn get_session(
     let usage = crate::metrics::session_usage(s.store(), &id);
     let ceiling =
         crate::metrics::ceiling(s.store(), &s.manager.bindings(&row.channel), &row.channel);
-    // What the harness image could offer this session's languages, as it was
-    // at launch. Absent for a harness that has no such profile, and for every
-    // session that started before the node recorded one.
-    let toolchain = s
-        .store()
-        .first_event_payload(&id, crate::session::state::event_kind::SESSION_STARTED)?
-        .and_then(|payload| payload.get("toolchain").cloned())
-        .filter(|toolchain| !toolchain.is_null());
     // The policy this session runs under on exhaustion, and its latest one:
     // what it waits for, when, or what carried it on.
     let exhaustion = s.store().exhaustion(&id)?;
@@ -1582,7 +1539,6 @@ pub async fn get_session(
         "usage": usage,
         "ceiling": ceiling,
         "exhaustion": exhaustion,
-        "toolchain": toolchain,
         "shown_work": s.store().shown_work_for_session(&id)?,
     })))
 }
@@ -1734,102 +1690,6 @@ pub async fn kill(State(s): State<AppState>, Path(id): Path<String>) -> ApiResul
     Ok(StatusCode::OK)
 }
 
-// ---- per-session OpenCode state ----
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-pub struct BackupBody {
-    /// Stop the harness first, through the supervisor. Without it a live
-    /// session is refused: a copy taken under a running writer is a file, not
-    /// a backup.
-    pub quiesce: bool,
-}
-
-#[derive(Deserialize)]
-pub struct UpgradeStateBody {
-    /// The OpenCode release to migrate the state onto.
-    pub to: String,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-pub struct RestoreStateBody {
-    /// A backup directory this node holds, by path or by its own name.
-    pub backup: String,
-    /// Accept a workspace that has moved since the checkpoint.
-    pub confirm: bool,
-}
-
-/// What this session's state is, and every backup of it this node holds.
-pub async fn session_state(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
-    use crate::session::opencode_state as state;
-    let identity = s.store().opencode_state_get(&id)?;
-    let backups: Vec<Value> = state::list_backups(&id)
-        .into_iter()
-        .map(|(path, manifest)| json!({ "path": path.to_string_lossy(), "manifest": manifest }))
-        .collect();
-    Ok(Json(json!({
-        "session_id": id,
-        "identity": identity,
-        "claimed": crate::session::materialize::state_claimed(&id),
-        "backups": backups,
-    })))
-}
-
-pub async fn backup_state(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<BackupBody>,
-) -> ApiResult<Json<Value>> {
-    let report = s.manager.backup_state(&id, body.quiesce).await?;
-    Ok(Json(json!(report)))
-}
-
-pub async fn upgrade_state(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<UpgradeStateBody>,
-) -> ApiResult<Json<Value>> {
-    let report = s.manager.upgrade_state(&id, body.to.trim()).await?;
-    Ok(Json(json!(report)))
-}
-
-pub async fn restore_state(
-    State(s): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<RestoreStateBody>,
-) -> ApiResult<Json<Value>> {
-    use crate::session::opencode_state as state;
-    let named = body.backup.trim();
-    if named.is_empty() {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "name the backup to restore",
-        ));
-    }
-    // A bare name is resolved inside this session's own backup directory: the
-    // operator names a backup, and a path from a request never decides where
-    // the node reads from.
-    let candidate = std::path::Path::new(named);
-    let path = if candidate.components().count() == 1 {
-        state::backups_dir(&id).join(named)
-    } else {
-        let path = candidate.to_path_buf();
-        if !path.starts_with(state::backups_dir(&id)) {
-            return Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{named} is not a backup of session {id} this node holds"),
-            ));
-        }
-        path
-    };
-    let report = s.manager.restore_state(&id, &path, body.confirm).await?;
-    Ok(Json(json!(report)))
-}
-
 /// Put an ended session away, or bring it back. Presentation only: nothing
 /// about the session changes but whether the home still lists it.
 pub async fn archive_session(
@@ -1871,16 +1731,17 @@ pub async fn archive_ended(State(s): State<AppState>) -> ApiResult<Json<serde_js
 
 #[derive(Deserialize, Default)]
 pub struct ArchiveLegacyBody {
-    /// The retired harness to put away. Defaults to the one this build
-    /// removed; named explicitly so a node that ran some other harness a
-    /// build or two ago can be migrated with the same gesture.
+    /// The retired harness to put away. Defaults to every harness this node
+    /// no longer has (`adapter::RETIRED`); named explicitly so a node that
+    /// ran some other harness a build or two ago can be migrated with the
+    /// same gesture.
     #[serde(default)]
     pub harness: Option<String>,
 }
 
 /// Put every session that ran a retired harness away read-only.
 ///
-/// The migration step for the OpenCode cutover: the sessions keep their
+/// The migration step when a harness is retired: the sessions keep their
 /// harness identity and version, their transcripts, their evidence and their
 /// workspaces, and lose only the ability to run — which they had already
 /// lost, because nothing resolves their harness any more. What this adds is
@@ -1890,22 +1751,34 @@ pub async fn archive_legacy(
     State(s): State<AppState>,
     body: Option<Json<ArchiveLegacyBody>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let harness = body
-        .and_then(|Json(b)| b.harness)
-        .unwrap_or_else(|| crate::adapter::RETIRED.to_string());
-    if crate::adapter::KNOWN
-        .iter()
-        .chain(crate::adapter::EXPERIMENTAL)
-        .any(|id| *id == harness)
-    {
+    let harnesses: Vec<String> = match body.and_then(|Json(b)| b.harness) {
+        Some(harness) => vec![harness],
+        None => crate::adapter::RETIRED
+            .iter()
+            .map(|h| h.to_string())
+            .collect(),
+    };
+    if let Some(harness) = harnesses.iter().find(|harness| {
+        crate::adapter::KNOWN
+            .iter()
+            .chain(crate::adapter::EXPERIMENTAL)
+            .any(|id| id == harness)
+    }) {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("`{harness}` is a harness this node still runs; it has no legacy sessions"),
         ));
     }
-    let archived = s
-        .store()
-        .archive_legacy_sessions(&harness, crate::store::now_ms())?;
+    let mut archived = crate::store::LegacyArchive::default();
+    for harness in &harnesses {
+        let one = s
+            .store()
+            .archive_legacy_sessions(harness, crate::store::now_ms())?;
+        archived.sessions.extend(one.sessions);
+        archived.approvals_closed += one.approvals_closed;
+        archived.workspaces.extend(one.workspaces);
+    }
+    let harness = harnesses.join(", ");
     for row in &archived.sessions {
         s.manager
             .bus()
@@ -6309,7 +6182,7 @@ pub async fn probe_models_into_store(
     // it: a session's harness follows its model's credential. Both supported
     // adapters answer from the wiring alone and launch nothing, so the other
     // one is asked through the same runner. A harness with nothing to offer
-    // (OpenCode with no models declared) leaves the other's list standing.
+    // (tracon-agent with no models declared) leaves the other's list standing.
     if crate::adapter::is_enabled(&s.cfg, s.adapter.id()) {
         for id in crate::adapter::enabled(&s.cfg)
             .into_iter()
@@ -7666,20 +7539,6 @@ pub async fn put_config(
     })))
 }
 
-/// The cached OpenCode model catalogue `default_models` draws its tier-1
-/// defaults from — what the Connections pane offers as suggestions, not what
-/// any provider is currently declared to serve. An ordinary operator read:
-/// a provider is configured from wherever the operator is, and the
-/// catalogue is a public list the node fetched, with nothing of its own in
-/// it.
-pub async fn get_model_catalogue() -> ApiResult<Json<serde_json::Value>> {
-    let catalogue = crate::models_catalogue::cached();
-    Ok(Json(json!({
-        "fetched_ms": catalogue.fetched_ms,
-        "providers": catalogue.providers,
-    })))
-}
-
 /// The launch manifest an operator customizes a channel with, and what the
 /// next launch would build from it.
 ///
@@ -7703,9 +7562,6 @@ pub async fn get_manifest(
         "recorded": recorded,
         "next": built.as_ref().ok(),
         "error": built.as_ref().err(),
-        // The image's side of the agreement, so the pane can say why a plugin
-        // name was refused without the operator having to read node.toml.
-        "baked_plugins": crate::adapter::baked_plugins(&s.cfg.harness.id),
     })))
 }
 
@@ -7716,9 +7572,7 @@ pub async fn get_manifest(
 ///
 /// The configuration read here is the *running* node's, not node.toml on disk.
 /// A launch builds its manifest from the Arc this node took at startup, so
-/// showing the file would show a manifest no session would get. An edit to
-/// `[launch]` therefore appears here after the restart `PUT /api/config`
-/// already says is owed, which is the same answer that endpoint gives.
+/// showing the file would show a manifest no session would get.
 fn build_manifest(s: &AppState, channel: &str) -> Result<crate::manifest::LaunchManifest, String> {
     let (skills, instructions, agents) = s
         .store()
@@ -7730,10 +7584,6 @@ fn build_manifest(s: &AppState, channel: &str) -> Result<crate::manifest::Launch
         skills: crate::manifest::with_builtins(skills),
         instructions,
         agents,
-        plugins: &cfg.launch.plugins,
-        baked: &crate::adapter::baked_plugins(&cfg.harness.id),
-        lsp: crate::manifest::toolchain_lsp(&cfg.harness.id),
-        formatters: crate::manifest::toolchain_formatters(&cfg.harness.id),
         providers: cfg.providers.keys().cloned().collect(),
         policy_revision: s.manager.policy_version().to_string(),
     })
@@ -7792,9 +7642,8 @@ pub async fn post_skill(
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 format!(
-                    "`{}` is already imported on `{channel}` from {}. OpenCode resolves two \
-                     skills of one name by overwriting one of them nondeterministically, so \
-                     this node keeps one: remove it first, or rename this package.",
+                    "`{}` is already imported on `{channel}` from {}. A channel keeps one \
+                     skill of a name: remove it first, or rename this package.",
                     entry.name, existing.source
                 ),
             ));

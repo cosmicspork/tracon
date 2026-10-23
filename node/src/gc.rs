@@ -248,7 +248,7 @@ pub fn classify_directory(
 }
 
 /// Top-level directories no current code reads.
-const RETIRED_DIRECTORIES: [(&str, &str); 2] = [
+const RETIRED_DIRECTORIES: [(&str, &str); 5] = [
     (
         "providers",
         "sign-in container state; providers sign in natively now",
@@ -256,6 +256,18 @@ const RETIRED_DIRECTORIES: [(&str, &str); 2] = [
     (
         "harness-state",
         "harness state from before it moved into the runtime volume",
+    ),
+    (
+        "opencode-ui",
+        "the OpenCode web interface bundle; the OpenCode harness was removed",
+    ),
+    (
+        "opencode-state",
+        "backups of OpenCode sessions' state; the OpenCode harness was removed",
+    ),
+    (
+        "opencode-state-work",
+        "scratch for reading OpenCode sessions' state; the OpenCode harness was removed",
     ),
 ];
 

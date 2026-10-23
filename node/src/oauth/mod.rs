@@ -1,8 +1,7 @@
 //! Subscription sign-in, run by the node itself.
 //!
 //! Each provider's subscription is minted by its own first-party client's
-//! OAuth app: Claude Code's for Anthropic, the Codex CLI's (as OpenCode uses
-//! it) for ChatGPT. The node speaks those flows directly rather than driving
+//! OAuth app: Claude Code's for Anthropic, the Codex CLI's for ChatGPT. The node speaks those flows directly rather than driving
 //! the CLIs, so the only thing that crosses a process boundary is HTTPS to the
 //! provider. The client ids and endpoints are the providers' own and change
 //! only when they do; `docs/ARCHITECTURE.md` records where each was read from.
@@ -57,8 +56,8 @@ pub enum Flow {
 }
 
 impl Flow {
-    /// `openai-codex` is the id the retired harness wrote into `node.toml`;
-    /// OpenCode's `openai` replaced it, and both still mean this flow.
+    /// `openai-codex` is the id the omp harness wrote into `node.toml`, and
+    /// `openai` the one written since; both mean this flow.
     pub fn for_login(id: &str) -> Option<Self> {
         match id {
             "anthropic" => Some(Self::Anthropic),

@@ -145,7 +145,6 @@ fn spec() -> LaunchSpec {
         env: Vec::new(),
         secret_env: Default::default(),
         system_prompt_file: None,
-        cursor: None,
         resume: None,
     }
 }

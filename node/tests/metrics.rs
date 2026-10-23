@@ -612,7 +612,7 @@ fn a_gateway_request_the_harness_never_reported_is_named() {
     );
 }
 
-/// Claude Code and OpenCode report a turn's usage only as a total: their
+/// Claude Code reports a turn's usage only as a total: its
 /// turns carry no per-request verdict, and the session says null, not zero.
 #[test]
 fn a_harness_that_reports_no_requests_leaves_the_fields_empty() {

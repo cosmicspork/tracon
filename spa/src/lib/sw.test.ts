@@ -195,48 +195,6 @@ describe('the API is never touched', () => {
   })
 })
 
-describe('the OpenCode view is never this worker s to serve', () => {
-  // The shell route is a tracon page and caches like any other navigation. The
-  // *view* inside it is a different origin with a single-use bootstrap, and a
-  // worker that answered any part of it from a cache would be replaying a
-  // capability the node has already spent.
-  test.each(['/boot'])('%s passes straight through', async (path) => {
-    const sw = load()
-    const { answered } = await handle(sw, path)
-    expect(answered).toBe(false)
-  })
-
-  test('the UI origin is another origin and is not intercepted at all', async () => {
-    const sw = load()
-    let answered = false
-    sw.handlers.fetch({
-      request: new Request('http://127.0.0.2:7423/#/session/ses_1'),
-      respondWith: () => {
-        answered = true
-      },
-      waitUntil: () => {},
-    })
-    expect(answered).toBe(false)
-  })
-
-  test('nothing about the boot exchange is ever put in a cache', async () => {
-    const sw = load()
-    await handle(sw, '/boot')
-    await handle(sw, '/boot', { method: 'POST' })
-    const cached = [...sw.store.values()].flatMap((m) => [...m.keys()])
-    expect(cached).not.toContain('/boot')
-  })
-
-  test('the shell route itself is a navigation, served from the node', async () => {
-    const sw = load()
-    const { answered, response } = await handle(sw, '/sessions/ses_1/opencode', {
-      mode: 'navigate',
-    })
-    expect(answered).toBe(true)
-    expect(await response!.text()).toContain('network:')
-  })
-})
-
 test('a write is left alone even outside the API', async () => {
   const sw = load()
   const { answered } = await handle(sw, '/anything', { method: 'POST' })

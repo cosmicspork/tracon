@@ -3,8 +3,8 @@
 //!
 //! These shapes were first read from the Agent Client Protocol, which the
 //! retired omp harness spoke, and they outlived it because every harness has
-//! the same things to say in its own spelling — the OpenCode adapter and the
-//! Claude Code adapter each translate into this, and the supervisor, the MCP
+//! the same things to say in its own spelling — the Claude Code adapter
+//! translates into this, and the supervisor, the MCP
 //! layer and the store read only this. `tracon-agent` speaks it as its wire
 //! protocol, so both directions serialize. Unknown fields
 //! are kept in `extra` maps and unknown update variants land in

@@ -290,10 +290,6 @@ mod tests {
             skills,
             instructions,
             agents,
-            plugins: &[],
-            baked: &[],
-            lsp: Vec::new(),
-            formatters: Vec::new(),
             providers: vec!["anthropic".into()],
             policy_revision: "1".into(),
         })

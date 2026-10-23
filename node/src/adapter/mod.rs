@@ -3,12 +3,11 @@
 //! keeps its state, and what it must find in that state directory all live
 //! behind it rather than being spelled with one harness's name throughout the
 //! node. That seam is what let the omp harness be removed at the OpenCode
-//! cutover without the rest of the node noticing.
+//! cutover, and OpenCode after it, without the rest of the node noticing.
 
 pub mod claude;
 pub mod compat;
 pub mod native;
-pub mod opencode;
 pub mod types;
 
 use std::sync::Arc;
@@ -30,20 +29,20 @@ pub struct Layout {
     /// Directory under the harness's home, including the leading dot.
     pub dir: &'static str,
     /// The environment variable that names it. Empty when the harness has no
-    /// such variable — OpenCode decides where its state lives from `HOME` and
-    /// the XDG directories, which its adapter sets per session — and then the
-    /// runners set none rather than inventing one.
+    /// such variable, and then the runners set none rather than inventing one.
     pub env: &'static str,
 }
 
-/// The harness ids this node has an adapter for and supports.
-pub const KNOWN: &[&str] = &["opencode", "claude"];
+/// The harness ids every node runs. Claude Code for the Anthropic
+/// credentials, and tracon's own harness for every other: without it a model
+/// that is not Claude has nothing to run on.
+pub const KNOWN: &[&str] = &[claude::ClaudeAdapter::ID, native::NativeAdapter::ID];
 
 /// Harnesses with an adapter that run only where the operator turns them on
 /// (`[harness] experimental`). Every harness a node runs needs its image
 /// before the boundary passes, so one still being proven must not be able to
-/// stop the supported ones.
-pub const EXPERIMENTAL: &[&str] = &[native::NativeAdapter::ID];
+/// stop the supported ones. None today.
+pub const EXPERIMENTAL: &[&str] = &[];
 
 /// The harnesses this node runs: the supported ones, then the experimental
 /// ones it turned on.
@@ -63,37 +62,43 @@ pub fn is_enabled(cfg: &Config, harness_id: &str) -> bool {
     enabled(cfg).contains(&harness_id)
 }
 
-/// The harness this node ran until the 2026-09-13 cutover. A `node.toml`
-/// that still names it is migrated to OpenCode as it loads
+/// Harnesses this node once ran and no longer has: omp until the 2026-09-13
+/// cutover, OpenCode until tracon's own harness replaced it. A `node.toml`
+/// that still names one is migrated to Claude Code as it loads
 /// (`crate::legacy::migrate_config`); a config that reaches the adapter
-/// saying `omp` anyway reads the migration path rather than a bare "no
-/// adapter for harness `omp`".
-pub const RETIRED: &str = "omp";
+/// naming one anyway reads the migration path rather than a bare "no adapter
+/// for harness".
+pub const RETIRED: &[&str] = &["omp", "opencode"];
 
-/// What that operator is told. The sessions omp ran are not lost — they are
-/// archived read-only, keeping their harness identity and version — and the
-/// way to carry one forward is a new session under a supported harness, not a
-/// relaunch of a harness that is gone.
-pub const RETIRED_MESSAGE: &str = concat!(
-    "the `omp` harness was removed at the OpenCode cutover. ",
-    "A node.toml that names it is migrated to \"opencode\" when the node loads it; ",
-    "this configuration was not. ",
-    "Set [harness] id = \"opencode\" (or \"claude\") in node.toml, then run ",
-    "`tracon setup` to build the image and `tracon session archive-legacy` to ",
-    "put the omp sessions away read-only. Carry one forward with ",
-    "`tracon session reopen <id> --harness opencode`."
-);
+pub fn is_retired(harness_id: &str) -> bool {
+    RETIRED.contains(&harness_id)
+}
+
+/// What that operator is told. The sessions a retired harness ran are not
+/// lost — they are archived read-only, keeping their harness identity and
+/// version — and the way to carry one forward is a new session under a
+/// supported harness, not a relaunch of a harness that is gone.
+pub fn retired_message(harness_id: &str) -> String {
+    format!(
+        "the `{harness_id}` harness was removed from tracon. \
+         A node.toml that names it is migrated to \"claude\" when the node loads it; \
+         this configuration was not. \
+         Set [harness] id = \"claude\" in node.toml, then run `tracon setup` to build \
+         the images and `tracon session archive-legacy` to put its sessions away \
+         read-only. Carry one forward with \
+         `tracon session reopen <id> --harness claude` (or `native`)."
+    )
+}
 
 /// The layout for a harness id, for the few callers that have the config but
-/// not the adapter (the boundary preflight). An id that is not Claude's gets
-/// OpenCode's, which only that preflight can reach: `adapter_for` refuses an
-/// unknown id first, so no session ever runs against a layout that is not its
-/// harness's.
+/// not the adapter (the boundary preflight). An id that is not native's gets
+/// Claude Code's, which only that preflight can reach: `adapter_for` refuses
+/// an unknown id first, so no session ever runs against a layout that is not
+/// its harness's.
 pub fn layout(harness_id: &str) -> Layout {
     match harness_id {
-        claude::ClaudeAdapter::ID => claude::ClaudeAdapter::layout(),
         native::NativeAdapter::ID => native::NativeAdapter::layout(),
-        _ => opencode::OpenCodeAdapter::layout(),
+        _ => claude::ClaudeAdapter::layout(),
     }
 }
 
@@ -116,18 +121,10 @@ pub fn adapter_for_id(
         claude::ClaudeAdapter::ID => Ok(Arc::new(claude::ClaudeAdapter::new(pinned_version_for(
             cfg, harness_id,
         )))),
-        opencode::OpenCodeAdapter::ID => Ok(Arc::new(opencode::OpenCodeAdapter::new(
-            pinned_version_for(cfg, harness_id),
-        ))),
-        native::NativeAdapter::ID if is_enabled(cfg, harness_id) => Ok(Arc::new(
-            native::NativeAdapter::new(pinned_version_for(cfg, harness_id)),
-        )),
-        native::NativeAdapter::ID => Err(AdapterError::Protocol(
-            "the native harness is experimental and off on this node; turn it on with \
-             [harness] experimental = [\"native\"], then run `tracon setup`"
-                .into(),
-        )),
-        RETIRED => Err(AdapterError::Protocol(RETIRED_MESSAGE.to_string())),
+        native::NativeAdapter::ID => Ok(Arc::new(native::NativeAdapter::new(pinned_version_for(
+            cfg, harness_id,
+        )))),
+        retired if is_retired(retired) => Err(AdapterError::Protocol(retired_message(retired))),
         other => Err(AdapterError::Protocol(format!(
             "no adapter for harness `{other}`; this node knows {}",
             KNOWN.join(", ")
@@ -145,9 +142,9 @@ pub fn pinned_version(cfg: &Config) -> String {
 
 /// One picker list from two harnesses' catalogues, `first` in its own order
 /// ahead of what `more` adds. Claude Code names an Anthropic model bare where
-/// OpenCode names it `anthropic/<id>`; the bare entry takes the qualified
-/// spelling where it stands, since both harnesses accept it and it says which
-/// credential it spends, and the duplicate is dropped.
+/// a provider-qualified list names it `anthropic/<id>`; the bare entry takes
+/// the qualified spelling where it stands, since it says which credential it
+/// spends, and the duplicate is dropped.
 pub fn merge_catalogues(first: Vec<ModelOption>, more: Vec<ModelOption>) -> Vec<ModelOption> {
     let all: Vec<ModelOption> = first.into_iter().chain(more).collect();
     let qualified: std::collections::HashSet<String> = all
@@ -176,24 +173,11 @@ pub fn pinned_version_for(cfg: &Config, harness_id: &str) -> String {
     image_version(harness_id).to_string()
 }
 
-/// Plugin packages the harness image for `harness_id` bakes into its offline
-/// package cache. A harness with no plugin mechanism has none, and a name
-/// outside this list is refused when a launch manifest is built rather than
-/// discovered as a missing module inside a runner with no network.
-pub fn baked_plugins(harness_id: &str) -> Vec<String> {
-    if harness_id == opencode::OpenCodeAdapter::ID {
-        opencode::OpenCodeAdapter::baked_plugins()
-    } else {
-        Vec::new()
-    }
-}
-
 /// The version the harness image for `harness_id` installs.
 pub fn image_version(harness_id: &str) -> &'static str {
     match harness_id {
-        claude::ClaudeAdapter::ID => claude::ClaudeAdapter::PINNED_VERSION,
         native::NativeAdapter::ID => native::NativeAdapter::PINNED_VERSION,
-        _ => opencode::OpenCodeAdapter::PINNED_VERSION,
+        _ => claude::ClaudeAdapter::PINNED_VERSION,
     }
 }
 
@@ -218,8 +202,7 @@ impl HarnessVersion {
 /// can interpret afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolSupport {
-    /// What the protocol is called on the wire: `opencode-http`,
-    /// `claude-stream-json`.
+    /// What the protocol is called on the wire: `claude-stream-json`, `acp`.
     pub name: &'static str,
     pub min: u32,
     pub max: u32,
@@ -239,7 +222,7 @@ impl ProtocolSupport {
         }
     }
 
-    /// `opencode-http/1` — what a session records as the contract it ran
+    /// `claude-stream-json/1` — what a session records as the contract it ran
     /// under.
     pub fn tag(&self, version: u32) -> String {
         format!("{}/{version}", self.name)
@@ -257,7 +240,7 @@ pub struct HarnessCompat {
     pub agent: String,
     /// The version the harness reported, which the pin was checked against.
     pub version: String,
-    /// The protocol and version this session negotiated: `opencode-http/1`.
+    /// The protocol and version this session negotiated: `claude-stream-json/1`.
     pub protocol: String,
 }
 
@@ -419,10 +402,7 @@ pub struct LaunchSpec {
     pub cwd_in_runner: String,
     pub model: String,
     pub container_name: String,
-    /// The harness user's home inside the runner. A harness whose state is a
-    /// per-session tree rather than a single directory (OpenCode's HOME and
-    /// four XDG dirs) needs to know where it may keep that tree; the stdio
-    /// harnesses ignore it.
+    /// The harness user's home inside the runner.
     pub harness_home: String,
     /// MCP servers offered to the harness at session start. The node's own
     /// tools reach it this way and no other.
@@ -439,12 +419,6 @@ pub struct LaunchSpec {
     /// A file inside the runner appended to the harness's system prompt: the
     /// session's orientation.
     pub system_prompt_file: Option<String>,
-    /// Where the harness's durable event stream resumes from, and what has
-    /// already been ingested. `None` leaves the adapter to keep the sequence
-    /// in its own memory, which is all a stdio harness can do; a harness with
-    /// a durable, sequenced stream is given the node's own cursor so a restart
-    /// resumes where the store says rather than where the process forgot.
-    pub cursor: Option<Arc<dyn DurableCursor>>,
     /// Carry on this harness session instead of starting one: set when the
     /// node relaunches a harness whose process died (`restorable`).
     pub resume: Option<Resume>,
@@ -457,74 +431,6 @@ pub struct Resume {
     /// The last update sequence the node received, so nothing at or below it
     /// is taken twice.
     pub last_seq: u64,
-}
-
-/// The harness's own HTTP surface, narrowed to what reconciliation needs: ask
-/// it something, tell it something. The adapter implements this over the
-/// client it already holds — the credential, the base address and the pinned
-/// directory stay behind it — so the ingestion layer can drive the snapshot
-/// and reply routes without owning a second connection to the harness or a
-/// second copy of its credential.
-#[async_trait]
-pub trait HarnessSnapshots: Send + Sync {
-    async fn get(&self, path: &str) -> Result<Value, AdapterError>;
-    async fn post(&self, path: &str, body: Value) -> Result<Value, AdapterError>;
-}
-
-/// The node's ownership of a durable stream's position.
-///
-/// OpenCode's per-session stream is the only one with replay, and it is
-/// anchored on an aggregate sequence (`api-ui.md` §3, finding 6). Which
-/// sequence to resume from is a durable fact about the session, not a variable
-/// in the adapter's loop: a node that restarts mid-turn has to ask the store,
-/// or it either replays a turn it already recorded or loses one it never did.
-/// So the adapter asks this, and admits each event through it.
-#[async_trait]
-pub trait DurableCursor: Send + Sync {
-    /// The upstream session the handshake created, and the client to reconcile
-    /// against. Called once the adapter knows both, before the stream opens.
-    async fn bind(&self, upstream_session_id: &str, api: Arc<dyn HarnessSnapshots>);
-
-    /// The durable sequence to resume from — the `?after=` of the next
-    /// connection.
-    async fn resume_from(&self) -> u64;
-
-    /// Admit one durable event. `false` means it has already been ingested (a
-    /// reconnect overlap, a restart replay, a snapshot that got there first),
-    /// and the adapter must not translate it into a harness event a second
-    /// time.
-    async fn admit(&self, event: &Value) -> bool;
-
-    /// Every event the adapter read, admitted or not, before anything is
-    /// decided about it.
-    ///
-    /// Ingestion is the node's *record*; this is the node's *tap*. The native
-    /// UI's only live channel is a stream the node synthesises rather than
-    /// forwards (`gateway::native_events`, finding 20), and it is built from
-    /// what the adapter is already reading — so the two pumps stay the only
-    /// readers of the harness's streams. Deliberately not gated on `admit`: a
-    /// replayed event is a duplicate for the record and still the freshest
-    /// thing a browser that just reconnected has seen.
-    ///
-    /// Cheap, synchronous and infallible by contract: it runs on the pump's
-    /// own loop, and a tap that could block would stall ingestion.
-    fn observe(&self, _event: &Value) {}
-
-    /// Claim one milestone of one part — a text part's final text, a tool
-    /// part's call or result, a step's usage. True exactly once per
-    /// (part, milestone), however many times the part is delivered: the v1
-    /// stream has no sequence, so this is its idempotency (finding 23).
-    /// Synchronous by contract, like `observe`: it runs on the pump's loop.
-    fn claim(&self, _part_id: &str, _milestone: &str) -> bool {
-        true
-    }
-
-    /// The stream dropped and is about to be reopened. Nothing published while
-    /// it was down comes back on its own (finding 6), so this is where the
-    /// harness's message list and pending-permission list are read and
-    /// anything missed — a turn that ended, a permission raised, a session
-    /// that no longer exists — is reconciled.
-    async fn reconnected(&self);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -631,32 +537,9 @@ pub trait HarnessAdapter: Send + Sync {
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError>;
 }
 
-/// A running harness's own HTTP API, as the gateway that mediates it needs to
-/// reach it. The credential stays on the node: the gateway injects it upstream
-/// and the browser never sees it (`docs/reference/opencode-v1.18.30/`,
-/// finding 4).
-#[derive(Debug, Clone)]
-pub struct NativeApi {
-    /// `http://host:port` — this session's server and no other's.
-    pub base: String,
-    /// The `Authorization` header value that endpoint demands.
-    pub authorization: String,
-    /// The workspace directory, in the runner's namespace, that every
-    /// forwarded request is pinned to.
-    pub directory: String,
-    /// The harness's own session id: the only one the gateway forwards.
-    pub session_id: String,
-}
-
 #[async_trait]
 pub trait HarnessHandle: Send + Sync {
     fn harness_session_id(&self) -> &str;
-    /// The harness's own HTTP API, when it has one worth mediating. A harness
-    /// driven over a pipe has none, and the gateway answers for no session it
-    /// cannot reach this way.
-    fn native_api(&self) -> Option<NativeApi> {
-        None
-    }
     /// What the handshake that produced this handle reported. Available only
     /// once the handshake succeeded, which is the only time it is true.
     fn compat(&self) -> HarnessCompat;
@@ -687,12 +570,12 @@ mod tests {
             harnesses: Vec::new(),
         };
         let claude = vec![option("claude-opus-5"), option("claude-sonnet-5")];
-        let opencode = vec![
+        let qualified = vec![
             option("anthropic/claude-opus-5"),
             option("openai-codex/gpt-5.5"),
             option("anthropic/claude-opus-5"),
         ];
-        let merged: Vec<String> = super::merge_catalogues(claude, opencode)
+        let merged: Vec<String> = super::merge_catalogues(claude, qualified)
             .into_iter()
             .map(|m| m.value)
             .collect();
@@ -732,47 +615,32 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("not-a-harness"), "{err}");
-        assert!(err.contains("opencode"), "{err}");
         assert!(err.contains("claude"), "{err}");
+        assert!(err.contains("native"), "{err}");
     }
 
-    /// The retired harness is not merely unknown. An operator whose node.toml
-    /// still says `omp` gets the migration path — the supported ids, the
+    /// A retired harness is not merely unknown. An operator whose node.toml
+    /// still names one gets the migration path — the supported ids, the
     /// archive step, and how to carry one session forward — rather than a
     /// list of adapter names that leaves them to guess what happened to their
     /// sessions.
     #[test]
-    fn the_retired_harness_is_refused_with_the_migration_path() {
-        let mut cfg = Config::default();
-        cfg.harness.id = RETIRED.into();
-        let err = match adapter_for(&cfg) {
-            Ok(_) => panic!("the retired harness must not resolve"),
-            Err(e) => e.to_string(),
-        };
-        assert!(err.contains("was removed"), "{err}");
-        assert!(err.contains("archive-legacy"), "{err}");
-        assert!(err.contains("session reopen"), "{err}");
-        assert!(err.contains("opencode"), "{err}");
-    }
-
-    /// The OpenCode adapter drives a server rather than stdio, and its state
-    /// is a per-session tree rather than one directory the runner can name.
-    #[test]
-    fn the_configured_opencode_harness_picks_its_own_adapter() {
-        let mut cfg = Config::default();
-        cfg.harness.id = "opencode".into();
-        cfg.harness.version = String::new();
-        let Ok(a) = adapter_for(&cfg) else {
-            panic!("opencode has an adapter")
-        };
-        assert_eq!(a.id(), "opencode");
-        assert_eq!(a.layout().dir, ".opencode");
-        assert_eq!(a.layout().env, "");
-        assert_eq!(
-            a.pinned_version(),
-            opencode::OpenCodeAdapter::PINNED_VERSION
-        );
-        assert_eq!(a.protocol().name, "opencode-http");
+    fn a_retired_harness_is_refused_with_the_migration_path() {
+        for retired in RETIRED {
+            let mut cfg = Config::default();
+            cfg.harness.id = (*retired).into();
+            let err = match adapter_for(&cfg) {
+                Ok(_) => panic!("{retired} must not resolve"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                err.contains(&format!("`{retired}` harness was removed")),
+                "{err}"
+            );
+            assert!(err.contains("archive-legacy"), "{err}");
+            assert!(err.contains("session reopen"), "{err}");
+            assert!(err.contains("claude"), "{err}");
+        }
     }
 
     /// The pin has to be one fact, not two that happen to agree today: the
@@ -788,17 +656,6 @@ mod tests {
             .unwrap_or_else(|| panic!("{arg} is set in the Containerfile"))
             .trim()
             .to_string()
-    }
-
-    #[test]
-    fn the_image_installs_the_pinned_opencode() {
-        assert_eq!(
-            container_arg(
-                include_str!("../../../containers/harness-opencode/Containerfile"),
-                "OPENCODE_VERSION"
-            ),
-            opencode::OpenCodeAdapter::PINNED_VERSION
-        );
     }
 
     #[test]
@@ -834,13 +691,14 @@ mod tests {
         );
     }
 
+    /// Every model that is not Claude runs on the native harness, so every
+    /// node runs it; an `experimental` list naming it changes nothing.
     #[test]
-    fn the_native_harness_runs_only_where_it_is_turned_on() {
+    fn every_node_runs_claude_and_the_native_harness() {
         let mut cfg = Config::default();
-        assert_eq!(enabled(&cfg), ["opencode", "claude"]);
-        assert!(adapter_for_id(&cfg, "native").is_err());
+        assert_eq!(enabled(&cfg), ["claude", "native"]);
         cfg.harness.experimental = vec!["native".into()];
-        assert_eq!(enabled(&cfg), ["opencode", "claude", "native"]);
+        assert_eq!(enabled(&cfg), ["claude", "native"]);
         let a = adapter_for_id(&cfg, "native").unwrap();
         assert_eq!(a.pinned_version(), native::NativeAdapter::PINNED_VERSION);
         assert_eq!(layout("native").dir, ".tracon-agent");
@@ -857,28 +715,28 @@ mod tests {
             panic!("claude has an adapter")
         };
         assert_eq!(a.pinned_version(), claude::ClaudeAdapter::PINNED_VERSION);
-        cfg.harness.id = "opencode".into();
+        cfg.harness.id = "native".into();
         let Ok(a) = adapter_for(&cfg) else {
-            panic!("opencode has an adapter")
+            panic!("native has an adapter")
         };
-        assert_eq!(
-            a.pinned_version(),
-            opencode::OpenCodeAdapter::PINNED_VERSION
-        );
+        assert_eq!(a.pinned_version(), native::NativeAdapter::PINNED_VERSION);
     }
 
-    /// Only the harnesses with an adapter have images. The retired harness had
-    /// one, `containers/harness`, and it is gone: a build that still carried
-    /// it would be an image nothing can launch.
+    /// Only the harnesses with an adapter have images. The retired harnesses
+    /// had them, `containers/harness` and `containers/harness-opencode`, and
+    /// they are gone: a build that still carried one would be an image
+    /// nothing can launch.
     #[test]
     fn only_the_supported_harnesses_have_images() {
-        assert_eq!(KNOWN, ["opencode", "claude"]);
-        assert_eq!(EXPERIMENTAL, ["native"]);
+        assert_eq!(KNOWN, ["claude", "native"]);
+        assert!(EXPERIMENTAL.is_empty());
         let containers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../containers");
-        assert!(
-            !containers.join("harness").exists(),
-            "the retired harness's image directory is still here"
-        );
+        for retired in ["harness", "harness-opencode"] {
+            assert!(
+                !containers.join(retired).exists(),
+                "the retired {retired} image directory is still here"
+            );
+        }
         for id in KNOWN.iter().chain(EXPERIMENTAL) {
             assert!(
                 containers
@@ -939,7 +797,7 @@ mod tests {
     #[test]
     fn a_protocol_range_reads_as_one_version_or_a_span() {
         let one = ProtocolSupport {
-            name: "opencode-http",
+            name: "claude-stream-json",
             min: 1,
             max: 1,
         };
@@ -947,9 +805,9 @@ mod tests {
         assert!(!one.accepts(0));
         assert!(!one.accepts(2));
         assert_eq!(one.versions(), "1");
-        assert_eq!(one.tag(1), "opencode-http/1");
+        assert_eq!(one.tag(1), "claude-stream-json/1");
         let span = ProtocolSupport {
-            name: "opencode-http",
+            name: "claude-stream-json",
             min: 1,
             max: 3,
         };

@@ -5,8 +5,8 @@
 //! password in a proxy URL, so they travel as secret environment and from
 //! there in a Secret of the run's own; a node that may not make one issues no
 //! grant, and refuses a session, rather than putting them in a pod spec. The
-//! same goes for every other secret a session carries: its gateway token,
-//! Claude Code's MCP header and OpenCode's server password.
+//! same goes for every other secret a session carries: its gateway token and
+//! Claude Code's MCP header.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -282,9 +282,8 @@ async fn no_grant_without_the_secret_rights_or_the_port() {
 }
 
 /// The secrets a session carries never reach its pod spec: the gateway
-/// token (in the wiring's environment and in Claude Code's MCP header), the
-/// egress grant, and OpenCode's per-launch server password. Each is a
-/// `secretKeyRef` to the session's own Secret.
+/// token (in the wiring's environment and in Claude Code's MCP header) and
+/// the egress grant. Each is a `secretKeyRef` to the session's own Secret.
 #[tokio::test(start_paused = true)]
 async fn a_sessions_secrets_never_reach_its_pod_spec() {
     support::state::isolate();
@@ -321,7 +320,6 @@ async fn a_sessions_secrets_never_reach_its_pod_spec() {
         env: env.clone(),
         secret_env: secret_env.clone(),
         system_prompt_file: None,
-        cursor: None,
         resume: None,
     };
 
@@ -333,10 +331,12 @@ async fn a_sessions_secrets_never_reach_its_pod_spec() {
         .launch(runner.as_ref(), launch("tracon-h-claude"))
         .await
         .is_err());
-    let runner = Backend::runner_for(&backend, "opencode", Vec::new());
-    let opencode = tracon::adapter::opencode::OpenCodeAdapter::new("1.18.30");
-    assert!(opencode
-        .launch(runner.as_ref(), launch("tracon-h-opencode"))
+    let runner = Backend::runner_for(&backend, "native", Vec::new());
+    let native = tracon::adapter::native::NativeAdapter::new(
+        tracon::adapter::native::NativeAdapter::PINNED_VERSION.to_string(),
+    );
+    assert!(native
+        .launch(runner.as_ref(), launch("tracon-h-native"))
         .await
         .is_err());
 
@@ -375,9 +375,6 @@ async fn a_sessions_secrets_never_reach_its_pod_spec() {
                 "{name} is not from the Secret: {hidden:?}"
             );
         }
-        if name.contains("opencode") {
-            assert!(hidden.contains(&"OPENCODE_SERVER_PASSWORD"), "{hidden:?}");
-        }
         // Base URLs are not secret and stay readable.
         assert!(container
             .env
@@ -407,11 +404,6 @@ async fn a_sessions_secrets_never_reach_its_pod_spec() {
         assert_eq!(data["ANTHROPIC_API_KEY"].0, TOKEN.as_bytes());
         assert_eq!(data["HTTPS_PROXY"].0, grant.url().as_bytes());
     }
-    assert!(secrets.iter().any(|secret| secret
-        .data
-        .as_ref()
-        .unwrap()
-        .contains_key("OPENCODE_SERVER_PASSWORD")));
 }
 
 async fn answer(h: &Harness, id: &str, body: Value) -> (StatusCode, Value) {

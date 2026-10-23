@@ -37,10 +37,6 @@ pub fn config_view(cfg: &Config) -> Value {
         "external": {
             "enabled": cfg.external.enabled,
         },
-        // What a session's harness may load, beyond what the node decides.
-        // The per-channel half — skills, instructions, agents — lives in the
-        // store, behind `/api/manifest`.
-        "launch": { "plugins": cfg.launch.plugins },
         // The catalogue, per provider: what the picker offers and what a
         // declaring harness is told. The rest of a provider entry — its
         // credential name, upstream, shape — is shown so the models can be
@@ -109,8 +105,8 @@ pub fn apply(cfg: &Config, patch: &Value) -> Result<Patch, String> {
                             // the node has no adapter for is a crash loop
                             // under the service, so it never reaches the file.
                             let id = v.as_str().unwrap_or_default();
-                            if id == crate::adapter::RETIRED {
-                                return Err(crate::adapter::RETIRED_MESSAGE.into());
+                            if crate::adapter::is_retired(id) {
+                                return Err(crate::adapter::retired_message(id));
                             }
                             if v.is_string() && !crate::adapter::is_enabled(cfg, id) {
                                 return Err(format!(
@@ -257,14 +253,6 @@ pub fn apply(cfg: &Config, patch: &Value) -> Result<Patch, String> {
                         // times out; an older interface may still send it.
                         "idle_timeout_secs" => {}
                         other => return Err(unknown(&format!("external.{other}"))),
-                    }
-                }
-            }
-            "launch" => {
-                for (k, v) in object(value, "launch")? {
-                    match k.as_str() {
-                        "plugins" => set_list(&cfg.launch.plugins, v, "launch.plugins", &mut out)?,
-                        other => return Err(unknown(&format!("launch.{other}"))),
                     }
                 }
             }
@@ -502,7 +490,6 @@ mod tests {
                 "external",
                 "gateway",
                 "harness",
-                "launch",
                 "node_name",
                 "providers",
                 "publish",
@@ -612,10 +599,10 @@ mod tests {
     fn a_patch_applies_only_what_changed() {
         let mut file = File::new();
         let before = file.cfg.harness.id.clone();
-        let changed = file.apply(&json!({ "harness": { "id": "claude" }, "session": { "budget_tokens": 5_000_000 } }),
+        let changed = file.apply(&json!({ "harness": { "id": "native" }, "session": { "budget_tokens": 5_000_000 } }),
         )
         .unwrap();
-        assert_eq!(file.cfg.harness.id, "claude");
+        assert_eq!(file.cfg.harness.id, "native");
         assert_eq!(file.cfg.session.budget_tokens, 5_000_000);
         assert!(changed.contains(&"harness.id".to_string()));
         assert!(changed.contains(&"session.budget_tokens".to_string()));
@@ -624,7 +611,7 @@ mod tests {
         // Re-applying the same values changes nothing, so the interface can
         // say honestly whether a restart is owed.
         let again = file
-            .apply(&json!({ "harness": { "id": "claude" } }))
+            .apply(&json!({ "harness": { "id": "native" } }))
             .unwrap();
         assert!(again.is_empty());
     }
@@ -639,7 +626,7 @@ mod tests {
         let err = file
             .apply(&json!({ "harness": { "id": "aider" } }))
             .unwrap_err();
-        assert!(err.contains("opencode"), "{err}");
+        assert!(err.contains("native"), "{err}");
         assert_eq!(file.cfg.harness.id, Config::default().harness.id);
     }
 

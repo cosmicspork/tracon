@@ -161,10 +161,10 @@ fn shaped_for_subscription(body: &[u8]) -> Option<Vec<u8>> {
 /// One provider as this session may reach it: where the gateway serves it and
 /// which models this node declares under it.
 ///
-/// A harness that reads no base-URL environment variable (OpenCode; see
-/// `docs/reference/opencode-v1.18.30/providers.md` §2.5) cannot be wired by
-/// `env` at all, and one that declares its catalogue rather than probing it
-/// needs the model list before it starts. Both come from here, in structured
+/// A harness that reads no base-URL environment variable (tracon-agent reads
+/// a providers file) cannot be wired by `env` at all, and one that declares
+/// its catalogue rather than probing it needs the model list before it
+/// starts. Both come from here, in structured
 /// form, rather than from a rendered document read back by string surgery.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderWiring {
@@ -183,11 +183,7 @@ pub struct ProviderWiring {
 /// What a harness needs to reach the gateway: environment for the providers
 /// that honour one (Claude Code reads `ANTHROPIC_BASE_URL`), and the same
 /// wiring in structured form for the ones whose entire provider table is a
-/// file this node writes (OpenCode).
-///
-/// There was a third half — a `models.json` document for a harness that read
-/// its provider overrides from its state directory — and it went with the omp
-/// adapter at the OpenCode cutover. Neither remaining harness reads one.
+/// file this node writes (tracon-agent).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Wiring {
     pub env: Vec<(String, String)>,
@@ -195,20 +191,19 @@ pub struct Wiring {
     /// The placeholder key every provider entry carries, which is also this
     /// session's token at the gateway.
     pub token: String,
-    /// The operator's half of the same file: skills, standing instructions,
-    /// agents, approved plugins and the language servers turned on for this
-    /// channel.
+    /// The operator's half of the launch: skills, standing instructions and
+    /// agents for this channel.
     ///
-    /// It rides here because the two halves are rendered together — an
-    /// adapter writes one configuration document, not two — and because what
-    /// a manifest may name is bounded by what this wiring already settled:
-    /// the provider set is part of the manifest's digest. Empty is the
-    /// default and renders nothing, which is what a probe and every harness
-    /// but OpenCode get.
+    /// It rides here because an adapter stages it with the rest of the
+    /// session's files, and because what a manifest may name is bounded by
+    /// what this wiring already settled: the provider set is part of the
+    /// manifest's digest. Empty is the default and renders nothing, which is
+    /// what a probe gets.
     pub manifest: crate::manifest::LaunchManifest,
     /// The node's MCP server for this session, as `LaunchSpec::mcp_servers`
-    /// names it. A harness that reads its servers from its configuration file
-    /// (OpenCode) renders them here; one that takes them at launch ignores it.
+    /// names it. A harness that reads its servers from a configuration file
+    /// (Claude Code's `--mcp-config`) renders them here; one that takes them
+    /// at launch ignores it.
     pub mcp_servers: Vec<serde_json::Value>,
 }
 
@@ -298,13 +293,9 @@ pub fn harness_wiring(
             env.push(("ANTHROPIC_BASE_URL".to_string(), base));
             env.push(("ANTHROPIC_API_KEY".to_string(), token.to_string()));
         }
-        // The same placeholder under a name the catalogue can point at.
-        // OpenCode's session runner takes a provider's credential from a
-        // connection it builds out of the environment variables the
-        // catalogue names for that provider, and sends nothing at all when
-        // the key is only in the provider's `options` (observed against the
-        // pinned binary: no `x-api-key`, no `Authorization`). One variable per
-        // provider, so a catalogue entry names exactly its own.
+        // The same placeholder under a per-provider name: tracon-agent's
+        // providers file names the variable each provider's key is in
+        // (`key_env`), so an entry names exactly its own.
         env.push((key_env_name(name), token.to_string()));
     }
     Wiring {
@@ -1056,8 +1047,7 @@ impl Injection {
 /// OpenAI-compatible server reached through a provider whose shape this build
 /// does not recognise still answers `prompt_tokens`/`completion_tokens`, and a
 /// scanner that only looked for `input_tokens` would count it as zero — which
-/// is the failure `docs/reference/opencode-v1.18.30/providers.md` §6.3 names,
-/// arrived at from the gateway's side instead of the harness's.
+/// is a harness reporting zero for a turn the provider charged.
 ///
 /// The two dialects disagree about caches, and a budget must not care which
 /// one a provider speaks. Anthropic's `input_tokens` already leaves out what

@@ -1393,31 +1393,6 @@ export interface CodexLimits {
   reached_type: string | null
 }
 
-/** One language server or formatter the harness image was asked for.
- *
- *  Three states, not five: OpenCode publishes no LSP status events and logs
- *  nothing when a server fails to spawn, so "starting", "running" and "failed"
- *  are not observable. What is observable is what the node named at launch and
- *  whether the image it launched from had it. */
-export interface ToolStatus {
-  id: string
-  kind: 'lsp' | 'formatter'
-  version: string
-  path: string
-  /** What runs `path` when it is a script; a tool whose interpreter does not
-   *  run on the image is unavailable. Absent for a native tool, and from older
-   *  nodes. */
-  interpreter?: string
-  state: 'configured' | 'unavailable' | 'disabled'
-}
-
-export interface ToolchainStatus {
-  revision: string
-  /** What the image reported. Null when it carried no profile at all. */
-  image_revision: string | null
-  tools: ToolStatus[]
-}
-
 /** A browser this node pushes to, from `/api/push/subscriptions`. */
 export interface PushDevice {
   id: string
@@ -1800,7 +1775,6 @@ export interface NodeConfig {
   publish: { gh: string; glab: string; git: string }
   boundary: { podman: string }
   external: { enabled: boolean }
-  launch: { plugins: string[] }
   providers: Record<string, ProviderConfig>
   readonly: { hub_url: string | null; runtime: string; config_path: string }
   running: { harness_id: string; harness_version: string; node_name: string }
@@ -2023,9 +1997,6 @@ export interface LaunchManifest {
   skills: { name: string; description: string; source: string; digest: string }[]
   instructions: { name: string; body: string }[]
   agents: { name: string; body: string }[]
-  plugins: string[]
-  lsp: { name: string; command: string[] }[]
-  formatters: { name: string; command: string[] }[]
   providers: string[]
   policy_revision: string
 }
@@ -2039,8 +2010,6 @@ export interface ManifestView {
   next: LaunchManifest | null
   /** Why it would be refused, when it would. */
   error: string | null
-  /** Plugin packages the harness image bakes; nothing else may be approved. */
-  baked_plugins: string[]
 }
 
 export interface EnrollStatus {

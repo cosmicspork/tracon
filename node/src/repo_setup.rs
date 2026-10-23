@@ -873,7 +873,6 @@ async fn run(
                         workdir: Some("/work".into()),
                         name,
                         image: Some(environment.image.clone()),
-                        expose: None,
                     };
                     let finished = tokio::time::timeout(timeout, runner.run_capture(cmd)).await;
                     let step = match finished {

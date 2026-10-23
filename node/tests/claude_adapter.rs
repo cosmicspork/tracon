@@ -71,7 +71,6 @@ fn spec_env(env: Vec<(String, String)>) -> LaunchSpec {
         tools: Vec::new(),
         env,
         system_prompt_file: None,
-        cursor: None,
         resume: None,
     }
 }

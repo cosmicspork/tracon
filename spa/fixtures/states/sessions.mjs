@@ -1,7 +1,6 @@
 // The sessions list and a session across its lifecycle: starting, working,
 // waiting on a permission / the operator / a check, idle, paused, exhausted,
-// suspended after publishing, ended every way it can end, and the OpenCode
-// shell around a session. Each state overrides the session list (the session
+// suspended after publishing, and ended every way it can end. Each state overrides the session list (the session
 // screen reads its row from there), the detail, the events and whatever the
 // panels on the page fetch.
 
@@ -84,16 +83,6 @@ const usageReconciled = {
   turns: [],
 }
 const ceilingUnder = { usage_today: 412000, ceiling: 4000000, state: 'under', unmetered_turns: 0 }
-const toolchainReady = {
-  revision: 'tc-7',
-  image_revision: 'tc-7',
-  tools: [
-    { id: 'rust-analyzer', kind: 'lsp', version: '2026-09-29', path: '/opt/tools/rust-analyzer', state: 'configured' },
-    { id: 'rustfmt', kind: 'formatter', version: '1.90.0', path: '/opt/tools/rustfmt', state: 'configured' },
-    { id: 'typescript-language-server', kind: 'lsp', version: '4.4.0', path: '/opt/tools/tsls', state: 'configured' },
-  ],
-}
-
 function detail(s, o = {}) {
   return {
     session: s,
@@ -101,7 +90,6 @@ function detail(s, o = {}) {
     questions: [],
     usage: usageReconciled,
     ceiling: ceilingUnder,
-    toolchain: s.harness_id === 'opencode' ? toolchainReady : null,
     exhaustion: null,
     shown_work: [],
     publications: [],
@@ -382,7 +370,7 @@ const perm = (sid, o = {}) => ({
 
 const ROWS = [
   session('a1f0c3e2-7b4d-4e19-9c58-2d6b0f8e1a73', { state: 'starting', harness_found: null, harness_agent: null, harness_protocol: null, tokens_used: 0, cost_usd: 0, branch: 'fix/egress-retry', created_ms: -40000, updated_ms: -8000 }),
-  session('b2e1d4f3-8c5e-4f2a-ad69-3e7c1a9f2b84', { state: 'running', turn_active: 1, harness_id: 'opencode', harness_version: '1.3.4', harness_agent: 'opencode', harness_found: '1.3.4', model: 'anthropic/claude-sonnet-4-5', branch: 'feat/service-sidecars', created_ms: -1800000, updated_ms: -4000 }),
+  session('b2e1d4f3-8c5e-4f2a-ad69-3e7c1a9f2b84', { state: 'running', turn_active: 1, harness_id: 'native', harness_version: '0.35.0', harness_agent: 'tracon-agent', harness_found: '0.35.0', model: 'openai-codex/gpt-6-luna', branch: 'feat/service-sidecars', created_ms: -1800000, updated_ms: -4000 }),
   session('c3f2e5a4-9d6f-4a3b-be7a-4f8d2b0a3c95', { state: 'waiting_on_you', updated_ms: -95000 }),
   session('d4a3f6b5-ae7a-4b4c-8f8b-5a9e3c1b4da6', { state: 'waiting_on_check', branch: 'feat/outcome-record', created_ms: -5400000, updated_ms: -61000 }),
   session('e5b4a7c6-bf8b-4c5d-9a9c-6b0f4d2c5eb7', { state: 'paused', branch: 'chore/bump-axum', model: 'opus', tokens_used: 1310000, created_ms: -9000000, updated_ms: -3000000 }),
@@ -426,7 +414,7 @@ const many = Array.from({ length: 28 }, (_, i) =>
 
 const S = {
   starting: session('a1f0c3e2-7b4d-4e19-9c58-2d6b0f8e1a73', { state: 'starting', harness_found: null, harness_agent: null, harness_protocol: null, tokens_used: 0, cost_usd: 0, context_used: null, context_size: null, branch: 'fix/egress-retry', created_ms: -40000, updated_ms: -8000 }),
-  working: session('b2e1d4f3-8c5e-4f2a-ad69-3e7c1a9f2b84', { state: 'running', turn_active: 1, harness_id: 'opencode', harness_version: '1.3.4', harness_agent: 'opencode', harness_found: '1.3.4', harness_protocol: 'opencode-v1', model: 'anthropic/claude-sonnet-4-5', branch: 'feat/service-sidecars', created_ms: -1800000, updated_ms: -4000 }),
+  working: session('b2e1d4f3-8c5e-4f2a-ad69-3e7c1a9f2b84', { state: 'running', turn_active: 1, harness_id: 'native', harness_version: '0.35.0', harness_agent: 'tracon-agent', harness_found: '0.35.0', harness_protocol: 'acp/1', model: 'openai-codex/gpt-6-luna', branch: 'feat/service-sidecars', created_ms: -1800000, updated_ms: -4000 }),
   waiting: session('c3f2e5a4-9d6f-4a3b-be7a-4f8d2b0a3c95', { state: 'waiting_on_you', updated_ms: -95000 }),
   question: session('c4a3e6b5-0d7f-4b4c-9f8b-5b0e4c2d5fa6', { state: 'waiting_on_you', branch: 'feat/repo-entry', updated_ms: -300000 }),
   check: session('d4a3f6b5-ae7a-4b4c-8f8b-5a9e3c1b4da6', { state: 'waiting_on_check', branch: 'feat/outcome-record', created_ms: -5400000, updated_ms: -61000 }),
@@ -494,7 +482,7 @@ export default [
     route: '/sessions',
     title: 'Sessions list, every lifecycle state',
     since: '#375',
-    note: 'One row per kind: starting, working (OpenCode), waiting on you, on a check, paused, suspended · published (#380), a peer\'s, ended by node restart (#375), provider exhausted (#384), continued, item closed, planned, reviewed, killed, budget, failed, external. Archived and Legacy collapsed below.',
+    note: 'One row per kind: starting, working (tracon-agent), waiting on you, on a check, paused, suspended · published (#380), a peer\'s, ended by node restart (#375), provider exhausted (#384), continued, item closed, planned, reviewed, killed, budget, failed, external. Archived and Legacy collapsed below.',
     api: {
       'GET /api/sessions': [...ROWS, ...ARCHIVED],
       'GET /api/queue': NO_QUEUE,
@@ -625,12 +613,12 @@ export default [
     id: 'sessions-running-working',
     area: 'sessions',
     route: `/sessions/${S.working.id}`,
-    title: 'Running, a turn in progress (OpenCode)',
+    title: 'Running, a turn in progress (tracon-agent)',
     since: '#389',
-    note: 'Open tool group with a call still running; service sidecar events (#389) and policy_allowed lines; keeping-awake note in the rail foot (#379); OpenCode link in the header; lsp/fmt note.',
+    note: 'Open tool group with a call still running; service sidecar events (#389) and policy_allowed lines; keeping-awake note in the rail foot (#379).',
     api: page(S.working, {
       events: [
-        ...opening(S.working.id, { model: 'anthropic/claude-sonnet-4-5', branch: 'feat/service-sidecars', prompt: 'Start postgres beside the session by name from the catalogue and run the migration tests against it.' }),
+        ...opening(S.working.id, { model: 'openai-codex/gpt-6-luna', branch: 'feat/service-sidecars', prompt: 'Start postgres beside the session by name from the catalogue and run the migration tests against it.' }),
         ev(S.working.id, 'service', { name: 'postgres', container: 'tracon-svc-b2e1d4-postgres', state: 'started' }, -1700000),
         ev(S.working.id, 'service', { name: 'postgres', container: 'tracon-svc-b2e1d4-postgres', state: 'ready' }, -1690000),
         ev(S.working.id, 'message', { text: 'Postgres is up as `postgres:5432` on the session network. Running the migration tests against it now.' }, -1600000),
@@ -1221,7 +1209,7 @@ export default [
     area: 'sessions',
     route: `/sessions/${S.long.id}`,
     title: 'Long everything: branch, paths, model, unbroken strings',
-    note: 'Header wrapping, ceiling banner, repetition hint, unmetered usage, missing toolchain, orientation with omissions, an unbroken URL and hash in a message.',
+    note: 'Header wrapping, ceiling banner, repetition hint, unmetered usage, orientation with omissions, an unbroken URL and hash in a message.',
     api: page(S.long, {
       events: [
         ev(S.long.id, 'session_started', { model: S.long.model, phase: 'execute', policy_version: 12, image_note: 'the repository image failed to build at 7c1e9a0 (apt-get: unable to locate package libssl1.1); falling back to the harness image' }, -2700000),
@@ -1254,14 +1242,6 @@ export default [
       detail: {
         usage: { ...usageReconciled, state: 'unmetered', unmetered_turns: 2, gateway_tokens: 1876000, harness_tokens: 1870000, cache_read_tokens: 12400000 },
         ceiling: { usage_today: 2000000, ceiling: 2000000, state: 'at', unmetered_turns: 2 },
-        toolchain: {
-          revision: 'tc-7',
-          image_revision: 'tc-5',
-          tools: [
-            { id: 'rust-analyzer', kind: 'lsp', version: '2026-09-29', path: '/opt/tools/rust-analyzer', state: 'unavailable' },
-            { id: 'rustfmt', kind: 'formatter', version: '1.90.0', path: '/opt/tools/rustfmt', state: 'configured' },
-          ],
-        },
       },
     }),
   },
@@ -1346,47 +1326,5 @@ export default [
     act: async (page) => {
       await page.locator('header.sess button', { hasText: 'Stop' }).click()
     },
-  },
-
-  // ---------------- OpenCode shell ----------------
-  {
-    id: 'sessions-opencode-shell',
-    area: 'sessions',
-    route: `/sessions/${S.working.id}/opencode`,
-    title: 'OpenCode shell around the framed view',
-    note: 'The frame content is a stand-in served from another origin; look at the slim bar: back, branch, state chip.',
-    api: page(S.working, {
-      api: {
-        [`POST /api/sessions/${S.working.id}/opencode-boot`]: { url: 'http://localhost:5204/api/opencode-standin#/?boot=cap_9f2b7e1d4c', origin: 'http://localhost:5204', expires_ms: 60000, cookie_ttl_ms: 43200000 },
-        'GET /api/opencode-standin': '[stand-in for OpenCode\'s own interface, served cross-origin by the node]',
-      },
-    }),
-  },
-  {
-    id: 'sessions-opencode-shell-error',
-    area: 'sessions',
-    route: `/sessions/${S.working.id}/opencode`,
-    title: 'OpenCode shell: boot refused',
-    note: 'The node will not mint a capability: message and Try again.',
-    api: page(S.working, {
-      api: { [`POST /api/sessions/${S.working.id}/opencode-boot`]: fail(409, "this session's OpenCode server is not listening yet; it starts with the harness") },
-    }),
-  },
-  {
-    id: 'sessions-opencode-shell-bad-url',
-    area: 'sessions',
-    route: `/sessions/${S.working.id}/opencode`,
-    title: 'OpenCode shell: boot URL refused by the page',
-    note: 'A boot URL on this page\'s own origin is refused before framing.',
-    api: page(S.working, {
-      api: { [`POST /api/sessions/${S.working.id}/opencode-boot`]: { url: 'http://127.0.0.1:5204/#/?boot=cap_9f2b7e1d4c', origin: 'http://127.0.0.1:5204', expires_ms: 60000 } },
-    }),
-  },
-  {
-    id: 'sessions-opencode-shell-loading',
-    area: 'sessions',
-    route: `/sessions/${S.working.id}/opencode`,
-    title: 'OpenCode shell: opening',
-    api: page(S.working, { api: { [`POST /api/sessions/${S.working.id}/opencode-boot`]: never } }),
   },
 ]

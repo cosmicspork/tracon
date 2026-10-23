@@ -59,7 +59,7 @@
   // Values the schema cannot list because the node holds them.
   function choices(key: string): string[] | undefined {
     if (key === 'session.default_channel') return ['', ...channels]
-    if (key === 'harness.id') return ['claude', 'opencode']
+    if (key === 'harness.id') return ['claude', 'native']
     return undefined
   }
 

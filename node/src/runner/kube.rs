@@ -13,17 +13,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, ContainerStatus, EmptyDirVolumeSource, EnvVar,
-    HostAlias, LocalObjectReference, PersistentVolumeClaimVolumeSource, Pod, PodDNSConfig,
-    PodSchedulingGate, PodSecurityContext, PodSpec, PodStatus, ResourceRequirements,
-    SeccompProfile, SecurityContext, Volume, VolumeMount,
+    Capabilities, Container, ContainerStatus, EmptyDirVolumeSource, EnvVar, HostAlias,
+    LocalObjectReference, PersistentVolumeClaimVolumeSource, Pod, PodDNSConfig, PodSchedulingGate,
+    PodSecurityContext, PodSpec, PodStatus, ResourceRequirements, SeccompProfile, SecurityContext,
+    Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{AttachParams, DeleteParams, LogParams};
 use kube::{Api, Client};
 
-use super::toolchain::image_entrypoint;
 use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::{Config, KubeResources, PodSizing};
 
@@ -99,16 +98,10 @@ pub struct KubeSpec {
     /// See `RunSpec::state_env`: the harness names its own state directory.
     pub state_env: &'static str,
     pub state_dir: &'static str,
-    /// The entrypoint `image` has, when it has one. Podman prefixes a
-    /// container's command with the image's `ENTRYPOINT`; a pod's `command`
-    /// *replaces* it. So an image whose entrypoint does real work (the
-    /// OpenCode harness seeds its package caches there) has to have it named
-    /// here, or a pod silently skips it. It belongs to `image` alone: a
-    /// command run in another image (a repository's, for its checks or its
-    /// preparation) does not have this file.
-    pub entrypoint: Option<String>,
     /// An init `image` carries, run in front of everything else as `init --`.
-    /// Like `entrypoint` it belongs to `image` alone.
+    /// It belongs to `image` alone: a command run in another image (a
+    /// repository's, for its checks or its preparation) does not have this
+    /// file.
     pub init: Option<String>,
     /// Seconds between the SIGTERM the kubelet sends and the SIGKILL that
     /// follows. See `Boundary::stop_timeout_secs`.
@@ -130,7 +123,7 @@ impl KubeSpec {
         Self::for_harness(cfg, &cfg.harness.id, env)
     }
 
-    /// The spec for a named harness: its image, its layout, its entrypoint.
+    /// The spec for a named harness: its image and its layout.
     pub fn for_harness(cfg: &Config, harness_id: &str, env: PodEnv) -> Self {
         let k = &cfg.runtime.kubernetes;
         let layout = crate::adapter::layout(harness_id);
@@ -147,7 +140,6 @@ impl KubeSpec {
             workdir: "/work".into(),
             state_env: layout.env,
             state_dir: layout.dir,
-            entrypoint: image_entrypoint(harness_id),
             init: None,
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
             start_timeout: Duration::from_secs(k.start_timeout_secs),
@@ -340,9 +332,8 @@ impl KubeSpec {
             (self.state_env, state),
         ]
         .into_iter()
-        // A harness that names no state-directory variable (OpenCode decides
-        // by HOME and XDG, which its adapter sets) gets none invented for it,
-        // and a value the command sets itself is not also set here: two
+        // A harness that names no state-directory variable gets none invented
+        // for it, and a value the command sets itself is not also set here: two
         // entries for one name is a rule about ordering rather than a choice.
         .filter(|(k, _)| !k.is_empty() && !cmd.sets(k))
         .map(|(k, v)| EnvVar {
@@ -364,24 +355,14 @@ impl KubeSpec {
         labels.insert(SESSION_LABEL.to_string(), name.to_string());
         let workdir = cmd.workdir.clone().unwrap_or_else(|| self.workdir.clone());
         let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
-        // Only the spec's own image (the harness's, or a session image with
-        // the harness layered on) has the harness's entrypoint. Forcing it onto
-        // a repository image would run a path that image does not have, and
-        // every check and preparation in it would fail before it started.
+        // Only the spec's own image (a session image with the harness layered
+        // on) has the init. Forcing it onto a repository image would run a
+        // path that image does not have, and every check and preparation in
+        // it would fail before it started.
         let own = image == self.image;
-        let entrypoint = self.entrypoint.as_ref().filter(|_| own);
-        let mut command: Vec<String> = match self.init.as_ref().filter(|_| own) {
-            Some(init) => vec![init.clone(), "--".into()],
-            None => Vec::new(),
-        };
-        command.extend(entrypoint.cloned());
-        // An image entrypoint is named rather than replaced: a pod `command`
-        // overrides `ENTRYPOINT`, so an image that does work before
-        // `exec`ing the harness would have that work skipped here and
-        // nowhere else.
-        let (command, args) = match command.is_empty() {
-            true => (cmd.argv.clone(), None),
-            false => (command, Some(cmd.argv.clone())),
+        let (command, args) = match self.init.as_ref().filter(|_| own) {
+            Some(init) => (vec![init.clone(), "--".into()], Some(cmd.argv.clone())),
+            None => (cmd.argv.clone(), None),
         };
         Ok(Pod {
             metadata: ObjectMeta {
@@ -397,10 +378,9 @@ impl KubeSpec {
                 // session image runs `init` as its PID 1), so
                 // `shareProcessNamespace` is deliberately not set: sharing one
                 // would put the harness and any sidecar in the same
-                // namespace, which is a wider grant than reaping needs. The namespace teardown at the end
-                // of this window is what actually removes the LSP and
-                // formatter children OpenCode never reaps
-                // (`config-state.md` §6.7).
+                // namespace, which is a wider grant than reaping needs. The
+                // namespace teardown at the end of this window is what
+                // removes any child the harness never reaped.
                 termination_grace_period_seconds: Some(i64::from(self.stop_timeout_secs)),
                 // No API token, no service env, no resolver: the harness has
                 // nothing to discover and no name to look up. The one name it
@@ -455,19 +435,6 @@ impl KubeSpec {
                     working_dir: Some(workdir),
                     stdin: Some(true),
                     stdin_once: Some(true),
-                    // A harness driven over HTTP is reached at the pod's own
-                    // address on the cluster network: no Service, no NodePort,
-                    // nothing named that anything else could resolve. The
-                    // declared port is documentation for whoever reads the
-                    // pod; the listener is what actually opens it.
-                    ports: cmd.expose.map(|port| {
-                        vec![ContainerPort {
-                            container_port: i32::from(port),
-                            name: Some("harness".into()),
-                            protocol: Some("TCP".into()),
-                            ..Default::default()
-                        }]
-                    }),
                     env: Some(env),
                     volume_mounts: Some(
                         [self.volume_mounts(cmd)?, Self::scratch_mounts().into()].concat(),
@@ -647,34 +614,6 @@ impl KubeRunner {
                 }
             }
             tokio::time::sleep(FINISH_POLL).await;
-        }
-    }
-
-    /// The pod's own address on the cluster network. Nothing is published and
-    /// no Service is created: the node reaches a harness pod directly, which
-    /// is also why the deployment's NetworkPolicies have to allow that one
-    /// direction (node pod → harness pod) and nothing else.
-    async fn pod_ip(&self, name: &str, timeout: Duration) -> Result<String, RunnerError> {
-        let pods = self.pods();
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let ip = pods
-                .get(name)
-                .await
-                .ok()
-                .and_then(|pod| pod.status)
-                .and_then(|status| status.pod_ip)
-                .filter(|ip| !ip.is_empty());
-            if let Some(ip) = ip {
-                return Ok(ip);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(RunnerError::Other(format!(
-                    "pod {name} reported no address in {}s",
-                    timeout.as_secs()
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 
@@ -872,19 +811,6 @@ impl Runner for KubeRunner {
             self.remove(&name).await;
             return Err(e);
         }
-        // The address the node dials for an HTTP-driven harness. A pod that is
-        // Running has an IP, but the status can be read a moment before the
-        // kubelet records it, so this waits rather than failing the launch.
-        let endpoint = match cmd.expose {
-            Some(port) => match self.pod_ip(&name, Duration::from_secs(30)).await {
-                Ok(ip) => Some(format!("{ip}:{port}")),
-                Err(e) => {
-                    self.remove(&name).await;
-                    return Err(e);
-                }
-            },
-            None => None,
-        };
         let mut attached = match pods
             .attach(
                 &name,
@@ -913,7 +839,6 @@ impl Runner for KubeRunner {
         Ok(Spawned {
             stdin: Box::new(stdin),
             stdout: Box::new(stdout),
-            endpoint,
             done: Box::pin(async move {
                 let _ = attached.join().await;
                 let code = pods_for_exit
@@ -1032,7 +957,7 @@ mod tests {
 
     fn cmd() -> RunnerCommand {
         RunnerCommand {
-            argv: vec!["opencode".into(), "serve".into()],
+            argv: vec!["claude".into(), "-p".into()],
             name: "tracon-h-1".into(),
             mounts: vec![
                 Mount::volume("tracon-workspace-repo-x", "/work", false),
@@ -1101,16 +1026,10 @@ mod tests {
             .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
             .collect();
         assert!(env.contains(&("HTTPS_PROXY".into(), "http://tracon-gw:8888".into())));
-        // OpenCode names no state-directory variable (`Layout::env` is
-        // empty), so the pod carries none rather than one it invented.
-        assert!(!env.iter().any(|(name, _)| name.ends_with("STATE_DIR")));
-        // The image's entrypoint is named rather than replaced; the argv
-        // becomes the args. See the entrypoint test below.
-        assert_eq!(
-            c.command,
-            Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
-        );
-        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
+        // The harness image has no entrypoint to name: the argv is the
+        // command.
+        assert_eq!(c.command, Some(vec!["claude".into(), "-p".into()]));
+        assert!(c.args.is_none());
         assert_eq!(
             pod.metadata
                 .labels
@@ -1391,41 +1310,10 @@ mod tests {
         assert!(spec().pod("p", &c, false).is_err());
     }
 
-    /// A pod `command` replaces the image's `ENTRYPOINT`. The OpenCode image's
-    /// entrypoint seeds the package caches that keep the harness off a
-    /// registry, so a pod that skipped it would reach for one on a network
-    /// that refuses — a slower, noisier version of the same failure the seed
-    /// exists to prevent.
-    #[test]
-    fn the_opencode_image_entrypoint_is_named_rather_than_replaced() {
-        let mut cfg = Config::default();
-        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        cfg.harness.id = crate::adapter::opencode::OpenCodeAdapter::ID.into();
-        let spec = KubeSpec::from_config(
-            &cfg,
-            PodEnv {
-                namespace: "tracon-lab".into(),
-                pod_ip: "10.244.0.9".into(),
-                node_name: "general-1".into(),
-            },
-        );
-        let pod = spec.pod("tracon-h-1", &cmd(), false).unwrap();
-        let s = pod.spec.unwrap();
-        let c = &s.containers[0];
-        assert_eq!(
-            c.command,
-            Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
-        );
-        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
-        // The grace period is the same number the Podman runner stops with,
-        // and the pod carries no shared process namespace: the container's own
-        // init is what reaps.
-        assert_eq!(s.termination_grace_period_seconds, Some(10));
-        assert!(s.share_process_namespace.is_none());
-    }
-
-    /// A harness image with no entrypoint — the Claude Code one — keeps the
-    /// plain shape: the command is the argv and there are no args.
+    /// A harness image keeps the plain shape: the command is the argv and
+    /// there are no args. The grace period is the same number the Podman
+    /// runner stops with, and the pod carries no shared process namespace:
+    /// the container's own init is what reaps.
     #[test]
     fn an_image_without_an_entrypoint_still_carries_its_argv_as_the_command() {
         let mut cfg = Config::default();
@@ -1440,66 +1328,33 @@ mod tests {
             },
         );
         let pod = spec.pod("tracon-h-1", &cmd(), false).unwrap();
-        let c = &pod.spec.unwrap().containers[0];
-        assert_eq!(c.command, Some(vec!["opencode".into(), "serve".into()]));
+        let s = pod.spec.unwrap();
+        let c = &s.containers[0];
+        assert_eq!(c.command, Some(vec!["claude".into(), "-p".into()]));
         assert!(c.args.is_none());
-    }
-
-    /// The entrypoint is the harness image's file. A check or a preparation
-    /// run in a repository's image gets its argv as the command, and naming
-    /// the harness image explicitly is the same as naming none.
-    #[test]
-    fn only_the_harness_image_gets_the_harness_entrypoint() {
-        let spec = spec();
-        assert!(spec.entrypoint.is_some(), "the default harness is OpenCode");
-        let mut repo = cmd();
-        repo.image = Some("registry.example/app@sha256:".to_string() + &"a".repeat(64));
-        let pod = spec.pod("tracon-c-1", &repo, false).unwrap();
-        let c = &pod.spec.unwrap().containers[0];
-        assert_eq!(c.image.as_deref(), repo.image.as_deref());
-        assert_eq!(c.command, Some(vec!["opencode".into(), "serve".into()]));
-        assert!(c.args.is_none());
-
-        let mut harness = cmd();
-        harness.image = Some(spec.image.clone());
-        let pod = spec.pod("tracon-c-2", &harness, false).unwrap();
-        let c = &pod.spec.unwrap().containers[0];
-        assert_eq!(
-            c.command,
-            Some(vec![crate::runner::toolchain::IMAGE_ENTRYPOINT.to_string()])
-        );
-        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
+        assert_eq!(s.termination_grace_period_seconds, Some(10));
+        assert!(s.share_process_namespace.is_none());
     }
 
     /// A session image's init goes in front of everything its image runs,
     /// with `--` so the harness's own flags are never read as the init's,
-    /// and like an entrypoint it is never forced onto another image.
+    /// and it is never forced onto another image.
     #[test]
     fn an_init_runs_in_front_of_its_own_image_only() {
         let mut spec = spec();
         spec.image = "registry.example/app-claude@sha256:".to_string() + &"b".repeat(64);
-        spec.entrypoint = None;
         spec.init = Some(SESSION_INIT.into());
         let pod = spec.pod("tracon-h-1", &cmd(), false).unwrap();
         let c = &pod.spec.unwrap().containers[0];
         assert_eq!(c.image.as_deref(), Some(spec.image.as_str()));
         assert_eq!(c.command, Some(vec![SESSION_INIT.into(), "--".into()]));
-        assert_eq!(c.args, Some(vec!["opencode".into(), "serve".into()]));
-
-        // With an entrypoint too, the init runs it.
-        spec.entrypoint = Some("/opt/entry".into());
-        let pod = spec.pod("tracon-h-2", &cmd(), false).unwrap();
-        let c = &pod.spec.unwrap().containers[0];
-        assert_eq!(
-            c.command,
-            Some(vec![SESSION_INIT.into(), "--".into(), "/opt/entry".into()])
-        );
+        assert_eq!(c.args, Some(vec!["claude".into(), "-p".into()]));
 
         let mut other = cmd();
         other.image = Some("registry.example/app@sha256:".to_string() + &"a".repeat(64));
         let pod = spec.pod("tracon-c-1", &other, false).unwrap();
         let c = &pod.spec.unwrap().containers[0];
-        assert_eq!(c.command, Some(vec!["opencode".into(), "serve".into()]));
+        assert_eq!(c.command, Some(vec!["claude".into(), "-p".into()]));
         assert!(c.args.is_none());
     }
 

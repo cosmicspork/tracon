@@ -2,23 +2,12 @@
 
 default: check
 
-# The node image for pod-hosted nodes, and the harness image those pods pull.
+# The node image for pod-hosted nodes, and the Claude Code harness image those
+# pods pull. The native harness image installs a released tracon-agent, so the
+# release workflow builds that one.
 node-image tag="dev":
     podman build -f Dockerfile.node -t ghcr.io/cosmicspork/tracon-node:{{tag}} .
     podman build -f containers/harness-claude/Containerfile -t ghcr.io/cosmicspork/tracon-harness-claude:{{tag}} containers/harness-claude
-    podman build -f containers/harness-opencode/Containerfile -t ghcr.io/cosmicspork/tracon-harness-opencode:{{tag}} containers/harness-opencode
-
-# The OpenCode harness image on its own, which is the slow one: it bakes the
-# language servers and formatters a session is allowed to use. Name it in
-# TRACON_OPENCODE_IMAGE to run node/tests/opencode_runtime.rs against it.
-harness-opencode-image tag="test":
-    podman build -f containers/harness-opencode/Containerfile -t localhost/tracon-harness-opencode-{{tag}} containers/harness-opencode
-
-# Build OpenCode's native UI from a pinned checkout and vendor it where the node
-# serves it from. Not embedded in the binary: 34 MiB, verified by the tree digest
-# in containers/opencode-ui/DIGEST. See containers/opencode-ui/README.md.
-opencode-ui src:
-    ./containers/opencode-ui/build.sh --src {{src}}
 
 # Build the SPA into spa/dist (embedded by the node at compile time).
 spa:
@@ -59,12 +48,10 @@ hub admit="":
 hub-image:
     podman build -t localhost/tracon-hub .
 
-# Build the gateway and harness images this node runs. Both harnesses: a node
-# runs sessions with one of them and still signs in to the other's
-# subscription with the other.
+# Build the gateway and Claude Code images. `tracon setup` builds the native
+# harness's, which needs this version's tracon-agent (`just native-agent`).
 images:
     podman build -t localhost/tracon-gateway containers/gateway
-    podman build -t localhost/tracon-harness-opencode containers/harness-opencode
     podman build -t localhost/tracon-harness-claude containers/harness-claude
 
 # Create the harness network and gateway the node owns.

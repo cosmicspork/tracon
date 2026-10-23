@@ -19,7 +19,7 @@ const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
   state: 'ready',
   failed_check: null,
   failed_detail: null,
-  harness: { id: 'opencode', pinned: '1', found: '1', mismatch: false },
+  harness: { id: 'claude', pinned: '1', found: '1', mismatch: false },
   models: [],
   checked_at_ms: NOW,
   is_self: true,

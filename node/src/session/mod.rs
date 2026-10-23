@@ -4,9 +4,7 @@
 pub mod chunks;
 pub mod exhaustion;
 pub mod external;
-pub mod ingest;
 pub mod materialize;
-pub mod opencode_state;
 pub mod state;
 pub mod supervisor;
 pub mod waits;
@@ -442,7 +440,8 @@ pub enum SessionError {
     /// build has no adapter for. Carries what to do instead.
     #[error(
         "session {id} ran the retired `{harness}` harness and cannot be launched again. \
-             Carry its work forward with `tracon session reopen {id} --harness opencode`; \
+             Carry its work forward with `tracon session reopen {id} --harness claude` \
+             (or `native`); \
              its workspace and transcript are kept."
     )]
     Legacy { id: String, harness: String },
@@ -490,20 +489,8 @@ pub struct Manager {
     /// starts and dropped when it ends, so it authorises exactly one session
     /// for exactly as long as that session runs.
     tokens: Arc<Mutex<HashMap<String, (String, String)>>>,
-    /// Session id → the running harness's own HTTP API, for the sessions
-    /// whose harness has one. Registered when the harness starts and dropped
-    /// when its supervisor ends, so the gateway can answer for exactly the
-    /// sessions that are live and for no other endpoint.
-    native: Arc<Mutex<HashMap<String, crate::adapter::NativeApi>>>,
     /// Which harness processes called under each external lane.
     liveness: Arc<external::Liveness>,
-    /// Session id → the live channel the node synthesises for that session's
-    /// native UI (`gateway::native_events`). Created on demand — ingestion and
-    /// the gateway each ask for it and neither is reliably first — and dropped
-    /// when the session's supervisor ends, so its replay ring does not outlive
-    /// the session whose events it holds.
-    native_events:
-        Arc<std::sync::Mutex<HashMap<String, Arc<crate::gateway::native_events::NativeEvents>>>>,
     /// The node's own model probe presents this to the gateway; it may only
     /// read, and it names no channel.
     probe_token: String,
@@ -549,18 +536,6 @@ impl Manager {
         policy: Arc<parking_lot::RwLock<crate::policy::Policy>>,
         backend: Arc<dyn crate::boundary::Backend>,
     ) -> Self {
-        // A mediated mutation this process did not dispatch was left in flight
-        // by one that is gone: nobody is waiting for its answer and nobody
-        // knows what it was. That is uncertain, and the session it belongs to
-        // refuses a new prompt until reconciliation settles it.
-        match store.opencode_reconcile_interrupted(crate::process::instance_id()) {
-            Ok(0) => {}
-            Ok(n) => tracing::warn!(
-                intents = n,
-                "the node restarted with harness mutations in flight; their sessions are uncertain"
-            ),
-            Err(e) => tracing::error!(error = %e, "failed to reconcile interrupted mutations"),
-        }
         Self {
             tools,
             policy,
@@ -571,9 +546,7 @@ impl Manager {
             node_id,
             live: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
-            native: Arc::new(Mutex::new(HashMap::new())),
             liveness: Arc::default(),
-            native_events: Arc::new(std::sync::Mutex::new(HashMap::new())),
             probe_token: mint_token(),
             mesh: Arc::new(std::sync::OnceLock::new()),
             providers: Arc::new(std::sync::OnceLock::new()),
@@ -1363,46 +1336,6 @@ impl Manager {
     fn session_allows_work(&self, session_id: &str) -> bool {
         self.ensure_active(session_id).is_ok()
     }
-    /// The running harness's own HTTP API for a session, when it has one.
-    /// This is the only way the gateway learns an endpoint: a request cannot
-    /// name one, so no session's mount can reach another's server.
-    pub async fn native_api(&self, session_id: &str) -> Option<crate::adapter::NativeApi> {
-        self.native.lock().await.get(session_id).cloned()
-    }
-
-    /// The live channel the node synthesises for one session's native UI,
-    /// created if this is the first time anyone asked.
-    ///
-    /// Created on demand rather than with the session because both ends ask
-    /// for it independently and neither is reliably first: ingestion starts
-    /// writing to it when the harness's streams open, and the gateway starts
-    /// reading it when a browser connects. A session with no harness yet
-    /// simply has an empty one, which is the honest answer to "what is live"
-    /// rather than a 404 the page would retry against forever.
-    pub fn native_events(
-        &self,
-        session_id: &str,
-    ) -> Arc<crate::gateway::native_events::NativeEvents> {
-        self.native_events
-            .lock()
-            .unwrap()
-            .entry(session_id.to_string())
-            .or_insert_with(crate::gateway::native_events::NativeEvents::new)
-            .clone()
-    }
-
-    /// Register a native API directly. Tests drive the gateway against a fake
-    /// harness server without starting one; sessions always go through
-    /// `start`.
-    #[doc(hidden)]
-    pub async fn register_native_api_for_test(
-        &self,
-        session_id: &str,
-        api: crate::adapter::NativeApi,
-    ) {
-        self.native.lock().await.insert(session_id.to_string(), api);
-    }
-
     /// Whether a session may switch to this `provider/model`: the checks
     /// `create` makes before a session starts, asked again by the gateway when
     /// a native-UI model switch arrives mid-session. The channel must be able
@@ -2246,8 +2179,8 @@ impl Manager {
                     let bound = bindings["providers"].as_array().is_none_or(|allowed| {
                         allowed.iter().any(|value| value.as_str() == Some(name))
                     });
-                    // A credential this harness may not run on (an Anthropic
-                    // subscription under OpenCode) is not offered at all.
+                    // A credential this harness may not run on (a Codex
+                    // sign-in under Claude Code) is not offered at all.
                     let fits = broker.get(&provider.credential).is_none_or(|credential| {
                         crate::adapter::compat::CredentialClass::classify(
                             &provider.shape,
@@ -2320,11 +2253,9 @@ impl Manager {
         // either harness. It replaces the harness proxy and carries the hosts
         // that proxy allows (`[gateway] allow_hosts`), so nothing the harness
         // reached before is lost; the model and the node's MCP server are on
-        // the gateway host, which `NO_PROXY` keeps off any proxy. OpenCode's
-        // shell and terminals inherit its environment, so the agent's
-        // installs go through the grant as Claude Code's do. What OpenCode
-        // fetches on its own stays closed by its launch flags and its image's
-        // seeds (plugins, `rg`, no LSP downloads), not by the proxy.
+        // the gateway host, which `NO_PROXY` keeps off any proxy. A harness's
+        // shell inherits its environment, so the agent's installs go through
+        // the grant.
         let environment = crate::environment::session_environment(&self.cfg, &self.store, id);
         let egress = self
             .backend
@@ -2402,13 +2333,6 @@ impl Manager {
                 skills: crate::manifest::with_builtins(skills),
                 instructions,
                 agents,
-                plugins: &self.cfg.launch.plugins,
-                baked: &crate::adapter::baked_plugins(adapter.id()),
-                // The toolchain profile belongs to one image. A session on a
-                // harness that does not use it records no toolchain rather
-                // than a list of servers it never had.
-                lsp: crate::manifest::toolchain_lsp(adapter.id()),
-                formatters: crate::manifest::toolchain_formatters(adapter.id()),
                 providers: wiring.providers.iter().map(|p| p.name.clone()).collect(),
                 policy_revision: self.policy.read().version.to_string(),
             })
@@ -2596,8 +2520,8 @@ impl Manager {
                 "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }],
             })]
         };
-        // Written into the harness's own configuration too: OpenCode reads
-        // its MCP servers from the config file, not from anything at launch.
+        // Staged into the harness's own configuration too: Claude Code reads
+        // its MCP servers from a config file.
         wiring.mcp_servers = mcp_servers.clone();
 
         // Whose name the session's commits carry: the account behind the
@@ -2644,30 +2568,8 @@ impl Manager {
             harness_environment(&wiring, egress.as_ref(), &self.backend.harness_home());
         harness_env.extend(cache_env);
 
-        // The supervisor's channel exists before the harness does, because the
-        // ingestion layer needs it: a permission reconciliation re-raises goes
-        // through the same queue as every other one, and reconciliation can
-        // begin the moment the stream does.
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
-        // Only a harness with a durable, sequenced stream has anything to
-        // ingest. For the others the adapter keeps its own position, which is
-        // all a stdio pipe can offer.
-        let ingest = (adapter.id() == crate::adapter::opencode::OpenCodeAdapter::ID).then(|| {
-            ingest::Ingest::new(
-                self.store.clone(),
-                self.bus.clone(),
-                self.node_id.clone(),
-                id.to_string(),
-                started,
-                cmd_tx.clone(),
-                self.native_events(id),
-            )
-        });
-
         let launch_spec = LaunchSpec {
-            cursor: ingest
-                .clone()
-                .map(|i| i as Arc<dyn crate::adapter::DurableCursor>),
             cwd_in_runner: "/work".into(),
             model: spec.model.clone(),
             container_name: container.clone(),
@@ -2715,22 +2617,6 @@ impl Manager {
         // returned, so this records a session that is already known compatible
         // — for reading the transcript later against the build that produced it.
         let compat = handle.compat();
-        // Which LSP servers and formatters the config this session was
-        // launched with names, and whether the image it launched from has
-        // them. OpenCode emits no status of its own for either — a server
-        // that fails to spawn is added to a `broken` set with no log line and
-        // no event (`config-state.md` §6.5) — so this is recorded at launch or
-        // it is not knowable at all.
-        let toolchain = match adapter.id() == crate::adapter::opencode::OpenCodeAdapter::ID {
-            true => Some(crate::runner::toolchain::probe(runner.as_ref()).await),
-            false => None,
-        };
-        // What the policy-aware API gateway answers for. Registered before the
-        // session is announced as started, so the interface never has a
-        // running session whose native API it cannot reach.
-        if let Some(api) = handle.native_api() {
-            self.native.lock().await.insert(id.to_string(), api);
-        }
         self.store.update_session(
             id,
             SessionPatch {
@@ -2741,14 +2627,6 @@ impl Manager {
                 ..Default::default()
             },
         )?;
-        // What this session's state *is*, recorded next to the session the
-        // moment the harness that made it has said what it is. The database
-        // itself carries no version (`config-state.md` §7.2), so a backup taken
-        // later would otherwise have nothing to name the schema it copied — and
-        // a restore nothing to be gated on.
-        if adapter.id() == crate::adapter::opencode::OpenCodeAdapter::ID {
-            self.record_state_identity(id, &compat.version, adapter.pinned_version());
-        }
         self.record(NewEvent {
             session_id: id.to_string(),
             work_item_id: None,
@@ -2764,7 +2642,6 @@ impl Manager {
                 "harness_version": compat.version,
                 "harness_expected": adapter.pinned_version(),
                 "harness_protocol": compat.protocol,
-                "toolchain": toolchain,
                 "image": image.image,
                 "image_source": image.source(),
                 "toolchain_image": image.toolchain_image,
@@ -2798,10 +2675,6 @@ impl Manager {
             self.policy.clone(),
             spec.channel.clone(),
         );
-        let sup = match ingest {
-            Some(ingest) => sup.with_ingest(ingest),
-            None => sup,
-        };
         let sup = match relaunch {
             Some(relaunch) => sup.with_relaunch(relaunch),
             None => sup,
@@ -2810,8 +2683,6 @@ impl Manager {
         .with_waits(self.waits());
         let live = self.live.clone();
         let tokens = self.tokens.clone();
-        let native = self.native.clone();
-        let native_events = self.native_events.clone();
         let waits = self.waits();
         let sid = id.to_string();
         tokio::spawn(async move {
@@ -2822,17 +2693,6 @@ impl Manager {
             tokens.lock().await.remove(&sid);
             // And its way out with it.
             drop(egress);
-            // So does the gateway's route to its harness: the endpoint is
-            // gone, and a later request must not be forwarded to whatever
-            // took the port.
-            native.lock().await.remove(&sid);
-            // And the live channel its native UI streamed from. Nothing will
-            // publish to it again, and its replay ring is a held page of this
-            // session's events; a node that ran a thousand sessions would
-            // otherwise still be holding all thousand. A browser that
-            // reconnects after this gets a fresh, empty channel, which is the
-            // truth about a session that has ended.
-            native_events.lock().unwrap().remove(&sid);
             materialize::remove(&sid);
         });
         Ok(())
@@ -3867,118 +3727,6 @@ impl Manager {
         self.terminate(id).await
     }
 
-    // ---- per-session OpenCode state ----
-
-    /// Write down what this session's OpenCode state is, the moment the
-    /// harness has said what it is.
-    ///
-    /// The build identity and the layout are known here and written straight
-    /// away. The *generation* — the applied migration ids — is only in the
-    /// database, and the database is at that instant being written by the
-    /// harness through a runtime volume; reading it means copying the volume,
-    /// which does not belong on a launch path. So it is read behind the
-    /// launch, best-effort, and settled for certain by the first quiesced
-    /// backup, which is the first moment anything can read it truthfully.
-    fn record_state_identity(&self, id: &str, found: &str, pinned: &str) {
-        let volume = crate::workspace::scratch_volume_name(id);
-        let row = crate::store::OpenCodeStateRow {
-            session_id: id.to_string(),
-            build_version: found.to_string(),
-            build_pinned: pinned.to_string(),
-            generation: Vec::new(),
-            generation_digest: String::new(),
-            // The launch manifest is built and recorded on the session before
-            // anything is staged, so by the time the harness has said what it
-            // is, the digest is on the row. Read rather than passed down: this
-            // is the same fact, and two copies could disagree. Still nullable
-            // — a session on a harness with no manifest has none, and the
-            // column says "not recorded" rather than a guess.
-            manifest_digest: self
-                .store
-                .get_session(id)
-                .ok()
-                .flatten()
-                .and_then(|row| row.manifest_digest),
-            state_volume: volume.clone(),
-            state_path: materialize::HARNESS_TREE.to_string(),
-            recorded_ms: now_ms(),
-            updated_ms: now_ms(),
-        };
-        if let Err(error) = self.store.opencode_state_put(&row) {
-            tracing::warn!(session = %id, %error, "could not record the OpenCode state identity");
-            return;
-        }
-        let store = self.store.clone();
-        let backend = self.backend.clone();
-        let id = id.to_string();
-        tokio::spawn(async move {
-            let staging = Config::state_dir()
-                .join("opencode-state-work")
-                .join(&id)
-                .join("generation");
-            let _ = std::fs::remove_dir_all(&staging);
-            {
-                let lock = crate::workspace::volume_lock(&volume);
-                let _guard = lock.lock().await;
-                if backend.export_volume(&volume, &staging).await.is_err() {
-                    return;
-                }
-            }
-            let db = staging.join(materialize::OPENCODE_DB);
-            match opencode_state::read_generation(&db) {
-                Ok(ids) if !ids.is_empty() => {
-                    let _ = store.opencode_state_set_generation(&id, &ids);
-                }
-                Ok(_) => {}
-                Err(error) => tracing::debug!(
-                    session = %id, %error,
-                    "the state generation could not be read behind the launch; \
-                     the first backup will settle it"
-                ),
-            }
-            let _ = std::fs::remove_dir_all(&staging);
-        });
-    }
-
-    /// A quiesced backup of one session's OpenCode state. `quiesce` is the
-    /// operator's `--quiesce`: without it a live session is refused rather
-    /// than copied out from under its own harness.
-    pub async fn backup_state(
-        &self,
-        id: &str,
-        quiesce: bool,
-    ) -> Result<opencode_state::BackupReport, opencode_state::StateError> {
-        let quiescer: Option<&dyn opencode_state::Quiesce> = quiesce.then_some(self);
-        opencode_state::backup(&self.store, self.backend.as_ref(), quiescer, id).await
-    }
-
-    /// Migrate one session's state onto another OpenCode release, on a clone.
-    pub async fn upgrade_state(
-        &self,
-        id: &str,
-        to: &str,
-    ) -> Result<opencode_state::UpgradeReport, opencode_state::StateError> {
-        opencode_state::upgrade_state(&self.store, self.backend.as_ref(), id, to).await
-    }
-
-    /// Put a verified backup back, if this node's runtime can read it.
-    pub async fn restore_state(
-        &self,
-        id: &str,
-        backup: &std::path::Path,
-        confirm: bool,
-    ) -> Result<opencode_state::RestoreReport, opencode_state::StateError> {
-        opencode_state::restore(
-            &self.store,
-            self.backend.as_ref(),
-            &self.cfg,
-            id,
-            backup,
-            confirm,
-        )
-        .await
-    }
-
     /// End one session; its row closes exactly as `stop` leaves it.
     pub async fn kill(&self, id: &str) -> Result<(), SessionError> {
         self.terminate(id).await
@@ -4095,27 +3843,6 @@ impl Manager {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         tracing::warn!("some sessions did not stop in time");
-    }
-}
-
-/// Stopping a session so its state can be copied.
-///
-/// A pause first, so the running turn is quiesced rather than cut in half, and
-/// only then a stop. Never `kill`: killing the harness leaves its WAL exactly
-/// as unquiesced as taking no quiesce at all would have, which is the one thing
-/// `--quiesce` exists to avoid. A pause that is refused because the session has
-/// already gone terminal is not a failure — the writer is gone either way, and
-/// that is all the backup needs.
-#[async_trait::async_trait]
-impl opencode_state::Quiesce for Manager {
-    async fn quiesce(&self, session_id: &str) -> Result<(), String> {
-        let _ = self
-            .pause(
-                session_id,
-                "operator asked for a quiesced backup of this session's state".into(),
-            )
-            .await;
-        self.stop(session_id).await.map_err(|e| e.to_string())
     }
 }
 

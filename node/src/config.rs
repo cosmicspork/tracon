@@ -63,119 +63,25 @@ pub struct Config {
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
-    /// What an operator may customize a session's launch with, bounded by
-    /// what the harness image bakes.
-    pub launch: Launch,
-    /// Interfaces this node serves beside the operator's own.
-    pub ui: Ui,
 }
 
-/// The harness's native interface, served by tracon from a pinned bundle on an
-/// origin of its own.
-///
-/// A separate origin rather than a path under the operator interface, for three
-/// reasons that are all upstream's: the bundle's asset, font and manifest
-/// references are root-absolute, so it cannot live under a subpath
-/// (`api-ui.md` §8 #16); its `site.webmanifest` claims `scope: "/"` and would
-/// collide with tracon's own (#17); and its server URL is `location.origin`,
-/// so whatever origin serves the page is the origin its API calls go to
-/// (§6, "Server URL discovery"). Giving it an origin is what lets tracon
-/// answer those calls with the mediated gateway instead of the harness.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Ui {
-    /// Dedicated bind address for the native OpenCode interface. A different
-    /// port from the operator listener, and never the same router: no operator
-    /// route is reachable here and no operator cookie is read here.
-    pub opencode_listen: SocketAddr,
-    /// Public HTTP(S) origin for that listener, when it is published through
-    /// an ingress. A *separate hostname* from the operator interface's — the
-    /// cookie that authorises this origin is host-only, and a browser does not
-    /// scope cookies by port, so two loopback ports share a cookie jar even
-    /// though they are different origins to everything else. The separation
-    /// that actually holds is in the code (each guard reads only its own
-    /// cookie name, `http::ui::UI_COOKIE` and `http::auth::COOKIE`); a
-    /// distinct hostname is what makes the browser agree.
-    pub opencode_url: Option<String>,
-    /// Where the vendored bundle was installed. Unset is the node's state
-    /// directory, which is where `containers/opencode-ui/build.sh` puts it.
-    pub opencode_bundle_dir: Option<PathBuf>,
-}
-
-impl Default for Ui {
-    fn default() -> Self {
-        Self {
-            opencode_listen: "127.0.0.1:7423".parse().expect("valid UI address"),
-            opencode_url: None,
-            opencode_bundle_dir: None,
-        }
-    }
-}
-
-impl Ui {
-    /// The origin the UI is reached at: what its CSP, its cookie audience and
-    /// its `Origin` check are all written against.
-    pub fn opencode_origin(&self) -> Result<String, String> {
-        let Some(configured) = self.opencode_url.as_deref() else {
-            return Ok(format!("http://127.0.0.1:{}", self.opencode_listen.port()));
-        };
-        let url = url::Url::parse(configured)
-            .map_err(|error| format!("ui.opencode_url is not a valid URL: {error}"))?;
-        if !matches!(url.scheme(), "http" | "https")
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || !matches!(url.path(), "" | "/")
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(
-                "ui.opencode_url must be an HTTP(S) origin without credentials, path, query, or fragment"
-                    .into(),
-            );
-        }
-        Ok(url.origin().ascii_serialization())
-    }
-
-    /// The host the UI listener answers to, for the `Host` check that is the
-    /// DNS-rebinding defence on this origin — the same question
-    /// `http::auth::is_local` asks of the operator listener.
-    pub fn opencode_host(&self) -> Result<String, String> {
-        let origin = self.opencode_origin()?;
-        Ok(crate::http::hostname(&origin).to_string())
-    }
-
-    /// Whether the origin is loopback, which is what decides `Secure` on the
-    /// cookie: a `Secure` cookie over plain HTTP is dropped by the browser,
-    /// and loopback is the one place tracon serves plain HTTP on purpose.
-    pub fn opencode_is_loopback(&self) -> bool {
-        let Ok(host) = self.opencode_host() else {
-            return false;
-        };
-        matches!(host.as_str(), "localhost" | "::1")
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    }
-
-    /// Where the vendored bundle is read from.
-    ///
-    /// `TRACON_OPENCODE_UI_DIR` wins over both, because the one deployment
-    /// that needs it has no operator to write a config file: the node image
-    /// carries the tree on its own filesystem (`Dockerfile.node`) and mounts
-    /// the state directory as a volume, which would shadow a copy under it.
-    /// The digest check does not move — whatever this names is verified over
-    /// the bytes about to be served, or nothing is served.
-    pub fn opencode_bundle_path(&self) -> PathBuf {
-        if let Some(named) = std::env::var_os("TRACON_OPENCODE_UI_DIR") {
-            if !named.is_empty() {
-                return PathBuf::from(named);
-            }
-        }
-        self.opencode_bundle_dir
-            .clone()
-            .unwrap_or_else(|| Config::state_dir().join("opencode-ui"))
-    }
+/// The tables an older `node.toml` may still carry for OpenCode, which is
+/// gone: its native interface (`[ui]`) and its plugin approvals
+/// (`[launch]`). Ignored either way, and worth one line in the log rather
+/// than silence.
+fn retired_opencode_sections(text: &str) -> Vec<&'static str> {
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return Vec::new();
+    };
+    ["ui", "launch"]
+        .into_iter()
+        .filter(|key| {
+            value
+                .get(*key)
+                .and_then(toml::Value::as_table)
+                .is_some_and(|t| !t.is_empty())
+        })
+        .collect()
 }
 
 /// What a `[qa]` table in an older `node.toml` still configures, if anything.
@@ -297,29 +203,6 @@ pub fn safe_relative_path(value: &str) -> bool {
         && value
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\0'))
-}
-
-/// The operator's approvals for what a session's harness may load.
-///
-/// A skill is bytes the node copied and can stage anywhere. A plugin is not:
-/// OpenCode resolves one by a bare existence check at
-/// `$XDG_CACHE_HOME/opencode/packages/<pkg>@<ver>/node_modules/<pkg>`, with no
-/// version check and no registry contact (`config-state.md` §4.4), and it is
-/// then loaded into the server's own process with its credentials and a shell
-/// (§4.6). So what a plugin *is* comes entirely from what the harness image
-/// baked, and this list can only ever narrow that — a name the image's
-/// toolchain profile does not seed is refused when the manifest is built,
-/// with the cache path it would have needed.
-///
-/// Language servers and formatters are not here: the image's toolchain
-/// profile decides those, because the absolute paths they name only exist in
-/// the image.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Launch {
-    /// Plugin packages the operator approves, each as
-    /// `<package>@<exact-version>`.
-    pub plugins: Vec<String>,
 }
 
 /// The corpus written back out as files, on a timer, so a directory kept under
@@ -1441,7 +1324,7 @@ impl Default for Kubernetes {
         Self {
             namespace: String::new(),
             harness_image: format!(
-                "ghcr.io/cosmicspork/tracon-harness-opencode:{}",
+                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
                 env!("CARGO_PKG_VERSION")
             ),
             state_claim: "tracon-state".into(),
@@ -1681,11 +1564,13 @@ pub struct Consulta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Harness {
-    /// Harness id: `opencode` or `claude`. An unknown id refuses to start. A
-    /// `node.toml` that still names the retired `omp` is migrated to
-    /// `opencode` as it loads (`crate::legacy::migrate_config`); a config
-    /// that says `omp` anyway is refused with the migration path rather than
-    /// a bare refusal (`crate::adapter::RETIRED_MESSAGE`).
+    /// The default harness: `claude` or `native`. A session's harness follows
+    /// its model's credential, so this only breaks a tie. An unknown id
+    /// refuses to start. A `node.toml` that still names a retired harness
+    /// (`omp`, `opencode`) is migrated to `claude` as it loads
+    /// (`crate::legacy::migrate_config`); a config that names one anyway is
+    /// refused with the migration path rather than a bare refusal
+    /// (`crate::adapter::retired_message`).
     pub id: String,
     /// The tools a session may use at all, by the harness's own names. Empty
     /// means the adapter's default set, which is the default here: for Claude
@@ -1708,9 +1593,9 @@ pub struct Harness {
     /// the image happens to contain", since the same string is what the image
     /// build fetches and what both checks compare against.
     pub version: String,
-    /// Harnesses outside the supported configuration that this node also
-    /// runs: `["native"]` turns on `tracon-agent`. Off by default, because
-    /// every harness a node runs needs its image before any session starts.
+    /// Harnesses outside the ones every node runs that this node also runs
+    /// (`adapter::EXPERIMENTAL`; none today). Off by default, because every
+    /// harness a node runs needs its image before any session starts.
     #[serde(default)]
     pub experimental: Vec<String>,
     /// A Linux `tracon-agent` binary for the native harness image, in place of
@@ -1742,8 +1627,7 @@ pub struct Boundary {
     /// Seconds between the SIGTERM a stopped harness container's init receives
     /// and the SIGKILL that follows. It bounds how long a stop can take, not
     /// how thorough it is: the container's PID namespace goes either way, and
-    /// with it every LSP and formatter process the harness started
-    /// (`docs/reference/opencode-v1.18.30/config-state.md` §6.7). The same
+    /// with it every process the harness started. The same
     /// number is the pod's `terminationGracePeriodSeconds`.
     pub stop_timeout_secs: u16,
 }
@@ -1820,9 +1704,8 @@ pub struct Provider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<Price>,
     /// The models this node declares under this provider, for a harness that
-    /// is told its catalogue rather than asked for one (OpenCode; see
-    /// `docs/reference/opencode-v1.18.30/providers.md` §7.4). A harness that
-    /// probes its own catalogue ignores this. A built-in provider written
+    /// is told its catalogue rather than asked for one (tracon-agent; Claude
+    /// Code's picker too, for the `anthropic`-shaped provider). A built-in provider written
     /// without any gets `default_models` for its name on load, so a node that
     /// names no models still has a catalogue; write `models = []` to declare
     /// none on purpose.
@@ -1991,38 +1874,14 @@ pub fn default_providers() -> std::collections::BTreeMap<String, Provider> {
 
 /// The models a provider declares when the operator names none, so a fresh
 /// node — or a provider the operator just added — has a catalogue the moment
-/// it is connected. A declaring harness (OpenCode) serves exactly this list
-/// and the gateway lends the credential for exactly these ids; a probing
-/// harness ignores it. The limits are what the harness is told, not what is
-/// enforced.
-///
-/// Three tiers, tried in order:
-///
-/// 1. An exact match on the cached OpenCode model catalogue's provider key
-///    (`models_catalogue::provider_models`). Generic on the provider name —
-///    a custom provider like `openrouter` gets real defaults the moment the
-///    catalogue knows that key, not only the three built-ins below.
-/// 2. The hardcoded list below for `anthropic`/`openai`/`openai-codex`, kept
-///    as the safety net for a locked-down node whose `allow_hosts` refuses
-///    the catalogue host, or one that has not fetched yet.
-/// 3. An empty list.
+/// it is connected: the current generation for `anthropic`, `openai` and
+/// `openai-codex`, and nothing for any other provider, whose models the
+/// operator declares. A declaring harness serves exactly this list. The
+/// limits are what the harness is told, not what is enforced.
 pub fn default_models(provider: &str) -> Vec<ModelDecl> {
-    default_models_tiered(provider, crate::models_catalogue::provider_models(provider))
-}
-
-/// The tiered lookup itself, taking the catalogue hit (or its absence) as a
-/// parameter so it is testable without touching the process-wide catalogue
-/// cache `models_catalogue` holds.
-fn default_models_tiered(provider: &str, catalogue_hit: Option<Vec<ModelDecl>>) -> Vec<ModelDecl> {
-    if let Some(models) = catalogue_hit {
-        return models;
-    }
     hardcoded_default_models(provider)
 }
 
-/// Tier 2: the fixed list this node falls back to when the catalogue has no
-/// entry for `provider` — either because it names none of these three, or
-/// because the catalogue itself is unavailable.
 /// A model's reasoning effort is one the providers know.
 fn validate_models(providers: &std::collections::BTreeMap<String, Provider>) -> Result<(), String> {
     for (name, provider) in providers {
@@ -2102,18 +1961,6 @@ pub struct SessionDefaults {
     pub suspend_published_after_secs: u64,
     /// Where worktrees are created. Outside any repo, so nothing is gitignored.
     pub worktree_root: PathBuf,
-    /// How many terminal frames the gateway will hold for a browser that has
-    /// stopped reading, in each direction. Past this the connection is closed
-    /// with a reason rather than buffered: a stalled tab must not be able to
-    /// grow the node's memory without bound.
-    pub pty_buffer_frames: usize,
-    /// Whether a proxied terminal's output tail is written to the session log
-    /// when the connection ends. Off, because a terminal transcript is not a
-    /// tool ledger and reads like one: the harness raises no permission and
-    /// no tool call for anything typed at a PTY prompt, so a captured
-    /// transcript records what the operator happened to run, not what tracon
-    /// decided. Turn it on deliberately, knowing that.
-    pub pty_capture_output: bool,
 }
 
 impl Default for Config {
@@ -2129,7 +1976,6 @@ impl Default for Config {
             providers: default_providers(),
             declared_providers: Default::default(),
             memory: Memory::default(),
-            ui: Ui::default(),
             supervision: Supervision::default(),
             review: ReviewLimits::default(),
             notify: Notify::default(),
@@ -2137,10 +1983,9 @@ impl Default for Config {
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
-            launch: Launch::default(),
             harness: Harness {
-                id: crate::adapter::opencode::OpenCodeAdapter::ID.into(),
-                version: crate::adapter::opencode::OpenCodeAdapter::PINNED_VERSION.into(),
+                id: crate::adapter::claude::ClaudeAdapter::ID.into(),
+                version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
                 // Empty: see the field's note. The surface a session actually
                 // runs against is bounded by the boundary and by policy, both
                 // of which hold whatever the harness offers.
@@ -2155,7 +2000,7 @@ impl Default for Config {
                 gateway_ip: "10.89.0.2".into(),
                 gateway_container: "tracon-gw".into(),
                 gateway_image: "localhost/tracon-gateway".into(),
-                harness_image: "localhost/tracon-harness-opencode".into(),
+                harness_image: "localhost/tracon-harness-claude".into(),
                 selinux_label_disable: None,
                 start_machine: true,
                 stop_timeout_secs: 10,
@@ -2205,8 +2050,6 @@ impl Default for Config {
                 claim_grace_secs: 60,
                 suspend_published_after_secs: 1800,
                 worktree_root: default_worktree_root(),
-                pty_buffer_frames: 256,
-                pty_capture_output: false,
             },
         }
     }
@@ -2488,6 +2331,12 @@ impl Config {
             config.providers.entry(name).or_insert(provider);
         }
         config.review.lift_retired_defaults();
+        for section in retired_opencode_sections(text) {
+            tracing::warn!(
+                "{}: [{section}] is ignored; it configured the OpenCode harness, which was removed",
+                path.display()
+            );
+        }
         if let Some(section) = retired_qa_section(text) {
             tracing::warn!(
                 "{}: [qa] is ignored; candidate QA deploys, browser runs and prototype builds were removed ({section})",
@@ -2507,10 +2356,6 @@ impl Config {
         config
             .docs
             .preview_origin()
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        config
-            .ui
-            .opencode_origin()
             .map_err(|error| format!("{}: {error}", path.display()))?;
         config
             .auth
@@ -2747,6 +2592,17 @@ mod tests {
         );
         assert_eq!(retired_qa_section("[qa]\n"), None);
         assert_eq!(retired_qa_section("[review]\nmax_files = 1\n"), None);
+    }
+
+    /// The OpenCode harness's own tables still load, and are named rather
+    /// than silently dropped.
+    #[test]
+    fn retired_opencode_sections_still_load_and_are_named() {
+        let text = "[ui]\nopencode_listen = \"127.0.0.1:7423\"\n\n[launch]\nplugins = [\"a@1\"]\n";
+        toml::from_str::<Config>(text).expect("an old [ui] or [launch] must not stop the node");
+        assert_eq!(retired_opencode_sections(text), ["ui", "launch"]);
+        assert!(retired_opencode_sections("[ui]\n").is_empty());
+        assert!(retired_opencode_sections("[review]\nmax_files = 1\n").is_empty());
     }
 
     #[test]
@@ -3211,38 +3067,13 @@ models = [{ id = "gpt-6" }]
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Tier 1: any provider name the catalogue knows gets its exact models,
-    /// not only the three built-ins — the pure lookup, exercised directly so
-    /// it needs no process-wide catalogue state.
+    /// A built-in provider declares the current generation unasked, and any
+    /// other declares nothing rather than guessing.
     #[test]
-    fn default_models_tier1_matches_any_catalogue_provider_key() {
-        let catalogue = vec![ModelDecl {
-            id: "some/model".into(),
-            name: "Some Model".into(),
-            context: 128_000,
-            output: 8_000,
-            reasoning: false,
-            attachment: false,
-            ..Default::default()
-        }];
-        assert_eq!(
-            default_models_tiered("openrouter", Some(catalogue.clone())),
-            catalogue
-        );
-    }
-
-    /// Tier 2: no catalogue hit falls back to the hardcoded three-entry
-    /// match, so a locked-down node (or one that has not fetched yet) never
-    /// regresses to zero models for a built-in provider.
-    #[test]
-    fn default_models_tier2_falls_back_to_hardcoded_entries() {
-        assert_eq!(
-            default_models_tiered("anthropic", None),
-            hardcoded_default_models("anthropic")
-        );
-        assert_eq!(default_models_tiered("anthropic", None).len(), 3);
-        assert_eq!(default_models_tiered("openai", None).len(), 2);
-        let codex: Vec<_> = default_models_tiered("openai-codex", None)
+    fn default_models_are_the_built_ins_and_nothing_else() {
+        assert_eq!(default_models("anthropic").len(), 3);
+        assert_eq!(default_models("openai").len(), 2);
+        let codex: Vec<_> = default_models("openai-codex")
             .into_iter()
             .map(|m| m.id)
             .collect();
@@ -3251,13 +3082,7 @@ models = [{ id = "gpt-6" }]
             ["gpt-5.5"],
             "a ChatGPT sign-in refuses the -codex models"
         );
-    }
-
-    /// Tier 3: neither the catalogue nor the hardcoded match knows this
-    /// name, so it declares nothing rather than guessing.
-    #[test]
-    fn default_models_tier3_is_empty_for_an_unknown_provider() {
-        assert!(default_models_tiered("totally-unknown", None).is_empty());
+        assert!(default_models("totally-unknown").is_empty());
     }
 
     #[test]
@@ -3368,39 +3193,6 @@ models = [{ id = "gpt-6" }]
                 .as_deref(),
             Some("mailto:ops@example.org")
         );
-    }
-
-    #[test]
-    fn the_opencode_ui_origin_is_its_own_and_origin_only() {
-        let mut ui = Ui::default();
-        // Not the operator listener's port, and not the preview listener's.
-        assert_eq!(ui.opencode_origin().unwrap(), "http://127.0.0.1:7423");
-        assert_ne!(
-            ui.opencode_listen.port(),
-            Docs::default().preview_listen.port()
-        );
-        assert!(ui.opencode_is_loopback());
-        assert_eq!(ui.opencode_host().unwrap(), "127.0.0.1");
-
-        ui.opencode_url = Some("https://opencode.example:8443".into());
-        assert_eq!(
-            ui.opencode_origin().unwrap(),
-            "https://opencode.example:8443"
-        );
-        assert_eq!(ui.opencode_host().unwrap(), "opencode.example");
-        // Published through an ingress: the cookie must carry `Secure`.
-        assert!(!ui.opencode_is_loopback());
-
-        for invalid in [
-            "ftp://opencode.example",
-            "https://opencode.example/path",
-            "https://user@opencode.example",
-            "https://opencode.example?x=1",
-            "https://opencode.example#f",
-        ] {
-            ui.opencode_url = Some(invalid.into());
-            assert!(ui.opencode_origin().is_err(), "{invalid}");
-        }
     }
 
     /// Every harness pod renders explicit requests and a memory limit, so a

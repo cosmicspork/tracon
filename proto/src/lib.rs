@@ -35,7 +35,6 @@ pub mod envelope;
 pub mod frame;
 pub mod keyring;
 pub mod keys;
-pub mod stream;
 
 /// Length-prefixed bytes: u32 big-endian length then the bytes. Shared by every
 /// canonical encoding in this crate.

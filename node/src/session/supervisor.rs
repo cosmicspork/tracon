@@ -209,14 +209,6 @@ pub struct Supervisor {
     /// A fenced turn is still allowed to report completion, but resume waits
     /// for that exact receipt rather than trusting cancel's enqueue ack.
     paused_turn: Option<u64>,
-    /// The durable identity and history of this session's harness, for a
-    /// harness that has one. It owns the sequence the stream resumes from, and
-    /// it is what a mediated mutation's intent is written to before the
-    /// mutation is dispatched.
-    ingest: Option<Arc<crate::session::ingest::Ingest>>,
-    /// The intent of the prompt currently in flight, settled when the turn
-    /// reports and marked uncertain when it does not.
-    prompt_intent: Option<String>,
     /// See `with_checks`.
     checks: Vec<String>,
     /// What the operator allowed for the rest of this session, by
@@ -278,8 +270,6 @@ impl Supervisor {
             last_tool_call: None,
             repeated_tool_calls: 0,
             paused_turn: None,
-            ingest: None,
-            prompt_intent: None,
             checks: Vec::new(),
             grants: Default::default(),
             offered: HashMap::new(),
@@ -307,14 +297,6 @@ impl Supervisor {
             open: Arc::new(Mutex::new(HashMap::new())),
             chunks: ChunkBuffer::default(),
         }
-    }
-
-    /// Give this session the ingestion layer that owns its harness's durable
-    /// identity. Set for a harness whose stream is sequenced and replayable;
-    /// a stdio harness has nothing to reconcile against and gets none.
-    pub fn with_ingest(mut self, ingest: Arc<crate::session::ingest::Ingest>) -> Self {
-        self.ingest = Some(ingest);
-        self
     }
 
     /// The operator's required check commands. Running one exactly as
@@ -1264,12 +1246,6 @@ impl Supervisor {
                             "context_window": v["contextWindow"],
                         }),
                     );
-                } else if let Some(message) = step_failure(&v) {
-                    self.record(
-                        ek::ERROR,
-                        None,
-                        json!({ "error": message, "source": "harness" }),
-                    );
                 }
             }
             HarnessEvent::Decided(request) => {
@@ -1339,7 +1315,7 @@ impl Supervisor {
 
     /// A tool call the harness ran on its own permission rules, never asking
     /// the node: Claude Code lets reads and searches through without a
-    /// `can_use_tool`, where OpenCode asks for every one. The ledger records
+    /// `can_use_tool`, where tracon-agent asks for every one. The ledger records
     /// the decision the node's policy makes for it all the same, so what a
     /// session's log says was allowed does not depend on which harness ran.
     /// The call has already run; when the policy would not have allowed it,
@@ -1758,18 +1734,6 @@ impl Supervisor {
         if s.state != SessionState::Running.as_str() && !held {
             return Err(format!("session is {}", s.state));
         }
-        // A prompt depends on knowing whether the last one landed. While that
-        // is unknown, sending another could duplicate a turn that is already
-        // running upstream, so it is refused with the reason rather than
-        // guessed at. Reconciliation clears it; so can the operator.
-        if let Some(ingest) = &self.ingest {
-            if let Some(reason) = ingest.uncertain_reason() {
-                return Err(format!(
-                    "the outcome of the last mutation on this session is unknown ({reason}); \
-                     prompting again could duplicate a turn the harness may already be running"
-                ));
-            }
-        }
         if held {
             self.set_state(SessionState::Running, None);
         }
@@ -1801,12 +1765,6 @@ impl Supervisor {
             .ok()
             .flatten()
             .and_then(|s| s.cost_usd);
-        // Written down before the dispatch, not after: the gap between the
-        // two is exactly where an answer can be lost, and a row that says
-        // "this may have happened" is what makes asking possible.
-        self.prompt_intent = self.ingest.as_ref().map(|ingest| {
-            ingest.intent_begin(crate::store::intent_kind::PROMPT, None, Some(text.as_str()))
-        });
         let mut payload = json!({ "text": text });
         if !queued.is_empty() {
             payload["queued"] = json!(queued);
@@ -1878,7 +1836,6 @@ impl Supervisor {
     /// the outcome, reconcile the two usage sources, and charge the session.
     async fn on_turn_done(&mut self, kind: &'static str, payload: serde_json::Value, tokens: i64) {
         self.flush_chunks();
-        self.settle_prompt(kind, &payload);
         let session = self.store.get_session(&self.session_id).ok().flatten();
         let previous = session.as_ref().map(|s| s.tokens_used).unwrap_or(0);
         // A turn that errored reports nothing rather than zero: there is a
@@ -1914,28 +1871,6 @@ impl Supervisor {
         }
         self.publish_session();
     }
-    /// What became of the prompt this turn was dispatched with.
-    ///
-    /// A turn that ended is proof the harness took it. A turn that timed out
-    /// is proof too — it ran long enough to be stopped. Anything else is a
-    /// dispatch that never reported: the POST may have been received and acted
-    /// on with only the answer lost, so the honest state is neither sent nor
-    /// unsent, and the session refuses a new prompt until reconciliation asks
-    /// the harness which it was.
-    fn settle_prompt(&mut self, kind: &'static str, payload: &serde_json::Value) {
-        let (Some(ingest), Some(intent)) = (self.ingest.as_ref(), self.prompt_intent.take()) else {
-            return;
-        };
-        if kind != ek::ERROR || payload["turn_timeout"] == true {
-            ingest.intent_settle(&intent, crate::store::intent_state::ADMITTED, None);
-            return;
-        }
-        let reason = payload["error"]
-            .as_str()
-            .unwrap_or("the prompt dispatch did not report an outcome");
-        ingest.mark_uncertain(&intent, reason);
-    }
-
     /// Budget is checked at turn end, when the turn's spend is settled, so a
     /// single long turn can overshoot (the gateway refuses its model calls
     /// once the open turn's count reaches the budget). Enforced by holding the
@@ -2329,27 +2264,20 @@ fn node_tool(action: &str) -> bool {
         .is_some_and(|tool| !tool.is_empty())
 }
 
-/// The name of the node's own MCP tool a harness's call names, under either
-/// harness's spelling of it: Claude Code's `mcp__tracon__<tool>`, and
-/// OpenCode's flattened `tracon_<tool>` (`sanitize(server) + "_" + tool`,
-/// `docs/reference/opencode-v1.18.30/config-state.md` §5). The same tool on
+/// The name of the node's own MCP tool a harness's call names
+/// (`mcp__tracon__<tool>`, as both harnesses spell it). The same tool on
 /// another server is not the node's.
 fn own_tool_name(title: &str) -> Option<&str> {
     title
         .strip_prefix("mcp__tracon__")
-        .or_else(|| title.strip_prefix("tracon_"))
         .filter(|tool| !tool.is_empty())
 }
 
 /// Recognise a harness's own "the provider refused, I am retrying" notice.
 ///
-/// Two harnesses say it two ways and neither is in a schema the node shares:
-/// the Claude adapter forwards `{"type":"system","subtype":"api_retry",…}`,
-/// and the OpenCode adapter forwards its `session.next.retried` event as
-/// `{"method":"session.next.retried","params":…}`. Rather than model either,
-/// match on the discriminator wherever it sits and read whatever fields came
-/// with it. The stem is `retr` plus an ending, because the two harnesses do
-/// not even agree on the tense.
+/// Both harnesses send `{"type":"system","subtype":"api_retry",…}`, but its
+/// fields are not in a schema the node shares, so match on the discriminator
+/// wherever it sits and read whatever fields came with it.
 fn retry_notice(v: &serde_json::Value) -> Option<RetryNotice> {
     let named_retry = [v["subtype"].as_str(), v["method"].as_str()]
         .into_iter()
@@ -2385,27 +2313,6 @@ fn retry_notice(v: &serde_json::Value) -> Option<RetryNotice> {
         attempt: number(&["attempt", "attempts", "retry"]).filter(|n| *n > 0),
         max_retries: number(&["max_retries", "maxRetries"]).filter(|n| *n > 0),
     })
-}
-
-/// A step the harness gave up on — a provider error it will not retry, or a
-/// stream cut mid-answer — as the line the operator reads. Without it the
-/// turn ends with nothing but its stop reason, and the cause is only in the
-/// harness's own log.
-fn step_failure(v: &serde_json::Value) -> Option<String> {
-    if v["method"].as_str() != Some("session.next.step.failed") {
-        return None;
-    }
-    Some(
-        [
-            &v["message"],
-            &v["params"]["error"]["message"],
-            &v["params"]["error"],
-        ]
-        .into_iter()
-        .find_map(|m| m.as_str().filter(|s| !s.is_empty()))
-        .unwrap_or("the harness gave up on this step without saying why")
-        .to_string(),
-    )
 }
 
 /// How much of a running call's output its progress frame carries.
@@ -2622,12 +2529,12 @@ mod tests {
     }
 
     #[test]
-    fn the_node_s_own_tools_are_named_under_either_harness() {
+    fn the_node_s_own_tools_are_named_by_their_server() {
         assert_eq!(
             own_tool_name("mcp__tracon__review_status"),
             Some("review_status")
         );
-        assert_eq!(own_tool_name("tracon_review_status"), Some("review_status"));
+        assert_eq!(own_tool_name("tracon_review_status"), None);
         assert_eq!(own_tool_name("mcp__other__review_status"), None);
         assert_eq!(own_tool_name("other_review_status"), None);
         assert_eq!(own_tool_name("mcp__tracon__"), None);
@@ -2650,23 +2557,6 @@ mod tests {
             output_tail(Some(&json!({ "stdout": "x" }))).as_deref(),
             Some(r#"{"stdout":"x"}"#)
         );
-    }
-
-    #[test]
-    fn a_failed_step_is_recorded_with_its_cause() {
-        // As the OpenCode adapter forwards `session.next.step.failed` for a
-        // stream the gateway cut mid-answer.
-        let cut = step_failure(&json!({
-            "method": "session.next.step.failed",
-            "params": { "error": { "type": "unknown", "message": "Failed to read stream" } },
-            "provider": "unknown",
-            "message": "Failed to read stream",
-        }));
-        assert_eq!(cut.as_deref(), Some("Failed to read stream"));
-        let silent = step_failure(&json!({ "method": "session.next.step.failed", "params": {} }));
-        assert!(silent.is_some_and(|m| !m.is_empty()));
-        // A retry is the recogniser's, not this one's.
-        assert!(step_failure(&json!({ "method": "session.next.retried" })).is_none());
     }
 
     #[test]
@@ -2696,29 +2586,10 @@ mod tests {
         assert_eq!(bounded.status, Some(502));
         assert_eq!(bounded.max_retries, Some(10));
         assert_eq!(bounded.message.as_deref(), Some("server_error"));
-        // OpenCode's `session.next.retried`, as its adapter forwards it: past
-        // tense, and the fields in the event's own payload rather than beside
-        // the discriminator.
-        let opencode = retry_notice(&json!({
-            "method": "session.next.retried",
-            "params": {
-                "providerID": "openai-codex",
-                "error": { "statusCode": 429, "message": "rate limited" },
-            },
-            "message": "rate limited",
-        }))
-        .expect("opencode's session.next.retried");
-        assert_eq!(opencode.provider.as_deref(), Some("openai-codex"));
-        assert_eq!(opencode.status, Some(429));
-        assert_eq!(opencode.message.as_deref(), Some("rate limited"));
-        assert_eq!(
-            opencode.attempt, None,
-            "the node counts when the harness does not"
-        );
         // Anything else is not a retry, including a plain error.
         assert!(retry_notice(&json!({ "type": "system", "subtype": "init" })).is_none());
         // Every notice above says why; one that does not is kept whole.
-        assert!(!claude.unexplained() && !bounded.unexplained() && !opencode.unexplained());
+        assert!(!claude.unexplained() && !bounded.unexplained());
         let unknown = retry_notice(&json!({
             "type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10,
             "error": "unknown"

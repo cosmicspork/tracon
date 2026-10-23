@@ -1,7 +1,6 @@
 <script lang="ts">
   // What a channel's sessions launch with, beyond what the node decides for
-  // them: the operator's standing notes, skills, agents, and the plugins and
-  // language servers the harness image made available.
+  // them: the operator's standing notes, skills and agents.
   //
   // The pane shows two things on purpose. The *selection* is what is imported
   // now; the *manifest* is the revision and digest a launch would build from
@@ -214,22 +213,6 @@
     </div>
     {#each warnings as w (w)}<small class="warn">{w}</small>{/each}
 
-    <div class="image">
-      <span class="dim">From the harness image, and not editable here:</span>
-      <span class="mono"
-        >plugins {view.baked_plugins.length ? view.baked_plugins.join(', ') : 'none baked'}</span
-      >
-      {#if view.next}
-        <span class="mono"
-          >lsp {view.next.lsp.length ? view.next.lsp.map((l) => l.name).join(', ') : 'none'}</span
-        >
-        <span class="mono"
-          >formatters {view.next.formatters.length
-            ? view.next.formatters.map((f) => f.name).join(', ')
-            : 'none'}</span
-        >
-      {/if}
-    </div>
   {:else if error}
     <p class="why"><b>The manifest could not be read</b><i>{error}</i></p>
   {:else}
@@ -296,7 +279,6 @@
     color: var(--dim);
   }
   .rev,
-  .image,
   .acts {
     display: flex;
     gap: 8px;

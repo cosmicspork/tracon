@@ -17,7 +17,6 @@
 mod launcher;
 mod links;
 mod node;
-mod opencode;
 mod prefs;
 mod queue;
 mod service;
@@ -269,9 +268,6 @@ fn main() {
         )
         .manage(state.clone())
         .manage(preferences.clone())
-        // The origin the OpenCode window is allowed to hold, read by that
-        // window's navigation handlers and rewritten by each boot.
-        .manage(Arc::new(opencode::Allowed::default()))
         .invoke_handler(tauri::generate_handler![
             desktop_managed_local,
             desktop_update_status,
@@ -284,7 +280,6 @@ fn main() {
             desktop_preferences,
             desktop_set_preferences,
             desktop_open_node,
-            opencode::desktop_open_opencode,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

@@ -1,6 +1,6 @@
 //! Two usage sources, one ledger. The gateway counts every model call on the
 //! wire; the harness reports its own numbers per turn and a harness that saw
-//! nothing reports zero rather than "unknown" (`providers.md` §6.3). So both
+//! nothing reports zero rather than "unknown". So both
 //! are recorded per turn and reconciled at turn end, the gateway's count is
 //! what the budget and the channel ceiling are charged, and a turn nobody
 //! could count is marked unmetered rather than free.

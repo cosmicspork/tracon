@@ -51,19 +51,17 @@ anything has a branch on the forge, and that branch is a normal clone away.
 
 ## 2. Run the harness directly
 
-Both harnesses are ordinary programs. Run one in the checkout or the unpacked
+Claude Code is an ordinary program. Run it in the checkout or the unpacked
 workspace, with the operator's own configuration and credentials:
 
 ```sh
 cd <the work>
-claude                     # Claude Code
-opencode                   # OpenCode's TUI; `opencode serve` for its own API
+claude
 ```
 
-Neither reads anything of tracon's. OpenCode uses the operator's
-`opencode auth login` credentials and the config under `$XDG_CONFIG_HOME/opencode/`,
-not the node's generated `opencode.json`; Claude Code uses its own login. That
-is the point — nothing in tracon is required for this step, which is what makes
+It reads nothing of tracon's: it uses its own login and configuration. (`tracon-agent
+--standalone` runs too, against a model you name, with no permission gate; see
+`agent/README.md`.) That is the point — nothing in tracon is required for this step, which is what makes
 it a recovery route rather than another feature to keep working.
 
 **What does not apply while you work this way:**
@@ -121,58 +119,63 @@ worst case is a change with a thin history, not an unreviewed merge. What would
 not be acceptable is making this the ordinary path — at which point the
 guarantees are gone and nothing says so.
 
-## Migrating a node off the retired omp harness
+## Migrating a node off a retired harness
 
-tracon's first harness was omp, and the 2026-09-13 OpenCode cutover removed it:
-the adapter, its image, its provider wiring and its catalogue workarounds.
-Versions before the cutover wrote `node.toml` in full, so most nodes that ran
-omp still say `[harness] id = "omp"` without anyone having chosen it.
+tracon has retired two harnesses. Its first was omp, removed at the 2026-09-13
+cutover to OpenCode; OpenCode was removed in its turn once `tracon-agent` ran the
+models it had (the Codex subscription, local and OpenAI-compatible providers).
+Versions before the omp cutover wrote `node.toml` in full, so a node may still say
+`[harness] id = "omp"` without anyone having chosen it, and an OpenCode node says
+`id = "opencode"`.
 
 The node migrates that file the first time anything loads it — `tracon serve`
 under the service, `tracon setup`, or any other command — and logs a warning
 naming what it changed:
 
-- `[harness] id` becomes `"opencode"`, and a pinned `version` is cleared
-  (empty is the version this node's OpenCode image installs);
+- `[harness] id` becomes `"claude"`, and a pinned `version` is cleared (empty is
+  the version this node's Claude Code image installs);
 - `[boundary] harness_image` and `[runtime.kubernetes] harness_image` are
-  replaced only when they are omp's own defaults (`localhost/tracon-harness`,
-  `ghcr.io/cosmicspork/tracon-harness:<tag>`); an image you chose is kept;
-- `[gateway] allow_hosts` gains `^platform\.claude\.com$` and `^claude\.ai$`
-  if it lacks them, which the Anthropic subscription login needs; hosts you
-  added stay.
+  replaced only when they are a retired harness's own defaults
+  (`localhost/tracon-harness`, `localhost/tracon-harness-opencode`, and their
+  `ghcr.io/cosmicspork/…:<tag>` counterparts); an image you chose is kept. A file
+  that names one of those images under a supported id is migrated for the image
+  alone.
 
-The original is kept beside it as `node.toml.pre-opencode` (written once, never
-overwritten). Keys the file did not have are left out, so they keep following
-the defaults; comments in a hand-written file are not carried over, which is
-what the backup is for. A harness id that is neither omp nor a supported one is
-still refused at startup rather than guessed at.
+The original is kept beside it as `node.toml.pre-omp` or `node.toml.pre-opencode`
+(written once, never overwritten). Keys the file did not have are left out, so they
+keep following the defaults; comments in a hand-written file are not carried over,
+which is what the backup is for. A harness id that is neither retired nor supported
+is still refused at startup rather than guessed at. A `[ui]` or `[launch]` table,
+which configured OpenCode's web interface and its plugins, is ignored with a warning.
 
 What is left is two steps, and neither is needed for the node to serve:
 
 ```sh
-tracon setup                       # builds the OpenCode image, retires omp's leftovers
-tracon session archive-legacy      # puts the omp sessions away, read-only
+tracon setup                       # builds the harness images, retires omp's leftovers
+tracon session archive-legacy      # puts the retired harnesses' sessions away, read-only
 ```
 
-Until the second runs, the node logs how many omp sessions are unarchived at
-every start: the ones that never ended still read as running, which holds up
-anything waiting for the node to be idle — the desktop app's restart onto a
-newer node after an update among them.
+Until the second runs, the node logs how many sessions of each retired harness are
+unarchived at every start: the ones that never ended still read as running, which
+holds up anything waiting for the node to be idle — the desktop app's restart onto
+a newer node after an update among them. `tracon gc` lists what OpenCode left in the
+state directory (`opencode-ui/`, `opencode-state/`, `opencode-state-work/`) for
+removal; the OpenCode image itself is yours to `podman rmi`.
 
-A session on an Anthropic subscription runs on Claude Code whatever `[harness] id`
-says; the setting only breaks the tie for a model either harness runs (an
-Anthropic API key). To prefer Claude Code there, set `[harness] id = "claude"`
-(and run `tracon setup`) after the migration, or before it.
+A session's harness follows its model's credential whatever `[harness] id` says:
+an Anthropic credential runs on Claude Code, every other provider on
+`tracon-agent`. The setting only breaks the tie for a model the node cannot
+classify.
 
 `tracon setup` removes what omp left in node-owned state and prints each thing
 it removed — today that is `harness-state/agent/`, its login credential
 database and the provider document it persisted. It does **not** touch
-`credentials.sealed`: the tokens the node lifted out of that database are
-provider credentials, they still work, and the harness they were obtained
-through is irrelevant to them. Nor does it touch workspaces or `node.db`.
+`credentials.sealed`: the tokens the node holds are provider credentials, they
+still work, and the harness they were obtained through is irrelevant to them.
+Nor does it touch workspaces or `node.db`.
 
-`tracon session archive-legacy` marks every omp session read-only, for good. It
-is deliberately not deletion:
+`tracon session archive-legacy` marks every session of a retired harness
+read-only, for good (`--harness` names one). It is deliberately not deletion:
 
 - the row keeps `harness_id` and `harness_version`, so the transcript stays
   interpretable against the thing that produced it;
@@ -187,7 +190,7 @@ is deliberately not deletion:
 To carry one forward:
 
 ```sh
-tracon session reopen <id> --harness opencode
+tracon session reopen <id> --harness claude    # or native
 ```
 
 That is a **new session, with a new id**, on the same workspace and branch,
@@ -199,7 +202,8 @@ session to read from it rather than assuming it can.
 
 `--harness` may name either supported harness the session's model can run on:
 `tracon setup` builds an image for each, and a session runs the one it names
-whatever `[harness] id` says. A subscription session reopens on Claude Code only.
+whatever `[harness] id` says. A session on an Anthropic credential reopens on
+Claude Code only, and one on any other provider on `native` only.
 
 ## Locked out of admin from afar
 

@@ -28,16 +28,8 @@ pub struct TestHub {
     pub url: String,
     pub members: Arc<MemoryMembers>,
     pub frames: Arc<MemoryFrames>,
-    /// The router's own state, so a stream test can watch the relay: what it
-    /// is holding, and who is connected to it.
+    /// The router's own state.
     pub state: hub::AppState,
-}
-
-impl TestHub {
-    /// Whether a node's owner-stream connection is open on this hub.
-    pub fn relay_connected(&self, node_id: &str) -> bool {
-        self.state.streams.is_connected(node_id)
-    }
 }
 
 /// A hub with these members already admitted, on an ephemeral port.

@@ -28,8 +28,7 @@ absence is felt in real work.
 
 One configuration is what daily use runs on, and what a defect has to be in to enter
 **Now**: the desktop app on macOS or Linux, rootless Podman, Claude Code as the managed
-harness, a single node. Everything else — OpenCode, the native harness, the Kubernetes
-runtime, the hub and mesh, the installed phone app, handoff between nodes — is built and
+harness, a single node. Everything else — the native harness, the Kubernetes runtime, the hub and mesh, the installed phone app, handoff between nodes — is built and
 tested but *experimental* until that configuration is boring. The homelab node keeps running the
 hub and serving the phone; work on those surfaces is deferred, not removed.
 
@@ -78,17 +77,8 @@ Needed for daily use, but not blocking it today.
 **Sessions and accounting**
 
 - [ ] While a tool call runs, its transcript line shows the tail of its output. The frame
-      carries it (`tool_update.output`, #436), but neither managed harness streams a
-      running call's output yet.
-- [ ] **`just check` passes on the operator's own machine.** Three OpenCode integration
-      tests (`opencode_adversarial` ×2, `opencode_pty::a_real_shell_is_spawned_and_read_back_through_the_proxy`)
-      fail on unmodified `main` on the desktop host with "Unexpected server error" from the
-      `opencode` on its PATH (Homebrew, 1.18.30), so the recipe stops before the doc tests
-      and the SPA. What differs from CI: CI has no `opencode` on PATH, so `pinned_binary()`
-      skips these tests there, while the Homebrew build also reports 1.18.30, so the version
-      check never skips them here. Have the tests use the pinned binary from the image, or
-      skip when the one found is not it, saying why.
-
+      carries it (`tool_update.output`, #436), and `tracon-agent` streams its shell's
+      (#622); Claude Code does not stream a running call's output yet.
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
 retries variations. Each item below is a brokered replacement on the node, shaped like
@@ -162,12 +152,12 @@ hit on a real task.
 **The native harness, experimental**
 
 `tracon-agent` is a harness tracon owns for models that are not Claude: the Codex
-subscription and local llama.cpp models, which before it could only be reached through
-the OpenCode adapter, whose v1 routes OpenCode 2.x removed. It is a separate binary in
-the boundary, in the same trust position as `claude`; the node still does not reason.
-Every phase of its plan has landed; what was decided along the way and what was left
-unbuilt are in `agent/README.md`. It stays experimental until it has done a week of real
-work.
+subscription, local llama.cpp models and any OpenAI-compatible provider. It replaced the
+OpenCode adapter, whose v1 routes OpenCode 2.x removed, and OpenCode was then removed
+from the node. It is a separate binary in the boundary, in the same trust position as
+`claude`; the node still does not reason. Every phase of its plan has landed; what was
+decided along the way and what was left unbuilt are in `agent/README.md`. Every node
+runs it, and it stays experimental until it has done a week of real work.
 
 - [x] Phase 0, standalone: the loop, Chat Completions, six tools with hashline anchors,
       accepted against local models (#602).
@@ -180,22 +170,6 @@ work.
 - [x] Phase 4: Codex through the ChatGPT backend over the Responses API (#621), then
       per-model settings, live command output and strict tool schemas (#622).
 - [x] Phase 5: subagents that run together and return results shaped by a schema (#624).
-
-**OpenCode, contingent on the spike above**
-
-- [ ] Open the native OpenCode window from any origin the SPA is served at. It loads only
-      when the tracon tab is at exactly `http://127.0.0.1:7420`; `localhost`, a LAN address
-      or the hub's origin get a refused frame.
-- [ ] Let the model catalogue refresh. The node already fetches it and hands the harness a
-      file, with the harness's own fetch turned off, but the node's fetch checks the
-      gateway's `allow_hosts`. `models.opencode.ai` is not there by default, so the node
-      keeps its cached copy and logs a skip. Exempt the one host from that check, or add it
-      to the defaults.
-- [ ] Tell an OpenCode agent why the node's policy refused its call. Claude Code now reads
-      "the node's policy refused this (rule …): <reason>" (#441); OpenCode's v1 permission
-      reply takes only `response`, so the same refusal reaches it as a bare `reject`.
-      Carry the reason another way (a tool result, or a message on the session) and keep
-      it distinct from the operator declining.
 
 ## Later — earned by the loop before it
 
@@ -351,10 +325,6 @@ work that does not need it, and nothing on it may be described elsewhere as prov
 
 **For the experimental surfaces**
 
-- [ ] **An OpenCode session over the v1 routes, live**: a node-started session that
-      calls one of the node's MCP tools, is asked before it, and ends its turn on
-      `session.idle`, against a real provider; and the native window showing that
-      session's history, which the v1 store now holds.
 - [ ] **Codex subscription** signed in through the node's own OAuth flow, by local callback
       and by device code, and with it whether the ChatGPT backend accepts a Codex request
       whose system prompt stays in the message array. (The native harness's Responses
@@ -366,29 +336,8 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       under its spawn. Concurrency is proven by test only; the one live run (on
       2026-10-21, `openai-codex/gpt-6-luna`, four subagents) had parallel calls off, so
       its children ran one after another.
-- [ ] **`OPENCODE_SERVER_PASSWORD` refused live**: an unauthenticated probe of a running
-      session server, rather than of the fake.
-- [ ] **The model-dependent adversarial cases** on OpenCode: a second identical tool call
-      asking again after a gateway-mediated `once`; a subagent child session the harness
-      raises for itself; and killing the server *after* a tool call was recorded.
-- [ ] **Usage reconciliation against the pinned OpenCode binary and a live provider**, not
-      the fake server and a stub upstream.
-- [ ] **A real restart against a surviving `opencode serve`**, closing the missed turn from
-      the durable stream; today the container dies with the session and the path is proven
-      by test.
-- [ ] **The desktop window against the real OpenCode UI origin**, wrapper and origin and PTY
-      together, rather than each against a stand-in; and **the browser and PWA runs against
-      the real pinned bundle**, which needs `containers/opencode-ui/build.sh` to have been
-      run on the machine.
 - [ ] **Physical devices**: install from the always-on node over HTTPS on iOS Safari and
-      Android Chrome, and confirm the framed native view authenticates with cross-site
-      tracking prevention on. Safari is the open one; if the frame is refused there the
-      candidate fix is `document.requestStorageAccess` from inside the frame before
-      `POST /boot`, which needs a gesture and therefore a visible control.
-- [ ] **The relayed run through the real hub**: `tracon session open` a session owned by
-      another node, with `RUST_LOG=tracon::mesh::stream=debug` on both, confirming the
-      relay's `GET /v0/streams` connection holds and `GET /v0/info` reports the same
-      contract everywhere.
+      Android Chrome.
 - [ ] **A repository recipe offered over the real hub**: offered from the laptop, accepted
       on the homelab node, which builds and pins its own image from it.
 - [ ] **Publication from the Kubernetes node**: an approved review on the homelab node
@@ -398,26 +347,16 @@ work that does not need it, and nothing on it may be described elsewhere as prov
       node passed eight required checks and was approved. Its branch was pushed, but the
       pull request had to be opened by hand.
 
-**Upstream contributions worth a bounded PR** (not blockers): a flag that turns the
-web-UI fallback into a 404; a flag check on nested instruction attachment; invoking the
-declared `permission.ask` hook; an LSP status event; and, if the spike confirms it, MCP
-servers reaching the v2 session runner.
-
 ## Current limitations
 
 - Everything under "Live proofs still the operator's" is unproven live, including the
   private-repository run.
-- OpenCode is driven over its v1 session routes, which offer the model the node's MCP
-  tools where the v2 runner offered none (findings 22, 23); a real session has not yet
-  run that way. Claude Code is the working managed harness until one has.
 - Required checks run in the image, and after the preparation, the operator named for the
   repository (`[[repo]]`), and in the harness image — which has no project toolchain —
   when they named none. A session of either harness runs in that same image with the
   harness layered on, so it has its checks' tools, and reaches the registries its
   repository opens to sessions (`session_egress`). On Kubernetes that takes a builder, and the
-  image runs as uid 65532, so its tools must be readable by any uid. OpenCode's language
-  servers need glibc and `libstdc++` in the repository's image, and are reported
-  unavailable where it has neither. An image the node
+  image runs as uid 65532, so its tools must be readable by any uid. An image the node
   builds from a repository's Dockerfile is built by Podman, or on Kubernetes by a
   BuildKit daemon the deployment runs (`[runtime.kubernetes.builder]`) and pushed to a
   registry. A superseded one is removed only when nothing still runs from it under
@@ -444,36 +383,16 @@ servers reaching the v2 session runner.
 - The Kubernetes backend **drops** denied egress rather than refusing it. A NetworkPolicy
   has no reject verb and no portable CNI option turns a drop into an ICMP or RST refusal,
   so what Podman gets from having no route out has to come from the cluster. Until one that
-  can express it is configured, a harness pod's protection against the hang is the download
-  flag and the explicitly disabled server list alone — which cover OpenCode but not a future
-  harness with its own timeout-free fetch. `check-boundary --deep` measures the same bound
+  can express it is configured, a harness pod has no protection against a tool that
+  fetches with no timeout of its own. `check-boundary --deep` measures the same bound
   on both backends. It fails Podman if it drops, and on Kubernetes records the drop as the
   runtime's limitation rather than failing.
 - Mesh transfers are capped at 2 MB, and an imported transfer is the carried tree under a
   fresh `git init` with no history, so a candidate moved between nodes cannot be submitted
   or published from the destination. Handoff is a portable file carried by hand today.
-- The OpenCode UI bundle is about 34 MiB of built assets. It is not in git: `tracon setup`
-  fetches and verifies it, or `--ui-bundle` installs it offline, and the node serves it from
-  disk against the tree digest in `containers/opencode-ui/DIGEST`. A tree that does not
-  match is not served, and a node without the bundle serves no native view.
-- The native UI is a v1 client of a server that raises its asks in the v2 permission system,
-  and its only live channel is a global stream with no durable replay. Both are bridged by
-  the node — the reply is respelled, the stream is synthesised per session — rather than by
-  widening the matrix, so an upstream release that moves either moves the seam.
 - A skill package is text. `SKILL.md`, scripts and text assets are staged into node-owned
   storage; a file that is not valid UTF-8 is refused at import, because the node carries the
   contents rather than a reference to them.
-- Nothing registers a child session with the harness, so a fork or background subagent is
-  recorded with its lineage and surfaced as `untracked` rather than driven.
-- A terminal is not a per-command ledger. What a PTY records is that one was opened, with
-  what shell and where, plus byte counts and duration; output capture exists, is off, and is
-  labelled.
-- OpenCode's v2 surface reports `cost` as zero, so a priced turn is only as good as the v1
-  usage numbers the adapter reads; the gateway's on-the-wire count remains authoritative.
-- The OpenCode harness image is about 1 GB, roughly a third of it the `librustc_driver` and
-  LLVM shared objects rust-analyzer and rustfmt link against. The dist channel publishes no
-  self-contained build of either, and a rustfmt from anywhere else formats differently from
-  the workspace's pinned one.
 - Nothing reaches into the boundary. A provider that delivers webhooks through an
   outbound forwarder (`stripe listen`) works with egress and a credential, and an OAuth
   callback lands wherever the browser that followed it runs; a provider that must reach a
@@ -509,8 +428,8 @@ Kept as intent, off the plan until the supported configuration has earned them.
   Sequence when revisited: reliability, then profiles and effective authority, then one
   proven customization, then triggers. No workflow language, no plugin runtime.
 - **Retrieval reranker:** when existing retrieval proves insufficient.
-- **Client terminal:** superseded by the OpenCode PTY capability; no separate tracon
-  terminal.
+- **Client terminal:** a shell in a session's workspace from the interface. OpenCode's
+  PTY capability covered it and went with OpenCode; wait until one is missed.
 - **`cr-sqlite`:** only if real multi-writer convergence requires it.
 - **Stacked MR automation:** decide whether stacks are preferable to feature flags first.
 - **General dashboard/plugin system:** only after isolated reports and views prove
@@ -524,7 +443,6 @@ Kept as intent, off the plan until the supported configuration has earned them.
   `claude` does.
 - A general-purpose multi-harness framework: a few concrete adapters behind one trait, not a
   plugin system for harnesses.
-- Forking and maintaining the OpenCode UI.
 - Required tracon configuration files installed into project repositories, or any other
   requirement on a repository made for tracon's sake: an endpoint or header, a seeder, a
   tool in its image.

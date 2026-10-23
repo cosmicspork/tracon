@@ -17,7 +17,6 @@ use std::time::Duration;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use tracon::config::{Config, RuntimeKind};
 use tracon::runner::kube::{KubeRunner, KubeSpec, PodEnv};
-use tracon::runner::toolchain::IMAGE_ENTRYPOINT;
 use tracon::runner::{Runner, RunnerCommand};
 
 const NAMESPACE: &str = "tracon-test";
@@ -303,48 +302,6 @@ async fn a_fresh_runner_resolves_a_pinned_image() {
             .await,
         None
     );
-}
-
-/// The OpenCode image's entrypoint seeds its caches; a repository image has no
-/// such file. A check or a preparation in a repository image runs its argv as
-/// the command, and only a command in the harness image is prefixed.
-#[tokio::test(start_paused = true)]
-async fn checks_in_a_repository_image_get_no_entrypoint() {
-    let api = KubeApi::new(NAMESPACE).default_script(Script::exits(0));
-    let state = tempfile::tempdir().unwrap();
-    let runner = runner(&api, "opencode", state.path());
-    let argv = vec!["sh".to_string(), "-c".to_string(), "just check".to_string()];
-
-    runner
-        .run_capture(check("tracon-c-repo", Some(pinned("app"))))
-        .await
-        .unwrap();
-    runner
-        .run_capture(RunnerCommand {
-            argv: vec!["sh".into(), "-lc".into(), "bun install".into()],
-            name: "tracon-prepare-w".into(),
-            image: Some(pinned("app")),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    runner
-        .run_capture(check("tracon-c-harness", None))
-        .await
-        .unwrap();
-
-    let created = api.created();
-    let container = |i: usize| created[i].spec.as_ref().unwrap().containers[0].clone();
-    let repo = container(0);
-    assert_eq!(repo.image, Some(pinned("app")));
-    assert_eq!(repo.command, Some(argv.clone()));
-    assert!(repo.args.is_none());
-    let prepare = container(1);
-    assert_eq!(prepare.command.unwrap()[0], "sh");
-    assert!(prepare.args.is_none());
-    let harness = container(2);
-    assert_eq!(harness.command, Some(vec![IMAGE_ENTRYPOINT.to_string()]));
-    assert_eq!(harness.args, Some(argv));
 }
 
 /// What reaches the API server for a check: the command's requests and

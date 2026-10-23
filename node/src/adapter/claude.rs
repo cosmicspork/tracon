@@ -204,7 +204,7 @@ impl ClaudeAdapter {
 }
 
 /// The model as Claude Code names it. The node's picker spells models
-/// `provider/id` (that is how OpenCode takes them), and Claude Code passes its
+/// `provider/id` (that is how tracon-agent takes them), and Claude Code passes its
 /// `--model` to Anthropic verbatim, which answers 404 for `anthropic/…`. A
 /// model another provider serves is refused rather than sent where it cannot
 /// run.
@@ -892,9 +892,9 @@ impl HarnessAdapter for ClaudeAdapter {
     ///
     /// Claude Code only ever talks to Anthropic, so the one `anthropic`-shaped
     /// provider's `models` is the whole answer when it names any — mapped the
-    /// same way `opencode.rs::declared_models` maps a declaring harness's
-    /// models to `ModelOption`, minus the `provider/` prefix that addressing
-    /// needs there: `--model` forwards a bare id here. A provider that names
+    /// same way `native.rs` maps a declaring harness's models to
+    /// `ModelOption`, minus the `provider/` prefix that addressing needs
+    /// there: `--model` forwards a bare id here. A provider that names
     /// none, or an anthropic-shaped provider not found at all, falls back to
     /// the fixed alias list unchanged.
     async fn probe_models(
@@ -1026,7 +1026,6 @@ mod tests {
                 "http://gw/model/anthropic".into(),
             )],
             system_prompt_file: Some("/root/.claude/orientation.md".into()),
-            cursor: None,
             resume: None,
         }
     }

@@ -14,7 +14,6 @@ pub mod replica;
 pub mod routes;
 pub mod snapshot;
 pub mod store;
-pub mod streams;
 
 use std::sync::Arc;
 
@@ -64,8 +63,6 @@ pub struct AppState {
     pub limiter: Arc<RateLimit>,
     /// The replica half, when the hub has an identity and a data directory.
     pub replica: Option<Arc<replica::Replica>>,
-    /// The non-durable half: bounded, in-memory relay of owner streams.
-    pub streams: Arc<streams::StreamRelay>,
 }
 
 /// Admit the bootstrap keys (`TRACON_HUB_ADMIT`) into `@mesh` if absent.
@@ -126,7 +123,6 @@ pub fn state_for(
         claims: Arc::new(Claims::new()),
         limiter: Arc::new(RateLimit::new()),
         replica,
-        streams: Arc::new(streams::StreamRelay::default()),
     }
 }
 
@@ -168,11 +164,6 @@ pub fn app_with_state(state: AppState) -> Router {
             post(routes::post_frame).get(routes::get_frames),
         )
         .route("/v0/events", get(routes::events))
-        .route(
-            "/v0/streams",
-            post(routes::post_stream).get(routes::stream_events),
-        )
-        .route("/v0/streams/{stream_id}", delete(routes::close_stream))
         .route("/v0/members", get(routes::list_members))
         .route("/v0/rollups", get(routes::get_rollups))
         .route(

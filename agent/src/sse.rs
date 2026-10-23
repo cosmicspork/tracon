@@ -1,7 +1,7 @@
 //! Server-sent events, decoded from bytes as they arrive.
 //!
-//! Adapted from the OpenCode adapter's reader, with `[DONE]` recognised: the
-//! OpenAI-shaped streams end on it, and a stream that stops without it was cut.
+//! With `[DONE]` recognised: the OpenAI-shaped streams end on it, and a
+//! stream that stops without it was cut.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {

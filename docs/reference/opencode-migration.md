@@ -1,8 +1,9 @@
 # OpenCode migration record
 
 The gate-by-gate record of the 2026-09 move from omp to OpenCode, kept here as history.
-The roadmap carries only open work; `opencode-v1.18.30/` is the compatibility inventory
-and upgrade checklist for the pinned release.
+**OpenCode has since been removed** (its models run on `tracon-agent`; see
+`agent/README.md` and RECOVERY.md, "Migrating a node off a retired harness"), and the
+`opencode-v1.18.30/` inventory this record cites went with it; git history has both.
 
 **Decided 2026-09-13, cut over 2026-09-14.** OpenCode is the primary managed harness,
 driven through its native server API, with its native web UI offered as an optional

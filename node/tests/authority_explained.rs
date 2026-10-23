@@ -174,12 +174,8 @@ async fn consequential_actions_are_listed_with_the_grants_that_bear_on_them() {
     assert_eq!(merge["verdict"], "ask");
     assert_eq!(merge["surface"], "authority");
     assert!(merge["grants"].is_null() || merge["grants"].as_array().unwrap().is_empty());
-    // A terminal is a capability, not a forge action, and is decided under the
-    // kind a bundle rule would have to name to reach it.
-    assert_eq!(
-        standing(&before, "terminal").unwrap()["surface"],
-        "capability"
-    );
+    // A capability that went with its harness is no longer explained.
+    assert!(standing(&before, "terminal").is_none());
 
     let (status, _) = call_local(
         &h.operator,
@@ -326,13 +322,7 @@ async fn every_action_a_grant_can_carry_is_explained() {
     h.store.insert_session(&session_row("s1")).unwrap();
     let view = explain(&h, "s1").await;
 
-    for action in [
-        "merge",
-        "publish",
-        "ticket_transition",
-        "deploy",
-        "terminal",
-    ] {
+    for action in ["merge", "publish", "ticket_transition", "deploy"] {
         assert!(
             tracon::authority::valid_action(action),
             "{action} is no longer an action the node accepts; fix this list"

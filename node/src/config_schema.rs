@@ -53,9 +53,6 @@ pub enum PathKind {
     /// system directory, the configuration or state directory, a worktree
     /// root or a package manager's prefix.
     WriteDir,
-    /// A directory the node replaces whole and serves files from: only
-    /// inside the state or data directory, or one that does not exist yet.
-    ManagedDir,
     /// A directory under which worktrees are made or accepted. Never `/`, a
     /// system directory or a package manager's prefix, and never the state
     /// or configuration directory or a directory holding either.
@@ -196,8 +193,6 @@ pub const KEYS: &[KeySpec] = &[
     live("session.claim_grace_secs"),
     live("session.suspend_published_after_secs"),
     restart("session.worktree_root").path(PathKind::Root),
-    restart("session.pty_buffer_frames"),
-    restart("session.pty_capture_output"),
     // [consulta]
     restart("consulta.command").exec(),
     restart("consulta.args").exec_args(),
@@ -342,12 +337,6 @@ pub const KEYS: &[KeySpec] = &[
     live("docs.kind.label"),
     live("docs.kind.description"),
     live("docs.kind.working_note"),
-    // [launch]
-    restart("launch.plugins"),
-    // [ui]
-    restart("ui.opencode_listen"),
-    restart("ui.opencode_url"),
-    restart("ui.opencode_bundle_dir").path(PathKind::ManagedDir),
     // [auth]
     restart("auth.public_origin"),
     restart("auth.trusted_proxies"),

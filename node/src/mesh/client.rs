@@ -123,8 +123,6 @@ pub struct MeshClient {
     /// Told the names of the credentials a peer's revoke dropped, for the
     /// same reason.
     on_revoke: std::sync::OnceLock<OnHandoff>,
-    /// The non-durable half: bounded owner streams relayed by the hub.
-    pub(super) streams: Arc<super::stream::StreamRouter>,
     /// When the member list was last read again for a sender's refused key
     /// handoff, by sender: at most once a minute each, so a peer sending
     /// handoffs for channels it is not in cannot make this node ask the hub
@@ -183,7 +181,6 @@ impl MeshClient {
             broker: std::sync::OnceLock::new(),
             on_handoff: std::sync::OnceLock::new(),
             on_revoke: std::sync::OnceLock::new(),
-            streams: Arc::new(super::stream::StreamRouter::new(weak.clone())),
             handoff_refresh: Mutex::new(HashMap::new()),
         })
     }
@@ -203,12 +200,6 @@ impl MeshClient {
 
     pub fn set_executor(&self, executor: Arc<dyn super::forward::CommandExecutor>) {
         let _ = self.executor.set(executor);
-    }
-
-    /// The stream router: what opens a stream to a remote owner and what
-    /// answers one addressed here.
-    pub fn streams(&self) -> &Arc<super::stream::StreamRouter> {
-        &self.streams
     }
 
     /// Is the hub connected and the peer recently heard from?
@@ -271,8 +262,6 @@ impl MeshClient {
         tokio::spawn(async move { c.pull_loop().await });
         let c = self.clone();
         tokio::spawn(async move { c.sse_loop().await });
-        let c = self.clone();
-        tokio::spawn(async move { c.stream_loop().await });
         let c = self.clone();
         tokio::spawn(async move { c.heartbeat_loop().await });
         let c = self.clone();

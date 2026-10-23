@@ -34,7 +34,7 @@ use crate::{
 pub struct ActionStanding {
     pub name: String,
     /// `tool` for a brokered call, `authority` for a consequential external
-    /// action, `capability` for a surface like a terminal.
+    /// action.
     pub surface: String,
     #[serde(flatten)]
     pub standing: Standing,
@@ -77,7 +77,6 @@ const AUTHORITY_ACTIONS: &[&str] = &[
     authority::PUBLISH,
     authority::TICKET_TRANSITION,
     authority::DEPLOY,
-    authority::TERMINAL,
 ];
 
 pub fn session_authority(

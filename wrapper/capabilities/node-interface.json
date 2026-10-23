@@ -17,7 +17,6 @@
     "allow-desktop-install-cli",
     "allow-desktop-restart-node",
     "allow-desktop-preferences",
-    "allow-desktop-set-preferences",
-    "allow-desktop-open-opencode"
+    "allow-desktop-set-preferences"
   ]
 }

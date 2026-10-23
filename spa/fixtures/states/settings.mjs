@@ -11,11 +11,11 @@ const PEER = '4b8e2d90c1f6a35720e9d4b8a1c5f3e7d0b6a2c8e4f1d7b3a9c5e0f2d8b4a6c1'
 const GONE = 'c27d90e1b4a6f3582d0c9e7b1a4f6d3c8e2b5a9f0d7c4e1b6a3f8d2c5e9b0a7d'
 
 const MODELS = [
-  { value: 'anthropic/sonnet', name: 'Claude Sonnet', harnesses: ['claude', 'opencode'] },
-  { value: 'anthropic/opus', name: 'Claude Opus', harnesses: ['claude', 'opencode'] },
-  { value: 'anthropic/haiku', name: 'Claude Haiku', harnesses: ['claude', 'opencode'] },
-  { value: 'openrouter/qwen3-coder', name: 'Qwen3 Coder (OpenRouter)', harnesses: ['opencode'] },
-  { value: 'openrouter/deepseek-v3', name: 'DeepSeek V3 (OpenRouter)', harnesses: ['opencode'] },
+  { value: 'anthropic/sonnet', name: 'Claude Sonnet', harnesses: ['claude'] },
+  { value: 'anthropic/opus', name: 'Claude Opus', harnesses: ['claude'] },
+  { value: 'anthropic/haiku', name: 'Claude Haiku', harnesses: ['claude'] },
+  { value: 'openrouter/qwen3-coder', name: 'Qwen3 Coder (OpenRouter)', harnesses: ['native'] },
+  { value: 'openrouter/deepseek-v3', name: 'DeepSeek V3 (OpenRouter)', harnesses: ['native'] },
 ]
 
 const P_ANTHROPIC = {
@@ -88,7 +88,7 @@ const PROVIDERS = [P_ANTHROPIC, P_CODEX, P_OPENROUTER, P_OPENAI_FAILED]
 
 const HARNESSES = [
   { id: 'claude', pinned: '2.5.0', found: '2.5.0', mismatch: false, default: true, image: 'localhost/tracon-claude:2.5.0', image_state: 'current' },
-  { id: 'opencode', pinned: '1.4.2', found: '1.4.2', mismatch: false, default: false, image: 'localhost/tracon-opencode:1.4.2', image_state: 'stale' },
+  { id: 'native', pinned: '0.35.0', found: '0.35.0', mismatch: false, default: false, image: 'localhost/tracon-harness-native', image_state: 'stale' },
 ]
 
 const selfNode = (over = {}) => ({
@@ -198,7 +198,6 @@ const CONFIG = {
   publish: { gh: '', glab: '', git: '' },
   boundary: { podman: '' },
   external: { enabled: true },
-  launch: { plugins: [] },
   providers: {
     anthropic: {
       shape: 'anthropic',
@@ -340,7 +339,7 @@ const compat = (over = {}) => ({
   found: '2.5.0',
   harnesses: [
     { id: 'claude', default: true, runtime: 'compatible', pinned: '2.5.0', found: '2.5.0', image: null, image_state: 'current' },
-    { id: 'opencode', default: false, runtime: 'compatible', pinned: '1.4.2', found: '1.4.2', image: null, image_state: 'stale' },
+    { id: 'native', default: false, runtime: 'compatible', pinned: '0.35.0', found: '0.35.0', image: null, image_state: 'stale' },
   ],
   checked_at_ms: -60000,
   models: { state: 'offered', offered: 5 },
@@ -564,7 +563,7 @@ const MANIFEST = {
     { channel: 'personal', kind: 'agent', name: 'reviewer', source: '/home/op/skills/agents/reviewer.md', digest: 'c40e88a1d2f3', body: '', warnings: ['names a tool the harness does not offer: WebFetch'], imported_ms: -86400000 },
     { channel: 'personal', kind: 'instruction', name: 'house-style', source: '', digest: '', body: 'Prefer small commits with conventional-commit subjects. Ask before adding a dependency. Run `just check` before submitting a review.', warnings: [], imported_ms: -3600000 },
   ],
-  recorded: { channel: 'personal', revision: 6, digest: '4e1d0c9b8a7f6e5d', skills: [], instructions: [], agents: [], plugins: [], lsp: [], formatters: [], providers: [], policy_revision: 'v12' },
+  recorded: { channel: 'personal', revision: 6, digest: '4e1d0c9b8a7f6e5d', skills: [], instructions: [], agents: [], providers: [], policy_revision: 'v12' },
   next: {
     channel: 'personal',
     revision: 7,
@@ -572,14 +571,10 @@ const MANIFEST = {
     skills: [{ name: 'release-notes', description: 'Draft release notes from merged PRs', source: '/home/op/skills/release-notes', digest: '9f2c1a7e44b0' }],
     instructions: [{ name: 'house-style', body: '…' }],
     agents: [{ name: 'reviewer', body: '…' }],
-    plugins: [],
-    lsp: [{ name: 'rust-analyzer', command: ['rust-analyzer'] }, { name: 'typescript', command: ['typescript-language-server', '--stdio'] }],
-    formatters: [{ name: 'rustfmt', command: ['rustfmt'] }, { name: 'prettier', command: ['prettier'] }],
     providers: ['anthropic', 'openrouter'],
     policy_revision: 'v12',
   },
   error: null,
-  baked_plugins: ['@tracon/opencode-orientation'],
 }
 
 const TRANSFERS = {
@@ -867,7 +862,7 @@ export default [
     over: {
       '/api/nodes': [selfNode({ models: [], providers: [] }), peerNode({ models: [] })],
       '/api/channels': CHANNELS.slice(0, 2),
-      '/api/manifest': { ...MANIFEST, items: [], next: { ...MANIFEST.next, lsp: [], formatters: [] }, recorded: null, baked_plugins: [] },
+      '/api/manifest': { ...MANIFEST, items: [], recorded: null },
     },
   }),
   S('channels-manifest-refused', '/settings#channels', 'Channels: manifest that will not build', {
@@ -1139,7 +1134,7 @@ export default [
   // --- System and Access (Maintenance was split between them) -----------------
   // The ids keep their old `maintenance` names so the audit history lines up.
   S('maintenance', '/settings#system', 'System: configuration, boundary, service, harnesses, storage, data', {
-    note: 'Two harnesses (opencode image stale), capabilities (restart unavailable), runtime storage and the data inventory. The session transfer inbox is on Sessions now (docs-transfer-inbox).',
+    note: 'Two harnesses (native image stale), capabilities (restart unavailable), runtime storage and the data inventory. The session transfer inbox is on Sessions now (docs-transfer-inbox).',
   }),
   S('access', '/settings#access', 'Access & devices: operator token, administrator access, devices, your own harness', {
     note: 'What was the top and the tail of Maintenance (operator access, external harness MCP lines per channel) with Devices & notifications between.',

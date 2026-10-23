@@ -470,7 +470,6 @@ const settingsSupport = {
     publish: { gh: '', glab: '', git: '' },
     boundary: { podman: '' },
     external: { enabled: true },
-    launch: { plugins: [] },
     providers: {},
     readonly: { hub_url: 'https://hub.example.net', runtime: 'podman', config_path: '/home/op/.config/tracon/node.toml' },
     running: { harness_id: 'claude', harness_version: '2.5.0', node_name: 'laptop' },

@@ -225,10 +225,7 @@ async fn every_session_holds_its_own_grant_whatever_its_harness() {
     }
     let repo = repo();
 
-    for (model, harness) in [
-        ("anthropic/claude-x", "claude"),
-        ("openai/gpt-x", "opencode"),
-    ] {
+    for (model, harness) in [("anthropic/claude-x", "claude"), ("openai/gpt-x", "native")] {
         let session = manager
             .create(spec(&repo, model))
             .await

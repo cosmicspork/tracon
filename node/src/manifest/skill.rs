@@ -1,10 +1,9 @@
 //! Importing a skill package into storage the node owns.
 //!
 //! A skill is a directory with a `SKILL.md` at its root and whatever assets
-//! and scripts it ships beside it. Upstream discovers such directories from
-//! six places, follows symlinks in all of them, applies no depth or size
-//! limit, and fetches `skills.urls` over the network before any interaction
-//! (`config-state.md` §3.1–§3.6). The node does none of that. It reads one
+//! and scripts it ships beside it. A harness left to itself discovers such
+//! directories from several places, follows symlinks, and applies no depth or
+//! size limit. The node does none of that. It reads one
 //! package that an operator named, validates every path in it, copies the
 //! bytes into its own storage, and renders exactly that at launch.
 //!
@@ -22,19 +21,18 @@ use sha2::{Digest, Sha256};
 use super::{ManifestError, ManifestFile, SkillEntry};
 
 /// The warning every import records. Skill *content* is executable: a
-/// `SKILL.md` body is registered as a slash command and command templates are
-/// shell-interpolated, so a body carrying `` !`cmd` `` runs a shell on
-/// `/<name>` without reaching the `skill` permission check
-/// (`config-state.md` §3.7). Scripts beside it are listed by the skill tool
-/// and run by the harness's own `bash`, under the gate like any other command.
+/// harness may register a `SKILL.md` body as a slash command whose template
+/// is shell-interpolated, so a body carrying `` !`cmd` `` can run a shell
+/// without reaching the `skill` permission check. Scripts beside it run by
+/// the harness's own shell tool, under the gate like any other command.
 pub const CODE_WARNING: &str = "Skill content is code: its scripts run inside the runner under \
-                                the gate, and its body is also registered as a slash command \
-                                whose template OpenCode shell-interpolates. Import only packages \
-                                you would run yourself.";
+                                the gate, and a harness may register its body as a slash command \
+                                whose template is shell-interpolated. Import only packages you \
+                                would run yourself.";
 
 /// Bounds. A skill package is documentation and a script or two; anything
 /// past these is a mistake worth reporting rather than a package worth
-/// mounting. Upstream applies no limit of any kind.
+/// mounting.
 const MAX_FILES: usize = 64;
 const MAX_FILE_BYTES: usize = 256 * 1024;
 const MAX_TOTAL_BYTES: usize = 1024 * 1024;
@@ -182,12 +180,11 @@ pub fn read_package(source: &SkillSource) -> Result<SkillEntry, ManifestError> {
     let (name, description) = frontmatter(&body.text)?;
     validate_name(&name)?;
     if description.contains('<') || description.contains('>') {
-        // `name` and `description` are interpolated into the system prompt
-        // without HTML escaping (`config-state.md` §3.7); `location` is the
-        // only field that is escaped.
+        // `name` and `description` are interpolated into a harness's system
+        // prompt without escaping.
         return Err(ManifestError::Skill(format!(
-            "the description of `{name}` contains markup. OpenCode writes a skill's name \
-             and description into the system prompt without escaping them, so angle \
+            "the description of `{name}` contains markup. A harness writes a skill's name \
+             and description into its system prompt without escaping them, so angle \
              brackets there are an injection channel."
         )));
     }
@@ -196,8 +193,8 @@ pub fn read_package(source: &SkillSource) -> Result<SkillEntry, ManifestError> {
     for file in &files {
         if file.text.contains("!`") {
             warnings.push(format!(
-                "`{}` contains shell interpolation (!`…`). OpenCode registers a skill as a \
-                 slash command and interpolates its template, so this executes on \
+                "`{}` contains shell interpolation (!`…`). A harness that registers a skill as \
+                 a slash command interpolates its template, so this can execute on \
                  /{name} on a path that never reaches the skill permission check.",
                 file.path
             ));
@@ -409,11 +406,9 @@ fn read_git(repo: &Path, commit: &str, prefix: &str) -> Result<Vec<ManifestFile>
     Ok(files)
 }
 
-/// `name` and `description` out of the YAML frontmatter. Upstream accepts
-/// only those two fields and validates nothing else (`config-state.md` §3.1);
-/// this reads the same two and refuses a file without them rather than
-/// inferring a name from the directory, which is a v2 behaviour the pinned v1
-/// does not have.
+/// `name` and `description` out of the YAML frontmatter. This reads those
+/// two and refuses a file without them rather than inferring a name from the
+/// directory.
 pub(super) fn frontmatter(text: &str) -> Result<(String, String), ManifestError> {
     let body = text
         .strip_prefix("---\n")

@@ -1567,8 +1567,8 @@ budget_tokens = 5    # small on purpose
 default_channel = "work"
 
 [harness]
-# OpenCode until Claude is set up.
-id = "opencode"
+# The native harness until Claude is set up.
+id = "native"
 
 [[repo]]
 # The blog builds with Zola.
@@ -1606,7 +1606,7 @@ checks = []
             "# This node's configuration. Hand-written.",
             "# what the mesh calls it",
             "# Sessions get more room here.",
-            "# OpenCode until Claude is set up.",
+            "# The native harness until Claude is set up.",
             "# The blog builds with Zola.",
             "# releases come from GitHub",
             "# small on purpose",
@@ -1756,7 +1756,7 @@ checks = []
             &store,
             &[
                 set("session.budget_tokens", 5_i64),
-                set("harness.id", "opencode"),
+                set("harness.id", "native"),
             ],
             None,
             "test",
@@ -1811,7 +1811,7 @@ checks = []
         assert_eq!(
             row.changes,
             serde_json::json!([
-                { "key": "harness.id", "before": "opencode", "after": "claude" },
+                { "key": "harness.id", "before": "native", "after": "claude" },
                 { "key": "repo[1].timeout_secs", "before": null, "after": 60 },
             ])
         );

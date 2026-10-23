@@ -53,14 +53,7 @@ self.addEventListener('fetch', (event) => {
   // The node's API and its event stream are never cached and never even
   // intercepted: what is waiting on you is worth nothing if it is stale, and
   // wrapping an endless SSE response in a fetch handler breaks it outright.
-  //
-  // `/boot` is here for the same reason and one more. It is the OpenCode UI
-  // origin's bootstrap exchange — a different origin, so the check above has
-  // already let it past — but a node reached at some other address, or a
-  // future same-origin spelling of it, must never find a cached answer: the
-  // token it carries is single-use, and a replayed response would be a
-  // capability the node has already spent. Named rather than assumed.
-  if (url.pathname.startsWith('/api/') || url.pathname === '/boot') return
+  if (url.pathname.startsWith('/api/')) return
 
   // Build assets carry a content hash, so a hit is always correct.
   if (url.pathname.startsWith('/assets/')) {

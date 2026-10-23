@@ -4,8 +4,7 @@
 //! field in it was derived from something the node already knew — the wired
 //! providers, the permission ruleset, the MCP entry. Customization is the part
 //! an operator decides: which skills a session may call, what standing
-//! instructions it starts with, which agents it may spawn, which plugins the
-//! image is allowed to load, which language servers and formatters are on.
+//! instructions it starts with, which agents it may spawn.
 //!
 //! Three properties make that safe to hand to a harness, and they are the
 //! reason this is a node-owned object rather than a directory the harness
@@ -18,18 +17,14 @@
 //!   manifest mints a new revision and never touches a running session: the
 //!   files were staged at launch and the next launch is what picks the change
 //!   up.
-//! * **Upstream's own resolution is not trusted.** OpenCode warns and then
-//!   overwrites on a duplicate skill name, and which of the two wins varies
-//!   run to run (`config-state.md` §3.4). It fetches `skills.urls` over plain
-//!   HTTP before any user interaction, with no path-traversal hardening on the
-//!   v1 path and nothing that disables it (§3.6). So duplicates are refused
-//!   here, at build time, and a URL source is refused outright — the node
+//! * **A harness's own resolution is not trusted.** A duplicate skill name
+//!   is refused here, at build time, rather than left to whichever copy a
+//!   harness happens to load, and a URL source is refused outright — the node
 //!   copies a package it has read into storage it owns, and the harness is
 //!   pointed at that and nothing else.
-//! * **Skill content is code.** A `SKILL.md` body is also registered as a
-//!   slash command, and command templates are shell-interpolated: a body
-//!   containing `` !`cmd` `` becomes shell execution on `/name`, on a path
-//!   that never reaches the `skill` permission check (§3.7). Nothing here
+//! * **Skill content is code.** A skill's scripts run in the runner, and a
+//!   body carrying shell interpolation (`` !`cmd` ``) can become shell
+//!   execution in a harness that registers skills as commands. Nothing here
 //!   pretends otherwise. An import records that its scripts run in the runner,
 //!   and a body that already carries shell interpolation says so by name.
 
@@ -43,8 +38,8 @@ use sha2::{Digest, Sha256};
 pub use skill::{parse_source, read_package, SkillSource};
 
 /// The directory the rendered skill packages sit under, relative to wherever
-/// the adapter stages them: one `<name>/` per skill, the layout OpenCode
-/// discovers as `skills/**/SKILL.md` in its global config directory.
+/// the adapter stages them: one `<name>/` per skill, the layout Claude Code
+/// discovers as `skills/**/SKILL.md` in its config directory.
 pub const SKILL_DIR: &str = "skills";
 
 /// Where a built-in skill says it came from: the node itself, so an operator
@@ -94,94 +89,21 @@ pub fn with_builtins(mut skills: Vec<SkillEntry>) -> Vec<SkillEntry> {
     skills
 }
 
-/// The shape of the image's offline package cache, relative to
-/// `$XDG_CACHE_HOME/opencode`. A pure existence check at this path is the
-/// whole of OpenCode's offline resolution — no version verification, no
-/// registry contact (`config-state.md` §4.4) — so the image that creates it is
-/// the trust root and the manifest may name nothing else.
-pub fn plugin_cache_path(package: &str) -> String {
-    let (name, _) = split_package(package).unwrap_or((package, ""));
-    format!("packages/{package}/node_modules/{name}")
-}
-
-/// `@scope/pkg@1.2.3` → `("@scope/pkg", "1.2.3")`. A bare name has no version
-/// and is refused: `<pkg>@latest` resolves against whatever the image happened
-/// to bake, which is not a pin.
-fn split_package(package: &str) -> Option<(&str, &str)> {
-    let at = package.rfind('@').filter(|at| *at > 0)?;
-    let (name, version) = package.split_at(at);
-    let version = &version[1..];
-    if name.is_empty() || version.is_empty() {
-        return None;
-    }
-    Some((name, version))
-}
-
-/// The language servers the harness image's toolchain profile bakes, in the
-/// shape the manifest records them.
-///
-/// The manifest does not choose these and does not render them — the profile
-/// writes the harness's `lsp` key, because only the image knows the paths.
-/// What the manifest adds is memory: the names and commands go into the
-/// digest, so a session's row still says which toolchain produced its
-/// transcript after the profile has moved on.
-pub fn toolchain_lsp(harness_id: &str) -> Vec<ToolEntry> {
-    if harness_id != crate::adapter::opencode::OpenCodeAdapter::ID {
-        return Vec::new();
-    }
-    crate::runner::toolchain::profile()
-        .lsp
-        .iter()
-        .map(|tool| ToolEntry {
-            name: tool.id.clone(),
-            command: tool.argv(),
-        })
-        .collect()
-}
-
-/// The same for formatters.
-pub fn toolchain_formatters(harness_id: &str) -> Vec<ToolEntry> {
-    if harness_id != crate::adapter::opencode::OpenCodeAdapter::ID {
-        return Vec::new();
-    }
-    crate::runner::toolchain::profile()
-        .formatter
-        .iter()
-        .map(|tool| ToolEntry {
-            name: tool.id.clone(),
-            command: tool.argv(),
-        })
-        .collect()
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
-    /// Upstream warns and overwrites nondeterministically; the node refuses.
+    /// Which of two same-named skills a harness loads is not the node's to
+    /// leave to chance; it refuses the pair.
     #[error(
-        "two skills in this manifest are named `{0}`; OpenCode resolves a duplicate by \
-         overwriting one of them and which one wins varies run to run, so the manifest \
-         refuses it. Rename or remove one before importing."
+        "two skills in this manifest are named `{0}`, and which one a session would load is \
+         not something the manifest leaves to chance. Rename or remove one before importing."
     )]
     DuplicateSkill(String),
     #[error(
-        "`{0}` is a URL skill source. OpenCode fetches `skills.urls` over plain HTTP before \
-         any interaction, with no flag that disables it and no path-traversal hardening on \
-         the version this node pins. Import the package from a directory or a git revision \
-         instead: the node copies what it has read into storage it owns."
+        "`{0}` is a URL skill source. Import the package from a directory or a git revision \
+         instead: the node copies what it has read into storage it owns, and a session never \
+         fetches a skill itself."
     )]
     UrlSource(String),
-    #[error(
-        "plugin `{name}` is not in this image's offline package cache. The image bakes \
-         `$XDG_CACHE_HOME/opencode/{cache}`, and a name it did not bake would either \
-         resolve to nothing or send the runner to a registry it cannot reach. Add it to \
-         the harness image and to `[launch] plugins` in node.toml, then rebuild."
-    )]
-    UnapprovedPlugin { name: String, cache: String },
-    #[error(
-        "plugin `{0}` has no exact version. Name it `<package>@<version>`: a bare name \
-         resolves to whatever the image happened to bake, which is not a pin."
-    )]
-    UnpinnedPlugin(String),
     #[error("{0}")]
     Skill(String),
     #[error("io: {0}")]
@@ -212,20 +134,6 @@ pub struct SkillEntry {
     pub files: Vec<ManifestFile>,
 }
 
-/// A language server or formatter the image's toolchain profile bakes:
-/// OpenCode's own name for it, and the absolute command the image installed
-/// it at.
-///
-/// The command travels with the name because it is what distinguishes two
-/// otherwise identical launches: the same `rust` server at another path is a
-/// different toolchain, and a digest that could not tell them apart would say
-/// less than it appears to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolEntry {
-    pub name: String,
-    pub command: Vec<String>,
-}
-
 /// A standing instruction or an agent definition: text the node owns and the
 /// session is told, rather than a file in the worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,18 +161,6 @@ pub struct LaunchManifest {
     pub instructions: Vec<TextEntry>,
     #[serde(default)]
     pub agents: Vec<TextEntry>,
-    /// Approved plugin packages, `<pkg>@<version>`, every one of them present
-    /// in the image's offline cache.
-    #[serde(default)]
-    pub plugins: Vec<String>,
-    /// The language servers the harness image's toolchain profile bakes, as
-    /// this launch was configured with them. Recorded rather than rendered:
-    /// the profile writes the harness's `lsp` key, and this is what makes the
-    /// session's digest say which toolchain produced its transcript.
-    #[serde(default)]
-    pub lsp: Vec<ToolEntry>,
-    #[serde(default)]
-    pub formatters: Vec<ToolEntry>,
     /// The providers this channel could actually spend on when the manifest
     /// was built. Part of the digest because a session launched against a
     /// different provider set is a different session.
@@ -283,22 +179,13 @@ pub struct Inputs<'a> {
     pub skills: Vec<SkillEntry>,
     pub instructions: Vec<TextEntry>,
     pub agents: Vec<TextEntry>,
-    /// Plugin packages the operator approved.
-    pub plugins: &'a [String],
-    /// Packages the harness image's offline cache contains, read from the
-    /// image's own toolchain profile. The only seam where the node's approval
-    /// and the image's contents have to agree.
-    pub baked: &'a [String],
-    pub lsp: Vec<ToolEntry>,
-    pub formatters: Vec<ToolEntry>,
     pub providers: Vec<String>,
     pub policy_revision: String,
 }
 
 /// Build and validate. Every refusal here is a refusal *before* a session
 /// exists: a manifest that would have been resolved nondeterministically, or
-/// fetched over the network, or pointed at a package the image cannot
-/// resolve, never reaches a launch.
+/// fetched over the network, never reaches a launch.
 pub fn build(inputs: Inputs<'_>) -> Result<LaunchManifest, ManifestError> {
     let mut seen = BTreeSet::new();
     for entry in &inputs.skills {
@@ -310,19 +197,6 @@ pub fn build(inputs: Inputs<'_>) -> Result<LaunchManifest, ManifestError> {
         }
     }
 
-    let baked: BTreeSet<&str> = inputs.baked.iter().map(String::as_str).collect();
-    for plugin in inputs.plugins {
-        if split_package(plugin).is_none() {
-            return Err(ManifestError::UnpinnedPlugin(plugin.clone()));
-        }
-        if !baked.contains(plugin.as_str()) {
-            return Err(ManifestError::UnapprovedPlugin {
-                name: plugin.clone(),
-                cache: plugin_cache_path(plugin),
-            });
-        }
-    }
-
     let mut manifest = LaunchManifest {
         channel: inputs.channel.to_string(),
         revision: 0,
@@ -330,9 +204,6 @@ pub fn build(inputs: Inputs<'_>) -> Result<LaunchManifest, ManifestError> {
         skills: inputs.skills,
         instructions: inputs.instructions,
         agents: inputs.agents,
-        plugins: inputs.plugins.to_vec(),
-        lsp: inputs.lsp,
-        formatters: inputs.formatters,
         providers: inputs.providers,
         policy_revision: inputs.policy_revision,
     };
@@ -341,9 +212,6 @@ pub fn build(inputs: Inputs<'_>) -> Result<LaunchManifest, ManifestError> {
     manifest.skills.sort_by(|a, b| a.name.cmp(&b.name));
     manifest.instructions.sort_by(|a, b| a.name.cmp(&b.name));
     manifest.agents.sort_by(|a, b| a.name.cmp(&b.name));
-    manifest.plugins.sort();
-    manifest.lsp.sort_by(|a, b| a.name.cmp(&b.name));
-    manifest.formatters.sort_by(|a, b| a.name.cmp(&b.name));
     manifest.providers.sort();
     manifest.digest = manifest.compute_digest();
     Ok(manifest)
@@ -380,17 +248,6 @@ impl LaunchManifest {
             line("agent.name", &entry.name);
             line("agent.body", &entry.body);
         }
-        for plugin in &self.plugins {
-            line("plugin", plugin);
-        }
-        for entry in &self.lsp {
-            line("lsp", &entry.name);
-            line("lsp.command", &entry.command.join(" "));
-        }
-        for entry in &self.formatters {
-            line("formatter", &entry.name);
-            line("formatter.command", &entry.command.join(" "));
-        }
         for name in &self.providers {
             line("provider", name);
         }
@@ -400,8 +257,7 @@ impl LaunchManifest {
 
     /// The skill packages as files to stage, relative to the harness's state
     /// directory. Each one is mounted read-only; the harness reads them and
-    /// writes nothing back (`config-state.md` §3.5 — loading is glob, read,
-    /// parse, with no lock and no index).
+    /// writes nothing back.
     pub fn skill_files(&self) -> Vec<(String, String)> {
         let mut files = Vec::new();
         for skill in &self.skills {
@@ -420,11 +276,9 @@ impl LaunchManifest {
     /// because a session that cannot tell the node's account of itself from a
     /// human's standing advice cannot weigh either one correctly.
     ///
-    /// Instructions are *not* written into the harness's `instructions` config
-    /// key. That key takes globs resolved against the project and re-rooted
-    /// when the project is disabled (`config-state.md` §1.4); the node already
-    /// owns one place a session's standing text goes, and two would be one too
-    /// many. Instruction content grants no permission here either — it is
+    /// Instructions are not written into any harness configuration: the node
+    /// already owns one place a session's standing text goes, and two would be
+    /// one too many. Instruction content grants no permission either — it is
     /// text, and every tool class is still `ask`.
     pub fn operator_notes(&self) -> String {
         if self.instructions.is_empty() {
@@ -502,10 +356,6 @@ mod tests {
             skills,
             instructions: Vec::new(),
             agents: Vec::new(),
-            plugins: &[],
-            baked: &[],
-            lsp: Vec::new(),
-            formatters: Vec::new(),
             providers: vec!["anthropic".into()],
             policy_revision: "3".into(),
         }
@@ -547,9 +397,9 @@ mod tests {
         let error = build(inputs(vec![skill("alpha", "a"), skill("alpha", "b")]))
             .expect_err("a duplicate must not build");
         assert!(matches!(error, ManifestError::DuplicateSkill(ref n) if n == "alpha"));
-        // The message has to say why, because upstream's own behaviour is to
-        // accept it: an operator who sees "refused" needs the reason.
-        assert!(error.to_string().contains("overwriting"), "{error}");
+        // The message has to say why: an operator who sees "refused" needs
+        // the reason.
+        assert!(error.to_string().contains("leaves to chance"), "{error}");
     }
 
     #[test]
@@ -570,48 +420,6 @@ mod tests {
     /// is the whole of upstream's offline resolution, so a name the image did
     /// not bake is refused here rather than discovered as a missing module
     /// inside a runner with no network.
-    #[test]
-    fn a_plugin_the_image_did_not_bake_is_refused_with_the_cache_path() {
-        let approved = ["@tracon/audit@1.0.0".to_string()];
-        let mut bad = inputs(Vec::new());
-        bad.plugins = &approved;
-        let error = build(bad).expect_err("an unbaked plugin must not build");
-        assert!(
-            error
-                .to_string()
-                .contains("packages/@tracon/audit@1.0.0/node_modules/@tracon/audit"),
-            "{error}"
-        );
-
-        let mut good = inputs(Vec::new());
-        good.plugins = &approved;
-        let baked = ["@tracon/audit@1.0.0".to_string()];
-        good.baked = &baked;
-        assert_eq!(build(good).unwrap().plugins, approved);
-    }
-
-    #[test]
-    fn a_plugin_without_an_exact_version_is_refused() {
-        let approved = ["@tracon/audit".to_string()];
-        let mut unpinned = inputs(Vec::new());
-        unpinned.plugins = &approved;
-        unpinned.baked = &approved;
-        let error = build(unpinned).expect_err("a bare name is not a pin");
-        assert!(matches!(error, ManifestError::UnpinnedPlugin(_)), "{error}");
-    }
-
-    #[test]
-    fn the_cache_path_is_the_shape_the_image_bakes() {
-        assert_eq!(
-            plugin_cache_path("@tracon/audit@1.0.0"),
-            "packages/@tracon/audit@1.0.0/node_modules/@tracon/audit"
-        );
-        assert_eq!(
-            plugin_cache_path("plain@2.3.4"),
-            "packages/plain@2.3.4/node_modules/plain"
-        );
-    }
-
     #[test]
     fn skills_render_under_one_root_named_by_skill() {
         let manifest = build(inputs(vec![skill("alpha", "a"), skill("beta", "b")])).unwrap();

@@ -1,6 +1,5 @@
 //! A session's harness follows the credential its model spends: an Anthropic
-//! subscription runs on Claude Code only, every other provider on OpenCode,
-//! and an Anthropic API key on either, where `[harness] id` breaks the tie.
+//! credential runs on Claude Code, and every other provider on tracon-agent.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -231,12 +230,12 @@ fn spec(model: &str, harness: Option<&str>) -> NewSession {
 #[tokio::test]
 async fn the_credential_picks_the_harness_whatever_the_node_default() {
     state::isolate();
-    for default in ["opencode", "claude"] {
+    for default in ["native", "claude"] {
         let node = node(default).await;
         for (model, harness, source) in [
             ("anthropic/claude-x", "claude", "credential"),
-            ("openai/gpt-x", "opencode", "credential"),
-            ("anthropic-key/claude-x", default, "node_default"),
+            ("openai/gpt-x", "native", "credential"),
+            ("anthropic-key/claude-x", "claude", "credential"),
         ] {
             let (status, body) = node.start(model, None).await;
             assert_eq!(status, StatusCode::CREATED, "{default}, {model}: {body}");
@@ -254,9 +253,14 @@ async fn the_credential_picks_the_harness_whatever_the_node_default() {
 #[tokio::test]
 async fn naming_a_harness_the_credential_cannot_run_on_is_refused() {
     state::isolate();
-    let node = node("opencode").await;
+    let node = node("native").await;
     for (model, harness, reason) in [
-        ("anthropic/claude-x", "opencode", "extra usage"),
+        ("anthropic/claude-x", "native", "extra usage"),
+        (
+            "anthropic-key/claude-x",
+            "native",
+            "does not run Anthropic models",
+        ),
         ("openai/gpt-x", "claude", "Anthropic models only"),
     ] {
         let refused = node
@@ -271,7 +275,7 @@ async fn naming_a_harness_the_credential_cannot_run_on_is_refused() {
     }
     assert!(node.store.list_sessions(None).unwrap().is_empty());
 
-    // Named and compatible: an Anthropic API key runs on whichever is asked.
+    // Named and compatible: the harness asked for runs it.
     let (status, body) = node.start("anthropic-key/claude-x", Some("claude")).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["harness_id"], "claude");
@@ -280,11 +284,11 @@ async fn naming_a_harness_the_credential_cannot_run_on_is_refused() {
 #[tokio::test]
 async fn the_picker_learns_which_harnesses_each_model_runs_on() {
     state::isolate();
-    let node = node("opencode").await;
+    let node = node("native").await;
     for (model, harnesses) in [
         ("anthropic/claude-x", vec!["claude"]),
-        ("anthropic-key/claude-x", vec!["opencode", "claude"]),
-        ("openai/gpt-x", vec!["opencode"]),
+        ("anthropic-key/claude-x", vec!["claude"]),
+        ("openai/gpt-x", vec!["native"]),
         ("sonnet", vec!["claude"]),
         ("elsewhere/m", vec![]),
     ] {
@@ -296,7 +300,7 @@ async fn the_picker_learns_which_harnesses_each_model_runs_on() {
 #[tokio::test]
 async fn compose_runs_on_the_harness_the_operator_chose() {
     state::isolate();
-    let node = node("opencode").await;
+    let node = node("native").await;
     let response = node
         .app
         .clone()
@@ -335,11 +339,11 @@ async fn compose_runs_on_the_harness_the_operator_chose() {
 #[tokio::test]
 async fn a_mismatched_harness_blocks_only_its_own_sessions() {
     state::isolate();
-    let node = node("opencode").await;
+    let node = node("native").await;
     let mut row = node.store.get_node("n1").unwrap().unwrap();
     row.harnesses_json = Some(
         json!([
-            {"id": "opencode", "pinned": "1.0.0", "found": "1.0.0", "default": true},
+            {"id": "native", "pinned": "1.0.0", "found": "1.0.0", "default": true},
             {"id": "claude", "pinned": "2.0.0", "found": "1.9.0"},
         ])
         .to_string(),
@@ -356,5 +360,5 @@ async fn a_mismatched_harness_blocks_only_its_own_sessions() {
 
     let (status, body) = node.start("openai/gpt-x", None).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(body["harness_id"], "opencode");
+    assert_eq!(body["harness_id"], "native");
 }
