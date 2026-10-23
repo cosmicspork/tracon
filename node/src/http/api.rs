@@ -310,10 +310,13 @@ pub async fn list_nodes(
 pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let mut out = Vec::new();
     let rows = s.store().channel_list()?;
+    // What an external submission's trigger defaults to on this node.
+    let external_checks = s.cfg.external.run_checks;
     if rows.is_empty() {
         for name in DEFAULT_CHANNELS.iter().copied() {
             let ceiling = crate::metrics::ceiling(s.store(), &json!({}), name);
-            let review_trigger = crate::mcp::review::ReviewerBinding::of(&json!({})).view();
+            let review_trigger =
+                crate::mcp::review::ReviewerBinding::of(&json!({}), external_checks).view();
             out.push(json!({
                 "name": name, "nodes": [s.node_id], "bindings": {}, "ceiling": ceiling,
                 "review_trigger": review_trigger,
@@ -328,7 +331,8 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
             serde_json::from_str(&c.bindings_json).unwrap_or(json!({}));
         let ceiling = crate::metrics::ceiling(s.store(), &bindings, &c.name);
         // Defaults included, which the bindings leave out.
-        let review_trigger = crate::mcp::review::ReviewerBinding::of(&bindings).view();
+        let review_trigger =
+            crate::mcp::review::ReviewerBinding::of(&bindings, external_checks).view();
         out.push(json!({
             "name": c.name, "nodes": s.store().nodes_in_channel(&c.name)?,
             "review_trigger": review_trigger,

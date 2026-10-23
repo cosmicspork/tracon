@@ -2046,6 +2046,121 @@ async fn an_external_submission_of_a_commit_a_session_captured_first_gets_its_ch
     assert_eq!(node_runs[0].command.as_deref(), Some("test -f a.txt"));
 }
 
+/// With `[external] run_checks` on, a reviewer has the node's checks to go
+/// on, so an external submission on a channel that sets no trigger for it
+/// starts one on its own, once those checks are done.
+#[tokio::test]
+async fn a_node_that_checks_external_submissions_reviews_them_unless_told_not_to() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+        c.supervision.checks = vec![SLOW_CHECK.into()];
+    })
+    .await;
+    // A model, and no trigger at all.
+    bind_review_model(&f);
+    let v = submit_externally(&f, json!({})).await;
+    assert_eq!(v["review_session"]["trigger"], "auto", "{v}");
+    assert_eq!(v["review_session"]["state"], "starting", "{v}");
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let reviewer = reviewer_of(&f, &id).await;
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(checks[0]["ok"], true, "{checks}");
+    running_reviewer(&f, &reviewer).await;
+    let text = f
+        .store
+        .events_after(&reviewer, 0, 500)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "orientation")
+        .and_then(|e| e.payload["text"].as_str().map(str::to_string))
+        .expect("the reviewer was oriented");
+    assert!(
+        text.contains(&format!("- `{SLOW_CHECK}`: passed")),
+        "{text}"
+    );
+}
+
+/// The settings screen is told the default that applies on this node.
+#[tokio::test]
+async fn the_channels_say_external_submissions_start_a_reviewer_when_the_node_checks_them() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.run_checks = true;
+    })
+    .await;
+    bind_review_model(&f);
+    let (status, body) = f.call("GET", "/api/channels", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let work = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "work")
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(
+        work["review_trigger"],
+        json!({"session": "auto", "external": "auto", "model": "m/reviewer"}),
+        "{work}"
+    );
+}
+
+/// An explicit `external = "manual"` wins over that default: the checks
+/// still run, and the reviewer is the operator's to start.
+#[tokio::test]
+async fn an_explicit_manual_trigger_holds_even_when_the_node_checks_external_submissions() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+    })
+    .await;
+    bind_review(
+        &f,
+        json!({"model": "m/reviewer", "trigger": {"external": "manual"}}),
+    );
+    let v = submit_externally(&f, json!({})).await;
+    assert_eq!(v["review_session"]["trigger"], "manual", "{v}");
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(checks[0]["ok"], true, "{checks}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(review.review_session_id, None);
+    assert_eq!(
+        f.store.review_session_reason(&id).unwrap().as_deref(),
+        Some(tracon::mcp::review::MANUAL_REVIEW)
+    );
+}
+
+/// Without `run_checks` an external submission still waits for the
+/// operator: its reviewer would have only the diff.
+#[tokio::test]
+async fn an_external_submission_the_node_does_not_check_waits_for_the_operator() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    bind_review_model(&f);
+    let v = submit_externally(&f, json!({})).await;
+    assert_eq!(v["review_session"]["trigger"], "manual", "{v}");
+    assert_eq!(v["review_session"]["state"], "none", "{v}");
+    let id = v["review_id"].as_str().unwrap_or_else(|| panic!("{v}"));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        f.store.get_review(id).unwrap().unwrap().review_session_id,
+        None
+    );
+}
+
 /// A submission from the harness the operator runs: `f`'s branch and
 /// worktree, with `args` over the usual ones.
 async fn submit_externally(f: &Fixture, args: Value) -> Value {

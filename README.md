@@ -765,9 +765,13 @@ go on). Set it beside the review model in **Settings → Channels**, or:
 
 ```sh
 tracon channel bind work phases.review.trigger.session=auto      # the default
-tracon channel bind work phases.review.trigger.external=manual   # the default
+tracon channel bind work phases.review.trigger.external=manual   # the default, unless [external] run_checks
 tracon channel bind work phases.review.trigger=manual            # both at once
 ```
+
+With `[external] run_checks` on, an external submission's default is `auto`
+instead: the node runs the repository's checks on it, and the reviewer starts once
+they are done, with them to go on. A trigger the channel sets still wins.
 
 Under `auto`, each submission from that source, and each resubmission, starts a
 reviewer. Under `manual`, none starts on its own and the review says so; start one
@@ -1337,7 +1341,8 @@ max_files = 200
 enabled = false
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 run_checks = false                  # true: run the repository's checks on the node's copy of each submission,
-                                    # in its image, as evidence for the reviewer; never gates the submission
+                                    # in its image, as evidence for the reviewer; never gates the submission.
+                                    # Also makes `auto` the external review trigger where a channel sets none
 
 [docs]
 # export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/;
