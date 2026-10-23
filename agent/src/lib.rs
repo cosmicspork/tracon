@@ -4,9 +4,9 @@
 //! and runs inside the boundary in the same trust position as `claude` or
 //! `opencode`. It holds no credential, catalogue or settings store.
 //!
-//! Phase 0 is a standalone spike: the model loop, one wire encoder (OpenAI
-//! Chat Completions, which llama.cpp speaks) and six in-boundary tools, with no
-//! node and no permission gate. See `plan-tracon-native-harness`.
+//! The model loop, two wire encoders (OpenAI Chat Completions for llama.cpp,
+//! the Responses API for the Codex backend) and six in-boundary tools, driven by
+//! the node over ACP or run `--standalone`. See `agent/README.md`.
 
 pub mod agent;
 pub mod compact;

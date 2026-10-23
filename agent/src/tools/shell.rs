@@ -1,5 +1,5 @@
-//! `sh -c` with piped output. The plan's PTY and the node's open/byte-count
-//! ledger arrive with the node in Phase 1; standalone, a pipe is enough.
+//! `sh -c` with piped output, its tail streamed to the node while it runs. Not
+//! a PTY: none has been needed yet (agent/README.md, Not built).
 
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};

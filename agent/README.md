@@ -1,11 +1,13 @@
 # tracon-agent
 
 The harness tracon owns, for models that are not Claude: local llama.cpp over Chat
-Completions, and the Codex subscription over the Responses API. It is a separate binary that runs inside the boundary, like
-`claude`. The node supervises it and does no reasoning of its own. The plan is
-`plan-tracon-native-harness` on the personal channel.
+Completions, and the Codex subscription over the Responses API. It is a separate binary
+that runs inside the boundary, like `claude`. The node supervises it and does no reasoning
+of its own.
 
-**Status: Phase 1, experimental.** It has two modes:
+**Status: experimental.** Everything planned for it has landed (#602–#624); it stays
+experimental until it has done a week of real work (`docs/ROADMAP.md`, *The native
+harness*). It has two modes:
 
 - **Protocol mode** (the default). The node drives it over stdin and stdout and answers a
   permission request for every tool call. The node's adapter is `node/src/adapter/native.rs`.
@@ -22,7 +24,7 @@ stdin and stdout carry newline-delimited JSON-RPC 2.0, using the vocabulary in t
 | `initialize` | node → agent | Protocol version (1), agent info, and `agentCapabilities.loadSession` when sessions are journaled. |
 | `session/new` | node → agent | The session's `cwd`, and the `mcpServers` whose tools join the six built-in ones. Answers with a new session id (a UUID). |
 | `session/load` | node → agent | Carries on a journaled session in this process: the same `sessionId`, `cwd` and `mcpServers`. |
-| `session/prompt` | node → agent | Runs a turn. Answers with `stopReason` (`end_turn`, `max_turn_requests` or `cancelled`) and the turn's `usage`. |
+| `session/prompt` | node → agent | Runs a turn. Answers with `stopReason` (`end_turn`, `max_turn_requests` or `cancelled`) and the turn's `usage`. Under the node a turn has no request cap, so `max_turn_requests` comes only from an explicit `--max-turns`: the session budget, enforced at the gateway mid-turn, cancel and the operator bound it. |
 | `session/cancel` | node → agent (notification) | Ends the running turn. |
 | `session/close` | node → agent | Ends the session. |
 | `session/update` | agent → node (notification) | Message and thought chunks, tool calls and their updates, context usage with each request's own usage, and retry notices. Each carries a monotonic `seq`, continued across a load, and is mirrored to `--events`. |
@@ -165,7 +167,8 @@ The tools are `read`, `edit`, `write`, `glob`, `grep` and `shell`, plus `spawn` 
 Subagents), and nothing else.
 Every path is resolved inside `--cwd`: escapes with `..`, absolute paths and symlinks
 are refused. `glob` and `grep` respect `.gitignore`. `shell` runs `sh -c` with piped
-output, a timeout, and its process group killed on timeout. It is not a PTY yet. While a
+output, a timeout, and its process group killed on timeout. It is not a PTY (see *Not
+built*). While a
 command runs, the last 2 KiB of what it has printed goes to the node once a second (a
 running `tool_call_update` whose `rawOutput` is the tail), so the session shows it before
 the result.
@@ -239,3 +242,46 @@ child that answers in prose instead is reminded once, then stopped.
 
 Models on that provider then offer a choice of harness, OpenCode or `native`. A model whose
 credential runs only here (none today) would start here directly.
+
+## Decisions
+
+- **Translation lives in the harness, not the gateway.** The gateway stays a
+  credential-injecting, usage-counting proxy that forwards either wire's body untouched;
+  the Responses API's round-tripped items make the wire a property of the conversation.
+- **The command line is the only input.** No credential, catalogue, settings store or
+  project discovery: the node's `--providers` file and system prompt say everything, so
+  there is nowhere for an "always allow" to persist. The node checks the protocol version
+  at `initialize`; there is no separate manifest digest for the agent to verify.
+- **No per-family tool dialect** (a Qwen-specific in-band call format, say) unless
+  llama.cpp's template parser fails on a target model. The fabricated-result guard stays
+  regardless.
+- **The journal decides an interrupted call's outcome**, not a node query, and after a
+  restore the node carries the work on once, unattended.
+- **A compaction summary is never the only record.** A weak local summariser was seen
+  writing an unread part of a file, and once half the task, as done; what ran and what the
+  operator asked are copied into the summary, not summarised.
+- **Subagents run in the agent's process**, nested in the parent's log, with the parent's
+  tools and provider, one level deep.
+- **Not borrowed from oh-my-pi**, on principle: project-input auto-loading, persisted
+  approval grants, provider fallback chains, and its scope features (URL schemes, eval
+  kernels, LSP/DAP, an advisor model, TTSR). Its compaction, retry and restore rules are
+  where the ones above came from.
+- **Phase 3, the OpenAI API with an API key, was dropped**: llama.cpp already exercises the
+  Chat Completions encoder, and the Codex subscription is reached only over Responses.
+
+## Not built
+
+None of these was missed on a real task; each waits until one is.
+
+- **`shell` as a PTY.** It runs `sh -c` with pipes, its output streamed to the node as it
+  comes; nothing interactive has needed a terminal yet.
+- **Elision by a tool's `useless` flag.** Superseded reads and edits are elided instead.
+- **A short orientation for small context windows.** Only compaction's sizes scale down.
+- **A declared `cache` capability per model** (`explicit`, `prefix`, `none`). The prompt is
+  assembled stable-prefix first for every model, which is what each cache rewards.
+- **Wall-clock time in the budget.** Local generation runs at about 15 tokens/s, so a
+  session's tokens can be cheap while its hours are not.
+- **A record of the Codex request shape on each session.** The Codex backend accepts what
+  Codex CLI sends, so a header or item type it stops accepting breaks the encoder with
+  nothing in the session to compare against. The encoder pins what it sends
+  (`wire/openai_responses.rs`); recording it per session would make drift visible.
