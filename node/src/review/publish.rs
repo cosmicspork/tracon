@@ -692,8 +692,10 @@ async fn attempt(
     // Look before acting: a resumed attempt asks what the forge holds rather
     // than repeating a push whose outcome it never learned. An update or a
     // leased push always looks, because what it may replace is exactly what
-    // it was reviewed on.
-    let observed = if p.resume || p.target.change.is_some() || p.lease.is_some() {
+    // it was reviewed on. A first commit looks too: it was reviewed against
+    // nothing, so a base the forge gained since is not what was approved.
+    let observed = if p.resume || p.target.change.is_some() || p.lease.is_some() || p.target.initial
+    {
         Some(remote_sha(cfg, &publisher, &credential, &refname).await?)
     } else {
         None
@@ -721,6 +723,13 @@ async fn attempt(
                 expected: pushing.to_string(),
                 found: found.unwrap_or_else(|| "nothing".into()),
             });
+        }
+        Some(Some(found)) if p.target.initial => {
+            return Err(PublishError::Target(format!(
+                "{} is on the forge at {found:.8} now, so this is not the repository's first \
+                 commit any more; fetch it, rebase onto it and submit again",
+                p.target.branch
+            )));
         }
         _ => {
             let refspec = format!("{}:refs/heads/{}", pushing, p.target.branch);

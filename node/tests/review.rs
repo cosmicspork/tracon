@@ -7590,3 +7590,44 @@ async fn a_change_into_the_base_of_an_empty_repository_is_refused_at_submit() {
     assert!(!error.contains("ambiguous argument"), "{error}");
     assert!(f.store.open_reviews().unwrap().is_empty());
 }
+
+/// A first commit is reviewed against nothing. If the forge gained its base
+/// after the submit, even one the reviewed head builds on, pushing would land
+/// on a base the operator never saw, so publication refuses.
+#[tokio::test]
+async fn a_first_commit_is_not_pushed_over_a_base_the_forge_gained_since() {
+    state::isolate();
+    let f = fixture_on_empty_origin(test_name!(), WITH_GH, |_| {}).await;
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "echo second >> a.txt && git add -A && git commit -qm 'feat: second commit'",
+    );
+    let mut args = f.submit_args();
+    args["branch"] = json!("main");
+    let id = review_id(&f.tool("s1", "submit_review", args).await);
+    sh(
+        wt,
+        &format!(
+            "git push -q {} HEAD~1:refs/heads/main",
+            f.dir.join("origin.git").display()
+        ),
+    );
+    let theirs = sh_out(wt, "git rev-parse HEAD~1");
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not the repository's first commit any more"),
+        "{body}"
+    );
+    assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
+    assert_eq!(
+        sh_out(&f.dir.join("origin.git"), "git rev-parse refs/heads/main"),
+        theirs
+    );
+}
