@@ -11,6 +11,7 @@ pub mod http;
 pub mod kube_api;
 pub mod mesh;
 pub mod oauth_fake;
+pub mod podman;
 pub mod rows;
 pub mod soft_passkey;
 pub mod state;
