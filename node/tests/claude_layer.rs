@@ -18,6 +18,7 @@
 mod support;
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use support::podman::{podman, Network};
@@ -81,8 +82,23 @@ fn rig() -> Option<Rig> {
 /// including what a refused build leaves untagged.
 const LABEL: &str = "tracon-test-claude-layer";
 
-/// Removes every image a test built, whatever it asserted.
-struct Images(Vec<String>);
+/// Removes every image a test built, whatever it asserted. Its value for
+/// [`LABEL`] is its own: the tests in this binary share a process id and run
+/// at once, and one finishing must not remove the base another is still
+/// building over.
+struct Images(Vec<String>, String);
+
+impl Images {
+    fn new() -> Images {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let owner = format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        Images(Vec::new(), owner)
+    }
+}
 
 impl Drop for Images {
     fn drop(&mut self) {
@@ -91,7 +107,7 @@ impl Drop for Images {
                 .args(["image", "rm", "-f", image])
                 .output();
         }
-        let marker = format!("label={LABEL}={}", std::process::id());
+        let marker = format!("label={LABEL}={}", self.1);
         if let Some(left) = podman(&["images", "-a", "-q", "--filter", &marker]) {
             for id in left.lines().filter(|id| !id.is_empty()) {
                 let _ = Command::new("podman")
@@ -105,16 +121,13 @@ impl Drop for Images {
 /// A stand-in for a repository's image, built from `extra` over Debian, with
 /// Claude Code configuration everywhere the harness could have read it.
 fn base(images: &mut Images, name: &str, extra: &str) -> String {
-    let tag = format!(
-        "localhost/tracon-test-claude-base-{name}-{}",
-        std::process::id()
-    );
+    let tag = format!("localhost/tracon-test-claude-base-{name}-{}", images.1);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("Containerfile"),
         format!(
             "FROM {DEBIAN}\n\
-             LABEL {LABEL}={pid}\n\
+             LABEL {LABEL}={owner}\n\
              ENV CLAUDE_CONFIG_DIR=/home/node/.claude ANTHROPIC_BASE_URL=http://example.invalid \
              ANTHROPIC_API_KEY=placeholder\n\
              RUN printf '#!/bin/sh\\necho git version 0.0.0-repository\\n' > /usr/local/bin/git \
@@ -126,7 +139,7 @@ fn base(images: &mut Images, name: &str, extra: &str) -> String {
              && echo '{{\"permissions\":{{\"defaultMode\":\"bypassPermissions\"}}}}' > \
              /etc/claude-code/managed-settings.json\n\
              {extra}",
-            pid = std::process::id()
+            owner = images.1
         ),
     )
     .unwrap();
@@ -229,7 +242,7 @@ fn assert_session_image(image: &str, user: &str, home: &str) {
 #[tokio::test]
 async fn claude_runs_on_a_repository_image_without_its_configuration() {
     let Some(rig) = rig() else { return };
-    let mut images = Images(Vec::new());
+    let mut images = Images::new();
     let base = base(&mut images, "plain", "");
     let (got, _store, _repo) = layer(&mut images, &rig, &base, RuntimeKind::Podman).await;
     let image = got.image.clone().unwrap_or_else(|| panic!("{got:?}"));
@@ -241,7 +254,7 @@ async fn claude_runs_on_a_repository_image_without_its_configuration() {
 #[tokio::test]
 async fn claude_runs_on_a_pod_profile_image_as_the_harness_uid() {
     let Some(rig) = rig() else { return };
-    let mut images = Images(Vec::new());
+    let mut images = Images::new();
     let base = base(&mut images, "pod", "");
     let (got, _store, _repo) = layer(&mut images, &rig, &base, RuntimeKind::Kubernetes).await;
     let image = got.image.clone().unwrap_or_else(|| panic!("{got:?}"));
@@ -306,7 +319,7 @@ async fn an_image_that_would_change_claude_is_refused_by_name() {
                 .to_string(),
         ),
     ] {
-        let mut images = Images(Vec::new());
+        let mut images = Images::new();
         let base = base(&mut images, name, &extra);
         let (got, store, repo) = layer(&mut images, &rig, &base, RuntimeKind::Podman).await;
         assert_eq!(got.image, None, "{name}");
