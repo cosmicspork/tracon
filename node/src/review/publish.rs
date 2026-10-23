@@ -102,6 +102,12 @@ pub struct Target {
     /// resubmission may name another base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<ChangeRef>,
+    /// The forge had no branches when this was submitted, so there is no base
+    /// for a change to merge into: `branch` is the base itself, and
+    /// publication pushes it as the repository's first commit and opens no
+    /// change. Settled again by every submit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub initial: bool,
 }
 
 impl Target {
@@ -750,6 +756,13 @@ async fn attempt(
         recheck().map_err(PublishError::Broker)?;
     }
     p.journal.opening().map_err(PublishError::Broker)?;
+    // A repository's first commit is its base: there is nothing for a change
+    // to merge into, and the branch the push made is what was published.
+    if p.target.initial {
+        let url = branch_url(provider, &remote, &p.target.branch);
+        p.journal.opened(&url).map_err(PublishError::Broker)?;
+        return Ok(url);
+    }
     let (url, number) = match &p.target.change {
         Some(change) => {
             // Replacing a description is idempotent, so a resumed attempt
@@ -1784,6 +1797,15 @@ fn remote_url(
     Ok(format!("https://{host}/{project}.git"))
 }
 
+/// The forge's web page for `branch`, from the remote it was pushed to.
+fn branch_url(provider: Provider, remote: &str, branch: &str) -> String {
+    let project = remote.strip_suffix(".git").unwrap_or(remote);
+    match provider {
+        Provider::Github => format!("{project}/tree/{branch}"),
+        Provider::Gitlab => format!("{project}/-/tree/{branch}"),
+    }
+}
+
 /// A program that could not be started, the path guard's refusal included.
 fn spawn_error(cli: &str, source: std::io::Error) -> PublishError {
     PublishError::Spawn {
@@ -2023,6 +2045,7 @@ encoding ISO-8859-1\n\nsubject\n";
             worktree: None,
             repo: None,
             change: None,
+            initial: false,
         };
         let outputs = Outputs {
             description: Some(Description {
@@ -2133,6 +2156,7 @@ encoding ISO-8859-1\n\nsubject\n";
             worktree: None,
             repo: None,
             change: None,
+            initial: false,
         };
         let args = open_change_args(Provider::Gitlab, &target, "fix: x", "b".into(), false);
         assert_eq!(
@@ -2178,6 +2202,7 @@ encoding ISO-8859-1\n\nsubject\n";
             worktree: None,
             repo: None,
             change: None,
+            initial: false,
         };
         let err = publish(
             &broker,
@@ -2199,6 +2224,7 @@ encoding ISO-8859-1\n\nsubject\n";
             worktree: None,
             repo: None,
             change: None,
+            initial: false,
         };
         let err = publish(
             &crate::broker::Broker::default().shared(),
@@ -2228,6 +2254,7 @@ encoding ISO-8859-1\n\nsubject\n";
             worktree: None,
             repo: None,
             change: None,
+            initial: false,
         };
         let journal = NoJournal;
         let outputs = Outputs::default();
@@ -2248,6 +2275,26 @@ encoding ISO-8859-1\n\nsubject\n";
     }
 
     #[test]
+    fn a_first_commit_is_published_as_its_branch_on_the_forge() {
+        assert_eq!(
+            branch_url(
+                Provider::Github,
+                "https://github.example/group/project.git",
+                "main"
+            ),
+            "https://github.example/group/project/tree/main"
+        );
+        assert_eq!(
+            branch_url(
+                Provider::Gitlab,
+                "https://gitlab.example/group/project.git",
+                "main"
+            ),
+            "https://gitlab.example/group/project/-/tree/main"
+        );
+    }
+
+    #[test]
     fn an_unknown_outcome_is_neither_success_nor_failure() {
         assert!(PublishError::Unknown("x".into()).is_unknown());
         assert!(!PublishError::IdentityChanged.is_unknown());
@@ -2263,6 +2310,7 @@ encoding ISO-8859-1\n\nsubject\n";
             worktree: None,
             repo: None,
             change: None,
+            initial: false,
         };
         let state = ChangeState {
             url: "https://github.test/pull/7".into(),

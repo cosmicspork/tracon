@@ -586,6 +586,13 @@ pub async fn publish_review(
     );
     let mut broken = Vec::new();
     if let Some(branch) = outputs.branch.as_deref().filter(|b| *b != target.branch) {
+        if target.initial {
+            return Err(PublishError::Conflict(format!(
+                "this pushes {} as the repository's first commit, and a change pushed to {branch} \
+                 would have no base to merge into; approve it on {}",
+                target.base, target.branch
+            )));
+        }
         if !crate::review::prose::ref_name(branch) {
             return Err(PublishError::Conflict(format!(
                 "{branch} is not a branch name git accepts"

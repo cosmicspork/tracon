@@ -448,6 +448,8 @@
   const noun = $derived(review?.provider === 'gitlab' ? 'merge request' : 'pull request')
   /** The open change this review updates, or null when it opens a new one. */
   const change = $derived<{ number: number; url: string } | null>(target?.change ?? null)
+  /** The forge had no branches: approval pushes the base itself and opens no change. */
+  const initial = $derived(target?.initial === true)
   /**
    * Whether the review's title and body are only your summary. They describe
    * a new change when it has no description of its own, as every review did
@@ -468,7 +470,10 @@
       squashing && (intent.forge.commit !== undefined || message.trim() !== proposedMessage)
         ? message.trim()
         : undefined,
-    branch: change === null && branchName.trim() && branchName.trim() !== target?.branch ? branchName.trim() : undefined,
+    branch:
+      change === null && !initial && branchName.trim() && branchName.trim() !== target?.branch
+        ? branchName.trim()
+        : undefined,
     messages: !squashing && Object.keys(reworded).length ? reworded : undefined,
   })
   /**
@@ -817,10 +822,16 @@
         <a href={landed.url} target="_blank" rel="noreferrer">{landed.number !== null ? `${noun} ${landed.number}` : landed.url}</a>
       {:else if change}
         updates <a href={change.url} target="_blank" rel="noreferrer">{noun} {change.number}</a>
+      {:else if initial}
+        the repository's first commit, no {noun}
       {:else}
         new {noun}{intent.forge.draft ? ' (draft)' : ''}
       {/if}
-      → {target?.project} · {outputs.branch ?? target?.branch} into {target?.base}
+      {#if initial}
+        → {target?.project} · {target?.branch}
+      {:else}
+        → {target?.project} · {outputs.branch ?? target?.branch} into {target?.base}
+      {/if}
       {#if intent.rewrite}
         <span
           class="chip warn"
@@ -1279,7 +1290,7 @@
     {#if squashing && !remoteOwner}
       <CommitMessage label="commit message" bind:value={message} disabled={busy || publishing || closed || surface.phone} />
     {/if}
-    {#if change === null && !remoteOwner}
+    {#if change === null && !initial && !remoteOwner}
       <label class="branch">
         Branch
         <input class="edit mono" bind:value={branchName} disabled={busy || publishing || closed || surface.phone} />

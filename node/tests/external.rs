@@ -366,6 +366,48 @@ async fn an_external_harness_puts_its_own_worktree_up_for_review() {
     assert_eq!(files[0].content, b"base\none\ntwo\n");
 }
 
+/// The first work on a GitLab project nothing was ever pushed to, from a
+/// worktree of a clone made while it was empty: there is no `origin/main` to
+/// diff against, so the whole tree is the change, and with the base as its
+/// branch it is the repository's first commit (#629).
+#[tokio::test]
+async fn the_first_commit_of_an_empty_repository_is_put_up_for_review_whole() {
+    state::isolate();
+    let dir = state::scratch("external-empty-origin");
+    std::fs::create_dir_all(dir.join("root")).unwrap();
+    sh(&dir, "git init -q --bare -b main origin.git");
+    sh(
+        &dir,
+        "git clone -q origin.git root/repo 2>/dev/null && cd root/repo \
+         && git config user.email t@e && git config user.name t \
+         && git symbolic-ref HEAD refs/heads/feat/core-sync \
+         && printf 'one\\ntwo\\n' > a.txt && git add -A && git commit -qm 'feat: core sync' \
+         && git checkout -q --detach && git worktree add ../../wt feat/core-sync 2>/dev/null",
+    );
+    let wt = dir.join("wt").to_string_lossy().into_owned();
+    let h = harness_with(with_roots(&dir.join("root"))).await;
+    let mut args = submit_args(&wt);
+    args["provider"] = json!("gitlab");
+    args["project"] = json!("group/name");
+    args["branch"] = json!("main");
+    let (_, v) = mcp(&h.operator, "work", tool_call("submit_review", args)).await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(
+        (out["files"].clone(), out["added"].clone()),
+        (json!(1), json!(2))
+    );
+    let r = h
+        .store
+        .get_review(out["review_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(r.diff.contains("+one"), "{}", r.diff);
+    let target: Value = serde_json::from_str(&r.target).unwrap();
+    assert_eq!(target["initial"], json!(true), "{target}");
+    assert_eq!(target["branch"], "main");
+}
+
 #[tokio::test]
 async fn a_retried_submission_answers_with_the_review_it_already_made() {
     state::isolate();
