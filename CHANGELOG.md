@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.36.0](https://github.com/cosmicspork/tracon/compare/v0.35.0...v0.36.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **harness:** remove the OpenCode harness; tracon-agent runs every non-Claude model ([#633](https://github.com/cosmicspork/tracon/issues/633))
+
+### Features
+
+* **harness:** remove the OpenCode harness; tracon-agent runs every non-Claude model ([#633](https://github.com/cosmicspork/tracon/issues/633)) ([0daf631](https://github.com/cosmicspork/tracon/commit/0daf6319537df9cae127e0e5c501213885836a67))
+* **review:** auto/manual reviewer trigger, clearer reviewer states, and the AI's changes in one click ([#627](https://github.com/cosmicspork/tracon/issues/627)) ([3db3aab](https://github.com/cosmicspork/tracon/commit/3db3aabdb7e80adf17566fad85192e3a0f60f9f8))
+* **review:** give reviewers evidence and say what verdicts rest on ([#628](https://github.com/cosmicspork/tracon/issues/628)) ([de14cef](https://github.com/cosmicspork/tracon/commit/de14cefd30585652a69d0befa2e2c9b08be29fb8))
+
 ## [0.35.0](https://github.com/cosmicspork/tracon/compare/v0.34.0...v0.35.0) (2026-10-22)
 
 
