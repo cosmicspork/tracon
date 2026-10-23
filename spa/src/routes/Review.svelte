@@ -41,6 +41,8 @@
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import {
     CLOSED_STATES,
+    basisLabel,
+    checksState,
     composerLabel,
     publishedChange,
     rereadDelay,
@@ -484,6 +486,12 @@
   })
   const verdict = $derived(review ? reviewVerdict(review) : null)
   const checks = $derived(review ? reviewChecks(review) : [])
+  /** Checks the node tried to run on an external candidate and could not. */
+  const unrun = $derived(checks.find((c) => c.outcome === 'could_not_run'))
+  /** The node is running an external candidate's checks; they gate nothing. */
+  const checksRunning = $derived(checksState(checks) === 'running')
+  /** A reviewer is waiting on them: only when the channel binds a review model. */
+  const reviewerWaits = $derived(reviewerReason?.startsWith('waiting for') ?? false)
   const session = $derived(review?.session_id ? store.sessions.get(review.session_id) : undefined)
   const reviewer = $derived(review?.review_session_id ? store.sessions.get(review.review_session_id) : undefined)
   // The reviewer's id and state alone: the session row changes on every
@@ -932,6 +940,10 @@
                 </details>
               </div>
             {/each}
+          {:else if checksRunning}
+            <p class="missing">The node is running this candidate's required checks; they gate nothing{reviewerWaits ? ', and the reviewer starts once they are done' : ''}.</p>
+          {:else if unrun}
+            <p class="missing">{unrun.tail}</p>
           {:else if target?.worktree}
             <p class="missing">Submitted from a harness you run yourself: the node ran no checks on this candidate.</p>
           {:else}
@@ -1039,7 +1051,7 @@
 
   {#if checks.length}
     <div class="checks">
-      {#each checks as c (c.command)}<span class="chip ok">✓ {c.command} · {Math.round(c.ms / 1000)}s</span>{/each}
+      {#each checks as c, index (index)}{@const running = c.outcome === 'running'}<span class="chip" class:ok={c.ok} class:bad={!c.ok && !running} title={c.ok ? undefined : c.tail}>{c.ok ? '✓' : running ? '…' : '✗'} {c.command}{running ? ' · running' : ` · ${Math.round(c.ms / 1000)}s`}</span>{/each}
     </div>
   {/if}
 
@@ -1055,7 +1067,7 @@
     <div class="verdict" class:rc={verdict.verdict === 'request_changes'}>
       <span class="vbar"></span>
       <div class="in">
-        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b>{verdictRevision !== null ? ` · for revision ${verdictRevision}` : ''} · {verdict.model} · read only the requirements and the diff{reviewer && verdictRevision === null ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
+        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b>{verdictRevision !== null ? ` · for revision ${verdictRevision}` : ''} · {verdict.model}{basisLabel(verdict.basis) ? ` · ${basisLabel(verdict.basis)}` : ''}{reviewer && verdictRevision === null ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
         <div class="sum">{verdict.summary}</div>
         {#if verdict.findings?.length}
           <ul class="findings">
@@ -1655,6 +1667,10 @@
   .chip.ok {
     background: var(--wash-ok);
     color: var(--ok);
+  }
+  .checks .chip.bad {
+    background: var(--wash-crit);
+    color: var(--crit);
   }
   .criteria-block {
     display: flex;

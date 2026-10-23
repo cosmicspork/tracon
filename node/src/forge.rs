@@ -62,6 +62,13 @@ impl Forge {
         }
     }
 
+    /// The host this forge's repositories are cloned from, as the
+    /// credential's env names it (`GH_HOST`, `GITLAB_HOST`), or the public
+    /// forge's: the first component of a managed clone's identity.
+    pub fn clone_host(&self, env: &BTreeMap<String, String>) -> String {
+        self.endpoints(env).1
+    }
+
     /// The REST base and the clone host, from the credential's own env so an
     /// enterprise or self-hosted forge (`GH_HOST`/`GITHUB_API`, `GITLAB_HOST`)
     /// needs nothing new — and so a test can stand a forge on loopback.

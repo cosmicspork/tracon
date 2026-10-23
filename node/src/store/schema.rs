@@ -1731,6 +1731,19 @@ const MIGRATIONS: &[&str] = &[
         trigger     TEXT NOT NULL
     );
     "#,
+    // 74: the repository a workspace no session imported answers to. A review
+    // session's workspace is its review's candidate, so nothing in the
+    // `workspace://` chain leads back to a repository; the node records the
+    // review's when it builds the workspace, and the session gets that
+    // repository's image and environment from it. `repo` is NULL for a review
+    // tied to none.
+    r#"
+    CREATE TABLE workspace_origin (
+        workspace_id TEXT PRIMARY KEY,
+        repo         TEXT,
+        created_ms   INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

@@ -155,19 +155,38 @@ impl Store {
     /// without naming one. Each is stale once the review's candidate is no
     /// longer the commit it was shown at.
     pub fn shown_work_for_review(&self, review: &ReviewRow) -> Result<Vec<ShownWorkView>> {
-        let rows = match review.session_id.as_deref() {
-            Some(session_id) => self.shown_work_where(
-                "review_id=?1 OR (review_id IS NULL AND session_id=?2)",
-                &[&review.id, &session_id],
-            )?,
-            None => self.shown_work_where("review_id=?1", &[&review.id])?,
-        };
+        let rows = self.shown_rows_for_review(review)?;
         let head = self
             .latest_review_revision(&review.id)?
             .map(|revision| revision.head_sha)
             .unwrap_or_else(|| review.head_sha.clone());
+        self.shown_views(rows, &head)
+    }
+
+    /// [`Store::shown_work_for_review`] for a caller that already read the
+    /// candidate the review is of: `head`, its commit.
+    pub fn shown_work_for_review_at(
+        &self,
+        review: &ReviewRow,
+        head: &str,
+    ) -> Result<Vec<ShownWorkView>> {
+        let rows = self.shown_rows_for_review(review)?;
+        self.shown_views(rows, head)
+    }
+
+    fn shown_rows_for_review(&self, review: &ReviewRow) -> Result<Vec<ShownWorkRow>> {
+        match review.session_id.as_deref() {
+            Some(session_id) => self.shown_work_where(
+                "review_id=?1 OR (review_id IS NULL AND session_id=?2)",
+                &[&review.id, &session_id],
+            ),
+            None => self.shown_work_where("review_id=?1", &[&review.id]),
+        }
+    }
+
+    fn shown_views(&self, rows: Vec<ShownWorkRow>, head: &str) -> Result<Vec<ShownWorkView>> {
         rows.into_iter()
-            .map(|row| self.shown_work_view(row, Some(&head)))
+            .map(|row| self.shown_work_view(row, Some(head)))
             .collect()
     }
 

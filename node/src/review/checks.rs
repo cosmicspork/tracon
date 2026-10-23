@@ -205,11 +205,43 @@ pub async fn run_required(
     force_rerun: bool,
     cancel: &dyn Cancel,
 ) -> Result<CheckReport, String> {
+    let repo = origin_repo(store, candidate.owner_session_id.as_deref())?;
+    run_required_for(
+        backend,
+        cfg,
+        store,
+        candidate,
+        candidate.owner_session_id.as_deref(),
+        repo.as_deref(),
+        snapshot,
+        force_rerun,
+        cancel,
+    )
+    .await
+}
+
+/// [`run_required`] for the checks of `repo`, run for `session_id`, both
+/// named by the caller rather than read from the session that owns the
+/// candidate. A candidate is named by its commit, so its owner is whoever
+/// captured that commit first; checks the node runs for a harness the
+/// operator runs belong to no session (`None`), and its review names the
+/// repository (`environment::review_repo`).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_required_for(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    candidate: &CandidateRow,
+    session_id: Option<&str>,
+    repo: Option<&Path>,
+    snapshot: &Path,
+    force_rerun: bool,
+    cancel: &dyn Cancel,
+) -> Result<CheckReport, String> {
     // The one place a check run may build: the image for the default branch's
     // Dockerfile as it is now, so a check never runs in an image a merged
     // change has since replaced.
-    let repo = origin_repo(store, candidate.owner_session_id.as_deref())?;
-    let environment = crate::repo_image::environment(backend, cfg, store, repo.as_deref()).await;
+    let environment = crate::repo_image::environment(backend, cfg, store, repo).await;
     let commands = environment.checks.clone();
     let raw_image = environment.image.clone();
     let runner = backend.runner(Vec::new());
@@ -283,7 +315,7 @@ pub async fn run_required(
                 .insert_check_run(&CheckRunRow {
                     id: run_id.clone(),
                     candidate_id: Some(candidate.id.clone()),
-                    session_id: candidate.owner_session_id.clone(),
+                    session_id: session_id.map(str::to_string),
                     command: Some(command.clone()),
                     definition_json,
                     definition_hash: Some(definition_hash),
@@ -327,7 +359,7 @@ pub async fn run_required(
         let run = CheckRunRow {
             id: run_id.clone(),
             candidate_id: Some(candidate.id.clone()),
-            session_id: candidate.owner_session_id.clone(),
+            session_id: session_id.map(str::to_string),
             command: Some(command.clone()),
             definition_json,
             definition_hash: Some(definition_hash),
@@ -1144,18 +1176,23 @@ fn hash(value: &str) -> String {
 }
 
 /// The failure lines a run recorded in its metadata, if it recorded any.
-fn recorded_failures(metadata_json: &str) -> String {
+pub(crate) fn recorded_failures(metadata_json: &str) -> String {
     serde_json::from_str::<serde_json::Value>(metadata_json)
         .ok()
         .and_then(|metadata| metadata.get("failures")?.as_str().map(str::to_string))
         .unwrap_or_default()
 }
 
-fn tail(text: &str) -> String {
-    if text.len() <= TAIL_BYTES {
+pub(crate) fn tail(text: &str) -> String {
+    tail_of(text, TAIL_BYTES)
+}
+
+/// The last `bytes` of `text`, marked as cut when it is.
+pub(crate) fn tail_of(text: &str, bytes: usize) -> String {
+    if text.len() <= bytes {
         return text.to_string();
     }
-    let mut at = text.len() - TAIL_BYTES;
+    let mut at = text.len() - bytes;
     while at < text.len() && !text.is_char_boundary(at) {
         at += 1;
     }

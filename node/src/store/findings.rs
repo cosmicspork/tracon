@@ -145,6 +145,18 @@ impl Store {
         Ok(())
     }
 
+    /// Record the repository a workspace no session imported answers to,
+    /// before a session is started on it (`environment::origin_repo`).
+    pub fn record_workspace_origin(&self, workspace_id: &str, repo: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO workspace_origin (workspace_id, repo, created_ms)
+             VALUES (?1,?2,?3)",
+            params![workspace_id, repo, now_ms()],
+        )?;
+        Ok(())
+    }
+
     /// The reviewer trigger that applied when a revision was submitted, when
     /// that was recorded.
     pub fn review_revision_trigger(&self, revision_id: &str) -> Result<Option<String>> {
@@ -153,6 +165,20 @@ impl Store {
             .query_row(
                 "SELECT trigger FROM review_revision_trigger WHERE revision_id=?1",
                 [revision_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// What [`Store::record_workspace_origin`] recorded for a workspace:
+    /// `None` when nothing was, `Some(None)` for a workspace tied to no
+    /// repository.
+    pub fn workspace_origin(&self, workspace_id: &str) -> Result<Option<Option<String>>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT repo FROM workspace_origin WHERE workspace_id=?1",
+                [workspace_id],
                 |row| row.get(0),
             )
             .optional()?)
@@ -189,6 +215,20 @@ impl Store {
             Some(id) => Ok(Some(id)),
             None => Ok(self.review_session_revision(session)?.map(|r| r.id)),
         }
+    }
+
+    /// Every review session started on a review, oldest first, with the
+    /// revision each was started for: `(session_id, revision_id)`.
+    pub fn review_sessions_of(&self, review_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, revision_id FROM review_session_revision
+             WHERE review_id=?1 ORDER BY created_ms ASC, session_id ASC",
+        )?;
+        let rows = stmt
+            .query_map([review_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 
     /// The revision a review session exercises: the one recorded when it was

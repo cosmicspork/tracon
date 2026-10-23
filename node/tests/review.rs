@@ -1021,6 +1021,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         base: "main".into(),
         branch: "feat/x".into(),
         worktree: None,
+        repo: None,
         change: None,
     };
     // A head_sha that is not the worktree's HEAD stands in for a branch that
@@ -1698,7 +1699,24 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
         .tool(
             &rsid,
             "review_verdict",
-            json!({"verdict": "request_changes", "summary": "a.txt grew without a test",
+            json!({"verdict": "request_changes", "basis": "vibes",
+                   "summary": "a.txt grew without a test",
+                   "findings": [{"path": "a.txt", "line": 2, "severity": "should", "note": "cover it"}]}),
+        )
+        .await;
+    // What it rests on is one of the bases, or it is not taken.
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("basis"),
+        "{v}"
+    );
+    // A reviewer started before verdicts named a basis sends none: its
+    // verdict stands, as resting on the diff.
+    let v = f
+        .tool(
+            &rsid,
+            "review_verdict",
+            json!({"verdict": "request_changes",
+                   "summary": "a.txt grew without a test",
                    "findings": [{"path": "a.txt", "line": 2, "severity": "should", "note": "cover it"}]}),
         )
         .await;
@@ -1706,6 +1724,7 @@ async fn a_bound_review_model_spawns_a_fresh_review_session_whose_verdict_lands_
     let r = f.store.get_review(&id).unwrap().unwrap();
     let verdict: Value = serde_json::from_str(r.ai_verdict_json.as_deref().unwrap()).unwrap();
     assert_eq!(verdict["verdict"], "request_changes");
+    assert_eq!(verdict["basis"], "diff_only");
     assert_eq!(verdict["model"], "m/reviewer");
     assert_eq!(verdict["findings"][0]["path"], "a.txt");
     assert!(f.event_kinds(&rsid).contains(&"review_verdict".to_string()));
@@ -1823,6 +1842,713 @@ async fn a_review_from_a_harness_you_run_yourself_gets_a_reviewer_seeded_from_it
     assert_eq!(f.store.review_session_reason(&id).unwrap(), None);
 }
 
+/// The repository the fixture's session works in, through the session that
+/// first imported its workspace, as `a_repo_entry_names_its_own_checks_…`
+/// records it.
+fn on_repository(f: &Fixture, repo: &str) {
+    let workspace = f
+        .store
+        .get_session("s1")
+        .unwrap()
+        .unwrap()
+        .repo_path
+        .strip_prefix("workspace://")
+        .expect("the fixture session is on a workspace")
+        .to_string();
+    f.store
+        .insert_session(&{
+            let mut origin = support::rows::session_row(&workspace, "n1", "work");
+            origin.repo_path = repo.into();
+            origin.state = "closed".into();
+            origin
+        })
+        .unwrap();
+}
+
+const TOOLCHAIN: &str =
+    "registry.test/app@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+#[tokio::test]
+async fn a_reviewer_starts_in_the_image_of_the_repository_under_review() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.repo = vec![tracon::config::Repo {
+            path: "owner/reviewed-app".into(),
+            image: Some(TOOLCHAIN.into()),
+            ..Default::default()
+        }];
+    })
+    .await;
+    on_repository(&f, "/clones/github.com/owner/reviewed-app");
+    bind_review_model(&f);
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let rsid = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    running_reviewer(&f, &rsid).await;
+    // Its workspace is the candidate, and its repository is the review's, so
+    // it answers to that repository's entry as a session on it does.
+    let rs = f.store.get_session(&rsid).unwrap().unwrap();
+    assert!(rs.repo_path.starts_with("workspace://review-"), "{rs:?}");
+    assert_eq!(
+        tracon::environment::origin_repo(&f.store, Some(&rsid)).unwrap(),
+        Some("/clones/github.com/owner/reviewed-app".into())
+    );
+    let environment = tracon::environment::session_environment(f.manager.cfg(), &f.store, &rsid);
+    assert_eq!(environment.image, TOOLCHAIN);
+    assert_eq!(environment.image_source, "repository toolchain");
+    // The launch looked for that image. This runtime cannot give it one, and
+    // the reviewer is told its image may lack the toolchain, so it tries.
+    let events = f.store.events_after(&rsid, 0, 500).unwrap();
+    let started = events
+        .iter()
+        .find(|e| e.kind == "session_started")
+        .expect("the reviewer started");
+    assert!(
+        started.payload["image_note"].is_string(),
+        "{}",
+        started.payload
+    );
+    let orientation = events
+        .iter()
+        .find(|e| e.kind == "orientation")
+        .expect("the reviewer was oriented");
+    let text = orientation.payload["text"].as_str().unwrap();
+    assert!(
+        text.contains("which may lack this repository's toolchain"),
+        "{text}"
+    );
+    // Its candidate's checks are its evidence.
+    assert!(text.contains("- `test -f a.txt`: passed"), "{text}");
+}
+
+#[tokio::test]
+async fn an_external_submission_gets_the_repositorys_checks_run_on_its_candidate_when_asked() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+    })
+    .await;
+    bind_review_model_for_external(&f);
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let v = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &tracon::mcp::CallContext::external(None, "work", "n1"),
+        "submit_review",
+        &args,
+    )
+    .await
+    .unwrap();
+    // The submission is answered before any check has run: they gate nothing.
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_eq!(v["state"], "new", "{v}");
+    let candidate =
+        tracon::store::candidate_id(&f.store.get_review(&id).unwrap().unwrap().head_sha, "work");
+    let mut runs = Vec::new();
+    let mut reviewer = None;
+    for _ in 0..1000 {
+        runs = f.store.check_runs_for_candidate(&candidate).unwrap();
+        reviewer = f.store.get_review(&id).unwrap().unwrap().review_session_id;
+        if reviewer.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // Run on the node's own copy of the candidate, in the local runtime, and
+    // kept on the candidate as an internal session's checks are.
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].command.as_deref(), Some("test -f a.txt"));
+    assert_eq!(runs[0].outcome, "passed", "{runs:?}");
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let checks: Value = serde_json::from_str(review.checks_json.as_deref().unwrap()).unwrap();
+    assert_eq!(checks[0]["command"], "test -f a.txt", "{checks}");
+    assert_eq!(checks[0]["ok"], true, "{checks}");
+    // The reviewer started once they were done, and was told them.
+    let reviewer = reviewer.expect("a reviewer once the checks ran");
+    running_reviewer(&f, &reviewer).await;
+    let events = f.store.events_after(&reviewer, 0, 500).unwrap();
+    let text = events
+        .iter()
+        .find(|e| e.kind == "orientation")
+        .and_then(|e| e.payload["text"].as_str().map(str::to_string))
+        .expect("the reviewer was oriented");
+    assert!(text.contains("- `test -f a.txt`: passed"), "{text}");
+    assert!(!text.contains("No checks ran"), "{text}");
+}
+
+/// A candidate is named by its commit, so a session that captured the commit
+/// first owns the row; an external submission of the same commit is still
+/// external, and still gets its checks.
+#[tokio::test]
+async fn an_external_submission_of_a_commit_a_session_captured_first_gets_its_checks() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+    })
+    .await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    assert!(v["error"].is_null(), "{v}");
+    let head = f
+        .store
+        .get_review(v["review_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap()
+        .head_sha;
+    let candidate = tracon::store::candidate_id(&head, "work");
+    assert_eq!(
+        f.store
+            .candidate(&candidate)
+            .unwrap()
+            .unwrap()
+            .owner_session_id
+            .as_deref(),
+        Some("s1")
+    );
+    let by_session = |runs: &[tracon::store::CheckRunRow]| {
+        runs.iter()
+            .filter(|run| run.session_id.as_deref() == Some("s1"))
+            .count()
+    };
+    let session_runs = by_session(&f.store.check_runs_for_candidate(&candidate).unwrap());
+    assert_eq!(session_runs, 1);
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let v = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &tracon::mcp::CallContext::external(None, "work", "n1"),
+        "submit_review",
+        &args,
+    )
+    .await
+    .unwrap();
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(checks[0]["command"], "test -f a.txt", "{checks}");
+    // The node's run for the external submission is no session's: not the
+    // session that happened to capture the commit first.
+    let runs = f.store.check_runs_for_candidate(&candidate).unwrap();
+    assert_eq!(by_session(&runs), session_runs, "{runs:?}");
+    let node_runs: Vec<_> = runs.iter().filter(|run| run.session_id.is_none()).collect();
+    assert_eq!(node_runs.len(), 1, "{runs:?}");
+    assert_eq!(node_runs[0].command.as_deref(), Some("test -f a.txt"));
+}
+
+/// A submission from the harness the operator runs: `f`'s branch and
+/// worktree, with `args` over the usual ones.
+async fn submit_externally(f: &Fixture, args: Value) -> Value {
+    let mut submitted = f.submit_args();
+    submitted["branch"] = json!("feat/x");
+    submitted["worktree"] = json!(f.worktree);
+    for (key, value) in args.as_object().into_iter().flatten() {
+        submitted[key] = value.clone();
+    }
+    tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &tracon::mcp::CallContext::external(None, "work", "n1"),
+        "submit_review",
+        &submitted,
+    )
+    .await
+    .unwrap()
+}
+
+/// A review's checks record once the node's run of them has ended: not
+/// while it says they are running.
+async fn checks_ran(f: &Fixture, id: &str) -> Value {
+    let mut checks = Value::Null;
+    for _ in 0..1000 {
+        checks = f
+            .store
+            .get_review(id)
+            .unwrap()
+            .unwrap()
+            .checks_json
+            .map(|json| serde_json::from_str(&json).unwrap())
+            .unwrap_or(Value::Null);
+        if checks[0].is_object() && checks[0]["outcome"] != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(checks[0].is_object(), "no checks recorded");
+    checks
+}
+
+/// The node's own runs of a candidate's checks, for no session.
+fn node_runs(f: &Fixture, head: &str) -> Vec<tracon::store::CheckRunRow> {
+    f.store
+        .check_runs_for_candidate(&tracon::store::candidate_id(head, "work"))
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.session_id.is_none())
+        .collect()
+}
+
+/// The reviewer of a review, once one is recorded on it.
+async fn reviewer_of(f: &Fixture, id: &str) -> String {
+    for _ in 0..1000 {
+        if let Some(reviewer) = f.store.get_review(id).unwrap().unwrap().review_session_id {
+            return reviewer;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "no reviewer started: {:?}",
+        f.store.review_session_reason(id).unwrap()
+    );
+}
+
+/// A check slow enough to submit again while it runs.
+const SLOW_CHECK: &str = "sleep 1 && test -f a.txt";
+
+/// A new commit submitted while the node checks the last one is the one a
+/// reviewer starts on, once its own checks are done: the start waiting on
+/// the earlier commit's lets go rather than starting on a commit whose
+/// checks have not run, or on one nobody will read.
+#[tokio::test]
+async fn a_resubmission_while_checks_run_starts_its_reviewer_on_its_own_checks() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+        c.supervision.checks = vec![SLOW_CHECK.into()];
+    })
+    .await;
+    bind_review_model_for_external(&f);
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_eq!(v["review_session"]["state"], "starting", "{v}");
+    let first = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    // The card says they are running, not that they failed.
+    let running: Value = serde_json::from_str(
+        &f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .checks_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(running[0]["outcome"], "running", "{running}");
+
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm more",
+    );
+    let v = submit_externally(&f, json!({ "review_id": id })).await;
+    assert_eq!(v["review_id"], id.as_str(), "{v}");
+    assert_eq!(v["review_session"]["state"], "starting", "{v}");
+    let second = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    assert_ne!(first, second);
+
+    let reviewer = reviewer_of(&f, &id).await;
+    // Started on the second commit, with its checks done and recorded.
+    let latest = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let row = f.store.get_session(&reviewer).unwrap().unwrap();
+    assert_eq!(
+        f.store.review_session_revision(&row).unwrap().unwrap().id,
+        latest.id
+    );
+    let runs = node_runs(&f, &second);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].outcome, "passed", "{runs:?}");
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(checks[0]["command"], SLOW_CHECK, "{checks}");
+    assert_eq!(checks[0]["ok"], true, "{checks}");
+    running_reviewer(&f, &reviewer).await;
+    let text = f
+        .store
+        .events_after(&reviewer, 0, 500)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "orientation")
+        .and_then(|e| e.payload["text"].as_str().map(str::to_string))
+        .expect("the reviewer was oriented");
+    assert!(text.contains(&format!("`{}`", &second[..12])), "{text}");
+    assert!(
+        text.contains(&format!("- `{SLOW_CHECK}`: passed")),
+        "{text}"
+    );
+    // And only that one: the start for the first commit started none.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(f.store.review_sessions_of(&id).unwrap().len(), 1);
+}
+
+/// The same commit submitted again while its checks run gets that run, not
+/// a second one beside it.
+#[tokio::test]
+async fn a_resubmission_of_the_commit_being_checked_runs_its_checks_once() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+        c.supervision.checks = vec![SLOW_CHECK.into()];
+    })
+    .await;
+    bind_review_model_for_external(&f);
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    let v = submit_externally(&f, json!({ "review_id": id, "body": "why, said again" })).await;
+    assert_eq!(v["review_id"], id.as_str(), "{v}");
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().head_sha, head);
+    // Its resubmission cleared the card; it says they are running again.
+    let running: Value = serde_json::from_str(
+        &f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .checks_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(running[0]["outcome"], "running", "{running}");
+
+    reviewer_of(&f, &id).await;
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(checks[0]["ok"], true, "{checks}");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let runs = node_runs(&f, &head);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(f.store.review_sessions_of(&id).unwrap().len(), 1);
+}
+
+/// Files the node could not keep are checks it could not run, said where
+/// the card and the reviewer read them, not left saying they are running.
+#[tokio::test]
+async fn checks_on_a_candidate_too_large_to_keep_say_why_none_ran() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+        c.supervision.max_snapshot_bytes = 1;
+    })
+    .await;
+    bind_review_model_for_external(&f);
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(
+        checks[0]["outcome"],
+        tracon::mcp::review::COULD_NOT_RUN,
+        "{checks}"
+    );
+    let tail = checks[0]["tail"].as_str().unwrap();
+    assert!(
+        tail.contains("the candidate's files could not be kept"),
+        "{tail}"
+    );
+    assert!(tail.contains("the operator limit is 1"), "{tail}");
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    assert!(node_runs(&f, &head).is_empty());
+    let mut reason = None;
+    for _ in 0..600 {
+        reason = f.store.review_session_reason(&id).unwrap();
+        if reason.as_deref().is_some_and(|r| !r.starts_with("waiting")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(reason.unwrap_or_default().contains("were not kept"));
+}
+
+/// Whether the node has kept a candidate's files.
+async fn kept(f: &Fixture, head: &str) {
+    let candidate = tracon::store::candidate_id(head, "work");
+    for _ in 0..1000 {
+        let capture = f.store.candidate(&candidate).unwrap().unwrap().capture_json;
+        if serde_json::from_str::<Value>(&capture).unwrap()["materialized"] == true {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the candidate's files were not kept");
+}
+
+/// A restart ends the node's runs of external checks with the process: a
+/// review left saying they are running is told they were interrupted, and
+/// the reviewer that was waiting on them starts rather than waiting forever.
+#[tokio::test]
+async fn checks_a_restart_interrupted_say_so_and_their_reviewer_starts() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    // What a node that stopped mid-run leaves: the files kept, the card
+    // saying the checks are running, and the reviewer waiting on them.
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    kept(&f, &head).await;
+    let running = json!([{
+        "command": "required checks", "ok": false, "exit": null, "outcome": "running",
+        "tail": "the node is running this candidate's required checks", "ms": 0,
+    }]);
+    assert!(f
+        .store
+        .set_checks_at(&id, &head, &running.to_string())
+        .unwrap());
+    f.store
+        .set_review_session_reason(&id, tracon::mcp::review::WAITING_FOR_CHECKS)
+        .unwrap();
+    bind_review_model(&f);
+
+    tracon::mcp::review::reconcile_interrupted_checks(&f.store, &f.manager).await;
+    let checks: Value = serde_json::from_str(
+        &f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .checks_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        checks[0]["outcome"],
+        tracon::mcp::review::COULD_NOT_RUN,
+        "{checks}"
+    );
+    assert!(
+        checks[0]["tail"]
+            .as_str()
+            .unwrap()
+            .contains("the node restarted while it ran them"),
+        "{checks}"
+    );
+    let reviewer = reviewer_of(&f, &id).await;
+    running_reviewer(&f, &reviewer).await;
+}
+
+/// A reviewer whose wait a restart ended is started even when its checks
+/// had already landed; a review decided meanwhile gets none, and keeps what
+/// it says.
+#[tokio::test]
+async fn a_restart_starts_waiting_reviewers_but_not_on_decided_reviews() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    let submit = |body: &'static str| {
+        let f = &f;
+        async move {
+            let v = submit_externally(f, json!({ "body": body })).await;
+            let id = v["review_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{v}"))
+                .to_string();
+            let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+            kept(f, &head).await;
+            (id, head)
+        }
+    };
+    // Its checks done, its reviewer still waiting when the node stopped.
+    let (waiting, _) = submit("why").await;
+    f.store
+        .set_review_session_reason(&waiting, tracon::mcp::review::WAITING_FOR_CHECKS)
+        .unwrap();
+    // Decided while its checks were still said to be running.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo other >> a.txt && git add -A && git commit -qm other",
+    );
+    let (decided, head) = submit("another").await;
+    let running = json!([{
+        "command": "required checks", "ok": false, "exit": null, "outcome": "running",
+        "tail": "the node is running this candidate's required checks", "ms": 0,
+    }])
+    .to_string();
+    assert!(f.store.set_checks_at(&decided, &head, &running).unwrap());
+    f.store
+        .set_review_session_reason(&decided, tracon::mcp::review::WAITING_FOR_CHECKS)
+        .unwrap();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{decided}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "not this" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bind_review_model(&f);
+
+    tracon::mcp::review::reconcile_interrupted_checks(&f.store, &f.manager).await;
+    let reviewer = reviewer_of(&f, &waiting).await;
+    running_reviewer(&f, &reviewer).await;
+    let decided_row = f.store.get_review(&decided).unwrap().unwrap();
+    assert_eq!(decided_row.review_session_id, None);
+    assert_eq!(decided_row.checks_json.as_deref(), Some(running.as_str()));
+    assert!(f.store.review_sessions_of(&decided).unwrap().is_empty());
+}
+
+/// The node's run for a commit ends when the review moves to another, and
+/// the commit submitted again meanwhile gets its checks run and its
+/// reviewer, never a card left saying they are running.
+#[tokio::test]
+async fn a_commit_submitted_again_after_another_gets_its_checks_and_its_reviewer() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_checks = true;
+        c.supervision.checks = vec![SLOW_CHECK.into()];
+    })
+    .await;
+    bind_review_model_for_external(&f);
+    let worktree = std::path::Path::new(&f.worktree);
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let first = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    sh(
+        worktree,
+        "echo more >> a.txt && git add -A && git commit -qm more",
+    );
+    submit_externally(&f, json!({ "review_id": id })).await;
+    sh(worktree, "git reset -q --hard HEAD~1");
+    submit_externally(&f, json!({ "review_id": id, "body": "why, back again" })).await;
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().head_sha, first);
+
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(checks[0]["command"], SLOW_CHECK, "{checks}");
+    assert_eq!(checks[0]["ok"], true, "{checks}");
+    let reviewer = reviewer_of(&f, &id).await;
+    // Every run has ended, and none left the card saying otherwise.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert_eq!(f.manager.external_checks().in_flight(), 0);
+    let checks: Value = serde_json::from_str(
+        &f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .checks_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(checks[0]["ok"], true, "{checks}");
+    // One reviewer, on the commit as it was submitted last.
+    let latest = f.store.latest_review_revision(&id).unwrap().unwrap();
+    let sessions = f.store.review_sessions_of(&id).unwrap();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0], (reviewer, latest.id));
+}
+
+/// A start by hand reads the latest revision when it runs. A resubmission's
+/// start that waited it out does not start a second reviewer on what the
+/// hand start already started one on.
+#[tokio::test]
+async fn a_start_by_hand_is_not_followed_by_a_second_reviewer_on_the_same_revision() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    bind_review_model_for_external(&f);
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    reviewer_of(&f, &id).await;
+    for _ in 0..500 {
+        if !f.manager.review_starts().pending(&id) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // A start by hand is under way when the review is resubmitted.
+    let by_hand = f
+        .manager
+        .review_starts()
+        .claim(&id)
+        .expect("no start under way");
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm more",
+    );
+    let v = submit_externally(&f, json!({ "review_id": id })).await;
+    assert_eq!(v["review_session"]["state"], "starting", "{v}");
+    let second = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    kept(&f, &second).await;
+    let started = tracon::mcp::review::spawn_claimed_review_session(
+        &f.store,
+        &f.manager,
+        by_hand,
+        None,
+        tracon::mcp::review::StartedBy::Operator,
+    )
+    .await;
+    assert_eq!(started["state"], "started", "{started}");
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let sessions = f.store.review_sessions_of(&id).unwrap();
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    let latest = f.store.latest_review_revision(&id).unwrap().unwrap();
+    assert_eq!(sessions[1].1, latest.id);
+    assert_eq!(f.store.review_session_reason(&id).unwrap(), None);
+    assert!(!f.manager.review_starts().pending(&id));
+}
+
+#[tokio::test]
+async fn an_external_submission_runs_no_checks_unless_asked() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let v = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &tracon::mcp::CallContext::external(None, "work", "n1"),
+        "submit_review",
+        &args,
+    )
+    .await
+    .unwrap();
+    let id = v["review_id"].as_str().unwrap_or_else(|| panic!("{v}"));
+    let review = f.store.get_review(id).unwrap().unwrap();
+    // Given the time a run would have taken, there is still none.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let candidate = tracon::store::candidate_id(&review.head_sha, "work");
+    assert!(f
+        .store
+        .check_runs_for_candidate(&candidate)
+        .unwrap()
+        .is_empty());
+    assert_eq!(f.store.get_review(id).unwrap().unwrap().checks_json, None);
+}
+
 #[tokio::test]
 async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
     state::isolate();
@@ -1875,7 +2601,7 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
         .tool(
             &reviewer,
             "review_verdict",
-            json!({"verdict": "approve", "summary": "fine"}),
+            json!({"verdict": "approve", "basis": "diff_only", "summary": "fine"}),
         )
         .await;
     assert_eq!(v["recorded"], true, "{v}");
