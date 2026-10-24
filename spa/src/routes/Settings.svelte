@@ -65,6 +65,7 @@
   import { hashToken, loginUrl, mintToken } from '../lib/settings'
   import { contextOf, saveOps, type SaveOutcome } from '../lib/config-form'
   import { router } from '../lib/router.svelte'
+  import { SETTINGS_SECTIONS, settingsSection } from '../lib/routes'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
   import type { AuthorityGrant, BoundaryCheck, ChannelInfo, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule, ReviewTrigger } from '../lib/types'
@@ -74,19 +75,8 @@
   const params = $derived(new URLSearchParams(router.search))
   // Old anchors (#maintenance, #devices, #data, #repositories) are moved to
   // the section that holds them now by the router; see lib/routes.ts.
-  const sections = [
-    ['general', 'General'],
-    ['connections', 'Connections'],
-    ['channels', 'Channels & repositories'],
-    ['access', 'Access & devices'],
-    ['policies', 'Permissions & policies'],
-    ['mesh', 'Mesh'],
-    ['config', 'Configuration'],
-    ['system', 'System'],
-  ] as const
-  const activeSection = $derived(
-    sections.find(([id]) => id === router.hash.slice(1))?.[0] ?? 'general',
-  )
+  const sections = SETTINGS_SECTIONS
+  const activeSection = $derived(settingsSection(router.hash))
   let adminRevision = $state(0)
   // Bumped when either credential card changes what the node holds, so the
   // other re-reads it.

@@ -1,7 +1,7 @@
-// Where an address that used to name a screen now leads. Bookmarks, links in
-// documents and notifications already delivered keep working after a screen
-// moves; the router swaps the address in place rather than adding a step to
-// history. Pure, so it tests flat.
+// Where an address that used to name a screen now leads, and which screen a
+// current one opens. Bookmarks, links in documents and notifications already
+// delivered keep working after a screen moves; the router swaps the address in
+// place rather than adding a step to history. Pure, so it tests flat.
 
 /**
  * Settings sections that were folded into others when Settings was regrouped,
@@ -35,6 +35,86 @@ export function redirect(path: string, search = '', hash = ''): string | null {
     if (moved) return `/settings${search}#${moved}`
   }
   return null
+}
+
+/** Settings' sections, by the anchor that opens each, in the order its nav lists them. */
+export const SETTINGS_SECTIONS = [
+  ['general', 'General'],
+  ['connections', 'Connections'],
+  ['channels', 'Channels & repositories'],
+  ['access', 'Access & devices'],
+  ['policies', 'Permissions & policies'],
+  ['mesh', 'Mesh'],
+  ['config', 'Configuration'],
+  ['system', 'System'],
+] as const
+
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number][0]
+
+/** The section `hash` opens: General for none, or for one Settings does not have. */
+export function settingsSection(hash: string): SettingsSection {
+  return SETTINGS_SECTIONS.find(([id]) => id === hash.slice(1))?.[0] ?? 'general'
+}
+
+/**
+ * The screen App.svelte renders at a current address (see `redirect`). The
+ * login gate and a device approval replace whatever this says: they hang on
+ * the node's answer and on the fragment, not on the path.
+ */
+export type Screen =
+  | { name: 'doc-preview'; channel: string; slug: string }
+  | { name: 'review' | 'approval' | 'promotion' | 'session' | 'task'; id: string }
+  | { name: 'doc'; channel: string; slug: string; edit: boolean }
+  | { name: 'sessions' | 'enroll' | 'usage' | 'tasks' | 'more' | 'evidence' | 'docs' | 'memories' | 'settings' | 'home' }
+
+/** Every screen's name, so a test can hold the screen audit to all of them. */
+export const SCREENS = Object.keys({
+  'doc-preview': 1,
+  review: 1,
+  approval: 1,
+  promotion: 1,
+  session: 1,
+  sessions: 1,
+  enroll: 1,
+  usage: 1,
+  task: 1,
+  tasks: 1,
+  more: 1,
+  evidence: 1,
+  doc: 1,
+  docs: 1,
+  memories: 1,
+  settings: 1,
+  home: 1,
+} satisfies Record<Screen['name'], 1>) as Screen['name'][]
+
+export function screenFor(path: string): Screen {
+  // First match wins: a session's address also starts with /sessions.
+  const preview = path.match(/^\/docs\/([^/]+)\/([^/]+)\/preview$/)
+  if (preview) return { name: 'doc-preview', channel: preview[1], slug: preview[2] }
+  for (const [prefix, name] of [
+    ['reviews', 'review'],
+    ['approvals', 'approval'],
+    ['promotions', 'promotion'],
+    ['sessions', 'session'],
+  ] as const) {
+    const m = path.match(new RegExp(`^/${prefix}/([^/]+)`))
+    if (m) return { name, id: m[1] }
+  }
+  if (path === '/sessions') return { name: 'sessions' }
+  if (path === '/nodes/enroll') return { name: 'enroll' }
+  if (path === '/usage') return { name: 'usage' }
+  const task = path.match(/^\/tasks\/([^/]+)/)
+  if (task) return { name: 'task', id: task[1] }
+  if (path === '/tasks') return { name: 'tasks' }
+  if (path === '/more') return { name: 'more' }
+  if (path === '/evidence') return { name: 'evidence' }
+  const doc = path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/)
+  if (doc) return { name: 'doc', channel: doc[1], slug: doc[2], edit: Boolean(doc[3]) }
+  if (path.startsWith('/docs')) return { name: 'docs' }
+  if (path.startsWith('/memories')) return { name: 'memories' }
+  if (path === '/settings') return { name: 'settings' }
+  return { name: 'home' }
 }
 
 /** How the Usage page's breakdown keys its rows, past channel and provider. */

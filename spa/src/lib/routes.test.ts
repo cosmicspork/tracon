@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { localDate, redirect, usageSearch, usageView, usageWindow } from './routes'
+import { localDate, redirect, screenFor, settingsSection, usageSearch, usageView, usageWindow } from './routes'
 
 test('old top-level addresses lead to where the screen moved', () => {
   expect(redirect('/metrics')).toBe('/usage')
@@ -73,4 +73,27 @@ test('a Usage window runs from the first local day to the end of the last', () =
   const now = day('2026-10-21') + 5_000
   expect(usageWindow(usageView('?since=7'), now)).toEqual({ since: now - 7 * 86_400_000, until: null })
   expect(localDate(day('2026-10-21') + 1)).toBe('2026-10-21')
+})
+
+test('each address opens its screen, the first match winning', () => {
+  expect(screenFor('/')).toEqual({ name: 'home' })
+  expect(screenFor('/sessions')).toEqual({ name: 'sessions' })
+  expect(screenFor('/sessions/s-1')).toEqual({ name: 'session', id: 's-1' })
+  expect(screenFor('/reviews/r-1/files')).toEqual({ name: 'review', id: 'r-1' })
+  expect(screenFor('/tasks/wi-2')).toEqual({ name: 'task', id: 'wi-2' })
+  expect(screenFor('/nodes/enroll')).toEqual({ name: 'enroll' })
+  expect(screenFor('/docs/personal/guide-x')).toEqual({ name: 'doc', channel: 'personal', slug: 'guide-x', edit: false })
+  expect(screenFor('/docs/personal/guide-x/edit')).toMatchObject({ name: 'doc', edit: true })
+  expect(screenFor('/docs/personal/guide-x/preview')).toEqual({ name: 'doc-preview', channel: 'personal', slug: 'guide-x' })
+  expect(screenFor('/docs')).toEqual({ name: 'docs' })
+  expect(screenFor('/memories')).toEqual({ name: 'memories' })
+  // Nothing renders at an address no screen claims but the home.
+  expect(screenFor('/sessions/')).toEqual({ name: 'home' })
+  expect(screenFor('/nowhere')).toEqual({ name: 'home' })
+})
+
+test('a Settings anchor opens its section, and anything else General', () => {
+  expect(settingsSection('#mesh')).toBe('mesh')
+  expect(settingsSection('')).toBe('general')
+  expect(settingsSection('#nonsense')).toBe('general')
 })
