@@ -69,9 +69,39 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ fromJson(steps.rp.outputs.pr).headBranchName }}
+          # The release commit and the main commit under it, for the rebuild
+          # below.
+          fetch-depth: 2
           # Same token as release-please, so the lockfile push below re-runs CI
           # on the commit the release PR will actually merge.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+      # release-please commits each version-bumped file as it read it, on top of
+      # the newest main. A merge landing seconds earlier can be in that tree but
+      # not in the read, and its edits to the file are silently reverted (#644's
+      # zbus dependency vanished from the 0.38.0 PR). Rebuild each file from the
+      # main commit under the release commit, changing only its version line.
+      - name: Rebuild the version-bumped files from main
+        if: steps.rp.outputs.prs_created == 'true'
+        run: |
+          old=$(git show HEAD^:.release-please-manifest.json | jq -r '."."')
+          new=$(jq -r '."."' .release-please-manifest.json)
+          old_re=${old//./\\.}
+          jq -r '.packages."."."extra-files"[] | "\(.type) \(.path)"' release-please-config.json |
+            while read -r type path; do
+              case "$type" in
+                toml) script="0,/^version = \"$old_re\"\$/s//version = \"$new\"/" ;;
+                json) script="0,/^\( *\)\"version\": \"$old_re\"/s//\1\"version\": \"$new\"/" ;;
+                *) echo "::error::No rebuild rule for $type file $path"; exit 1 ;;
+              esac
+              git show "HEAD^:$path" | sed "$script" > "$path.rebuilt"
+              if git show "HEAD^:$path" | cmp -s - "$path.rebuilt"; then
+                echo "::error::$path has no version line for $old"; exit 1
+              fi
+              mv "$path.rebuilt" "$path"
+              if ! git diff --quiet -- "$path"; then
+                echo "::warning::$path was bumped from a stale copy; rebuilt it from main"
+              fi
+            done
       - name: Install Rust
         if: steps.rp.outputs.prs_created == 'true'
         run: rustup toolchain install 1.98.1 --profile minimal
@@ -80,13 +110,14 @@ jobs:
         run: |
           cargo update --workspace
           cargo update --workspace --manifest-path wrapper/Cargo.toml
-      - name: Commit and push the refreshed lockfiles
+      - name: Commit and push the rebuilt files and refreshed lockfiles
         if: steps.rp.outputs.prs_created == 'true'
         run: |
-          if [ -n "$(git status --porcelain Cargo.lock wrapper/Cargo.lock)" ]; then
+          files="Cargo.lock wrapper/Cargo.lock $(jq -r '.packages."."."extra-files"[].path' release-please-config.json)"
+          if [ -n "$(git status --porcelain $files)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add Cargo.lock wrapper/Cargo.lock
+            git add $files
             git commit -m "chore: refresh lockfiles for release"
             git push origin HEAD:${{ fromJson(steps.rp.outputs.pr).headBranchName }}
           fi
