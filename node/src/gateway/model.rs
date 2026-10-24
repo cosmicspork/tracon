@@ -997,10 +997,10 @@ fn decide(
     let broker = s.tools.broker.read().unwrap();
     match channel {
         Some(ch) => broker
-            .inject_for(&p.credential, ch, &s.node_id, &p.shape)
+            .inject_for_provider(provider, &p.credential, ch, &s.node_id, &p.shape)
             .map_err(|e| e.to_string()),
         None => broker
-            .inject_for_probe(&p.credential, &s.node_id, &p.shape)
+            .inject_for_probe_provider(provider, &p.credential, &s.node_id, &p.shape)
             .map_err(|e| e.to_string()),
     }
 }

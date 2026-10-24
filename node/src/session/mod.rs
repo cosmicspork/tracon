@@ -1051,24 +1051,36 @@ impl Manager {
         let _ = self.default_adapter.set(adapter);
     }
 
-    /// What a model's credential is, as far as choosing a harness goes.
-    /// `None` when the node cannot say: a provider it has no configuration
-    /// for, or a credential it does not hold.
-    fn credential_class(&self, model: &str) -> Option<crate::adapter::compat::CredentialClass> {
+    /// What a model's credential is, as far as choosing a harness goes: the
+    /// sign-in that serves `channel`, or without one the provider's primary
+    /// sign-in. `None` when the node cannot say: a provider it has no
+    /// configuration for, or a credential it does not hold.
+    fn credential_class(
+        &self,
+        model: &str,
+        channel: Option<&str>,
+    ) -> Option<crate::adapter::compat::CredentialClass> {
         use crate::adapter::compat::CredentialClass;
         let Some((provider_name, _)) = model.split_once('/') else {
             return (!model.trim().is_empty()).then_some(CredentialClass::BareAlias);
         };
         let provider = self.cfg.providers.get(provider_name)?;
         let broker = self.tools.broker.read().ok()?;
-        let kind = broker.get(&provider.credential)?.kind.clone();
-        Some(CredentialClass::classify(&provider.shape, &kind))
+        let base = provider.credential.as_str();
+        let credential = channel
+            .and_then(|channel| {
+                broker.model_credential(provider_name, base, channel, &self.node_id)
+            })
+            .or_else(|| broker.primary_sign_in(provider_name, base, &self.node_id))
+            .map(|(_, credential)| credential)
+            .or_else(|| broker.get(base))?;
+        Some(CredentialClass::classify(&provider.shape, &credential.kind))
     }
 
     /// The supported harnesses `model` runs on, for the picker; empty where
     /// the node cannot classify it.
     pub fn model_harnesses(&self, model: &str) -> Vec<&'static str> {
-        self.credential_class(model)
+        self.credential_class(model, None)
             .map(|class| class.harnesses_among(&crate::adapter::enabled(&self.cfg)))
             .unwrap_or_default()
     }
@@ -1081,7 +1093,7 @@ impl Manager {
         &self,
         spec: &NewSession,
     ) -> Result<(Arc<dyn HarnessAdapter>, &'static str), SessionError> {
-        let class = self.credential_class(&spec.model);
+        let class = self.credential_class(&spec.model, Some(&spec.channel));
         if let Some(named) = spec.harness.as_deref().filter(|h| !h.trim().is_empty()) {
             if !crate::adapter::is_enabled(&self.cfg, named) {
                 return Err(SessionError::Rejected(format!(
@@ -1352,7 +1364,7 @@ impl Manager {
                 "{model} is not a model channel {channel} is authorised for"
             ));
         }
-        self.check_fit(model, self.credential_class(model), harness)
+        self.check_fit(model, self.credential_class(model, Some(channel)), harness)
             .map_err(|e| e.to_string())
     }
 
@@ -1614,7 +1626,7 @@ impl Manager {
         // would refuse the session whatever it ran on has had its say.
         let (adapter, harness_source) = match chosen {
             Some(adapter) => {
-                let class = self.credential_class(&spec.model);
+                let class = self.credential_class(&spec.model, Some(&spec.channel));
                 self.check_fit(&spec.model, class, adapter.id())?;
                 (adapter, "caller")
             }
@@ -2181,18 +2193,23 @@ impl Manager {
                     });
                     // A credential this harness may not run on (a Codex
                     // sign-in under Claude Code) is not offered at all.
-                    let fits = broker.get(&provider.credential).is_none_or(|credential| {
-                        crate::adapter::compat::CredentialClass::classify(
-                            &provider.shape,
-                            &credential.kind,
-                        )
-                        .fits(adapter.id())
-                        .is_ok()
-                    });
+                    let fits = broker
+                        .model_credential(name, &provider.credential, &spec.channel, &self.node_id)
+                        .map(|(_, credential)| credential)
+                        .or_else(|| broker.get(&provider.credential))
+                        .is_none_or(|credential| {
+                            crate::adapter::compat::CredentialClass::classify(
+                                &provider.shape,
+                                &credential.kind,
+                            )
+                            .fits(adapter.id())
+                            .is_ok()
+                        });
                     bound
                         && fits
                         && broker
-                            .inject_for(
+                            .inject_for_provider(
+                                name,
                                 &provider.credential,
                                 &spec.channel,
                                 &self.node_id,
@@ -3267,7 +3284,8 @@ impl Manager {
             return false;
         };
         broker
-            .inject_for(
+            .inject_for_provider(
+                provider_name,
                 &provider.credential,
                 channel,
                 &self.node_id,

@@ -1468,13 +1468,13 @@ async fn only_a_local_browser_is_offered_the_local_sign_in_callback() {
     }
 }
 
-/// A provider holds one sign-in per node. Signing in for other channels
-/// over it, or disconnecting it, is refused with the channels that would
-/// lose it and the peers holding a copy named, and goes ahead once the
-/// caller confirms; a sign-in that keeps every channel, or the cancel of one
-/// in progress, needs no confirmation.
+/// A provider holds a sign-in per set of channels. Signing in for another
+/// channel replaces nothing, so it asks for no confirmation. Disconnecting a
+/// sign-in names the channels that lose the provider and the peers holding a
+/// copy, and goes ahead once confirmed; with several sign-ins held, which
+/// one must be named.
 #[tokio::test]
-async fn replacing_or_removing_a_sign_in_names_what_loses_it_until_confirmed() {
+async fn removing_a_sign_in_names_what_loses_it_until_confirmed() {
     state::isolate();
     let n = node();
     n.store.channel_put("work", &[], "{}").unwrap();
@@ -1482,28 +1482,44 @@ async fn replacing_or_removing_a_sign_in_names_what_loses_it_until_confirmed() {
     let mut peer = n.store.get_node("n2").unwrap().unwrap();
     peer.name = "bazzite".into();
     n.store.put_node(&peer).unwrap();
-    let mut held = Credential {
-        kind: KIND_OAUTH.into(),
-        provider: Some("anthropic".into()),
-        channels: vec!["personal".into()],
-        nodes: vec!["n1".into(), "n2".into()],
-        identity: Some("me@example.com".into()),
-        ..Default::default()
+    let sign_in = |channel: &str, nodes: &[&str], identity: &str| {
+        let mut held = Credential {
+            kind: KIND_OAUTH.into(),
+            provider: Some("anthropic".into()),
+            channels: vec![channel.into()],
+            nodes: nodes.iter().map(|node| node.to_string()).collect(),
+            identity: Some(identity.into()),
+            ..Default::default()
+        };
+        held.env.insert("ACCESS_TOKEN".into(), "access".into());
+        held
     };
-    held.env.insert("ACCESS_TOKEN".into(), "access".into());
-    n.broker.write().unwrap().put("anthropic", held);
-    let still_held = || n.broker.read().unwrap().get("anthropic").is_some();
+    n.broker.write().unwrap().put(
+        "anthropic",
+        sign_in("personal", &["n1", "n2"], "me@example.com"),
+    );
+    let held = |name: &str| n.broker.read().unwrap().get(name).is_some();
+    let card = || async {
+        let (s, _, listed) = call(&n, "GET", "/api/providers", LOCAL, "", &[], None).await;
+        assert_eq!(s, StatusCode::OK, "{listed}");
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "anthropic")
+            .unwrap()
+            .clone()
+    };
+    let listed = card().await;
+    assert_eq!(listed["shared_with"], json!(["n2"]), "{listed}");
+    assert_eq!(listed["sign_ins"][0]["credential"], "anthropic", "{listed}");
+    assert_eq!(
+        listed["sign_ins"][0]["shared_with"],
+        json!(["n2"]),
+        "{listed}"
+    );
 
-    let (s, _, listed) = call(&n, "GET", "/api/providers", LOCAL, "", &[], None).await;
-    assert_eq!(s, StatusCode::OK, "{listed}");
-    let card = listed
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|p| p["name"] == "anthropic")
-        .unwrap();
-    assert_eq!(card["shared_with"], json!(["n2"]), "{card}");
-
+    // Signing in for another channel takes nothing from personal.
     for uri in [
         "/api/providers/anthropic/connect",
         "/api/nodes/n1/providers/anthropic/connect",
@@ -1518,60 +1534,105 @@ async fn replacing_or_removing_a_sign_in_names_what_loses_it_until_confirmed() {
             Some(json!({ "channels": ["work"] })),
         )
         .await;
-        assert_eq!(s, StatusCode::CONFLICT, "{uri}: {v}");
-        let message = v["error"]["message"].as_str().unwrap();
-        assert_eq!(
-            message,
-            "anthropic holds one sign-in on this node. Signing in for work replaces the one \
-             serving personal, which loses anthropic here; bazzite holds a shared copy of it. \
-             Send \"confirm\": true to go ahead.",
-        );
+        assert_eq!(s, StatusCode::OK, "{uri}: {v}");
+        cancel_sign_in(&n).await;
     }
-    assert!(still_held());
+    assert!(held("anthropic"));
 
-    // Keeping the channel it serves loses nothing.
-    let keeps = json!({ "channels": ["personal", "work"] });
+    n.broker
+        .write()
+        .unwrap()
+        .put("anthropic@work", sign_in("work", &[], "work@example.com"));
+    let listed = card().await;
+    assert_eq!(listed["channels"], json!(["personal", "work"]), "{listed}");
+    assert_eq!(
+        listed["sign_ins"][1]["credential"], "anthropic@work",
+        "{listed}"
+    );
+    assert_eq!(
+        listed["sign_ins"][1]["identity"], "work@example.com",
+        "{listed}"
+    );
+
     let (s, _, v) = call(
         &n,
         "POST",
-        "/api/providers/anthropic/connect",
+        "/api/providers/anthropic/disconnect",
         LOCAL,
         "",
         &[],
-        Some(keeps),
+        Some(json!({ "confirm": true })),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    cancel_sign_in(&n).await;
-    let confirmed = json!({ "channels": ["work"], "confirm": true });
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        v["error"]["message"],
+        "anthropic holds 2 sign-ins on this node (anthropic, anthropic@work); name the one to change",
+    );
     let (s, _, v) = call(
         &n,
         "POST",
-        "/api/providers/anthropic/connect",
+        "/api/providers/anthropic/disconnect",
         LOCAL,
         "",
         &[],
-        Some(confirmed),
+        Some(json!({ "sign_in": "openai-codex", "confirm": true })),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    cancel_sign_in(&n).await;
-    assert!(still_held(), "a cancelled sign-in replaces nothing");
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
 
     for uri in [
         "/api/providers/anthropic/disconnect",
         "/api/nodes/n1/providers/anthropic/disconnect",
     ] {
-        let (s, _, v) = call(&n, "POST", uri, LOCAL, "", &[], None).await;
+        let (s, _, v) = call(
+            &n,
+            "POST",
+            uri,
+            LOCAL,
+            "",
+            &[],
+            Some(json!({ "sign_in": "anthropic" })),
+        )
+        .await;
         assert_eq!(s, StatusCode::CONFLICT, "{uri}: {v}");
         assert_eq!(
             v["error"]["message"],
-            "anthropic holds one sign-in on this node. Disconnecting takes anthropic from \
-             personal on this node; the shared copies on bazzite stay there. Send \"confirm\": \
-             true to go ahead.",
+            "Disconnecting the anthropic sign-in anthropic takes anthropic from personal on this \
+             node; the shared copies on bazzite stay there. Send \"confirm\": true to go ahead.",
         );
     }
-    assert!(still_held());
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/disconnect",
+        LOCAL,
+        "",
+        &[],
+        Some(json!({ "sign_in": "anthropic@work" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        v["error"]["message"],
+        "Disconnecting the anthropic sign-in anthropic@work takes anthropic from work on this \
+         node. Send \"confirm\": true to go ahead.",
+    );
+    let (s, _, v) = call(
+        &n,
+        "POST",
+        "/api/providers/anthropic/disconnect",
+        LOCAL,
+        "",
+        &[],
+        Some(json!({ "sign_in": "anthropic@work", "confirm": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!held("anthropic@work"));
+    assert!(held("anthropic"), "only the named sign-in goes");
+
+    // One left: it needs no naming, only confirming.
     let (s, _, v) = call(
         &n,
         "POST",
@@ -1583,7 +1644,7 @@ async fn replacing_or_removing_a_sign_in_names_what_loses_it_until_confirmed() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert!(!still_held());
+    assert!(!held("anthropic"));
     // With nothing held, there is nothing to confirm.
     let (s, _, v) = call(
         &n,

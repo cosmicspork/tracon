@@ -828,8 +828,14 @@ export const api = {
     call<void>('POST', `/api/providers/${name}/code`, { code }),
   disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
   /** The channels a connected provider on the serving node serves. */
-  setProviderChannels: (name: string, channels: string[]) =>
-    call<{ name: string; channels: string[] }>('PUT', `/api/providers/${name}/channels`, { channels }),
+  /** Change the channels one of a provider's sign-ins serves: the one held
+      under `signIn`, or the only one when it is empty. */
+  setProviderChannels: (name: string, channels: string[], signIn = '') =>
+    call<{ name: string; channels: string[] }>(
+      'PUT',
+      `/api/providers/${name}/channels`,
+      signIn ? { channels, sign_in: signIn } : { channels },
+    ),
   /** Seal an API key for a provider the serving node runs. Write-only: the
       key never comes back. */
   setProviderKey: (name: string, key: string, channels: string[]) =>
@@ -850,13 +856,11 @@ export const api = {
     channels: string[],
     localCallback = false,
     share = true,
-    confirm = false,
   ) =>
     call<ProviderConnectResult>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
       channels,
       local_callback: localCallback,
       share,
-      confirm,
     }),
   nodeProviderCode: (nodeId: string, name: string, code: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),
@@ -891,13 +895,15 @@ export const api = {
       'GET',
       '/api/operator/notifications',
     ),
-  /** `confirm` goes ahead although channels lose the sign-in (the node
-      refuses otherwise, naming them: see `displacedSignIn`). */
-  nodeDisconnectProvider: (nodeId: string, name: string, confirm = false) =>
+  /** Remove the sign-in held under `signIn`, or with none, cancel a sign-in
+      in progress or remove the only one. `confirm` goes ahead although
+      channels lose the provider (the node refuses otherwise, naming them:
+      see `disconnectLoses`). */
+  nodeDisconnectProvider: (nodeId: string, name: string, confirm = false, signIn = '') =>
     call<{ ok: boolean }>(
       'POST',
       `/api/nodes/${nodeId}/providers/${name}/disconnect`,
-      confirm ? { confirm } : undefined,
+      confirm || signIn ? { ...(confirm ? { confirm } : {}), ...(signIn ? { sign_in: signIn } : {}) } : undefined,
     ),
   // The work ledger.
   work: (channel: string, opts: { project_id?: string; state?: string } = {}) => {

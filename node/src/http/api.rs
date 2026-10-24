@@ -5757,8 +5757,9 @@ pub struct ConnectBody {
     /// in. On unless asked otherwise.
     #[serde(default = "share_by_default")]
     pub share: bool,
-    /// Go ahead although the sign-in replaces the one serving other channels
-    /// here ([`confirm_displaced`]).
+    /// Accepted from clients that confirm a sign-in replacing another; there
+    /// is nothing left to confirm, since a sign-in now takes over only the
+    /// channels it is made for.
     #[serde(default)]
     pub confirm: bool,
 }
@@ -5788,16 +5789,9 @@ pub async fn connect_provider(
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let local_callback = callback_allowed(&s, local, body.local_callback);
-    connect_local(
-        &s,
-        &name,
-        body.channels,
-        body.share,
-        local_callback,
-        body.confirm,
-    )
-    .await
-    .map(Json)
+    connect_local(&s, &name, body.channels, body.share, local_callback)
+        .await
+        .map(Json)
 }
 
 /// A login callback on this machine's loopback is only reachable by a browser
@@ -5813,10 +5807,8 @@ async fn connect_local(
     channels: Vec<String>,
     share: bool,
     local_callback: bool,
-    confirm: bool,
 ) -> ApiResult<serde_json::Value> {
     let channels = chosen_channels(s.store(), channels, false)?;
-    confirm_displaced(s, name, Some(&channels), confirm)?;
     let result = providers_of(s)?
         .connect(
             name,
@@ -5839,10 +5831,14 @@ async fn connect_local(
 #[serde(deny_unknown_fields)]
 pub struct ChannelsBody {
     channels: Vec<String>,
+    /// The credential of the sign-in to change; the only one when absent.
+    #[serde(default)]
+    sign_in: Option<String>,
 }
 
-/// `PUT /api/providers/{name}/channels`: the channels a connected provider
-/// serves. A peer's sign-in is changed on the node that holds it.
+/// `PUT /api/providers/{name}/channels`: the channels one of a connected
+/// provider's sign-ins serves. A peer's sign-in is changed on the node that
+/// holds it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderKeyBody {
@@ -5878,7 +5874,7 @@ pub async fn set_provider_channels(
 ) -> ApiResult<Json<serde_json::Value>> {
     let channels = chosen_channels(s.store(), body.channels, false)?;
     providers_of(&s)?
-        .set_channels(&name, channels.clone())
+        .set_channels(&name, body.sign_in.as_deref(), channels.clone())
         .map_err(provider_err)?;
     Ok(Json(json!({ "name": name, "channels": channels })))
 }
@@ -5911,6 +5907,10 @@ pub struct DisconnectBody {
     /// ([`confirm_displaced`]).
     #[serde(default)]
     pub confirm: bool,
+    /// The credential of the sign-in to remove: the only one, or a sign-in
+    /// in progress, when absent.
+    #[serde(default)]
+    pub sign_in: Option<String>,
 }
 
 pub async fn disconnect_provider(
@@ -5919,28 +5919,26 @@ pub async fn disconnect_provider(
     super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<DisconnectBody>>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
-    disconnect_local(&s, &name, body.confirm).await.map(Json)
+    disconnect_local(&s, &name, body).await.map(Json)
 }
 
-/// Refuse to replace or remove the sign-in `name` holds here, when that
-/// takes it from channels (or a disconnect leaves shared copies behind),
-/// unless the caller confirmed it. A provider holds one sign-in per node, so
-/// signing in for `keeps` replaces the one serving every other channel, and
-/// a disconnect (`keeps` of `None`) takes it from all of them. The refusal
-/// names what would be lost, which is also what a client shows before it
-/// asks again with `confirm`. The peers are named because their copies
-/// outlive it: a disconnect here revokes nothing.
+/// Refuse to remove one of the sign-ins `name` holds here, when that takes
+/// the provider from channels no other sign-in here serves, or leaves
+/// shared copies behind, unless the caller confirmed it. The refusal names
+/// what would be lost, which is also what a client shows before it asks
+/// again with `confirm`. The peers are named because their copies outlive
+/// it: a disconnect here revokes nothing.
 fn confirm_displaced(
     s: &AppState,
     name: &str,
-    keeps: Option<&[String]>,
+    sign_in: Option<&str>,
     confirm: bool,
 ) -> ApiResult<()> {
     if confirm {
         return Ok(());
     }
     let Some(displaced) = providers_of(s)?
-        .displaced(name, keeps)
+        .displaced(name, sign_in)
         .map_err(provider_err)?
     else {
         return Ok(());
@@ -5958,46 +5956,37 @@ fn confirm_displaced(
                 .unwrap_or_else(|| id.clone())
         })
         .collect();
-    let channels = displaced.channels.join(", ");
-    let lose = if displaced.channels.len() == 1 {
-        "loses"
+    let mut message = if displaced.channels.is_empty() {
+        format!(
+            "Disconnecting the {name} sign-in {} leaves no channel here without {name}",
+            displaced.sign_in
+        )
     } else {
-        "lose"
+        format!(
+            "Disconnecting the {name} sign-in {} takes {name} from {} on this node",
+            displaced.sign_in,
+            displaced.channels.join(", ")
+        )
     };
-    let mut message = format!("{name} holds one sign-in on this node. ");
-    match keeps {
-        Some(keeps) => message.push_str(&format!(
-            "Signing in for {} replaces the one serving {channels}, which {lose} {name} here",
-            keeps.join(", ")
-        )),
-        None if displaced.channels.is_empty() => {
-            message.push_str(&format!("Disconnecting removes {name} from this node"))
-        }
-        None => message.push_str(&format!(
-            "Disconnecting takes {name} from {channels} on this node"
-        )),
-    }
     if !peers.is_empty() {
-        // A disconnect revokes nothing; a new sign-in replaces only the
-        // copies it is shared to, so which of these keep the old one
-        // depends on the channels their nodes are in.
-        message.push_str(&match keeps {
-            Some(_) => format!(
-                "; {} hold{} a shared copy of it",
-                peers.join(", "),
-                if peers.len() == 1 { "s" } else { "" }
-            ),
-            None => format!("; the shared copies on {} stay there", peers.join(", ")),
-        });
+        message.push_str(&format!(
+            "; the shared copies on {} stay there",
+            peers.join(", ")
+        ));
     }
     message.push_str(". Send \"confirm\": true to go ahead.");
     Err(ApiError(StatusCode::CONFLICT, message))
 }
 
-async fn disconnect_local(s: &AppState, name: &str, confirm: bool) -> ApiResult<serde_json::Value> {
-    confirm_displaced(s, name, None, confirm)?;
+async fn disconnect_local(
+    s: &AppState,
+    name: &str,
+    body: DisconnectBody,
+) -> ApiResult<serde_json::Value> {
+    let sign_in = body.sign_in.as_deref();
+    confirm_displaced(s, name, sign_in, body.confirm)?;
     providers_of(s)?
-        .disconnect(name, &crate::providers::LoginOwner::Local)
+        .disconnect(name, sign_in, &crate::providers::LoginOwner::Local)
         .await
         .map_err(provider_err)?;
     Ok(json!({ "ok": true }))
@@ -6093,17 +6082,10 @@ pub async fn node_connect_provider(
             .await
             .map_err(super::peer_admin::refused)?;
         let local_callback = callback_allowed(&s, local, body.local_callback);
-        return connect_local(
-            &s,
-            &name,
-            body.channels,
-            body.share,
-            local_callback,
-            body.confirm,
-        )
-        .await
-        .map(Json)
-        .map_err(super::peer_admin::refused);
+        return connect_local(&s, &name, body.channels, body.share, local_callback)
+            .await
+            .map(Json)
+            .map_err(super::peer_admin::refused);
     }
     admin_on_peer(
         &s,
@@ -6187,7 +6169,7 @@ pub async fn node_disconnect_provider(
         super::passkey::authorize(&s, &parts, &bytes)
             .await
             .map_err(super::peer_admin::refused)?;
-        return disconnect_local(&s, &name, body.confirm)
+        return disconnect_local(&s, &name, body)
             .await
             .map(Json)
             .map_err(super::peer_admin::refused);
@@ -6217,7 +6199,11 @@ pub(crate) fn providers_json(s: &AppState) -> Vec<serde_json::Value> {
         .providers
         .keys()
         .map(|name| {
-            let cred = broker.model_credential_for(name, &s.node_id);
+            let cred = s.cfg.providers.get(name).and_then(|provider| {
+                broker
+                    .primary_sign_in(name, &provider.credential, &s.node_id)
+                    .filter(|(_, c)| c.is_model())
+            });
             json!({
                 "name": name,
                 "state": if cred.is_some() { "connected" } else { "disconnected" },
@@ -6268,9 +6254,14 @@ pub async fn probe_models_into_store(
             &s.cfg,
             &backend.harness_host(),
             s.manager.probe_token(),
-            |_, provider| {
+            |name, provider| {
                 broker
-                    .inject_for_probe(&provider.credential, &s.node_id, &provider.shape)
+                    .inject_for_probe_provider(
+                        name,
+                        &provider.credential,
+                        &s.node_id,
+                        &provider.shape,
+                    )
                     .is_ok()
             },
         )
@@ -6614,30 +6605,25 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
             ))?;
             forwarded_session(s, sender, &session_id)
         }
+        // A sign-in takes over only the channels it is made for: it replaces
+        // a sign-in here serving those alone, and takes those from one that
+        // serves more. Being in each of them is what a peer needs, unless
+        // the provider's credential here is bound to no channel: that is
+        // this node's alone, and the sign-in would take it over.
         C::ProviderConnect { name, channels, .. } => {
             for channel in channels {
                 sender_in_channel(s, sender, channel, "sign-in")?;
             }
-            match providers_of(s)?
-                .credential_channels(name)
-                .map_err(provider_err)?
-            {
-                // A credential bound to no channel is this node's alone, and
-                // one serving a channel the sender is not in would be taken
-                // from that channel's sessions: neither is a peer's to replace.
-                Some(serves)
-                    if serves.is_empty() || !serves.iter().all(|c| shares(s, sender, c)) =>
-                {
-                    Err(ApiError(
-                        StatusCode::FORBIDDEN,
-                        format!(
-                            "sender is not a member of every channel the {name} credential \
-                             this sign-in would replace serves"
-                        ),
-                    ))
-                }
-                _ => Ok(()),
+            if providers_of(s)?.holds_unbound(name).map_err(provider_err)? {
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "the {name} credential on this node is bound to no channel; \
+                         a sign-in from a peer would replace it"
+                    ),
+                ));
             }
+            Ok(())
         }
         C::ProviderCode { name, .. } | C::ProviderDisconnect { name, .. } => {
             // Only a sign-in the sender started is reachable from a peer (the
@@ -7025,6 +7011,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 Ok(providers) => providers
                     .disconnect(
                         &name,
+                        None,
                         &crate::providers::LoginOwner::Peer(sender.to_string()),
                     )
                     .await
@@ -7350,7 +7337,7 @@ fn remove_credential(s: &AppState, name: &str) -> ApiResult<serde_json::Value> {
     // the next publish. Not a refusal: revoking a leaked token stays one
     // command.
     if let (Some(provider), Some(providers)) = (&removed.provider, s.manager.providers()) {
-        providers.credential_removed(provider);
+        providers.credential_removed(provider, name);
     }
     let Some(revoke_id) = revoke_id else {
         let origin = (!removed.originates_at(&s.node_id)).then(|| removed.origin());

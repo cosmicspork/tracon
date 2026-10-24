@@ -16,6 +16,7 @@
 pub mod guard;
 
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -325,6 +326,40 @@ impl Credential {
         }
         Ok(())
     }
+}
+
+/// Whether the credential `name` is one of provider `entry`'s sign-ins under
+/// `base` ([`Broker::family`]). `base` is, whatever it holds, as it always
+/// was; a further sign-in must say it is `entry`'s, so a `base@…` name an
+/// operator gave something else is never injected for the provider.
+pub fn in_family(name: &str, cred: &Credential, entry: &str, base: &str) -> bool {
+    name == base
+        || (is_sign_in_name(name, base)
+            && cred.is_model()
+            && cred.provider.as_deref() == Some(entry))
+}
+
+/// Whether `name` is written as a further sign-in under `base`, whatever it
+/// holds: what a revoke, which carries only names, is matched by.
+pub fn is_sign_in_name(name: &str, base: &str) -> bool {
+    name.strip_prefix(base)
+        .and_then(|rest| rest.strip_prefix('@'))
+        .is_some_and(|suffix| !suffix.is_empty())
+}
+
+/// The order sign-ins serving one channel are chosen in: one that
+/// originates at `node_id` first, then the later sign-in, then the name, so
+/// the choice never rests on the map's order alone.
+fn precedence(a: &(&str, &Credential), b: &(&str, &Credential), node_id: &str) -> Ordering {
+    let key = |(name, cred): &(&str, &Credential)| {
+        (
+            cred.originates_at(node_id),
+            cred.grant_id.clone(),
+            cred.grant_version,
+            std::cmp::Reverse(name.to_string()),
+        )
+    };
+    key(a).cmp(&key(b))
 }
 
 /// Whether `bound`, one entry in a credential's `repos`, names the
@@ -1074,6 +1109,94 @@ impl Broker {
             .map(|(n, c)| (n.as_str(), c))
     }
 
+    /// The sign-ins provider `entry` holds here under `base`, the credential
+    /// its `[providers.<entry>]` names: `base` itself, and each `base@…`
+    /// model credential for `entry`, one per set of channels it serves.
+    pub fn family(
+        &self,
+        entry: &str,
+        base: &str,
+    ) -> impl Iterator<Item = (&str, &Credential)> + '_ {
+        let (entry, base) = (entry.to_string(), base.to_string());
+        self.credentials
+            .iter()
+            .filter(move |(name, cred)| in_family(name, cred, &entry, &base))
+            .map(|(n, c)| (n.as_str(), c))
+    }
+
+    /// The sign-in of provider `entry` that serves `channel` on `node_id`:
+    /// of those bound to it, one signed in here before a copy of another
+    /// node's, then the later sign-in. A copy shared from a peer can serve a
+    /// channel a sign-in here also does; the operator's own is the one used.
+    pub fn model_credential(
+        &self,
+        entry: &str,
+        base: &str,
+        channel: &str,
+        node_id: &str,
+    ) -> Option<(&str, &Credential)> {
+        self.family(entry, base)
+            .filter(|(_, c)| c.allows(channel) && c.allows_node(node_id))
+            .max_by(|a, b| precedence(a, b, node_id))
+    }
+
+    /// The sign-in a provider is described by where no channel is asked:
+    /// `base` when it is held here, otherwise the first by
+    /// [`Self::model_credential`]'s order.
+    pub fn primary_sign_in(
+        &self,
+        entry: &str,
+        base: &str,
+        node_id: &str,
+    ) -> Option<(&str, &Credential)> {
+        if let Some((name, cred)) = self
+            .credentials
+            .get_key_value(base)
+            .filter(|(_, c)| c.allows_node(node_id))
+        {
+            return Some((name.as_str(), cred));
+        }
+        self.family(entry, base)
+            .filter(|(_, c)| c.allows_node(node_id))
+            .max_by(|a, b| precedence(a, b, node_id))
+    }
+
+    /// [`Self::inject_for`] for a provider, through the sign-in that serves
+    /// `channel`. With none, the refusal is the one `base` itself earns, so
+    /// a provider holding one sign-in is refused as it always was.
+    pub fn inject_for_provider(
+        &self,
+        entry: &str,
+        base: &str,
+        channel: &str,
+        node_id: &str,
+        shape: &str,
+    ) -> Result<Injection, BrokerError> {
+        match self.model_credential(entry, base, channel, node_id) {
+            Some((_, cred)) => Self::injection(cred, shape),
+            None => self.inject_for(base, channel, node_id, shape),
+        }
+    }
+
+    /// [`Self::inject_for_probe`] for a provider: any of its sign-ins some
+    /// channel on this node could use.
+    pub fn inject_for_probe_provider(
+        &self,
+        entry: &str,
+        base: &str,
+        node_id: &str,
+        shape: &str,
+    ) -> Result<Injection, BrokerError> {
+        let usable = self
+            .family(entry, base)
+            .filter(|(_, c)| !c.channels.is_empty() && c.allows_node(node_id))
+            .max_by(|a, b| precedence(a, b, node_id));
+        match usable {
+            Some((_, cred)) => Self::injection(cred, shape),
+            None => self.inject_for_probe(base, node_id, shape),
+        }
+    }
+
     fn usable(&self, name: &str, channel: &str, node_id: &str) -> Result<&Credential, BrokerError> {
         let cred = self
             .credentials
@@ -1544,6 +1667,81 @@ mod tests {
         assert!(b.inject_for_probe("max", "node-a", "anthropic").is_ok());
         assert!(b.model_credential_for("anthropic", "node-a").is_some());
         assert!(b.model_credential_for("openai", "node-a").is_none());
+    }
+
+    /// A provider's sign-ins are its base credential and each `base@…` one
+    /// written for it; a channel is served by one made here before a peer's
+    /// copy, then by the later sign-in.
+    #[test]
+    fn a_channel_is_served_by_the_sign_in_made_here_then_the_later_one() {
+        let sign_in = |channels: &[&str], origin: &str, key: &str| {
+            let mut cred = Credential {
+                kind: KIND_API_KEY.into(),
+                provider: Some("anthropic".into()),
+                channels: channels.iter().map(|c| c.to_string()).collect(),
+                nodes: vec![origin.into(), "node-a".into()],
+                grant_id: Some(uuid::Uuid::now_v7().to_string()),
+                grant_origin: Some(origin.into()),
+                ..Default::default()
+            };
+            cred.env.insert("API_KEY".into(), key.into());
+            cred
+        };
+        let key = |b: &Broker, channel: &str| {
+            b.inject_for_provider("anthropic", "anthropic", channel, "node-a", "anthropic")
+                .ok()
+                .and_then(|i| i.x_api_key)
+        };
+        let mut b = Broker::default();
+        b.put(
+            "anthropic",
+            sign_in(&["personal", "work"], "node-b", "peer"),
+        );
+        assert_eq!(key(&b, "work").as_deref(), Some("peer"));
+        b.put("anthropic@work", sign_in(&["work"], "node-a", "mine"));
+        b.put("anthropic@ops", sign_in(&["ops"], "node-b", "later-peer"));
+        // Named like a sign-in but written for something else.
+        let mut other = sign_in(&["ops"], "node-a", "not-anthropic");
+        other.provider = Some("openai".into());
+        b.put("anthropic@other", other);
+        b.put("anthropicx", sign_in(&["ops"], "node-a", "not-anthropic"));
+        assert_eq!(
+            b.family("anthropic", "anthropic")
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>(),
+            ["anthropic", "anthropic@ops", "anthropic@work"]
+        );
+        assert_eq!(key(&b, "work").as_deref(), Some("mine"));
+        assert_eq!(key(&b, "personal").as_deref(), Some("peer"));
+        assert_eq!(key(&b, "ops").as_deref(), Some("later-peer"));
+        assert!(matches!(
+            b.inject_for_provider("anthropic", "anthropic", "nowhere", "node-a", "anthropic")
+                .unwrap_err(),
+            BrokerError::NotBound { .. }
+        ));
+        b.put(
+            "anthropic@ops-2",
+            sign_in(&["ops"], "node-b", "latest-peer"),
+        );
+        assert_eq!(key(&b, "ops").as_deref(), Some("latest-peer"));
+        assert_eq!(
+            b.primary_sign_in("anthropic", "anthropic", "node-a")
+                .map(|(n, _)| n),
+            Some("anthropic")
+        );
+        b.remove("anthropic");
+        assert_eq!(
+            b.primary_sign_in("anthropic", "anthropic", "node-a")
+                .map(|(n, _)| n),
+            Some("anthropic@work"),
+            "made here, before the peers' copies"
+        );
+        assert!(b
+            .inject_for_probe_provider("anthropic", "anthropic", "node-a", "anthropic")
+            .is_ok());
+        assert!(is_sign_in_name("anthropic@work", "anthropic"));
+        assert!(!is_sign_in_name("anthropic@", "anthropic"));
+        assert!(!is_sign_in_name("anthropicx@work", "anthropic"));
     }
 
     #[test]
