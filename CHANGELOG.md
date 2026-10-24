@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.38.0](https://github.com/cosmicspork/tracon/compare/v0.37.0...v0.38.0) (2026-10-24)
+
+
+### Features
+
+* **providers:** hold a sign-in per channel ([#641](https://github.com/cosmicspork/tracon/issues/641)) ([58092ba](https://github.com/cosmicspork/tracon/commit/58092ba06258d29d79b03805cd3b499cc77cac42))
+
+
+### Bug Fixes
+
+* **devcontainer:** mount any checkout at the fixed workspace path ([#643](https://github.com/cosmicspork/tracon/issues/643)) ([1e52f2c](https://github.com/cosmicspork/tracon/commit/1e52f2c3386b66e6e313b6aac15a353d134c44e3))
+* **release:** rebuild version-bumped files from main ([#645](https://github.com/cosmicspork/tracon/issues/645)) ([d8d0397](https://github.com/cosmicspork/tracon/commit/d8d0397d23791dadfe87783783adb2b20c509c68))
+* **wrapper:** show a white tray glyph on a dark Linux desktop ([#644](https://github.com/cosmicspork/tracon/issues/644)) ([8692598](https://github.com/cosmicspork/tracon/commit/8692598fe0c54487b47689480b372e829288cf2b))
+
 ## [0.37.0](https://github.com/cosmicspork/tracon/compare/v0.36.0...v0.37.0) (2026-10-23)
 
 
