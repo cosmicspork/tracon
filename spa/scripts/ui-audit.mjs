@@ -5,9 +5,17 @@
 //   cd spa && bun scripts/ui-audit.mjs [--only review,settings] [--state failed]
 //     [--sizes desktop,phone] [--schemes dark,light] [--out DIR] [--list]
 //
-// Writes DIR/<state>--<size>-<scheme>.png and DIR/manifest.json, which records
+// Writes DIR/<state>--<size>-<scheme>.png, DIR/manifest.json, which records
 // for each state the API calls that had no fixture and any console or page
-// errors: a screen that looks wrong because its fixture is missing says so.
+// errors (a screen that looks wrong because its fixture is missing says so),
+// and DIR/index.html, a contact sheet of every state's shots side by side.
+//
+// Each shot waits for the page to settle: text on it, no "Loading…", its
+// images loaded, and half a second without a DOM change. One that never does
+// is still taken, and its state is flagged rather than passed off as done.
+// A request the state holds open on purpose lets "Loading…" stand.
+//
+// src/lib/ui-audit.test.ts fails when a screen or Settings section has no state.
 //
 // A state module default-exports an array of:
 //
@@ -30,6 +38,10 @@
 //     act: async (page) => { ... },     // optional, after load and before the shot
 //     sizes: ['desktop'],               // optional subset
 //     full: false,                      // optional: viewport only, not the whole page
+//     settle: false,                    // optional: shoot after a fixed wait instead,
+//                                       // for a state that never settles on purpose
+//     screen: 'login',                  // optional: the screen, when the route does not
+//                                       // say (the login gate replaces any of them)
 //   }
 //
 // A response wrapped as { status, body } is sent with that status; anything
@@ -134,12 +146,48 @@ async function respond(route, value, req) {
   })
 }
 
+const settleTimeout = 10000
+
+/**
+ * Runs in the page: resolves with the ms it took to go quiet, or null when it
+ * did not within `timeout`. Quiet is text on the page, no "Loading…" (unless
+ * `loading` allows it), every eager image complete, and `quiet` ms since the
+ * last DOM mutation; then the fonts. Ported from hounddogreading's screenshots.
+ */
+const settled = ({ timeout, quiet, loading }) =>
+  new Promise((resolve) => {
+    const start = performance.now()
+    let last = start
+    const observer = new MutationObserver(() => (last = performance.now()))
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true })
+    const busy = /Loading[^\n]{0,40}(\.\.\.|…)/
+    const tick = () => {
+      const now = performance.now()
+      const text = document.body?.innerText ?? ''
+      const ready =
+        text.trim() !== '' &&
+        (loading || !busy.test(text)) &&
+        [...document.images].every((img) => img.loading === 'lazy' || img.complete)
+      if (ready && now - last >= quiet) {
+        observer.disconnect()
+        document.fonts.ready.then(() => resolve(Math.round(now - start)))
+      } else if (now - start > timeout) {
+        observer.disconnect()
+        resolve(null)
+      } else setTimeout(tick, 50)
+    }
+    tick()
+  })
+
 async function shoot(browser, state, sizeName, scheme) {
   const size = sizes[sizeName]
   const ctx = await browser.newContext({ viewport: size, colorScheme: scheme, deviceScaleFactor: 1 })
   const page = await ctx.newPage()
   const misses = new Set()
   const errors = []
+  // Overridden responses not yet sent: one still open is a loading state the
+  // state holds on purpose.
+  let held = 0
   page.on('console', (m) => {
     if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text().slice(0, 400))
   })
@@ -157,7 +205,12 @@ async function shoot(browser, state, sizeName, scheme) {
     }
     const value = lookup(state.api, req.method(), url.pathname)
     if (value !== undefined) {
-      return respond(route, value, { method: req.method(), path: url.pathname, query: Object.fromEntries(url.searchParams), body })
+      held++
+      try {
+        return await respond(route, value, { method: req.method(), path: url.pathname, query: Object.fromEntries(url.searchParams), body })
+      } finally {
+        held--
+      }
     }
     const res = await route.fetch()
     if (res.status() === 404) misses.add(`${req.method()} ${url.pathname}`)
@@ -169,10 +222,15 @@ async function shoot(browser, state, sizeName, scheme) {
     // Bounded: a state that holds a request open on purpose (a loading state)
     // never goes idle.
     await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {})
-    await page.waitForTimeout(350)
+    const settle = async (when) => {
+      if (state.settle === false) return page.waitForTimeout(350)
+      const ms = await page.evaluate(settled, { timeout: settleTimeout, quiet: 500, loading: held > 0 })
+      if (ms === null) errors.push(`settle: still loading or changing after ${settleTimeout / 1000}s, ${when}`)
+    }
+    await settle('after load')
     if (state.act) {
       await state.act(page, { size: sizeName, scheme })
-      await page.waitForTimeout(350)
+      await settle('after its act')
     }
     // A whole page is taken by growing the window to fit it, not with
     // fullPage: that stitches past the viewport, leaving the sticky rail
@@ -195,6 +253,78 @@ async function shoot(browser, state, sizeName, scheme) {
   }
   await ctx.close()
   return { key: `${sizeName}-${scheme}`, file, misses: [...misses], errors }
+}
+
+const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+
+/** The contact sheet: each state's shots side by side, grouped by area, flags first in each. */
+function sheet(manifest) {
+  const order = ['desktop', 'phone'].flatMap((size) => ['dark', 'light'].map((scheme) => `${size}-${scheme}`))
+  const areas = [...new Set(manifest.map((m) => m.area))]
+  const flagged = (m) => m.misses.length > 0 || m.errors.length > 0
+  const row = (m) => {
+    const shots = order.filter((k) => m.shots[k])
+    const flags = [...m.errors.map((e) => `<li>${esc(e)}</li>`), ...m.misses.map((x) => `<li>no fixture: <code>${esc(x)}</code></li>`)]
+    return `<article id="${esc(m.id)}"${flagged(m) ? ' class="flagged"' : ''} data-find="${esc(`${m.id} ${m.title} ${m.route}`.toLowerCase())}">
+<h3><a href="#${esc(m.id)}">${esc(m.title)}</a></h3>
+<p class="meta"><code>${esc(m.id)}</code> <code>${esc(m.route)}</code>${m.since ? ` <span>${esc(m.since)}</span>` : ''}</p>
+${m.note ? `<p class="note">${esc(m.note)}</p>` : ''}${flags.length ? `<ul class="flags">${flags.join('')}</ul>` : ''}
+<div class="shots">${shots
+      .map((k) => `<figure class="${k.split('-')[0]}"><a href="${esc(m.shots[k])}"><img loading="lazy" src="${esc(m.shots[k])}" alt="${esc(`${m.title}, ${k}`)}"></a><figcaption>${k}</figcaption></figure>`)
+      .join('')}</div>
+</article>`
+  }
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen audit</title>
+<style>
+:root { color-scheme: light dark; --bg: #f6f6f4; --s1: #fff; --ink: #1d1d1b; --dim: #6b6b66; --line: #ddddd8; --crit: #b3261e; }
+@media (prefers-color-scheme: dark) { :root { --bg: #151514; --s1: #1f1f1d; --ink: #ececea; --dim: #9a9a94; --line: #34342f; --crit: #ff8a80; } }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, sans-serif; }
+header { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+header h1 { font-size: 16px; margin: 0; }
+header nav { display: flex; flex-wrap: wrap; gap: 2px 10px; }
+header nav a { color: var(--ink); }
+input[type=search] { font: inherit; padding: 4px 8px; flex: 1 1 14em; min-width: 0; max-width: 24em; }
+main { padding: 0 16px 48px; }
+h2 { margin: 28px 0 8px; font-size: 18px; }
+h2, article { scroll-margin-top: 120px; }
+article { background: var(--s1); border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin: 10px 0; }
+article.flagged { border-color: var(--crit); }
+h3 { margin: 0; font-size: 15px; }
+h3 a { color: inherit; text-decoration: none; }
+.meta, .note { margin: 4px 0; color: var(--dim); overflow-wrap: anywhere; }
+.flags { color: var(--crit); margin: 6px 0; padding-left: 20px; overflow-wrap: anywhere; }
+.shots { display: flex; gap: 10px; overflow-x: auto; margin-top: 8px; align-items: flex-start; }
+figure { margin: 0; flex: none; }
+figure.desktop img { width: 320px; }
+figure.phone img { width: 130px; }
+img { display: block; height: auto; max-height: 420px; object-fit: cover; object-position: top; border: 1px solid var(--line); }
+figcaption { color: var(--dim); font-size: 12px; }
+body.only-flagged article:not(.flagged), article.hidden { display: none; }
+</style></head><body>
+<header><h1>Screen audit</h1>
+<span>${manifest.length} states, ${manifest.filter(flagged).length} flagged</span>
+<label><input type="checkbox" id="flagged"> flagged only</label>
+<input type="search" id="find" placeholder="Filter by id, title or route">
+<nav>${areas.map((a) => `<a href="#area-${esc(a)}">${esc(a)}</a>`).join('')}</nav></header>
+<main>
+${areas
+  .map((a) => {
+    const ms = manifest.filter((m) => m.area === a)
+    return `<h2 id="area-${esc(a)}">${esc(a)} <small>${ms.length}</small></h2>\n${[...ms.filter(flagged), ...ms.filter((m) => !flagged(m))].map(row).join('\n')}`
+  })
+  .join('\n')}
+</main>
+<script>
+document.getElementById('flagged').onchange = (e) => document.body.classList.toggle('only-flagged', e.target.checked)
+document.getElementById('find').oninput = (e) => {
+  const q = e.target.value.trim().toLowerCase()
+  for (const a of document.querySelectorAll('article')) a.classList.toggle('hidden', q !== '' && !a.dataset.find.includes(q))
+}
+</script>
+</body></html>
+`
 }
 
 if (!stateFilter && !onlyAreas) rmSync(out, { recursive: true, force: true })
@@ -273,4 +403,9 @@ if (stateFilter) {
 }
 writeFileSync(`${out}${manifestFile}`, JSON.stringify(merged, null, 2))
 console.log(`${out}${manifestFile}`)
+const sheetFile = manifestFile.replace('manifest', 'index').replace(/\.json$/, '.html')
+writeFileSync(`${out}${sheetFile}`, sheet(merged))
+console.log(`${out}${sheetFile}`)
+const flagged = merged.filter((m) => m.misses.length || m.errors.length)
+if (flagged.length) console.log(`${flagged.length} of ${merged.length} states flagged; see the sheet`)
 process.exit(0)

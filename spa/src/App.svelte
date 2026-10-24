@@ -29,6 +29,7 @@
   import { servingBanner } from './lib/nodes'
   import { remedy } from './lib/refusal'
   import { router } from './lib/router.svelte'
+  import { screenFor } from './lib/routes'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
   import { staleInterface, versionLabel } from './lib/version'
@@ -103,19 +104,10 @@
       now: clock.now,
     }).count,
   )
-  const sessionId = $derived(router.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
-  const reviewId = $derived(router.path.match(/^\/reviews\/([^/]+)/)?.[1] ?? null)
-  const approvalId = $derived(router.path.match(/^\/approvals\/([^/]+)/)?.[1] ?? null)
-  const promotionId = $derived(router.path.match(/^\/promotions\/([^/]+)/)?.[1] ?? null)
-  const enroll = $derived(router.path === '/nodes/enroll')
-  const settings = $derived(router.path === '/settings')
-  const docPreviewRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)\/preview$/))
-  const docRef = $derived(router.path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/))
-  const docEdit = $derived(Boolean(docRef?.[3]))
-  const workId = $derived(router.path.match(/^\/tasks\/([^/]+)/)?.[1] ?? null)
+  const screen = $derived(screenFor(router.path))
   /** Which rail entry the screen belongs to. Enrolling a node is part of Mesh. */
   const nav = $derived(
-    settings || enroll
+    screen.name === 'settings' || screen.name === 'enroll'
       ? 'settings'
       : router.path.startsWith('/docs')
         ? 'docs'
@@ -159,8 +151,8 @@
   <Login />
 {:else if approving}
   <DeviceApproval id={approving} ondone={doneApproving} />
-{:else if docPreviewRef}
-  <DocPreview channel={docPreviewRef[1]} slug={docPreviewRef[2]} />
+{:else if screen.name === 'doc-preview'}
+  <DocPreview channel={screen.channel} slug={screen.slug} />
 {:else}
 <div class="shell" class:narrow={collapsed}>
   <nav class="rail">
@@ -267,35 +259,35 @@
     {:else if store.reconnected !== null}
       <div class="banner ok">Hub reconnected <b>· {store.reconnected} queued update{store.reconnected === 1 ? '' : 's'} handed to the hub</b></div>
     {/if}
-    {#if reviewId}
-      <Review id={reviewId} />
-    {:else if approvalId}
-      <Approval id={approvalId} />
-    {:else if promotionId}
-      <Promotion id={promotionId} />
-    {:else if sessionId}
-      <Session id={sessionId} />
-    {:else if router.path === '/sessions'}
+    {#if screen.name === 'review'}
+      <Review id={screen.id} />
+    {:else if screen.name === 'approval'}
+      <Approval id={screen.id} />
+    {:else if screen.name === 'promotion'}
+      <Promotion id={screen.id} />
+    {:else if screen.name === 'session'}
+      <Session id={screen.id} />
+    {:else if screen.name === 'sessions'}
       <Sessions />
-    {:else if enroll}
+    {:else if screen.name === 'enroll'}
       <Enroll />
-    {:else if router.path === '/usage'}
+    {:else if screen.name === 'usage'}
       <Metrics />
-    {:else if workId}
-      <WorkItem id={workId} />
-    {:else if router.path === '/tasks'}
+    {:else if screen.name === 'task'}
+      <WorkItem id={screen.id} />
+    {:else if screen.name === 'tasks'}
       <Work />
-    {:else if nav === 'more'}
+    {:else if screen.name === 'more'}
       <More />
-    {:else if router.path === '/evidence'}
+    {:else if screen.name === 'evidence'}
       <Evidence />
-    {:else if docRef}
-      <Doc channel={docRef[1]} slug={docRef[2]} edit={docEdit} />
-    {:else if nav === 'docs'}
+    {:else if screen.name === 'doc'}
+      <Doc channel={screen.channel} slug={screen.slug} edit={screen.edit} />
+    {:else if screen.name === 'docs'}
       <Docs />
-    {:else if nav === 'memories'}
+    {:else if screen.name === 'memories'}
       <Memories />
-    {:else if settings}
+    {:else if screen.name === 'settings'}
       <Settings />
     {:else}
       <Home />

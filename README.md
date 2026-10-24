@@ -1702,7 +1702,10 @@ just setup && just boundary
 
 `just musl` builds the static Linux binary; `just gui` builds the desktop app in a
 container (it needs webkit2gtk headers an immutable host lacks). The interface's
-screenshots regenerate without a node: `cd spa && bun scripts/screenshots.mjs`.
+screenshots regenerate without a node: `cd spa && bun scripts/screenshots.mjs`. Every
+screen in every state worth checking, at phone and desktop widths in both themes, comes
+from `cd spa && bun scripts/ui-audit.mjs`, which writes a contact sheet to
+`target/ui-audit/index.html`.
 
 To run an unreleased build as your own node on Linux, against your real state and
 credentials, use `just node-dev [ref]` (default `origin/main`). It builds the ref in a

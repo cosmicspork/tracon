@@ -1,9 +1,9 @@
 // Home and the shell around it: the rail and its footer, the phone tabs, every
 // banner App.svelte can raise, each card the home's lanes render, the
 // first-run guide and setup checklist, readiness under the composer, plus the
-// login gate, /nodes/enroll, the desktop app's setup page, and the two
-// Settings cards (this device's push enrollment, hub summaries) the home
-// links to.
+// login gate, a device approval, /nodes/enroll, the desktop app's setup page,
+// and the two Settings cards (this device's push enrollment, hub summaries) the
+// home links to.
 //
 // The baseline's ended sessions say `state: "ended"`, which is not a session
 // state (types.ts `SessionState`); their rows lose the kind label and show an
@@ -386,6 +386,28 @@ const base = (o = {}) => {
 }
 
 const never = () => new Promise(() => {})
+
+const APPROVAL = 'dap_7Hq2xV9mK4pL8sN3'
+const deviceApproval = (o = {}) => ({
+  id: APPROVAL,
+  kind: 'sign-in',
+  code_tries_left: 3,
+  requester_session: null,
+  requester_delegated_from: null,
+  status: 'pending',
+  created_ms: -40000,
+  expires_ms: 260000,
+  requester_agent: 'tracon desktop 0.37.0 (Linux x86_64)',
+  requester_addr: '192.168.1.40',
+  action: null,
+  summary: null,
+  prompt: 'Sign in tracon desktop on 192.168.1.40',
+  local: false,
+  passkeys: 1,
+  relying_party: true,
+  same_session: false,
+  ...o,
+})
 
 // `asleep_ms` is a duration, but the runner stamps every small *_ms value as
 // an offset from now; a string body is sent as-is, so stamp `woke_ms` here.
@@ -1226,6 +1248,7 @@ export default [
     area: 'home',
     route: '/',
     title: 'Login gate',
+    screen: 'login',
     note: 'Every snapshot answers 401: the operator token form replaces the shell.',
     api: {
       '/api/*': { status: 401, body: { error: { code: 401, message: 'log in' } } },
@@ -1237,6 +1260,7 @@ export default [
     area: 'home',
     route: '/',
     title: 'Login gate, token not accepted',
+    screen: 'login',
     note: 'A token typed and refused: the error line under the field.',
     api: {
       '/api/*': { status: 401, body: { error: { code: 401, message: 'log in' } } },
@@ -1253,6 +1277,7 @@ export default [
     area: 'home',
     route: '/',
     title: 'Login gate, checking the token',
+    screen: 'login',
     note: 'The exchange in flight: button reads "Checking…", input disabled.',
     api: {
       '/api/*': { status: 401, body: { error: { code: 401, message: 'log in' } } },
@@ -1263,6 +1288,69 @@ export default [
       await page.getByPlaceholder('trc1.…').fill('trc1.9f31c6a870d24b5e.0123456789abcdef')
       await page.getByRole('button', { name: 'Log in' }).click()
     },
+  },
+
+  // --- Device approval ---------------------------------------------------------
+  // Opened from another window's link (`#approve=<id>`): the sheet replaces the
+  // shell until it is decided or closed.
+  {
+    id: 'home-device-approval-sign-in',
+    area: 'home',
+    route: `/#approve=${APPROVAL}`,
+    title: 'Device approval: sign in another window',
+    note: 'A pending sign-in from the desktop app, opened in a browser with a passkey: the warning, the code field, who asked and from where.',
+    api: base({ [`/api/auth/device/approvals/${APPROVAL}`]: deviceApproval() }),
+  },
+  {
+    id: 'home-device-approval-step-up',
+    area: 'home',
+    route: `/#approve=${APPROVAL}`,
+    title: 'Device approval: confirm an admin action, one try left',
+    note: 'A step-up for a session that was itself signed in by approval: the action, the delegated session, the tries-left line.',
+    api: base({
+      [`/api/auth/device/approvals/${APPROVAL}`]: deviceApproval({
+        kind: 'step-up',
+        action: 'policy.install',
+        summary: 'Install policy bundle v19',
+        requester_session: 'a1b2c3d4',
+        requester_delegated_from: 'Firefox on phone',
+        code_tries_left: 1,
+      }),
+    }),
+    act: async (page) => page.getByPlaceholder('BCDF-GHJK').fill('BCDF-GHJK'),
+  },
+  {
+    id: 'home-device-approval-no-passkey',
+    area: 'home',
+    route: `/#approve=${APPROVAL}`,
+    title: 'Device approval: no passkey enrolled',
+    note: 'Approve stays disabled with the reason under the code: approve at the node, or enroll a passkey first.',
+    api: base({ [`/api/auth/device/approvals/${APPROVAL}`]: deviceApproval({ passkeys: 0 }) }),
+  },
+  {
+    id: 'home-device-approval-settled',
+    area: 'home',
+    route: `/#approve=${APPROVAL}`,
+    title: 'Device approval: already approved',
+    note: 'A link opened again after it was used: the done line and a Done button, no code field.',
+    api: base({ [`/api/auth/device/approvals/${APPROVAL}`]: deviceApproval({ status: 'consumed' }) }),
+  },
+  {
+    id: 'home-device-approval-loading',
+    area: 'home',
+    route: `/#approve=${APPROVAL}`,
+    title: 'Device approval: loading',
+    api: base({ [`/api/auth/device/approvals/${APPROVAL}`]: never }),
+  },
+  {
+    id: 'home-device-approval-missing',
+    area: 'home',
+    route: `/#approve=${APPROVAL}`,
+    title: 'Device approval: unknown or expired link',
+    note: 'The node no longer holds the request: its message in place of the sheet, and Close.',
+    api: base({
+      [`/api/auth/device/approvals/${APPROVAL}`]: { status: 404, body: { error: { code: 404, message: 'no such approval request; it may have expired' } } },
+    }),
   },
 
   // --- Enroll -----------------------------------------------------------------

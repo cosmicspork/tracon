@@ -1225,5 +1225,24 @@
       "open": false,
       "closes_ms": null
     }
+  },
+  "/api/restart": {
+    "config": null,
+    "restart": {
+      "available": true,
+      "mechanism": "systemd",
+      "reason": null
+    },
+    "plan": null,
+    "busy": {
+      "turns": [],
+      "checks": 0,
+      "reviews": 0
+    },
+    "closing": [],
+    "last_error": null
+  },
+  "/api/repos/offers": {
+    "offers": []
   }
 }
