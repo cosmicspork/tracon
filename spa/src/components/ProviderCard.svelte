@@ -11,7 +11,7 @@
     prepareExternalOpen,
   } from '../lib/external'
   import { formatDuration } from '../lib/format'
-  import { completionInstruction, displacedSignIn, oneSignIn, providerLabel } from '../lib/providers'
+  import { completionInstruction, disconnectLoses, providerLabel, signInLabel, signIns, takesOver } from '../lib/providers'
   import { store } from '../lib/store.svelte'
   import {
     declareOps,
@@ -28,7 +28,7 @@
     type SaveOutcome,
   } from '../lib/config-form'
   import ConfigField from './settings/ConfigField.svelte'
-  import type { ConfigOp, ModelDecl, ProviderConfig, ProviderConnectResult, ProviderInfo } from '../lib/types'
+  import type { ConfigOp, ModelDecl, ProviderConfig, ProviderConnectResult, ProviderInfo, ProviderSignIn } from '../lib/types'
 
   let {
     p,
@@ -62,10 +62,13 @@
   let shareSignIn = $state(true)
   // The operator's pick, once they touch the boxes; until then the seed.
   let chosen = $state<string[] | null>(null)
-  let editingChannels = $state(false)
-  // A sign-in or disconnect that takes the provider from channels, waiting
-  // for the operator to confirm what it names.
-  let confirming = $state<{ kind: 'connect' | 'disconnect'; text: string } | null>(null)
+  // The sign-in whose channels are being edited, by credential.
+  let editing = $state<string | null>(null)
+  // Signing in again, beside the sign-ins already held, for other channels.
+  let adding = $state(false)
+  // A disconnect that takes the provider from channels, waiting for the
+  // operator to confirm what it names.
+  let confirming = $state<{ signIn: ProviderSignIn; text: string } | null>(null)
 
   // The declared-models editor's own local copy: edited freely, saved on
   // request. Re-seeded whenever the node's own config changes under it
@@ -226,41 +229,47 @@
 
   const peerName = (id: string) => store.nodes.find((node) => node.id === id)?.name ?? id.slice(0, 8)
 
-  // The serving node holds one sign-in per provider: one that would take it
-  // from channels is confirmed first, naming them. A peer's card has no
-  // such list to name, and the peer refuses replacing what its sender
-  // does not share.
-  function connect(confirmed = false) {
-    const text = isSelf && !confirmed ? displacedSignIn(p, picked, peerName) : null
-    confirming = text ? { kind: 'connect', text } : null
-    if (text) return
+  const held = $derived(signIns(p))
+  const takeover = $derived(isSelf && held.length ? takesOver(p, picked) : null)
+
+  // A sign-in takes over only the channels it is made for, so starting one
+  // asks nothing: the note beside Connect says which it takes over.
+  function connect() {
     return act(async () => {
-      justResult = await api.nodeConnectProvider(
-        nodeId,
-        p.name,
-        picked,
-        managedLocal || sameHostBrowser,
-        shareSignIn,
-        confirmed,
-      )
+      justResult = await api.nodeConnectProvider(nodeId, p.name, picked, managedLocal || sameHostBrowser, shareSignIn)
+      adding = false
     })
   }
 
-  function editChannels() {
-    chosen = [...p.channels]
-    editingChannels = true
+  // Seeded with the channels no sign-in serves yet: what a second sign-in
+  // is usually for.
+  function startAdding() {
+    const served = new Set(held.flatMap((signIn) => signIn.channels))
+    chosen = channelChoices.map((channel) => channel.name).filter((name) => !served.has(name))
+    adding = true
+  }
+
+  function cancelAdding() {
+    chosen = null
+    adding = false
+  }
+
+  function editChannels(signIn: ProviderSignIn) {
+    chosen = [...signIn.bound]
+    editing = signIn.credential
   }
 
   function cancelChannels() {
     chosen = null
-    editingChannels = false
+    editing = null
   }
 
   function saveChannels() {
+    const signIn = editing ?? ''
     return act(async () => {
-      await api.setProviderChannels(p.name, picked)
+      await api.setProviderChannels(p.name, picked, signIn)
       chosen = null
-      editingChannels = false
+      editing = null
     })
   }
 
@@ -296,36 +305,61 @@
   }
 
   // Go ahead with what the operator was shown. If what it would take has
-  // changed since (other channels picked, a fresher listing), the new text
-  // is what they confirm instead.
+  // changed since (a fresher listing), the new text is what they confirm
+  // instead.
   function goAhead() {
     if (!confirming) return
-    const { kind, text } = confirming
-    const now = displacedSignIn(p, kind === 'connect' ? picked : null, peerName)
-    if (now !== null && now !== text) {
-      confirming = { kind, text: now }
+    const { signIn, text } = confirming
+    const now = held.find((other) => other.credential === signIn.credential) ?? signIn
+    const again = disconnectLoses(p, now, peerName)
+    if (again !== null && again !== text) {
+      confirming = { signIn: now, text: again }
       return
     }
-    return kind === 'connect' ? connect(true) : disconnect(true)
+    return disconnect(now, true)
   }
 
-  function disconnect(confirmed = false) {
-    const text = isSelf && !confirmed ? displacedSignIn(p, null, peerName) : null
-    confirming = text ? { kind: 'disconnect', text } : null
+  // Without a sign-in, this cancels the one in progress.
+  function disconnect(signIn: ProviderSignIn | null, confirmed = false) {
+    const text = signIn && isSelf && !confirmed ? disconnectLoses(p, signIn, peerName) : null
+    confirming = text && signIn ? { signIn, text } : null
     if (text) return
     return act(async () => {
-      await api.nodeDisconnectProvider(nodeId, p.name, confirmed)
+      await api.nodeDisconnectProvider(nodeId, p.name, confirmed, signIn?.credential ?? '')
       justResult = null
     })
   }
 
-
-  function expiry(): string {
-    if (!p.expires_ms) return ''
-    const left = p.expires_ms - clock.now
+  function expiry(expiresMs: number | null): string {
+    if (!expiresMs) return ''
+    const left = expiresMs - clock.now
     return left <= 0 ? 'expired' : `refreshes in ${formatDuration(left)}`
   }
 </script>
+
+{#snippet signInOptions()}
+  {#if channelChoices.length > 1}
+    <ChannelChoice
+      legend="Channels this sign-in serves"
+      choices={channelChoices}
+      selected={picked}
+      onchange={(next) => (chosen = next)}
+      disabled={busy}
+    />
+  {/if}
+  {#if mayClaimBrowser}
+    <label class="local-choice">
+      <input type="checkbox" bind:checked={sameHostBrowser} />
+      This browser is physically on the serving node; use its local callback
+    </label>
+  {/if}
+  {#if meshed}
+    <label class="local-choice">
+      <input type="checkbox" bind:checked={shareSignIn} />
+      Share this sign-in with every node in its channels
+    </label>
+  {/if}
+{/snippet}
 
 <div
   class="prov"
@@ -338,7 +372,7 @@
   <span class="pnm">
     {providerLabel(p.name)}
     <small
-      >{#if p.state === 'connected'}{p.kind === 'oauth' ? 'subscription' : 'api key'}{#if p.identity}{' · '}{p.identity}{/if}{:else if shownState === 'pending'}waiting on you{:else}{p.can_login
+      >{#if held.length}{held[0].kind === 'oauth' ? 'subscription' : 'api key'}{:else if shownState === 'pending'}waiting on you{:else}{p.can_login
           ? 'subscription'
           : 'api key'}{/if}</small
     >
@@ -347,39 +381,63 @@
     {#if !isSelf}
       <span class="scope">Remote node {nodeName}: commands are sealed to it. Its provider credential stays there and this browser cannot claim its local callback.</span>
     {/if}
-    {#if p.state === 'connected'}
-      <span class="l"
-        ><span class="chip">connected</span>{#if p.channels.length}{' · '}{p.channels.join(', ')}{:else}{' · '}no channel{/if}{#if isSelf && editable && !editingChannels}
-          · <button class="lnk" onclick={editChannels} disabled={busy}>edit channels</button>{/if}</span
-      >
-      {#if editingChannels}
-        <ChannelChoice
-          legend="Channels this sign-in serves"
-          choices={channelChoices}
-          selected={picked}
-          onchange={(next) => (chosen = next)}
-          disabled={busy}
-        />
-        {#if p.channels.some((channel) => !picked.includes(channel)) && store.nodes.length > 1}
-          <span class="l off">Peers that already hold this sign-in keep it for channels you remove.</span>
-        {/if}
-        <span class="actions">
-          <button class="btn p" onclick={saveChannels} disabled={busy || picked.length === 0}>{busy ? 'Saving…' : 'Save channels'}</button>
-          <button class="lnk" onclick={cancelChannels} disabled={busy}>Cancel</button>
+    {#if held.length}
+      <!-- One row per sign-in: each serves its own channels, with its own account. -->
+      {#each held as signIn (signIn.credential)}
+        <span class="signin">
+          <span class="l"
+            ><span class="chip" class:bad={signIn.state === 'needs_reconnect'}>{signIn.state === 'needs_reconnect' ? 'sign in again' : 'connected'}</span>{#if signIn.identity}{' · '}{signIn.identity}{/if}{' · '}{signIn.channels.length ? signIn.channels.join(', ') : 'no channel'}{#if isSelf && editable && editing === null}{' · '}<button class="lnk" onclick={() => editChannels(signIn)} disabled={busy}>edit channels</button>{/if}{#if isSelf}{' · '}<button
+                class="lnk d"
+                onclick={() => disconnect(signIn)}
+                disabled={busy}>Disconnect</button
+              >{/if}</span
+          >
+          {#if signIn.bound.some((channel) => !signIn.channels.includes(channel))}
+            <span class="l off">A copy shared from another node; a sign-in made here serves {signIn.bound.filter((channel) => !signIn.channels.includes(channel)).join(', ')}.</span>
+          {/if}
+          {#if signIn.error}<span class="l bad">{signIn.error}</span>{/if}
+          {#if signIn.kind === 'oauth' && expiry(signIn.expires_ms)}<span class="meta">{expiry(signIn.expires_ms)}</span>{/if}
+          {#if editing === signIn.credential}
+            <ChannelChoice
+              legend="Channels this sign-in serves"
+              choices={channelChoices}
+              selected={picked}
+              onchange={(next) => (chosen = next)}
+              disabled={busy}
+            />
+            {#if signIn.bound.some((channel) => !picked.includes(channel)) && store.nodes.length > 1}
+              <span class="l off">Peers that already hold this sign-in keep it for channels you remove.</span>
+            {/if}
+            {#if held.some((other) => other !== signIn && other.channels.some((channel) => picked.includes(channel) && !signIn.bound.includes(channel)))}
+              <span class="l off">A channel another sign-in serves moves to this one.</span>
+            {/if}
+            <span class="actions">
+              <button class="btn p" onclick={saveChannels} disabled={busy || picked.length === 0}>{busy ? 'Saving…' : 'Save channels'}</button>
+              <button class="lnk" onclick={cancelChannels} disabled={busy}>Cancel</button>
+            </span>
+          {/if}
         </span>
+      {/each}
+      {#if !isSelf}
+        <span><button class="lnk d" onclick={() => disconnect(null)} disabled={busy}>Disconnect on {nodeName}</button></span>
       {/if}
-      {#if isSelf && p.kind === 'oauth'}
-        <span class="l off">{oneSignIn(p)}</span>
-      {/if}
-      {#if isSelf}
-        <span><button class="lnk d" onclick={() => disconnect()} disabled={busy}>Disconnect</button></span>
-      {:else}
-        <span><button class="lnk d" onclick={() => disconnect()} disabled={busy}>Disconnect on {nodeName}</button></span>
+      {#if isSelf && p.can_login && shownState !== 'pending'}
+        {#if adding}
+          {@render signInOptions()}
+          {#if takeover}<span class="l off">{takeover}</span>{/if}
+          <span class="actions">
+            <button class="btn p" onclick={() => connect()} disabled={busy || picked.length === 0}>Sign in</button>
+            <button class="lnk" onclick={cancelAdding} disabled={busy}>Cancel</button>
+          </span>
+        {:else if editing === null}
+          <span><button class="lnk" onclick={startAdding} disabled={busy}>Sign in for other channels</button></span>
+          <span class="l off">Each channel can use its own {providerLabel(p.name)} account: a sign-in serves only the channels it is made for.</span>
+        {/if}
       {/if}
       {#if config}
         <span class="meta">
           {#if p.kind === 'oauth'}
-            {expiry() ? `Renews automatically · ${expiry()}` : 'Renews automatically'}
+            Renews automatically
           {:else}
             {config.shape}-compatible · {config.upstream}
           {/if}
@@ -466,7 +524,8 @@
           </details>
         {/if}
       {/if}
-    {:else if shownState === 'pending'}
+    {/if}
+    {#if shownState === 'pending'}
       {#if shownUrl}
         <span class="l warn"><span class="chip warn">connect</span> · {completionInstruction(completion)}</span>
         {#if completionNote}<span class="l off">{completionNote}</span>{/if}
@@ -475,7 +534,7 @@
         {/if}
         <span class="actions">
           <button class="lnk" onclick={openAgain} disabled={busy}>Open sign-in</button>
-          <button class="lnk d" onclick={() => disconnect()} disabled={busy}>Cancel</button>
+          <button class="lnk d" onclick={() => disconnect(null)} disabled={busy}>Cancel</button>
         </span>
         {#if completion === 'local_callback'}
           <details class="alternate">
@@ -505,33 +564,12 @@
         <span class="l warn"><span class="chip warn">connect</span> · This sign-in belongs to your connection to that node.</span>
         <span><button class="lnk" onclick={() => connect()} disabled={busy}>Resume sign-in</button></span>
       {/if}
-    {:else}
+    {:else if !held.length}
       <span class="l off" class:bad={p.state === 'failed'}
         ><span class="chip" class:off={p.state !== 'failed'} class:bad={p.state === 'failed'}>{p.state === 'failed' ? 'failed' : 'disconnected'}</span>{#if p.error}{' · '}{p.error}{/if}</span
       >
       {#if p.can_login}
-        {#if channelChoices.length > 1}
-          <ChannelChoice
-            legend="Channels this sign-in serves"
-            choices={channelChoices}
-            selected={picked}
-            onchange={(next) => (chosen = next)}
-            disabled={busy}
-          />
-        {/if}
-        {#if mayClaimBrowser}
-          <label class="local-choice">
-            <input type="checkbox" bind:checked={sameHostBrowser} />
-            This browser is physically on the serving node; use its local callback
-          </label>
-        {/if}
-        {#if meshed}
-          <label class="local-choice">
-            <input type="checkbox" bind:checked={shareSignIn} />
-            Share this sign-in with every node in its channels
-          </label>
-        {/if}
-        {#if isSelf}<span class="l off">{oneSignIn(p)}</span>{/if}
+        {@render signInOptions()}
         <span><button class="lnk" onclick={() => connect()} disabled={busy || picked.length === 0}>{p.state === 'failed' ? 'Try again' : 'Connect'}</button></span>
       {:else if isSelf}
         {#if channelChoices.length > 1}
@@ -565,11 +603,7 @@
       <span class="confirm" role="alert">
         <span class="l warn">{confirming.text}</span>
         <span class="actions">
-          <button
-            class="btn d"
-            onclick={goAhead}
-            disabled={busy}>{confirming.kind === 'connect' ? 'Sign in anyway' : 'Disconnect anyway'}</button
-          >
+          <button class="btn d" onclick={goAhead} disabled={busy}>Disconnect anyway</button>
           <button class="lnk" onclick={() => (confirming = null)} disabled={busy}>Cancel</button>
         </span>
       </span>
@@ -642,6 +676,11 @@
   }
   .pst .l.bad {
     color: var(--crit);
+  }
+  .signin {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
   .confirm {
     display: flex;

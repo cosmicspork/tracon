@@ -1035,12 +1035,18 @@ async fn a_subscription_signed_in_once_is_shared_and_renewed_by_one_holder_at_a_
     .await;
 
     use tracon::providers::Refreshed;
-    assert_eq!(pa.refresh("anthropic").await.unwrap(), Refreshed::Renewed);
+    assert_eq!(
+        pa.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
     wait_for("B to receive A's renewal", || {
         version(&b).is_some_and(|(v, _)| v == 1)
     })
     .await;
-    assert_eq!(pb.refresh("anthropic").await.unwrap(), Refreshed::Renewed);
+    assert_eq!(
+        pb.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
     wait_for("A to receive B's renewal", || {
         version(&a).is_some_and(|(v, _)| v == 2)
     })
@@ -1048,7 +1054,10 @@ async fn a_subscription_signed_in_once_is_shared_and_renewed_by_one_holder_at_a_
     assert_eq!(version(&a), version(&b));
 
     let before = fake.with(|f| f.refreshes);
-    let (ra, rb) = tokio::join!(pa.refresh("anthropic"), pb.refresh("anthropic"));
+    let (ra, rb) = tokio::join!(
+        pa.refresh("anthropic", "anthropic"),
+        pb.refresh("anthropic", "anthropic")
+    );
     let mut outcomes = [ra.unwrap(), rb.unwrap()];
     outcomes.sort_by_key(|o| *o == Refreshed::Renewed);
     assert_eq!(
@@ -1236,9 +1245,30 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
         "{seen}"
     );
 
-    // Nor may a member sign in over a credential that also serves a channel
-    // it is not in: sharing one of its channels is not enough.
+    // A member may sign in for a channel it shares although the credential
+    // here also serves one it is not in: the sign-in takes over only its own
+    // channels, and the other keeps serving `private`.
     let credential = Config::default().providers["anthropic"].credential.clone();
+    let connect = || {
+        confirmed(
+            &a.id,
+            &bi,
+            Command::ProviderConnect {
+                name: "anthropic".into(),
+                channels: vec!["personal".into()],
+                share: true,
+                statement: None,
+            },
+        )
+    };
+    // Bound to no channel, it is this node's alone, and a sign-in would
+    // take it over.
+    b.broker
+        .write()
+        .unwrap()
+        .put(&credential, tracon::broker::Credential::default());
+    let result = a.client.command(&bi, connect(), t).await;
+    assert!(refused_with(&result, "bound to no channel"), "{result:?}");
     b.broker.write().unwrap().put(
         &credential,
         tracon::broker::Credential {
@@ -1246,49 +1276,7 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
             ..Default::default()
         },
     );
-    let result = a
-        .client
-        .command(
-            &bi,
-            confirmed(
-                &a.id,
-                &bi,
-                Command::ProviderConnect {
-                    name: "anthropic".into(),
-                    channels: vec!["personal".into()],
-                    share: true,
-                    statement: None,
-                },
-            ),
-            t,
-        )
-        .await;
-    assert!(refused_with(&result, "would replace"), "{result:?}");
-    // Once it serves only channels the member shares, the member may.
-    b.broker.write().unwrap().put(
-        &credential,
-        tracon::broker::Credential {
-            channels: vec!["personal".into()],
-            ..Default::default()
-        },
-    );
-    let started = a
-        .client
-        .command(
-            &bi,
-            confirmed(
-                &a.id,
-                &bi,
-                Command::ProviderConnect {
-                    name: "anthropic".into(),
-                    channels: vec!["personal".into()],
-                    share: true,
-                    statement: None,
-                },
-            ),
-            t,
-        )
-        .await;
+    let started = a.client.command(&bi, connect(), t).await;
     assert!(
         started.as_ref().is_ok_and(|v| v["url"].is_string()),
         "{started:?}"

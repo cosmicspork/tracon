@@ -1,4 +1,4 @@
-import type { LoginCompletion, ProviderInfo } from './types'
+import type { LoginCompletion, ProviderInfo, ProviderSignIn } from './types'
 
 export function providerLabel(name: string): string {
   if (name === 'openai') return 'OpenAI API'
@@ -7,40 +7,68 @@ export function providerLabel(name: string): string {
   return name
 }
 
-/** What the card says about a subscription: the node holds one sign-in for
-    it, whichever channels it serves. */
-export function oneSignIn(p: ProviderInfo): string {
-  return `This node holds one ${providerLabel(p.name)} sign-in, for every channel it serves: signing in again replaces it, and disconnecting removes it, for all of them.`
+/** The sign-ins a provider holds on its node, or for a node too old to
+    list them, the one its top-level fields describe. */
+export function signIns(p: ProviderInfo): ProviderSignIn[] {
+  if (p.sign_ins) return p.sign_ins
+  if (p.state !== 'connected' || p.kind === null) return []
+  return [
+    {
+      credential: '',
+      state: 'connected',
+      kind: p.kind,
+      identity: p.identity,
+      expires_ms: p.expires_ms,
+      channels: p.channels,
+      bound: p.channels,
+      shared_with: p.shared_with,
+    },
+  ]
+}
+
+/** How the card names a sign-in: the account it is, or failing that the
+    credential it is held under. */
+export function signInLabel(signIn: ProviderSignIn): string {
+  return signIn.identity ?? (signIn.credential || 'this sign-in')
 }
 
 /**
- * What signing in for `keeps` would take from the sign-in a provider already
- * holds on the serving node, or with `null` what disconnecting it would, in
- * the words the card asks the operator to confirm. Null when nothing is lost.
- * The node refuses the same cases until confirmed (`confirm_displaced`):
- * channels the new sign-in does not serve lose the provider here, and a
- * disconnect leaves peers' shared copies where they are.
+ * Which of `picked` a new sign-in would take over from a sign-in already
+ * serving them on the node, in the words the card shows beside Connect.
+ * Nothing outside `picked` changes: the node keeps every other channel on
+ * the sign-in it has. Null when none of them is served yet.
  */
-export function displacedSignIn(
+export function takesOver(p: ProviderInfo, picked: string[]): string | null {
+  const parts = signIns(p)
+    .map((signIn) => ({ signIn, taken: signIn.channels.filter((channel) => picked.includes(channel)) }))
+    .filter(({ taken }) => taken.length)
+    .map(({ signIn, taken }) => `${taken.join(', ')} ${taken.length === 1 ? 'is' : 'are'} served by ${signInLabel(signIn)}`)
+  if (!parts.length) return null
+  return `${parts.join('; ')}. This sign-in takes ${parts.length === 1 && picked.length === 1 ? 'it' : 'them'} over; every other channel keeps the sign-in it has.`
+}
+
+/**
+ * What disconnecting `signIn` would take from the provider's node, in the
+ * words the card asks the operator to confirm: the channels it serves that
+ * no other sign-in there is bound to, and the peers whose shared copies
+ * stay. Null when nothing is lost. The node refuses the same cases until
+ * confirmed (`confirm_displaced`).
+ */
+export function disconnectLoses(
   p: ProviderInfo,
-  keeps: string[] | null,
+  signIn: ProviderSignIn,
   peerName: (id: string) => string = (id) => id,
 ): string | null {
-  // Only a held credential is replaced, and a disconnect while a sign-in is
-  // in flight only cancels that sign-in.
-  if (p.kind === null || (keeps === null && p.state === 'pending')) return null
-  const label = providerLabel(p.name)
-  const lost = p.channels.filter((channel) => keeps === null || !keeps.includes(channel))
-  const peers = (p.shared_with ?? []).map(peerName)
-  if (keeps !== null) {
-    if (!lost.length) return null
-    const copies = peers.length ? `; ${peers.join(', ')} ${peers.length === 1 ? 'holds' : 'hold'} a shared copy of it` : ''
-    return `${label} holds one sign-in on this node. Signing in for ${keeps.join(', ')} replaces the one serving ${lost.join(', ')}, which ${lost.length === 1 ? 'loses' : 'lose'} it here${copies}.`
-  }
+  const others = signIns(p).filter((other) => other !== signIn)
+  const lost = signIn.channels.filter((channel) => !others.some((other) => other.bound.includes(channel)))
+  const peers = (signIn.shared_with ?? []).map(peerName)
   if (!lost.length && !peers.length) return null
-  const taken = lost.length ? `Disconnecting takes ${label} from ${lost.join(', ')} on this node` : `Disconnecting removes ${label} from this node`
+  const label = providerLabel(p.name)
+  const taken = lost.length
+    ? `Disconnecting ${signInLabel(signIn)} takes ${label} from ${lost.join(', ')} on this node`
+    : `Disconnecting ${signInLabel(signIn)} leaves no channel here without ${label}`
   const copies = peers.length ? `; the shared copies on ${peers.join(', ')} stay there` : ''
-  return `${label} holds one sign-in on this node. ${taken}${copies}.`
+  return `${taken}${copies}.`
 }
 
 export function completionInstruction(completion: LoginCompletion | null): string {

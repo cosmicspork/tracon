@@ -303,6 +303,52 @@ async fn the_placeholder_never_reaches_the_provider_and_the_credential_does() {
     );
 }
 
+/// A provider signed in once per channel: each session's request carries
+/// the key of the sign-in its channel is served by.
+#[tokio::test]
+async fn each_channel_is_served_by_its_own_sign_in() {
+    state::isolate();
+    let store = format!(
+        "{STORE}{}",
+        r#"
+    [credentials."stubcred@personal"]
+    kind = "api_key"
+    provider = "stub"
+    channels = ["personal"]
+    [credentials."stubcred@personal".env]
+    API_KEY = "personal-key"
+"#
+    );
+    let h = harness(&store, LOOPBACK).await;
+    for (session, channel) in [("s1", "work"), ("s2", "personal")] {
+        let token = h
+            .manager
+            .register_tool_token_for_test(session, channel)
+            .await;
+        let (status, _, body) = call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages",
+            &token,
+            json!({"model": "claude-x", "stream": true, "messages": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{channel}: {body}");
+    }
+    let seen = h.seen.requests.lock().unwrap();
+    let keys: Vec<_> = seen
+        .iter()
+        .map(|(_, _, up, _)| header(up, "x-api-key").map(str::to_string))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            Some("real-key".to_string()),
+            Some("personal-key".to_string())
+        ]
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_key_is_unauthorized_and_nothing_is_forwarded() {
     state::isolate();

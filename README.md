@@ -342,7 +342,13 @@ A sign-in starts out serving the node's default channel (or every channel the no
 belongs to when it has none); choose others before connecting, or use **edit
 channels** on a connected provider to change them without signing in again. A
 shared sign-in reaches the members of a channel you add; a peer that already holds
-it keeps its copy for a channel you remove.
+it keeps its copy for a channel you remove. Each channel can use its own account:
+**Sign in for other channels** on a connected subscription adds a second sign-in
+beside the first, and a sign-in only ever takes over the channels it is made for, so
+signing in Codex for `work` with a work account leaves `personal` on the account it
+had. Each sign-in is listed with its account and channels, renews on its own, and is
+disconnected on its own; the node names the channels that lose the provider before a
+disconnect goes ahead.
 A connected provider whose models never appear has a stale catalogue — the probe
 runs when the provider connects, and can miss if the harness was not up yet or the
 credential arrived by handoff: **Settings → Connections → Refresh models**, under the
@@ -1279,7 +1285,9 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
                                     # methods and paths the gateway will lend the credential to:
                                     # inference, token counting, embeddings and the models list,
                                     # never the provider account behind the key
-# login = "anthropic"               # the subscription sign-in the node runs: "anthropic", or "openai" for ChatGPT/Codex
+# login = "anthropic"               # the subscription sign-in the node runs: "anthropic", or "openai" for ChatGPT/Codex;
+                                    # a sign-in per set of channels is held under `credential`, and
+                                    # each further one under `<credential>@<channel>`
 # models = [                        # what the picker offers and tracon-agent is told; a built-in provider
 #   { id = "claude-opus-5", name = "Claude Opus 5", context = 200000, output = 64000, reasoning = true, attachment = true },
 #   # parallel_tools = false, reasoning_effort = "high": read by the native harness only (parallel is on by default)

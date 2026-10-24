@@ -629,6 +629,17 @@ a fixed date about a month after sign-in, so the operator signs in again roughly
 monthly. A refresh revokes the access token it replaces at once. ChatGPT access
 tokens last ten days, and their refresh token rotates too.
 
+A provider holds a sign-in per set of channels, so one channel can use a work
+account and another a personal one. The first is held under the credential the
+provider's entry names and each further one under `<credential>@<channel>`, marked
+as that provider's (`Broker::family`). A sign-in takes over only the channels it is
+made for: it replaces a sign-in serving nothing else, takes those channels from one
+made here that serves more, and leaves a copy of another node's sign-in alone. Which
+sign-in serves a session is decided per request by its channel
+(`Broker::model_credential`): one made on this node ahead of a shared copy, then the
+later sign-in. Each renews and is disconnected on its own. A node too old to know
+this stores a shared `<credential>@<channel>` copy and never uses it.
+
 One sign-in serves the mesh. Signing in shares the credential, by default, with every
 member bound to one of its channels, as a direct-sealed handoff. The credential carries
 the sign-in it came from (a UUIDv7) and how many refreshes it has been through, and a
@@ -1464,9 +1475,9 @@ Invariants on top of the wire:
   code that finishes a sign-in the sender started with a confirmed connect rides on
   that connect's statement (only that sign-in, from that sender, while it waits and
   for at most 15 minutes); a code for any other sign-in needs its own. Then the
-  sign-in still needs the sender in every channel it would bind and in every
-  channel served by the credential it would replace (one bound to no channel is the
-  owner's alone and never replaced by a peer); a pasted code or a cancel is held to
+  sign-in still needs the sender in every channel it would bind, which are the only
+  channels it can take over (a provider credential bound to no channel is the owner's
+  alone, and a peer may not start a sign-in that would replace it); a pasted code or a cancel is held to
   the channels of the sign-in the sender started. Create, verdict, notification, evidence
   and review-detail commands check their own channel as they run. A refusal is acked
   to the sender with its reason, logged, and shown as the mesh's last refusal.

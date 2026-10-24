@@ -181,8 +181,14 @@ async fn an_anthropic_sign_in_from_another_device_completes_by_paste_and_refresh
     // Two hours left: not due now, due inside the half hour ahead.
     let now = tracon::store::now_ms();
     assert!(p.due_for_refresh(now).is_empty());
-    assert_eq!(p.due_for_refresh(now + 100 * 60 * 1000), ["anthropic"]);
-    assert_eq!(p.refresh("anthropic").await.unwrap(), Refreshed::Renewed);
+    assert_eq!(
+        p.due_for_refresh(now + 100 * 60 * 1000),
+        [("anthropic".to_string(), "anthropic".to_string())]
+    );
+    assert_eq!(
+        p.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
     assert_eq!(
         env(&broker, "anthropic", "ACCESS_TOKEN").as_deref(),
         Some("sk-ant-access-2")
@@ -192,10 +198,12 @@ async fn an_anthropic_sign_in_from_another_device_completes_by_paste_and_refresh
         Some("sk-ant-refresh-2")
     );
     assert!(matches!(
-        p.disconnect("anthropic", &phone).await.unwrap_err(),
+        p.disconnect("anthropic", None, &phone).await.unwrap_err(),
         ProviderError::RemoteDisconnect
     ));
-    p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
+    p.disconnect("anthropic", None, &LoginOwner::Local)
+        .await
+        .unwrap();
     assert!(broker.read().unwrap().get("anthropic").is_none());
 }
 
@@ -296,7 +304,7 @@ async fn a_codex_sign_in_on_this_host_returns_to_a_local_listener() {
     );
     assert_eq!(listed(&p, "openai-codex")["identity"], oauth_fake::EMAIL);
 
-    p.refresh("openai-codex").await.unwrap();
+    p.refresh("openai-codex", "openai-codex").await.unwrap();
     assert_eq!(
         env(&broker, "openai-codex", "REFRESH_TOKEN").as_deref(),
         Some("codex-refresh-2")
@@ -375,7 +383,7 @@ async fn a_codex_sign_in_whose_port_is_taken_falls_back_to_a_device_code() {
             .is_some_and(|note| note.contains(&port.to_string())),
         "{result:?}"
     );
-    p.disconnect("openai-codex", &LoginOwner::Local)
+    p.disconnect("openai-codex", None, &LoginOwner::Local)
         .await
         .unwrap();
     drop(occupier);
@@ -410,7 +418,7 @@ async fn a_denied_or_cancelled_device_sign_in_keeps_nothing() {
         .await
         .unwrap();
     eventually("a pending poll", || fake.with(|f| f.device_polls) >= 1).await;
-    p.disconnect("openai-codex", &LoginOwner::Local)
+    p.disconnect("openai-codex", None, &LoginOwner::Local)
         .await
         .unwrap();
     let polls = fake.with(|f| {
@@ -461,7 +469,9 @@ async fn invalid_providers_and_malformed_pastes_are_refused() {
             "{bad:?}"
         );
     }
-    p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
+    p.disconnect("anthropic", None, &LoginOwner::Local)
+        .await
+        .unwrap();
     assert!(broker.read().unwrap().is_empty());
 
     // A newer sign-in replaces a cancelled one; the old code is not its code.
@@ -470,7 +480,9 @@ async fn invalid_providers_and_malformed_pastes_are_refused() {
         .await
         .unwrap();
     let old_state = fake.authorize(&first.url).state;
-    p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
+    p.disconnect("anthropic", None, &LoginOwner::Local)
+        .await
+        .unwrap();
     let second = p
         .connect("anthropic", vec![], true, LoginOwner::Local, false)
         .await
@@ -515,7 +527,10 @@ async fn a_credential_that_cannot_be_renewed_asks_for_a_new_sign_in() {
     )
     .await
     .unwrap();
-    assert_eq!(p.due_for_refresh(tracon::store::now_ms()), ["anthropic"]);
+    assert_eq!(
+        p.due_for_refresh(tracon::store::now_ms()),
+        [("anthropic".to_string(), "anthropic".to_string())]
+    );
 
     fake.with(|f| f.reject_refresh = true);
     let loop_task = tokio::spawn(p.clone().refresh_loop());
@@ -542,7 +557,7 @@ async fn a_credential_that_cannot_be_renewed_asks_for_a_new_sign_in() {
         b.put("anthropic", c);
     }
     assert!(matches!(
-        p.refresh("anthropic").await.unwrap_err(),
+        p.refresh("anthropic", "anthropic").await.unwrap_err(),
         ProviderError::ReconnectRequired(_)
     ));
 }
@@ -680,7 +695,9 @@ async fn a_sign_in_is_shared_with_every_member_of_its_channels() {
     }
 
     // Asked not to share, it stays here.
-    p.disconnect("anthropic", &LoginOwner::Local).await.unwrap();
+    p.disconnect("anthropic", None, &LoginOwner::Local)
+        .await
+        .unwrap();
     sign_in_anthropic(&p, &fake, false).await;
     let held = broker.read().unwrap().get("anthropic").unwrap().clone();
     assert_eq!(held.nodes, ["n1"]);
@@ -710,7 +727,10 @@ async fn a_shared_credential_is_renewed_by_whichever_holder_wins_the_claim() {
         .clone()
         .unwrap();
 
-    assert_eq!(p.refresh("anthropic").await.unwrap(), Refreshed::Renewed);
+    assert_eq!(
+        p.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
     let held = broker.read().unwrap().get("anthropic").unwrap().clone();
     assert_eq!(held.grant_version, 1);
     assert_eq!(held.grant_id.as_deref(), Some(grant.as_str()));
@@ -730,7 +750,7 @@ async fn a_shared_credential_is_renewed_by_whichever_holder_wins_the_claim() {
     *mesh.claim.lock().unwrap() = Some(ClaimResult::Lost);
     let refreshes = fake.with(|f| f.refreshes);
     assert_eq!(
-        p.refresh("anthropic").await.unwrap(),
+        p.refresh("anthropic", "anthropic").await.unwrap(),
         Refreshed::LeftToAnotherHolder
     );
     assert_eq!(fake.with(|f| f.refreshes), refreshes);
@@ -739,7 +759,10 @@ async fn a_shared_credential_is_renewed_by_whichever_holder_wins_the_claim() {
     // With no claim to be had, the node that signed in still renews, and no
     // other holder does.
     *mesh.claim.lock().unwrap() = Some(ClaimResult::Unsupported);
-    assert_eq!(p.refresh("anthropic").await.unwrap(), Refreshed::Renewed);
+    assert_eq!(
+        p.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
     assert_eq!(
         broker
             .read()
@@ -757,7 +780,7 @@ async fn a_shared_credential_is_renewed_by_whichever_holder_wins_the_claim() {
     }
     *mesh.claim.lock().unwrap() = Some(ClaimResult::Unreachable("down".into()));
     assert_eq!(
-        p.refresh("anthropic").await.unwrap(),
+        p.refresh("anthropic", "anthropic").await.unwrap(),
         Refreshed::LeftToAnotherHolder
     );
     assert_eq!(fake.with(|f| f.refreshes), refreshes + 1);
@@ -789,12 +812,18 @@ fn the_renewing_node_tries_first_and_the_other_holders_after() {
         .unwrap()
         .put("anthropic", credential(&["n2", "n1"]));
     assert!(p.due_for_refresh(now).is_empty());
-    assert_eq!(p.due_for_refresh(now + 6 * 60 * 1000), ["anthropic"]);
+    assert_eq!(
+        p.due_for_refresh(now + 6 * 60 * 1000),
+        [("anthropic".to_string(), "anthropic".to_string())]
+    );
     broker
         .write()
         .unwrap()
         .put("anthropic", credential(&["n1"]));
-    assert_eq!(p.due_for_refresh(now), ["anthropic"]);
+    assert_eq!(
+        p.due_for_refresh(now),
+        [("anthropic".to_string(), "anthropic".to_string())]
+    );
 
     let mut cfg = Config::default();
     cfg.mesh.renew_credentials = true;
@@ -810,7 +839,10 @@ fn the_renewing_node_tries_first_and_the_other_holders_after() {
         .write()
         .unwrap()
         .put("anthropic", credential(&["n2", "n1"]));
-    assert_eq!(renewer.due_for_refresh(now), ["anthropic"]);
+    assert_eq!(
+        renewer.due_for_refresh(now),
+        [("anthropic".to_string(), "anthropic".to_string())]
+    );
 }
 
 /// A renewed copy arriving from another holder clears a provider that was
@@ -869,7 +901,7 @@ async fn a_sign_in_can_serve_another_channel_without_signing_in_again() {
     assert_eq!(before.nodes, ["n1", "n2"]);
 
     let mut frames = bus.subscribe();
-    p.set_channels("anthropic", vec!["personal".into(), "work".into()])
+    p.set_channels("anthropic", None, vec!["personal".into(), "work".into()])
         .unwrap();
     let after = broker.read().unwrap().get("anthropic").unwrap().clone();
     assert_eq!(after.channels, ["personal", "work"]);
@@ -893,7 +925,8 @@ async fn a_sign_in_can_serve_another_channel_without_signing_in_again() {
     ));
 
     // Taking a channel away keeps the holders it already has.
-    p.set_channels("anthropic", vec!["work".into()]).unwrap();
+    p.set_channels("anthropic", None, vec!["work".into()])
+        .unwrap();
     let narrowed = broker.read().unwrap().get("anthropic").unwrap().clone();
     assert_eq!(narrowed.channels, ["work"]);
     assert_eq!(narrowed.nodes, ["n1", "n2", "n3"]);
@@ -911,7 +944,7 @@ async fn an_unshared_sign_in_stays_here_when_its_channels_change() {
     });
     p.set_mesh(mesh.clone());
     sign_in_anthropic(&p, &fake, false).await;
-    p.set_channels("anthropic", vec!["personal".into(), "work".into()])
+    p.set_channels("anthropic", None, vec!["personal".into(), "work".into()])
         .unwrap();
     let held = broker.read().unwrap().get("anthropic").unwrap().clone();
     assert_eq!(held.nodes, ["n1"]);
@@ -924,11 +957,11 @@ async fn channels_are_changed_only_on_a_connected_provider() {
     let fake = OAuthFake::start().await;
     let (p, _broker, _bus) = providers(fake.endpoints());
     assert!(matches!(
-        p.set_channels("anthropic", vec!["work".into()]),
+        p.set_channels("anthropic", None, vec!["work".into()]),
         Err(ProviderError::Failed(_))
     ));
     assert!(matches!(
-        p.set_channels("nope", vec!["work".into()]),
+        p.set_channels("nope", None, vec!["work".into()]),
         Err(ProviderError::Unknown(_))
     ));
 }
@@ -1021,4 +1054,228 @@ async fn the_listing_says_which_providers_the_operator_declared() {
     assert_eq!(declared("openai"), true);
     assert_eq!(declared("anthropic"), false);
     assert_eq!(listed(&p, "openai")["declared"], true);
+}
+
+/// Sign in to `name` for `channels` by paste, as the operator's other device
+/// would, and return the access token the sign-in was given.
+async fn sign_in(p: &Arc<Providers>, fake: &OAuthFake, channels: &[&str]) {
+    let result = p
+        .connect(
+            "anthropic",
+            channels.iter().map(|c| c.to_string()).collect(),
+            true,
+            LoginOwner::Local,
+            false,
+        )
+        .await
+        .unwrap();
+    let authorized = fake.authorize(&result.url);
+    p.code(
+        "anthropic",
+        &format!("{}#{}", oauth_fake::GOOD_CODE, authorized.state),
+        &LoginOwner::Local,
+    )
+    .await
+    .unwrap();
+}
+
+fn channels_of(broker: &SharedBroker, credential: &str) -> Option<Vec<String>> {
+    broker
+        .read()
+        .unwrap()
+        .get(credential)
+        .map(|c| c.channels.clone())
+}
+
+fn serving(broker: &SharedBroker, channel: &str) -> Option<String> {
+    broker
+        .read()
+        .unwrap()
+        .inject_for_provider("anthropic", "anthropic", channel, "n1", "anthropic")
+        .ok()
+        .and_then(|injection| injection.authorization)
+}
+
+/// Each channel can be signed in to with its own account: a second sign-in
+/// for another channel is held beside the first rather than replacing it,
+/// each channel's requests carry its own token, each renews on its own, and
+/// disconnecting one leaves the other.
+#[tokio::test]
+async fn a_sign_in_per_channel_keeps_each_channel_on_its_own() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+
+    sign_in(&p, &fake, &["personal"]).await;
+    sign_in(&p, &fake, &["work"]).await;
+    assert_eq!(channels_of(&broker, "anthropic").unwrap(), ["personal"]);
+    assert_eq!(channels_of(&broker, "anthropic@work").unwrap(), ["work"]);
+    assert_eq!(
+        serving(&broker, "personal").as_deref(),
+        Some("Bearer sk-ant-access-1")
+    );
+    assert_eq!(
+        serving(&broker, "work").as_deref(),
+        Some("Bearer sk-ant-access-2")
+    );
+    assert_eq!(serving(&broker, "elsewhere"), None);
+
+    let card = listed(&p, "anthropic");
+    assert_eq!(card["state"], "connected");
+    assert_eq!(card["channels"], serde_json::json!(["personal", "work"]));
+    let sign_ins = card["sign_ins"].as_array().unwrap();
+    assert_eq!(sign_ins.len(), 2, "{card}");
+    assert_eq!(sign_ins[0]["credential"], "anthropic");
+    assert_eq!(sign_ins[0]["channels"], serde_json::json!(["personal"]));
+    assert_eq!(sign_ins[1]["credential"], "anthropic@work");
+    assert_eq!(sign_ins[1]["channels"], serde_json::json!(["work"]));
+
+    let later = tracon::store::now_ms() + 100 * 60 * 1000;
+    assert_eq!(
+        p.due_for_refresh(later),
+        [
+            ("anthropic".to_string(), "anthropic".to_string()),
+            ("anthropic".to_string(), "anthropic@work".to_string()),
+        ]
+    );
+    // The fake honours only the refresh token it issued last: the second
+    // sign-in's.
+    assert_eq!(
+        p.refresh("anthropic", "anthropic@work").await.unwrap(),
+        Refreshed::Renewed
+    );
+    assert_eq!(
+        env(&broker, "anthropic@work", "ACCESS_TOKEN").as_deref(),
+        Some("sk-ant-access-3")
+    );
+    assert_eq!(
+        env(&broker, "anthropic", "ACCESS_TOKEN").as_deref(),
+        Some("sk-ant-access-1")
+    );
+    assert_eq!(channels_of(&broker, "anthropic@work").unwrap(), ["work"]);
+
+    assert!(matches!(
+        p.disconnect("anthropic", None, &LoginOwner::Local)
+            .await
+            .unwrap_err(),
+        ProviderError::Conflict(_)
+    ));
+    assert!(matches!(
+        p.set_channels("anthropic", None, vec!["work".into()])
+            .unwrap_err(),
+        ProviderError::Conflict(_)
+    ));
+    p.disconnect("anthropic", Some("anthropic@work"), &LoginOwner::Local)
+        .await
+        .unwrap();
+    assert!(channels_of(&broker, "anthropic@work").is_none());
+    assert_eq!(
+        serving(&broker, "personal").as_deref(),
+        Some("Bearer sk-ant-access-1")
+    );
+    assert_eq!(serving(&broker, "work"), None);
+}
+
+/// A sign-in takes over only the channels it is made for: from a sign-in
+/// serving more it takes those alone, one serving nothing else it replaces,
+/// and moving a channel between sign-ins never leaves one serving none.
+#[tokio::test]
+async fn a_sign_in_takes_over_only_the_channels_it_is_made_for() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+
+    sign_in(&p, &fake, &["personal", "work"]).await;
+    sign_in(&p, &fake, &["work"]).await;
+    assert_eq!(channels_of(&broker, "anthropic").unwrap(), ["personal"]);
+    assert_eq!(channels_of(&broker, "anthropic@work").unwrap(), ["work"]);
+    assert_eq!(
+        serving(&broker, "personal").as_deref(),
+        Some("Bearer sk-ant-access-1")
+    );
+
+    // Moving a channel takes it from the other sign-in; taking the other's
+    // last is refused.
+    p.set_channels(
+        "anthropic",
+        Some("anthropic@work"),
+        vec!["work".into(), "ops".into()],
+    )
+    .unwrap();
+    assert!(matches!(
+        p.set_channels(
+            "anthropic",
+            Some("anthropic"),
+            vec!["personal".into(), "work".into(), "ops".into()]
+        )
+        .unwrap_err(),
+        ProviderError::Conflict(_)
+    ));
+    assert_eq!(channels_of(&broker, "anthropic").unwrap(), ["personal"]);
+    p.set_channels(
+        "anthropic",
+        Some("anthropic"),
+        vec!["personal".into(), "ops".into()],
+    )
+    .unwrap();
+    assert_eq!(channels_of(&broker, "anthropic@work").unwrap(), ["work"]);
+
+    // Signing in for everything both serve replaces both, under the name
+    // the provider's entry gives.
+    sign_in(&p, &fake, &["personal", "work", "ops"]).await;
+    assert!(channels_of(&broker, "anthropic@work").is_none());
+    assert_eq!(
+        channels_of(&broker, "anthropic").unwrap(),
+        ["personal", "work", "ops"]
+    );
+    assert_eq!(
+        listed(&p, "anthropic")["sign_ins"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A copy of a peer's sign-in is its origin's to change: a sign-in here for
+/// one of its channels leaves it whole, and serves that channel ahead of it.
+#[tokio::test]
+async fn a_sign_in_here_serves_its_channel_ahead_of_a_peer_copy() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let mut copy = Credential {
+        kind: KIND_OAUTH.into(),
+        provider: Some("anthropic".into()),
+        channels: vec!["personal".into(), "work".into()],
+        nodes: vec!["n2".into(), "n1".into()],
+        grant_id: Some(uuid::Uuid::now_v7().to_string()),
+        grant_origin: Some("n2".into()),
+        ..Default::default()
+    };
+    copy.env.insert("ACCESS_TOKEN".into(), "peer-access".into());
+    broker.write().unwrap().put("anthropic", copy);
+
+    sign_in(&p, &fake, &["work"]).await;
+    assert_eq!(
+        channels_of(&broker, "anthropic").unwrap(),
+        ["personal", "work"]
+    );
+    assert_eq!(channels_of(&broker, "anthropic@work").unwrap(), ["work"]);
+    assert_eq!(
+        serving(&broker, "work").as_deref(),
+        Some("Bearer sk-ant-access-1")
+    );
+    assert_eq!(
+        serving(&broker, "personal").as_deref(),
+        Some("Bearer peer-access")
+    );
+    let card = listed(&p, "anthropic");
+    let sign_ins = card["sign_ins"].as_array().unwrap();
+    assert_eq!(sign_ins[0]["channels"], serde_json::json!(["personal"]));
+    assert_eq!(
+        sign_ins[0]["bound"],
+        serde_json::json!(["personal", "work"])
+    );
+    assert_eq!(sign_ins[0]["shared_with"], serde_json::json!(["n2"]));
 }

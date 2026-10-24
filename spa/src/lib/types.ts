@@ -99,6 +99,29 @@ export interface ProviderInfo {
   /** The other nodes holding a shared copy of this sign-in, by id. Private
       to the serving node, and absent from older builds. */
   shared_with?: string[]
+  /** Each sign-in the provider holds on the node, one per set of channels,
+      the one the top-level fields describe first. Absent from older builds,
+      which hold one. */
+  sign_ins?: ProviderSignIn[]
+}
+
+/** One of a provider's sign-ins on a node. */
+export interface ProviderSignIn {
+  /** The credential it is held under: what a disconnect or a change of
+      channels names. Empty for the one sign-in an older node describes. */
+  credential: string
+  state: 'connected' | 'needs_reconnect'
+  kind: 'api_key' | 'oauth' | null
+  identity: string | null
+  expires_ms: number | null
+  /** The channels it serves on the node. */
+  channels: string[]
+  /** The channels it is bound to, which can include one a sign-in made on
+      the node serves instead of this shared copy. */
+  bound: string[]
+  /** Private to the serving node. */
+  error?: string | null
+  shared_with?: string[]
 }
 
 /** What the broker will say about a credential: bindings and key names, never a value. */
