@@ -18,6 +18,10 @@ const TRAY_ID: &str = "tracon";
 /// drawn from its alpha channel alone, so this is black on transparent —
 /// handing macOS the full-colour app icon paints a filled square instead.
 const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-44.png");
+/// A Linux panel shows the template as the black it is, which vanishes on a
+/// dark panel; this copy is swapped in when the desktop prefers dark.
+#[cfg(target_os = "linux")]
+const TRAY_ICON_WHITE: &[u8] = include_bytes!("../icons/tray-44-white.png");
 /// Beyond this the menu is a wall of text; the window is better for that.
 const MAX_LISTED: usize = 8;
 
@@ -39,7 +43,69 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
         .build(app)?;
+    #[cfg(target_os = "linux")]
+    follow_color_scheme(app);
     Ok(())
+}
+
+/// Keep the Linux glyph white on a dark desktop and black on a light one,
+/// following the desktop portal's colour scheme as it changes.
+///
+/// A themed icon name would let the panel recolour the glyph itself, but
+/// Plasma does not find a name under an IconThemePath made at runtime and
+/// shows the app icon instead. Without a portal the glyph stays black.
+#[cfg(target_os = "linux")]
+fn follow_color_scheme(app: &AppHandle) {
+    let app = app.clone();
+    // Its own thread: a portal that never answers must not hold up the tray.
+    std::thread::spawn(move || {
+        if let Err(e) = watch_color_scheme(&app) {
+            eprintln!("tracon: tray icon will not follow the colour scheme: {e}");
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn watch_color_scheme(app: &AppHandle) -> zbus::Result<()> {
+    use zbus::zvariant::OwnedValue;
+
+    const NAMESPACE: &str = "org.freedesktop.appearance";
+    const KEY: &str = "color-scheme";
+
+    let conn = zbus::blocking::Connection::session()?;
+    let portal = zbus::blocking::Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Settings",
+    )?;
+    // Subscribed before the first read, so a switch between the two is not
+    // missed.
+    let changes = portal.receive_signal("SettingChanged")?;
+    let scheme: OwnedValue = portal.call("ReadOne", &(NAMESPACE, KEY))?;
+    set_glyph(app, prefers_dark(&scheme));
+    for change in changes {
+        let (namespace, key, scheme): (String, String, OwnedValue) = change.body().deserialize()?;
+        if namespace == NAMESPACE && key == KEY {
+            set_glyph(app, prefers_dark(&scheme));
+        }
+    }
+    Ok(())
+}
+
+/// The portal's scheme is 1 for dark, 2 for light, 0 for no preference.
+#[cfg(target_os = "linux")]
+fn prefers_dark(scheme: &zbus::zvariant::OwnedValue) -> bool {
+    matches!(u32::try_from(scheme), Ok(1))
+}
+
+#[cfg(target_os = "linux")]
+fn set_glyph(app: &AppHandle, dark: bool) {
+    let bytes = if dark { TRAY_ICON_WHITE } else { TRAY_ICON };
+    let (Some(tray), Ok(image)) = (tray_icon(app), tauri::image::Image::from_bytes(bytes)) else {
+        return;
+    };
+    let _ = tray.set_icon(Some(image));
 }
 
 fn tray_icon(app: &AppHandle) -> Option<TrayIcon> {
@@ -259,6 +325,31 @@ mod tests {
     #[test]
     fn a_short_label_is_left_alone() {
         assert_eq!(truncate("feat/thing"), "feat/thing");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn both_glyphs_load_at_the_same_size() {
+        use tauri::image::Image;
+        let black = Image::from_bytes(super::TRAY_ICON).unwrap();
+        let white = Image::from_bytes(super::TRAY_ICON_WHITE).unwrap();
+        assert_eq!(
+            (black.width(), black.height()),
+            (white.width(), white.height())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_a_dark_preference_turns_the_glyph_white() {
+        use zbus::zvariant::{OwnedValue, Value};
+        let scheme = |v: u32| OwnedValue::try_from(Value::from(v)).unwrap();
+        assert!(super::prefers_dark(&scheme(1)));
+        assert!(!super::prefers_dark(&scheme(2)));
+        assert!(!super::prefers_dark(&scheme(0)));
+        assert!(!super::prefers_dark(&OwnedValue::from(
+            zbus::zvariant::Str::from("dark")
+        )));
     }
 
     #[test]
