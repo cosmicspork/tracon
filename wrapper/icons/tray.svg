@@ -1,7 +1,9 @@
-<!-- The menu bar glyph: the brand mark from the interface's rail, drawn for a
+<!-- The tray glyph: the brand mark from the interface's rail, drawn for a
      template icon. macOS renders a template from its alpha channel alone, so
-     this is black on transparent and carries no colour of its own.
-     Render: rsvg-convert -w 44 -h 44 tray.svg -o tray-44.png -->
+     this is black on transparent and carries no colour of its own. A Linux
+     panel shows pixels as given, so it also gets a white copy for dark themes.
+     Render: rsvg-convert -w 44 -h 44 tray.svg -o tray-44.png
+             sed 's/#000/#fff/g' tray.svg | rsvg-convert -w 44 -h 44 -o tray-44-white.png -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="44" height="44">
   <g fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="9" />

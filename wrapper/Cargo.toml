@@ -35,5 +35,10 @@ sha2 = "0.10"
 parking_lot = "0.12"
 libc = "0.2"
 
+# Reads the desktop portal's colour scheme for the tray glyph. Already in the
+# tree through the single-instance plugin, with the same features.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+
 [profile.release]
 strip = true
