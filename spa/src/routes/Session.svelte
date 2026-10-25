@@ -8,6 +8,7 @@
   import ContinuationPanel from '../components/ContinuationPanel.svelte'
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { draftBox } from '../lib/draft'
   import { humanizeError } from '../lib/errors'
@@ -561,7 +562,9 @@
   {#if !isTerminal(session.state)}
     <form class="prompt" onsubmit={send}>
       <textarea
+        class="grow compact"
         bind:value={draft}
+        use:autogrow={draft}
         oninput={onDraftInput}
         {placeholder}
         disabled={composer.disabled}
@@ -635,8 +638,6 @@
     color: var(--ink);
     font: 13.5px var(--sans);
     padding: 9px 11px;
-    min-height: 58px;
-    resize: vertical;
   }
   /* Plainly not taking input: no resize grip, no text cursor. */
   textarea:disabled {

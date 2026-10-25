@@ -217,7 +217,7 @@
       </label>
       <label class="field">
         <span>Requirements</span>
-        <textarea bind:value={draft.body} use:autogrow={draft.body} spellcheck="true"></textarea>
+        <textarea class="grow" bind:value={draft.body} use:autogrow={draft.body} spellcheck="true"></textarea>
       </label>
       <div class="row2">
         <label class="pick">
@@ -334,14 +334,10 @@
     padding: 8px 10px;
     font: 13.5px var(--sans);
   }
-  /* As tall as the text, up to what fits under the header and the buttons;
-     past that it scrolls inside. */
+  /* The title above it and the priority row and buttons below it. */
   .edit textarea {
+    --chrome: 260px;
     font: 13px/1.5 var(--mono);
-    min-height: 6em;
-    max-height: calc(100dvh - 260px);
-    overflow-y: auto;
-    resize: none;
     box-sizing: border-box;
   }
   .edit .row2 {

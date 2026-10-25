@@ -14,6 +14,7 @@
   // standing note is the operator's own. Something that reaches every session
   // on a channel needs a place the operator can find it and read it back.
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { store } from '../lib/store.svelte'
   import type { ManifestView } from '../lib/types'
   import Card from './settings/Card.svelte'
@@ -175,7 +176,9 @@
       <label>
         <span>Note</span>
         <textarea
+          class="grow"
           bind:value={noteBody}
+          use:autogrow={noteBody}
           rows="4"
           placeholder="Prefer small commits. Ask before adding a dependency."
         ></textarea>
@@ -246,9 +249,6 @@
     padding: 8px 10px;
     font: 13.5px var(--sans);
     min-width: 0;
-  }
-  textarea {
-    resize: vertical;
   }
   .notes {
     display: grid;

@@ -9,6 +9,7 @@
   // change approach (the same, with the operator's new direction handed to the
   // next attempt), abandon (close the item, or put a plain lineage away).
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { attemptState, carries, verbs } from '../lib/continuation'
   import { formatAge, formatTokens } from '../lib/format'
@@ -125,7 +126,9 @@
       {#if mode === 'approach'}
         <div class="form">
           <textarea
+            class="grow"
             bind:value={approach}
+            use:autogrow={approach}
             rows="3"
             placeholder="How the next attempt should go about it instead"
             aria-label="New approach"

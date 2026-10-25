@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { store } from '../lib/store.svelte'
 
   let { channel }: { channel: string } = $props()
@@ -95,7 +96,7 @@
   </label>
   <label>
     <span>Handoff note</span>
-    <textarea bind:value={note} placeholder="What the next session should know"></textarea>
+    <textarea class="grow" bind:value={note} use:autogrow={note} placeholder="What the next session should know"></textarea>
   </label>
   <button class="btn" type="button" onclick={exportTransfer} disabled={sending || !candidateId.trim()}>
     {sending ? 'Preparing package…' : destination ? 'Send sealed package' : 'Download signed package'}
@@ -130,7 +131,6 @@
   }
   small { color: var(--dim); }
   input, select, textarea { width: 100%; }
-  textarea { min-height: 72px; resize: vertical; }
   .transfer > .btn { margin-top: 12px; }
   .ok { color: var(--ok); }
   .bad { color: var(--crit); }

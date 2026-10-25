@@ -2,6 +2,7 @@
   import LoadGate from '../components/LoadGate.svelte'
   import WorkRow from '../components/WorkRow.svelte'
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { hasAnswer } from '../lib/load'
   import { Loader } from '../lib/loader.svelte'
@@ -165,7 +166,7 @@
     </label>
     <label class="field">
       <span>Requirements</span>
-      <textarea placeholder="What done looks like and what it must not touch" bind:value={body}></textarea>
+      <textarea class="grow" placeholder="What done looks like and what it must not touch" bind:value={body} use:autogrow={body}></textarea>
     </label>
     <div class="row2">
       <label class="pick">
@@ -334,10 +335,6 @@
   .field {
     display: grid;
     gap: 3px;
-  }
-  .new textarea {
-    min-height: 90px;
-    resize: vertical;
   }
   .row2 {
     display: flex;

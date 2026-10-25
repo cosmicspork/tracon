@@ -5,6 +5,7 @@
   // from TOML sits at the top, since it takes any credential, not only a
   // forge token.
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { store } from '../lib/store.svelte'
   import { credentialReach } from '../lib/credentials'
   import type { CredentialSummary } from '../lib/types'
@@ -94,7 +95,9 @@
     <label>
       <span>Credential TOML</span>
       <textarea
+        class="grow"
         bind:value={toml}
+        use:autogrow={toml}
         rows="6"
         spellcheck="false"
         placeholder={'[credentials.name]\nchannels = ["personal"]\n[credentials.name.env]\nTOKEN = "…"'}

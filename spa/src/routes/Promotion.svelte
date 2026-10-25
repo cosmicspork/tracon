@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { router } from '../lib/router.svelte'
@@ -111,7 +112,9 @@
           <em>{it.kind}</em>
           {#if !done && v === 'promote'}
             <textarea
+              class="grow"
               value={entry?.body ?? it.body}
+              use:autogrow={entry?.body ?? it.body}
               oninput={(e) => editBody(it.memory_id, (e.currentTarget as HTMLTextAreaElement).value)}
               spellcheck="false"
             ></textarea>
@@ -206,14 +209,12 @@
   .body textarea {
     display: block;
     width: 100%;
-    min-height: 4.5em;
     font: inherit;
     color: inherit;
     background: var(--s2);
     border: 0;
     border-radius: 3px;
     padding: 6px 8px;
-    resize: vertical;
     box-sizing: border-box;
   }
   .act {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import HtmlImport from '../components/HtmlImport.svelte'
   import { api, ApiError, DocConflict } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { render } from '../lib/markdown'
@@ -240,8 +241,9 @@
   </div>
 
   {#if editing}
-    <!-- The editor takes the page below the header: the draft scrolls inside
-         it, and Save and Cancel stay at the foot of the window. -->
+    <!-- The draft is as tall as what it holds, up to the window below the
+         header; past that it scrolls inside, and Save and Cancel stay in view
+         under it. -->
     <div class="editor">
     {#if changedElsewhere && !conflict}
       <div class="banner dim">this document changed elsewhere while you were editing <b>· saving will show you the other version first</b></div>
@@ -251,7 +253,7 @@
         <b>· <button class="lnk" onclick={takeTheirs}>take theirs</button> (drops your draft) or <button class="lnk d" onclick={keepMine}>keep mine</button> (overwrites theirs)</b>
       </div>
     {/if}
-    <textarea bind:value={draft} spellcheck="false"></textarea>
+    <textarea class="grow" bind:value={draft} use:autogrow={draft} spellcheck="false"></textarea>
     <div class="send">
       <button class="btn p" onclick={save} disabled={busy || loadError !== null || draft === (doc?.body ?? '')}>Save</button>
       <button class="lnk" onclick={() => { editing = false; draft = doc?.body ?? draft; if (!doc) router.go('/docs') }}>Cancel</button>
@@ -317,26 +319,19 @@
     letter-spacing: 0;
     text-transform: none;
   }
-  /* main is a column at least the window's height; the editor takes what
-     the header and any banner leave of it. */
   .editor {
-    flex: 1;
-    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 10px;
   }
   textarea {
-    flex: 1;
     width: 100%;
-    min-height: 12em;
     font: 13px/1.5 var(--mono);
     background: var(--s1);
     color: var(--ink);
     border: 0;
     border-radius: 4px;
     padding: 12px 14px;
-    resize: none;
     box-sizing: border-box;
   }
   .send {

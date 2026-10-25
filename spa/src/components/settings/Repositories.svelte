@@ -2,6 +2,7 @@
   import Card from './Card.svelte'
   import RecipeOffers from './RecipeOffers.svelte'
   import { api } from '../../lib/api'
+  import { autogrow } from '../../lib/autogrow'
   import { store } from '../../lib/store.svelte'
   import { forgeIdentity, offerResultLine, offerTargets } from '../../lib/recipes'
   import {
@@ -317,7 +318,7 @@
             <span class="heading">Required checks</span>
             <label class="toggle"><input type="checkbox" bind:checked={form.ownChecks} /> This repository has its own</label>
             {#if form.ownChecks}
-              <textarea bind:value={form.checks} rows="2" spellcheck="false" placeholder="just check" aria-label="Required checks, one per line"></textarea>
+              <textarea class="grow" bind:value={form.checks} use:autogrow={form.checks} rows="2" spellcheck="false" placeholder="just check" aria-label="Required checks, one per line"></textarea>
               <small>One command per line. Left empty, this repository has no required checks.</small>
             {:else}
               <small>The node-wide checks run.</small>
@@ -326,7 +327,7 @@
 
           <label class="wide">
             <span>Preparation</span>
-            <textarea bind:value={form.prepare} rows="2" spellcheck="false" placeholder="cargo fetch --locked"></textarea>
+            <textarea class="grow" bind:value={form.prepare} use:autogrow={form.prepare} rows="2" spellcheck="false" placeholder="cargo fetch --locked"></textarea>
             <small>One command per line, run once before a run's checks with the registries below reachable. The checks that follow have no network.</small>
           </label>
 
@@ -491,10 +492,9 @@
     padding: 8px 10px;
     font: 13px var(--mono);
     min-width: 0;
-    min-height: 36px;
   }
+  input:not([type='checkbox']), select { min-height: 36px; }
   select { font-family: var(--sans); }
-  textarea { resize: vertical; }
   input:disabled, select:disabled, textarea:disabled { opacity: 0.5; }
   label.toggle { display: flex; align-items: center; gap: 6px; color: var(--ink); }
   small { font-size: 12.5px; color: var(--dim); }

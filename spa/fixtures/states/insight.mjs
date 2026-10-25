@@ -476,6 +476,14 @@ const longMemories = [
   memory(25, { kind: 'a-very-long-custom-memory-kind-name', confidence: 0.333, body: 'An unusual kind should not push the body off the row.' }),
 ]
 
+// Forty lines in five paragraphs: the editor should open showing all of them.
+const longBodyMemory = memory(31, {
+  kind: 'lesson',
+  body: Array.from({ length: 5 }, (_, p) =>
+    Array.from({ length: 8 }, (_, l) => `Paragraph ${p + 1}, line ${l + 1}: wait for the gateway health check before retrying a fetch.`).join('\n'),
+  ).join('\n\n'),
+})
+
 const manyMemories = Array.from({ length: 40 }, (_, i) =>
   memory(100 + i, {
     kind: ['fact', 'lesson', 'directive', 'episode'][i % 4],
@@ -937,6 +945,18 @@ export default [
     api: memoriesApi({ personal: typicalMemories }),
     act: async (page) => {
       await page.getByRole('button', { name: 'Edit' }).nth(1).click()
+    },
+  },
+  {
+    id: 'insight-memories-edit-long',
+    area: 'insight',
+    route: '/memories',
+    title: 'Memories: editing a forty-line body',
+    note: 'The box opens as tall as the body, every line showing with no scrollbar inside it, up to the window; Save and Cancel under it.',
+    since: '#654',
+    api: memoriesApi({ personal: [longBodyMemory, ...typicalMemories] }),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Edit' }).first().click()
     },
   },
   {

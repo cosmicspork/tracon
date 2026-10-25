@@ -7,6 +7,7 @@
   // underneath is read again and the operator decides where both changed.
   import ConfigField from './ConfigField.svelte'
   import { api } from '../../lib/api'
+  import { autogrow } from '../../lib/autogrow'
   import {
     BESPOKE,
     blankEntry,
@@ -429,7 +430,9 @@
                   />
                   {#if map.control === 'lines'}
                     <textarea
+                      class="grow"
                       aria-label="{map.label}: {row.name || 'value'}"
+                      use:autogrow={row.v}
                       rows="2"
                       value={row.v}
                       disabled={!map.editable || busy !== ''}
@@ -557,8 +560,10 @@
     padding: 8px 10px;
     font: 13px var(--mono);
     min-width: 0;
-    min-height: 36px;
     box-sizing: border-box;
+  }
+  input {
+    min-height: 36px;
   }
   input:disabled,
   textarea:disabled {

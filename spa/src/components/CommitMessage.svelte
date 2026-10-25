@@ -67,6 +67,7 @@
     <!-- On one line: the mirror keeps white space, so any between its lines would be a line too. -->
     <div class="mirror" aria-hidden="true" bind:this={mirror}>{#each lines as line, i (i)}<div class="ln">{line || ' '}</div>{/each}</div>
     <textarea
+      class="grow"
       bind:this={box}
       aria-label={label}
       aria-describedby={subject !== null ? `${uid}-hint` : undefined}
@@ -140,14 +141,11 @@
   textarea {
     display: block;
     width: 100%;
-    min-height: 64px;
-    max-height: 70vh;
     margin: 0;
     border: 0;
     border-radius: 0 4px 4px 0;
     background: transparent;
     color: var(--ink);
-    resize: vertical;
     overflow-x: hidden;
   }
   .wide textarea {

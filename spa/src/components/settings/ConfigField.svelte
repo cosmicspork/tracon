@@ -3,6 +3,7 @@
   // for, whether a change applies now or at the next restart, and, for a key
   // this browser may not change, why not. A secret is written, never read
   // back: the field says whether one is held and offers to replace it.
+  import { autogrow } from '../../lib/autogrow'
   import { changed, initialDraft, magnitude, parseDraft, shown, type Draft, type Field } from '../../lib/config-form'
 
   let {
@@ -87,7 +88,9 @@
     </select>
   {:else if field.control === 'lines'}
     <textarea
+      class="grow"
       {id}
+      use:autogrow={String(current.v)}
       rows={Math.min(6, Math.max(2, String(current.v).split('\n').length))}
       value={String(current.v)}
       disabled={off || current.reset}
@@ -212,14 +215,14 @@
     font: 13px var(--mono);
     min-width: 0;
     width: 100%;
-    min-height: 36px;
     box-sizing: border-box;
+  }
+  input:not([type='checkbox']),
+  select {
+    min-height: 36px;
   }
   select {
     font-family: var(--sans);
-  }
-  textarea {
-    resize: vertical;
   }
   input:disabled,
   select:disabled,
