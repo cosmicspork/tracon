@@ -1,7 +1,9 @@
 //! Memory as the node owns it: `recall` reads across memories and documents,
 //! `retain` writes what the agent learned. Directives are human-only; a
 //! lesson, or a fact the agent is not sure of, enters as `proposed` and waits
-//! for the nightly batch rather than becoming context on its own.
+//! for the nightly batch rather than becoming context on its own. So does a
+//! correction: a memory retained with `supersedes` replaces the one it names
+//! only when the operator promotes it.
 
 use serde_json::{json, Value};
 use tracon_sync::ChangeOp;
@@ -38,7 +40,9 @@ pub fn definitions() -> Vec<Value> {
             "description": "Remember something for later sessions. A fact is a durable truth about \
                             the code (say how sure you are); a lesson is a generalised gotcha and is \
                             proposed to the operator before it is ever injected; an episode records \
-                            what happened and is only ever searched. Directives are the operator's.",
+                            what happened and is only ever searched. Directives are the operator's. \
+                            When a recalled memory is wrong or stale, pass its id as supersedes: the \
+                            correction waits for the operator and, once promoted, replaces it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -46,6 +50,7 @@ pub fn definitions() -> Vec<Value> {
                     "scope": { "type": "string", "enum": ["project", "session", "global"], "default": "project" },
                     "body": { "type": "string" },
                     "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.8 },
+                    "supersedes": { "type": "string", "description": "The id of a memory (from recall) this one corrects." },
                 },
                 "required": ["kind", "body"],
             },
@@ -144,9 +149,35 @@ pub async fn call(
                 other => return Err(format!("unknown scope {other:?}")),
             };
             let confidence = args["confidence"].as_f64().unwrap_or(0.8).clamp(0.0, 1.0);
+            // A correction names a memory this channel holds, and never one of
+            // the operator's directives: refused here, before anything is written.
+            let supersedes = match args["supersedes"].as_str().map(str::trim) {
+                None | Some("") => None,
+                Some(old) => {
+                    let row = access
+                        .store
+                        .memory_get(old)
+                        .map_err(|e| e.to_string())?
+                        .filter(|m| m.deleted == 0 && m.channel == ctx.channel);
+                    match row {
+                        None => {
+                            return Err(format!("no memory {old:?} on this channel to supersede"))
+                        }
+                        Some(m) if m.kind == KIND_DIRECTIVE => {
+                            return Err(
+                                "directives are the operator's; a correction cannot replace one"
+                                    .into(),
+                            )
+                        }
+                        Some(m) => Some(m.id),
+                    }
+                }
+            };
             // What becomes context on its own is bounded: a lesson always waits
-            // for the operator, a fact only when the agent is sure of it.
+            // for the operator, a fact only when the agent is sure of it, and a
+            // correction always, since promoting it retires what it replaces.
             let state = match kind {
+                _ if supersedes.is_some() => "candidate",
                 KIND_LESSON => "candidate",
                 KIND_FACT if confidence < crate::store::CONFIDENT => "candidate",
                 _ => "active",
@@ -165,15 +196,20 @@ pub async fn call(
                 json!({
                     "channel": ctx.channel, "scope": scope, "scope_ref": scope_ref, "kind": kind, "body": body,
                     "source_session": ctx.session_id(), "source_node": node_id, "confidence": confidence,
-                    "state": state, "created_ms": now, "updated_ms": now,
+                    "state": state, "supersedes": supersedes, "created_ms": now, "updated_ms": now,
                 }),
             )
             .map_err(|e| e.to_string())?;
-            Ok(
-                json!({ "id": id, "state": state, "note": if state == "candidate" {
-                "held for the operator's nightly batch; it is not context until promoted"
-            } else { "active: recalled by later sessions on this channel" } }),
-            )
+            let note = match (&supersedes, state) {
+                (Some(_), _) => "held for the operator's nightly batch; promoting it retires the memory it supersedes, which recall marks as having a correction pending until then",
+                (None, "candidate") => "held for the operator's nightly batch; it is not context until promoted",
+                _ => "active: recalled by later sessions on this channel",
+            };
+            let mut out = json!({ "id": id, "state": state, "note": note });
+            if let Some(old) = supersedes {
+                out["supersedes"] = json!(old);
+            }
+            Ok(out)
         }
         other => Err(format!("no tool named {other}")),
     }

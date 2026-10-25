@@ -216,6 +216,15 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE work_item ADD COLUMN discovered_by_lane TEXT;
     "#,
+    // Step 8: the memory a candidate would replace, when an agent retained it
+    // as a correction. Null for every other memory. Promoting the candidate
+    // retires the one it names; rejecting it leaves that one live. A peer
+    // that predates the column leaves the field out of its rows, so a row
+    // from one keeps whatever link this replica already holds.
+    r#"
+    ALTER TABLE memory ADD COLUMN supersedes TEXT;
+    CREATE INDEX IF NOT EXISTS memory_supersedes ON memory(supersedes);
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.

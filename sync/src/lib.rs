@@ -61,6 +61,7 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "source_node",
             "confidence",
             "state",
+            "supersedes",
             "created_ms",
             "updated_ms",
         ],

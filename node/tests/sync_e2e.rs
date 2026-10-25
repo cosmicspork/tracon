@@ -234,6 +234,21 @@ async fn records_converge_through_the_hub_and_survive_its_absence() {
                "confidence": 0.9, "state": "active", "created_ms": now_ms(), "updated_ms": now_ms()}),
     )
     .unwrap();
+    // And a correction of it, which carries its link to the replica.
+    corpus::write(
+        &a.store,
+        &a.bus,
+        &ai,
+        "personal",
+        "memory",
+        ChangeOp::Upsert,
+        "m2",
+        json!({"channel": "personal", "scope": "global", "scope_ref": null, "kind": "fact",
+               "body": "the check command is just check", "source_session": null, "source_node": ai,
+               "confidence": 0.9, "state": "candidate", "supersedes": "m1",
+               "created_ms": now_ms(), "updated_ms": now_ms()}),
+    )
+    .unwrap();
     let hits = a
         .store
         .recall("personal", "test command", None, None, None, 5)
@@ -278,6 +293,16 @@ async fn records_converge_through_the_hub_and_survive_its_absence() {
     hub.restart().await;
     wait_for("B to hold A's memory", || {
         b.store.memory_get("m1").ok().flatten().is_some()
+    })
+    .await;
+    wait_for("B to hold the correction and what it replaces", || {
+        b.store
+            .memory_get("m2")
+            .ok()
+            .flatten()
+            .and_then(|m| m.supersedes)
+            .as_deref()
+            == Some("m1")
     })
     .await;
     wait_for("both to hold B's edit", || {

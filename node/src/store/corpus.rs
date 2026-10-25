@@ -122,6 +122,8 @@ pub struct MemoryRow {
     pub source_node: Option<String>,
     pub confidence: f64,
     pub state: String,
+    /// The memory this one would replace: a correction an agent retained.
+    pub supersedes: Option<String>,
     pub site: String,
     pub hlc_ms: i64,
     pub deleted: i64,
@@ -215,6 +217,11 @@ pub struct RecallHit {
     pub confidence: Option<f64>,
     /// Lower sorts first: the tier, then relevance within it.
     pub rank: f64,
+    /// Memories only: the id of a correction that would replace this one and
+    /// is waiting for the operator. Until it is decided this memory is still
+    /// live, but a session should not act on it blindly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_pending: Option<String>,
 }
 
 impl DocumentRow {
@@ -264,6 +271,7 @@ impl MemoryRow {
             source_node: r.get("source_node")?,
             confidence: r.get("confidence")?,
             state: r.get("state")?,
+            supersedes: r.get("supersedes")?,
             site: r.get("site")?,
             hlc_ms: r.get("hlc_ms")?,
             deleted: r.get("deleted")?,
@@ -276,7 +284,8 @@ impl MemoryRow {
         json!({
             "channel": self.channel, "scope": self.scope, "scope_ref": self.scope_ref, "kind": self.kind,
             "body": self.body, "source_session": self.source_session, "source_node": self.source_node,
-            "confidence": self.confidence, "state": self.state, "created_ms": self.created_ms, "updated_ms": self.updated_ms,
+            "confidence": self.confidence, "state": self.state, "supersedes": self.supersedes,
+            "created_ms": self.created_ms, "updated_ms": self.updated_ms,
         })
     }
 }
@@ -1349,6 +1358,7 @@ impl Store {
                         scope: None,
                         confidence: None,
                         rank: 3.0 + r.get::<_, f64>(5)?,
+                        correction_pending: None,
                     })
                 })?
                 .collect::<std::result::Result<Vec<RecallHit>, _>>()?;
@@ -1413,6 +1423,7 @@ impl Store {
                 scope: None,
                 confidence: None,
                 rank: 3.0 - vector_bonus(n.0),
+                correction_pending: None,
             });
         }
         hits.extend(fresh);
@@ -1482,6 +1493,7 @@ impl Store {
                 scope: None,
                 confidence: None,
                 rank: 3.0,
+                correction_pending: None,
             });
         }
         // Named documents keep their order among themselves and go just ahead
@@ -1662,6 +1674,7 @@ impl Store {
                     scope: Some(scope),
                     confidence: Some(confidence),
                     rank,
+                    correction_pending: None,
                 });
             }
         }
@@ -1722,7 +1735,23 @@ impl Store {
                     scope: Some(scope),
                     confidence: Some(confidence),
                     rank: tier - vector_bonus(*pos),
+                    correction_pending: None,
                 });
+            }
+        }
+        // A memory a waiting correction names is still returned, marked, so a
+        // session sees both that it may be wrong and what would replace it.
+        if !hits.is_empty() {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM memory WHERE supersedes = ?1 AND channel = ?2 AND deleted = 0
+                   AND state IN ('candidate', 'proposed')
+                 ORDER BY created_ms DESC LIMIT 1",
+            )?;
+            for h in hits.iter_mut() {
+                h.correction_pending = stmt
+                    .query_row(params![h.id, channel], |r| r.get(0))
+                    .optional()?;
             }
         }
         if want("document") {
