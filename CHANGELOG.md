@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.39.0](https://github.com/cosmicspork/tracon/compare/v0.38.0...v0.39.0) (2026-10-25)
+
+
+### Features
+
+* **tasks:** project tabs, search and an editor for tasks ([#652](https://github.com/cosmicspork/tracon/issues/652)) ([881ba51](https://github.com/cosmicspork/tracon/commit/881ba5124d84fd02ae5815c6f46c1aeefbeb9247))
+* **work:** edit, search and named priorities for tasks, with full ledger tools for agents ([#651](https://github.com/cosmicspork/tracon/issues/651)) ([932481f](https://github.com/cosmicspork/tracon/commit/932481fe41e9165b5b32f1af423def62653f0fb0))
+
+
+### Bug Fixes
+
+* **tasks:** hide empty project tabs and offer only real projects ([#653](https://github.com/cosmicspork/tracon/issues/653)) ([9455e08](https://github.com/cosmicspork/tracon/commit/9455e0899bd257cdef7d32b8e37e209c42e520d4))
+* **wrapper:** give the Linux app icon a rounded, inset tile ([#646](https://github.com/cosmicspork/tracon/issues/646)) ([5980445](https://github.com/cosmicspork/tracon/commit/59804451e7b442865e62bdfe283532fcd9c54cd3))
+
 ## [0.38.0](https://github.com/cosmicspork/tracon/compare/v0.37.0...v0.38.0) (2026-10-24)
 
 
