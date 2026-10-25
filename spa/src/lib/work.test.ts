@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 
 import type { Project, WorkView } from './types'
-import { inProject, isTopPriority, matches, priorityLabel, projectName, projectTabs } from './work'
+import { inProject, isTopPriority, matches, pickableProjects, priorityLabel, projectLabel, projectName, projectTabs } from './work'
 
 const levels = [
   { name: 'Urgent', value: 4 },
@@ -76,4 +76,29 @@ test('tabs are All, each project that holds an item, an unnamed one by id, then 
   expect(inProject(items[0], 'all')).toBe(true)
   expect(projectName(items[3], projects)).toBe('feedc0ff')
   expect(projectName(items[4], projects)).toBeNull()
+})
+
+test('a project with nothing open gets a tab only while it is the one open', () => {
+  const items = [
+    view({ id: 'a1', project_id: 'p-hdr' }),
+    view({ id: 'a2', project_id: 'p-old', readiness: { state: 'closed' }, state: 'closed' }),
+    view({ id: 'a3', readiness: { state: 'closed' }, state: 'closed' }),
+  ]
+  const projects = [project('p-hdr', 'hounddogreading'), project('p-old', 'imported workspace')]
+  expect(projectTabs(items, projects).map((t) => t.key)).toEqual(['all', 'p-hdr'])
+  expect(projectTabs(items, projects, 'p-old').map((t) => t.key)).toEqual(['all', 'p-hdr', 'p-old'])
+  expect(projectTabs(items, projects, 'none').map((t) => t.key)).toEqual(['all', 'p-hdr', 'none'])
+})
+
+test('pickers offer repositories and projects with work, and tell same-named ones apart', () => {
+  const projects: Project[] = [
+    { ...project('p-hdr', 'hounddogreading'), remote_url: 'github.com/h/h' },
+    { ...project('ws-aaaaaa1', 'imported workspace'), total: 1 },
+    project('ws-bbbbbb2', 'imported workspace'),
+    project('ws-cccccc3', 'imported workspace'),
+  ]
+  expect(pickableProjects(projects).map((p) => p.id)).toEqual(['p-hdr', 'ws-aaaaaa1'])
+  expect(pickableProjects(projects, 'ws-cccccc3').map((p) => p.id)).toEqual(['p-hdr', 'ws-aaaaaa1', 'ws-cccccc3'])
+  expect(projectLabel(projects[0], projects)).toBe('hounddogreading')
+  expect(projectLabel(projects[1], projects)).toBe('imported workspace ws-aaa')
 })
