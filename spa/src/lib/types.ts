@@ -29,6 +29,8 @@ export interface NodeInfo {
   loopback?: boolean
   /** The channel this node prefers the composer to start on; only on the serving node's row. */
   default_channel?: string | null
+  /** How the ledger names priorities; only on the serving node's row, absent from older builds. */
+  work?: WorkPriorities
   /** The release the node runs. Absent from older builds. */
   application_version?: string | null
   /**
@@ -911,6 +913,27 @@ export function reviewVerdict(r: Review): AiVerdict | null {
   } catch {
     return null
   }
+}
+
+/** One named priority: the ledger stores `value`, and higher runs first. */
+export interface PriorityLevel {
+  name: string
+  value: number
+}
+
+/** The node's priority names, highest first; empty means plain numbers. */
+export interface WorkPriorities {
+  priority_levels: PriorityLevel[]
+  default_priority: number
+}
+
+/** A repository the node knows on a channel, with how much of the ledger is its. */
+export interface Project {
+  id: string
+  name: string
+  remote_url: string | null
+  open: number
+  total: number
 }
 
 /** A work item as the node keeps it; `deps` are the ids it waits on. */

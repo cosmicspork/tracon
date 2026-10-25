@@ -82,6 +82,10 @@ export const NODE_TOOLS = new Set([
   'work_ready',
   'work_discover',
   'work_close',
+  'work_list',
+  'work_show',
+  'work_update',
+  'work_delete',
   'brief_read',
   'brief_note',
   'criteria_read',
@@ -290,6 +294,14 @@ function callLine(tool: string, rawInput: unknown): string {
       return line('Record new work', clip(str(a.title)))
     case 'work_close':
       return line('Close the work item', clip(str(a.summary), 56))
+    case 'work_list':
+      return line('Tasks', [str(a.project), str(a.state), str(a.query) && `“${clip(str(a.query), 40)}”`].filter(Boolean).join(' · '))
+    case 'work_show':
+      return str(a.id) ? sp('Task', str(a.id).slice(0, 8)) : 'This task'
+    case 'work_update':
+      return line(sp('Update task', str(a.id).slice(0, 8)), clip(str(a.title)))
+    case 'work_delete':
+      return sp('Delete task', str(a.id).slice(0, 8))
     case 'brief_read':
       return 'Read the brief'
     case 'brief_note':

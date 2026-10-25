@@ -5,6 +5,7 @@
   import CriteriaPanel from '../components/CriteriaPanel.svelte'
   import EvidenceLinks from '../components/EvidenceLinks.svelte'
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatBudget } from '../lib/format'
   import { isNotFound } from '../lib/load'
@@ -12,8 +13,8 @@
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
-  import type { Brief, Criteria, Session, WorkView } from '../lib/types'
-  import { blockersLine, short, workLabel, workState } from '../lib/work'
+  import type { Brief, Criteria, Project, Session, WorkView } from '../lib/types'
+  import { blockersLine, priorityLabel, projectName, short, workLabel, workState } from '../lib/work'
 
   let { id }: { id: string } = $props()
 
@@ -29,6 +30,12 @@
   let failed = $state(false)
   let busy = $state(false)
   let depInput = $state('')
+  let projects = $state<Project[]>([])
+  let editing = $state(false)
+  let confirmingDelete = $state(false)
+  let draft = $state({ title: '', body: '', priority: '', project: '' })
+
+  const levels = $derived(store.node?.work?.priority_levels ?? [])
 
   async function load() {
     try {
@@ -40,8 +47,12 @@
       sessions = d.sessions
       discovered = d.discovered
       if (d.item) {
-        const all = await api.work(d.item.channel)
+        const [all, known] = await Promise.all([
+          api.work(d.item.channel),
+          api.projects(d.item.channel).catch(() => ({ projects: [] as Project[] })),
+        ])
         titles = new Map(all.items.map((i) => [i.id, i.title]))
+        projects = known.projects
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
@@ -95,6 +106,31 @@
       router.go('/tasks')
     })
   }
+  function edit() {
+    if (!item) return
+    draft = {
+      title: item.title,
+      body: item.body,
+      priority: String(item.priority),
+      project: item.project_id ?? '',
+    }
+    confirmingDelete = false
+    editing = true
+  }
+  const draftPriority = $derived(Number(draft.priority))
+  const draftValid = $derived(draft.title.trim() !== '' && draft.priority.trim() !== '' && Number.isInteger(draftPriority))
+  function save() {
+    if (!item || !draftValid) return
+    const patch: Parameters<typeof api.putWork>[1] = {}
+    if (draft.title.trim() !== item.title) patch.title = draft.title.trim()
+    if (draft.body.trim() !== item.body) patch.body = draft.body
+    if (draftPriority !== item.priority) patch.priority = draftPriority
+    if ((draft.project || null) !== item.project_id) patch.project_id = draft.project || null
+    return act(async () => {
+      if (Object.keys(patch).length) await api.putWork(id, patch)
+      editing = false
+    })
+  }
   function phaseLabel(s: Session): string {
     const end = s.end_reason === 'phase_done' ? (s.phase === 'plan' ? 'planned' : 'reviewed') : s.end_reason ?? s.state
     return `${s.phase} ${short(s.id)} · ${end}`
@@ -117,11 +153,15 @@
     <span class="t">
       <em>{workLabel(item)}</em>
       {item.title}
-      <small>{short(item.id, 12)} · {item.channel}{item.project_id ? ` · project ${short(item.project_id)}` : ''} · p{item.priority} · added {formatAge(item.created_ms, clock.now)}</small>
+      <small>{short(item.id, 12)} · {item.channel} · added {formatAge(item.created_ms, clock.now)}</small>
     </span>
   </div>
 
   <dl class="kv">
+    <dt>Priority</dt>
+    <dd class="m">{priorityLabel(item.priority, levels)}{levels.length ? '' : ' · higher runs first'}</dd>
+    <dt>Project</dt>
+    <dd class="m">{projectName(item, projects) ?? 'none'}</dd>
     <dt>Plan</dt>
     <dd class="m">
       {#if item.phase_plan_slug}<a href="/docs/{item.channel}/{item.phase_plan_slug}">{item.phase_plan_slug}</a>{:else}none yet · a plan session writes it{/if}
@@ -160,7 +200,41 @@
     {/if}
   </dl>
 
-  {#if item.body.trim()}
+  {#if editing}
+    <form class="edit" onsubmit={(e) => (e.preventDefault(), save())}>
+      <label class="field">
+        <span>Title</span>
+        <input bind:value={draft.title} />
+      </label>
+      <label class="field">
+        <span>Requirements</span>
+        <textarea bind:value={draft.body} use:autogrow={draft.body} spellcheck="true"></textarea>
+      </label>
+      <div class="row2">
+        <label class="pick">
+          <span>Priority</span>
+          {#if levels.length}
+            <select bind:value={draft.priority}>
+              {#each levels as l (l.value)}<option value={String(l.value)}>{l.name}</option>{/each}
+              {#if !levels.some((l) => String(l.value) === draft.priority)}<option value={draft.priority}>{draft.priority}</option>{/if}
+            </select>
+          {:else}
+            <input class="num" bind:value={draft.priority} inputmode="numeric" pattern="-?[0-9]*" />
+          {/if}
+        </label>
+        <label class="pick">
+          <span>Project</span>
+          <select bind:value={draft.project}>
+            <option value="">No project</option>
+            {#each projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+            {#if draft.project && !projects.some((p) => p.id === draft.project)}<option value={draft.project}>{short(draft.project)}</option>{/if}
+          </select>
+        </label>
+        <button class="btn p" type="submit" disabled={busy || !draftValid}>Save</button>
+        <button class="lnk" type="button" onclick={() => (editing = false)} disabled={busy}>Cancel</button>
+      </div>
+    </form>
+  {:else if item.body.trim()}
     <div class="body md">{@html renderMessage(item.body)}</div>
   {/if}
 
@@ -204,16 +278,83 @@
         {:else if ws === 'insession' && item.session_id}
           <a class="btn p" href="/sessions/{item.session_id}">Open session</a>
         {/if}
+        {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
         <button class="lnk d" onclick={close} disabled={busy}>Close</button>
-        <button class="lnk d" onclick={remove} disabled={busy}>Delete</button>
+        {#if confirmingDelete}
+          <span class="confirm">Delete this task for good? <button class="btn d" onclick={remove} disabled={busy}>Delete</button>
+            <button class="lnk" onclick={() => (confirmingDelete = false)} disabled={busy}>Keep it</button></span
+          >
+        {:else}
+          <button class="lnk d" onclick={() => (confirmingDelete = true)} disabled={busy}>Delete</button>
+        {/if}
       </div>
     {:else}
-      <div class="actions"><button class="lnk" onclick={reopen} disabled={busy}>Reopen</button></div>
+      <div class="actions">
+        <button class="lnk" onclick={reopen} disabled={busy}>Reopen</button>
+        {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
+      </div>
     {/if}
   {/if}
 {/if}
 
 <style>
+  .edit {
+    display: grid;
+    gap: 8px;
+    margin: 12px 0;
+    max-width: 820px;
+  }
+  .edit .field {
+    display: grid;
+    gap: 3px;
+  }
+  .edit .field > span,
+  .edit .pick > span {
+    color: var(--ink2);
+    font: 11px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .edit input,
+  .edit select,
+  .edit textarea {
+    background: var(--s1);
+    border: 0;
+    border-radius: 4px;
+    color: var(--ink);
+    padding: 8px 10px;
+    font: 13.5px var(--sans);
+  }
+  /* As tall as the text, up to what fits under the header and the buttons;
+     past that it scrolls inside. */
+  .edit textarea {
+    font: 13px/1.5 var(--mono);
+    min-height: 6em;
+    max-height: calc(100dvh - 260px);
+    overflow-y: auto;
+    resize: none;
+    box-sizing: border-box;
+  }
+  .edit .row2 {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+  }
+  .edit .pick {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .edit .num {
+    width: 56px;
+  }
+  .confirm {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    color: var(--crit);
+  }
   .head {
     display: grid;
     grid-template-columns: 3px minmax(0, 1fr);

@@ -78,6 +78,7 @@ import type {
   WorkContext,
   WorkItem,
   WorkView,
+  Project,
   CandidateDetail,
   UsageTotal,
   ManifestView,
@@ -906,12 +907,16 @@ export const api = {
       confirm || signIn ? { ...(confirm ? { confirm } : {}), ...(signIn ? { sign_in: signIn } : {}) } : undefined,
     ),
   // The work ledger.
-  work: (channel: string, opts: { project_id?: string; state?: string } = {}) => {
+  work: (channel: string, opts: { project_id?: string; state?: string; q?: string } = {}) => {
     const q = new URLSearchParams({ channel })
     if (opts.project_id) q.set('project_id', opts.project_id)
     if (opts.state) q.set('state', opts.state)
+    if (opts.q) q.set('q', opts.q)
     return call<{ items: WorkView[] }>('GET', `/api/work?${q}`)
   },
+  /** The channel's projects by name, and how many items have none. */
+  projects: (channel: string) =>
+    call<{ projects: Project[]; none: { open: number; total: number } }>('GET', `/api/projects?${new URLSearchParams({ channel })}`),
   workReady: (channel: string, project_id?: string) => {
     const q = new URLSearchParams({ channel })
     if (project_id) q.set('project_id', project_id)
@@ -983,7 +988,11 @@ export const api = {
   unlinkBrief: (id: string) => call<{ ok: boolean; slug: string; document_kept: boolean }>('DELETE', `/api/work/${id}/brief`),
   addWork: (w: { channel: string; title: string; body?: string; deps?: string[]; priority?: number; project_id?: string; discovered_from?: string }) =>
     call<WorkItem>('POST', '/api/work', w),
-  putWork: (id: string, patch: { title?: string; body?: string; deps?: string[]; priority?: number; state?: 'open' | 'closed' }) =>
+  /** Only the fields given change; `project_id: null` takes the item out of its project. */
+  putWork: (
+    id: string,
+    patch: { title?: string; body?: string; deps?: string[]; priority?: number; state?: 'open' | 'closed'; project_id?: string | null },
+  ) =>
     call<WorkItem>('PUT', `/api/work/${id}`, patch),
   deleteWork: (id: string) => call<void>('DELETE', `/api/work/${id}`),
   /** The newest subscription limit snapshot per channel and provider since `sinceMs`. */

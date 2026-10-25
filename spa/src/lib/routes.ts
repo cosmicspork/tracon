@@ -151,6 +151,26 @@ export function localDate(ms: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+/** What the Tasks page shows: a project tab (`all`, `none` or an id) and a search. */
+export interface TasksView {
+  project: string
+  q: string
+}
+
+export function tasksView(search: string): TasksView {
+  const q = new URLSearchParams(search)
+  return { project: q.get('project')?.trim() || 'all', q: q.get('q') ?? '' }
+}
+
+/** The query for `view`, leaving out what is already the default. */
+export function tasksSearch(view: TasksView): string {
+  const q = new URLSearchParams()
+  if (view.project !== 'all') q.set('project', view.project)
+  if (view.q.trim()) q.set('q', view.q)
+  const s = q.toString()
+  return s ? `?${s}` : ''
+}
+
 export function usageView(search: string): UsageView {
   const q = new URLSearchParams(search)
   const since = q.get('since') ?? ''

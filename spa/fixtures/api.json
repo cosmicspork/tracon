@@ -24,6 +24,7 @@
     ],
     "checked_at_ms": -420000,
     "is_self": true,
+    "work": { "priority_levels": [{ "name": "Urgent", "value": 4 }, { "name": "Priority", "value": 3 }, { "name": "Planned", "value": 2 }, { "name": "Backlog", "value": 1 }], "default_priority": 2 },
     "reachable": true,
     "last_seen_ms": null,
     "providers": [
@@ -69,6 +70,7 @@
       ],
       "checked_at_ms": -420000,
       "is_self": true,
+      "work": { "priority_levels": [{ "name": "Urgent", "value": 4 }, { "name": "Priority", "value": 3 }, { "name": "Planned", "value": 2 }, { "name": "Backlog", "value": 1 }], "default_priority": 2 },
       "reachable": true,
       "last_seen_ms": null,
       "providers": [
@@ -648,6 +650,13 @@
       "mono_ms": 2560000
     }
   ],
+  "/api/projects": {
+    "projects": [
+      { "id": "orbit", "name": "orbit", "remote_url": "github.com/op/orbit", "open": 3, "total": 4 },
+      { "id": "tracon", "name": "tracon", "remote_url": "github.com/op/tracon", "open": 0, "total": 0 }
+    ],
+    "none": { "open": 0, "total": 0 }
+  },
   "/api/work": {
     "items": [
       {
