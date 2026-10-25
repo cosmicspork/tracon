@@ -593,20 +593,20 @@ const states = [
     id: 'work-new-form',
     area: 'work',
     route: '/tasks',
-    title: 'New work item form',
+    title: 'New task form',
     api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
     act: async (page) => {
-      await page.getByRole('button', { name: 'New work item' }).click()
+      await page.getByRole('button', { name: 'New task' }).click()
       await page.fill('.new input', 'Cap the retry queue at the same window')
       await page.fill('.new textarea', 'Same token bucket as the gateway. Done when a stalled peer never holds more than 500 pushes.')
-      await page.fill('.new .pri', '3')
+      await page.selectOption('.new .pri', '3')
     },
   },
   {
     id: 'work-new-form-refused',
     area: 'work',
     route: '/tasks',
-    title: 'New work item refused',
+    title: 'New task refused',
     note: 'an add that fails shows its error under the heading "Could not load work"',
     api: {
       '/api/work': { items: ledger },
@@ -614,10 +614,51 @@ const states = [
       '/api/sessions': sessionsWithRun,
     },
     act: async (page) => {
-      await page.getByRole('button', { name: 'New work item' }).click()
+      await page.getByRole('button', { name: 'New task' }).click()
       await page.fill('.new input', 'Cap the retry queue at the same window')
-      await page.getByRole('button', { name: 'Add work item' }).click()
+      await page.getByRole('button', { name: 'Add task' }).click()
     },
+  },
+
+  {
+    id: 'work-project-tabs',
+    area: 'work',
+    route: '/tasks',
+    title: 'Ledger across projects: tabs with open counts',
+    note: 'All, two named projects, one a peer named that this node has no name for (short id), and No project; rows on All carry their project',
+    api: {
+      '/api/work': {
+        items: ledger.map((i, n) =>
+          n % 4 === 1 ? { ...i, project_id: 'tracon' } : n % 4 === 2 ? { ...i, project_id: null } : n % 4 === 3 ? { ...i, project_id: '7c1e9a4f02b3d658' } : i,
+        ),
+      },
+      '/api/sessions': sessionsWithRun,
+    },
+  },
+  {
+    id: 'work-project-tab-open',
+    area: 'work',
+    route: '/tasks?project=tracon',
+    title: 'One project tab open',
+    api: {
+      '/api/work': { items: ledger.map((i, n) => (n % 2 ? { ...i, project_id: 'tracon' } : i)) },
+      '/api/sessions': sessionsWithRun,
+    },
+  },
+  {
+    id: 'work-search',
+    area: 'work',
+    route: '/tasks',
+    title: 'Searching the ledger',
+    api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
+    act: async (page) => page.fill('.search', 'retry'),
+  },
+  {
+    id: 'work-search-nothing',
+    area: 'work',
+    route: '/tasks?q=nothing-like-this',
+    title: 'A search nothing matches',
+    api: { '/api/work': { items: ledger }, '/api/sessions': sessionsWithRun },
   },
 
   // ------------------------------------------------------------- an item
@@ -631,6 +672,29 @@ const states = [
     api: itemApi(ledger.find((i) => i.id === ID.export), {
       continuation: continuation(ledger.find((i) => i.id === ID.export), { decisions: { plan: null, brief: null, answered: [] } }),
     }),
+  },
+  {
+    id: 'work-item-edit',
+    area: 'work',
+    route: `/tasks/${ID.export}`,
+    title: 'Editing an item: title, requirements, priority, project',
+    note: 'the requirements box grows with its text up to the viewport, then scrolls inside; editing is desktop-only',
+    sizes: ['desktop'],
+    full: false,
+    api: itemApi({
+      ...ledger.find((i) => i.id === ID.export),
+      body: Array.from({ length: 60 }, (_, n) => `${n + 1}. Export step ${n + 1}: write the batch, check the checksum, and record where it went.`).join('\n'),
+    }),
+    act: async (page) => page.getByRole('button', { name: 'Edit' }).click(),
+  },
+  {
+    id: 'work-item-delete-confirm',
+    area: 'work',
+    route: `/tasks/${ID.export}`,
+    title: 'Deleting an item asks once more',
+    sizes: ['desktop'],
+    api: itemApi(ledger.find((i) => i.id === ID.export)),
+    act: async (page) => page.getByRole('button', { name: 'Delete' }).click(),
   },
   // An external harness records work with work_discover from its own worktree:
   // the node binds the item to that worktree's project and names the lane, and

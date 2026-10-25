@@ -81,6 +81,11 @@ test('documents, memory, services, setup and the work item read as actions', () 
   expect(nodeCallText('brief_read', {})).toBe('Read the brief')
   expect(nodeCallText('criteria_link', { criterion: 'c1', kind: 'test', value: 'v' })).toBe('Link evidence to c1')
   expect(nodeCallText('work_close', { summary: 'done' })).toBe('Close the work item · done')
+  expect(nodeCallText('work_list', { project: 'tracon', state: 'all' })).toBe('Tasks · tracon · all')
+  expect(nodeCallText('work_show', { id: '0b0e29c44da42ee5' })).toBe('Task 0b0e29c4')
+  expect(nodeCallText('work_show', {})).toBe('This task')
+  expect(nodeCallText('work_update', { id: '0b0e29c44da42ee5', title: 'Lists past 100' })).toBe('Update task 0b0e29c4 · Lists past 100')
+  expect(nodeCallText('work_delete', { id: '0b0e29c44da42ee5' })).toBe('Delete task 0b0e29c4')
 })
 
 test('every tool the node offers reads as words, and an unknown one falls back to its name', () => {

@@ -3,10 +3,22 @@
   import { formatAge } from '../lib/format'
   import { nodeLabel } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
-  import type { WorkView } from '../lib/types'
-  import { blockersLine, short, workLabel, workState } from '../lib/work'
+  import type { PriorityLevel, WorkView } from '../lib/types'
+  import { blockersLine, isTopPriority, priorityLabel, short, workLabel, workState } from '../lib/work'
 
-  let { item, titles }: { item: WorkView; titles: Map<string, string> } = $props()
+  let {
+    item,
+    titles,
+    levels = [],
+    project = null,
+  }: {
+    item: WorkView
+    titles: Map<string, string>
+    /** The node's priority names; without them a priority shows as its number. */
+    levels?: PriorityLevel[]
+    /** The project's name, when the list mixes projects. */
+    project?: string | null
+  } = $props()
 
   const state = $derived(workState(item))
   const holder = $derived(item.session_id ? store.sessions.get(item.session_id) : undefined)
@@ -26,10 +38,13 @@
 
 <a class="row {state}" href={state === 'insession' && item.session_id ? `/sessions/${item.session_id}` : `/tasks/${item.id}`}>
   <span class="bar"></span>
-  <span class="mono pri" class:hi={item.priority >= 5}>p{item.priority} · {formatAge(item.created_ms, clock.now)}</span>
+  <span class="mono pri" class:hi={levels.length ? isTopPriority(item.priority, levels) : item.priority >= 5}
+    >{levels.length ? priorityLabel(item.priority, levels) : `p${item.priority}`} · {formatAge(item.created_ms, clock.now)}</span
+  >
   <span class="t">
     <em>{workLabel(item)}</em>
     {item.title}
+    {#if project}<span class="proj">{project}</span>{/if}
     <small>{detail}</small>
   </span>
   <span class="act">{act}</span>
@@ -38,7 +53,7 @@
 <style>
   .row {
     display: grid;
-    grid-template-columns: 3px 72px minmax(0, 1fr) auto;
+    grid-template-columns: 3px 96px minmax(0, 1fr) auto;
     gap: 0 14px;
     align-items: center;
     background: var(--s1);
@@ -113,6 +128,15 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .proj {
+    margin-left: 8px;
+    padding: 0 6px;
+    border-radius: 3px;
+    background: var(--s2);
+    color: var(--dim);
+    font: 11.5px var(--mono);
+    font-weight: 400;
   }
   .act {
     color: var(--acc);

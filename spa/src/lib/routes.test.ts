@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { localDate, redirect, screenFor, settingsSection, usageSearch, usageView, usageWindow } from './routes'
+import { localDate, redirect, screenFor, settingsSection, tasksSearch, tasksView, usageSearch, usageView, usageWindow } from './routes'
 
 test('old top-level addresses lead to where the screen moved', () => {
   expect(redirect('/metrics')).toBe('/usage')
@@ -96,4 +96,13 @@ test('a Settings anchor opens its section, and anything else General', () => {
   expect(settingsSection('#mesh')).toBe('mesh')
   expect(settingsSection('')).toBe('general')
   expect(settingsSection('#nonsense')).toBe('general')
+})
+
+test('the Tasks address carries the project tab and the search, and nothing that is the default', () => {
+  expect(tasksView('')).toEqual({ project: 'all', q: '' })
+  expect(tasksView('?project=p1&q=word%20machine')).toEqual({ project: 'p1', q: 'word machine' })
+  expect(tasksSearch({ project: 'all', q: '' })).toBe('')
+  expect(tasksSearch({ project: 'none', q: '  ' })).toBe('?project=none')
+  const view = { project: 'p1', q: 'word machine' }
+  expect(tasksView(tasksSearch(view))).toEqual(view)
 })

@@ -50,6 +50,15 @@ class Router {
     this.revision += 1
   }
 
+  /**
+   * Change the address without a new history entry: a search being typed is
+   * one place to come back to, not one per keystroke.
+   */
+  replace(path: string) {
+    if (path !== this.path + this.search + this.hash) history.replaceState(history.state, '', path)
+    this.read()
+  }
+
   /** Take the address bar as it is, first moving an old address to its new one. */
   private read() {
     const moved = redirect(location.pathname, location.search, location.hash)
