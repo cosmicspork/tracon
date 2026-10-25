@@ -13,6 +13,8 @@
     inProject,
     matches,
     projectName,
+    pickableProjects,
+    projectLabel,
     projectTabs,
     rememberedProject,
     rememberProject,
@@ -66,7 +68,8 @@
 
   const items = $derived(work.value ?? [])
   const view = $derived(tasksView(router.search))
-  const tabs = $derived(projectTabs(items, projects))
+  const tabs = $derived(projectTabs(items, projects, view.project))
+  const pickable = $derived(pickableProjects(projects))
   // Only worth tabs once some item belongs to a project.
   const tabbed = $derived(tabs.some((t) => t.key !== 'all' && t.key !== 'none'))
   const tab = $derived(tabs.some((t) => t.key === view.project) ? view.project : 'all')
@@ -107,7 +110,7 @@
 
   function openForm() {
     adding = true
-    newProject = tab !== 'all' && tab !== 'none' && projects.some((p) => p.id === tab) ? tab : ''
+    newProject = tab !== 'all' && tab !== 'none' && pickable.some((p) => p.id === tab) ? tab : ''
     priority = null
   }
 
@@ -175,12 +178,12 @@
           <input class="pri num" value={priority ?? String(defaultPriority)} oninput={(e) => (priority = e.currentTarget.value)} inputmode="numeric" pattern="-?[0-9]*" />
         {/if}
       </label>
-      {#if projects.length}
+      {#if pickable.length}
         <label class="pick">
           <span>Project</span>
           <select class="proj" bind:value={newProject}>
             <option value="">No project</option>
-            {#each projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+            {#each pickable as p (p.id)}<option value={p.id}>{projectLabel(p, projects)}</option>{/each}
           </select>
         </label>
       {/if}

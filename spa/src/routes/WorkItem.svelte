@@ -14,7 +14,16 @@
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
   import type { Brief, Criteria, Project, Session, WorkView } from '../lib/types'
-  import { blockersLine, priorityLabel, projectName, short, workLabel, workState } from '../lib/work'
+  import {
+    blockersLine,
+    pickableProjects,
+    priorityLabel,
+    projectLabel,
+    projectName,
+    short,
+    workLabel,
+    workState,
+  } from '../lib/work'
 
   let { id }: { id: string } = $props()
 
@@ -226,7 +235,7 @@
           <span>Project</span>
           <select bind:value={draft.project}>
             <option value="">No project</option>
-            {#each projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+            {#each pickableProjects(projects, item.project_id) as p (p.id)}<option value={p.id}>{projectLabel(p, projects)}</option>{/each}
             {#if draft.project && !projects.some((p) => p.id === draft.project)}<option value={draft.project}>{short(draft.project)}</option>{/if}
           </select>
         </label>

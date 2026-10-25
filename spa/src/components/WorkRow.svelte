@@ -53,7 +53,7 @@
 <style>
   .row {
     display: grid;
-    grid-template-columns: 3px 96px minmax(0, 1fr) auto;
+    grid-template-columns: 3px 118px minmax(0, 1fr) auto;
     gap: 0 14px;
     align-items: center;
     background: var(--s1);
@@ -104,6 +104,7 @@
   }
   .pri {
     color: var(--dim);
+    white-space: nowrap;
   }
   .pri.hi {
     color: var(--wait);

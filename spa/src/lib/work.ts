@@ -70,16 +70,44 @@ export interface ProjectTab {
  * item, by name, then the items with no project. A project this node has no
  * name for (an item from a peer) is shown by its id.
  */
-export function projectTabs(items: readonly WorkView[], projects: readonly Project[]): ProjectTab[] {
-  const open = (key: ProjectKey) => items.filter((i) => i.readiness.state !== 'closed' && inProject(i, key)).length
-  const held = new Set(items.map((i) => i.project_id).filter((p): p is string => !!p))
+export function projectTabs(
+  items: readonly WorkView[],
+  projects: readonly Project[],
+  current: ProjectKey = 'all',
+): ProjectTab[] {
+  const isOpen = (i: WorkView) => i.readiness.state !== 'closed'
+  const open = (key: ProjectKey) => items.filter((i) => isOpen(i) && inProject(i, key)).length
+  // A project with nothing open is a tab of closed work: All still shows it,
+  // so it gets a tab only while it is the one open.
+  const held = new Set(
+    items
+      .filter((i) => isOpen(i) || i.project_id === current)
+      .map((i) => i.project_id)
+      .filter((p): p is string => !!p),
+  )
   const named = projects.filter((p) => held.has(p.id))
   const unnamed = [...held].filter((id) => !projects.some((p) => p.id === id)).sort()
   const tabs: ProjectTab[] = [{ key: 'all', label: 'All', open: open('all') }]
-  for (const p of named) tabs.push({ key: p.id, label: p.name, open: open(p.id) })
+  for (const p of named) tabs.push({ key: p.id, label: projectLabel(p, projects), open: open(p.id) })
   for (const id of unnamed) tabs.push({ key: id, label: short(id), open: open(id) })
-  if (items.some((i) => !i.project_id)) tabs.push({ key: 'none', label: 'No project', open: open('none') })
+  if (items.some((i) => !i.project_id && (isOpen(i) || current === 'none'))) {
+    tabs.push({ key: 'none', label: 'No project', open: open('none') })
+  }
   return tabs
+}
+
+/** A project's name, with its short id beside it when another project shares the name. */
+export function projectLabel(p: Project, projects: readonly Project[]): string {
+  return projects.some((o) => o.id !== p.id && o.name === p.name) ? `${p.name} ${short(p.id, 6)}` : p.name
+}
+
+/**
+ * The projects worth offering in a picker: a repository with a remote, or one
+ * that already holds work. A one-off imported workspace with nothing in it is
+ * not somewhere new work goes.
+ */
+export function pickableProjects(projects: readonly Project[], keep: string | null = null): Project[] {
+  return projects.filter((p) => p.id === keep || p.total > 0 || !!p.remote_url)
 }
 
 /** Whether an item is under a tab. */
@@ -92,7 +120,8 @@ export function inProject(item: Pick<WorkItem, 'project_id'>, key: ProjectKey): 
 /** The name an item's project goes by here: its name, its short id, or null for none. */
 export function projectName(item: Pick<WorkItem, 'project_id'>, projects: readonly Project[]): string | null {
   if (!item.project_id) return null
-  return projects.find((p) => p.id === item.project_id)?.name ?? short(item.project_id)
+  const p = projects.find((p) => p.id === item.project_id)
+  return p ? projectLabel(p, projects) : short(item.project_id)
 }
 
 const TAB_KEY = 'tracon.tasks.project.'
