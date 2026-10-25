@@ -64,6 +64,14 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (memory::RETAIN, "markdown", &["body"], &["kind"]),
     (work::BRIEF_NOTE, "markdown", &["text"], &[]),
     (work::CRITERIA_LINK, "markdown", &["value"], &["criterion"]),
+    // Which item is the call; an edit to it would be a different call.
+    (
+        work::WORK_UPDATE,
+        "markdown",
+        &["body"],
+        &["id", "worktree"],
+    ),
+    (work::WORK_DELETE, "markdown", &[], &["id"]),
     (review::SUBMIT_REPORT, "markdown", &["body"], &["report_id"]),
     (super::egress::REQUEST, "markdown", &[], &["host"]),
     (

@@ -19,7 +19,7 @@
 # A denial wins over any allow, whatever the order. An action no rule names —
 # a brokered write, a tool whose kind the node does not know — is asked.
 
-version = 21
+version = 22
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -157,7 +157,7 @@ matches = [
 [[rule]]
 id = "corpus-and-ledger"
 verdict = "allow"
-reason = "Recalling what is known, reading a document or a brief, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
+reason = "Recalling what is known, reading a document, a brief or the ledger, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
 kinds = ["tool"]
 matches = [
     "recall",
@@ -167,9 +167,15 @@ matches = [
     "brief_read",
     "criteria_read",
     "work_ready",
+    "work_list",
+    "work_show",
     "work_discover",
     "work_close",
 ]
+
+# Rewriting or deleting an item is not named above: `work_update` and
+# `work_delete` change what the operator wrote down or agreed to, so each one
+# is put to the operator first.
 
 # A brief line is not a working note: `brief_note` is named nowhere here, so
 # every line a session would add to a brief is put to the operator first. The

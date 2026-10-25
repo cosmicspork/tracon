@@ -337,6 +337,11 @@ pub const KEYS: &[KeySpec] = &[
     live("docs.kind.label"),
     live("docs.kind.description"),
     live("docs.kind.working_note"),
+    // [work]
+    live("work.default_priority"),
+    // [[work.priority]]
+    live("work.priority.name"),
+    live("work.priority.value"),
     // [auth]
     restart("auth.public_origin"),
     restart("auth.trusted_proxies"),

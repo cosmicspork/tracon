@@ -3,10 +3,10 @@
 //! to the mesh the same way a document is.
 
 use serde_json::Value;
-use tracon_sync::work::{item_id, WorkItem, CLOSED, OPEN};
+use tracon_sync::work::{item_id, Readiness, WorkItem, CLOSED, OPEN};
 use tracon_sync::ChangeOp;
 
-use crate::store::{now_ms, work_change_row, Store, StoreError};
+use crate::store::{now_ms, work_change_row, Store, StoreError, WorkView};
 use crate::stream::Bus;
 
 pub struct NewWork {
@@ -81,6 +81,20 @@ pub struct Patch {
     pub priority: Option<i64>,
     /// `open` or `closed`.
     pub state: Option<String>,
+    /// The project the item belongs to: absent leaves it, `null` clears it.
+    /// The id stays what it was minted as; it is a name, not an address.
+    #[serde(default, deserialize_with = "present")]
+    pub project_id: Option<Option<String>>,
+}
+
+/// A field that was sent, `null` included, as `Some`; one left out stays
+/// `None` through `#[serde(default)]`.
+fn present<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Option::<String>::deserialize(d).map(Some)
 }
 
 pub fn update(
@@ -113,6 +127,9 @@ pub fn update(
     if let Some(p) = patch.priority {
         item.priority = p;
     }
+    if let Some(project) = patch.project_id {
+        item.project_id = project.filter(|p| !p.trim().is_empty());
+    }
     match patch.state.as_deref() {
         Some(CLOSED) if item.state != CLOSED => {
             item.state = CLOSED.into();
@@ -127,6 +144,117 @@ pub fn update(
     item.updated_ms = now_ms();
     put(store, bus, site, &item)?;
     Ok(item)
+}
+
+/// Whether an item answers a search: every word of `query` appears in its
+/// title or body, ignoring case, or is the start of its id.
+pub fn matches(item: &WorkItem, query: &str) -> bool {
+    let title = item.title.to_lowercase();
+    let body = item.body.to_lowercase();
+    query.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        title.contains(&word) || body.contains(&word) || item.id.starts_with(&word)
+    })
+}
+
+/// The ledger in ready order, narrowed: `project` is a project id or `none`
+/// for items with no project; `state` is `ready`, `blocked`, `in_session`,
+/// `open` (everything not closed), `closed`, or anything else for all;
+/// `query` keeps the items that `matches` it.
+pub fn select(
+    store: &Store,
+    channel: &str,
+    project: Option<&str>,
+    state: Option<&str>,
+    query: Option<&str>,
+) -> Result<Vec<WorkView>, StoreError> {
+    let none = project == Some("none");
+    let items = store.work_status(channel, project.filter(|_| !none))?;
+    Ok(items
+        .into_iter()
+        .filter(|v| !none || v.item.project_id.is_none())
+        .filter(|v| match state {
+            Some("ready") => v.readiness == Readiness::Ready && v.session_id.is_none(),
+            Some("blocked") => matches!(v.readiness, Readiness::Blocked { .. }),
+            Some("in_session") => v.readiness != Readiness::Closed && v.session_id.is_some(),
+            Some("open") => v.readiness != Readiness::Closed,
+            Some("closed") => v.readiness == Readiness::Closed,
+            _ => true,
+        })
+        .filter(|v| query.is_none_or(|q| matches(&v.item, q)))
+        .collect())
+}
+
+/// The shortest id prefix an agent or the CLI may name an item by.
+pub const MIN_PREFIX: usize = 6;
+
+/// An item on one channel, by its id or an unambiguous prefix of it. An
+/// item on another channel is not found: a caller acts on its own channel.
+pub fn find(store: &Store, channel: &str, id: &str) -> Result<WorkItem, String> {
+    let id = id.trim();
+    if let Some(item) = store.work_get(id).map_err(|e| e.to_string())? {
+        if item.channel == channel {
+            return Ok(item);
+        }
+        return Err(format!("no work item {id} on channel {channel}"));
+    }
+    if id.len() < MIN_PREFIX {
+        return Err(format!(
+            "no work item {id:?}: name it by its id or at least {MIN_PREFIX} characters of it"
+        ));
+    }
+    let mut hits: Vec<WorkItem> = store
+        .work_list(channel, None)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|i| i.id.starts_with(id))
+        .collect();
+    match hits.len() {
+        0 => Err(format!("no work item {id} on channel {channel}")),
+        1 => Ok(hits.remove(0)),
+        n => Err(format!("{id} names {n} work items; give more of the id")),
+    }
+}
+
+/// A project on a channel, by its name (any case), its id or a prefix of it.
+pub fn find_project(store: &Store, channel: &str, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    let projects = store.project_list(channel).map_err(|e| e.to_string())?;
+    if let Some(p) = projects.iter().find(|p| p.id == text) {
+        return Ok(p.id.clone());
+    }
+    let named: Vec<_> = projects
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case(text))
+        .collect();
+    if named.len() == 1 {
+        return Ok(named[0].id.clone());
+    }
+    if named.len() > 1 {
+        return Err(format!(
+            "{} projects on {channel} are named {text:?}; name it by its id",
+            named.len()
+        ));
+    }
+    let prefixed: Vec<_> = projects
+        .iter()
+        .filter(|p| text.len() >= MIN_PREFIX && p.id.starts_with(text))
+        .collect();
+    match prefixed.len() {
+        1 => Ok(prefixed[0].id.clone()),
+        0 => {
+            let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+            Err(if names.is_empty() {
+                format!("no project {text:?} on {channel}: none is known yet")
+            } else {
+                format!(
+                    "no project {text:?} on {channel}; known: {}",
+                    names.join(", ")
+                )
+            })
+        }
+        n => Err(format!("{text} names {n} projects; give more of the id")),
+    }
 }
 
 /// Close an item, recording which session did it.

@@ -348,18 +348,43 @@ enum WorkCommand {
         /// Items this one waits on, comma-separated ids (prefixes are fine).
         #[arg(long, value_delimiter = ',')]
         dep: Vec<String>,
-        #[arg(long, default_value_t = 0)]
-        priority: i64,
+        /// A level's name or a number; higher runs first. Unset: the
+        /// node's `[work] default_priority`.
+        #[arg(long)]
+        priority: Option<String>,
     },
     /// List the ledger with derived readiness, in the ready order.
     Ls {
         #[arg(long, default_value = "personal")]
         channel: String,
+        /// A project's name or id, or `none`.
         #[arg(long)]
         project: Option<String>,
-        /// ready | blocked | open | closed
+        /// ready | blocked | in_session | open | closed
         #[arg(long)]
         state: Option<String>,
+        /// Words every item must contain in its title or body.
+        #[arg(long)]
+        query: Option<String>,
+    },
+    /// Change an item: only the fields given change.
+    Edit {
+        id: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the body from a file, or `-` for stdin.
+        #[arg(long)]
+        body_file: Option<std::path::PathBuf>,
+        /// A level's name or a number; higher runs first.
+        #[arg(long)]
+        priority: Option<String>,
+        /// A project's name or id, or `none` to clear it.
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Ready work: what a session may pick, in order.
     Ready {
@@ -2327,7 +2352,128 @@ fn resolve_prefix<'a>(
     }
 }
 
-fn work_line(i: &serde_json::Value) -> String {
+/// The ledger's priority levels and the channel's project names, for
+/// printing and for reading what the operator typed.
+struct WorkNames {
+    levels: Vec<(String, i64)>,
+    projects: Vec<(String, String)>,
+}
+
+impl WorkNames {
+    async fn load(channel: &str) -> Result<Self> {
+        use reqwest::Method;
+        let node = node_call(Method::GET, "/api/node", None, None).await?;
+        let levels = node["work"]["priority_levels"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| Some((l["name"].as_str()?.to_string(), l["value"].as_i64()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let v = node_call(
+            Method::GET,
+            &format!("/api/projects?channel={}", urlencode(channel)),
+            None,
+            None,
+        )
+        .await?;
+        let projects = v["projects"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| {
+                        Some((
+                            p["id"].as_str()?.to_string(),
+                            p["name"].as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self { levels, projects })
+    }
+
+    fn priority(&self, text: &str) -> Result<i64> {
+        let text = text.trim();
+        if let Some((_, v)) = self
+            .levels
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(text))
+        {
+            return Ok(*v);
+        }
+        text.parse().map_err(|_| {
+            let names: Vec<&str> = self.levels.iter().map(|(n, _)| n.as_str()).collect();
+            anyhow::anyhow!(
+                "priority {text:?} is not a number{}",
+                if names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" or one of {}", names.join(", "))
+                }
+            )
+        })
+    }
+
+    fn priority_name(&self, value: i64) -> String {
+        self.levels
+            .iter()
+            .find(|(_, v)| *v == value)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| value.to_string())
+    }
+
+    /// `None` for `none`; otherwise the project's id, by name, id or prefix.
+    fn project(&self, text: &str) -> Result<Option<String>> {
+        let text = text.trim();
+        if text.eq_ignore_ascii_case("none") {
+            return Ok(None);
+        }
+        let hits: Vec<&String> = self
+            .projects
+            .iter()
+            .filter(|(id, name)| {
+                id == text
+                    || name.eq_ignore_ascii_case(text)
+                    || (text.len() >= 6 && id.starts_with(text))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        match hits.as_slice() {
+            [one] => Ok(Some((*one).clone())),
+            [] => {
+                let names: Vec<&str> = self.projects.iter().map(|(_, n)| n.as_str()).collect();
+                if names.is_empty() {
+                    anyhow::bail!("no project {text:?}: none is known on this channel yet")
+                }
+                anyhow::bail!("no project {text:?}; known: {}", names.join(", "))
+            }
+            _ => anyhow::bail!("{text:?} names more than one project; give its id"),
+        }
+    }
+
+    fn project_name(&self, id: &str) -> String {
+        self.projects
+            .iter()
+            .find(|(p, _)| p == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id[..8.min(id.len())].to_string())
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn work_line(i: &serde_json::Value, names: &WorkNames) -> String {
     let id = i["id"].as_str().unwrap_or("");
     let state = match i["readiness"]["state"].as_str().unwrap_or("") {
         "ready" if i["session_id"].is_string() => "in session".to_string(),
@@ -2338,7 +2484,10 @@ fn work_line(i: &serde_json::Value) -> String {
                     a.iter()
                         .map(|b| match b["kind"].as_str() {
                             Some("cycle") => "cycle".to_string(),
-                            _ => b["id"].as_str().unwrap_or("?")[..8].to_string(),
+                            _ => {
+                                let id = b["id"].as_str().unwrap_or("?");
+                                id[..8.min(id.len())].to_string()
+                            }
                         })
                         .collect()
                 })
@@ -2347,10 +2496,14 @@ fn work_line(i: &serde_json::Value) -> String {
         }
         other => other.to_string(),
     };
+    let project = i["project_id"]
+        .as_str()
+        .map(|p| format!("  [{}]", names.project_name(p)))
+        .unwrap_or_default();
     format!(
-        "{}  p{:<2} {:<24} {}",
+        "{}  {:<9} {:<24} {}{project}",
         &id[..8.min(id.len())],
-        i["priority"].as_i64().unwrap_or(0),
+        names.priority_name(i["priority"].as_i64().unwrap_or(0)),
         state,
         i["title"].as_str().unwrap_or("")
     )
@@ -2372,6 +2525,12 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
             for d in dep.iter().filter(|d| !d.trim().is_empty()) {
                 deps.push(work_resolve(&channel, d.trim()).await?);
             }
+            let names = WorkNames::load(&channel).await?;
+            let project = match project {
+                Some(p) => names.project(&p)?,
+                None => None,
+            };
+            let priority = priority.map(|p| names.priority(&p)).transpose()?;
             let v = node_call(
                 Method::POST,
                 "/api/work",
@@ -2389,29 +2548,85 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
             channel,
             project,
             state,
+            query,
         } => {
-            let mut q = format!("/api/work?channel={channel}");
+            let names = WorkNames::load(&channel).await?;
+            let mut q = format!("/api/work?channel={}", urlencode(&channel));
             if let Some(p) = project {
-                q.push_str(&format!("&project_id={p}"));
+                let id = names.project(&p)?.unwrap_or_else(|| "none".into());
+                q.push_str(&format!("&project_id={id}"));
             }
             if let Some(s) = state {
-                q.push_str(&format!("&state={s}"));
+                q.push_str(&format!("&state={}", urlencode(&s)));
+            }
+            if let Some(words) = query {
+                q.push_str(&format!("&q={}", urlencode(&words)));
             }
             let v = node_call(Method::GET, &q, None, None).await?;
             for i in v["items"].as_array().cloned().unwrap_or_default() {
-                println!("{}", work_line(&i));
+                println!("{}", work_line(&i, &names));
             }
             Ok(())
         }
         WorkCommand::Ready { channel, project } => {
-            let mut q = format!("/api/work/ready?channel={channel}");
+            let names = WorkNames::load(&channel).await?;
+            let mut q = format!("/api/work/ready?channel={}", urlencode(&channel));
             if let Some(p) = project {
-                q.push_str(&format!("&project_id={p}"));
+                if let Some(id) = names.project(&p)? {
+                    q.push_str(&format!("&project_id={id}"));
+                }
             }
             let v = node_call(Method::GET, &q, None, None).await?;
             for i in v["items"].as_array().cloned().unwrap_or_default() {
-                println!("{}", work_line(&i));
+                println!("{}", work_line(&i, &names));
             }
+            Ok(())
+        }
+        WorkCommand::Edit {
+            id,
+            channel,
+            title,
+            body,
+            body_file,
+            priority,
+            project,
+        } => {
+            let id = work_resolve(&channel, &id).await?;
+            let names = WorkNames::load(&channel).await?;
+            let mut patch = serde_json::Map::new();
+            if let Some(t) = title {
+                patch.insert("title".into(), json!(t));
+            }
+            let body = match body_file {
+                Some(path) if path.as_os_str() == "-" => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                    Some(text)
+                }
+                Some(path) => Some(std::fs::read_to_string(&path)?),
+                None => body,
+            };
+            if let Some(b) = body {
+                patch.insert("body".into(), json!(b));
+            }
+            if let Some(p) = priority {
+                patch.insert("priority".into(), json!(names.priority(&p)?));
+            }
+            if let Some(p) = project {
+                patch.insert("project_id".into(), json!(names.project(&p)?));
+            }
+            if patch.is_empty() {
+                anyhow::bail!("nothing to change: give --title, --body, --priority or --project");
+            }
+            node_call(
+                Method::PUT,
+                &format!("/api/work/{id}"),
+                Some(serde_json::Value::Object(patch)),
+                None,
+            )
+            .await?;
+            let v = node_call(Method::GET, &format!("/api/work/{id}"), None, None).await?;
+            println!("{}", work_line(&v["item"], &names));
             Ok(())
         }
         WorkCommand::Show { id, channel } => {

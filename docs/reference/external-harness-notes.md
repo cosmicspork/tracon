@@ -119,6 +119,15 @@ session. `work_close` takes an id, and refuses an item a running session holds,
 since closing it would end that session. What stays absent is `review_verdict`,
 which belongs to a review session the node starts.
 
+**The ledger was write-once; now it is kept.** With only `work_ready`,
+`work_discover` and `work_close`, a harness could not read a blocked or closed
+item, fix a title, reprioritise, or undo a mistaken item, and making the ledger
+the source of truth meant going around the broker to the operator API.
+`work_list`/`work_show` read it (by `project` name or a `worktree`), and
+`work_update`/`work_delete` change it after the operator allows each call. Every
+id is resolved on the caller's channel, which also closed a gap where
+`work_close` would close an item on any channel by id.
+
 **Review could only open a change; now it can update one.** An external
 harness most often works on a branch that already has a pull or merge request
 (review feedback, a rebase), and publication's `gh pr create` failed there after

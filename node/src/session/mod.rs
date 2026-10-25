@@ -1789,6 +1789,21 @@ impl Manager {
             remote_url: remote,
             created_ms: now_ms(),
         });
+        // An item with no project takes the one its first session runs in,
+        // so a composed task is grouped with its repository from then on.
+        if let Some(item) = held_item.as_ref().filter(|i| i.project_id.is_none()) {
+            let _ = crate::corpus::work::update(
+                &self.store,
+                &self.bus,
+                &self.node_id,
+                &item.id,
+                crate::corpus::work::Patch {
+                    project_id: Some(Some(project_id.clone())),
+                    ..Default::default()
+                },
+                None,
+            );
+        }
         let id = uuid::Uuid::now_v7().to_string();
         let slug = id.split('-').next_back().unwrap_or("session").to_string();
         let branch = spec

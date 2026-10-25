@@ -63,6 +63,7 @@ pub struct Config {
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
+    pub work: Work,
 }
 
 /// The tables an older `node.toml` may still carry for OpenCode, which is
@@ -1680,6 +1681,108 @@ impl Default for Memory {
     }
 }
 
+/// How the work ledger reads an item's priority. The ledger stores an
+/// integer and runs higher first; these name the values people pick from.
+/// Written out, the list replaces the default whole; an empty list names
+/// nothing and priorities are plain numbers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Work {
+    /// `[[work.priority]]`: the named levels.
+    pub priority: Vec<PriorityLevel>,
+    /// What a new item gets when nobody says.
+    pub default_priority: i64,
+}
+
+/// One named priority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorityLevel {
+    pub name: String,
+    pub value: i64,
+}
+
+impl Default for Work {
+    fn default() -> Self {
+        let level = |name: &str, value| PriorityLevel {
+            name: name.into(),
+            value,
+        };
+        Self {
+            priority: vec![
+                level("Urgent", 4),
+                level("Priority", 3),
+                level("Planned", 2),
+                level("Backlog", 1),
+            ],
+            default_priority: 2,
+        }
+    }
+}
+
+impl Work {
+    /// The levels, highest first.
+    pub fn levels(&self) -> Vec<PriorityLevel> {
+        let mut levels = self.priority.clone();
+        levels.sort_by_key(|l| std::cmp::Reverse(l.value));
+        levels
+    }
+
+    /// The name of a priority, when a level has exactly that value.
+    pub fn priority_name(&self, value: i64) -> Option<&str> {
+        self.priority
+            .iter()
+            .find(|l| l.value == value)
+            .map(|l| l.name.as_str())
+    }
+
+    /// A priority as someone wrote it: a level's name (any case) or a number.
+    pub fn parse_priority(&self, text: &str) -> Result<i64, String> {
+        let text = text.trim();
+        if let Some(level) = self
+            .priority
+            .iter()
+            .find(|l| l.name.eq_ignore_ascii_case(text))
+        {
+            return Ok(level.value);
+        }
+        text.parse().map_err(|_| {
+            let levels = self.levels();
+            let names: Vec<&str> = levels.iter().map(|l| l.name.as_str()).collect();
+            if names.is_empty() {
+                format!("priority {text:?} is not a number")
+            } else {
+                format!(
+                    "priority {text:?} is not a number or one of {}",
+                    names.join(", ")
+                )
+            }
+        })
+    }
+}
+
+/// Refuse levels a picker could not tell apart: an empty name, or a name or
+/// value given twice.
+pub fn validate_priorities(levels: &[PriorityLevel]) -> Result<(), String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut values = std::collections::BTreeSet::new();
+    for level in levels {
+        let name = level.name.trim();
+        if name.is_empty() {
+            return Err("work.priority: a level has no name".into());
+        }
+        if !names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("work.priority: {name:?} is given twice"));
+        }
+        if !values.insert(level.value) {
+            return Err(format!(
+                "work.priority: value {} is given to two levels",
+                level.value
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Request shapes the model gateway knows how to inject a credential into.
 pub const SHAPE_ANTHROPIC: &str = "anthropic";
 pub const SHAPE_OPENAI: &str = "openai";
@@ -1986,6 +2089,7 @@ impl Default for Config {
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
+            work: Work::default(),
             harness: Harness {
                 id: crate::adapter::claude::ClaudeAdapter::ID.into(),
                 version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
@@ -2372,6 +2476,8 @@ impl Config {
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_doc_kinds(&config.docs.kind)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_priorities(&config.work.priority)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_admin_peers(&config.mesh.admin_peers)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -3086,6 +3192,52 @@ models = [{ id = "gpt-6" }]
             "a ChatGPT sign-in refuses the -codex models"
         );
         assert!(default_models("totally-unknown").is_empty());
+    }
+
+    #[test]
+    fn priorities_are_named_by_the_operator_or_left_as_numbers() {
+        let load = |text: &str| Config::from_toml(text, Path::new("node.toml"));
+        let cfg = load("").unwrap();
+        let names: Vec<&str> = cfg.work.priority.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Urgent", "Priority", "Planned", "Backlog"]);
+        assert_eq!(cfg.work.default_priority, 2);
+        assert_eq!(cfg.work.priority_name(4), Some("Urgent"));
+        assert_eq!(
+            cfg.work.priority_name(0),
+            None,
+            "an unnamed value is a number"
+        );
+        assert_eq!(cfg.work.parse_priority("urgent"), Ok(4));
+        assert_eq!(cfg.work.parse_priority(" 7 "), Ok(7));
+        assert!(cfg
+            .work
+            .parse_priority("soon")
+            .unwrap_err()
+            .contains("Urgent"));
+
+        // Written out, the list replaces the default, in any order.
+        let cfg = load(
+            "[work]\ndefault_priority = 0\n[[work.priority]]\nname = \"Low\"\nvalue = -1\n\
+             [[work.priority]]\nname = \"High\"\nvalue = 10\n",
+        )
+        .unwrap();
+        let levels: Vec<i64> = cfg.work.levels().iter().map(|l| l.value).collect();
+        assert_eq!(levels, [10, -1], "highest first");
+        assert_eq!(cfg.work.default_priority, 0);
+
+        // An empty list names nothing: priorities are plain numbers.
+        let cfg = load("[work]\npriority = []\n").unwrap();
+        assert!(cfg.work.levels().is_empty());
+        assert_eq!(cfg.work.parse_priority("3"), Ok(3));
+        assert!(cfg.work.parse_priority("Urgent").is_err());
+
+        for refused in [
+            "[[work.priority]]\nname = \"\"\nvalue = 1\n",
+            "[[work.priority]]\nname = \"A\"\nvalue = 1\n[[work.priority]]\nname = \"a\"\nvalue = 2\n",
+            "[[work.priority]]\nname = \"A\"\nvalue = 1\n[[work.priority]]\nname = \"B\"\nvalue = 1\n",
+        ] {
+            assert!(load(refused).is_err(), "{refused}");
+        }
     }
 
     #[test]

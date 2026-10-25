@@ -400,10 +400,8 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
             &item.body,
             BODY_CHARS,
             "the work item's description",
-            // No tool returns the held item's own body: `work_ready` lists
-            // what no session holds. The only honest route to the rest is the
-            // operator, so that is what is named.
-            Some("ask for the rest with `ask_operator`"),
+            // `work_show` with no id returns the held item whole.
+            Some("`work_show` returns the whole item"),
             missing,
         );
         out.push_str("\n\n");
@@ -460,8 +458,9 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
                  screenshot, or what you want the operator to check, goes to `show_work`. \
                  Work you find but \
                  should not do now: `work_discover` records it against this item instead of \
-                 losing it. `work_close` closes the item this session holds, and ends the \
-                 session with it. Submitting is not closing: a change can be under review, \
+                 losing it. `work_list` and `work_show` read the ledger; `work_update` \
+                 corrects an item (asked first). `work_close` closes the item this session \
+                 holds, and ends the session with it. Submitting is not closing: a change can be under review, \
                  or published and still awaiting a verdict on whether it was any good. Close \
                  when the item itself is finished, and leave it open otherwise.\n\n",
             );

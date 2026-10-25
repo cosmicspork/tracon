@@ -1773,6 +1773,26 @@ impl Store {
         Ok(())
     }
 
+    /// The projects this node knows on a channel, by name. Projects are
+    /// this node's own record; an item from a peer can name one missing here.
+    pub fn project_list(&self, channel: &str) -> Result<Vec<ProjectRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT * FROM project WHERE channel = ?1 ORDER BY name COLLATE NOCASE, id")?;
+        let rows = stmt
+            .query_map([channel], |r| {
+                Ok(ProjectRow {
+                    id: r.get("id")?,
+                    channel: r.get("channel")?,
+                    name: r.get("name")?,
+                    remote_url: r.get("remote_url")?,
+                    created_ms: r.get("created_ms")?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn project_get(&self, id: &str) -> Result<Option<ProjectRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT * FROM project WHERE id = ?1", [id], |r| {
