@@ -20,11 +20,15 @@ export function autogrow(node: HTMLTextAreaElement, _value?: string) {
   fit()
   node.addEventListener('input', fit)
   view?.addEventListener('resize', fit)
+  // Inside a closed <details> it may have no height to measure until it opens.
+  const details = node.closest?.('details')
+  details?.addEventListener('toggle', fit)
   return {
     update: (_value?: string) => fit(),
     destroy: () => {
       node.removeEventListener('input', fit)
       view?.removeEventListener('resize', fit)
+      details?.removeEventListener('toggle', fit)
     },
   }
 }

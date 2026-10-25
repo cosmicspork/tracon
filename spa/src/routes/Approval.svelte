@@ -10,6 +10,7 @@
     grantsAccess,
     outcome,
     problemsByField,
+    replacement,
     resultRows,
     schemaFor,
     type ApprovalDetails,
@@ -105,8 +106,16 @@
   const shown = $derived(
     pending ? edited : details?.edited_arguments ? asArguments(details.edited_arguments) : original,
   )
+  /**
+   * While it waits, the draft against what it would replace: the document
+   * as it stands, or nothing for a new one. Once decided the document is
+   * what ran, so there is nothing left to compare.
+   */
+  const replacing = $derived(pending && details ? replacement(details, edited) : null)
   const prose = $derived(
-    (details?.prose_fields ?? []).filter((k) => typeof shown[k] === 'string' && shown[k] !== ''),
+    (details?.prose_fields ?? []).filter(
+      (k) => typeof shown[k] === 'string' && shown[k] !== '' && k !== replacing?.key,
+    ),
   )
   const settledChanges = $derived(
     !pending && details?.edited_arguments ? diffArguments(original, asArguments(details.edited_arguments)) : [],
@@ -257,6 +266,38 @@
     {/if}
   {/if}
 
+  {#if replacing}
+    {#if details.stale}
+      <div class="banner crit" role="alert">
+        the document changed since the agent read it <b
+          >· this diff is against the document as it is now; Allow will fail as a conflict, so ask for changes
+          or reject</b
+        >
+      </div>
+    {/if}
+    <div class="h4">
+      Changes to the document <b
+        >{replacing.created ? 'new document' : `edit · “${replacing.title}”`}{replacing.format &&
+        replacing.format !== 'markdown'
+          ? ` · ${replacing.format}`
+          : ''} · +{replacing.added} −{replacing.removed}</b
+      >
+    </div>
+    <div class="change">
+      <div class="lines">
+        {#each replacing.hunks as h, i (i)}
+          {#if h.kind === 'skip'}
+            <div class="skip">… {h.count} unchanged {h.count === 1 ? 'line' : 'lines'}</div>
+          {:else}
+            {#each h.lines as l, j (j)}
+              <div class={l.kind}>{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '} {l.text}</div>
+            {/each}
+          {/if}
+        {/each}
+      </div>
+    </div>
+  {/if}
+
   {#each prose as key (key)}
     <section class="doc">
       <div class="dochead">
@@ -287,59 +328,78 @@
       {#each fields as f (f.key)}
         {@const v = values[f.key]}
         {@const msgs = [...(problems[f.key] ?? []), ...(refused[f.key] ?? [])]}
-        <label class="field" class:bad={msgs.length > 0}>
-          <span class="name"
-            >{f.key}{f.required ? '' : ' · optional'}{#if f.locked}<span
-                class="chip"
-                title="names what this call acts on; reject it and ask for a new call to change it">locked</span
-              >{/if}</span
-          >
-          {#if f.locked}
-            <code class="locked">{display(original[f.key])}</code>
-          {:else if f.kind === 'prose' || f.kind === 'json'}
-            <textarea
-              class="grow"
-              class:mono={f.kind === 'json'}
-              value={String(v ?? '')}
-              use:autogrow={String(v ?? '')}
-              disabled={busy}
-              spellcheck={f.kind === 'prose'}
-              oninput={(e) => set(f.key, e.currentTarget.value)}
-            ></textarea>
-          {:else if f.kind === 'tags'}
-            <!-- One entry per line: a comma can sit inside a command. -->
-            <textarea
-              class="list mono grow"
-              value={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
-              use:autogrow={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
-              placeholder="one per line"
-              disabled={busy}
-              spellcheck="false"
-              oninput={(e) => set(f.key, e.currentTarget.value.split('\n'))}
-            ></textarea>
-          {:else if f.kind === 'boolean'}
-            <input
-              type="checkbox"
-              checked={v === true}
-              disabled={busy}
-              onchange={(e) => set(f.key, e.currentTarget.checked)}
-            />
-          {:else if f.kind === 'select'}
-            <select value={String(v ?? '')} disabled={busy} onchange={(e) => set(f.key, e.currentTarget.value)}>
-              {#if !f.required}<option value="">—</option>{/if}
-              {#each f.options ?? [] as o (o)}<option value={o}>{o}</option>{/each}
-            </select>
-          {:else}
-            <input
-              value={String(v ?? '')}
-              inputmode={f.kind === 'integer' || f.kind === 'number' ? 'decimal' : undefined}
-              disabled={busy}
-              oninput={(e) => set(f.key, e.currentTarget.value)}
-            />
-          {/if}
-          {#if f.description}<small>{f.description}</small>{/if}
-          {#each msgs as m, i (i)}<small class="err">{m}</small>{/each}
-        </label>
+        {#if f.key === replacing?.key && !f.locked}
+          <!-- The diff above is how it reads; the text is here to edit, and the diff follows it. -->
+          <div class="field" class:bad={msgs.length > 0}>
+            <details class="fulltext">
+              <summary class="name">Full text · {f.key}</summary>
+              <textarea
+                class="grow"
+                aria-label={f.key}
+                value={String(v ?? '')}
+                use:autogrow={String(v ?? '')}
+                disabled={busy}
+                spellcheck="true"
+                oninput={(e) => set(f.key, e.currentTarget.value)}
+              ></textarea>
+            </details>
+            {#each msgs as m, i (i)}<small class="err">{m}</small>{/each}
+          </div>
+        {:else}
+          <label class="field" class:bad={msgs.length > 0}>
+            <span class="name"
+              >{f.key}{f.required ? '' : ' · optional'}{#if f.locked}<span
+                  class="chip"
+                  title="names what this call acts on; reject it and ask for a new call to change it">locked</span
+                >{/if}</span
+            >
+            {#if f.locked}
+              <code class="locked">{display(original[f.key])}</code>
+            {:else if f.kind === 'prose' || f.kind === 'json'}
+              <textarea
+                class="grow"
+                class:mono={f.kind === 'json'}
+                value={String(v ?? '')}
+                use:autogrow={String(v ?? '')}
+                disabled={busy}
+                spellcheck={f.kind === 'prose'}
+                oninput={(e) => set(f.key, e.currentTarget.value)}
+              ></textarea>
+            {:else if f.kind === 'tags'}
+              <!-- One entry per line: a comma can sit inside a command. -->
+              <textarea
+                class="list mono grow"
+                value={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
+                use:autogrow={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
+                placeholder="one per line"
+                disabled={busy}
+                spellcheck="false"
+                oninput={(e) => set(f.key, e.currentTarget.value.split('\n'))}
+              ></textarea>
+            {:else if f.kind === 'boolean'}
+              <input
+                type="checkbox"
+                checked={v === true}
+                disabled={busy}
+                onchange={(e) => set(f.key, e.currentTarget.checked)}
+              />
+            {:else if f.kind === 'select'}
+              <select value={String(v ?? '')} disabled={busy} onchange={(e) => set(f.key, e.currentTarget.value)}>
+                {#if !f.required}<option value="">—</option>{/if}
+                {#each f.options ?? [] as o (o)}<option value={o}>{o}</option>{/each}
+              </select>
+            {:else}
+              <input
+                value={String(v ?? '')}
+                inputmode={f.kind === 'integer' || f.kind === 'number' ? 'decimal' : undefined}
+                disabled={busy}
+                oninput={(e) => set(f.key, e.currentTarget.value)}
+              />
+            {/if}
+            {#if f.description}<small>{f.description}</small>{/if}
+            {#each msgs as m, i (i)}<small class="err">{m}</small>{/each}
+          </label>
+        {/if}
       {/each}
       {#each unnamed as key (key)}
         <div class="field">
@@ -681,6 +741,19 @@
   }
   .lines .del {
     background: color-mix(in srgb, var(--crit) 16%, transparent);
+  }
+  .lines .skip {
+    color: var(--dim);
+    font-style: italic;
+  }
+  .fulltext summary {
+    cursor: pointer;
+  }
+  .fulltext[open] summary {
+    margin-bottom: 4px;
+  }
+  .fulltext textarea {
+    display: block;
   }
   .request {
     color: var(--dim);

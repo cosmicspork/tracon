@@ -1108,7 +1108,7 @@ async fn a_document_card_locks_its_slug_and_takes_an_edited_body() {
     )
     .await;
     let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
-    assert_eq!(v["approval"]["title"], "doc_write plan-foo");
+    assert_eq!(v["approval"]["title"], "doc_write plan-foo · new");
     assert_eq!(v["format"], "markdown");
     assert_eq!(v["prose_fields"], json!(["body"]));
     let locked = v["locked_fields"].as_array().unwrap();
@@ -1138,6 +1138,119 @@ async fn a_document_card_locks_its_slug_and_takes_an_edited_body() {
         "# Final"
     );
     assert!(h.store.doc_get("work", "plan-bar").unwrap().is_none());
+}
+
+/// Stand a Markdown document at `slug` on the harness channel, as a sync
+/// write would, and return its hash.
+fn seed_document(h: &Harness, slug: &str, body: &str) -> String {
+    let hash = tracon::corpus::hash_body(body);
+    h.store
+        .write_document_change(
+            "n1",
+            "work",
+            slug,
+            "plan",
+            &tracon::mcp::docs::title_of(&[], slug, body),
+            body,
+            &hash,
+            None,
+            false,
+            &tracon::corpus::new_id(),
+            None,
+            None,
+        )
+        .unwrap();
+    hash
+}
+
+/// A write over a document that stands is titled as an edit of it, and its
+/// details carry the document as it is now, for the page to diff against.
+/// An `if_hash` that no longer matches is called stale before anything runs.
+#[tokio::test]
+async fn a_document_edit_card_names_the_document_and_details_carry_its_current_body() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let current = "# Plan: foo\n\nOne.\nTwo.\n";
+    let hash = seed_document(&h, "plan-foo", current);
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-foo", "body": "# Plan: foo\n\nOne.\nThree.\n", "if_hash": hash }),
+    )
+    .await;
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(
+        v["approval"]["title"], "doc_write plan-foo · edit · \"Plan: foo\"",
+        "{v}"
+    );
+    assert_eq!(v["document"]["body"], current, "{v}");
+    assert_eq!(v["document"]["hash"], hash, "{v}");
+    assert_eq!(v["document"]["format"], "markdown", "{v}");
+    assert_eq!(v["document"]["title"], "Plan: foo", "{v}");
+    assert!(v["document"]["updated_ms"].as_i64().unwrap() > 0, "{v}");
+    assert_eq!(v["stale"], false, "{v}");
+
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-foo", "body": "# Plan: foo\n", "if_hash": "not-the-hash" }),
+    )
+    .await;
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(v["stale"], true, "{v}");
+}
+
+/// A write to a slug nothing stands at is new: its details carry no document
+/// and nothing to be stale against.
+#[tokio::test]
+async fn a_new_document_card_says_new_and_details_carry_no_document() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-new", "body": "# New plan" }),
+    )
+    .await;
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(v["approval"]["title"], "doc_write plan-new · new", "{v}");
+    assert!(v.as_object().unwrap().contains_key("document"), "{v}");
+    assert_eq!(v["document"], Value::Null, "{v}");
+    assert_eq!(v["stale"], false, "{v}");
+}
+
+/// `doc_write` cannot replace an HTML document, so it is refused before it
+/// is held rather than put to the operator as a call that cannot run.
+#[tokio::test]
+async fn a_document_write_over_an_html_document_is_refused_before_it_is_held() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    h.store
+        .write_html_document_change(
+            &[],
+            "n1",
+            "work",
+            "ref-page",
+            "page.html",
+            "page.html",
+            vec![tracon::corpus::html::HtmlFile {
+                path: "page.html".into(),
+                bytes: b"<title>Page</title><p>page</p>".to_vec(),
+            }],
+            None,
+            true,
+        )
+        .unwrap();
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("doc_write", json!({ "slug": "ref-page", "body": "# Page" })),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err, "{out}");
+    assert!(out.to_string().contains("HTML document"), "{out}");
+    assert!(h.store.open_approval_cards("[]").unwrap().is_empty());
 }
 
 /// `retain` runs unattended under the shipped agreements, but a node's policy

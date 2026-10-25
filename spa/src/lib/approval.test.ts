@@ -8,6 +8,7 @@ import {
   grantsAccess,
   outcome,
   problemsByField,
+  replacement,
   resultRows,
   schemaFor,
 } from './approval'
@@ -132,4 +133,16 @@ test('a result reads as rows, with links where they are URLs', () => {
   ])
   expect(resultRows('done')).toBeNull()
   expect(resultRows([1])).toBeNull()
+})
+
+test('a document write diffs the draft against the document as it stands, or as all added when new', () => {
+  const document = { body: '# Plan\n\nOne.\nTwo.', hash: 'h', format: 'markdown', title: 'Plan', updated_ms: 1 }
+  const edit = replacement({ document }, { slug: 'plan-foo', body: '# Plan\n\nOne.\nThree.' })!
+  expect(edit).toMatchObject({ created: false, title: 'Plan', format: 'markdown', added: 1, removed: 1 })
+  // The operator's edit is the draft the diff is taken from.
+  expect(replacement({ document }, { body: document.body })).toMatchObject({ added: 0, removed: 0 })
+  const fresh = replacement({ document: null }, { body: '# New\n\nBody.' })!
+  expect(fresh).toMatchObject({ created: true, title: null, added: 3, removed: 0 })
+  // A tool that replaces nothing sends no document at all.
+  expect(replacement({}, { body: 'x' })).toBeNull()
 })

@@ -401,6 +401,13 @@ impl Tools {
             if let Some(refusal) = docs::reserved_for_operator(args) {
                 return Err(refusal);
             }
+            if let Some(access) = self.session.get() {
+                let current =
+                    docs::replaced(&access.store, &ctx.channel, args).map_err(|e| e.to_string())?;
+                if let Some(refusal) = docs::html_refusal(current.as_ref()) {
+                    return Err(refusal);
+                }
+            }
         }
         if matches!(
             name,
@@ -1219,13 +1226,23 @@ impl Tools {
 
     /// What the operator reads on the card and in the push for a held call:
     /// [`summarize`], except that a Jira transition is named by the status it
-    /// leads to, which only Jira can say. A lookup that fails or is slow
-    /// leaves the id in the title rather than holding the request.
+    /// leads to, which only Jira can say, and a document write says whether
+    /// it creates or edits, and what. A lookup that fails or is slow leaves
+    /// the plain summary rather than holding the request.
     async fn approval_title(&self, ctx: &CallContext, name: &str, args: &Value) -> String {
         if name == jira::ISSUE_TRANSITION {
             let lookup = jira::transition_target(&self.broker, &self.http, ctx, args);
             if let Ok(Some(to)) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
                 return transition_title(args, &to);
+            }
+        }
+        if name == docs::DOC_WRITE {
+            if let Some(access) = self.session.get() {
+                if let Ok(current) = docs::replaced(&access.store, &ctx.channel, args) {
+                    let mut title = docs::approval_title(&summarize(name, args), current.as_ref());
+                    bound(&mut title);
+                    return title;
+                }
             }
         }
         summarize(name, args)
@@ -1991,6 +2008,24 @@ pub fn summarize(name: &str, args: &Value) -> String {
     };
     bound(&mut s);
     s
+}
+
+/// What a held call would replace, as it stands now, for the approval page
+/// to show the proposal against: fields merged into the approval's details.
+/// `None` for a tool that replaces nothing the node holds.
+pub fn approval_context(
+    store: &crate::store::Store,
+    channel: &str,
+    tool: &str,
+    args: &Value,
+) -> Result<Option<Value>, crate::store::StoreError> {
+    match tool {
+        docs::DOC_WRITE => {
+            let current = docs::replaced(store, channel, args)?;
+            Ok(Some(docs::approval_context(current.as_ref(), args)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// A title cut to the length a card and a push notification carry.

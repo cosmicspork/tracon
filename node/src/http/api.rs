@@ -2159,9 +2159,14 @@ pub async fn get_approval(
     let parse = |text: Option<&str>| {
         text.map(|t| serde_json::from_str::<Value>(t).unwrap_or_else(|_| Value::from(t)))
     };
-    Ok(Json(json!({
+    let arguments = parse(Some(&a.arguments));
+    let context = match &arguments {
+        Some(args) => crate::mcp::approval_context(s.store(), &a.channel, &a.tool, args)?,
+        None => None,
+    };
+    let mut details = json!({
         "approval": a,
-        "arguments": parse(Some(&a.arguments)),
+        "arguments": arguments,
         "edited_arguments": parse(a.edited_arguments.as_deref()),
         "result": parse(a.result.as_deref()),
         "input_schema": crate::mcp::schema::input_schema(&a.tool),
@@ -2173,7 +2178,11 @@ pub async fn get_approval(
         "claimed_before_ms": before.claimed_ms,
         "options": serde_json::from_str::<Value>(crate::store::approvals::card_options(&a.tool))
             .unwrap_or_default(),
-    })))
+    });
+    if let (Some(Value::Object(context)), Some(out)) = (context, details.as_object_mut()) {
+        out.extend(context);
+    }
+    Ok(Json(details))
 }
 
 pub async fn release_approval(
