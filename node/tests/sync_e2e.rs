@@ -414,6 +414,8 @@ async fn a_late_joiner_backfills_records_from_each_site() {
             ],
             None,
             true,
+            None,
+            None,
         )
         .unwrap();
     a.bus.publish(Frame::Changes {
@@ -516,6 +518,91 @@ async fn a_late_joiner_backfills_records_from_each_site() {
         .rposition(|change| change.table == "document_bundle_chunk")
         .unwrap();
     assert!(last_chunk_ix < document_ix);
+}
+
+/// Converting an HTML document to Markdown travels as one ordered batch: the
+/// peer applies the Markdown row and then the old generation's tombstones,
+/// and is left with no live bundle rows behind a Markdown document.
+#[tokio::test]
+async fn a_peer_receives_an_html_to_markdown_conversion_with_its_bundle_tombstones() {
+    state::isolate();
+    let (_hub, a, b) = pair().await;
+    let ai = a.id.node_id();
+    let html = tracon::mcp::docs::write_document_as(
+        &a.store,
+        &a.bus,
+        &[],
+        &ai,
+        "personal",
+        "ref-flip",
+        tracon::mcp::docs::Format::Html,
+        "<title>Flip</title><p>a page</p>",
+        None,
+        true,
+        Some(true),
+        None,
+    )
+    .unwrap();
+    wait_for("B to receive the HTML document", || {
+        b.store
+            .doc_get("personal", "ref-flip")
+            .ok()
+            .flatten()
+            .is_some_and(|d| d.format == "html" && b.store.read_html_bundle(&d).is_ok())
+    })
+    .await;
+
+    tracon::mcp::docs::write_document(
+        &a.store,
+        &a.bus,
+        &[],
+        &ai,
+        "personal",
+        "ref-flip",
+        "# Flip\n\nNow Markdown.",
+        Some(&html.hash),
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    let live = |store: &Store| -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM document_bundle_file
+                         WHERE document_hash = ?1 AND deleted = 0) +
+                        (SELECT COUNT(*) FROM document_bundle_chunk
+                         WHERE document_hash = ?1 AND deleted = 0)",
+                [&html.hash],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    wait_for("B to convert and retire the bundle", || {
+        b.store
+            .doc_get("personal", "ref-flip")
+            .ok()
+            .flatten()
+            .is_some_and(|d| d.format == "markdown")
+            && live(&b.store) == 0
+    })
+    .await;
+    let converted = b.store.doc_get("personal", "ref-flip").unwrap().unwrap();
+    assert_eq!(converted.id, html.id);
+    assert_eq!(converted.archived, 1);
+    assert_eq!(converted.body, "# Flip\n\nNow Markdown.");
+    assert_eq!(converted.entry_path, None);
+    let tombstones: i64 = b
+        .store
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM document_bundle_file WHERE document_hash = ?1 AND deleted = 1",
+            [&html.hash],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tombstones, 1);
 }
 
 /// A hand-driven node: no loops, so the test says exactly when a frame is sent

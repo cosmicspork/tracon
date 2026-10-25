@@ -45,7 +45,7 @@ export interface ApprovalDetails {
   edited_arguments: unknown
   result: unknown
   input_schema: JsonSchema | null
-  /** `jira_wiki` or `markdown`. */
+  /** `jira_wiki`, `markdown`, or `source` (shown as text, never rendered). */
   format: string
   prose_fields: string[]
   locked_fields: string[]

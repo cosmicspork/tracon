@@ -488,6 +488,8 @@ mod tests {
                 }],
                 None,
                 true,
+                None,
+                None,
             )
             .unwrap();
         let (docs, skipped_html) = from_store(&store, "personal").unwrap();

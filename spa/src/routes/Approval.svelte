@@ -133,6 +133,9 @@
   const rows = $derived(resultRows(result))
   const fallback = $derived(details?.approval.session_id ? `/sessions/${details.approval.session_id}` : '/')
 
+  /** A page for the preview origin's sandbox: shown as text here, never rendered. */
+  const source = $derived(details?.format === 'source')
+
   function html(text: string): string {
     return details?.format === 'jira_wiki' ? renderJiraWiki(text) : render(text)
   }
@@ -302,11 +305,15 @@
     <section class="doc">
       <div class="dochead">
         <span>{key}</span>
-        <button class="lnk" type="button" onclick={() => (raw[key] = !raw[key])}>
-          {raw[key] ? 'Rendered' : 'Raw source'}
-        </button>
+        {#if source}
+          <span>source · runs only in the preview</span>
+        {:else}
+          <button class="lnk" type="button" onclick={() => (raw[key] = !raw[key])}>
+            {raw[key] ? 'Rendered' : 'Raw source'}
+          </button>
+        {/if}
       </div>
-      {#if raw[key]}
+      {#if raw[key] || source}
         <pre class="src">{shown[key]}</pre>
       {:else}
         <article class="md">{@html html(String(shown[key]))}</article>

@@ -1066,7 +1066,7 @@ mod tests {
         // and it says what went.
         let store_slug = slug_for(&item().id);
         store
-            .delete_document_change("n", "personal", &store_slug)
+            .delete_document_change("n", "personal", &store_slug, None)
             .unwrap();
         let (delivered, fourth) = prepare(&store, "s4", &item()).unwrap().unwrap();
         assert!(delivered.text.is_empty());

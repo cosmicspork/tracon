@@ -64,15 +64,29 @@ pub struct DocumentRow {
 
 #[derive(Debug)]
 pub enum DocumentWrite {
+    /// Written, with every change the write made in the order to publish
+    /// them: the document's own, then tombstones for an HTML generation it
+    /// replaced.
     Written {
         row: Box<DocumentRow>,
-        change: Change,
+        changes: Vec<Change>,
     },
     Conflict {
         hash: String,
         body: String,
     },
-    HtmlDocument,
+}
+
+#[derive(Debug)]
+pub enum DocumentDelete {
+    /// The document's tombstone, then its HTML generation's, in publish order.
+    Deleted(Vec<Change>),
+    Missing,
+    /// `if_hash` named a version that is no longer the live one.
+    Conflict {
+        hash: String,
+        body: String,
+    },
 }
 #[derive(Debug, thiserror::Error)]
 pub enum HtmlWriteError {
@@ -577,9 +591,13 @@ impl Store {
             let (hash, body) = existing.map(|cur| (cur.hash, cur.body)).unwrap_or_default();
             return Ok(DocumentWrite::Conflict { hash, body });
         }
-        if existing.as_ref().is_some_and(|doc| doc.format == "html") {
-            return Ok(DocumentWrite::HtmlDocument);
-        }
+        // Markdown over an HTML document converts it: the same row, and the
+        // generation it served retired after the document change, as an HTML
+        // replacement retires its predecessor.
+        let (old_chunk_ids, old_file_ids) = match existing.as_ref().filter(|d| d.format == "html") {
+            Some(current) => generation_ids(&tx, channel, &current.id, &current.hash)?,
+            None => Default::default(),
+        };
 
         let now = now_ms();
         let mut row = DocumentRow {
@@ -622,10 +640,15 @@ impl Store {
         )
         .map_err(sync_err)?;
         row.hlc_ms = change.hlc_ms;
+        let mut changes = vec![change];
+        changes.extend(
+            tombstone_generation(&tx, site, channel, old_chunk_ids, old_file_ids, now)
+                .map_err(sync_err)?,
+        );
         tx.commit()?;
         Ok(DocumentWrite::Written {
             row: Box::new(row),
-            change,
+            changes,
         })
     }
 
@@ -678,7 +701,7 @@ impl Store {
         tx.commit()?;
         Ok(DocumentWrite::Written {
             row: Box::new(row),
-            change,
+            changes: vec![change],
         })
     }
 
@@ -731,7 +754,7 @@ impl Store {
         tx.commit()?;
         Ok(DocumentWrite::Written {
             row: Box::new(row),
-            change,
+            changes: vec![change],
         })
     }
 
@@ -739,7 +762,9 @@ impl Store {
     ///
     /// Bundle records precede the document change; prior-generation tombstones
     /// follow it. Publishing the returned order prevents peers from observing
-    /// a document generation before its files and chunks.
+    /// a document generation before its files and chunks. An existing Markdown
+    /// document converts in place. `archived` and `pinned` of `None` keep
+    /// whatever the document already was.
     #[allow(clippy::too_many_arguments)]
     pub fn write_html_document_change(
         &self,
@@ -752,6 +777,8 @@ impl Store {
         files: Vec<HtmlFile>,
         if_hash: Option<&str>,
         create_only: bool,
+        archived: Option<bool>,
+        pinned: Option<bool>,
     ) -> std::result::Result<(DocumentRow, Vec<Change>), HtmlWriteError> {
         if source_name.is_empty()
             || source_name.len() > 255
@@ -777,30 +804,11 @@ impl Store {
             return Err(HtmlWriteError::Conflict { hash, body });
         }
 
-        let mut old_chunk_ids: Vec<String> = Vec::new();
-        let mut old_file_ids: Vec<String> = Vec::new();
-        if let Some(current) = existing.as_ref().filter(|doc| doc.format == "html") {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM document_bundle_chunk
-                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
-                 ORDER BY file_id, chunk_ix",
-            )?;
-            old_chunk_ids = stmt
-                .query_map(params![channel, current.id, current.hash], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<std::result::Result<_, _>>()?;
-            let mut stmt = tx.prepare(
-                "SELECT id FROM document_bundle_file
-                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
-                 ORDER BY path",
-            )?;
-            old_file_ids = stmt
-                .query_map(params![channel, current.id, current.hash], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<std::result::Result<_, _>>()?;
-        }
+        let (old_chunk_ids, old_file_ids) =
+            match existing.as_ref().filter(|doc| doc.format == "html") {
+                Some(current) => generation_ids(&tx, channel, &current.id, &current.hash)?,
+                None => Default::default(),
+            };
 
         let now = now_ms();
         let document_id = existing
@@ -873,8 +881,14 @@ impl Store {
             site: site.to_string(),
             hlc_ms: 0,
             deleted: 0,
-            archived: existing.as_ref().map(|doc| doc.archived).unwrap_or(0),
-            pinned: existing.as_ref().map(|doc| doc.pinned).unwrap_or(0),
+            archived: archived
+                .map(i64::from)
+                .or(existing.as_ref().map(|doc| doc.archived))
+                .unwrap_or(0),
+            pinned: pinned
+                .map(i64::from)
+                .or(existing.as_ref().map(|doc| doc.pinned))
+                .unwrap_or(0),
             created_ms: existing.as_ref().map(|doc| doc.created_ms).unwrap_or(now),
             updated_ms: now,
         };
@@ -890,31 +904,14 @@ impl Store {
         )?;
         row.hlc_ms = document_change.hlc_ms;
         changes.push(document_change);
-
-        for id in old_chunk_ids {
-            changes.push(tracon_sync::apply::write_change_in_tx(
-                &tx,
-                site,
-                channel,
-                "document_bundle_chunk",
-                ChangeOp::Delete,
-                &id,
-                Value::Null,
-                now,
-            )?);
-        }
-        for id in old_file_ids {
-            changes.push(tracon_sync::apply::write_change_in_tx(
-                &tx,
-                site,
-                channel,
-                "document_bundle_file",
-                ChangeOp::Delete,
-                &id,
-                Value::Null,
-                now,
-            )?);
-        }
+        changes.extend(tombstone_generation(
+            &tx,
+            site,
+            channel,
+            old_chunk_ids,
+            old_file_ids,
+            now,
+        )?);
 
         tx.commit()?;
         Ok((row, changes))
@@ -922,12 +919,14 @@ impl Store {
 
     /// Tombstone a document and the current HTML generation in one commit.
     /// Markdown documents still produce exactly one document tombstone.
+    /// `if_hash` is the caller's precondition: the hash it last read.
     pub fn delete_document_change(
         &self,
         site: &str,
         channel: &str,
         slug: &str,
-    ) -> Result<Option<Vec<Change>>> {
+        if_hash: Option<&str>,
+    ) -> Result<DocumentDelete> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let Some(existing) = tx
@@ -939,32 +938,24 @@ impl Store {
             )
             .optional()?
         else {
-            return Ok(None);
+            return Ok(match if_hash {
+                Some(_) => DocumentDelete::Conflict {
+                    hash: String::new(),
+                    body: String::new(),
+                },
+                None => DocumentDelete::Missing,
+            });
         };
-        let mut chunk_ids: Vec<String> = Vec::new();
-        let mut file_ids: Vec<String> = Vec::new();
-        if existing.format == "html" {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM document_bundle_chunk
-                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
-                 ORDER BY file_id, chunk_ix",
-            )?;
-            chunk_ids = stmt
-                .query_map(params![channel, existing.id, existing.hash], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<std::result::Result<_, _>>()?;
-            let mut stmt = tx.prepare(
-                "SELECT id FROM document_bundle_file
-                 WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
-                 ORDER BY path",
-            )?;
-            file_ids = stmt
-                .query_map(params![channel, existing.id, existing.hash], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<std::result::Result<_, _>>()?;
+        if if_hash.is_some_and(|want| want != existing.hash) {
+            return Ok(DocumentDelete::Conflict {
+                hash: existing.hash,
+                body: existing.body,
+            });
         }
+        let (chunk_ids, file_ids) = match existing.format.as_str() {
+            "html" => generation_ids(&tx, channel, &existing.id, &existing.hash)?,
+            _ => Default::default(),
+        };
 
         let now = now_ms();
         let mut changes = vec![tracon_sync::apply::write_change_in_tx(
@@ -978,38 +969,11 @@ impl Store {
             now,
         )
         .map_err(sync_err)?];
-        for id in chunk_ids {
-            changes.push(
-                tracon_sync::apply::write_change_in_tx(
-                    &tx,
-                    site,
-                    channel,
-                    "document_bundle_chunk",
-                    ChangeOp::Delete,
-                    &id,
-                    Value::Null,
-                    now,
-                )
-                .map_err(sync_err)?,
-            );
-        }
-        for id in file_ids {
-            changes.push(
-                tracon_sync::apply::write_change_in_tx(
-                    &tx,
-                    site,
-                    channel,
-                    "document_bundle_file",
-                    ChangeOp::Delete,
-                    &id,
-                    Value::Null,
-                    now,
-                )
-                .map_err(sync_err)?,
-            );
-        }
+        changes.extend(
+            tombstone_generation(&tx, site, channel, chunk_ids, file_ids, now).map_err(sync_err)?,
+        );
         tx.commit()?;
-        Ok(Some(changes))
+        Ok(DocumentDelete::Deleted(changes))
     }
 
     pub fn apply_changes(
@@ -1406,8 +1370,11 @@ impl Store {
             let Some(row) = self.doc_by_id(id)? else {
                 continue;
             };
+            // Only Markdown is embedded, and a vector left from before a
+            // document became HTML would slice its new body at old offsets.
             if row.deleted != 0
                 || row.archived != 0
+                || row.format != "markdown"
                 || channel.is_some_and(|c| c != row.channel)
                 || kind.is_some_and(|k| !k.admits(&row.slug))
             {
@@ -1869,6 +1836,62 @@ impl Store {
 }
 
 /// Of rows sharing a slug (two sites created it offline), keep the newest.
+/// The live chunk and file ids of one HTML bundle generation, chunks first,
+/// in the order their tombstones are written.
+fn generation_ids(
+    tx: &rusqlite::Transaction<'_>,
+    channel: &str,
+    document_id: &str,
+    hash: &str,
+) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+    let ids = |sql: &str| -> rusqlite::Result<Vec<String>> {
+        tx.prepare(sql)?
+            .query_map(params![channel, document_id, hash], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect()
+    };
+    Ok((
+        ids("SELECT id FROM document_bundle_chunk
+             WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+             ORDER BY file_id, chunk_ix")?,
+        ids("SELECT id FROM document_bundle_file
+             WHERE channel = ?1 AND document_id = ?2 AND document_hash = ?3 AND deleted = 0
+             ORDER BY path")?,
+    ))
+}
+
+/// Tombstone a generation's chunks and then its files, inside `tx`. Always
+/// written after the document change that stops serving it.
+fn tombstone_generation(
+    tx: &rusqlite::Transaction<'_>,
+    site: &str,
+    channel: &str,
+    chunk_ids: Vec<String>,
+    file_ids: Vec<String>,
+    now: i64,
+) -> std::result::Result<Vec<Change>, tracon_sync::SyncError> {
+    let chunks = chunk_ids
+        .into_iter()
+        .map(|id| ("document_bundle_chunk", id));
+    let files = file_ids.into_iter().map(|id| ("document_bundle_file", id));
+    chunks
+        .chain(files)
+        .map(|(table, id)| {
+            tracon_sync::apply::write_change_in_tx(
+                tx,
+                site,
+                channel,
+                table,
+                ChangeOp::Delete,
+                &id,
+                Value::Null,
+                now,
+            )
+        })
+        .collect()
+}
+
 fn dedupe_slugs(rows: Vec<DocumentRow>) -> Vec<DocumentRow> {
     let mut out: Vec<DocumentRow> = Vec::with_capacity(rows.len());
     for r in rows {
@@ -1886,7 +1909,7 @@ fn dedupe_slugs(rows: Vec<DocumentRow>) -> Vec<DocumentRow> {
     out
 }
 
-fn sync_err(e: tracon_sync::SyncError) -> StoreError {
+pub(crate) fn sync_err(e: tracon_sync::SyncError) -> StoreError {
     match e {
         tracon_sync::SyncError::Sqlite(e) => e.into(),
         tracon_sync::SyncError::Malformed(m) => StoreError::Invalid(m),
@@ -2285,6 +2308,8 @@ mod tests {
                 first,
                 None,
                 true,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(created.format, "html");
@@ -2322,6 +2347,8 @@ mod tests {
             }],
             Some("stale"),
             false,
+            None,
+            None,
         );
         assert!(matches!(stale, Err(HtmlWriteError::Conflict { .. })));
 
@@ -2339,6 +2366,8 @@ mod tests {
                 }],
                 Some(&created.hash),
                 false,
+                None,
+                None,
             )
             .unwrap();
         let document_ix = changes
@@ -2358,10 +2387,12 @@ mod tests {
             .unwrap();
         assert_eq!(retired_files, 2);
         drop(conn);
-        let deleted = store
-            .delete_document_change("node-a", "personal", "ref-demo")
+        let DocumentDelete::Deleted(deleted) = store
+            .delete_document_change("node-a", "personal", "ref-demo", None)
             .unwrap()
-            .unwrap();
+        else {
+            panic!("expected a delete");
+        };
         assert_eq!(deleted[0].table, "document");
         assert_eq!(deleted.len(), 3);
         assert!(store.doc_get("personal", "ref-demo").unwrap().is_none());
@@ -2378,6 +2409,206 @@ mod tests {
             )
             .unwrap();
         assert_eq!(live_generation_rows, 0);
+    }
+
+    fn live_generation_rows(store: &Store, hash: &str) -> i64 {
+        store
+            .conn()
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM document_bundle_file
+                     WHERE document_hash = ?1 AND deleted = 0) +
+                    (SELECT COUNT(*) FROM document_bundle_chunk
+                     WHERE document_hash = ?1 AND deleted = 0)",
+                [hash],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn two_file_html(store: &Store, slug: &str) -> DocumentRow {
+        let (row, _) = store
+            .write_html_document_change(
+                &[],
+                "node-a",
+                "personal",
+                slug,
+                "demo",
+                "index.html",
+                vec![
+                    HtmlFile {
+                        path: "index.html".into(),
+                        bytes: b"<title>Plan</title><script src=\"app.js\"></script>".to_vec(),
+                    },
+                    HtmlFile {
+                        path: "app.js".into(),
+                        bytes: vec![b'x'; CHUNK_BYTES + 1],
+                    },
+                ],
+                None,
+                true,
+                Some(true),
+                Some(true),
+            )
+            .unwrap();
+        row
+    }
+
+    #[test]
+    fn markdown_over_html_converts_in_place_and_then_retires_the_generation() {
+        let store = Store::open_in_memory().unwrap();
+        let html = two_file_html(&store, "plan-hdr");
+        assert_eq!((html.archived, html.pinned), (1, 1));
+        assert!(live_generation_rows(&store, &html.hash) > 0);
+
+        let stale = store
+            .write_document_change(
+                "node-a",
+                "personal",
+                "plan-hdr",
+                "plan",
+                "Plan",
+                "# Plan",
+                "md-hash",
+                Some("stale"),
+                false,
+                "unused",
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(stale, DocumentWrite::Conflict { ref hash, .. } if *hash == html.hash));
+
+        let DocumentWrite::Written { row, changes } = store
+            .write_document_change(
+                "node-a",
+                "personal",
+                "plan-hdr",
+                "plan",
+                "Plan",
+                "# Plan",
+                "md-hash",
+                Some(&html.hash),
+                false,
+                "unused",
+                None,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("expected a write");
+        };
+        assert_eq!(row.id, html.id);
+        assert_eq!(row.format, "markdown");
+        assert_eq!((row.archived, row.pinned), (1, 1));
+        assert_eq!(row.created_ms, html.created_ms);
+        assert_eq!(
+            (row.entry_path.as_deref(), row.source_name.as_deref()),
+            (None, None)
+        );
+        // The document change, then nothing but the old generation's
+        // tombstones: a peer never sees a document whose files are gone.
+        assert_eq!(changes[0].table, "document");
+        assert_eq!(changes[0].op, ChangeOp::Upsert);
+        assert!(changes.len() > 1);
+        assert!(changes[1..].iter().all(|c| c.op == ChangeOp::Delete
+            && matches!(
+                c.table.as_str(),
+                "document_bundle_file" | "document_bundle_chunk"
+            )));
+        assert_eq!(live_generation_rows(&store, &html.hash), 0);
+        let read = store.doc_get("personal", "plan-hdr").unwrap().unwrap();
+        assert_eq!((read.format.as_str(), read.archived), ("markdown", 1));
+    }
+
+    #[test]
+    fn html_over_markdown_converts_in_place_and_honours_its_hash() {
+        let store = Store::open_in_memory().unwrap();
+        let DocumentWrite::Written { row: md, .. } = store
+            .write_document_change(
+                "node-a",
+                "personal",
+                "guide-flip",
+                "guide",
+                "Flip",
+                "# Flip",
+                "md-hash",
+                None,
+                true,
+                "d-flip",
+                Some(true),
+                Some(true),
+            )
+            .unwrap()
+        else {
+            panic!("expected a write");
+        };
+        let page = || {
+            vec![HtmlFile {
+                path: "guide-flip.html".into(),
+                bytes: b"<title>Flip</title>".to_vec(),
+            }]
+        };
+        let stale = store.write_html_document_change(
+            &[],
+            "node-a",
+            "personal",
+            "guide-flip",
+            "guide-flip.html",
+            "guide-flip.html",
+            page(),
+            Some("stale"),
+            false,
+            None,
+            None,
+        );
+        assert!(
+            matches!(stale, Err(HtmlWriteError::Conflict { ref hash, .. }) if *hash == md.hash)
+        );
+        let (html, _) = store
+            .write_html_document_change(
+                &[],
+                "node-a",
+                "personal",
+                "guide-flip",
+                "guide-flip.html",
+                "guide-flip.html",
+                page(),
+                Some(&md.hash),
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(html.id, md.id);
+        assert_eq!(html.format, "html");
+        assert_eq!((html.archived, html.pinned), (1, 1));
+        assert_eq!(html.created_ms, md.created_ms);
+    }
+
+    #[test]
+    fn a_delete_with_a_stale_hash_conflicts_and_leaves_the_bundle() {
+        let store = Store::open_in_memory().unwrap();
+        let html = two_file_html(&store, "ref-keep");
+        let refused = store
+            .delete_document_change("node-a", "personal", "ref-keep", Some("stale"))
+            .unwrap();
+        assert!(matches!(refused, DocumentDelete::Conflict { ref hash, .. } if *hash == html.hash));
+        assert!(store.doc_get("personal", "ref-keep").unwrap().is_some());
+        assert!(live_generation_rows(&store, &html.hash) > 0);
+        assert!(matches!(
+            store
+                .delete_document_change("node-a", "personal", "ref-keep", Some(&html.hash))
+                .unwrap(),
+            DocumentDelete::Deleted(_)
+        ));
+        assert_eq!(live_generation_rows(&store, &html.hash), 0);
+        assert!(matches!(
+            store
+                .delete_document_change("node-a", "personal", "ref-keep", None)
+                .unwrap(),
+            DocumentDelete::Missing
+        ));
     }
 
     #[test]
@@ -2464,6 +2695,8 @@ mod tests {
                 }],
                 None,
                 true,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(created.pinned, 0);
@@ -2488,6 +2721,8 @@ mod tests {
                 }],
                 Some(&set.hash),
                 false,
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(reimported.pinned, 1);

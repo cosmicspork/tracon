@@ -189,6 +189,36 @@ impl Store {
         Ok(ids.len())
     }
 
+    /// Forget every document vector whose source is no longer a live Markdown
+    /// document: deleted, or now HTML, which is never embedded. The sweep
+    /// visits only what it embeds, so without this a document that stopped
+    /// being Markdown would keep answering searches with its old text.
+    pub fn vec_forget_unembedded_documents(&self) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM embedding WHERE source_table = 'document' AND source_id NOT IN
+                    (SELECT id FROM document WHERE deleted = 0 AND format = 'markdown')",
+            )?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<Result<_>>()?
+        };
+        if index_dim(&tx).is_some() {
+            for id in &ids {
+                tx.execute(
+                    &format!("DELETE FROM {VEC_TABLE} WHERE rowid = ?1"),
+                    params![id],
+                )?;
+            }
+        }
+        for id in &ids {
+            tx.execute("DELETE FROM embedding WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
     /// What this node has already embedded for a record, so a caller can tell
     /// a stale chunk from a current one without re-embedding to find out.
     pub fn vec_hashes(&self, source_table: &str, source_id: &str) -> Result<Vec<(i64, String)>> {

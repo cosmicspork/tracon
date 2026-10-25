@@ -2155,7 +2155,6 @@ pub async fn get_approval(
     let before = s.store().get_approval(&id)?.ok_or_else(missing)?;
     s.store().claim_approval(&id)?;
     let a = s.store().get_approval(&id)?.ok_or_else(missing)?;
-    let shown = crate::mcp::schema::presentation(&a.tool);
     let parse = |text: Option<&str>| {
         text.map(|t| serde_json::from_str::<Value>(t).unwrap_or_else(|_| Value::from(t)))
     };
@@ -2167,6 +2166,10 @@ pub async fn get_approval(
         }
         _ => None,
     };
+    let shown = crate::mcp::schema::presentation_for(
+        &a.tool,
+        arguments.as_ref().unwrap_or(&Value::Null),
+    );
     let mut details = json!({
         "approval": a,
         "arguments": arguments,
@@ -4647,6 +4650,8 @@ pub async fn import_html(
         files,
         if_match.as_deref(),
         create_only,
+        None,
+        None,
     ) {
         Ok((doc, changes)) => {
             for change in changes {
@@ -4723,11 +4728,17 @@ pub struct PutDoc {
     /// Pin or unpin it with this write; absent keeps it as it was.
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// `markdown` (when absent) or `html`: what `body` is. Writing the other
+    /// format converts the document in place; HTML is a single-file bundle.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// `PUT /api/docs/{channel}/{slug}` with `If-Match: <hash>` to refuse
 /// overwriting an edit not yet seen; a conflict returns 412 with the current
-/// hash and body, the editor contract the corpus inherited.
+/// hash and body, the editor contract the corpus inherited. A body is written
+/// in `format`, converting the document when it was the other one; an HTML
+/// document's archived or pinned flag can also change without one.
 pub async fn put_doc(
     State(s): State<AppState>,
     Path((channel, slug)): Path<(String, String)>,
@@ -4754,17 +4765,11 @@ pub async fn put_doc(
         Ok(document) => document,
         Err(error) => return ApiError::from(error).into_response(),
     };
-    if existing
-        .as_ref()
-        .is_some_and(|document| document.format == "html")
+    if body.body.is_none()
+        && existing
+            .as_ref()
+            .is_some_and(|document| document.format == "html")
     {
-        if body.body.is_some() {
-            return ApiError(
-                StatusCode::CONFLICT,
-                "HTML documents must be replaced through import".into(),
-            )
-            .into_response();
-        }
         if body.archived.is_none() && body.pinned.is_none() {
             return ApiError(
                 StatusCode::BAD_REQUEST,
@@ -4777,7 +4782,7 @@ pub async fn put_doc(
             return document_conflict_response(document.hash, document.body);
         }
         let mut last_row = None;
-        let mut last_change = None;
+        let mut changes = Vec::new();
         if let Some(archived) = body.archived {
             match s.store().set_document_archived_change(
                 &s.node_id,
@@ -4786,14 +4791,13 @@ pub async fn put_doc(
                 archived,
                 if_match.as_deref(),
             ) {
-                Ok(crate::store::DocumentWrite::Written { row, change }) => {
+                Ok(crate::store::DocumentWrite::Written { row, changes: made }) => {
                     last_row = Some(*row);
-                    last_change = Some(change);
+                    changes.extend(made);
                 }
                 Ok(crate::store::DocumentWrite::Conflict { hash, body }) => {
                     return document_conflict_response(hash, body);
                 }
-                Ok(crate::store::DocumentWrite::HtmlDocument) => unreachable!(),
                 Err(error) => return ApiError::from(error).into_response(),
             }
         }
@@ -4805,57 +4809,67 @@ pub async fn put_doc(
                 pinned,
                 if_match.as_deref(),
             ) {
-                Ok(crate::store::DocumentWrite::Written { row, change }) => {
+                Ok(crate::store::DocumentWrite::Written { row, changes: made }) => {
                     last_row = Some(*row);
-                    last_change = Some(change);
+                    changes.extend(made);
                 }
                 Ok(crate::store::DocumentWrite::Conflict { hash, body }) => {
                     return document_conflict_response(hash, body);
                 }
-                Ok(crate::store::DocumentWrite::HtmlDocument) => unreachable!(),
                 Err(error) => return ApiError::from(error).into_response(),
             }
         }
         let row = last_row.expect("archived or pinned checked above");
-        s.manager.bus().publish(crate::stream::Frame::Changes {
-            channel,
-            changes: vec![last_change.expect("a row implies its change")],
-        });
+        s.manager
+            .bus()
+            .publish(crate::stream::Frame::Changes { channel, changes });
         return Json(json!(row)).into_response();
     }
-    let Some(markdown) = body.body.as_deref() else {
+    let Some(text) = body.body.as_deref() else {
         return ApiError(
             StatusCode::BAD_REQUEST,
             "body is required for Markdown documents".into(),
         )
         .into_response();
     };
-    match crate::mcp::docs::write_document(
+    use crate::corpus::html::HtmlBundleError;
+    use crate::mcp::docs::{Format, WriteError};
+    let format = match Format::parse(body.format.as_deref()) {
+        Ok(format) => format,
+        Err(error) => return ApiError(StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    match crate::mcp::docs::write_document_as(
         s.store(),
         s.manager.bus(),
         &s.cfg.live().docs.kind,
         &s.node_id,
         &channel,
         &slug,
-        markdown,
+        format,
+        text,
         if_match.as_deref(),
         create_only,
         body.archived,
         body.pinned,
     ) {
         Ok(doc) => Json(json!(doc)).into_response(),
-        Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => {
-            document_conflict_response(hash, body)
-        }
-        Err(crate::mcp::docs::WriteError::Slug(m)) => {
+        Err(WriteError::Conflict { hash, body }) => document_conflict_response(hash, body),
+        Err(WriteError::Slug(m)) => {
             ApiError(StatusCode::BAD_REQUEST, format!("slug {m:?} is not usable")).into_response()
         }
-        Err(crate::mcp::docs::WriteError::HtmlDocument) => ApiError(
-            StatusCode::CONFLICT,
-            "HTML documents must be replaced through import".into(),
-        )
-        .into_response(),
-        Err(crate::mcp::docs::WriteError::Store(e)) => ApiError::from(e).into_response(),
+        Err(error @ WriteError::Format(_)) => {
+            ApiError(StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
+        Err(WriteError::Html(error)) => {
+            let status = match error {
+                HtmlBundleError::TooManyFiles
+                | HtmlBundleError::FileTooLarge(_)
+                | HtmlBundleError::BundleTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            ApiError(status, error.to_string()).into_response()
+        }
+        Err(WriteError::Store(e)) => ApiError::from(e).into_response(),
     }
 }
 
@@ -4871,19 +4885,37 @@ fn document_conflict_response(hash: String, body: String) -> Response {
         .into_response()
 }
 
+/// `DELETE /api/docs/{channel}/{slug}`, with `If-Match: <hash>` to refuse
+/// removing an edit not yet seen.
 pub async fn delete_doc(
     State(s): State<AppState>,
     Path((channel, slug)): Path<(String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let removed =
-        crate::mcp::docs::delete_document(s.store(), s.manager.bus(), &s.node_id, &channel, &slug)?;
-    if !removed {
-        return Err(ApiError(
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let if_match = headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim_matches('"').to_string());
+    match crate::mcp::docs::delete_document(
+        s.store(),
+        s.manager.bus(),
+        &s.node_id,
+        &channel,
+        &slug,
+        if_match.as_deref(),
+    ) {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => ApiError(
             StatusCode::NOT_FOUND,
             format!("no document {slug} on {channel}"),
-        ));
+        )
+        .into_response(),
+        Err(crate::mcp::docs::WriteError::Conflict { hash, body }) => {
+            document_conflict_response(hash, body)
+        }
+        Err(crate::mcp::docs::WriteError::Store(e)) => ApiError::from(e).into_response(),
+        Err(error) => ApiError(StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
-    Ok(Json(json!({ "ok": true })))
 }
 
 // ---- work ledger ----

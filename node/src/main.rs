@@ -226,12 +226,16 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
-    /// Create or replace a Markdown document from a file (or stdin with `-`).
+    /// Create or replace a document from a file (or stdin with `-`). Writing
+    /// the other format converts it in place; `html` is one self-contained
+    /// page, stored as a single-file bundle.
     Put {
         slug: String,
         file: std::path::PathBuf,
         #[arg(long, default_value = "personal")]
         channel: String,
+        #[arg(long, value_parser = ["markdown", "html"], default_value = "markdown")]
+        format: String,
     },
     /// Delete a document.
     Rm {
@@ -2206,6 +2210,7 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             slug,
             file,
             channel,
+            format,
         } => {
             let body = if file.as_os_str() == "-" {
                 let mut s = String::new();
@@ -2217,7 +2222,7 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             let v = node_call(
                 Method::PUT,
                 &format!("/api/docs/{channel}/{slug}"),
-                Some(serde_json::json!({ "body": body })),
+                Some(serde_json::json!({ "body": body, "format": format })),
                 None,
             )
             .await?;
