@@ -190,6 +190,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/promotions/{id}/verdict", post(api::decide_promotion))
         .route("/api/work", get(api::list_work).post(api::add_work))
         .route("/api/work/ready", get(api::ready_work))
+        .route("/api/projects", get(api::list_projects))
         .route(
             "/api/work/{id}",
             get(api::get_work)

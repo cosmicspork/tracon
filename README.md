@@ -896,7 +896,11 @@ behind the submission for the reviewer (the card says they are running until the
 land, and a reviewer, whether the trigger starts it or you do, waits for them), and on approval pushes that branch and opens
 the change — or updates the one named by `change` — with the brokered
 credential, exactly as for a session it started.
-`work_close` takes the item's id, and refuses one a running session holds. A
+`work_close` takes the item's id, and refuses one a running session holds.
+`work_list` and `work_show` read the channel's ledger (`worktree` narrows it to
+that repository's project), and `work_update` and `work_delete` change or remove
+an item once you allow them; neither touches an item a running session holds,
+beyond rewording it. A
 verb the policy does not name returns at once with an `approval_id` and a card
 on your home; nothing has run. Allow it and the node runs the call itself;
 `approval_status` tells the agent what became of it. You can edit the
@@ -1064,7 +1068,7 @@ and revoked the moment the hub loses that key.
 | `tracon session continue <id>` | carry on a session a node restart cut off, on its workspace and harness (also the session's **Continue** button) |
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
-| `tracon work add\|ls\|ready\|show\|close\|dep\|rm` | the ledger |
+| `tracon work add\|ls\|ready\|show\|edit\|close\|dep\|rm` | the ledger; `--project` and `--priority` take names (`[work]` names the priorities) |
 | `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
@@ -1471,7 +1475,8 @@ whoever checks the branch out, and an edit tool's write into Git's internals
 (`.git/`). It runs the brokered reads unattended — queries, lookups, searches,
 pipeline and check status, job logs, documents, memory, the ledger, an item's brief —
 and asks before every brokered write that others see: a comment, an edited or new
-ticket, a pipeline run, a document other than working notes, a line added to a brief.
+ticket, a pipeline run, a document other than working notes, a line added to a brief,
+a rewritten or deleted work item.
 A tool whose kind the node does not know is asked. The narrative a call carries (a
 review's or report's title and body, a review's forge description and comment, a ticket's summary and description, a comment,
 a reply, a document's body) is text, not an action, so it is left out of deny

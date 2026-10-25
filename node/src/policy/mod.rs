@@ -416,7 +416,7 @@ pub struct Request<'a> {
 /// production incident has to be able to say so. The fields that say where it
 /// goes (a key, a project, a slug) are still matched.
 fn prose_fields(action: &str) -> &'static [&'static str] {
-    use crate::mcp::{docs, github, gitlab, jira, review};
+    use crate::mcp::{docs, github, gitlab, jira, review, work};
     match action {
         review::SUBMIT => &[
             "title",
@@ -426,6 +426,8 @@ fn prose_fields(action: &str) -> &'static [&'static str] {
             "forge.comment",
         ],
         review::SUBMIT_REPORT => &["title", "body"],
+        // A work item describes work, which may well be a push or a merge.
+        work::WORK_DISCOVER | work::WORK_UPDATE => &["title", "body"],
         jira::ISSUE_CREATE | jira::ISSUE_UPDATE => &["summary", "description"],
         jira::ISSUE_COMMENT
         | github::PR_COMMENT

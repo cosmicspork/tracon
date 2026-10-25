@@ -1883,3 +1883,318 @@ async fn a_held_transition_is_titled_by_the_status_it_leads_to() {
 
     assert_eq!(*seen.lock().unwrap(), ["GET", "GET"]);
 }
+
+/// Seed an item on `channel` through the operator's API and return its id.
+async fn seed(h: &Harness, channel: &str, body: Value) -> String {
+    let mut body = body;
+    body["channel"] = json!(channel);
+    let (status, v) = call(&h.operator, "POST", "/api/work", Some(body)).await;
+    assert!(status.is_success(), "{status} {v}");
+    v["id"].as_str().unwrap().to_string()
+}
+
+/// Ask for a ledger write, allow it, and return what it settled as.
+async fn allowed(h: &Harness, name: &str, args: Value) -> Value {
+    let id = ask(h, name, args).await;
+    let (status, _) = answer(h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    settled(h, &id).await
+}
+
+/// The ledger reads run unattended and stay on the caller's channel; a
+/// rewrite and a delete are each put to the operator first, and priorities
+/// are read and written by the names the node gives them.
+#[tokio::test]
+async fn an_agent_reads_rewrites_and_deletes_items_on_its_own_channel() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let plain = seed(
+        &h,
+        "work",
+        json!({ "title": "tidy the docs", "body": "the readme" }),
+    )
+    .await;
+    let urgent = seed(
+        &h,
+        "work",
+        json!({ "title": "fix the outage", "body": "lists past 100 vanish", "priority": 4 }),
+    )
+    .await;
+    let elsewhere = seed(&h, "other", json!({ "title": "not yours" })).await;
+    // Nobody named a priority, so the node's default did.
+    assert_eq!(h.store.work_get(&plain).unwrap().unwrap().priority, 2);
+
+    let (_, v) = mcp(&h.operator, "work", tool_call("work_list", json!({}))).await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["total"], 2, "{out}");
+    assert_eq!(
+        out["items"][0]["id"],
+        json!(urgent),
+        "higher runs first: {out}"
+    );
+    assert_eq!(out["items"][0]["priority_name"], "Urgent");
+    assert_eq!(out["items"][1]["priority_name"], "Planned");
+    assert!(out["items"][0].get("body").is_none(), "{out}");
+    assert_eq!(out["priority_levels"][0]["name"], "Urgent");
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_list", json!({ "query": "README" })),
+    )
+    .await;
+    let (_, out) = outcome(&v);
+    assert_eq!(out["total"], 1, "{out}");
+    assert_eq!(out["items"][0]["id"], json!(plain));
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_show", json!({ "id": &urgent[..8] })),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    assert_eq!(out["id"], json!(urgent));
+    assert_eq!(out["body"], "lists past 100 vanish");
+    assert_eq!(out["state"], "ready");
+
+    // Another channel's item is not this caller's to read or change.
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_show", json!({ "id": elsewhere })),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err, "{out}");
+    let out = allowed(
+        &h,
+        "work_update",
+        json!({ "id": elsewhere, "title": "mine now" }),
+    )
+    .await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert_eq!(
+        h.store.work_get(&elsewhere).unwrap().unwrap().title,
+        "not yours"
+    );
+
+    // A rewrite waits for the operator, then lands by name.
+    let id = ask(
+        &h,
+        "work_update",
+        json!({ "id": &plain[..8], "priority": "backlog", "body": "the readme and the guide", "deps": [&urgent[..8]] }),
+    )
+    .await;
+    let card = h
+        .store
+        .open_permission_views()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.id == id)
+        .expect("a card for it");
+    assert!(
+        card.title
+            .starts_with(&format!("work_update {}", &plain[..8])),
+        "{}",
+        card.title
+    );
+    let item = h.store.work_get(&plain).unwrap().unwrap();
+    assert_eq!(item.priority, 2, "nothing ran before the operator answered");
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled(&h, &id).await["state"], "succeeded");
+    let item = h.store.work_get(&plain).unwrap().unwrap();
+    assert_eq!(item.priority, 1);
+    assert_eq!(item.body, "the readme and the guide");
+    assert_eq!(item.deps, vec![urgent.clone()]);
+
+    // An item cannot wait on itself, or on one that is not there.
+    let out = allowed(&h, "work_update", json!({ "id": plain, "deps": [plain] })).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    let out = allowed(
+        &h,
+        "work_update",
+        json!({ "id": plain, "deps": ["ffffffffff"] }),
+    )
+    .await;
+    assert_eq!(out["state"], "failed", "{out}");
+
+    // Closed, then reopened.
+    let out = allowed(
+        &h,
+        "work_update",
+        json!({ "id": urgent, "state": "closed" }),
+    )
+    .await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(h.store.work_get(&urgent).unwrap().unwrap().state, "closed");
+    let out = allowed(&h, "work_update", json!({ "id": urgent, "state": "open" })).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(h.store.work_get(&urgent).unwrap().unwrap().state, "open");
+
+    let out = allowed(&h, "work_delete", json!({ "id": &plain[..8] })).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert!(h.store.work_get(&plain).unwrap().is_none());
+}
+
+/// Items are grouped by project: an item named by a worktree joins that
+/// repository's project, `/api/projects` counts what each project holds, and
+/// an agent narrows the ledger or moves an item by the project's name.
+#[tokio::test]
+async fn items_are_grouped_and_moved_by_project_name() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("projects");
+    let h = harness_with(with_roots(&root)).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "work_discover",
+            json!({ "title": "in the repo", "worktree": wt }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    let in_repo = out["id"].as_str().unwrap().to_string();
+    let project = out["project_id"].as_str().unwrap().to_string();
+    let loose = seed(&h, "work", json!({ "title": "loose" })).await;
+
+    let (_, v) = call(&h.operator, "GET", "/api/projects?channel=work", None).await;
+    assert_eq!(v["projects"][0]["id"], json!(project), "{v}");
+    assert_eq!(v["projects"][0]["name"], "repo", "{v}");
+    assert_eq!(v["projects"][0]["open"], 1, "{v}");
+    assert_eq!(v["none"]["open"], 1, "{v}");
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_list", json!({ "project": "repo" })),
+    )
+    .await;
+    let (_, out) = outcome(&v);
+    assert_eq!(out["total"], 1, "{out}");
+    assert_eq!(out["items"][0]["id"], json!(in_repo));
+    assert_eq!(out["items"][0]["project"]["name"], "repo");
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_list", json!({ "worktree": wt })),
+    )
+    .await;
+    let (_, out) = outcome(&v);
+    assert_eq!(out["items"][0]["id"], json!(in_repo), "{out}");
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_list", json!({ "project": "none" })),
+    )
+    .await;
+    let (_, out) = outcome(&v);
+    assert_eq!(out["total"], 1, "{out}");
+    assert_eq!(out["items"][0]["id"], json!(loose));
+
+    let out = allowed(&h, "work_update", json!({ "id": loose, "project": "repo" })).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(
+        h.store
+            .work_get(&loose)
+            .unwrap()
+            .unwrap()
+            .project_id
+            .as_deref(),
+        Some(project.as_str())
+    );
+    let out = allowed(&h, "work_update", json!({ "id": loose, "project": "none" })).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(h.store.work_get(&loose).unwrap().unwrap().project_id, None);
+
+    // The operator's search narrows the same way.
+    let (_, v) = call(&h.operator, "GET", "/api/work?channel=work&q=LOOSE", None).await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "{v}");
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        "/api/work?channel=work&project_id=none",
+        None,
+    )
+    .await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "{v}");
+}
+
+/// A session's item takes the session's project when it has none, and while
+/// a session works on it an outside caller can neither close nor delete it.
+#[tokio::test]
+async fn an_item_in_use_takes_its_sessions_project_and_is_not_closed_or_deleted_from_outside() {
+    state::isolate();
+    let mut cfg = enabled();
+    let clone = state::managed_clone("external-held");
+    cfg.session.worktree_root = clone.parent().unwrap().join("worktrees");
+    let h = harness_with(cfg).await;
+    h.store
+        .put_node(&support::rows::node_row("n1", "external"))
+        .unwrap();
+    let item = seed(&h, "work", json!({ "title": "held" })).await;
+    let session = h
+        .manager
+        .create_with(
+            tracon::session::NewSession {
+                channel: "work".into(),
+                repo_path: clone.to_string_lossy().into_owned(),
+                branch: None,
+                work_item_id: Some(item.clone()),
+                model: "m/a".into(),
+                budget_tokens: Some(1000),
+                initial_prompt: None,
+                node_id: None,
+                phase: tracon::session::Phase::Plan,
+                review_id: None,
+                base_sha: None,
+                workspace_id: None,
+                parent_session: None,
+                continued_from: None,
+                harness: None,
+                on_exhaustion: None,
+                told_reviews: Vec::new(),
+            },
+            Arc::new(support::fake::FakeAdapter {
+                tx: Arc::new(tokio::sync::Mutex::new(None)),
+                tokens: Arc::new(tokio::sync::Mutex::new(0)),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        h.store.work_get(&item).unwrap().unwrap().project_id,
+        session.project_id,
+        "the item takes the project its session runs in"
+    );
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("work_close", json!({ "id": item })),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err && out.to_string().contains("working on"), "{out}");
+    let out = allowed(&h, "work_update", json!({ "id": item, "state": "closed" })).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    let out = allowed(&h, "work_delete", json!({ "id": item })).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    // Rewording an item in use is fine: the session keeps it.
+    let out = allowed(
+        &h,
+        "work_update",
+        json!({ "id": item, "title": "held, renamed" }),
+    )
+    .await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    let now = h.store.work_get(&item).unwrap().unwrap();
+    assert_eq!(now.state, "open");
+    assert_eq!(now.title, "held, renamed");
+    tracon::session::materialize::remove(&session.id);
+}

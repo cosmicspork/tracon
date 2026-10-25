@@ -1630,6 +1630,26 @@ collision, and a `discovered-from` edge so work found mid-session survives the
 session. Storage is the node's SQLite, replicated per channel; readiness is derived,
 never stored.
 
+**Priority is an integer; the names are configuration.** Higher runs first.
+`[[work.priority]]` names the values people pick from (Urgent 4, Priority 3,
+Planned 2, Backlog 1 by default) and `[work] default_priority` is what a new item
+gets; an empty list leaves plain numbers. Names are read where an item is shown or
+written, never stored, so renaming a level renames every item at that value and a
+peer with other names reads the same numbers its own way.
+
+**A project is a repository, and an item belongs to at most one.** The project id
+is the channel and canonical remote hashed (`corpus::project`), so every node names
+a repository the same way; the `project` row that gives it a readable name is
+node-local, so a peer's item can name a project this node has not seen. An item
+recorded without one (a composed prompt, the operator's form) takes the project of
+the first session launched on it. Moving an item between projects edits the column;
+the item's id, minted from the project it began in, does not change.
+
+**Agents keep the ledger as the operator does.** `work_list` and `work_show` read
+it unattended; `work_update` and `work_delete` are put to the operator, and are
+scoped to the caller's channel. Neither closes or deletes an item another session
+holds: closing ends the holder, which is the holder's call or the operator's.
+
 **Work items are an opt-in structure, not a requirement.** A plain prompt starts
 an execute session claiming no item, plan, or review lifecycle at all. Naming an
 item is what turns structural enforcement on: the `plan` phase requires one,

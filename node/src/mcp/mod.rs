@@ -250,6 +250,8 @@ impl Tools {
         operator::NOTIFY,
         work::WORK_READY,
         work::WORK_DISCOVER,
+        work::WORK_LIST,
+        work::WORK_SHOW,
         github::PR_STATUS,
         github::PR_THREADS,
         github::PR_FOR_BRANCH,
@@ -288,6 +290,9 @@ impl Tools {
         work::CRITERIA_READ,
         // What it thinks would settle a criterion, asked like any session's.
         work::CRITERIA_LINK,
+        // The item under review and its neighbours, read-only.
+        work::WORK_LIST,
+        work::WORK_SHOW,
         // Running the candidate where no check settles a criterion: a
         // browser beside the session, decided by the policy bundle by name,
         // and what it saw shown to the operator, bound to the candidate.
@@ -663,6 +668,10 @@ impl Tools {
             work::WORK_READY
             | work::WORK_DISCOVER
             | work::WORK_CLOSE
+            | work::WORK_LIST
+            | work::WORK_SHOW
+            | work::WORK_UPDATE
+            | work::WORK_DELETE
             | work::BRIEF_READ
             | work::BRIEF_NOTE
             | work::CRITERIA_READ
@@ -2069,6 +2078,39 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         ),
         docs::DOC_WRITE => format!("{name} {}", id("slug")),
         memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
+        work::WORK_UPDATE => {
+            let fields: Vec<String> = [
+                "title", "body", "priority", "deps", "project", "worktree", "state",
+            ]
+            .into_iter()
+            .filter(|f| args.get(*f).is_some_and(|v| !v.is_null()))
+            .map(|f| match (f, text(f)) {
+                ("state" | "priority", Some(v)) => format!("{f} {v}"),
+                _ => f.to_string(),
+            })
+            .collect();
+            let head = format!(
+                "{name} {} ({})",
+                id("id").chars().take(8).collect::<String>(),
+                fields.join(", ")
+            );
+            with(head, first_line("title"))
+        }
+        work::WORK_DELETE | work::WORK_SHOW => match text("id") {
+            Some(item) => format!("{name} {}", item.chars().take(8).collect::<String>()),
+            None => name.to_string(),
+        },
+        work::WORK_LIST => {
+            let narrowed: Vec<String> = ["project", "worktree", "state", "query"]
+                .into_iter()
+                .filter_map(|f| text(f).map(|v| format!("{f} {v}")))
+                .collect();
+            if narrowed.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name} ({})", narrowed.join(", "))
+            }
+        }
         work::BRIEF_NOTE => with(format!("{name} {}", id("field")), first_line("text")),
         work::CRITERIA_LINK => with(
             format!("{name} {} {}", id("criterion"), id("kind")),
@@ -2207,6 +2249,26 @@ mod tests {
         );
         let doc = json!({ "slug": "plan-foo", "body": "# Plan" });
         assert_eq!(summarize(docs::DOC_WRITE, &doc), "doc_write plan-foo");
+        let id = "0b0e29c44da42ee5fef94df7b1b9eff7";
+        assert_eq!(
+            summarize(
+                work::WORK_UPDATE,
+                &json!({ "id": id, "priority": "Urgent", "body": "x", "title": "Lists past 100" })
+            ),
+            "work_update 0b0e29c4 (title, body, priority Urgent): Lists past 100"
+        );
+        assert_eq!(
+            summarize(work::WORK_DELETE, &json!({ "id": id })),
+            "work_delete 0b0e29c4"
+        );
+        assert_eq!(
+            summarize(
+                work::WORK_LIST,
+                &json!({ "project": "tracon", "state": "all" })
+            ),
+            "work_list (project tracon, state all)"
+        );
+        assert_eq!(summarize(work::WORK_SHOW, &json!({})), "work_show");
         let query = json!({ "profile": "qa", "sql": "select 1" });
         assert!(summarize("query", &query).starts_with("query profile=qa {"));
     }

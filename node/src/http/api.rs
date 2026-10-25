@@ -295,6 +295,7 @@ pub async fn list_nodes(
             if r.is_self == 1 {
                 v["loopback"] = json!(local);
                 v["default_channel"] = json!(s.cfg.live().session.default_channel);
+                v["work"] = work_json(&s);
                 build_facts(&mut v);
             }
             v
@@ -586,6 +587,15 @@ pub async fn get_mesh_rollups(
     })
 }
 
+/// How the ledger names priorities here, for the interface's pickers.
+fn work_json(s: &AppState) -> serde_json::Value {
+    let work = s.cfg.live().work.clone();
+    json!({
+        "priority_levels": work.levels(),
+        "default_priority": work.default_priority,
+    })
+}
+
 pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     let row = s.store().get_node(&s.node_id)?;
     let Some(n) = row else {
@@ -597,6 +607,7 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     let mut v = node_row_json(&n);
     v["providers"] = json!(providers_json(s));
     v["default_channel"] = json!(s.cfg.live().session.default_channel);
+    v["work"] = work_json(s);
     // The policy this node runs beside the one its build ships, so Home can
     // say when a newer bundle is waiting to be applied. Read without waiting:
     // a caller may already hold the policy, and the line can wait a frame.
@@ -1399,8 +1410,9 @@ pub struct ComposeBody {
     pub title: String,
     #[serde(default)]
     pub body: String,
+    /// Unset: `[work] default_priority`.
     #[serde(default)]
-    pub priority: i64,
+    pub priority: Option<i64>,
     pub repo_path: String,
     #[serde(default)]
     pub branch: Option<String>,
@@ -1456,7 +1468,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
             title: c.title,
             body: c.body,
             deps: vec![],
-            priority: c.priority,
+            priority: c.priority.unwrap_or(s.cfg.live().work.default_priority),
             discovered_from: None,
             discovered_by_session: None,
             discovered_by_lane: None,
@@ -4857,14 +4869,38 @@ pub async fn delete_doc(
 #[derive(Deserialize, Default)]
 pub struct WorkQuery {
     pub channel: Option<String>,
+    /// A project's id, or `none` for items that belong to no project.
     pub project_id: Option<String>,
-    /// `ready`, `blocked`, `open` (ready + blocked), or `closed`; default all.
+    /// `ready`, `blocked`, `in_session`, `open` (all but closed), or
+    /// `closed`; default all.
     pub state: Option<String>,
+    /// Words every item must contain (`corpus::work::matches`).
+    pub q: Option<String>,
 }
 
-/// `GET /api/work?channel=&project_id=&state=`: the ledger with derived
+/// `GET /api/work?channel=&project_id=&state=&q=`: the ledger with derived
 /// readiness, in the deterministic order every node agrees on.
 pub async fn list_work(
+    State(s): State<AppState>,
+    Query(q): Query<WorkQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let channel = q.channel.clone().ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "channel is required".into(),
+    ))?;
+    let items = crate::corpus::work::select(
+        s.store(),
+        &channel,
+        q.project_id.as_deref(),
+        q.state.as_deref(),
+        q.q.as_deref(),
+    )?;
+    Ok(Json(json!({ "items": items })))
+}
+
+/// `GET /api/projects?channel=`: the projects this node knows on a channel,
+/// each with how many items belong to it, open and in all.
+pub async fn list_projects(
     State(s): State<AppState>,
     Query(q): Query<WorkQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -4873,18 +4909,27 @@ pub async fn list_work(
         StatusCode::BAD_REQUEST,
         "channel is required".into(),
     ))?;
-    let items = s.store().work_status(&channel, q.project_id.as_deref())?;
-    let items: Vec<_> = items
+    let items = s.store().work_status(&channel, None)?;
+    let count = |id: Option<&str>| {
+        let mine = items.iter().filter(|v| v.item.project_id.as_deref() == id);
+        let total = mine.clone().count();
+        let open = mine.filter(|v| v.readiness != Readiness::Closed).count();
+        (open, total)
+    };
+    let projects: Vec<_> = s
+        .store()
+        .project_list(&channel)?
         .into_iter()
-        .filter(|v| match q.state.as_deref() {
-            Some("ready") => v.readiness == Readiness::Ready && v.session_id.is_none(),
-            Some("blocked") => matches!(v.readiness, Readiness::Blocked { .. }),
-            Some("open") => v.readiness != Readiness::Closed,
-            Some("closed") => v.readiness == Readiness::Closed,
-            _ => true,
+        .map(|p| {
+            let (open, total) = count(Some(&p.id));
+            json!({ "id": p.id, "name": p.name, "remote_url": p.remote_url, "open": open, "total": total })
         })
         .collect();
-    Ok(Json(json!({ "items": items })))
+    let (open, total) = count(None);
+    Ok(Json(json!({
+        "projects": projects,
+        "none": { "open": open, "total": total },
+    })))
 }
 
 /// `GET /api/work/ready?channel=&project_id=`: what a session may pick.
@@ -4910,8 +4955,9 @@ pub struct NewWorkBody {
     pub body: String,
     #[serde(default)]
     pub deps: Vec<String>,
+    /// Unset: `[work] default_priority`.
     #[serde(default)]
-    pub priority: i64,
+    pub priority: Option<i64>,
     #[serde(default)]
     pub discovered_from: Option<String>,
 }
@@ -4930,7 +4976,7 @@ pub async fn add_work(
             title: w.title,
             body: w.body,
             deps: w.deps,
-            priority: w.priority,
+            priority: w.priority.unwrap_or(s.cfg.live().work.default_priority),
             discovered_from: w.discovered_from,
             discovered_by_session: None,
             discovered_by_lane: None,
