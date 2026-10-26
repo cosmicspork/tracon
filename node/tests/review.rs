@@ -796,6 +796,41 @@ async fn an_opened_publication_leaves_no_working_repository_behind() {
     assert!(!publisher.with_extension("bundle").exists());
 }
 
+/// The review page links the published request with where it now stands,
+/// as following it on the forge last saw; before any look, it says nothing.
+#[tokio::test]
+async fn a_published_review_says_where_its_request_stands_on_the_forge() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert!(body["forge_state"].is_null(), "{body}");
+
+    f.store
+        .append_event(&tracon::store::NewEvent {
+            session_id: "s1".into(),
+            work_item_id: None,
+            kind: "forge_follow".into(),
+            ref_id: Some(f.publication_id(&id)),
+            payload: json!({
+                "review_id": id,
+                "changes": ["merged"],
+                "snapshot": { "state": "merged", "draft": false, "checks": {}, "comments": 0 },
+            }),
+            at_ms: tracon::store::now_ms(),
+            mono_ms: 0,
+        })
+        .unwrap();
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(
+        body["forge_state"],
+        json!({ "state": "merged", "draft": false }),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn a_second_verdict_cannot_overwrite_the_first() {
     state::isolate();

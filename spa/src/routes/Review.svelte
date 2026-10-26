@@ -3,6 +3,8 @@
   import Diff from '../components/Diff.svelte'
   import CommitMessage from '../components/CommitMessage.svelte'
   import ShownWork from '../components/ShownWork.svelte'
+  import CheckDetail from '../components/CheckDetail.svelte'
+  import { tick } from 'svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -22,7 +24,8 @@
     type PinnedRequirements,
     type Review,
     type ReviewAuthorship,
-    type ReviewContext,
+    type CandidateCheckRun,
+    type ForgeState,
     type ReviewIntent,
     type ReviewOutputs,
     type ReviewPublication,
@@ -45,6 +48,7 @@
     checksState,
     composerLabel,
     publishedChange,
+    publishedLabel,
     rereadDelay,
     rereadReviewer,
     reviewerControl,
@@ -53,6 +57,7 @@
   } from '../lib/verdicts'
   import { openAiRequest, sentReason, withFinding } from '../lib/reviewerChanges'
   import { COVERAGE, FINDING, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
+  import { failuresOf, outcomeLabel, runDuration, runTone, runsSummary } from '../lib/checkRuns'
 
   let { id }: { id: string } = $props()
 
@@ -67,6 +72,8 @@
   let shownWork = $state<ShownWorkItem[]>([])
   let authorship = $state<ReviewAuthorship | null>(null)
   let publication = $state<ReviewPublication | null>(null)
+  /** Where the published request stands on the forge, as last followed. */
+  let forgeState = $state<ForgeState | null>(null)
   /** Why no reviewer is reading it, as the node last found. */
   let reviewerReason = $state<string | null>(null)
   let reviewerStarting = $state(false)
@@ -80,7 +87,6 @@
   let criterionVerdict = $state<Verdict>('met')
   let criterionNote = $state('')
   let criteriaError = $state<string | null>(null)
-  let surroundingCode = $state<ReviewContext[]>([])
   /** What changed since your last verdict, and which diff is showing. */
   let sinceReviewed = $state<SinceReviewed | null>(null)
   let diffView = $state<'since' | 'full'>('full')
@@ -178,12 +184,12 @@
         shownWork = d.shown_work ?? []
         authorship = d.authorship ?? null
         publication = d.publication ?? null
+        forgeState = d.forge_state ?? null
         reviewerReason = d.review_session_reason ?? null
         reviewerStarting = d.review_session_starting ?? false
         reviewerView = d.reviewer ?? null
         requirements = d.requirements
         criteria = d.criteria
-        surroundingCode = d.surrounding_code
         sinceReviewed = d.since_reviewed ?? null
         // A resubmission opens on what answered your feedback; the full diff
         // is one tap away.
@@ -546,24 +552,33 @@
           })),
   )
   const authoritativeChecks = $derived(evidence?.checks ?? [])
+  /** The run whose detail is open, if one is. */
+  let openRun = $state<CandidateCheckRun | null>(null)
+  /** Failed runs the operator folded away; a failed run opens unfolded. */
+  let folded = $state<Set<string>>(new Set())
 
-  /** The lines of a failed run's whole output that say what failed, which its log tail may not hold. */
-  function failuresOf(run: CandidateEvidence['checks'][number]): string {
-    try {
-      const failures = (JSON.parse(run.metadata_json) as { failures?: unknown }).failures
-      return typeof failures === 'string' ? failures : ''
-    } catch {
-      return ''
-    }
+  function fold(id: string) {
+    const next = new Set(folded)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    folded = next
   }
 
-  function inputsFor(run: CandidateEvidence['checks'][number]) {
-    if (!run.inputs_json) return 'input identity was not recorded'
-    try {
-      return JSON.stringify(JSON.parse(run.inputs_json))
-    } catch {
-      return run.inputs_json
+  /** What a failed run says failed: its recorded failures, else the end of its log. */
+  function whatFailed(run: CandidateCheckRun): string {
+    return failuresOf(run) || run.log.trimEnd().split('\n').slice(-12).join('\n')
+  }
+
+  /** Scroll to a file's changes, in the diff or the editor, whichever is showing. */
+  async function showFile(path: string) {
+    if (!editing && diffView === 'since' && !sinceReviewed?.files?.some((f) => f.path === path)) {
+      diffView = 'full'
+      await tick()
     }
+    const at = CSS.escape(path)
+    document
+      .querySelector(editing ? `.filehead[data-path="${at}"]` : `.diff [data-path="${at}"]`)
+      ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }
 
   /** The title of shown work on this review, for a finding that cites it. */
@@ -660,6 +675,7 @@
       const d = await api.review(id)
       review = d.review
       publication = d.publication ?? null
+      forgeState = d.forge_state ?? null
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting ?? false
       reviewerView = d.reviewer ?? null
@@ -813,6 +829,9 @@
           : ''}</small
       >
     </span>
+    {#if landed}
+      <a class="pr" href={landed.url} target="_blank" rel="noreferrer">{publishedLabel(review.provider, landed, forgeState)}</a>
+    {/if}
   </div>
 
   <dl class="kv">
@@ -850,7 +869,7 @@
     {/if}
   </dl>
   {#if remoteOwner && ownerDetail?.state === 'fetched'}
-    <div class="banner">
+    <div class="banner dim">
       held by {nodeLabel(store.nodes, remoteOwner)}
       <b>· read from it just now; it checks the branch for changes again when you decide</b>
     </div>
@@ -897,10 +916,7 @@
     </div>
   {:else}
     <section class="evidence">
-      <div class="h4">
-        Candidate evidence
-        <b>{evidence.candidate.head_sha.slice(0, 12)} · {evidence.candidate.tree_sha?.slice(0, 12) ?? 'tree not recorded'}</b>
-      </div>
+      <div class="h4">Candidate evidence</div>
       <div class="evidence-grid">
         <div class="evidence-panel">
           <h3>Requirements</h3>
@@ -911,46 +927,43 @@
             {:else}
               <p>No additional requirement detail.</p>
             {/if}
-            <a href="/tasks/{requirements.id}">open work item</a>
+            <a href="/tasks/{requirements.id}">open task</a>
           {:else}
             <p class="missing">No work item was linked when this review was captured.</p>
           {/if}
         </div>
         <div class="evidence-panel">
-          <h3>Pinned surrounding code</h3>
-          {#if surroundingCode.length}
-            {#each surroundingCode as context, index (index)}
-              <details>
-                <summary>{context.path}:{context.start_line}–{context.end_line}</summary>
-                <pre>{context.text}</pre>
-              </details>
-            {/each}
-          {:else}
-            <p class="missing">No textual hunk context was captured.</p>
-          {/if}
-        </div>
-        <div class="evidence-panel">
           <h3>Runtime evidence</h3>
           {#if authoritativeChecks.length}
-            {#each authoritativeChecks as run (run.id)}
-              {@const failures = failuresOf(run)}
-              <div class="run">
-                <span class:ok={run.outcome === 'passed' || run.source_outcome === 'passed'} class:bad={run.outcome === 'failed' || run.outcome === 'not_runnable' || run.outcome === 'not_run' || run.outcome === 'interrupted' || run.outcome === 'cancelled'}>
-                  {run.outcome === 'not_runnable' ? 'not runnable' : run.outcome === 'not_run' ? 'not run' : run.outcome}{run.outcome === 'reused' ? ` · ${run.source_outcome ?? 'unknown source'}` : ''}
-                </span>
-                <code>{run.command ?? 'command not recorded'}</code>
-                <code>{run.execution_image ?? 'image identity not recorded'}</code>
-                <small>{inputsFor(run)}</small>
-                {#if run.reused_from_id}<small>reused from {run.reused_from_id.slice(0, 8)}</small>{/if}
-                {#if failures}
-                  <pre class="failures" aria-label="what failed">{failures}</pre>
-                {/if}
-                <details>
-                  <summary>log · {run.duration_ms == null ? 'unfinished' : `${Math.round(run.duration_ms / 1000)}s`}</summary>
-                  <pre>{run.log || '(no retained output)'}</pre>
-                </details>
-              </div>
-            {/each}
+            {@const summary = runsSummary(authoritativeChecks)}
+            <p class="runs-said" class:bad={authoritativeChecks.some((r) => runTone(r) === 'bad')}>{summary}</p>
+            <ul class="runs">
+              {#each authoritativeChecks as run (run.id)}
+                {@const tone = runTone(run)}
+                {@const failed = tone === 'bad' ? whatFailed(run) : ''}
+                <li>
+                  <div class="run">
+                    <button class="line" type="button" aria-haspopup="dialog" onclick={() => (openRun = run)}>
+                      <span class="dot {tone}" aria-label={outcomeLabel(run)}></span>
+                      <code>{run.command ?? 'command not recorded'}</code>
+                      <span class="dur">{tone === 'bad' ? `${outcomeLabel(run)} · ` : ''}{runDuration(run)}</span>
+                    </button>
+                    {#if failed}
+                      <button
+                        class="lnk fold"
+                        type="button"
+                        aria-expanded={!folded.has(run.id)}
+                        aria-label={folded.has(run.id) ? 'show what failed' : 'hide what failed'}
+                        onclick={() => fold(run.id)}>{folded.has(run.id) ? '▸' : '▾'}</button
+                      >
+                    {/if}
+                  </div>
+                  {#if failed && !folded.has(run.id)}
+                    <pre class="failures" aria-label="what failed">{failed}</pre>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
           {:else if checksRunning}
             <p class="missing">The node is running this candidate's required checks; they gate nothing{reviewerWaits ? ', and the reviewer starts once they are done' : ''}.</p>
           {:else if unrun}
@@ -1069,9 +1082,7 @@
   <dl class="prov">
     <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
     <div><dt>Item</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
-    <div><dt>Policy</dt><dd>{session?.policy_version != null ? `working-agreements v${session.policy_version}` : '—'}</dd></div>
     <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}{reviewer && startedHow(reviewerView?.started_by) ? ` · ${startedHow(reviewerView?.started_by)}` : ''}</dd></div>
-    <div><dt>Commit</dt><dd>{review.head_sha.slice(0, 8)}</dd></div>
   </dl>
 
   {#if verdict}
@@ -1302,12 +1313,12 @@
   {#if !surface.phone}
     <div class="files">
       {#each files as f (f.path)}
-        <div class:moved={stale.includes(f.path)}>
-          <span>{f.path}</span>
+        <button type="button" class:moved={stale.includes(f.path)} onclick={() => showFile(f.path)}>
+          <span class="p">{f.path}</span>
           <span class={stale.includes(f.path) ? 'bad' : 'ok'}
             >{stale.includes(f.path) ? 'changed since submit' : 'unchanged'}</span
           >
-        </div>
+        </button>
       {/each}
     </div>
   {/if}
@@ -1325,7 +1336,7 @@
       </div>
     {:else}
       {#each [...editable] as [path, f] (path)}
-        <div class="filehead">
+        <div class="filehead" data-path={path}>
           <span class="p">{path}</span>
           {#if f.now !== f.head}<span class="chip warn">edited</span>{/if}
         </div>
@@ -1479,6 +1490,7 @@
     <div class="draft-state" aria-live="polite">{draftLine}</div>
   </div>
   {/if}
+  <CheckDetail run={openRun} onclose={() => (openRun = null)} />
 {/if}
 
 <style>
@@ -1495,7 +1507,7 @@
   }
   .head {
     display: grid;
-    grid-template-columns: 3px 72px minmax(0, 1fr);
+    grid-template-columns: 3px 72px minmax(0, 1fr) auto;
     gap: 0 14px;
     align-items: center;
     background: linear-gradient(90deg, var(--wash-wait), var(--s1) 42%);
@@ -1544,6 +1556,12 @@
   .head.closed .t em {
     color: var(--dim);
   }
+  /* The published change, where the review now lives on. */
+  .head .pr {
+    font: 12.5px var(--mono);
+    white-space: nowrap;
+    color: var(--acc);
+  }
   .t small {
     display: block;
     font: 12px var(--mono);
@@ -1578,7 +1596,7 @@
   }
   .evidence-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
   }
   .evidence-panel {
@@ -1603,59 +1621,89 @@
     margin: 5px 0;
     overflow-wrap: anywhere;
   }
-  .evidence-panel details,
-  .run {
-    border-top: 1px solid var(--rule);
-    padding: 6px 0;
-  }
-  .evidence-panel details:first-of-type,
-  .run:first-of-type {
-    border-top: 0;
-    padding-top: 0;
-  }
-  .evidence-panel summary {
-    overflow-wrap: anywhere;
-    cursor: pointer;
-    color: var(--ink2);
-    font: 11.5px var(--mono);
-  }
-  .evidence pre {
-    max-height: 210px;
-    margin: 6px 0 0;
-    overflow: auto;
-    white-space: pre;
-    font: 11px/1.45 var(--mono);
-  }
   /* Wrapped: a failure line cut off at the panel's edge says nothing. */
   .evidence pre.failures {
-    margin: 0;
+    max-height: 210px;
+    margin: 2px 0 4px 16px;
+    overflow: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     padding-left: 8px;
     border-left: 2px solid var(--crit);
+    font: 11px/1.45 var(--mono);
     color: var(--ink2);
+  }
+  .runs-said {
+    font: 11.5px var(--mono);
+    color: var(--ok);
+  }
+  .runs-said.bad {
+    color: var(--crit);
+  }
+  .runs {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .runs li {
+    border-top: 1px solid var(--rule);
+  }
+  .runs li:first-child {
+    border-top: 0;
   }
   .run {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    gap: 6px;
   }
-  .run > span {
-    font: 11px var(--mono);
-    color: var(--dim);
+  /* One line per check: the whole of it opens the run's detail. */
+  .run .line {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    background: none;
+    border: 0;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
   }
-  .run > span.ok {
-    color: var(--ok);
+  .run .line:hover code {
+    color: var(--ink);
   }
-  .run > span.bad {
-    color: var(--crit);
-  }
-  .run code,
-  .run small {
-    overflow-wrap: anywhere;
+  .run code {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: 11.5px var(--mono);
     color: var(--ink2);
   }
-  .run small,
+  .run .dur {
+    font: 11px var(--mono);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .run .fold {
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--wait);
+  }
+  .dot.ok {
+    background: var(--ok);
+  }
+  .dot.bad {
+    background: var(--crit);
+  }
   .missing,
   .demonstrations small {
     color: var(--dim);
@@ -2098,15 +2146,30 @@
     font: 12.5px var(--mono);
     overflow: hidden;
   }
-  .files div {
+  /* Each file is a way into its changes in the diff below. */
+  .files button {
     display: flex;
     justify-content: space-between;
     gap: 10px;
+    width: 100%;
     padding: 6px 12px;
+    border: 0;
     border-top: 1px solid var(--rule);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
   }
-  .files div:first-child {
+  .files button:first-child {
     border-top: 0;
+  }
+  .files button:hover .p {
+    color: var(--acc);
+  }
+  .files .p {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .files .ok {
     color: var(--dim);

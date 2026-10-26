@@ -2366,6 +2366,26 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
                 .map(|row| crate::authority::publication_view(s.store(), r, row)),
         }),
     };
+    // Where the latest published request stands on the forge, as following
+    // it last saw: `open`, `merged` or `closed`, and whether it is a draft.
+    // Node-local: the owner opened it and is the one following it.
+    let forge_state = match (&remote_owner, publications.first(), r.session_id.as_deref()) {
+        (None, Some(row), Some(session)) => s
+            .store()
+            .latest_event_payload(
+                session,
+                crate::session::state::event_kind::FORGE_FOLLOW,
+                &row.id,
+            )?
+            .and_then(|payload| {
+                let snapshot = &payload["snapshot"];
+                snapshot["state"].as_str().map(|state| {
+                    json!({ "state": state, "draft": snapshot["draft"].as_bool().unwrap_or(false) })
+                })
+            })
+            .unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Null,
+    };
     // What the agent showed of its work, each marked stale once the candidate
     // moved past the commit it was shown at. Node-local, like the checks: a
     // mirror never had the workspace it was read from.
@@ -2473,6 +2493,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         "legacy_check_events": legacy_check_events,
         "publications": publications,
         "publication": publication,
+        "forge_state": forge_state,
         "shown_work": shown_work,
         "authorship": authorship,
     }))
@@ -2500,6 +2521,7 @@ const OWNER_FIELDS: &[&str] = &[
     "requirements",
     "surrounding_code",
     "publications",
+    "forge_state",
 ];
 
 /// Fill a mirrored review's detail from the node that owns it, over the

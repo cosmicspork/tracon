@@ -658,6 +658,12 @@ export interface ReviewDetails {
    * journal); absent from a node that predates it.
    */
   publication?: ReviewPublication | null
+  /**
+   * Where the latest published request stands on the forge, as the owner
+   * following it last saw. Null before its first look; absent from a node
+   * that predates it.
+   */
+  forge_state?: ForgeState | null
 }
 
 export interface ForgeIdentity {
@@ -672,6 +678,12 @@ export interface ReviewAuthorship {
   /** Commits not authored and committed as `identity`. Never rewritten for you. */
   misattributed: { sha: string; author: string; author_email: string; committer_email: string }[]
   note: string
+}
+
+/** Where a published request stands on the forge, as following it last saw. */
+export interface ForgeState {
+  state: 'open' | 'merged' | 'closed'
+  draft: boolean
 }
 
 export interface ReviewPublication {
