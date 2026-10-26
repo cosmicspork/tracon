@@ -77,7 +77,9 @@ pub fn definitions() -> Vec<Value> {
                             as a diff against the memory as it stands; nothing changes until they \
                             allow it. Only the body changes: kind and scope stay. When the memory is \
                             wrong rather than badly worded, retain a correction with supersedes \
-                            instead. Directives are the operator's.",
+                            instead. Directives are the operator's. An asked call returns \
+                            `awaiting_operator` with an `approval_id` at once, and approval_status \
+                            reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

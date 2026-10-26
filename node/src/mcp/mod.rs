@@ -8,6 +8,7 @@
 //! something it may ask the node to do, never as something it holds.
 
 pub mod approvals;
+pub mod aside;
 pub mod checking;
 pub mod consulta;
 pub mod docs;
@@ -358,6 +359,10 @@ impl Tools {
         self.list(channel, node_id)
             .into_iter()
             .filter(|t| t["name"].as_str().is_some_and(|n| audience.offers(n)))
+            .map(|mut t| {
+                aside::shape(&mut t, audience);
+                t
+            })
             .collect()
     }
 

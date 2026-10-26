@@ -85,7 +85,7 @@ pub fn definitions(browser: bool) -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "worktree": { "type": "string", "description": "Absolute path of the worktree to review. Only for a harness you run yourself." },
+                    "worktree": { "type": "string", "description": "Only for a harness you run yourself: the absolute path of the worktree to review." },
                     "title": { "type": "string", "description": "The change's title, as it should appear." },
                     "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups, verification. The pull/merge request's description unless `forge.description` gives one, so written for the repository's reviewers, not the operator." },
                     "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "In a session on a GitHub or GitLab repository, defaults to that repository's forge; required outside a session." },

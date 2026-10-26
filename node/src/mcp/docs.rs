@@ -430,7 +430,7 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
          bundle and shown only in the sandboxed preview; replacing a multi-file bundle drops \
          its other files. Pass if_hash (from doc_read) to refuse overwriting an edit you have \
          not seen. The operator is asked before this runs, unless the policy writes it \
-         unattended (working notes): an asked call returns `awaiting_operator` with an \
+         unattended (working notes). An asked call returns `awaiting_operator` with an \
          `approval_id` at once, and approval_status reports the outcome.",
         writable.join(", ")
     );
@@ -476,7 +476,7 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
             "description": "Delete a document on this channel, in either format; an HTML \
                 document's bundle goes with it. Pass if_hash (from doc_read) to refuse deleting \
                 an edit you have not seen. A work item's brief, its selected context and shown \
-                work are refused. The operator is always asked: the call returns \
+                work are refused. The operator is always asked. An asked call returns \
                 `awaiting_operator` with an `approval_id` at once, and approval_status reports \
                 the outcome.",
             "inputSchema": {
