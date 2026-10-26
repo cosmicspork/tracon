@@ -355,6 +355,75 @@ pub async fn call(
     Ok(out)
 }
 
+/// What a `submit_review` note is shown under, among the review's shown work.
+pub const NOTE_TITLE: &str = "Note from the submitter";
+
+/// `submit_review`'s `note`: absent, or Markdown within the limit an account
+/// shown with `show_work` has. Read before anything is captured, so a note
+/// that cannot be kept refuses the submission rather than vanishing from it.
+pub fn note_arg(args: &Value) -> Result<Option<String>, String> {
+    let note = match args.get("note") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(note)) => note.trim(),
+        Some(_) => return Err("note is a string, in Markdown".into()),
+    };
+    if note.len() > MAX_MARKDOWN_BYTES {
+        return Err(format!(
+            "note is {} bytes; the limit is {MAX_MARKDOWN_BYTES}. Put a long account in a page \
+             and show it with show_work.",
+            note.len()
+        ));
+    }
+    Ok(Some(note.to_string()).filter(|note| !note.is_empty()))
+}
+
+/// Keep a submission's note as shown work on its review, at the commit it was
+/// submitted with: an account like any other, which goes stale once the
+/// candidate moves. Like everything shown, it stays in tracon.
+pub fn record_note(
+    store: &crate::store::Store,
+    manager: &crate::session::Manager,
+    ctx: &CallContext,
+    review_id: &str,
+    head_sha: &str,
+    markdown: &str,
+) -> Result<String, String> {
+    let id = uuid::Uuid::now_v7().to_string();
+    let row = ShownWorkRow {
+        id: id.clone(),
+        channel: ctx.channel.clone(),
+        session_id: ctx.session_id().map(str::to_string),
+        lane: ctx.lane().map(str::to_string),
+        review_id: Some(review_id.to_string()),
+        head_sha: head_sha.to_string(),
+        title: NOTE_TITLE.to_string(),
+        format: MARKDOWN.to_string(),
+        markdown: markdown.to_string(),
+        document_id: None,
+        document_slug: None,
+        document_hash: None,
+        files: Vec::new(),
+        created_ms: now_ms(),
+    };
+    store.insert_shown_work(&row).map_err(|e| e.to_string())?;
+    manager.record_for(
+        ctx,
+        ek::WORK_SHOWN,
+        Some(&id),
+        json!({
+            "id": id,
+            "title": row.title,
+            "format": row.format,
+            "head_sha": head_sha,
+            "review_id": review_id,
+            "channel": row.channel,
+            "slug": null,
+            "files": 0,
+        }),
+    );
+    Ok(id)
+}
+
 /// What a set of paths brought, and what was left out on the way: a symbolic
 /// link inside a directory, or anything under `.git`.
 #[derive(Debug)]
