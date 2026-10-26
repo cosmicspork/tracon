@@ -304,6 +304,10 @@ pub async fn put_doc(State(s): State<AppState>, Path((channel, slug)): Path<(Str
 ${Array.from({ length: 6 }, (_, i) => `## Section ${i + 1}: a heading long enough to wrap onto a second line on a phone screen\n\nFiller paragraph ${i + 1}. The renderer keeps a 72ch reading column; this text exists so the page is long enough to scroll and the heading rhythm can be judged.`).join('\n\n')}
 `
 
+// Four hundred lines: more than any window shows.
+const tallDoc = doc('ref-long-log', 'Long log', {
+  body: Array.from({ length: 400 }, (_, i) => `${String(i + 1).padStart(3, '0')} gateway: health check passed, egress open`).join('\n'),
+})
 const rich = doc('guide-release', 'Cutting a release with release-please', { body: richBody, pinned: true, updated_ms: -86400000 * 4 })
 const longDoc = doc(
   'ref-overflow-with-a-rather-long-slug-to-see-how-the-breadcrumb-copes',
@@ -784,12 +788,22 @@ export default [
     area,
     route: '/docs/personal/guide-release/edit',
     title: 'Editing, a change typed',
-    note: 'The editor fills the page below the header, scrolling inside itself; Save and Cancel sit at the foot of the window with no resize handle.',
+    note: 'The editor is as tall as the document, with no scrollbar inside it, and no resize handle; Save and Cancel sit right under it.',
     api: { '/api/docs/personal/guide-release': rich },
     act: async (page) => {
       await page.locator('textarea').press('End')
       await page.locator('textarea').pressSequentially('\n\nOne more line.')
     },
+  },
+  {
+    id: 'docs-edit-long',
+    area,
+    route: '/docs/personal/ref-long-log/edit',
+    title: 'Editing a 400-line document',
+    note: 'The editor fills the window below the header and scrolls inside itself; Save and Cancel stay in view under it.',
+    since: '#654',
+    api: { '/api/docs/personal/ref-long-log': tallDoc },
+    full: false,
   },
   {
     id: 'docs-edit-new',

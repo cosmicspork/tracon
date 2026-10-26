@@ -155,6 +155,22 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus
   :root { --tabbar: calc(57px + env(safe-area-inset-bottom)); }
 }
 
+/* A textarea that edits text, sized by use:autogrow (lib/autogrow.ts): three
+   lines at least, then as tall as what it holds, up to the window less
+   --chrome (the page's header above it and its actions below) and the phone's
+   tabs; past that it scrolls inside. A screen with more around the box sets
+   its own --chrome. A component's own min-height, max-height or resize on the
+   same box would win over these, so it sets none. */
+textarea.grow {
+  min-height: 5.5em;
+  min-height: calc(3lh + 18px);
+  max-height: calc(100dvh - var(--chrome, 160px) - var(--tabbar));
+  overflow-y: auto;
+  resize: none;
+}
+/* A message box under a transcript: the transcript stays in view above it. */
+textarea.grow.compact { max-height: 40dvh; }
+
 @media (max-width: 700px) {
   .btn, .lnk {
     min-height: 44px;

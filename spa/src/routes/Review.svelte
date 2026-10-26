@@ -1206,7 +1206,7 @@
       Title and body <b>{closed ? 'as decided' : surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
     </div>
     <input class="edit" bind:value={title} disabled={busy || publishing || closed || surface.phone} />
-    <textarea class="edit body" bind:value={body} use:autogrow={body} disabled={busy || publishing || closed || surface.phone}></textarea>
+    <textarea class="edit body grow" bind:value={body} use:autogrow={body} disabled={busy || publishing || closed || surface.phone}></textarea>
   {/if}
 
   <div class="h4">On the forge <b>{closed ? 'as decided' : remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
@@ -1219,14 +1219,14 @@
   </label>
   {#if describe}
     <input class="edit" bind:value={descTitle} placeholder="title" disabled={busy || publishing || closed || surface.phone} />
-    <textarea class="edit body" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || closed || surface.phone}></textarea>
+    <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || closed || surface.phone}></textarea>
   {/if}
   <label class="toggle">
     <input type="checkbox" bind:checked={commenting} disabled={busy || publishing || closed || surface.phone} />
     Comment on the {noun}
   </label>
   {#if commenting}
-    <textarea class="edit body" bind:value={comment} use:autogrow={comment} disabled={busy || publishing || closed || surface.phone}></textarea>
+    <textarea class="edit body grow" bind:value={comment} use:autogrow={comment} disabled={busy || publishing || closed || surface.phone}></textarea>
   {/if}
   {#if change && !describe && !(commenting && comment.trim())}
     <div class="note dim">Approving only pushes; the {noun}'s text is left as it is.</div>
@@ -1444,7 +1444,7 @@
       {/if}
       <label class="composer">
         <span>{composerLabel(composing, editedFiles)}</span>
-        <textarea bind:this={reasonInput} bind:value={reason} use:autogrow={reason} disabled={busy || publishing}></textarea>
+        <textarea class="grow compact" bind:this={reasonInput} bind:value={reason} use:autogrow={reason} disabled={busy || publishing}></textarea>
       </label>
       <div class="row">
         <button
@@ -1936,9 +1936,6 @@
     font: 13.5px var(--sans);
   }
   .edit.body {
-    min-height: 110px;
-    max-height: 70vh;
-    resize: vertical;
     font-family: var(--sans);
   }
   .note {
@@ -2191,7 +2188,6 @@
     color: var(--dim);
   }
   .decide textarea {
-    min-height: 64px;
     background: var(--s1);
     border: 0;
     border-radius: 4px;

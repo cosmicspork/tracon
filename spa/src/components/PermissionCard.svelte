@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api'
   import { intentLabel } from '../lib/attention'
+  import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
@@ -164,7 +165,7 @@
     <div class="fields">
       <label>
         <span>what to change</span>
-        <textarea bind:value={notes} disabled={busy} spellcheck="true"></textarea>
+        <textarea class="grow" bind:value={notes} use:autogrow={notes} disabled={busy} spellcheck="true"></textarea>
       </label>
       <div class="act">
         <button class="btn" disabled={busy || !notes.trim()} onclick={() => answer('request_changes')}>Request changes</button>
@@ -177,7 +178,9 @@
         <label>
           <span>{f.key}</span>
           <textarea
+            class="grow"
             value={f.value}
+            use:autogrow={f.value}
             disabled={busy}
             spellcheck="true"
             oninput={(e) => (drafts[f.key] = e.currentTarget.value)}
@@ -238,8 +241,6 @@
   }
   .fields textarea {
     width: 100%;
-    min-height: 5.5em;
-    resize: vertical;
     box-sizing: border-box;
     font: 12.5px/1.45 var(--mono);
     color: var(--ink);

@@ -6,6 +6,7 @@
   import ReadinessBanner from './ReadinessBanner.svelte'
   import RepoPicker from './RepoPicker.svelte'
   import { api, ApiError } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { modelLabel, phaseDefaults } from '../lib/bindings'
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
   import { digits, formatGrouped, formatTokens } from '../lib/format'
@@ -263,7 +264,9 @@
     </div>
   {:else}
     <textarea
+      class="grow compact"
       bind:value={prompt}
+      use:autogrow={prompt}
       {onkeydown}
       rows="2"
       placeholder={structured ? 'What should this plan cover?' : 'What should get done?'}
@@ -471,8 +474,6 @@
     color: var(--ink);
     padding: 11px 13px;
     font: 15px var(--sans);
-    resize: vertical;
-    min-height: 46px;
   }
   textarea::placeholder {
     color: var(--dim);

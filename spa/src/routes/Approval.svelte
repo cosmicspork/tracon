@@ -298,6 +298,7 @@
             <code class="locked">{display(original[f.key])}</code>
           {:else if f.kind === 'prose' || f.kind === 'json'}
             <textarea
+              class="grow"
               class:mono={f.kind === 'json'}
               value={String(v ?? '')}
               use:autogrow={String(v ?? '')}
@@ -308,7 +309,7 @@
           {:else if f.kind === 'tags'}
             <!-- One entry per line: a comma can sit inside a command. -->
             <textarea
-              class="list mono"
+              class="list mono grow"
               value={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
               use:autogrow={Array.isArray(v) ? v.join('\n') : String(v ?? '')}
               placeholder="one per line"
@@ -625,16 +626,12 @@
     justify-self: start;
   }
   .field textarea {
-    min-height: 110px;
-    max-height: 70vh;
-    resize: vertical;
     line-height: 1.5;
   }
   .field textarea.mono {
     font: 12.5px/1.45 var(--mono);
   }
   .field textarea.list {
-    min-height: 0;
     white-space: pre;
     overflow-x: auto;
   }

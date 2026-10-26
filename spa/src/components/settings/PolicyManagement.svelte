@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { ApiError } from '../../lib/api'
+  import { autogrow } from '../../lib/autogrow'
   import { newerShipped, policyAdmin, retryable, targetLabel, type PolicyRollout, type PolicyStatus, type SignedPolicyBundle } from '../../lib/policy-admin'
   import { store } from '../../lib/store.svelte'
   import Card from './Card.svelte'
@@ -262,7 +263,7 @@
         <p class="helper">{!local ? 'Open the signing node locally to edit its policy.' : !status.signing_key_present ? 'This node has no signing key. Edit on the node that signed this policy, then roll it out here.' : 'Preview with the existing signing key, then apply the exact signed bytes. The key never leaves this node.'}</p>
         <label class="policy-editor">
           <span>Policy TOML</span>
-          <textarea bind:value={draft} oninput={discardPreview} spellcheck="false" disabled={busy}></textarea>
+          <textarea class="grow" bind:value={draft} use:autogrow={draft} oninput={discardPreview} spellcheck="false" disabled={busy}></textarea>
         </label>
         <div class="actions">
           <button class="btn" onclick={makePreview} disabled={busy || !draft.trim() || !canSign}>{busy ? 'Working…' : 'Preview & sign'}</button>
@@ -358,7 +359,7 @@
   .confirm { display: flex; align-items: center; gap: .6rem; min-height: 36px; color: var(--ink); }
   .policy-editor { display: grid; gap: .5rem; }
   .policy-editor > span { color: var(--ink2); font: 500 11px/1.3 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
-  textarea { min-height: 16rem; width: 100%; resize: vertical; border: 0; border-radius: 4px; background: var(--s1); color: var(--ink); padding: .75rem; font: .82rem/1.45 var(--mono); }
+  textarea { width: 100%; border: 0; border-radius: 4px; background: var(--s1); color: var(--ink); padding: .75rem; font: .82rem/1.45 var(--mono); }
   fieldset { display: grid; gap: .75rem; background: none; padding: 0; margin: 0; }
   legend { color: var(--ink); font-weight: 600; padding: 0 0 .4rem; }
   .targets { display: grid; gap: .5rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }

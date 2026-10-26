@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { defaultChannel, rememberChannel, rememberedChannel } from '../lib/channel'
@@ -131,7 +132,7 @@
         <span class="bar-mark"></span>
         {#if editingId === m.id}
           <span class="t">
-            <textarea bind:value={draft} spellcheck="false"></textarea>
+            <textarea class="grow" bind:value={draft} use:autogrow={draft} spellcheck="false"></textarea>
             <div class="edit-act">
               <button class="btn p" disabled={busy || !draft.trim()} onclick={() => save(m.id)}>Save</button>
               <button class="lnk" disabled={busy} onclick={cancel}>Cancel</button>
@@ -236,14 +237,12 @@
   .t textarea {
     display: block;
     width: 100%;
-    min-height: 4.5em;
     font: 13px var(--sans);
     color: var(--ink);
     background: var(--s2);
     border: 0;
     border-radius: 3px;
     padding: 8px 10px;
-    resize: vertical;
     box-sizing: border-box;
   }
   .edit-act {
