@@ -1587,15 +1587,20 @@ async fn owner_checks(s: &AppState, facts: &mut crate::outcome::Facts) {
     let code: Vec<crate::store::ReviewRow> = facts
         .reviews
         .iter()
-        .filter(|review| review.kind != crate::store::reports::KIND)
+        // A review gone from its owner has nothing left to read there.
+        .filter(|review| review.kind != crate::store::reports::KIND && review.state != "gone")
         .cloned()
         .collect();
     let mut unread = None;
     if code.is_empty() {
         unread = Some("the session submitted no review to read its checks through".to_string());
     }
-    for review in &code {
-        let detail = match owner_review_detail(s, review).await {
+    // Asked together, so one owner that does not answer costs one timeout.
+    let details =
+        futures_util::future::join_all(code.iter().map(|review| owner_review_detail(s, review)))
+            .await;
+    for (review, detail) in code.iter().zip(details) {
+        let detail = match detail {
             Ok(detail) => detail,
             Err(reason) => {
                 unread = Some(reason);

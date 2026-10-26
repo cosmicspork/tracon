@@ -1211,6 +1211,21 @@ async fn a_placeholder_branch_renamed_by_submit_is_the_sessions_branch_from_then
     let named = tracon::review::prose::branch_from_title("feat: the thing").unwrap();
     assert_eq!(target["branch"], named.as_str(), "{target}");
     assert_eq!(f.store.get_session("s1").unwrap().unwrap().branch, named);
+
+    // A later new review is a change of its own, not a push onto the first's.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more > more.txt && git add -A && git commit -qm more",
+    );
+    let mut args = f.submit_args();
+    args["title"] = json!("fix: another thing");
+    let v = f.tool("s1", "submit_review", args).await;
+    let second = v["review_id"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert_ne!(second, id);
+    let review = f.store.get_review(second).unwrap().unwrap();
+    let target: Value = serde_json::from_str(&review.target).unwrap();
+    let other = tracon::review::prose::branch_from_title("fix: another thing").unwrap();
+    assert_eq!(target["branch"], other.as_str(), "{target}");
 }
 
 /// A required check whose command the check image does not have is the

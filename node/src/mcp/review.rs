@@ -603,7 +603,11 @@ async fn submit(
             }
             target.branch = asked.to_string();
         }
-    } else if resubmission.is_none() && review::prose::placeholder_branch(&target.branch) {
+    } else if resubmission.is_none()
+        && (review::prose::placeholder_branch(&target.branch)
+            || (asked_change.is_none()
+                && pushed_by_another(store, session.as_ref(), &target.branch)))
+    {
         if let Some(named) = review::prose::branch_from_title(&title) {
             target.branch = named;
         }
@@ -3874,6 +3878,23 @@ pub(crate) fn decided_report_view(report: &ReviewRow) -> Option<Value> {
         })),
         _ => None,
     }
+}
+
+/// Whether another of `session`'s reviews already pushes to `branch`. The
+/// first review renames the session's placeholder branch to its own; a later
+/// new review is a change of its own, not an update of that one's.
+fn pushed_by_another(
+    store: &Store,
+    session: Option<&crate::store::SessionRow>,
+    branch: &str,
+) -> bool {
+    session.is_some_and(|s| {
+        store
+            .reviews_of_session(&s.id)
+            .unwrap_or_default()
+            .iter()
+            .any(|r| serde_json::from_str::<Target>(&r.target).is_ok_and(|t| t.branch == branch))
+    })
 }
 
 /// What `review_status` answers for a review the operator has decided, or

@@ -3,7 +3,7 @@
 //! hub's SSE stream is only a hint to pull sooner. A hub outage therefore
 //! costs latency, never state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -129,14 +129,18 @@ pub struct MeshClient {
     /// on every frame.
     handoff_refresh: Mutex<HashMap<String, i64>>,
     /// Peers' reviews being read again from their owner because its listing
-    /// left them out, so a review is asked about once however many listings
-    /// arrive meanwhile.
-    rereading: Mutex<HashSet<String>>,
+    /// left them out, by when each may be asked again: once however many
+    /// listings arrive meanwhile, and not on every listing while the owner
+    /// cannot be reached.
+    rereading: Mutex<HashMap<String, i64>>,
 }
 
 /// How often a refused handoff from one sender may have the member list read
 /// again.
 const HANDOFF_REFRESH_MS: i64 = 60_000;
+/// How long an unlisted review the owner could not be read for waits before
+/// the next listing asks again.
+const REREAD_BACKOFF_MS: i64 = 5 * 60_000;
 
 impl MeshClient {
     pub fn new(
@@ -186,7 +190,7 @@ impl MeshClient {
             on_handoff: std::sync::OnceLock::new(),
             on_revoke: std::sync::OnceLock::new(),
             handoff_refresh: Mutex::new(HashMap::new()),
-            rereading: Mutex::new(HashSet::new()),
+            rereading: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1281,19 +1285,30 @@ impl MeshClient {
         let Some(this) = self.weak.upgrade() else {
             return;
         };
+        let now = now_ms();
         for id in unlisted {
-            if !self.rereading.lock().unwrap().insert(id.clone()) {
-                continue;
+            {
+                let mut rereading = self.rereading.lock().unwrap();
+                if rereading.get(&id).is_some_and(|after| *after > now) {
+                    continue;
+                }
+                rereading.insert(id.clone(), i64::MAX);
             }
             let (this, sender, channel) = (this.clone(), sender.to_string(), channel.to_string());
             tokio::spawn(async move {
-                this.reread_review(&sender, &channel, &id).await;
-                this.rereading.lock().unwrap().remove(&id);
+                let settled = this.reread_review(&sender, &channel, &id).await;
+                let mut rereading = this.rereading.lock().unwrap();
+                match settled {
+                    true => rereading.remove(&id),
+                    false => rereading.insert(id, now_ms() + REREAD_BACKOFF_MS),
+                };
             });
         }
     }
 
-    async fn reread_review(&self, owner: &str, channel: &str, id: &str) {
+    /// Whether the owner answered; `false` when it could not be read, to be
+    /// asked again after [`REREAD_BACKOFF_MS`].
+    async fn reread_review(&self, owner: &str, channel: &str, id: &str) -> bool {
         let request = serde_json::json!({ "review_id": id, "channel": channel, "owner": owner });
         let answer = self
             .command(
@@ -1324,9 +1339,13 @@ impl MeshClient {
                     }
                 }
             }
-            Err(super::forward::CommandError::Refused(why))
-                if why == crate::http::api::NO_SUCH_REVIEW =>
-            {
+            // The owner holds no such review, or will not give it (one too
+            // large for a frame, a channel it no longer shares): either way it
+            // has left the queue there, and asking again changes nothing.
+            Err(super::forward::CommandError::Refused(why)) => {
+                if why != crate::http::api::NO_SUCH_REVIEW {
+                    tracing::info!(review = %id, from = %owner, %why, "the owner refused an unlisted review; marked gone");
+                }
                 match self.store.gone_mirrored_review(owner, id) {
                     Ok(true) => self.mirror.publish_queue(),
                     Ok(false) => {}
@@ -1334,9 +1353,11 @@ impl MeshClient {
                 }
             }
             Err(error) => {
-                tracing::debug!(%error, review = %id, from = %owner, "unlisted review not read from its owner; asked again at the next listing")
+                tracing::debug!(%error, review = %id, from = %owner, "unlisted review not read from its owner; asked again later");
+                return false;
             }
         }
+        true
     }
 
     // ------------------------------------------------------------ presence
