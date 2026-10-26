@@ -63,6 +63,23 @@ async fn every_session_is_offered_memory_and_document_tools() {
         assert!(names.contains(&n), "{n} missing from {names:?}");
     }
     assert!(!names.contains(&"query"), "no credential, no consulta");
+
+    // What the phase cannot work without stays loaded where a harness defers
+    // MCP tools; the rest is loaded when the model asks for it.
+    let meta = |name: &str| {
+        v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .map(|t| t["_meta"].clone())
+            .unwrap()
+    };
+    assert_eq!(
+        meta("submit_review"),
+        json!({ "anthropic/alwaysLoad": true })
+    );
+    assert_eq!(meta("doc_search"), Value::Null);
 }
 
 #[tokio::test]
