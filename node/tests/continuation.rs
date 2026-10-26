@@ -721,6 +721,104 @@ async fn continuing_a_suspended_attempt_carries_it_on_and_ends_it() {
     assert_eq!(old.end_reason.as_deref(), Some("continued"));
 }
 
+/// Continue, a changed approach and the session's own continue, asked of one
+/// suspended attempt at once, start one session between them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_suspended_attempt_asked_to_continue_at_once_is_carried_on_once() {
+    let h = harness().await;
+    ready(&h).await;
+    let item = new_item(&h, "Fix the invoices", vec![]);
+    write_plan(&h, &item.id);
+    let mut s = session_row("s", "n1", "personal");
+    s.state = "suspended".into();
+    s.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&s).unwrap();
+
+    let asks = [
+        (
+            "/api/continuation/continue",
+            Some(json!({ "session_id": "s" })),
+        ),
+        (
+            "/api/continuation/continue",
+            Some(json!({ "session_id": "s" })),
+        ),
+        (
+            "/api/continuation/continue",
+            Some(json!({ "session_id": "s", "approach": "Answer the review comment." })),
+        ),
+        ("/api/sessions/s/continue", None),
+        ("/api/sessions/s/continue", None),
+    ];
+    let start = std::sync::Arc::new(tokio::sync::Barrier::new(asks.len()));
+    let calls: Vec<_> = asks
+        .into_iter()
+        .map(|(uri, body)| {
+            let operator = h.operator.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                call(&operator, "POST", uri, body).await
+            })
+        })
+        .collect();
+    let mut answers = Vec::new();
+    for c in calls {
+        answers.push(c.await.unwrap());
+    }
+    let created = answers
+        .iter()
+        .filter(|(st, _)| *st == StatusCode::CREATED)
+        .count();
+    assert_eq!(created, 1, "{answers:?}");
+    let continuations: Vec<_> = h
+        .store
+        .list_sessions(None)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.continued_from.as_deref() == Some("s"))
+        .collect();
+    assert_eq!(continuations.len(), 1, "{continuations:?}");
+    let old = h.store.get_session("s").unwrap().unwrap();
+    assert_eq!(old.end_reason.as_deref(), Some("continued"));
+}
+
+/// A suspended session whose item was closed elsewhere (the close arrived
+/// as a replicated change, with no `item_closed` here) ends on its own node
+/// rather than holding the closed item suspended. Another node's is left to
+/// that node, and one whose item is open stays suspended.
+#[tokio::test]
+async fn a_suspended_session_ends_when_its_item_closes_elsewhere() {
+    let h = harness().await;
+    let closed = new_item(&h, "Fix the invoices", vec![]);
+    let open = new_item(&h, "Fix the receipts", vec![]);
+    h.store.ensure_peer_node("n2").unwrap();
+    for (id, node, item) in [
+        ("here", "n1", &closed),
+        ("peer", "n2", &closed),
+        ("open", "n1", &open),
+    ] {
+        let mut s = session_row(id, node, "personal");
+        s.state = "suspended".into();
+        s.work_item_id = Some(item.id.clone());
+        h.store.insert_session(&s).unwrap();
+    }
+    tracon::corpus::work::close(&h.store, &h.bus, "n2", &closed.id, None).unwrap();
+
+    h.manager.end_closed_suspended().await;
+    let here = h.store.get_session("here").unwrap().unwrap();
+    assert_eq!(here.state, "closed");
+    assert_eq!(here.end_reason.as_deref(), Some("item_close"));
+    assert_eq!(
+        h.store.get_session("peer").unwrap().unwrap().state,
+        "suspended"
+    );
+    assert_eq!(
+        h.store.get_session("open").unwrap().unwrap().state,
+        "suspended"
+    );
+}
+
 /// Changing the approach on a suspended attempt whose work was published
 /// tells the new one where it landed, as a plain Continue does.
 #[tokio::test]

@@ -524,6 +524,16 @@ pub struct Manager {
     /// A restart asked for and waiting: while it waits, new sessions and
     /// new turns are refused.
     restart: Arc<crate::restart::Restart>,
+    /// Held while a continuation is checked and started; see [`Continuing`].
+    continuing: Arc<Mutex<()>>,
+}
+
+/// The manager's continuation guard, held. Every path that carries a session
+/// on looks for an existing continuation and starts its own under it, so the
+/// operator's Continue and a decision carrying a held session on (or two
+/// clicks) cannot each find none and each start one.
+pub(crate) struct Continuing<'a> {
+    _held: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl Manager {
@@ -559,6 +569,13 @@ impl Manager {
             external_checks: Arc::default(),
             told: Arc::default(),
             restart: Arc::default(),
+            continuing: Arc::default(),
+        }
+    }
+
+    pub(crate) async fn continuing(&self) -> Continuing<'_> {
+        Continuing {
+            _held: self.continuing.lock().await,
         }
     }
 
@@ -718,6 +735,16 @@ impl Manager {
     /// what was lost. Offered once per interrupted session; a second
     /// continuation of the same one is refused and names the first.
     pub async fn continue_interrupted(&self, id: &str) -> Result<SessionRow, SessionError> {
+        let held = self.continuing().await;
+        self.continue_interrupted_held(&held, id).await
+    }
+
+    /// `continue_interrupted`, for a caller already holding the guard.
+    pub(crate) async fn continue_interrupted_held(
+        &self,
+        held: &Continuing<'_>,
+        id: &str,
+    ) -> Result<SessionRow, SessionError> {
         let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         let suspended = old.state == SessionState::Suspended.as_str();
         let carried = self.store.carried_reviews(&old.id)?;
@@ -743,7 +770,7 @@ impl Manager {
             }
         };
         let choice = self.store.exhaustion(id)?.map(|row| row.choice());
-        self.continue_work(&old, None, note, told_reviews(&carried), choice)
+        self.continue_work(held, &old, None, note, told_reviews(&carried), choice)
             .await
     }
 
@@ -751,6 +778,7 @@ impl Manager {
     /// fallback), and the harness then follows the new model's credential.
     async fn continue_work(
         &self,
+        _held: &Continuing<'_>,
         old: &SessionRow,
         model: Option<String>,
         note: String,
@@ -818,13 +846,68 @@ impl Manager {
         // A suspended session's work now lives in the new one; the operator
         // asked for that, so the old one ends, saying where it went.
         if suspended {
-            self.end_suspended(
-                &old.id,
-                state::EndReason::Continued,
-                json!({ "continued_as": row.id }),
-            )?;
+            self.hand_over_suspended(&old.id, &row.id).await?;
         }
         Ok(row)
+    }
+
+    /// End the suspended session `old` as continued by `new`. One that ended
+    /// some other way while `new` started (its item closed, or it was
+    /// stopped) is not carried on after all: `new` is stopped again and
+    /// given back what it took over.
+    pub(crate) async fn hand_over_suspended(
+        &self,
+        old: &str,
+        new: &str,
+    ) -> Result<(), SessionError> {
+        if self.end_suspended(
+            old,
+            state::EndReason::Continued,
+            json!({ "continued_as": new }),
+        )? {
+            return Ok(());
+        }
+        let _ = self.stop(new).await;
+        let _ = self.store.hand_over_reviews(new, old);
+        Err(SessionError::Rejected(format!(
+            "session {old} ended while it was being carried on"
+        )))
+    }
+
+    /// A suspended session here whose item has closed ends with it. Closing
+    /// the item ends it at once (`item_closed`), but a close can miss it: one
+    /// sent while it was being suspended reached a supervisor that had
+    /// stopped reading, and one made on another node arrives as a replicated
+    /// change with nothing to end the session that holds it.
+    pub(crate) fn end_if_item_closed(&self, id: &str) -> bool {
+        let Ok(Some(row)) = self.store.get_session(id) else {
+            return false;
+        };
+        if row.node_id != self.node_id || row.state != SessionState::Suspended.as_str() {
+            return false;
+        }
+        let closed = row
+            .work_item_id
+            .as_deref()
+            .and_then(|item| self.store.work_get(item).ok().flatten())
+            .is_some_and(|item| item.state == tracon_sync::work::CLOSED);
+        closed
+            && self
+                .end_suspended(id, EndReason::ItemClose, json!({}))
+                .unwrap_or(false)
+    }
+
+    /// `end_if_item_closed` for every suspended session here.
+    pub async fn end_closed_suspended(&self) {
+        let Ok(rows) = self
+            .store
+            .list_sessions(Some(SessionState::Suspended.as_str()))
+        else {
+            return;
+        };
+        for row in rows.iter().filter(|row| row.node_id == self.node_id) {
+            self.end_if_item_closed(&row.id);
+        }
     }
 
     /// End a suspended session, which has no supervisor to end it: the row
@@ -979,8 +1062,7 @@ impl Manager {
     async fn continue_held_one(&self, old: &SessionRow) -> Option<SessionRow> {
         // The sweep and a decision can both get here for one session; it is
         // carried on once.
-        static CONTINUING: Mutex<()> = Mutex::const_new(());
-        let _one = CONTINUING.lock().await;
+        let held = self.continuing().await;
         let old = self.store.get_session(&old.id).ok().flatten()?;
         if old.state != SessionState::Suspended.as_str() {
             return None;
@@ -993,7 +1075,7 @@ impl Manager {
         let carried = self.store.carried_reviews(&old.id).ok()?;
         let note = held_note(old, &waited, &carried);
         match self
-            .continue_work(old, None, note, told_reviews(&carried), None)
+            .continue_work(&held, old, None, note, told_reviews(&carried), None)
             .await
         {
             Ok(row) => Some(row),
@@ -2738,9 +2820,12 @@ impl Manager {
         let tokens = self.tokens.clone();
         let waits = self.waits();
         let sid = id.to_string();
+        let manager = self.clone();
         tokio::spawn(async move {
             sup.run(events, cmd_rx).await;
             live.lock().await.remove(&sid);
+            // A close sent while it was suspending was never read.
+            manager.end_if_item_closed(&sid);
             waits.forget(&sid);
             // The token dies with the session; a later call with it is refused.
             tokens.lock().await.remove(&sid);
@@ -3059,7 +3144,8 @@ impl Manager {
     /// The item a session holds was closed: record it and end the session
     /// once its turn is over. A suspended one here, which has no turn and no
     /// supervisor, ends now. A session not live here (ended, or another
-    /// node's) is left alone; the close itself has already replicated.
+    /// node's) is left alone; the close itself replicates, and the node that
+    /// owns a suspended one ends it there (`end_closed_suspended`).
     pub async fn item_closed(&self, id: &str, summary: &str) {
         self.record(NewEvent {
             session_id: id.to_string(),
@@ -3647,8 +3733,10 @@ impl Manager {
                 let fallback = row.fallback.clone().unwrap_or_default();
                 let carried = self.store.carried_reviews(&session.id).unwrap_or_default();
                 let note = exhausted_note(&session, Some(&fallback), &carried);
+                let held = self.continuing().await;
                 let result = self
                     .continue_work(
+                        &held,
                         &session,
                         Some(fallback),
                         note,
@@ -3714,8 +3802,10 @@ impl Manager {
                 // model, once the reset has come.
                 let carried = self.store.carried_reviews(&session.id).unwrap_or_default();
                 let note = exhausted_note(&session, None, &carried);
+                let held = self.continuing().await;
                 let result = self
                     .continue_work(
+                        &held,
                         &session,
                         None,
                         note,
