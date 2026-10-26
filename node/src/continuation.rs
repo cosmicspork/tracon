@@ -37,6 +37,8 @@ pub struct Continuation {
     pub workspace: Option<Workspace>,
     pub decisions: Decisions,
     pub evidence: Evidence,
+    /// The request the work was published as, as following it last saw it.
+    pub follow: Option<Followed>,
     /// What the operator may do from here.
     pub actions: Actions,
 }
@@ -111,10 +113,28 @@ pub struct ShownSummary {
     pub created_ms: i64,
 }
 
+/// The request the work's change was published as, from the snapshots
+/// `follow` recorded on its sessions. While it is open the next action is
+/// what it needs; once it is merged, closing the task is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Followed {
+    pub url: String,
+    /// What the forge calls it: `PR #149`, or `MR !12` on GitLab.
+    pub label: String,
+    /// `open`, `merged` or `closed`.
+    pub state: String,
+    /// The checks that failed on the last look, by name.
+    pub failed: Vec<String>,
+    /// Comments and reviews that arrived since the latest attempt started.
+    pub new_comments: u64,
+    /// Changes were requested since the latest attempt started.
+    pub changes_requested: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NextAction {
     /// `done`, `start`, `watch`, `answer`, `resume`, `unblock`, `execute`,
-    /// `continue` or `change_approach`.
+    /// `continue`, `change_approach`, `merge` or `close`.
     pub kind: &'static str,
     pub text: String,
     /// The attempt the action is about, when it is about one.
@@ -123,10 +143,13 @@ pub struct NextAction {
 
 #[derive(Debug, Serialize)]
 pub struct Actions {
-    /// The ended attempt a continuation or a change of approach carries on
-    /// from; `None` while an attempt is live or nothing has run.
+    /// The ended or suspended attempt a continuation or a change of
+    /// approach carries on from; `None` while an attempt is live or nothing
+    /// has run.
     pub continue_from: Option<String>,
     pub abandon: bool,
+    /// The task is open and the operator may close it (`close_task`).
+    pub close: bool,
 }
 
 /// What the next action is derived from: the subject's own state and the
@@ -143,6 +166,8 @@ pub struct Situation<'a> {
     pub open_permissions: i64,
     pub open_questions: i64,
     pub abandoned: bool,
+    /// The request the work was published as, when one is followed.
+    pub follow: Option<Followed>,
 }
 
 /// The latest attempt, as far as the next action reads it.
@@ -187,6 +212,50 @@ fn written_plan(store: &Store, item: &WorkItem) -> Result<Option<String>> {
     Ok(store
         .doc_get(&item.channel, slug)?
         .map(|_| slug.to_string()))
+}
+
+/// What a followed request needs next. "Continue" carries the attempt on;
+/// starting it is the operator's call, never the request's.
+fn follow_next(f: &Followed, latest: Latest<'_>) -> NextAction {
+    let (kind, text) = match f.state.as_str() {
+        "merged" => ("close", format!("{} merged · close the task", f.label)),
+        "closed" => (
+            "continue",
+            format!(
+                "{} was closed without merging · continue, or close the task",
+                f.label
+            ),
+        ),
+        _ if !f.failed.is_empty() => (
+            "continue",
+            format!(
+                "CI failed on {} · continue",
+                f.failed
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        _ if f.changes_requested => (
+            "continue",
+            format!("Changes requested on {} · continue", f.label),
+        ),
+        _ if f.new_comments > 0 => (
+            "continue",
+            format!(
+                "{} new comment{} · continue",
+                f.new_comments,
+                if f.new_comments == 1 { "" } else { "s" }
+            ),
+        ),
+        _ => ("merge", format!("{} is open · merge it", f.label)),
+    };
+    NextAction {
+        kind,
+        text,
+        session_id: Some(latest.id.to_string()),
+    }
 }
 
 /// The one thing to do next, by fixed rules over recorded state.
@@ -241,6 +310,13 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
                 Some(latest),
             );
         }
+        // A suspended attempt waits on its request, and so does a live one
+        // whose request is no longer open: the request says what is next.
+        if let Some(f) = &s.follow {
+            if state == SessionState::Suspended || f.state != "open" {
+                return follow_next(f, latest);
+            }
+        }
         if state == SessionState::Paused {
             return at(
                 "resume",
@@ -272,6 +348,24 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
             format!("Waits on {}.", s.item_blockers.join(", ")),
             Some(latest),
         );
+    }
+    // A session that failed says so while its request is still open; once
+    // the request merged or closed, that is what matters.
+    let failed = latest.end_reason.is_some_and(|r| {
+        ![
+            EndReason::PhaseDone,
+            EndReason::ItemClose,
+            EndReason::Continued,
+        ]
+        .iter()
+        .any(|ok| r == ok.as_str())
+    });
+    if let Some(f) = s
+        .follow
+        .as_ref()
+        .filter(|f| latest.phase != "plan" && (!failed || f.state != "open"))
+    {
+        return follow_next(f, latest);
     }
     let reason = latest.end_reason.unwrap_or_default();
     let is = |r: EndReason| reason == r.as_str();
@@ -437,7 +531,9 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
         Some(item) => written_plan(store, item)?.is_some(),
         None => false,
     };
+    let follow = followed(store, &ids, latest.map_or(0, |l| l.created_ms))?;
     let next = next_action(&Situation {
+        follow: follow.clone(),
         item_closed,
         item_blockers,
         item_planned,
@@ -488,8 +584,11 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
     }
 
     let terminal = latest.is_some_and(|l| SessionState::from_stored(&l.state).is_terminal());
+    // A suspended attempt is carried on as an ended one is: what brings it
+    // back (a CI failure, a review comment) is the operator's to act on.
+    let suspended = latest.is_some_and(|l| l.state == SessionState::Suspended.as_str());
     let continuable = latest.filter(|l| {
-        terminal
+        (terminal || suspended)
             && !continued
             && !item_closed
             && !abandoned
@@ -499,6 +598,7 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
     let actions = Actions {
         continue_from: continuable.map(|l| l.id.clone()),
         abandon: !item_closed && !abandoned && (item.is_some() || !attempts.is_empty()),
+        close: item.is_some() && !item_closed,
     };
 
     Ok(Some(Continuation {
@@ -532,7 +632,53 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
             answered: store.decisions_of_sessions(&ids)?,
         },
         evidence: Evidence { reviews, shown },
+        follow,
         actions,
+    }))
+}
+
+/// The request these attempts' work was published as, as `follow` last saw
+/// it: the one looked at most recently. What is new is measured from the
+/// last look before `since`, when the latest attempt started, or from the
+/// first look, which is what the request already was when following began.
+fn followed(store: &Store, ids: &[String], since: i64) -> Result<Option<Followed>> {
+    let looks = store.forge_follows_of_sessions(ids)?;
+    let Some((publication, _, last)) = looks.last() else {
+        return Ok(None);
+    };
+    let snapshot = |payload: &serde_json::Value| {
+        serde_json::from_value::<crate::follow::Snapshot>(payload["snapshot"].clone()).ok()
+    };
+    let Some(now) = snapshot(last) else {
+        return Ok(None);
+    };
+    let of_it: Vec<_> = looks.iter().filter(|(p, ..)| p == publication).collect();
+    let before = of_it
+        .iter()
+        .rev()
+        .find(|(_, at, _)| *at <= since)
+        .or(of_it.first())
+        .and_then(|(_, _, payload)| snapshot(payload))
+        .unwrap_or_default();
+    let url = last["url"].as_str().unwrap_or_default().to_string();
+    let label = match crate::follow::number_of(&url) {
+        Some(n) if url.contains("/merge_requests/") => format!("MR !{n}"),
+        Some(n) => format!("PR #{n}"),
+        None => "The request".to_string(),
+    };
+    let changes = |s: &crate::follow::Snapshot| s.decision.as_deref() == Some("changes_requested");
+    Ok(Some(Followed {
+        url,
+        label,
+        failed: now
+            .checks
+            .iter()
+            .filter(|(_, verdict)| *verdict == "failed")
+            .map(|(name, _)| name.clone())
+            .collect(),
+        new_comments: now.comments.saturating_sub(before.comments),
+        changes_requested: changes(&now) && !changes(&before),
+        state: now.state,
     }))
 }
 
@@ -601,6 +747,56 @@ mod tests {
             ..Default::default()
         });
         assert!(n.text.ends_with("execute it."), "{}", n.text);
+    }
+
+    /// A published change's request says what is next while the attempt
+    /// waits on it; a live attempt still working is watched, until the
+    /// request is merged or closed under it.
+    #[test]
+    fn the_next_action_follows_the_published_request() {
+        let pr = |state: &str| Followed {
+            url: "https://github.test/o/r/pull/149".into(),
+            label: "PR #149".into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let suspended = row("suspended", None, "execute", None);
+        let with = |f: Followed, latest| {
+            next(Situation {
+                is_item: true,
+                latest: Some(latest),
+                follow: Some(f),
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            with(pr("open"), suspended).text,
+            "PR #149 is open · merge it"
+        );
+        let n = with(
+            Followed {
+                changes_requested: true,
+                new_comments: 2,
+                ..pr("open")
+            },
+            suspended,
+        );
+        assert_eq!(n.text, "Changes requested on PR #149 · continue");
+        assert_eq!(n.kind, "continue");
+        let n = with(pr("closed"), suspended);
+        assert!(n.text.contains("closed without merging"), "{}", n.text);
+        let running = row("running", None, "execute", None);
+        assert_eq!(with(pr("open"), running).kind, "watch");
+        assert_eq!(with(pr("merged"), running).kind, "close");
+        // An item the operator closed is done, whatever the request says.
+        let n = next(Situation {
+            is_item: true,
+            item_closed: true,
+            latest: Some(suspended),
+            follow: Some(pr("open")),
+            ..Default::default()
+        });
+        assert_eq!(n.kind, "done");
     }
 
     #[test]
@@ -732,10 +928,12 @@ pub struct CarryOn {
     pub harness: Option<String>,
 }
 
-/// Continue the work from an ended attempt, or continue it with a changed
-/// approach: a new session on the same workspace, branch and item, with the
-/// lineage on its row and a handoff that says what it carries on and what it
-/// does not inherit. Once per attempt, like every continuation.
+/// Continue the work from an ended or suspended attempt, or continue it with
+/// a changed approach: a new session on the same workspace, branch and item,
+/// with the lineage on its row and a handoff that says what it carries on and
+/// what it does not inherit. Once per attempt, like every continuation. A
+/// suspended attempt carried on as it was is told where its work landed
+/// (`Manager::continue_interrupted`); either way it then ends, continued.
 pub async fn carry_on(
     manager: &crate::session::Manager,
     ask: CarryOn,
@@ -745,7 +943,8 @@ pub async fn carry_on(
     let old = store
         .get_session(&ask.session_id)?
         .ok_or(SessionError::NotFound)?;
-    if !SessionState::from_stored(&old.state).is_terminal() {
+    let suspended = old.state == SessionState::Suspended.as_str();
+    if !suspended && !SessionState::from_stored(&old.state).is_terminal() {
         return Err(SessionError::Rejected(
             "this session is still live; resume or stop it first".into(),
         ));
@@ -778,6 +977,7 @@ pub async fn carry_on(
         .model
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty());
+    let named_harness = ask.harness.as_deref().is_some_and(|h| !h.trim().is_empty());
     let harness = ask
         .harness
         .map(|h| h.trim().to_string())
@@ -790,6 +990,9 @@ pub async fn carry_on(
                     .any(|id| *id == h.as_str())
             })
         });
+    if suspended && approach.is_none() && model.is_none() && !named_harness {
+        return manager.continue_interrupted(&old.id).await;
+    }
     let plan = match old.work_item_id.as_deref() {
         Some(id) => match store.work_get(id)? {
             Some(item) => written_plan(store, &item)?,
@@ -804,6 +1007,7 @@ pub async fn carry_on(
         .unwrap_or(&old.id)
         .to_string();
     let carried = store.carried_reviews(&old.id)?;
+    let published = store.session_publications(&old.id)?;
     let spec = NewSession {
         channel: old.channel.clone(),
         repo_path: old.repo_path.clone(),
@@ -816,6 +1020,7 @@ pub async fn carry_on(
             approach.as_deref(),
             plan.as_deref(),
             &carried,
+            &published,
         )),
         node_id: Some(old.node_id.clone()),
         // A written plan is carried on by executing it; an unfinished plan
@@ -835,19 +1040,29 @@ pub async fn carry_on(
         on_exhaustion: store.exhaustion(&old.id)?.map(|row| row.choice()),
         told_reviews: crate::session::told_reviews(&carried),
     };
-    manager.create(spec).await
+    let row = manager.create(spec).await?;
+    if suspended {
+        manager.end_suspended(
+            &old.id,
+            EndReason::Continued,
+            serde_json::json!({ "continued_as": row.id }),
+        )?;
+    }
+    Ok(row)
 }
 
 /// The new attempt's first prompt: what it continues, how that ended, that
 /// it inherits the workspace and nothing else, and the operator's changed
 /// approach when there is one. After a written plan, `plan` names it and the
 /// new attempt is told to carry it out. Either way it is told about each
-/// review it takes over, `carried`.
+/// review it takes over, `carried`, and where the old one's work was
+/// `published`.
 fn handoff(
     old: &SessionRow,
     approach: Option<&str>,
     plan: Option<&str>,
     carried: &[crate::store::ReviewRow],
+    published: &[(String, String)],
 ) -> String {
     if let Some(slug) = plan {
         let item = old.work_item_id.as_deref().unwrap_or_default();
@@ -868,6 +1083,9 @@ fn handoff(
         return note;
     }
     let ended = match old.end_reason.as_deref() {
+        None if old.state == SessionState::Suspended.as_str() => {
+            "was suspended, its workspace kept".to_string()
+        }
         Some("node_restart") => "was cut off when its node restarted".to_string(),
         Some("provider_exhausted") => "stopped when its provider was exhausted".to_string(),
         Some("phase_done") => "finished its phase".to_string(),
@@ -894,6 +1112,17 @@ fn handoff(
             "\n\nIt was working on item {item}, which is still open."
         ));
     }
+    if !published.is_empty() {
+        let landed = published
+            .iter()
+            .map(|(_, url)| format!("- {url}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        note.push_str(&format!(
+            "\n\nIts work was published:\n\n{landed}\n\nRead the change on the forge \
+             before changing anything, and carry that change on rather than opening another."
+        ));
+    }
     note.push_str(&crate::session::carried_note(carried));
     if let Some(approach) = approach {
         note.push_str(&format!(
@@ -902,6 +1131,28 @@ fn handoff(
         ));
     }
     note
+}
+
+/// Close the task: the operator's call, made once its change has landed.
+/// The item closes and the session holding it ends: a live one once its turn
+/// is over, a suspended one at once. No session closes its own item.
+pub async fn close_task(
+    manager: &crate::session::Manager,
+    item_id: &str,
+) -> std::result::Result<WorkItem, crate::session::SessionError> {
+    use crate::session::SessionError;
+    let store = manager.store();
+    let item = store.work_get(item_id)?.ok_or(SessionError::NotFound)?;
+    if item.state == tracon_sync::work::CLOSED {
+        return Err(SessionError::Rejected("the task is already closed".into()));
+    }
+    let holder = store.session_holding(item_id)?;
+    let item = crate::corpus::work::close(store, manager.bus(), manager.node_id(), item_id, None)
+        .map_err(|e| SessionError::Rejected(e.to_string()))?;
+    if let Some(h) = holder {
+        manager.item_closed(&h.id, "closed by the operator").await;
+    }
+    Ok(item)
 }
 
 /// Abandon the work: close the item (ending the attempt that holds it), or,

@@ -254,6 +254,7 @@ fn review(id: &str, state: &str) -> ReviewRow {
         ai_verdict_json: None,
         revision_patch: None,
         lane: None,
+        publication_failed: None,
     }
 }
 

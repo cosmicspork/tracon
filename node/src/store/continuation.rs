@@ -54,6 +54,40 @@ impl Store {
         Ok(rows)
     }
 
+    /// Every look `follow` recorded at the requests these sessions published,
+    /// oldest first: the publication it was of, when it was taken, and its
+    /// payload. A look is recorded only when something changed, so there are
+    /// few.
+    pub fn forge_follows_of_sessions(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<(String, i64, serde_json::Value)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT ref_id, at_ms, payload FROM event
+              WHERE kind = '{}' AND ref_id IS NOT NULL AND session_id IN ({})
+              ORDER BY at_ms, seq",
+            crate::session::state::event_kind::FORGE_FOLLOW,
+            placeholders(ids.len())
+        ))?;
+        let rows = stmt
+            .query_map(params_from_iter(ids), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, at, payload)| Some((id, at, serde_json::from_str(&payload).ok()?)))
+            .collect())
+    }
+
     /// The reviews these sessions submitted, oldest first.
     pub fn reviews_of_sessions(&self, ids: &[String]) -> Result<Vec<ReviewRow>> {
         if ids.is_empty() {

@@ -7,11 +7,13 @@
   //
   // The three verbs: continue (carry on from the last attempt's workspace),
   // change approach (the same, with the operator's new direction handed to the
-  // next attempt), abandon (close the item, or put a plain lineage away).
+  // next attempt), abandon (close the item, or put a plain lineage away). Once
+  // the followed request is merged, closing the task is the next action, and
+  // it is offered here first.
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
-  import { attemptState, carries, verbs } from '../lib/continuation'
+  import { attemptState, carries, closeOffer, verbs } from '../lib/continuation'
   import { formatAge, formatTokens } from '../lib/format'
   import { router } from '../lib/router.svelte'
   import type { Continuation } from '../lib/types'
@@ -51,6 +53,7 @@
   })
 
   const can = $derived(view ? verbs(view) : { continue: false, changeApproach: false, abandon: false })
+  const closing = $derived(view?.kind === 'item' && view.next.kind === 'close' ? closeOffer(view) : null)
 
   async function act(run: () => Promise<void>) {
     if (busy) return
@@ -73,6 +76,15 @@
         approach: withApproach ? approach.trim() : undefined,
       })
       router.go(`/sessions/${next.id}`)
+    })
+  }
+  function closeTask() {
+    if (!view) return
+    const id = view.id
+    return act(async () => {
+      await api.closeTask(id)
+      await load()
+      onchange?.()
     })
   }
   function abandon() {
@@ -103,16 +115,22 @@
       {#if view.next.session_id && ['watch', 'answer', 'resume'].includes(view.next.kind) && view.next.session_id !== sessionId}
         <a class="lnk" href="/sessions/{view.next.session_id}">Open</a>
       {/if}
+      {#if view.follow && view.follow.state === 'open'}
+        <a class="lnk" href={view.follow.url} target="_blank" rel="noreferrer">{view.follow.label}</a>
+      {/if}
     </div>
 
     {#if view.blockers.length}
       <div class="row"><span class="h5">In the way</span><span>{view.blockers.join(' · ')}</span></div>
     {/if}
 
-    {#if can.continue || can.changeApproach || can.abandon}
+    {#if closing || can.continue || can.changeApproach || can.abandon}
       <div class="verbs">
+        {#if closing}
+          <button class="btn p" disabled={busy} onclick={closeTask}>Close task</button>
+        {/if}
         {#if can.continue}
-          <button class="btn p" disabled={busy} onclick={() => carryOn(false)}>Continue</button>
+          <button class="btn" class:p={!closing} disabled={busy} onclick={() => carryOn(false)}>Continue</button>
         {/if}
         {#if can.changeApproach}
           <button class="btn" class:p={!can.continue} disabled={busy} onclick={() => (mode = mode === 'approach' ? '' : 'approach')}
