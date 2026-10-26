@@ -58,29 +58,22 @@ pub fn definitions(browser: bool) -> Vec<Value> {
             "name": SUBMIT,
             "description": format!(
                 "Submit the current branch for human review. The node captures the diff \
-                 from the worktree, so commit your work first. In a session the node then runs \
-                 the repository's required checks; it waits for them for up to `wait_secs` \
-                 ({MAX_WAIT_SECS} at most), and checks that take longer keep running on the \
-                 node while this returns `state: \"checking\"` with the review_id to pass to \
-                 review_status, which waits for them and then for the verdict. Submitting the \
-                 same commit again while its checks run returns the same review_id and starts \
-                 nothing. Nothing is published until a human approves; call review_status to \
-                 wait for the verdict. Resubmit with the same review_id after making changes, \
-                 including after checks failed. A harness you \
-                 run yourself passes `worktree`: the absolute path of a worktree whose \
-                 repository is under the node's [external] repo_roots; its branch is \
-                 what gets pushed. Without `change`, approval opens a new pull/merge \
-                 request described by `forge.description`, or by `title` and `body` when \
-                 that is absent. With `change`, approval pushes to that open change's \
-                 branch and sends only what `forge` asks for: a replacement description, \
-                 a comment, both, or neither. Whatever reaches the forge is read by the \
-                 repository's own reviewers, who have never heard of this node: write it \
-                 for them (what changed, why, trade-offs, follow-ups, how it was \
-                 verified), do not address the operator in it, and do not name tracon, \
-                 the node, its tools, or where screenshots and other evidence are \
-                 attached. What is for the operator alone (a screenshot, what you tried, \
-                 what to look at after it deploys) goes to `show_work`, which never \
-                 reaches the forge."
+                 from the worktree, so commit first. In a session the node then runs the \
+                 repository's required checks, waiting up to `wait_secs` ({MAX_WAIT_SECS} at \
+                 most); checks that take longer run on while this returns `state: \"checking\"` \
+                 and the review_id review_status waits on. Nothing is published until a human \
+                 approves. Resubmit with the same review_id after changes, including after \
+                 checks failed; the same commit again while its checks run returns the same \
+                 review. A harness you run yourself passes `worktree`: the absolute path of a \
+                 worktree whose repository is under the node's [external] repo_roots; its branch \
+                 is what gets pushed. Without `change`, approval opens a new pull/merge request \
+                 described by `forge.description`, or else by `title` and `body`. With `change`, \
+                 approval pushes to that change's branch and sends only what `forge` asks for. \
+                 Whatever reaches the forge is read by the repository's own reviewers, who have \
+                 never heard of this node: write it for them (what changed, why, trade-offs, \
+                 follow-ups, how it was verified), do not address the operator, and do not name \
+                 tracon, the node, its tools, or where evidence is attached. What is for the \
+                 operator alone goes to `show_work`, which never reaches the forge."
             ),
             "inputSchema": {
                 "type": "object",
@@ -90,7 +83,7 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                     "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups, verification. The pull/merge request's description unless `forge.description` gives one, so written for the repository's reviewers, not the operator." },
                     "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "In a session on a GitHub or GitLab repository, defaults to that repository's forge; required outside a session." },
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab. In a session on a GitHub or GitLab repository, defaults to that repository; required outside a session. Give both or neither when publishing somewhere else." },
-                    "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, and on a resubmission to the base it was last submitted with. A resubmission may name another base until its change is opened; after that the base is moved on the forge. Resubmitting a commit still waiting for a verdict with another base is such a resubmission, not a retry." },
+                    "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, or on a resubmission to the base it was last submitted with. Naming another base on a resubmission moves the change's base." },
                     "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested, or after it was published to update the change it opened." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
                     "wait_secs": {
@@ -101,7 +94,7 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                              Defaults to {MAX_WAIT_SECS}. The checks run on either way."
                         ),
                     },
-                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it). Approval pushes to that change's branch instead of opening a new one. Fixed by the first submit of a review; a review that opened a change updates it without this." },
+                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it), to push to instead of opening a new one. Fixed by a review's first submit; a review that opened its change needs no `change`." },
                     "forge": {
                         "type": "object",
                         "description": "What the forge shows besides the commits. Omit for a new change to describe it with title and body; omit for an existing change to push only.",
@@ -119,9 +112,9 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                             "draft": { "type": "boolean", "description": "Open the new change as a draft. Not for an existing change." },
                         },
                     },
-                    "message": { "type": "string", "description": "The commit message the change ships with. By default the node pushes one commit holding exactly the reviewed tree, carrying this message; a repository set to keep its commits pushes yours as written. Either way the operator sees and may edit it. Omitted, the squash carries the message of your one commit beyond the base (or beyond what the change's branch holds), and that commit itself ships, with its SHA and signature, when it sits directly on it; with several such commits `message` is required. The title, body and forge description never become the commit message. A message other than your commit's own ships a new, unsigned commit. The result says what ships: `ships` (\"own\" or \"new\"), `commit_message`, and `drops_signatures`, the signed commits a new commit replaces; resubmit with `message` to change it before the operator decides." },
-                    "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title when that is the node's placeholder. Fixed by the first submit of a review. An existing change is pushed to its own branch whatever your worktree's is called." },
-                    "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds: the change's head, or for a branch pushed before its change opened, whatever the branch holds now. Forced only over what it held at submit, and always approved by the operator." },
+                    "message": { "type": "string", "description": "The commit message the change ships with; the title, body and forge description never become it. Omitted, it is your one commit's own message, and that commit ships as it is, SHA and signature, when it sits directly on the base; with several commits beyond the base, `message` is required. Another message ships one new, unsigned commit of the reviewed tree (a repository set to keep its commits pushes them as written). The operator may edit it; the result says what ships (`ships`, `commit_message`, `drops_signatures`)." },
+                    "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title. Fixed by a review's first submit; an existing change is pushed to its own branch." },
+                    "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds, only over what it held at submit and always approved by the operator." },
                 },
                 "required": ["title", "body", "provider", "project"],
             },

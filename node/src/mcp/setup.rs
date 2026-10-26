@@ -84,14 +84,23 @@ pub fn definitions() -> Vec<Value> {
         "type": "integer",
         "description": format!("How long to block, up to {}. 0 returns at once.", super::wait::MAX_WAIT_SECS),
     });
+    // The same fields as a trial, said once there: a proposal follows a
+    // trial, so the session has already loaded what each one means.
     let mut propose_properties = entry_properties();
+    for (name, property) in propose_properties.as_object_mut().unwrap() {
+        if name != "checks" {
+            property.as_object_mut().unwrap().remove("description");
+        }
+    }
+    propose_properties["checks"]["description"] =
+        json!("The commands that must pass before a change is reviewed.");
     propose_properties["why"] = json!({
         "type": "string",
         "description": "What the trial showed, and anything you could not settle, in a few sentences the operator will read.",
     });
     propose_properties["run_notes"] = json!({
         "type": "string",
-        "description": "Optional: how to run the application and give it data, as plain text for the next session — the command that starts it, what it listens on, the seed or fixture that gives it data. Only what you saw work. Once the operator allows the proposal, these become a standing note on this channel, read by every session on it.",
+        "description": "Optional: how to run the application and give it data, only as you saw it work. Once allowed, a standing note every session on this channel reads.",
     });
     propose_properties["repo"] = json!({
         "type": "string",
@@ -100,47 +109,42 @@ pub fn definitions() -> Vec<Value> {
     vec![
         json!({
             "name": DRAFT,
-            "description": "Draft this repository's `[[repo]]` entry — the image its checks run in, the \
-                preparation that installs its dependencies, the checks that must pass before a change \
-                is reviewed, and what preparation may reach — from what its default branch already \
-                holds: a devcontainer, lockfiles, a `just check` recipe or `package.json` scripts, \
-                Cargo. Returns the draft, where each field came from, notes on what it could not \
-                settle, and the entry the node holds now. Hosts the operator opened to this session \
-                (`request_egress`) are suggested in `egress`. Then try the draft with repo_setup_try, \
-                fix what fails, and propose it with repo_setup_propose. How to run the application \
-                and give it data is not part of the entry; propose it alongside as `run_notes`, \
-                which become the operator's standing notes on this channel.",
+            "description": "Draft this repository's `[[repo]]` entry (its image, preparation, \
+                checks and egress) from what its default branch holds: a devcontainer, lockfiles, \
+                a `just check` recipe, `package.json` scripts, Cargo. Returns the draft, where each \
+                field came from, what it could not settle, and the entry the node holds now. Hosts \
+                the operator opened to this session are suggested in `egress`. The repo-setup skill \
+                says how to try and propose it.",
             "inputSchema": { "type": "object", "properties": {} },
         }),
         json!({
             "name": TRY,
             "description": format!(
-                "Try an entry in a fresh container: the default branch, prepared as `prepare` says \
-                 with a cache of its own, then each check on a copy of the result with no network \
-                 and the cache read-only — the way required checks run. Give the fields to try, or \
-                 none to try the draft. Preparation reaches only the `egress` hosts this session can \
-                 already reach; the rest are listed in `egress_not_tried`, and asking for one with \
-                 request_egress is how it becomes reachable (and suggested in the next draft). A \
-                 `dockerfile` is tried in the image built from it on the default branch, reused when \
-                 this node already built the same Dockerfile and context. Building one is the \
-                 operator's to allow: the call then returns `awaiting_operator` with an approval_id, \
-                 approval_status gives the started trial once they allow it, and its `build` step \
-                 says how the build went. Returns the trial: `running` (call again with its \
-                 `trial_id`), `passed`, or `failed` with each step's exit and the end of its \
-                 output. One trial runs per session at a time. {}",
+                "Try an entry the way required checks run: the default branch in a fresh \
+                 container, prepared as `prepare` says, then each check on a copy with no network \
+                 and the cache read-only. Give the fields to try, or none to try the draft. \
+                 Preparation reaches only hosts this session can already reach; the rest are \
+                 listed in `egress_not_tried`, and request_egress asks for one. Building a \
+                 `dockerfile` this node has not built before is the operator's to allow, and \
+                 approval_status then gives the started trial. {} Returns `running` (call again \
+                 with its `trial_id`), `passed`, or `failed` with each step's exit and the end of \
+                 its output. One trial runs per session at a time. {}",
+                super::aside::ASKED,
                 super::wait::pointer()
             ),
             "inputSchema": { "type": "object", "properties": try_properties },
         }),
         json!({
             "name": PROPOSE,
-            "description": "Propose this repository's `[[repo]]` entry to the operator, who answers on a \
-                card and may edit it first; the node writes it when they allow it, never before. It \
-                replaces the entry the node holds for this repository now, and keeps whether that \
-                entry opens its egress to sessions. Returns `awaiting_operator` with an approval id \
-                at once: read the answer with approval_status. Try the entry first and say what the \
-                trial showed in `why`. You cannot waive a check by leaving it out: the operator reads \
-                the list against what the repository holds.",
+            "description": format!(
+                "Propose this repository's `[[repo]]` entry, with repo_setup_try's fields, to the \
+                 operator, who may edit it on the card. The node writes it only once they allow \
+                 it, replacing the entry it holds now and keeping whether that entry opens its \
+                 egress to sessions. Try it first and say in `why` what the trial showed. Leaving \
+                 a check out does not waive it: the operator reads the list against what the \
+                 repository holds. The operator is always asked. {}",
+                super::aside::ASKED
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": propose_properties,

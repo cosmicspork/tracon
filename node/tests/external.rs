@@ -228,6 +228,10 @@ async fn an_attachment_is_offered_the_channels_tools_but_not_a_review_sessions_v
         );
     }
     assert!(!names.contains(&"review_verdict".to_string()), "{names:?}");
+    // What only works inside the boundary is not shown outside it.
+    for refused in ["request_egress", "repo_setup_try", "service_start"] {
+        assert!(!names.contains(&refused.to_string()), "{names:?}");
+    }
 
     let (_, v) = mcp(
         &h.operator,

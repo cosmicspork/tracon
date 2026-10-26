@@ -334,9 +334,10 @@ impl Tools {
 
     /// What an external harness is not offered: a verdict and findings are
     /// what a review session the node started gives on someone else's change,
-    /// and the brief
-    /// and criteria tools read and write the item a session holds, which an
-    /// external harness never does.
+    /// and the brief and criteria tools read and write the item a session
+    /// holds, which an external harness never does. Nor does it run behind
+    /// the node's proxy, beside the node's services, or in a repository the
+    /// node can set up: those tools refuse it, so it is not shown them.
     pub const NOT_EXTERNAL: &'static [&'static str] = &[
         review::VERDICT,
         review::FINDING,
@@ -344,6 +345,12 @@ impl Tools {
         work::BRIEF_NOTE,
         work::CRITERIA_READ,
         work::CRITERIA_LINK,
+        egress::REQUEST,
+        services::START,
+        services::STATUS,
+        setup::DRAFT,
+        setup::TRY,
+        setup::PROPOSE,
     ];
 
     /// Tool definitions for a channel, narrowed to what `audience` is offered.
