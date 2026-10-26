@@ -305,6 +305,32 @@ impl Tools {
         review::VERDICT,
     ];
 
+    /// What a session of each phase calls on most turns, marked
+    /// `anthropic/alwaysLoad` so a harness that defers MCP tools behind a
+    /// search (Claude Code, `adapter::claude`) keeps these loaded: each
+    /// deferred tool costs a round trip the first time it is called, and these
+    /// are the ones a session cannot do its job without. Everything else is
+    /// named to the model and loaded when it asks. Kept short: every one is
+    /// sent whole on every request.
+    pub fn always_loaded(phase: crate::session::Phase) -> &'static [&'static str] {
+        use crate::session::Phase;
+        match phase {
+            Phase::Plan => &[
+                docs::DOC_WRITE,
+                docs::DOC_READ,
+                memory::RECALL,
+                operator::ASK,
+            ],
+            Phase::Execute => &[review::SUBMIT, review::STATUS, show::SHOW, operator::ASK],
+            Phase::Review => &[
+                review::VERDICT,
+                review::FINDING,
+                work::CRITERIA_READ,
+                show::SHOW,
+            ],
+        }
+    }
+
     /// What an external harness is not offered: a verdict and findings are
     /// what a review session the node started gives on someone else's change,
     /// and the brief
@@ -1080,7 +1106,16 @@ impl Tools {
     /// repository is not required to name it to that forge's tools, since the
     /// call defaults to it; an external caller has no repository to default to.
     pub fn list_offered(&self, ctx: &CallContext) -> Vec<Value> {
-        let mut all = self.list_for(&ctx.channel, &ctx.node_id, self.audience(ctx));
+        let audience = self.audience(ctx);
+        let mut all = self.list_for(&ctx.channel, &ctx.node_id, audience);
+        if let Audience::Session(phase) = audience {
+            let core = Self::always_loaded(phase);
+            for tool in &mut all {
+                if tool["name"].as_str().is_some_and(|n| core.contains(&n)) {
+                    tool["_meta"] = json!({ "anthropic/alwaysLoad": true });
+                }
+            }
+        }
         if !ctx.is_external() {
             if let Some(repo) = self.session_forge_repo(ctx) {
                 for tool in &mut all {

@@ -98,12 +98,30 @@ impl ClaudeAdapter {
     /// with no route out. `Skill` stays so the manifest's skills load.
     /// `AskUserQuestion` is left out on purpose: nobody can answer it
     /// headless, and `ask_operator` is the route to the operator.
-    const DEFAULT_TOOLS: &'static [&'static str] =
-        &["Bash", "Read", "Edit", "Write", "TaskStop", "Skill"];
+    /// `ToolSearch` is [`Self::TOOL_SEARCH`].
+    const DEFAULT_TOOLS: &'static [&'static str] = &[
+        "Bash",
+        "Read",
+        "Edit",
+        "Write",
+        "TaskStop",
+        "Skill",
+        "ToolSearch",
+    ];
+
+    /// The built-in that loads deferred tools. With it named in `--tools` and
+    /// [`TOOL_SEARCH_ENV`] set, the node's MCP tools reach the model by name
+    /// only, and a definition is sent once the model asks for it: about 57 K
+    /// characters of definitions a request become 10 K for an execute
+    /// session (measured against 2.1.295). Either half alone loads them all
+    /// up front. It is added to an operator's own list too: it decides how
+    /// the node's tools are loaded, not what the session may do.
+    const TOOL_SEARCH: &'static str = "ToolSearch";
 
     /// The built-ins for `--tools`: the operator's own list when it names
     /// any, by tool name (`Bash(git:*)` is `Bash`; the node's MCP tools are
-    /// not built-ins), and [`Self::DEFAULT_TOOLS`] otherwise.
+    /// not built-ins), and [`Self::DEFAULT_TOOLS`] otherwise; always with
+    /// [`Self::TOOL_SEARCH`].
     fn builtin_tools(configured: &[String]) -> Vec<String> {
         let mut named: Vec<String> = Vec::new();
         for tool in configured {
@@ -114,10 +132,12 @@ impl ClaudeAdapter {
             named.push(name.to_string());
         }
         if named.is_empty() {
-            Self::DEFAULT_TOOLS.iter().map(|t| t.to_string()).collect()
-        } else {
-            named
+            return Self::DEFAULT_TOOLS.iter().map(|t| t.to_string()).collect();
         }
+        if !named.iter().any(|n| n == Self::TOOL_SEARCH) {
+            named.push(Self::TOOL_SEARCH.into());
+        }
+        named
     }
 
     /// The argv for a headless session.
@@ -192,6 +212,7 @@ impl ClaudeAdapter {
         // other value reaches the harness from anywhere.
         let mut env = spec.env.clone();
         env.push(("BUN_OPTIONS".into(), String::new()));
+        env.push((TOOL_SEARCH_ENV.into(), "true".into()));
         RunnerCommand {
             argv,
             env,
@@ -202,6 +223,17 @@ impl ClaudeAdapter {
         }
     }
 }
+
+/// Tool search, on. Claude Code turns it off by default when
+/// `ANTHROPIC_BASE_URL` is not an Anthropic host, as the gateway never is,
+/// until 2.1.304; the gateway forwards the `defer_loading` fields,
+/// `tool_reference` blocks and `anthropic-beta` flag it needs. `true` and not
+/// `auto`: auto counts the definitions against a share of the context window,
+/// which the node's tools stay under while still costing every request.
+/// 2.1.304 itself breaks every request behind a gateway when `ToolSearch` is
+/// missing from `--tools` (fixed in 2.1.305), which [`ClaudeAdapter::TOOL_SEARCH`]
+/// being always named also avoids.
+const TOOL_SEARCH_ENV: &str = "ENABLE_TOOL_SEARCH";
 
 /// The model as Claude Code names it. The node's picker spells models
 /// `provider/id` (that is how tracon-agent takes them), and Claude Code passes its
@@ -1068,7 +1100,15 @@ mod tests {
         let offered: Vec<&str> = argv[at + 1].split(',').collect();
         assert_eq!(
             offered,
-            ["Bash", "Read", "Edit", "Write", "TaskStop", "Skill"]
+            [
+                "Bash",
+                "Read",
+                "Edit",
+                "Write",
+                "TaskStop",
+                "Skill",
+                "ToolSearch"
+            ]
         );
         assert!(!offered.contains(&"AskUserQuestion"));
 
@@ -1083,9 +1123,29 @@ mod tests {
         ];
         let argv = ClaudeAdapter::cmd("c", &configured, "sid").argv;
         let at = argv.iter().position(|a| a == "--tools").unwrap();
-        assert_eq!(argv[at + 1], "Bash,Read");
+        assert_eq!(argv[at + 1], "Bash,Read,ToolSearch");
         let at = argv.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(argv[at + 1], "Bash(git:*),Bash,Read,mcp__tracon__recall");
+    }
+
+    /// The node's tools are deferred behind tool search, which takes both the
+    /// built-in and the variable: either alone loads every definition up
+    /// front behind the gateway.
+    #[test]
+    fn the_nodes_tools_are_deferred_behind_tool_search() {
+        let cmd = ClaudeAdapter::cmd("c", &spec(), "sid");
+        assert!(
+            cmd.env
+                .iter()
+                .any(|(name, value)| name == "ENABLE_TOOL_SEARCH" && value == "true"),
+            "{:?}",
+            cmd.env
+        );
+        let mut configured = spec();
+        configured.tools = vec!["Bash".into(), "ToolSearch".into()];
+        let argv = ClaudeAdapter::cmd("c", &configured, "sid").argv;
+        let at = argv.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(argv[at + 1], "Bash,ToolSearch", "named once");
     }
 
     /// The manifest's skills reach Claude Code as a sealed plugin the argv
