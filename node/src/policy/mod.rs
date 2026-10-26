@@ -677,7 +677,7 @@ pub struct UnattendedCommands {
     pub any: bool,
 }
 
-/// The five working agreements, as the node would enforce them. Shipped as the
+/// The working agreements, as the node would enforce them. Shipped as the
 /// starting bundle so the rules exist as data from the first run rather than as
 /// prose somewhere an agent may or may not read.
 pub const WORKING_AGREEMENTS: &str = include_str!("working-agreements.toml");
@@ -981,12 +981,12 @@ mod tests {
         assert_eq!(d.verdict, Verdict::Deny);
         let args = serde_json::json!({
             "title": "fix", "body": "x", "provider": "github", "project": "o/r",
-            "forge": { "comment": "x", "target": "gh pr merge" },
+            "forge": { "comment": "x", "target": "git push" },
         });
         let d = p.decide(&tool("submit_review", &args, "submit_review"));
         assert_eq!(d.verdict, Verdict::Deny);
         // A tool with no narrative fields is matched in full.
-        let args = serde_json::json!({ "project": "group/app", "ref": "gh pr merge" });
+        let args = serde_json::json!({ "project": "group/app", "ref": "git push" });
         let d = p.decide(&tool("pipeline_run", &args, "pipeline_run"));
         assert_eq!(d.verdict, Verdict::Deny);
     }
@@ -1043,7 +1043,7 @@ mod tests {
         for (name, args) in [
             (
                 "issue_comment",
-                serde_json::json!({ "key": "gh pr merge", "body": "x" }),
+                serde_json::json!({ "key": "git push", "body": "x" }),
             ),
             (
                 "issue_create",
@@ -1163,12 +1163,18 @@ mod tests {
         );
     }
 
+    /// A session holds no forge or tracker credential, so a merge or a
+    /// transition run from its shell fails on its own; the bundle no longer
+    /// names those lines, and the brokered tools that do either are asked.
     #[test]
-    fn merging_is_refused() {
-        for cmd in ["gh pr merge 12", "glab mr merge 12", "GLAB MR MERGE 12"] {
+    fn merging_or_transitioning_from_the_shell_is_no_longer_named() {
+        for cmd in [
+            "gh pr merge 12",
+            "glab mr merge 12",
+            "acli jira workitem transition PROJ-25",
+        ] {
             let d = policy().decide(&req(cmd, "work"));
-            assert_eq!(d.verdict, Verdict::Deny, "{cmd}");
-            assert!(d.reason.unwrap().to_lowercase().contains("merg"));
+            assert_eq!(d.rule_id.as_deref(), Some("boundary-shell"), "{cmd}");
         }
     }
 
@@ -1187,12 +1193,6 @@ mod tests {
                 "{cmd}"
             );
         }
-    }
-
-    #[test]
-    fn transitioning_a_ticket_is_refused() {
-        let d = policy().decide(&req("acli jira workitem transition PROJ-25", "work"));
-        assert_eq!(d.verdict, Verdict::Deny);
     }
 
     #[test]
@@ -1432,7 +1432,6 @@ mod tests {
                 "review-before-publish",
             ),
             ("cd /work && gh pr create --fill", "review-before-publish"),
-            ("gh pr merge 12 --squash", "no-merge"),
             ("cat x > .claude/settings.json", "harness-settings"),
         ] {
             let d = policy().decide(&req(cmd, "work"));

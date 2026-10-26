@@ -386,8 +386,8 @@ mod tests {
         // One rule flipped from deny to allow: exactly the edit signing exists
         // to catch.
         let tampered = WORKING_AGREEMENTS.replacen(
-            "id = \"no-merge\"\nverdict = \"deny\"",
-            "id = \"no-merge\"\nverdict = \"allow\"",
+            "id = \"review-before-publish\"\nverdict = \"deny\"",
+            "id = \"review-before-publish\"\nverdict = \"allow\"",
             1,
         );
         assert_ne!(
@@ -486,7 +486,7 @@ mod tests {
             action: "bash",
             kind: Some("execute"),
             resource: None,
-            command: Some("gh pr merge 12"),
+            command: Some("git push origin HEAD"),
             arguments: None,
             doc_kinds: None,
         });

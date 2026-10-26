@@ -414,12 +414,17 @@ plan document, carry it out following its plan, or review this change), so start
 work is one action; a plain session waits for the prompt you give it.
 
 It has two parts, and the split is the point. The **system orientation** is
-tracon's own account of the installation: this node and its harness, the work item
-and its phase, the brief it points at, the plan or the diff under review, the tool
-names this channel actually serves, and the working agreements the node enforces —
-including the fact that a refusal comes back as the rule's reason rather than as an
-auth error. It is generated from the node's own state, so it cannot describe a tool
-that does not exist or an agreement that is not enforced.
+tracon's own account of the installation. It opens with the work: the item and its
+phase, what the phase must produce, the brief it points at, and the plan. Then the
+environment: the node and its harness, the worktree and repository, the network the
+session may reach and how its dependencies were prepared. Then how to work with the
+node: the tools this channel actually serves, grouped by purpose (a harness that
+defers tool definitions shows the model only their names, so this is its map), how
+a call the operator decides and a wait answer, and the rules the node refuses
+outright, including the fact that a refusal comes back as the rule's reason rather
+than as an auth error. A review session's evidence and diff follow. It is generated
+from the node's own state, so it cannot describe a tool that does not exist or an
+agreement that is not enforced.
 
 **Operator notes** are the other part: your standing text for a channel, under its
 own heading, marked as yours rather than tracon's. Set them in **Settings →
@@ -428,11 +433,13 @@ replaces it — or over the API with `PUT /api/manifest/text` (`kind =
 "instruction"`). They reach every session launched on that channel from the next
 launch onward; a running session keeps the manifest revision it staged.
 
-Documents of kind `guide` in a channel's corpus follow as **Channel guides**. They
-are discretionary: the node includes them, shortest first, only as far as the
-session's context budget allows, and says so. Everything the budget kept out is
-named at the end of the orientation with the call that fetches it, so a session can
-ask for what it did not get.
+Documents you select for a work item follow as **Selected context**, and documents
+you pin to a channel as **Pinned documents**, in full. Your directives, and confident
+facts about the session's own project, are under **Known**; a fact retained for the
+whole channel is left to `recall`. The other ready work on the project is
+discretionary: it is included only as far as the session's context budget allows.
+Everything left out is named at the end of the orientation with the call that
+fetches it, so a session can ask for what it did not get.
 
 ### Review before publish
 
@@ -1474,8 +1481,10 @@ The shipped bundle lets the boundary do the containing. Inside a session's
 container, reading, editing and running shell commands go unasked: the container
 has no route out but the egress it is granted and no credentials, and nothing it
 makes reaches anyone until you approve the diff. What the bundle guards is what
-crosses that boundary or speaks in your name. It refuses publishing, merging and
-moving a ticket anywhere in a line. It also refuses an edit
+crosses that boundary or speaks in your name. It refuses publishing (`git push`,
+`gh pr create` and the like) anywhere in a line; a session holds no forge or tracker
+credential, and merging or moving a ticket is left to the brokered tools, which are
+asked and need a narrow authority grant. It also refuses an edit
 to the harness's settings (`.claude/settings…`), which would configure the harness of
 whoever checks the branch out, and an edit tool's write into Git's internals
 (`.git/`). It runs the brokered reads unattended — queries, lookups, searches,

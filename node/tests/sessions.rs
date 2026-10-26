@@ -3530,11 +3530,11 @@ async fn a_session_starts_with_its_orientation_recorded() {
         )
     });
     let text = e.payload["text"].as_str().unwrap();
-    assert!(text.contains("## This node"), "{text}");
+    assert!(text.contains("## Environment"), "{text}");
     assert!(text.contains("Node `orient`"));
-    assert!(text.contains("Project `repo`"), "{text}");
+    assert!(text.contains("project `repo`"), "{text}");
     assert!(
-        text.contains("no-merge"),
+        text.contains("review-before-publish"),
         "the working agreements are named"
     );
     assert!(text.contains("(directive) run just test before every commit"));
@@ -3543,7 +3543,7 @@ async fn a_session_starts_with_its_orientation_recorded() {
         "the tools offered are named: {text}"
     );
     assert_eq!(e.payload["trimmed"], false);
-    assert!(text.contains("## Work"), "{text}");
+    assert!(text.contains("## Work\n"), "{text}");
     assert!(text.contains("**Add the ledger**"), "{text}");
     assert!(text.contains("plan session"), "{text}");
     let slug = tracon::corpus::work::plan_slug(&item.id);
@@ -3587,14 +3587,14 @@ async fn pinned_documents_do_not_cost_a_session_its_task_or_its_directives() {
     // Sixty-four thousand characters of pinned document, and the session
     // still knows what it is doing, under whose rules, and what the
     // operator told it.
-    assert!(text.contains("## Work"), "{text}");
+    assert!(text.contains("## Work\n"), "{text}");
     assert!(text.contains("**Add the ledger**"), "{text}");
     assert!(text.contains("plan session"), "{text}");
     assert!(
         text.contains(&tracon::corpus::work::plan_slug(&item.id)),
         "{text}"
     );
-    assert!(text.contains("no-merge"), "{text}");
+    assert!(text.contains("review-before-publish"), "{text}");
     assert!(
         text.contains("(directive) run just test before every commit"),
         "{text}"

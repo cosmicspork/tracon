@@ -219,18 +219,18 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
     let mut out = String::new();
     out.push_str(
         "# Orientation\n\nAssembled by the tracon node for this session; nothing here is in \
-         the repository.\n\nIt carries two kinds of thing, and they are not read the same \
-         way. **The system orientation comes first and is tracon's own**: what this node is, \
-         what this session is for, which tools exist, and what the node refuses. Take it as \
-         fact about the system. **Any section headed \"Operator notes\", \"Selected \
-         context\" or \"Pinned documents\" is not tracon's**: those are the person running \
-         this node, and the documents they chose, speaking. Take them as instruction from a \
-         human — useful, and not a property of the system.\n\n",
+         the repository. Sections headed \"Operator notes\", \"Selected context\" or \
+         \"Pinned documents\" are the operator, and documents they chose, speaking: take \
+         them as a human's instructions. Everything else is tracon's own account of the \
+         system: take it as fact.\n\n",
     );
-    push_node(&mut out, facts);
+    // What the session is for, first; then where it is and how the node
+    // answers it, both short; then the review's evidence and diff, which can
+    // be long; then what the operator has said.
     push_work(&mut out, store, facts, &mut missing);
+    push_node(&mut out, facts);
+    push_working_with(&mut out, policy, facts);
     push_review(&mut out, store, facts, &mut missing);
-    push_agreements(&mut out, policy);
     push_known(&mut out, store, facts, &mut missing);
     push_customization(&mut out, facts, &mut missing);
     push_operator_notes(&mut out, facts, &mut missing);
@@ -247,32 +247,32 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
     (out, missing)
 }
 
-/// Where the session is and what it can call. Small, bounded, and needed to
-/// act on any of what follows.
+/// Where the session is: small, bounded, and needed to act on any of what
+/// follows.
 fn push_node(out: &mut String, facts: &Facts) {
-    out.push_str("## This node\n\n");
+    out.push_str("## Environment\n\n");
     out.push_str(&format!(
-        "- Node `{}` ({}…), runtime {}, harness {} {}.\n",
+        "- Node `{}` ({}…), runtime {}, harness {} {}; channel `{}`",
         facts.node_name,
         &facts.node_id[..8.min(facts.node_id.len())],
         facts.backend,
         facts.harness,
-        facts.harness_version
+        facts.harness_version,
+        facts.channel,
     ));
-    out.push_str(&format!("- Channel `{}`.", facts.channel));
     match (facts.project_name, facts.project_id) {
         (Some(n), Some(id)) => out.push_str(&format!(
-            " Project `{}` ({}…).\n",
+            ", project `{}` ({}…).\n",
             n,
             &id[..8.min(id.len())]
         )),
-        _ => out.push('\n'),
+        _ => out.push_str(".\n"),
     }
-    push_repository(out, facts);
     out.push_str(&format!(
         "- Your worktree is `{}`; the main checkout is not yours.\n",
         facts.worktree
     ));
+    push_repository(out, facts);
     if let Some(note) = facts.stale_base {
         out.push_str(&format!(
             "- Your base may be stale ({note}). The workspace starts from the default \
@@ -283,24 +283,17 @@ fn push_node(out: &mut String, facts: &Facts) {
     // The one refusal an agent meets as a bare status code from a package
     // manager. Said up front, in the words the refusal itself uses, so it is
     // read as the boundary and not as a fault to route around.
+    let refused = "any other host answers 403 until the operator opens it. The refusal \
+                   itself asks them; `request_egress` waits for the answer, or asks ahead for a \
+                   host you know you need, with what it is for. Do not look for another way to \
+                   fetch it.";
     match facts.egress {
-        Some([]) => out.push_str(
-            "- Network: no registry or other host is reachable from this session, so a \
-             package manager answers 403. It is not reachable from a session until the \
-             operator opens it: the refusal itself asks them, and says so. Retry once they \
-             have answered; `request_egress` waits for the answer, and asks first for a host \
-             you know you need, with what it is for. The operator can open it for once, for \
-             this session, or add it to this repository's egress. Do not look for another \
-             way to fetch it.\n",
-        ),
+        Some([]) => out.push_str(&format!(
+            "- Network: no registry or other host is open to this session, so a package \
+             manager answers 403: {refused}\n"
+        )),
         Some(opened) => out.push_str(&format!(
-            "- Network: this repository opens {} to its sessions, through the proxy already \
-             in your environment, so installing from there works. Any other host answers \
-             403: it is not reachable from a session until the operator opens it, and the \
-             refusal itself asks them. Retry once they have answered; `request_egress` waits \
-             for the answer, and asks first for a host you know you need, with what it is \
-             for. The operator can open it for once, for this session, or add it to this \
-             repository's egress. Do not look for another way to fetch it.\n",
+            "- Network: {} open through the proxy already in your environment; {refused}\n",
             opened
                 .iter()
                 .map(|entry| format!("`{entry}`"))
@@ -312,12 +305,149 @@ fn push_node(out: &mut String, facts: &Facts) {
     if let Some(prepared) = facts.prepared {
         push_preparation(out, prepared, facts.worktree);
     }
+    out.push('\n');
+}
+
+/// How the node answers the session: which of its tools exist, by purpose,
+/// how an asked call and a wait answer, and what it refuses outright. Said
+/// once here, so each tool's own description names only its own states.
+fn push_working_with(out: &mut String, policy: &Policy, facts: &Facts) {
+    out.push_str("## Working with the node\n\n");
     if facts.tools.is_empty() {
         out.push_str("- No node tools are offered on this channel.\n");
+    } else {
+        push_tool_index(out, facts);
     }
     push_asked(out, facts);
     push_waiting(out, facts);
+    push_agreements(out, policy);
     out.push('\n');
+}
+
+/// The node's tools a session may be offered, by what they are for. A
+/// harness that defers tools shows the model their names alone
+/// (`adapter::claude`), so this is its map of them; every offered tool is in
+/// exactly one group, and a test keeps new tools from going unlisted.
+const TOOL_GROUPS: &[(&str, &[&str])] = {
+    use crate::mcp::{
+        approvals, consulta, docs, egress, jira, memory, operator, review, services, setup, show,
+        work,
+    };
+    &[
+        (
+            "Review",
+            &[
+                review::SUBMIT,
+                review::STATUS,
+                show::SHOW,
+                review::VERDICT,
+                review::FINDING,
+            ],
+        ),
+        (
+            "Work ledger",
+            &[
+                work::WORK_SHOW,
+                work::WORK_LIST,
+                work::WORK_READY,
+                work::WORK_DISCOVER,
+                work::WORK_UPDATE,
+                work::WORK_CLOSE,
+                work::WORK_DELETE,
+                work::BRIEF_READ,
+                work::BRIEF_NOTE,
+                work::CRITERIA_READ,
+                work::CRITERIA_LINK,
+            ],
+        ),
+        (
+            "Memory and documents",
+            &[
+                memory::RECALL,
+                memory::RETAIN,
+                memory::AMEND,
+                docs::DOC_SEARCH,
+                docs::DOC_READ,
+                docs::DOC_WRITE,
+                docs::DOC_DELETE,
+            ],
+        ),
+        (
+            "The operator",
+            &[
+                operator::ASK,
+                operator::QUESTION_STATUS,
+                approvals::STATUS,
+                operator::NOTIFY,
+                review::SUBMIT_REPORT,
+                review::REPORT_STATUS,
+            ],
+        ),
+        (
+            "Environment",
+            &[
+                egress::REQUEST,
+                services::START,
+                services::STATUS,
+                setup::DRAFT,
+                setup::TRY,
+                setup::PROPOSE,
+            ],
+        ),
+        ("GitHub", crate::mcp::github::TOOLS),
+        ("GitLab", crate::mcp::gitlab::TOOLS),
+        (
+            "Jira",
+            &[
+                jira::ISSUE,
+                jira::ISSUE_SEARCH,
+                jira::ISSUE_TRANSITIONS,
+                jira::ISSUE_COMMENT,
+                jira::ISSUE_UPDATE,
+                jira::ISSUE_CREATE,
+                jira::ISSUE_TRANSITION,
+            ],
+        ),
+        ("Database", &[consulta::QUERY, consulta::DESCRIBE]),
+        (
+            "Reporting a fault in tracon",
+            &[operator::REPORT, operator::REPORT_STATUS],
+        ),
+    ]
+};
+
+fn push_tool_index(out: &mut String, facts: &Facts) {
+    out.push_str("- Tools, by purpose:\n");
+    let mut listed = 0;
+    for (purpose, names) in TOOL_GROUPS {
+        let offered: Vec<String> = names
+            .iter()
+            .filter(|name| offered(facts, name))
+            .map(|name| format!("`{name}`"))
+            .collect();
+        if offered.is_empty() {
+            continue;
+        }
+        listed += offered.len();
+        out.push_str(&format!("  - {purpose}: {}\n", offered.join(", ")));
+    }
+    // A tool no group names is still the session's: listed rather than
+    // hidden, until a group is given it.
+    if listed < facts.tools.len() {
+        let rest: Vec<String> = facts
+            .tools
+            .iter()
+            .filter(|tool| {
+                !TOOL_GROUPS
+                    .iter()
+                    .any(|(_, names)| names.contains(&tool.as_str()))
+            })
+            .map(|tool| format!("`{tool}`"))
+            .collect();
+        if !rest.is_empty() {
+            out.push_str(&format!("  - Other: {}\n", rest.join(", ")));
+        }
+    }
 }
 
 /// How a call the operator decides answers, said once here rather than in
@@ -349,17 +479,16 @@ fn push_waiting(out: &mut String, facts: &Facts) {
         return;
     }
     out.push_str(&format!(
-        "- Waiting: each call to {} blocks for at most {MAX_WAIT_SECS} seconds, so it \
-         returns before an MCP client gives up on it. A person takes far longer: expect \
-         `still_waiting`, and call again to keep waiting.",
+        "- Waiting: each call to {} blocks at most {MAX_WAIT_SECS} seconds. A person takes far \
+         longer: expect `still_waiting`, and call again to keep waiting.",
         waiting.join(", ")
     ));
     let held = named(HELD);
     if !held.is_empty() {
         out.push_str(&format!(
-            " A wait on the operator ({}) need not be polled: end your turn and the session \
-             stays open while it is undecided, and the node brings the outcome back to you \
-             as your next prompt. Ending your turn waits on nothing else.",
+            " A wait on the operator ({}) need not be polled: end your turn, the session stays \
+             open, and the outcome comes back as your next prompt. Ending your turn waits on \
+             nothing else.",
             held.join(", ")
         ));
     }
@@ -394,7 +523,7 @@ fn push_repository(out: &mut String, facts: &Facts) {
     }
     out.push_str(". The workspace has no git remote: fetching and pushing go through the node");
     if submit {
-        out.push_str(" (`submit_review` publishes)");
+        out.push_str(", and `submit_review` publishes");
     }
     out.push_str(".\n");
 }
@@ -451,32 +580,26 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
         "plan" => {
             let slug = crate::corpus::work::plan_slug(&item.id);
             out.push_str(&format!(
-                "This is a **plan session**: read, ask `recall`, and think; write no code. \
-                 It ends when you write the plan as document `{slug}` with `doc_write` \
-                 (that slug alone needs no approval). Say what will change, where, how it \
-                 is verified, and what you are unsure of. An execute session follows and \
-                 reads only that document and this item. A question you asked with \
-                 `ask_operator` that is still unanswered keeps this session open after \
-                 the plan is written: the answer comes back to you as a prompt, and you \
-                 revise the plan with it then.\n\n"
+                "This is a **plan session**: read, `recall`, and think; write no code. It \
+                 ends when you write the plan as document `{slug}` with `doc_write` (that \
+                 slug alone needs no approval): what will change, where, how it is verified, \
+                 and what you are unsure of. An execute session follows with only that \
+                 document and this item. An `ask_operator` question still unanswered keeps \
+                 this session open after the plan is written; the answer comes back as a \
+                 prompt, and you revise the plan then.\n\n"
             ));
         }
         "execute" => {
             out.push_str(
-                "This is an **execute session**: do the work in the worktree, commit it, and \
-                 call `submit_review` — you hold no forge token, so the node snapshots the \
-                 worktree and puts the change in front of the operator. Its title and body \
-                 become the pull request's description once approved, read by the \
-                 repository's reviewers: write them for those readers, never to the \
-                 operator, and do not name tracon or say where evidence is attached. A \
-                 screenshot, or what you want the operator to check, goes to `show_work`. \
-                 Work you find but \
-                 should not do now: `work_discover` records it against this item instead of \
-                 losing it. `work_list` and `work_show` read the ledger; `work_update` \
-                 corrects an item (asked first). `work_close` closes the item this session \
-                 holds, and ends the session with it. Submitting is not closing: a change can be under review, \
-                 or published and still awaiting a verdict on whether it was any good. Close \
-                 when the item itself is finished, and leave it open otherwise.\n\n",
+                "This is an **execute session**: do the work in your worktree, commit it, and \
+                 call `submit_review`. You hold no forge token; the node snapshots the worktree \
+                 and a human approves before anything is published. The title and body are \
+                 for the repository's reviewers (`submit_review` says how to write them); what \
+                 is for the operator alone, such as a screenshot or what to check, goes to \
+                 `show_work`. Work you find but should not do now goes to `work_discover`, \
+                 against this item. Submitting is not closing: `work_close` closes the item and \
+                 ends this session, so call it only when the item itself is finished, not \
+                 while its change is under review.\n\n",
             );
             if let Some(plan) = facts.plan_body {
                 out.push_str("### Plan\n\n");
@@ -1056,21 +1179,18 @@ fn push_agreements(out: &mut String, policy: &Policy) {
     if denies.is_empty() {
         return;
     }
-    out.push_str(
-        "## Working agreements\n\nThese are enforced by the node, not requested of you:\n\n",
-    );
-    for r in denies {
-        out.push_str(&format!("- **{}** — {}\n", r.id, r.reason));
-    }
     // The gate answers in the task's own terms rather than as an auth error
     // (`mcp::refusal`). Saying so is one sentence, and it is the difference
     // between an agent that reads the reason and one that goes looking for a
     // way round what it took for a broken tool.
     out.push_str(
-        "\nA refused call comes back as `refused by policy (<rule>): <reason>` — the rule's \
-         own words, not an error. Take the route the reason names, or ask the operator; \
-         there is no way around it to find.\n\n",
+        "- Refused outright by the node. A refused call comes back as `refused by policy \
+         (<rule>): <reason>`, the rule's own words and not an error: take the route the reason \
+         names, or ask the operator; there is no way around it to find.\n",
     );
+    for r in denies {
+        out.push_str(&format!("  - **{}**: {}\n", r.id, r.reason));
+    }
 }
 
 /// Directives always, confident facts for the project. Bounded, and the
@@ -1445,37 +1565,37 @@ mod tests {
         for (egress, said) in [
             (
                 &opened[..],
-                "this repository opens `crates`, `npm` to its sessions",
+                "Network: `crates`, `npm` open through the proxy",
             ),
-            (
-                &[][..],
-                "no registry or other host is reachable from this session",
-            ),
+            (&[][..], "no registry or other host is open to this session"),
         ] {
             facts.egress = Some(egress);
             let (told, _) = assemble(&store, &Policy::shipped(), &facts);
             assert!(told.contains(said), "{told}");
-            assert!(told.contains("not reachable from a session"));
-            assert!(told.contains("add it to this repository's egress"));
+            assert!(told.contains("answers 403 until the operator opens it"));
             assert!(told.contains("`request_egress` waits"));
         }
         assert!(i("## Pinned documents") < i("Conventional commits"));
         assert!(!text.contains("not pinned"));
         assert!(!text.contains("HTML must not become orientation"));
-        assert!(i("## This node") < i("## Working agreements"));
+        assert!(i("## Environment") < i("## Working with the node"));
         // Pinned documents are reserved, but they come after the agreements
         // and the operator's directives in the reserved tier, not before them.
         assert!(i("## Known") < i("## Pinned documents"));
-        assert!(i("no-merge") < i("## Known"));
+        assert!(i("review-before-publish") < i("## Known"));
         // And the session is told whose the pinned documents are, rather than
         // being left to read a channel document as a rule of the system.
         assert!(i("## Pinned documents") < i("They are not tracon's"));
         assert!(text.contains("(directive) run just test"));
-        // The tools are not listed: their definitions already say them, and
-        // none of these waits, so there is nothing to say about waiting.
-        assert!(!text.contains("`recall`, `retain`"), "{text}");
+        // The tools are named by purpose, the map a harness that shows the
+        // model only their names needs; none of these waits, so there is
+        // nothing to say about waiting.
+        assert!(
+            text.contains("Memory and documents: `recall`, `retain`"),
+            "{text}"
+        );
         assert!(!text.contains("Waiting:"), "{text}");
-        assert!(text.contains("Project `tracon`"));
+        assert!(text.contains("project `tracon`"));
         // No forge remote, no repository line: nothing is guessed.
         assert!(!text.contains("Repository:"), "{text}");
     }
@@ -1527,7 +1647,7 @@ mod tests {
         assert!(
             line.starts_with(
                 "- Waiting: each call to `question_status`, `review_status`, `run_wait` blocks \
-                 for at most 45 seconds"
+                 at most 45 seconds"
             ),
             "{line}"
         );
@@ -1542,7 +1662,7 @@ mod tests {
         // offered as a way to wait on it.
         let text = told(&names(&["run_wait"]));
         assert!(
-            text.contains("- Waiting: each call to `run_wait` blocks"),
+            text.contains("- Waiting: each call to `run_wait` blocks at most"),
             "{text}"
         );
         assert!(!text.contains("end your turn"), "{text}");
@@ -1586,7 +1706,7 @@ mod tests {
                 stale_base: None,
             };
             let (text, _) = assemble(&store, &Policy::default(), &facts);
-            let node = &text[text.find("## This node").unwrap()..];
+            let node = &text[text.find("## Environment").unwrap()..];
             node[..node.find("\n\n## ").unwrap_or(node.len())].to_string()
         };
 
@@ -1596,13 +1716,13 @@ mod tests {
             text.contains(
                 "- Repository: GitHub `cosmicspork/tracon`; `submit_review` and the forge tools \
                  default to it (the forge tools take it as `repo`). The workspace has no git \
-                 remote: fetching and pushing go through the node (`submit_review` publishes).\n"
+                 remote: fetching and pushing go through the node, and `submit_review` publishes."
             ),
             "{text}"
         );
-        // Beside the project, before the worktree.
-        assert!(text.find("Project `tracon`") < text.find("- Repository:"));
-        assert!(text.find("- Repository:") < text.find("Your worktree"));
+        // After the project and the worktree it is the repository of.
+        assert!(text.find("project `tracon`") < text.find("Your worktree"));
+        assert!(text.find("Your worktree") < text.find("- Repository:"));
 
         let gitlab = crate::forge::ForgeRepo::from_remote("gitlab.example.com/group/app");
         let text = told(gitlab.as_ref(), &tools);
@@ -1620,7 +1740,7 @@ mod tests {
         assert!(
             text.contains(
                 "- Repository: GitHub `cosmicspork/tracon`. The workspace has no git remote: \
-                 fetching and pushing go through the node.\n"
+                 fetching and pushing go through the node."
             ),
             "{text}"
         );
@@ -1751,8 +1871,38 @@ mod tests {
         assert!(i("Reads before it writes.") < i("## Operator notes"));
         assert!(i("## Operator notes") < i("## Pinned documents"));
         // The system orientation comes first and says so.
-        assert!(i("## This node") < i("## Operator notes"));
-        assert!(i("is tracon's own") < i("## This node"));
+        assert!(i("## Environment") < i("## Operator notes"));
+        assert!(i("is tracon's own") < i("## Environment"));
+    }
+
+    /// Every tool the node can offer is in one group of the index, so a new
+    /// tool is placed on purpose rather than falling under "Other".
+    #[test]
+    fn every_tool_is_in_exactly_one_group_of_the_index() {
+        use crate::mcp::*;
+        let mut all = Vec::new();
+        all.extend(consulta::definitions(&["default".to_string()]));
+        all.extend(github::definitions());
+        all.extend(gitlab::definitions());
+        all.extend(jira::definitions());
+        all.extend(review::definitions(true));
+        all.extend(memory::definitions());
+        all.extend(docs::definitions(&crate::config::default_doc_kinds()));
+        all.extend(operator::definitions());
+        all.extend(egress::definitions());
+        all.extend(show::definitions());
+        all.extend(setup::definitions());
+        all.extend(work::definitions());
+        all.extend(approvals::definitions());
+        all.extend(services::definitions_for(&["browser"], "browser"));
+        for tool in &all {
+            let name = tool["name"].as_str().unwrap();
+            let groups = TOOL_GROUPS
+                .iter()
+                .filter(|(_, names)| names.contains(&name))
+                .count();
+            assert_eq!(groups, 1, "{name} is in {groups} groups");
+        }
     }
 
     #[test]
@@ -2158,7 +2308,10 @@ mod tests {
             &Policy::default(),
             &facts(&item, &manifest, &execute, "execute"),
         );
-        assert!(!bare.contains("brief"), "no brief, nothing said: {bare}");
+        assert!(
+            !bare.contains("product brief"),
+            "no brief, nothing said: {bare}"
+        );
 
         item.brief_slug = Some("brief-item0001dead".into());
         let (text, missing) = assemble(
@@ -2266,7 +2419,7 @@ mod tests {
             &facts(&item, &manifest, &execute, "execute"),
         );
         assert!(
-            !quiet.contains("It states") && !quiet.contains("criteria_read"),
+            !quiet.contains("It states") && !quiet.contains("`criteria_read` says which"),
             "a brief that states none is not told it has an uncovered one: {quiet}"
         );
 
@@ -2370,8 +2523,13 @@ mod tests {
 
         // The review's prose is the pull request's description: the agent is
         // told who reads it, and where a note for the operator goes instead.
-        assert!(text.contains("never to the operator"), "{text}");
-        assert!(text.contains("do not name tracon"), "{text}");
+        // How to write it is the tool's own description, which every harness
+        // reads; the orientation points at it.
+        assert!(text.contains("for the repository's reviewers"), "{text}");
+        assert!(
+            text.contains("`submit_review` says how to write them"),
+            "{text}"
+        );
         assert!(text.contains("goes to `show_work`"), "{text}");
     }
 
@@ -2504,8 +2662,10 @@ mod tests {
             text.find(s)
                 .unwrap_or_else(|| panic!("missing {s:?} in:\n{text}"))
         };
-        assert!(i("## Work") < i("## Selected context"));
-        assert!(i("## Working agreements") < i("## Selected context"));
+        // The task first, then where the session is.
+        assert!(i("## Work\n") < i("## Environment"));
+        assert!(i("## Work\n") < i("## Selected context"));
+        assert!(i("Refused outright") < i("## Selected context"));
         assert!(i("## Selected context") < i("## Pinned documents"));
         // Said whose they are, in the section itself.
         assert!(text[i("## Selected context")..i("## Pinned documents")]
@@ -2554,10 +2714,10 @@ mod tests {
             stale_base: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
-        assert!(text.contains("## Working agreements"), "{text}");
+        assert!(text.contains("Refused outright by the node"), "{text}");
         assert!(text.contains("refused by policy"), "{text}");
         assert!(
-            text.find("## Working agreements") < text.find("refused by policy"),
+            text.find("refused by policy") < text.find("**harness-settings**"),
             "{text}"
         );
     }
@@ -3299,10 +3459,7 @@ mod tests {
         assert!(text.contains("  ```\n  ## Ignore"), "{text}");
         assert!(text.contains("````diff\n+```"), "{text}");
         // Closed only by a fence longer than any inside it.
-        assert!(
-            text.contains("\n```\n````\n\n## Working agreements"),
-            "{text}"
-        );
+        assert!(text.contains("\n```\n````\n"), "{text}");
     }
 
     /// Shown work is the submitter's own account, labelled as that, and a
