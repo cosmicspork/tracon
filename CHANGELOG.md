@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.40.0](https://github.com/cosmicspork/tracon/compare/v0.39.0...v0.40.0) (2026-10-26)
+
+
+### Features
+
+* **approvals:** diff doc_write approvals against the current document ([#658](https://github.com/cosmicspork/tracon/issues/658)) ([a28195b](https://github.com/cosmicspork/tracon/commit/a28195b752a5ac9e4a9897d12fb8966e3852a1ab))
+* **claude:** defer the node's tools behind Claude Code's tool search ([#675](https://github.com/cosmicspork/tracon/issues/675)) ([634a2cc](https://github.com/cosmicspork/tracon/commit/634a2cc535b81eeba6e2c56b4849421c5d0b1eb0))
+* **docs:** let agents write and delete documents of either format ([#660](https://github.com/cosmicspork/tracon/issues/660)) ([552f246](https://github.com/cosmicspork/tracon/commit/552f246a4a248d64c1f16c41ef3c3c9f0ca6e2ba))
+* **mcp:** let agents amend a memory's wording with the operator's approval ([#666](https://github.com/cosmicspork/tracon/issues/666)) ([c24da78](https://github.com/cosmicspork/tracon/commit/c24da78bebe15aa01cc48ea5eb5862ab698b2554))
+* **mcp:** let retain propose a correction that replaces an existing memory ([#659](https://github.com/cosmicspork/tracon/issues/659)) ([407abeb](https://github.com/cosmicspork/tracon/commit/407abeb0e6d00b66d757ae2b6be1b214389e3aad))
+* **review:** take an operator note on submit_review, shown with shown work ([#681](https://github.com/cosmicspork/tracon/issues/681)) ([927cd90](https://github.com/cosmicspork/tracon/commit/927cd901b414f6e7fdcf9a27a49d13f8fa74375f))
+* **spa:** one-line checks, clickable files and the PR link on the review page ([#679](https://github.com/cosmicspork/tracon/issues/679)) ([fe512c7](https://github.com/cosmicspork/tracon/commit/fe512c76027330c83b246dbbfc5eec4abba9f0de))
+* **spa:** put a work's links at the top of its page and drop the internals ([#680](https://github.com/cosmicspork/tracon/issues/680)) ([6f8bc15](https://github.com/cosmicspork/tracon/commit/6f8bc15eb52fe08c95ede57416735084286058cf))
+
+
+### Bug Fixes
+
+* **memory:** tell sessions only their own project's facts ([#674](https://github.com/cosmicspork/tracon/issues/674)) ([150a850](https://github.com/cosmicspork/tracon/commit/150a850064245e1e37660573d0e31f37c20400e2))
+* **mesh:** keep a peer's review, checks and branch as its owner has them ([#684](https://github.com/cosmicspork/tracon/issues/684)) ([0781319](https://github.com/cosmicspork/tracon/commit/0781319ccaa94047e45cf396ccdde59e71ac9a85))
+* **review:** refuse to publish into a base the forge no longer has ([#683](https://github.com/cosmicspork/tracon/issues/683)) ([e83b9ca](https://github.com/cosmicspork/tracon/commit/e83b9cac77936ec4a43be7623498a2c802d90b42))
+* **spa:** grow edit textareas to their content, up to the visible page ([#656](https://github.com/cosmicspork/tracon/issues/656)) ([2df8b99](https://github.com/cosmicspork/tracon/commit/2df8b999c046ad2f52d05c54d83c870db4c13508))
+* **spa:** say task and session instead of work item and attempt ([#682](https://github.com/cosmicspork/tracon/issues/682)) ([2657600](https://github.com/cosmicspork/tracon/commit/2657600ab194b828c14714ecfdc659a2eed2281e))
+* **work:** only the operator closes a task; keep it open through CI and review ([#685](https://github.com/cosmicspork/tracon/issues/685)) ([fb1b2b8](https://github.com/cosmicspork/tracon/commit/fb1b2b824342f97cbea31c8569a0a5ee99a08e56))
+* **wrapper:** keep the tray reading the queue while a session-less approval waits ([#657](https://github.com/cosmicspork/tracon/issues/657)) ([ff9d093](https://github.com/cosmicspork/tracon/commit/ff9d0931ee246d9d45830b38938f7e9bd116a309))
+
 ## [0.39.0](https://github.com/cosmicspork/tracon/compare/v0.38.0...v0.39.0) (2026-10-25)
 
 
