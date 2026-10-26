@@ -1166,11 +1166,23 @@ export default [
     area: 'sessions',
     route: `/sessions/${S.waiting.id}#authority`,
     title: '"What this session may do" opened by its anchor',
-    note: 'Only a permission card\'s "why this is asked" opens it; it is not on the page otherwise. Scoped ask, a grant, refusals, unattended checks, the policy footer.',
+    note: 'A permission card\'s "why this is asked" or the header\'s "what it may do" opens it; it is not on the page otherwise. Scoped ask, a grant, refusals, unattended checks, the policy footer.',
     api: page(S.waiting, {
       events: [...opening(S.waiting.id), ev(S.waiting.id, 'permission_request', { title: 'Bash: cargo test -p tracon-node --test gateway' }, -95000, 'perm-41')],
       queue: { ...NO_QUEUE, waiting: [perm(S.waiting.id)] },
     }),
+  },
+  {
+    id: 'sessions-authority-from-header',
+    area: 'sessions',
+    route: `/sessions/${S.idle.id}`,
+    title: '"What it may do" followed from the header, no permission card',
+    note: 'The header link opens the panel and scrolls it into view on a session that has nothing waiting.',
+    api: page(S.idle, { events: [...opening(S.idle.id)] }),
+    act: async (page) => {
+      await page.getByRole('link', { name: 'what it may do' }).click()
+      await page.getByText('Runs on').waitFor()
+    },
   },
   {
     id: 'sessions-authority-untrusted',
