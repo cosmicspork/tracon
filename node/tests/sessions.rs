@@ -6119,3 +6119,113 @@ async fn a_repository_not_cloned_yet_is_cloned_at_the_start_and_a_failed_clone_l
     }
     panic!("the session did not fail");
 }
+
+/// The fake harness, but closing it takes a while: a session being
+/// suspended sits in its suspend that long, after its row already says so.
+struct SlowClose(FakeAdapter);
+
+struct SlowCloseHandle(Box<dyn HarnessHandle>);
+
+#[async_trait]
+impl HarnessHandle for SlowCloseHandle {
+    fn harness_session_id(&self) -> &str {
+        self.0.harness_session_id()
+    }
+    fn compat(&self) -> tracon::adapter::HarnessCompat {
+        self.0.compat()
+    }
+    async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
+        self.0.prompt(text).await
+    }
+    async fn cancel(&self) -> Result<(), AdapterError> {
+        self.0.cancel().await
+    }
+    async fn close(&self) -> Result<(), AdapterError> {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        self.0.close().await
+    }
+}
+
+#[async_trait]
+impl HarnessAdapter for SlowClose {
+    fn id(&self) -> &'static str {
+        self.0.id()
+    }
+    fn pinned_version(&self) -> &str {
+        self.0.pinned_version()
+    }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        self.0.protocol()
+    }
+    async fn version(
+        &self,
+        r: &dyn Runner,
+    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
+        self.0.version(r).await
+    }
+    async fn probe_models(
+        &self,
+        r: &dyn Runner,
+        wiring: &tracon::gateway::model::Wiring,
+    ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
+        self.0.probe_models(r, wiring).await
+    }
+    async fn launch(
+        &self,
+        r: &dyn Runner,
+        spec: tracon::adapter::LaunchSpec,
+    ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
+        let (handle, events) = self.0.launch(r, spec).await?;
+        Ok((Box::new(SlowCloseHandle(handle)), events))
+    }
+}
+
+/// A task closed while its idle session is being suspended ends the session:
+/// the close reaches a supervisor that is putting the session away and reads
+/// no further commands, and the session must not stay suspended on a closed
+/// task.
+#[tokio::test]
+async fn closing_the_task_while_its_session_suspends_ends_the_session() {
+    state::isolate();
+    let slow = Arc::new(SlowClose(FakeAdapter {
+        tx: Default::default(),
+        tokens: Arc::new(Mutex::new(10)),
+    }));
+    // Held here: the harness's event stream lives as long as the adapter.
+    let o = orientation_with("suspend-close", Some(slow.clone()), 0).await;
+    let id = o.row.id.clone();
+    let session = || o.store.get_session(&id).unwrap().unwrap();
+    first_prompt(&o.store, &id).await;
+    for _ in 0..500 {
+        if session().state == "running" && session().turn_active == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    o.store
+        .insert_review(&published_review("rv-sc", &id))
+        .unwrap();
+
+    // Asked again until it takes: a turn still settling keeps it awake.
+    for _ in 0..1000 {
+        if session().state == "suspended" {
+            break;
+        }
+        o.manager.suspend_idle_published(Duration::ZERO).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(session().state, "suspended", "{:?}", session());
+
+    tracon::continuation::close_task(&o.manager, &o.item.id)
+        .await
+        .unwrap();
+    for _ in 0..500 {
+        if session().state == "closed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let s = session();
+    assert_eq!(s.state, "closed", "{s:?}");
+    assert_eq!(s.end_reason.as_deref(), Some("item_close"));
+}

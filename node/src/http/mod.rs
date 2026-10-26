@@ -970,6 +970,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 // A session waiting out its provider's limit is woken here,
                 // and one bound for its fallback is carried on.
                 manager.wake_exhausted().await;
+                // A suspended session whose item another node closed ends
+                // here, and is not carried on.
+                manager.end_closed_suspended().await;
                 // A session the node stopped under while it waited on the
                 // operator is carried on once they have decided.
                 manager.continue_held().await;

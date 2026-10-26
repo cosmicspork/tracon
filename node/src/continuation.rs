@@ -948,6 +948,7 @@ pub async fn carry_on(
 ) -> std::result::Result<SessionRow, crate::session::SessionError> {
     use crate::session::{external, NewSession, Phase, SessionError};
     let store = manager.store();
+    let held = manager.continuing().await;
     let old = store
         .get_session(&ask.session_id)?
         .ok_or(SessionError::NotFound)?;
@@ -999,7 +1000,7 @@ pub async fn carry_on(
             })
         });
     if suspended && approach.is_none() && model.is_none() && !named_harness {
-        return manager.continue_interrupted(&old.id).await;
+        return manager.continue_interrupted_held(&held, &old.id).await;
     }
     let plan = match old.work_item_id.as_deref() {
         Some(id) => match store.work_get(id)? {
@@ -1050,11 +1051,7 @@ pub async fn carry_on(
     };
     let row = manager.create(spec).await?;
     if suspended {
-        manager.end_suspended(
-            &old.id,
-            EndReason::Continued,
-            serde_json::json!({ "continued_as": row.id }),
-        )?;
+        manager.hand_over_suspended(&old.id, &row.id).await?;
     }
     Ok(row)
 }
