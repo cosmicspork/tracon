@@ -2,7 +2,7 @@
 // A disabled button with no reason is a puzzle; every action that cannot be
 // taken says so beside it instead.
 
-import type { ReviewerView } from './types'
+import type { ForgeState, ReviewerView } from './types'
 
 export type VerdictAction = 'approve' | 'revise' | 'reject'
 
@@ -72,6 +72,22 @@ export function publishedChange(result: string | null | undefined): { url: strin
   if (!url || !/^https?:\/\//.test(url)) return null
   const m = /\/(?:pull|pulls|merge_requests)\/(\d+)(?:[/?#]|$)/.exec(url)
   return { url, number: m ? Number(m[1]) : null }
+}
+
+/**
+ * The published change as the review header names it: "PR #149 · merged",
+ * "MR !12 · open · draft". Without a look from the forge yet it says only
+ * which change it is.
+ */
+export function publishedLabel(
+  provider: string,
+  change: { number: number | null },
+  forge: ForgeState | null | undefined,
+): string {
+  const gitlab = provider === 'gitlab'
+  const name = change.number === null ? (gitlab ? 'MR' : 'PR') : gitlab ? `MR !${change.number}` : `PR #${change.number}`
+  if (!forge) return name
+  return `${name} · ${forge.state}${forge.draft && forge.state === 'open' ? ' · draft' : ''}`
 }
 
 /** What the review page offers of its reviewer, from what happened to the latest revision. */
