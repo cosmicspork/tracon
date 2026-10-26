@@ -1744,6 +1744,12 @@ const MIGRATIONS: &[&str] = &[
         created_ms   INTEGER NOT NULL
     );
     "#,
+    // 75: why a peer's review failed to publish, as its owner last listed it.
+    // Only a mirrored row has it: the owner's publication record never leaves
+    // the owner, and this node's own reviews read theirs off that record.
+    r#"
+    ALTER TABLE review ADD COLUMN publication_failed TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

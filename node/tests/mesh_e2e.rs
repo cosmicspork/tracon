@@ -1223,6 +1223,86 @@ async fn a_peers_decided_review_is_read_again_from_its_owner_and_only_a_lost_one
     .await;
 }
 
+/// A peer's review whose approval failed to publish is back with the operator
+/// here too, and its card says why, as the owner lists it: only the owner
+/// holds the publication record. The owner's next listing without it clears
+/// it here.
+#[tokio::test]
+async fn a_peers_failed_publication_is_shown_here_until_its_owner_clears_it() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut held = held_review(&id, &bi);
+    held.state = "claimed".into();
+    b.store.insert_review(&held).unwrap();
+    let begin = tracon::store::publication::PublicationBegin {
+        id: "publication-1",
+        review_id: &id,
+        revision_id: None,
+        candidate_id: "candidate-1",
+        channel: "personal",
+        node_id: &bi,
+        provider: "github",
+        project: "o/r",
+        base: "main",
+        branch: "feat/x",
+        head_sha: "abc",
+        instance: "beta",
+    };
+    let note = "feat/x is not a branch on the forge any more";
+    b.store.publication_begin(&begin).unwrap();
+    b.store.publication_failed("publication-1", note).unwrap();
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+
+    let queued = |a: &Node| {
+        a.store
+            .open_reviews()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+    };
+    let card = |v: &serde_json::Value| {
+        v["reviews"]
+            .as_array()
+            .and_then(|reviews| reviews.iter().find(|r| r["id"] == id.as_str()))
+            .cloned()
+            .unwrap_or_default()
+    };
+    wait_for("A to show B's failed publication", || {
+        queued(&a).is_some_and(|r| r.publication_failed.is_some())
+    })
+    .await;
+    let (st, v) = call(&a.app, "GET", "/api/queue", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(card(&v)["publication_failed"], note, "{v}");
+    // The review's own page says so too, as the owner holds it.
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
+    assert_eq!(
+        v["publication"]["latest"]["outcome"], "not_attempted",
+        "{v}"
+    );
+    assert_eq!(v["publication"]["latest"]["note"], note, "{v}");
+
+    // Retried on the owner, the failure is no longer the review's there.
+    b.store.publication_begin(&begin).unwrap();
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+    wait_for("A to clear B's failed publication", || {
+        queued(&a).is_some_and(|r| r.publication_failed.is_none())
+    })
+    .await;
+    let (st, v) = call(&a.app, "GET", "/api/queue", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(card(&v)["id"], id.as_str(), "{v}");
+    assert!(card(&v)["publication_failed"].is_null(), "{v}");
+}
+
 /// A peer's session is checked on the node that runs it, and its outcome
 /// here says what that node's checks found on the review's commit; a node
 /// that cannot be read is said to be, never shown as one where no check ran.

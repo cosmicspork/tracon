@@ -2576,6 +2576,7 @@ const OWNER_FIELDS: &[&str] = &[
     "requirements",
     "surrounding_code",
     "publications",
+    "publication",
     "forge_state",
 ];
 
