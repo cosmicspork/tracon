@@ -75,10 +75,6 @@ the hub and mesh, the installed phone app, handoff between nodes — is built an
 but experimental until that configuration is boring; the
 [roadmap](docs/ROADMAP.md#the-supported-configuration) says why.
 
-What is built but not yet proven against a real credential, device, cluster, or
-published release is listed in one place:
-[the roadmap's live checklist](docs/ROADMAP.md#live-proofs-still-the-operators).
-
 ## Five minutes to a running node
 
 **On a laptop, the desktop app is the whole install.** Take the `.dmg` (macOS on

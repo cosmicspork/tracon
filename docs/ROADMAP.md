@@ -39,8 +39,7 @@ task or run that found it. **Next** holds work whose need is already clear from 
 use. **Later** holds intended changes that wait for the loop before them to be proven.
 Nothing enters from a blog post, an idea or a demo without first being missed on a real
 task. Completed items are removed when they land; the changelog and the reference
-documents under `docs/reference/` carry the history. Live validation of existing
-features is tracked separately under [Live proofs](#live-proofs-still-the-operators).
+documents under `docs/reference/` carry the history.
 
 Build on the existing ledger, documents, workspace snapshots, evidence, scoped grants
 and launch manifests. Do not replace the store, and keep any agent loop out of the node:
@@ -292,65 +291,8 @@ tracon's immutable candidates, isolated checks and brokered publication.
 - [ ] Present the outgoing title and body as sanitized Markdown with source editing and a
       preview of the exact text to be published.
 
-## Live proofs still the operator's
-
-Everything here is built and covered by test; what is missing is a real credential, a
-real device, a real cluster or a published release. Nothing on this list is a blocker for
-work that does not need it, and nothing on it may be described elsewhere as proven.
-
-**For the supported configuration**
-
-- [ ] **A hosted Anthropic API key end to end through the gateway** from a node-started
-      Claude Code session. (The subscription is proven: node-started plan and execute
-      sessions ran on it through the gateway on 2026-10-16.)
-- [ ] **The 0.29.0 live-session fixes, live** (#428, #429): a resubmitted, published
-      review updating the pull request it opened, passing `change`; and an update whose
-      revision merged `main` clearing GitHub's conflict. Each is proven against a fake
-      forge or by test only. (The update without `change` is proven: on 2026-10-11 the
-      approved revision was pushed to the pull request the review had opened.)
-- [ ] **The 0.29.0 follow-ups, live** (#432): a provider key saved from its Connections
-      card and used by a session. (#433 is proven: on 2026-10-17 a failed `just check`
-      under the Podman runner was refused naming the four failing tests.)
-- [ ] **The #436 additions, live**: a review under `publish.commits = keep` with an edited
-      message pushed to a real forge. (The run notes are proven: on 2026-10-11 a setup
-      proposal's notes appeared in the next session's operator notes.)
-- [ ] **The normal workflow, proven as a workflow**: client disconnect and reconnect,
-      interrupted execution, retained drafts, a node restart, and recovery through
-      completion, with what actually ran, what stayed uncertain, and where the operator
-      intervened recorded. Fixture screenshots and fake-provider tests are not evidence.
-- [ ] **The macOS desktop leg**: the bundle, its self-update against a published release,
-      and the Edit menu that makes copy and paste work. And, behind a Podman machine: an
-      image built from a repository's Dockerfile, and the per-client egress proxy reached
-      over `[gateway] egress_port` rather than a socket.
-
-**For the experimental surfaces**
-
-- [ ] **Codex subscription** signed in through the node's own OAuth flow, by local callback
-      and by device code, and with it whether the ChatGPT backend accepts a Codex request
-      whose system prompt stays in the message array. (The native harness's Responses
-      encoder sends its own system prompt as `instructions`, which the backend accepts,
-      shown live on 2026-10-21.)
-- [ ] **Native subagents running together, live**: a native session whose model makes
-      several `spawn` calls in one response, now that parallel tool calls are on by
-      default, with the children's calls overlapping in time in the log and each nested
-      under its spawn. Concurrency is proven by test only; the one live run (on
-      2026-10-21, `openai-codex/gpt-6-luna`, four subagents) had parallel calls off, so
-      its children ran one after another.
-- [ ] **Physical devices**: install from the always-on node over HTTPS on iOS Safari and
-      Android Chrome.
-- [ ] **A repository recipe offered over the real hub**: offered from the laptop, accepted
-      on the homelab node, which builds and pins its own image from it.
-- [ ] **Publication from the Kubernetes node**: an approved review on the homelab node
-      opening its own pull request, now that the node image carries `gh` (#547).
-      Preparation, a coding task, checks in the repository's registry image and review
-      are proven there: on 2026-10-15 a hounddogreading plan and execute on the homelab
-      node passed eight required checks and was approved. Its branch was pushed, but the
-      pull request had to be opened by hand.
-
 ## Current limitations
 
-- Everything under "Live proofs still the operator's" is unproven live, including the
-  private-repository run.
 - Required checks run in the image, and after the preparation, the operator named for the
   repository (`[[repo]]`), and in the harness image — which has no project toolchain —
   when they named none. A session of either harness runs in that same image with the
