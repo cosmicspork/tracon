@@ -2541,7 +2541,7 @@ async fn an_item_in_use_takes_its_sessions_project_and_is_not_closed_or_deleted_
     )
     .await;
     let (err, out) = outcome(&v);
-    assert!(err && out.to_string().contains("working on"), "{out}");
+    assert!(err && out.to_string().contains("the operator closes it"), "{out}");
     let out = allowed(&h, "work_update", json!({ "id": item, "state": "closed" })).await;
     assert_eq!(out["state"], "failed", "{out}");
     let out = allowed(&h, "work_delete", json!({ "id": item })).await;
