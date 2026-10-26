@@ -453,6 +453,7 @@ impl Fixture {
                 ai_verdict_json: None,
                 revision_patch: None,
                 lane: None,
+                publication_failed: None,
             })
             .unwrap();
         id
@@ -3331,8 +3332,11 @@ async fn the_page_shows_the_trigger_a_revision_was_submitted_under() {
     assert_eq!(polled["state"], detail["review"]["state"], "{polled}");
 }
 
+/// Publishing is not finishing: the item stays open through CI and review,
+/// so a CI failure or a comment has a session to come back to, until the
+/// operator closes the task.
 #[tokio::test]
-async fn publishing_closes_the_item_the_session_holds() {
+async fn publishing_leaves_the_item_open_until_the_operator_closes_the_task() {
     state::isolate();
     let f = fixture(test_name!(), WITH_GH).await;
     let item = tracon::corpus::work::create(
@@ -3368,15 +3372,28 @@ async fn publishing_closes_the_item_the_session_holds() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let closed = f.store.work_get(&item.id).unwrap().unwrap();
-    assert_eq!(closed.state, "closed");
-    assert_eq!(closed.closed_by_session.as_deref(), Some("s1"));
-    assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
-    // And the session says where its work went, not only the review.
+    let open = f.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(open.state, "open");
+    assert!(!f.event_kinds("s1").contains(&"work_closed".to_string()));
+    // The session says where its work went, not only the review.
     assert!(f.event_kinds("s1").contains(&"published".to_string()));
     let published = f.store.session_publications("s1").unwrap();
     assert_eq!(published.len(), 1, "{published:?}");
     assert_eq!(published[0].0, id);
+
+    // Closing the task is the operator's, and it is not a session's close.
+    let (status, body) = f
+        .call("POST", &format!("/api/work/{}/close", item.id), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let closed = f.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(closed.state, "closed");
+    assert_eq!(closed.closed_by_session, None);
+    assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
+    let (status, _) = f
+        .call("POST", &format!("/api/work/{}/close", item.id), None)
+        .await;
+    assert_ne!(status, StatusCode::OK, "a closed task is not closed twice");
 }
 
 /// An edited diff is a request for changes carrying a patch. What matters is
@@ -5363,11 +5380,12 @@ fn intent(f: &Fixture, id: &str) -> tracon::review::publish::Intent {
     serde_json::from_str(revision.intent_json.as_deref().unwrap()).unwrap()
 }
 
-/// A stacked review whose base was merged and deleted pushes its branch and
-/// then fails to open. Rebased onto main, the same review is resubmitted
-/// against main and replaces the branch it pushed, leased on exactly that.
+/// A stacked review whose base was merged and deleted is refused before its
+/// branch is pushed, with the missing base named, and review_status reports
+/// the failed publication rather than a review still plainly waiting (#665).
+/// Rebased onto main, the same review is resubmitted against main and opens.
 #[tokio::test]
-async fn a_stacked_review_whose_base_is_gone_is_retargeted_and_rewritten() {
+async fn a_stacked_review_whose_base_is_gone_is_refused_before_its_branch_is_pushed() {
     state::isolate();
     let f = fixture(test_name!(), WITH_GH).await;
     gh_forge(&f, pull_seven(&f.base_sha()));
@@ -5392,37 +5410,81 @@ async fn a_stacked_review_whose_base_is_gone_is_retargeted_and_rewritten() {
 
     let (status, body) = f.approve(&id).await;
     assert_ne!(status, StatusCode::OK, "{body}");
-    let stale = f.forge_branch();
-    let review = f.store.get_review(&id).unwrap().unwrap();
-    assert_eq!(
-        stale, review.head_sha,
-        "the push landed before the open failed"
+    let error = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("stack, which this change would merge into"),
+        "{body}"
     );
+    assert!(error.contains("nothing was pushed"), "{body}");
+    assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
+    assert!(!f.gh_log().contains("pr create"), "{}", f.gh_log());
+    assert_eq!(
+        sh_out(
+            &f.dir,
+            "git --git-dir=origin.git rev-parse -q --verify refs/heads/feat/x || true"
+        ),
+        "",
+        "the head branch was pushed"
+    );
+    let review = f.store.get_review(&id).unwrap().unwrap();
     assert_eq!(review.state, "claimed");
+
+    // A session that ended its turn on the review is brought the failure.
+    let waits = f.manager.waits().of("s1");
+    let failure = waits
+        .iter()
+        .find(|w| w.key.starts_with("publication:"))
+        .expect("a wait on the failed publication");
+    assert_eq!(failure.decided.as_ref().unwrap()["state"], "publish_failed");
+
+    // The submitter hears of it at once, not after the wait it asked for.
+    let told = f
+        .tool(
+            "s1",
+            "review_status",
+            json!({ "review_id": id, "wait_secs": 30 }),
+        )
+        .await;
+    assert_eq!(told["state"], "publish_failed", "{told}");
+    assert_eq!(told["waited_secs"], 0, "{told}");
+    assert!(
+        told["publication"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("stack, which this change would merge into"),
+        "{told}"
+    );
+    let queued = f.store.open_reviews().unwrap();
+    let queued = queued.iter().find(|r| r.id == id).unwrap();
+    assert!(
+        queued
+            .publication_failed
+            .as_deref()
+            .is_some_and(|note| note.contains("nothing was pushed")),
+        "{queued:?}"
+    );
 
     sh(wt, "git rebase -q --onto origin/main stack feat/x");
     let mut args = f.submit_args();
     args["review_id"] = json!(id);
-    args["rewrite"] = json!(true);
     let resubmitted = f.tool("s1", "submit_review", args).await;
     assert_eq!(review_id(&resubmitted), id);
     let review = f.store.get_review(&id).unwrap().unwrap();
     assert_eq!(review.base_ref, "main");
-    let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
-    assert_eq!(target.base, "main");
-    let intent = intent(&f, &id);
-    assert!(intent.rewrite);
-    assert_eq!(intent.lease.as_deref(), Some(stale.as_str()));
+    // A new revision is a new decision: the old failure is not its.
+    let queued = f.store.open_reviews().unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .find(|r| r.id == id)
+            .unwrap()
+            .publication_failed,
+        None
+    );
     f.forget_logs();
 
     let (status, body) = f.approve(&id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        f.git_log()
-            .contains(&format!("--force-with-lease=refs/heads/feat/x:{stale}")),
-        "{}",
-        f.git_log()
-    );
     assert!(f.gh_log().contains("--base main"), "{}", f.gh_log());
     assert_eq!(f.forge_branch(), review.head_sha);
 }

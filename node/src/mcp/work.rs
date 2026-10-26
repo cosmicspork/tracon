@@ -1,8 +1,10 @@
 //! The ledger as the agent sees it: `work_ready` lists what is unblocked
 //! (the tool sorts, the model picks), `work_discover` records work found
 //! mid-session linked to its origin instead of evaporating with the
-//! session, and `work_close` closes the item this session holds — or, for a
-//! harness the operator runs, which holds none, the item it names.
+//! session, and `work_close` closes the item a harness the operator runs
+//! names. A session the node started never closes the item it holds: that
+//! is the operator's call, once its change has landed, so until then the
+//! item stays open for CI failures and review comments to come back to.
 //!
 //! `brief_read` and `brief_note` are the item's product brief, when it has
 //! one: who the work is for and what would make it good, as the operator
@@ -187,9 +189,9 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": WORK_CLOSE,
-            "description": "Close a work item because it is done. In a session the node started \
-                            that is the session's own item, and the session ends with it. A \
-                            harness you run yourself passes the item's `id`.",
+            "description": "Close a work item because it is done. An item a session is \
+                            working on is the operator's to close, and no session closes its \
+                            own. A harness you run yourself passes the item's `id`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -238,8 +240,9 @@ pub fn definitions() -> Vec<Value> {
             "name": WORK_UPDATE,
             "description": "Change a work item on this channel: its title, body, priority, the \
                             items it waits on, its project, or reopen or close it. Only the fields \
-                            given change. Closing an item a session is working on is refused unless \
-                            it is this session's own. The operator is asked first. An asked call \
+                            given change. Closing this session's own item, or one another session \
+                            is working on, is refused: the operator closes those. The operator is \
+                            asked first. An asked call \
                             returns `awaiting_operator` with an `approval_id` at once, and \
                             approval_status reports the outcome.",
             "inputSchema": {
@@ -405,6 +408,44 @@ pub(crate) async fn external_project(
     Ok(id)
 }
 
+/// Why a session's `work_update` closing the item it holds is refused, or
+/// `None` when it is not that call. Closing ends the session on the item, and
+/// that is the operator's call: the item stays open through CI and review
+/// until they close it.
+fn closing_own(ctx: &CallContext, held: Option<&str>, item: &str, closing: bool) -> Option<String> {
+    (closing && !ctx.is_external() && held == Some(item)).then(|| {
+        format!(
+            "{item} is the item this session holds; the operator closes it, once its change \
+             is merged"
+        )
+    })
+}
+
+/// A session's `work_update` that would close its own item, refused before
+/// the operator is asked about a call that cannot run.
+pub fn refusal_before_asking(
+    access: &SessionAccess,
+    ctx: &CallContext,
+    args: &Value,
+) -> Option<String> {
+    if args["state"].as_str() != Some(tracon_sync::work::CLOSED) {
+        return None;
+    }
+    let held = access
+        .store
+        .get_session(ctx.session_id()?)
+        .ok()
+        .flatten()?
+        .work_item_id?;
+    let item = corpus::work::find(&access.store, &ctx.channel, args["id"].as_str()?.trim()).ok()?;
+    closing_own(
+        ctx,
+        Some(&held),
+        &item.id,
+        item.state != tracon_sync::work::CLOSED,
+    )
+}
+
 pub async fn call(
     cfg: &Config,
     access: &SessionAccess,
@@ -511,7 +552,7 @@ pub async fn call(
                 .map_err(|e| e.to_string())?
             {
                 return Err(format!(
-                    "session {} is working on {}; let it finish, or kill it first",
+                    "session {} holds {}; the operator closes it from the task page",
                     s.id, item.id
                 ));
             }
@@ -531,24 +572,13 @@ pub async fn call(
             );
             Ok(json!({ "id": item.id, "state": item.state }))
         }
-        WORK_CLOSE => {
-            let (Some(session_id), Some(id)) = (ctx.session_id(), item_id) else {
-                return Err("this session holds no work item".into());
-            };
-            let item = corpus::work::close(
-                &access.store,
-                access.manager.bus(),
-                &ctx.node_id,
-                &id,
-                Some(session_id),
-            )
-            .map_err(|e| e.to_string())?;
-            access
-                .manager
-                .item_closed(session_id, args["summary"].as_str().unwrap_or(""))
-                .await;
-            Ok(json!({ "id": item.id, "state": item.state }))
-        }
+        // No session is offered it (`Tools::NOT_EXECUTE`); said again here
+        // so a call that reaches this anyway closes nothing.
+        WORK_CLOSE => Err(
+            "the operator closes the item a session holds; it stays open \
+                           through CI and review until they do"
+                .into(),
+        ),
         WORK_LIST => {
             let project = match (args["project"].as_str(), args["worktree"].as_str()) {
                 (Some(p), _) if !p.trim().is_empty() => {
@@ -684,23 +714,24 @@ pub async fn call(
                 Some(other) => return Err(format!("state {other:?} is not open or closed")),
             };
             patch.state = args["state"].as_str().map(str::to_string);
-            // Closing ends the session on the item, which is the holder's
-            // own call to make: this session may close its own item.
-            let own = closing
-                && match access
+            // Closing ends the session on the item, and that is the
+            // operator's call, not the holder's: a session's item stays open
+            // through CI and review until the operator closes it.
+            if let Some(refusal) = closing_own(ctx, item_id.as_deref(), &item.id, closing) {
+                return Err(refusal);
+            }
+            if closing {
+                if let Some(h) = access
                     .store
                     .session_holding(&item.id)
                     .map_err(|e| e.to_string())?
                 {
-                    Some(h) if Some(h.id.as_str()) == ctx.session_id() => true,
-                    Some(h) => {
-                        return Err(format!(
-                            "session {} is working on {}; it closes the item, or the operator does",
-                            h.id, item.id
-                        ))
-                    }
-                    None => false,
-                };
+                    return Err(format!(
+                        "session {} is working on {}; the operator closes it",
+                        h.id, item.id
+                    ));
+                }
+            }
             let updated = corpus::work::update(
                 &access.store,
                 access.manager.bus(),
@@ -711,11 +742,7 @@ pub async fn call(
             )
             .map_err(|e| e.to_string())?;
             let summary = args["summary"].as_str().unwrap_or("");
-            if own {
-                if let Some(session_id) = ctx.session_id() {
-                    access.manager.item_closed(session_id, summary).await;
-                }
-            } else if closing {
+            if closing {
                 access.manager.record_for(
                     ctx,
                     crate::session::state::event_kind::WORK_CLOSED,

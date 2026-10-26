@@ -5,6 +5,7 @@
   import ShownWork from '../components/ShownWork.svelte'
   import CheckDetail from '../components/CheckDetail.svelte'
   import { tick } from 'svelte'
+  import CloseTask from '../components/CloseTask.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -1410,6 +1411,9 @@
         {review.state}{#if review.verdict_reason}<b>{` · ${review.verdict_reason}`}</b>{/if}
       {/if}
     </div>
+    {#if session?.work_item_id}
+      <CloseTask itemId={session.work_item_id} />
+    {/if}
   {:else}
   <!-- Everything that answers a verdict sits in the bar, so it is in view
        wherever on the page the verdict was given. -->

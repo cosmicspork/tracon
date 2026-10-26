@@ -1118,14 +1118,15 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
     let exec = listed(&t, &CallContext::session("exec", "work", "n1")).await;
     assert_eq!(exec, narrowed(&|n| !Tools::NOT_EXECUTE.contains(&n)));
     // A verdict and findings are a review session's account of someone
-    // else's change; everything else is the execute session's to use.
-    for withheld in ["review_verdict", "review_finding"] {
+    // else's change, and closing the item is the operator's; everything else
+    // is the execute session's to use.
+    for withheld in ["review_verdict", "review_finding", "work_close"] {
         assert!(
             !exec.iter().any(|n| n == withheld),
             "{withheld} in {exec:?}"
         );
     }
-    assert_eq!(exec.len(), channel.len() - 2, "{exec:?}");
+    assert_eq!(exec.len(), channel.len() - 3, "{exec:?}");
 
     let review = listed(&t, &CallContext::session("review", "work", "n1")).await;
     assert_eq!(review, narrowed(&|n| Tools::REVIEW_TOOLS.contains(&n)));
@@ -1149,6 +1150,23 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
         external.iter().any(|n| n == "submit_review"),
         "{external:?}"
     );
+}
+
+/// An execute session does not close the item it holds: the refusal says
+/// whose call that is, so the session does not go looking for another way.
+#[tokio::test]
+async fn an_execute_session_calling_work_close_is_told_the_operator_closes_the_item() {
+    state::isolate();
+    let t = phase_rig().await;
+    let exec = CallContext::session("exec", "work", "n1");
+    let (err, v) = call(&t, &exec, "work_close", json!({ "summary": "done" })).await;
+    assert!(err, "{v}");
+    let said = v.to_string();
+    assert!(
+        said.contains("work_close is not offered in an execute session"),
+        "{said}"
+    );
+    assert!(said.contains("the operator closes the item"), "{said}");
 }
 
 /// A tool a phase is not offered is refused when called, not only left off

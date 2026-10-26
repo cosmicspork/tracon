@@ -2838,6 +2838,11 @@ mod records {
         /// The label the submitting external harness gave, for display.
         #[serde(default)]
         pub lane: Option<String>,
+        /// Why the latest approval failed to publish, while the review is
+        /// back with the operator. Not a column: `open_reviews` reads it off
+        /// the publication record, so the queue can say so.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub publication_failed: Option<String>,
     }
 
     impl ReviewRow {
@@ -2882,6 +2887,7 @@ mod records {
                 ai_verdict_json: r.get("ai_verdict_json")?,
                 revision_patch: r.get("revision_patch")?,
                 lane: r.get("lane")?,
+                publication_failed: None,
             })
         }
     }
@@ -3563,16 +3569,24 @@ impl Store {
     /// Reviews still waiting on the operator, oldest first. Ordered after
     /// permission requests in the queue: requests expire, reviews do not.
     pub fn open_reviews(&self) -> Result<Vec<ReviewRow>> {
-        let conn = self.conn.lock().unwrap();
-        // An interrupted publish remains visible for operator reconciliation;
-        // it is never silently reset and retried.
-        let mut stmt = conn.prepare(
-            "SELECT * FROM review WHERE state IN ('new','claimed','revising','publishing') \
-             ORDER BY created_ms ASC",
-        )?;
-        let rows = stmt
-            .query_map([], ReviewRow::from_row)?
-            .collect::<std::result::Result<_, _>>()?;
+        let mut rows: Vec<ReviewRow> = {
+            let conn = self.conn.lock().unwrap();
+            // An interrupted publish remains visible for operator
+            // reconciliation; it is never silently reset and retried.
+            let mut stmt = conn.prepare(
+                "SELECT * FROM review WHERE state IN ('new','claimed','revising','publishing') \
+                 ORDER BY created_ms ASC",
+            )?;
+            let rows = stmt
+                .query_map([], ReviewRow::from_row)?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for row in &mut rows {
+            row.publication_failed = self
+                .failed_publication(row)?
+                .map(|failed| failed.note.unwrap_or_default());
+        }
         Ok(rows)
     }
 
@@ -4016,6 +4030,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         };
         store.insert_review(&report).unwrap();
 
@@ -4073,6 +4088,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: Some("tracon:main".into()),
+            publication_failed: None,
         };
         assert!(store.upsert_review_mirror(&review).unwrap());
         review.title = "retitled".into();
@@ -4183,6 +4199,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         };
         store.insert_review(&review).unwrap();
         review.id = "rv2".into();
@@ -4254,6 +4271,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         };
         let revision_a = crate::store::ReviewRevisionRow {
             id: "revA".into(),
@@ -4365,6 +4383,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         };
         store.insert_review(&review).unwrap();
         // Run on sha1, which the review was resubmitted away from.

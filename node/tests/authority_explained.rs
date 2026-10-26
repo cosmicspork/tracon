@@ -304,9 +304,9 @@ async fn the_explanation_is_of_this_session_not_of_the_node() {
 
     let ordinary = explain(&h, "s1").await;
     let reviewing = explain(&h, "s2").await;
-    assert!(standing(&ordinary, "work_close").is_some());
+    assert!(standing(&ordinary, "work_discover").is_some());
     assert!(
-        standing(&reviewing, "work_close").is_none(),
+        standing(&reviewing, "work_discover").is_none(),
         "a review session is not offered the work tools, so it must not be told it has them"
     );
     assert!(standing(&reviewing, "review_verdict").is_some());

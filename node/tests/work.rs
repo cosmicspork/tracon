@@ -250,7 +250,9 @@ async fn an_agent_sees_ready_work_and_discovered_work_links_to_its_item() {
     let (_, p) = call(&h.operator, "GET", &format!("/api/work/{parent}"), None).await;
     assert_eq!(p["discovered"][0]["id"], found);
 
-    // Closing from the agent closes the session's own item, recorded by session.
+    // A session never closes the item it holds: not with `work_close`,
+    // which it is not offered, and not with `work_update` either, which is
+    // refused before the operator is asked. Closing is the operator's.
     let v = mcp(
         &h.harness,
         "s1",
@@ -259,9 +261,21 @@ async fn an_agent_sees_ready_work_and_discovered_work_links_to_its_item() {
         json!({"summary": "done"}),
     )
     .await;
-    assert_eq!(v["state"], "closed", "{v}");
+    assert_eq!(v["error"], true, "{v}");
+    assert!(v.to_string().contains("the operator closes"), "{v}");
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        "work_update",
+        json!({"id": parent, "state": "closed", "summary": "done"}),
+    )
+    .await;
+    assert_eq!(v["error"], true, "{v}");
+    assert!(v.to_string().contains("the operator closes it"), "{v}");
+    assert!(h.store.approvals_of_session("s1").unwrap().is_empty());
     let item = h.store.work_get(&parent).unwrap().unwrap();
-    assert_eq!(item.closed_by_session.as_deref(), Some("s1"));
+    assert_eq!(item.state, "open");
     let kinds: Vec<String> = h
         .store
         .events_after("s1", 0, 50)
@@ -269,7 +283,7 @@ async fn an_agent_sees_ready_work_and_discovered_work_links_to_its_item() {
         .into_iter()
         .map(|e| e.kind)
         .collect();
-    assert!(kinds.contains(&"work_closed".to_string()), "{kinds:?}");
+    assert!(!kinds.contains(&"work_closed".to_string()), "{kinds:?}");
 
     // A session with no item cannot close anything.
     h.store.insert_session(&session_row("s2", None)).unwrap();
