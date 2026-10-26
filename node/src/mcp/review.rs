@@ -1054,7 +1054,13 @@ impl Submission {
                 ));
             }
             if let Some(note) = note.as_deref() {
-                super::show::record_note(store, manager, ctx, &id, &capture.head_sha, note)?;
+                // Before the reviewer starts, which reads shown work; a note that
+                // cannot be stored does not undo the review it came with.
+                if let Err(error) =
+                    super::show::record_note(store, manager, ctx, &id, &capture.head_sha, note)
+                {
+                    tracing::warn!(%error, review = %id, "submitter's note not stored");
+                }
             }
             let reviewer = keep_and_review(
                 store,
@@ -1146,7 +1152,13 @@ impl Submission {
             .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
         if let Some(note) = note.as_deref() {
-            super::show::record_note(store, manager, ctx, &id, &row.head_sha, note)?;
+            // Before the reviewer starts, which reads shown work; a note that
+            // cannot be stored does not undo the review it came with.
+            if let Err(error) =
+                super::show::record_note(store, manager, ctx, &id, &row.head_sha, note)
+            {
+                tracing::warn!(%error, review = %id, "submitter's note not stored");
+            }
         }
         let reviewer = keep_and_review(
             store,
