@@ -2160,9 +2160,12 @@ pub async fn get_approval(
         text.map(|t| serde_json::from_str::<Value>(t).unwrap_or_else(|_| Value::from(t)))
     };
     let arguments = parse(Some(&a.arguments));
+    // What the call would change, read now: only while it is still undecided.
     let context = match &arguments {
-        Some(args) => crate::mcp::approval_context(s.store(), &a.channel, &a.tool, args)?,
-        None => None,
+        Some(args) if a.state == crate::store::approvals::PENDING => {
+            crate::mcp::approval_context(s.store(), &a.channel, &a.tool, args)?
+        }
+        _ => None,
     };
     let mut details = json!({
         "approval": a,

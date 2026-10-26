@@ -28,13 +28,12 @@ test('an approval card offers no field to edit: its page edits it, against what 
   expect(editableFields(approvalCard('pr_comment', { repo: 'o/r', number: 1, body: 'x'.repeat(80) }))).toEqual([])
 })
 
-test('an approval card shows no request; a peer’s shows what it acts on, without the prose', () => {
+test('an approval card shows no request; a peer’s, which cannot open its page, shows all of it', () => {
   const body = '# Plan: foo\n\nOne line changed.\n'
   const write = approvalCard('doc_write', { slug: 'plan-foo', body, if_hash: 'abc' })
   expect(cardRequest(write, false)).toBeNull()
-  const peer = cardRequest(write, true)!
-  expect(peer).not.toContain('One line changed')
-  expect(JSON.parse(peer).arguments).toEqual({ slug: 'plan-foo', if_hash: 'abc' })
+  expect(JSON.parse(cardRequest(write, true)!).arguments).toEqual({ slug: 'plan-foo', body, if_hash: 'abc' })
+  expect(editableFields(write, true)).toEqual([{ key: 'body', value: body }])
   // A harness's own permission keeps its full request.
   expect(cardRequest(card({ body }), false)).toContain('One line changed')
   expect(cardRequest({ kind: 'tool', raw_input: 'not json' }, false)).toBe('not json')

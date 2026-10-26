@@ -11,6 +11,8 @@ export interface ArgumentChange {
   lines: LineChange[]
 }
 
+const MAX_CELLS = 1_000_000
+
 /**
  * A line-by-line diff of `before` against `after`, by longest common
  * subsequence. Empty text has no lines: against it, the other side is all
@@ -33,6 +35,16 @@ export function diffLines(before: string, after: string): LineChange[] {
 
   const n = endA - start
   const m = endB - start
+  // The table is n·m: past this (a rewrite of a long document, diffed again
+  // on every keystroke) the changed middle shows as removed then added.
+  if (n * m > MAX_CELLS) {
+    return [
+      ...a.slice(0, start).map((text) => ({ kind: 'same' as const, text })),
+      ...a.slice(start, endA).map((text) => ({ kind: 'del' as const, text })),
+      ...b.slice(start, endB).map((text) => ({ kind: 'add' as const, text })),
+      ...a.slice(endA).map((text) => ({ kind: 'same' as const, text })),
+    ]
+  }
   // lcs[i][j]: the common subsequence length of a[start+i..endA) and b[start+j..endB).
   const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1))
   for (let i = n - 1; i >= 0; i--) {

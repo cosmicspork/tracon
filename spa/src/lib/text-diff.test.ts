@@ -88,3 +88,15 @@ describe('hunks', () => {
     expect(fold(hunks(diffLines('', 'a\nb')))).toEqual(['+a|+b'])
   })
 })
+
+test('a rewrite too large to align shows the changed middle removed, then added', () => {
+  const before = ['# Doc', ...Array.from({ length: 1500 }, (_, i) => `old ${i}`), 'end'].join('\n')
+  const after = ['# Doc', ...Array.from({ length: 1500 }, (_, i) => `new ${i}`), 'end'].join('\n')
+  const lines = diffLines(before, after)
+  expect(lines[0]).toEqual({ kind: 'same', text: '# Doc' })
+  expect(lines.at(-1)).toEqual({ kind: 'same', text: 'end' })
+  expect(lines.filter((l) => l.kind === 'del').length).toBe(1500)
+  expect(lines.filter((l) => l.kind === 'add').length).toBe(1500)
+  expect(lines[1]).toEqual({ kind: 'del', text: 'old 0' })
+  expect(lines[1501]).toEqual({ kind: 'add', text: 'new 0' })
+})

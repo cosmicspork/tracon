@@ -1217,6 +1217,16 @@ async fn a_new_document_card_says_new_and_details_carry_no_document() {
     assert!(v.as_object().unwrap().contains_key("document"), "{v}");
     assert_eq!(v["document"], Value::Null, "{v}");
     assert_eq!(v["stale"], false, "{v}");
+
+    // Once decided, there is nothing to compare: the write has made the
+    // document, and calling the call stale against itself would mislead.
+    let (status, _) = answer(&h, &id, json!({ "option_id": "reject_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert!(
+        v.get("document").is_none() && v.get("stale").is_none(),
+        "{v}"
+    );
 }
 
 /// `doc_write` cannot replace an HTML document, so it is refused before it

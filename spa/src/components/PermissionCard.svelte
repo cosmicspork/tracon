@@ -30,7 +30,7 @@
   // A host a session asked to reach: its answers say how long it stays open,
   // and there is nothing in it to edit.
   const egress = $derived(isEgress(permission))
-  const fields = $derived(egress || allowElsewhere ? [] : editableFields(permission))
+  const fields = $derived(egress || allowElsewhere ? [] : editableFields(permission, peer))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
   // What the session was started to do. Answering "may I run this" without it
   // means opening the session to find out, which is most of the interruption.
