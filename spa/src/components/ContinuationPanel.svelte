@@ -1,9 +1,10 @@
 <script lang="ts">
-  // One piece of work, whatever shape it took: what it is for, the one thing
-  // to do next, what is in the way, every attempt and how it ended, what the
-  // operator decided, where the work lives and what it showed. Everything is
-  // the node's recorded state; the next action is derived from it by fixed
-  // rules, so it never claims more than the records say.
+  // One piece of work, whatever shape it took, at the top of its page: one
+  // bar of everything linked to it (task, plan, sessions, review, request,
+  // branch), the one thing to do next, what is in the way, and what the
+  // operator decided. Everything is the node's recorded state; the next action
+  // is derived from it by fixed rules, so it never claims more than the
+  // records say.
   //
   // The three verbs: continue (carry on from the last attempt's workspace),
   // change approach (the same, with the operator's new direction handed to the
@@ -12,22 +13,23 @@
   // it is offered here first.
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
-  import { clock } from '../lib/clock.svelte'
-  import { attemptState, carries, closeOffer, verbs } from '../lib/continuation'
-  import { formatAge, formatTokens } from '../lib/format'
+  import { closeOffer, verbs, workLinks } from '../lib/continuation'
   import { router } from '../lib/router.svelte'
   import type { Continuation } from '../lib/types'
 
   let {
     itemId = null,
     sessionId = null,
-    showIntent = true,
+    actions = true,
+    stamp = '',
     onchange,
   }: {
     itemId?: string | null
     sessionId?: string | null
-    /** An item's page already shows its title and body. */
-    showIntent?: boolean
+    /** Next and its verbs: a live session's page has its own controls. */
+    actions?: boolean
+    /** Read the view again when this changes: the session's state, say. */
+    stamp?: string
     onchange?: () => void
   } = $props()
 
@@ -49,8 +51,10 @@
   $effect(() => {
     void itemId
     void sessionId
+    void stamp
     void load()
   })
+  const links = $derived(view ? workLinks(view, { itemId, sessionId }) : [])
 
   const can = $derived(view ? verbs(view) : { continue: false, changeApproach: false, abandon: false })
   const closing = $derived(view?.kind === 'item' && view.next.kind === 'close' ? closeOffer(view) : null)
@@ -102,29 +106,40 @@
 
 {#if view}
   <section class="cont" aria-label="Where this work stands">
-    {#if showIntent && view.intent.source !== 'none'}
-      <div class="intent">
-        <span class="h5">For</span>
-        <span>{view.intent.title}</span>
-      </div>
+    {#if links.length}
+      <nav class="links" aria-label="Linked to this work">
+        {#each links as g, i (i)}
+          <span class="grp">
+            {#if g.label}<span class="h5">{g.label}</span>{/if}
+            {#each g.links as l, j (j)}
+              <span class="ln">
+                {#if !l.href}<span class="m" title={l.title}>{l.text}</span>
+                {:else if l.here}<b title={l.title}>{l.text}</b>
+                {:else if l.external}<a href={l.href} title={l.title} target="_blank" rel="noopener">{l.text}</a>
+                {:else}<a href={l.href} title={l.title}>{l.text}</a>{/if}
+                {#if l.note}<span class="st">{l.note}</span>{/if}
+              </span>
+            {/each}
+          </span>
+        {/each}
+      </nav>
     {/if}
 
-    <div class="next {view.next.kind}">
-      <span class="h5">Next</span>
-      <span class="t">{view.next.text}</span>
-      {#if view.next.session_id && ['watch', 'answer', 'resume'].includes(view.next.kind) && view.next.session_id !== sessionId}
-        <a class="lnk" href="/sessions/{view.next.session_id}">Open</a>
-      {/if}
-      {#if view.follow && view.follow.state === 'open'}
-        <a class="lnk" href={view.follow.url} target="_blank" rel="noreferrer">{view.follow.label}</a>
-      {/if}
-    </div>
+    {#if actions}
+      <div class="next {view.next.kind}">
+        <span class="h5">Next</span>
+        <span class="t">{view.next.text}</span>
+        {#if view.next.session_id && ['watch', 'answer', 'resume'].includes(view.next.kind) && view.next.session_id !== sessionId}
+          <a class="lnk" href="/sessions/{view.next.session_id}">Open</a>
+        {/if}
+      </div>
+    {/if}
 
     {#if view.blockers.length}
       <div class="row"><span class="h5">In the way</span><span>{view.blockers.join(' · ')}</span></div>
     {/if}
 
-    {#if closing || can.continue || can.changeApproach || can.abandon}
+    {#if actions && (closing || can.continue || can.changeApproach || can.abandon)}
       <div class="verbs">
         {#if closing}
           <button class="btn p" disabled={busy} onclick={closeTask}>Close task</button>
@@ -163,52 +178,16 @@
       {/if}
     {/if}
 
-    {#if view.attempts.length}
-      <div class="h5">Sessions <b>{view.attempts.length}</b></div>
-      <ol class="attempts">
-        {#each view.attempts as a (a.id)}
-          {@const from = carries(a, view.attempts)}
-          <li class:here={a.id === sessionId}>
-            <a href="/sessions/{a.id}">{a.phase} {a.id.slice(0, 8)}</a>
-            <span class="st">{attemptState(a)}</span>
-            <small
-              >{a.model}{from ? ` · continues ${from}` : ''} · {formatTokens(a.tokens_used)} tokens · {formatAge(a.created_ms, clock.now)}
-              ago</small
-            >
-          </li>
-        {/each}
-      </ol>
-    {/if}
-
-    {#if view.decisions.answered.length || (view.kind === 'session' && (view.decisions.plan || view.decisions.brief))}
-      <div class="h5">Decided <b>{view.decisions.answered.length}</b></div>
-      <ul class="decided">
-        {#each view.decisions.answered as d (`${d.kind}-${d.session_id}-${d.at_ms}-${d.asked}`)}
-          <li><span class="q">{d.asked}</span> <span class="arr">→</span> <span>{d.answer.replaceAll('_', ' ')}</span></li>
-        {/each}
-      </ul>
-    {/if}
-
-    {#if view.workspace}
-      <div class="row">
-        <span class="h5">Workspace</span>
-        <span class="m">{view.workspace.id.slice(0, 12)} · branch {view.workspace.branch}</span>
-      </div>
-    {/if}
-
-    {#if view.evidence.reviews.length || view.evidence.shown.length}
-      <div class="h5">Evidence <b>{view.evidence.reviews.length + view.evidence.shown.length}</b></div>
-      <ul class="decided">
-        {#each view.evidence.reviews as r (r.id)}
-          <li><a href="/reviews/{r.id}">review · {r.title}</a> <span class="st">{r.state}{r.publish_result ? ` · ${r.publish_result}` : ''}</span></li>
-        {/each}
-        {#each view.evidence.shown as w (w.id)}
-          <li>
-            {#if w.session_id}<a href="/sessions/{w.session_id}">shown · {w.title}</a>{:else}shown · {w.title}{/if}
-            <span class="st">{w.head_sha.slice(0, 7)}{w.stale ? ' · stale' : ''}</span>
-          </li>
-        {/each}
-      </ul>
+    {#if view.decisions.answered.length}
+      <!-- Folded: at the top of the page, a long list would push the work down. -->
+      <details class="decided-fold">
+        <summary class="h5">Decided <b>{view.decisions.answered.length}</b></summary>
+        <ul class="decided">
+          {#each view.decisions.answered as d (`${d.kind}-${d.session_id}-${d.at_ms}-${d.asked}`)}
+            <li><span class="q">{d.asked}</span> <span class="arr">→</span> <span>{d.answer.replaceAll('_', ' ')}</span></li>
+          {/each}
+        </ul>
+      </details>
     {/if}
 
     {#if error}<div class="banner crit">refused <b>· {error}</b></div>{/if}
@@ -237,7 +216,37 @@
     text-transform: none;
     letter-spacing: 0;
   }
-  .intent,
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    align-items: baseline;
+    font: 12.5px var(--mono);
+    min-width: 0;
+  }
+  .grp,
+  .ln {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    align-items: baseline;
+    min-width: 0;
+  }
+  .ln a,
+  .ln b,
+  .ln .m {
+    overflow-wrap: anywhere;
+  }
+  .ln b {
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .decided-fold summary {
+    cursor: pointer;
+  }
+  .decided-fold .decided {
+    margin-top: 6px;
+  }
   .row,
   .next {
     display: flex;
@@ -286,7 +295,6 @@
     padding: 6px 8px;
     font: 13px var(--sans);
   }
-  .attempts,
   .decided {
     margin: 0;
     padding: 0;
@@ -294,17 +302,6 @@
     display: grid;
     gap: 4px;
   }
-  .attempts li {
-    display: flex;
-    gap: 4px 10px;
-    flex-wrap: wrap;
-    align-items: baseline;
-    font: 12.5px var(--mono);
-  }
-  .attempts li.here a {
-    font-weight: 600;
-  }
-  .attempts small,
   .st,
   .m {
     color: var(--dim);

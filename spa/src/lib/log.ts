@@ -204,32 +204,39 @@ export function repetitionLine(payload: Record<string, unknown>): string {
   return `same call ${count}× in a row · ${title} · recorded, not paused`
 }
 
-/// "workspace imported · on feat/x · volume tracon-workspace-9f3" — where the
-/// session's files came from. The node records one shape per source: a
-/// workspace in a runtime volume names its volume and has no path, while a
-/// host worktree names its path and the base it started from. Only the parts
-/// the node recorded are said; a field it left out is left out of the line.
-/// A managed clone the node could not fetch says so last, in the node's own
-/// words ("stale: last fetched at …"), so the operator sees the base may be
-/// behind its forge.
+/// "workspace prepared" — the session's files are in place. Where they came
+/// from is internal (see `worktreeOrigin`) and folds under the line; only
+/// what the operator may act on stays on it: a main checkout left dirty, and
+/// a managed clone the node could not fetch, in the node's own words
+/// ("stale: last fetched at …"), so the base may be behind its forge.
 export function worktreeLine(payload: Record<string, unknown>): string {
+  const head = str(payload.source) === 'resumed' ? 'workspace resumed' : 'workspace prepared'
+  return [head, ...worktreeNotes(payload)].join(' · ')
+}
+
+/// What the operator may act on in a workspace's record, said last on its line.
+export function worktreeNotes(payload: Record<string, unknown>): string[] {
+  const synced = payload.synced && typeof payload.synced === 'object' ? (payload.synced as Record<string, unknown>) : {}
+  return [payload.main_checkout_dirty === true ? 'main checkout is dirty and was left alone' : '', str(synced.stale)].filter(Boolean)
+}
+
+/// "imported · on feat/x · volume tracon-workspace-9f3" — where the session's
+/// files came from. The node records one shape per source: a workspace in a
+/// runtime volume names its volume and has no path, while a host worktree
+/// names its path and the base it started from. Only the parts the node
+/// recorded are said; a field it left out is left out of the line.
+export function worktreeOrigin(payload: Record<string, unknown>): string {
   const source = str(payload.source)
   const path = str(payload.path)
-  const said: Record<string, string> = { imported: 'workspace imported', resumed: 'workspace resumed' }
-  const head =
-    said[source] ?? (source ? `workspace ${source.replace(/_/g, ' ')}` : path ? 'host worktree' : 'workspace')
   const branch = str(payload.branch)
   const base = str(payload.base)
   const volume = str(payload.volume)
-  const synced = payload.synced && typeof payload.synced === 'object' ? (payload.synced as Record<string, unknown>) : {}
   return [
-    head,
+    source ? source.replace(/_/g, ' ') : path ? 'host worktree' : '',
     path,
     branch ? `on ${branch}` : '',
     base ? `from ${base}` : '',
     volume ? `volume ${volume}` : '',
-    payload.main_checkout_dirty === true ? 'main checkout is dirty and was left alone' : '',
-    str(synced.stale),
   ]
     .filter(Boolean)
     .join(' · ')

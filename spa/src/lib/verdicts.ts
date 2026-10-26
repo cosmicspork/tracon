@@ -75,6 +75,16 @@ export function publishedChange(result: string | null | undefined): { url: strin
 }
 
 /**
+ * "PR #149" (or "MR !12" on GitLab): a published request by its number, so a link to it says which
+ * request it is rather than "open". Null for an address that names none.
+ */
+export function requestName(result: string | null | undefined): string | null {
+  const change = publishedChange(result)
+  if (change?.number == null) return null
+  return /\/merge_requests\//.test(change.url) ? `MR !${change.number}` : `PR #${change.number}`
+}
+
+/**
  * The published change as the review header names it: "PR #149 · merged",
  * "MR !12 · open · draft". Without a look from the forge yet it says only
  * which change it is.

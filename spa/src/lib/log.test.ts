@@ -21,6 +21,7 @@ import {
   usageMismatchLine,
   usageUnmeteredLine,
   worktreeLine,
+  worktreeOrigin,
 } from './log'
 import type { Event } from './types'
 import { formatTokens } from './format'
@@ -137,29 +138,23 @@ test('repetition reads as a signal to look at, not as a verdict', () => {
   expect(repetitionLine({})).toBe('same call 0× in a row · the same tool call · recorded, not paused')
 })
 
-test('the worktree line names the source and says only what the node recorded', () => {
-  // A workspace imported into a runtime volume: no path, no base.
-  expect(
-    worktreeLine({
-      branch: 'feat/tracon-991d226c9df2',
-      source: 'imported',
-      volume: 'tracon-workspace-991d226c9df2',
-      workspace_id: '991d226c9df2',
-    }),
-  ).toBe('workspace imported · on feat/tracon-991d226c9df2 · volume tracon-workspace-991d226c9df2')
-  expect(worktreeLine({ branch: 'feat/x', source: 'resumed', volume: 'tracon-workspace-abc' })).toBe(
-    'workspace resumed · on feat/x · volume tracon-workspace-abc',
-  )
+test('the worktree line says the workspace is prepared, and only what needs the operator', () => {
+  // A workspace imported into a runtime volume: where it came from is folded.
+  const imported = { branch: 'feat/tracon-991d226c9df2', source: 'imported', volume: 'tracon-workspace-991d226c9df2', workspace_id: '991d226c9df2' }
+  expect(worktreeLine(imported)).toBe('workspace prepared')
+  expect(worktreeOrigin(imported)).toBe('imported · on feat/tracon-991d226c9df2 · volume tracon-workspace-991d226c9df2')
+  expect(worktreeLine({ branch: 'feat/x', source: 'resumed', volume: 'tracon-workspace-abc' })).toBe('workspace resumed')
   // A source this does not know still reads as words, not as a field name.
-  expect(worktreeLine({ branch: 'feat/x', source: 'host_worktree' })).toBe('workspace host worktree · on feat/x')
+  expect(worktreeOrigin({ branch: 'feat/x', source: 'host_worktree' })).toBe('host worktree · on feat/x')
   // A host worktree, which names its path and the base it started from.
   expect(
-    worktreeLine({ path: '/var/lib/tracon/worktrees/orbit', branch: 'feat/x', base: 'origin/main', main_checkout_dirty: false }),
+    worktreeOrigin({ path: '/var/lib/tracon/worktrees/orbit', branch: 'feat/x', base: 'origin/main', main_checkout_dirty: false }),
   ).toBe('host worktree · /var/lib/tracon/worktrees/orbit · on feat/x · from origin/main')
   expect(worktreeLine({ path: '/w/orbit', branch: 'feat/x', base: 'origin/main', main_checkout_dirty: true })).toBe(
-    'host worktree · /w/orbit · on feat/x · from origin/main · main checkout is dirty and was left alone',
+    'workspace prepared · main checkout is dirty and was left alone',
   )
-  expect(worktreeLine({})).toBe('workspace')
+  expect(worktreeLine({})).toBe('workspace prepared')
+  expect(worktreeOrigin({})).toBe('')
   // A managed clone that could not be fetched says its base is stale.
   expect(
     worktreeLine({
@@ -167,8 +162,8 @@ test('the worktree line names the source and says only what the node recorded', 
       source: 'imported',
       synced: { source_ref: 'origin/main', stale: 'stale: last fetched at 2026-10-07 12:00 UTC; the fetch failed: x' },
     }),
-  ).toBe('workspace imported · on feat/x · stale: last fetched at 2026-10-07 12:00 UTC; the fetch failed: x')
-  expect(worktreeLine({ source: 'imported', synced: { stale: null } })).toBe('workspace imported')
+  ).toBe('workspace prepared · stale: last fetched at 2026-10-07 12:00 UTC; the fetch failed: x')
+  expect(worktreeLine({ source: 'imported', synced: { stale: null } })).toBe('workspace prepared')
 })
 
 test('the start line says which image the harness is in only when it matters', () => {

@@ -2104,19 +2104,6 @@ export interface EnrollStatus {
   restart_required: boolean
 }
 
-/** One captured candidate, as the node that holds it describes it. */
-export interface CandidateDetail {
-  candidate: {
-    id: string
-    channel: string
-    head_sha: string
-    owner_session_id: string | null
-    /** The node that captured this candidate. */
-    owner_node_id: string
-    captured_ms: number
-  }
-}
-
 /** One runtime volume or state directory, and what a storage sweep makes of it. */
 /** One kind of data a node holds (`GET /api/maintenance/data`). */
 export interface Holding {
@@ -2288,6 +2275,8 @@ export interface Continuation {
       state: string
       verdict_reason: string | null
       publish_result: string | null
+      /** The published request as the forge last showed it: open, merged or closed. Absent from older nodes. */
+      forge_state?: string | null
       head_sha: string
       created_ms: number
     }[]

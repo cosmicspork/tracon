@@ -319,6 +319,16 @@ impl Supervisor {
         self
     }
 
+    /// A first prompt that is the node's kickoff for the phase, not the
+    /// operator's words: its `user_prompt` says so, so the transcript does
+    /// not show it as something the operator typed.
+    pub fn with_kickoff(mut self, kickoff: bool) -> Self {
+        if kickoff {
+            self.next_prompt_origin = Some("kickoff");
+        }
+        self
+    }
+
     /// The node's view of what its sessions wait on: the checks it runs and
     /// what each session has been told. Without it a supervisor still sees
     /// what the store holds.
@@ -1714,6 +1724,9 @@ impl Supervisor {
     /// Start a turn with `text`. `queued` names the queued messages it
     /// carries, when it is their delivery.
     async fn dispatch_prompt(&mut self, text: String, queued: Vec<String>) -> Result<(), String> {
+        // Whose words these are holds for this prompt only, sent or not: a
+        // refused kickoff must not label the operator's next prompt.
+        let origin = self.next_prompt_origin.take();
         let s = self
             .store
             .get_session(&self.session_id)
@@ -1769,7 +1782,7 @@ impl Supervisor {
         if !queued.is_empty() {
             payload["queued"] = json!(queued);
         }
-        if let Some(origin) = self.next_prompt_origin.take() {
+        if let Some(origin) = origin {
             payload["origin"] = json!(origin);
         }
         self.record(ek::USER_PROMPT, None, payload);

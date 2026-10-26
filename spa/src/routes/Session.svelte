@@ -295,25 +295,21 @@
 {:else}
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
-    <span class="model">{session.harness_id === 'external' ? ['External agent', externalAgent(session.harness_session_id, session.harness_agent)].filter(Boolean).join(' · ') : session.model}</span>
+    <!-- The harness and its protocol are the node's business: on hover only. -->
+    <span
+      class="model"
+      title={session.harness_found
+        ? `${session.harness_agent ?? session.harness_id} ${session.harness_found} · ${session.harness_protocol}`
+        : undefined}
+      >{session.harness_id === 'external' ? ['External agent', externalAgent(session.harness_session_id, session.harness_agent)].filter(Boolean).join(' · ') : session.model}</span
+    >
     <span class="chip">{session.phase}</span>
     <span class="chip" class:self={owner?.is_self} class:off={unreachable !== null}
       >{chipLabel(store.nodes, session.node_id)}{unreachable !== null && owner?.last_seen_ms
         ? ` · last seen ${formatAge(owner.last_seen_ms, clock.now)}`
         : ''}</span
     >
-    {#if session.harness_found}
-      <span
-        class="mono"
-        title="the harness this session ran, and the protocol it negotiated (pinned {session.harness_version})"
-        >{session.harness_agent ?? session.harness_id} {session.harness_found} ·
-        {session.harness_protocol}</span
-      >
-    {/if}
-    {#if session.harness_id !== 'external'}
-      <span class="mono">{session.worktree_path ?? session.repo_path}</span>
-      <span class="mono">{session.branch}</span>
-    {:else}
+    {#if session.harness_id === 'external'}
       <span class="mono" title="The external host and its repository stay outside Tracon's supervision.">brokered external attachment</span>
     {/if}
     <span class="sp"></span>
@@ -343,18 +339,12 @@
     {#if session.harness_id !== 'external' && session.cost_usd != null}
       <span class="mono">${session.cost_usd.toFixed(2)}</span>
     {/if}
-    {#if session.policy_version != null}
-      <span class="mono">policy v{session.policy_version}</span>
-    {/if}
     {#if session.manifest_digest}
       <span
         class="mono"
         title="the launch manifest this session was staged from — its skills, instructions and agents. A later revision is for the next session, not this one."
         >manifest {session.manifest_digest.slice(0, 8)}</span
       >
-    {/if}
-    {#if session.work_item_id}
-      <a class="mono" href="/tasks/{session.work_item_id}">item {session.work_item_id.slice(0, 8)}</a>
     {/if}
     {#if controls?.resume}
       <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
@@ -378,6 +368,11 @@
       {/if}
     {/if}
   </header>
+
+  <!-- Everything linked to the work under the title: its task, plan,
+       sessions, review, request and branch. Next and its verbs once this
+       attempt has ended; until then the header holds the controls. -->
+  <ContinuationPanel sessionId={id} actions={isTerminal(session.state)} stamp={`${session.state}:${publications.length}`} />
 
   {#if session.legacy_ms}
     <div class="banner dim">
@@ -538,14 +533,10 @@
     <PermissionCard permission={p} inline />
   {/each}
 
-  <!-- Opened by the "why is this asked" link on a permission card, so the
-       answer is one tap from the request rather than a screen away. -->
-  <SessionAuthorityPanel {id} open={router.hash === '#authority'} />
-
-  <!-- Once an attempt has ended, what matters is the work it was part of:
-       how it stands across every attempt, and what to do next. -->
-  {#if isTerminal(session.state)}
-    <ContinuationPanel sessionId={id} />
+  <!-- Not part of the page: only the "why this is asked" link on a
+       permission card opens it, so the answer is one tap from the request. -->
+  {#if router.hash === '#authority'}
+    <SessionAuthorityPanel {id} open />
   {/if}
 
   {#if error}

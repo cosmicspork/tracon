@@ -3319,6 +3319,14 @@ async fn a_plan_session_starts_on_its_item_without_a_nudge() {
         "the plan document is named: {text}"
     );
     assert!(text.contains("`doc_write`"), "{text}");
+    // Said to be the node's, so the transcript does not show it as typed.
+    let prompt = store
+        .events_after(&row.id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "user_prompt")
+        .unwrap();
+    assert_eq!(prompt.payload["origin"], "kickoff", "{}", prompt.payload);
     assert!(store.get_session(&row.id).unwrap().unwrap().draft.is_none());
     tracon::session::materialize::remove(&row.id);
 }

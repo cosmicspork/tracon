@@ -25,6 +25,9 @@ export function redirect(path: string, search = '', hash = ''): string | null {
   if (path === '/work') return `/tasks${search}${hash}`
   const item = path.match(/^\/work\/([^/]+)$/)
   if (item) return `/tasks/${item[1]}${search}${hash}`
+  // Evidence repeated what a task and its review already link: its cards
+  // were the task and the review again. What it captured is on the review.
+  if (path === '/evidence') return `/tasks`
   // Nodes left the rail: its facts sit in Settings › Mesh beside the members.
   if (path === '/nodes') return `/settings${search}#mesh`
   // A section was only ever a hash, but a path is the obvious thing to type.
@@ -65,7 +68,7 @@ export type Screen =
   | { name: 'doc-preview'; channel: string; slug: string }
   | { name: 'review' | 'approval' | 'promotion' | 'session' | 'task'; id: string }
   | { name: 'doc'; channel: string; slug: string; edit: boolean }
-  | { name: 'sessions' | 'enroll' | 'usage' | 'tasks' | 'more' | 'evidence' | 'docs' | 'memories' | 'settings' | 'home' }
+  | { name: 'sessions' | 'enroll' | 'usage' | 'tasks' | 'more' | 'docs' | 'memories' | 'settings' | 'home' }
 
 /** Every screen's name, so a test can hold the screen audit to all of them. */
 export const SCREENS = Object.keys({
@@ -80,7 +83,6 @@ export const SCREENS = Object.keys({
   task: 1,
   tasks: 1,
   more: 1,
-  evidence: 1,
   doc: 1,
   docs: 1,
   memories: 1,
@@ -108,7 +110,6 @@ export function screenFor(path: string): Screen {
   if (task) return { name: 'task', id: task[1] }
   if (path === '/tasks') return { name: 'tasks' }
   if (path === '/more') return { name: 'more' }
-  if (path === '/evidence') return { name: 'evidence' }
   const doc = path.match(/^\/docs\/([^/]+)\/([^/]+)(\/edit)?$/)
   if (doc) return { name: 'doc', channel: doc[1], slug: doc[2], edit: Boolean(doc[3]) }
   if (path.startsWith('/docs')) return { name: 'docs' }

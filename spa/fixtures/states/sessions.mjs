@@ -120,7 +120,15 @@ function opening(sid, o = {}) {
       -2700000,
     ),
     ev(sid, 'worktree', { path: `/var/lib/tracon/worktrees/orbit-${sid.slice(0, 6)}`, branch: o.branch ?? 'feat/rate-limits', base: 'origin/main', main_checkout_dirty: false }, -2699000),
-    ev(sid, 'user_prompt', { text: o.prompt ?? 'Add per-channel rate limits to the gateway. The plan is in plan-rate-limits; the review binding stays untouched.' }, -2640000),
+    // A session on a work item starts on the node's kickoff; a given prompt is the operator's.
+    ev(
+      sid,
+      'user_prompt',
+      o.prompt
+        ? { text: o.prompt }
+        : { text: 'Carry out work item **Per-channel rate limits in the gateway** (`wi-2…`). Follow its plan, document `plan-rate-limits`: your orientation carries it, and `doc_read` returns it whole. Commit the work in the worktree and call `submit_review` when it is ready.', origin: 'kickoff' },
+      -2640000,
+    ),
   ]
 }
 
@@ -1066,7 +1074,7 @@ export default [
     route: `/sessions/${S.done.id}`,
     title: 'Ended normally at item close, outcome populated',
     since: '#386',
-    note: 'Outcome panel open: changed review, checks (one from an earlier commit), claims backed / unbacked. Continuation shows done.',
+    note: 'Links bar under the header: Task, Plan doc, Sessions, Review published, "PR #418 merged", Branch; Next says done. The first prompt folds as the node\'s prompt for the execute phase; "on the forge · merged · PR #418". Outcome panel open: changed review, checks (one from an earlier commit), claims backed / unbacked.',
     api: page(S.done, {
       events: [
         ...opening(S.done.id),
@@ -1076,13 +1084,14 @@ export default [
         ev(S.done.id, 'check_result', { command: 'just test', ok: true, exit: 0, tail: 'test result: ok. 412 passed', ms: 188000 }, -90700000),
         ev(S.done.id, 'work_shown', { title: 'Rate limit refusal, before and after', head_sha: '8c4be91f03a2', files: 2 }, -90500000),
         ev(S.done.id, 'work_closed', { summary: 'Per-channel limits shipped in #418' }, -90000000),
+        ev(S.done.id, 'forge_follow', { changes: ['merged'], url: 'https://github.com/cosmic-example/orbit/pull/418' }, -89000000),
       ],
       outcome: outcomeDone(S.done),
       continuation: continuation(S.done, {
         next: { kind: 'done', text: 'The work item is closed.', session_id: null },
         actions: { continue_from: null, abandon: false },
         evidence: {
-          reviews: [{ id: 'rev-7', session_id: S.done.id, title: 'Per-channel rate limits in the gateway', state: 'published', verdict_reason: null, publish_result: 'https://github.com/cosmic-example/orbit/pull/418', head_sha: '8c4be91', created_ms: -91000000 }],
+          reviews: [{ id: 'rev-7', session_id: S.done.id, title: 'Per-channel rate limits in the gateway', state: 'published', verdict_reason: null, publish_result: 'https://github.com/cosmic-example/orbit/pull/418', forge_state: 'merged', head_sha: '8c4be91', created_ms: -91000000 }],
           shown: [{ id: 'sw-1', session_id: S.done.id, title: 'Rate limit refusal, before and after', head_sha: '8c4be91f03a2', stale: false, created_ms: -90500000 }],
         },
         decisions: { plan: 'plan-rate-limits', brief: null, answered: [{ session_id: S.done.id, kind: 'permission', asked: 'Bash: just test', answer: 'allow_once', at_ms: -91100000 }] },
@@ -1157,7 +1166,7 @@ export default [
     area: 'sessions',
     route: `/sessions/${S.waiting.id}#authority`,
     title: '"What this session may do" opened by its anchor',
-    note: 'Scoped ask, a grant, refusals, unattended checks, the policy footer.',
+    note: 'Only a permission card\'s "why this is asked" opens it; it is not on the page otherwise. Scoped ask, a grant, refusals, unattended checks, the policy footer.',
     api: page(S.waiting, {
       events: [...opening(S.waiting.id), ev(S.waiting.id, 'permission_request', { title: 'Bash: cargo test -p tracon-node --test gateway' }, -95000, 'perm-41')],
       queue: { ...NO_QUEUE, waiting: [perm(S.waiting.id)] },

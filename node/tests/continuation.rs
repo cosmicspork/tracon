@@ -504,6 +504,59 @@ async fn continuing_an_attempt_hands_its_review_in_revision_to_the_next() {
     assert_eq!(decided.session_id.as_deref(), Some("a"));
 }
 
+/// A published review says what the forge last showed of its request, so the
+/// work's links can say a pull request is merged without opening it.
+#[tokio::test]
+async fn a_published_review_carries_the_forge_state_of_its_request() {
+    let h = harness().await;
+    h.store
+        .insert_session(&ended("a", 1, "phase_done", None))
+        .unwrap();
+    let mut published = review_row("rv-1", "a", "published");
+    published.publish_result = Some("https://github.test/owner/name/pull/149".into());
+    h.store.insert_review(&published).unwrap();
+    h.store
+        .publication_begin(&tracon::store::publication::PublicationBegin {
+            id: "p1",
+            review_id: "rv-1",
+            revision_id: None,
+            candidate_id: "c1",
+            channel: "personal",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat",
+            head_sha: "abc",
+            instance: "i",
+        })
+        .unwrap();
+    h.store
+        .publication_opened("p1", "https://github.test/owner/name/pull/149")
+        .unwrap();
+    let (_, v) = call(&h.operator, "GET", "/api/sessions/a/continuation", None).await;
+    assert_eq!(
+        v["evidence"]["reviews"][0]["forge_state"],
+        Value::Null,
+        "{v}"
+    );
+
+    h.store
+        .append_event(&NewEvent {
+            session_id: "a".into(),
+            work_item_id: None,
+            kind: "forge_follow".into(),
+            ref_id: Some("p1".into()),
+            payload: json!({ "review_id": "rv-1", "changes": ["merged"], "snapshot": { "state": "merged" } }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        })
+        .unwrap();
+    let (st, v) = call(&h.operator, "GET", "/api/sessions/a/continuation", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["evidence"]["reviews"][0]["forge_state"], "merged", "{v}");
+}
+
 /// One look `follow` recorded at request #149, as `follow::tick` records it.
 fn followed(h: &Harness, session: &str, at: i64, snapshot: Value) {
     h.store

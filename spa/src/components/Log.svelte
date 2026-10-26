@@ -18,9 +18,12 @@
     usageMismatchLine,
     usageUnmeteredLine,
     worktreeLine,
+    worktreeNotes,
+    worktreeOrigin,
   } from '../lib/log'
   import { clock } from '../lib/clock.svelte'
   import { formatTokens } from '../lib/format'
+  import { requestName } from '../lib/verdicts'
   import { formatSpan, runFailures, runMs, runRunning, transcript, type CallRow } from '../lib/transcript'
   import { renderMessage } from '../lib/markdown'
   import type { Event } from '../lib/types'
@@ -41,6 +44,15 @@
   } = $props()
 
   const entries = $derived(groupLog(events, toolProgress, toolOutput))
+  // Where the workspace came from folds into the line that says it is
+  // prepared: the repository's own preparation when it ran one.
+  const worktree = $derived(events.find((e) => e.kind === 'worktree'))
+  const prepared = $derived(events.some((e) => e.kind === 'workspace_prepared'))
+  /** The phase the node's first prompt is for, as the session started on it. */
+  const phase = $derived.by(() => {
+    const p = events.find((e) => e.kind === 'session_started')?.payload.phase
+    return typeof p === 'string' ? p : ''
+  })
   // Where each message the operator queued mid-turn went, and whether the
   // session ended before it could go anywhere.
   const deliveries = $derived(queuedDeliveries(events))
@@ -163,6 +175,12 @@
       {#if e.kind === 'user_prompt' && queuedCount(e) > 0}
         <!-- The text is on the queued lines above, each saying where it went. -->
         <div class="sys">{queuedCount(e) === 1 ? 'your queued message' : `your ${queuedCount(e)} queued messages`} sent as the next prompt</div>
+      {:else if e.kind === 'user_prompt' && e.payload.origin === 'kickoff'}
+        <!-- Not the operator's words: what the node starts a session on its work with. -->
+        <details class="fold">
+          <summary>{phase ? `the node's prompt for the ${phase} phase` : "the node's first prompt"}</summary>
+          <div class="md">{@html renderMessage(text(e))}</div>
+        </details>
       {:else if e.kind === 'user_prompt' && e.payload.origin === 'node'}
         <!-- Not the operator's words: the node carrying a cut turn on. -->
         <div class="sys">the node carried the turn on after the restart: {text(e)}</div>
@@ -195,7 +213,14 @@
       {:else if e.kind === 'cloning'}
         <div class="sys">cloning {e.payload.repo} from its forge · once on this node, before the workspace is made</div>
       {:else if e.kind === 'worktree'}
-        <div class="sys">{worktreeLine(e.payload)}</div>
+        {#if !prepared && worktreeOrigin(e.payload)}
+          <details class="fold">
+            <summary>{worktreeLine(e.payload)}</summary>
+            <div>{worktreeOrigin(e.payload)}</div>
+          </details>
+        {:else if !prepared}
+          <div class="sys">{worktreeLine(e.payload)}</div>
+        {/if}
       {:else if e.kind === 'session_started'}
         <div class="sys">harness started · {e.payload.model}{e.payload.phase ? ` · ${e.payload.phase}` : ''}{e.payload.policy_version != null ? ` · policy v${e.payload.policy_version}` : ''}{sessionImage(e.payload)}</div>
       {:else if e.kind === 'egress_refused'}
@@ -211,12 +236,13 @@
           <summary class="crit">{eventLine(e)?.text}</summary>
           <div>{[e.payload.message, e.payload.tail].filter(Boolean).join('\n\n')}</div>
         </details>
-      {:else if e.kind === 'workspace_prepared' && e.payload.detail}
-        <!-- A failed preparation keeps what it said behind the line; the
-             others are a line from eventLine like any other kind. -->
-        <details class="fold" open>
-          <summary class="crit">{eventLine(e)?.text}</summary>
-          <div>{e.payload.detail}</div>
+      {:else if e.kind === 'workspace_prepared' && (e.payload.detail || worktree)}
+        <!-- A failed preparation keeps what it said behind the line, and
+             where the workspace came from folds under it either way. -->
+        {@const notes = worktree ? worktreeNotes(worktree.payload) : []}
+        <details class="fold" open={Boolean(e.payload.detail) || notes.length > 0}>
+          <summary class:crit={Boolean(e.payload.detail)}>{eventLine(e)?.text}</summary>
+          <div>{[e.payload.detail, ...notes, worktree ? worktreeOrigin(worktree.payload) : ''].filter(Boolean).join('\n\n')}</div>
         </details>
       {:else if e.kind === 'context_compacted' && e.payload.summary}
         <!-- What the model now works from in place of the earlier transcript. -->
@@ -255,7 +281,8 @@
         {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
         {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}
         {#if changes.length}
-          <div class="mark">on the forge · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">open</a>{/if}</div>
+          <!-- Named by its number: a link reading "open" was taken for the request's state. -->
+          <div class="mark">on the forge · {changes.join(' · ')}{#if url}{' · '}<a href={url} target="_blank" rel="noopener">{requestName(url) ?? 'the request'}</a>{/if}</div>
         {/if}
       {:else if e.kind === 'pipeline_follow'}
         {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}

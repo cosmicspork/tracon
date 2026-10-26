@@ -1,6 +1,6 @@
-// Evidence, Usage, the node list in Settings › Mesh, and Memories: the screens that report what the node
+// Usage, the node list in Settings › Mesh, and Memories: the screens that report what the node
 // observed rather than drive work. api.json has no fixture for metrics,
-// memories, evidence or the data inventory, and its /api/mesh predates most of
+// memories or the data inventory, and its /api/mesh predates most of
 // MeshState's fields, so every state here brings its own.
 
 const SELF = '9f31c6a870d24b5e8c1f0a6d3e7b2905a4c8d1e6f0b3a7c2d5e8f1a4b7c0d3e6'
@@ -9,17 +9,6 @@ const DESK = 'c7d21e5fa09b3846e1d0c2b7a5f48e3d6c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f'
 const CI = '1e0f9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e'
 const NAS = '5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b'
 const OLD = 'e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4'
-
-/** A deterministic 40-hex commit sha from a small seed. */
-const sha = (seed) => {
-  let x = (seed * 2654435761) >>> 0
-  let out = ''
-  while (out.length < 40) {
-    x = (x * 1103515245 + 12345) >>> 0
-    out += x.toString(16).padStart(8, '0')
-  }
-  return out.slice(0, 40)
-}
 
 const err = (status, message) => ({ status, body: { error: { code: status, message } } })
 const hang = () => new Promise(() => {})
@@ -180,108 +169,7 @@ const permission = (id, sessionId, nodeId) => ({
   expires_ms: 810_000,
 })
 
-// ---------------------------------------------------------------- evidence
-
-const candidate = (n, o = {}) => {
-  const head = o.head ?? sha(n)
-  const channel = o.channel ?? 'personal'
-  return {
-    candidate: {
-      id: `${head}:${channel}`,
-      head_sha: head,
-      channel,
-      owner_session_id: o.session ?? `s-${n}`,
-      owner_node_id: o.owner ?? SELF,
-      source_kind: 'git',
-      captured_ms: o.captured ?? -(n * 3_100_000 + 240_000),
-    },
-    work_items: o.work ?? [],
-    more_work_items: o.moreWork ?? false,
-    reviews: o.reviews ?? [],
-    more_reviews: o.moreReviews ?? false,
-  }
-}
-
-const candidates = [
-  candidate(1, {
-    work: [{ id: 'wi-2', title: 'Rate-limit the public export endpoint', state: 'open' }],
-    reviews: [{ id: 'r-1', title: 'feat(api): rate-limit /export per token', state: 'new' }],
-  }),
-  candidate(2, {
-    work: [{ id: 'wi-7', title: 'Retry webhook delivery with backoff', state: 'closed' }],
-    reviews: [{ id: 'r-4', title: 'fix(webhooks): back off on 5xx instead of dropping', state: 'published' }],
-  }),
-  candidate(3, {
-    channel: 'work',
-    owner: POD,
-    work: [],
-    reviews: [{ id: 'rev-1', title: 'Export queue metrics per channel', state: 'new' }],
-  }),
-  candidate(4, { work: [{ id: 'wi-11', title: 'Document the session ceiling in the operator guide', state: 'open' }] }),
-  candidate(5, {}),
-  candidate(6, {
-    reviews: [
-      { id: 'r-9', title: 'refactor(store): split the evidence queries out of store.rs', state: 'rejected' },
-      { id: 'r-10', title: 'refactor(store): split evidence queries (second attempt)', state: 'approved' },
-    ],
-  }),
-]
-
-const page = (items, next = null) => ({ items, next_before: next })
-
-const detail = (c) => ({
-  candidate: {
-    id: c.candidate.id,
-    channel: c.candidate.channel,
-    head_sha: c.candidate.head_sha,
-    owner_session_id: c.candidate.owner_session_id,
-    owner_node_id: c.candidate.owner_node_id,
-    captured_ms: c.candidate.captured_ms,
-  },
-})
-
-const longTitle =
-  'Replace the hand-rolled retry loop in the forge client with the shared backoff policy, keep the 429 Retry-After handling, and stop retrying 422 validation failures that will never succeed'
-const longCandidates = [
-  candidate(21, {
-    channel: 'client-hounddog-reading-platform',
-    work: [
-      { id: 'wi-301', title: longTitle, state: 'open' },
-      ...Array.from({ length: 11 }, (_, i) => ({
-        id: `wi-${310 + i}`,
-        title: `Follow-up ${i + 1}: migrate ${['lesson', 'roster', 'grade', 'assignment', 'reader', 'invite', 'billing', 'audit', 'export', 'import', 'sso'][i]} endpoints to the new rate limiter`,
-        state: i % 3 ? 'open' : 'closed',
-      })),
-    ],
-    moreWork: true,
-    reviews: [
-      { id: 'r-301', title: `feat(forge): ${longTitle}`, state: 'new' },
-      { id: 'r-302', title: 'chore: bump the forge client to the backoff crate', state: 'published' },
-    ],
-    moreReviews: true,
-  }),
-  candidate(22, {
-    channel: 'client-hounddog-reading-platform',
-    owner: DESK,
-    reviews: [
-      {
-        id: 'r-303',
-        title: 'fix(paths): handle /var/home/op/src/.worktrees/hounddogreading-fix-very-long-branch-name-for-the-audit/app/Http/Controllers/Api/V2/LessonAssignmentExportController.php',
-        state: 'new',
-      },
-    ],
-  }),
-  candidate(23, {
-    work: [{ id: 'wi-330', title: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-unbroken', state: 'open' }],
-  }),
-]
-
-const evidenceApi = (list, extra = {}) => ({
-  '/api/nodes': [self, pod, node({ id: DESK, name: 'desk' })],
-  '/api/channels': channelsWithDesk,
-  '/api/evidence/candidates': list,
-  ...extra,
-})
+// ---------------------------------------------------------------- channels
 
 const channelsWithDesk = [
   {
@@ -306,9 +194,6 @@ const channelsWithDesk = [
     archived: null,
   },
 ]
-
-const selectedRoute = (c) =>
-  `/evidence?candidate=${encodeURIComponent(c.candidate.id)}&channel=${c.candidate.channel}${c.candidate.owner_node_id !== SELF ? `&owner=${c.candidate.owner_node_id}` : ''}`
 
 // ---------------------------------------------------------------- metrics
 
@@ -509,126 +394,6 @@ const memoriesApi = (byChannel) => ({
 // ---------------------------------------------------------------- states
 
 export default [
-  // ---- Evidence
-  {
-    id: 'insight-evidence-populated',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: captured candidates',
-    note: 'Cards with task/review links, one owned by a peer (work-pod suffix), and a Load more button.',
-    api: evidenceApi(page(candidates, { captured_ms: -19_000_000, id: candidates[5].candidate.id })),
-  },
-  {
-    id: 'insight-evidence-loading',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: first page loading',
-    api: evidenceApi(hang),
-  },
-  {
-    id: 'insight-evidence-empty',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: nothing captured',
-    api: evidenceApi(page([])),
-  },
-  {
-    id: 'insight-evidence-filter-empty',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: search matches nothing',
-    note: 'Empty state with Clear filters inline.',
-    api: evidenceApi((req) => page(req.query.q ? [] : candidates)),
-    act: async (page) => {
-      await page.getByLabel('Search task or review evidence').fill('pagination cursor')
-      await page.getByRole('button', { name: 'Search evidence' }).click()
-    },
-  },
-  {
-    id: 'insight-evidence-error',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: list fails',
-    api: evidenceApi(err(500, 'database is locked')),
-  },
-  {
-    id: 'insight-evidence-remote-runner',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: shared channel, peer runner, peer unreachable',
-    note: 'Channel and runner selects filled; the peer read fails with the node message.',
-    api: evidenceApi((req) =>
-      req.query.runner ? err(502, 'the evidence runner did not answer through the hub within 10s') : page(candidates),
-    ),
-    act: async (page) => {
-      await page.getByLabel('Evidence channel').selectOption('personal')
-      await page.getByLabel('Evidence runner').selectOption(DESK)
-      await page.getByRole('button', { name: 'Search evidence' }).click()
-    },
-  },
-  {
-    id: 'insight-evidence-long',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: long titles, many links, long channel',
-    note: 'Ellipsis on long titles and links, the "omitted" note, an unbroken title, a long path title.',
-    api: evidenceApi(page(longCandidates)),
-  },
-  {
-    id: 'insight-evidence-load-more',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: second page appended, no more pages',
-    api: evidenceApi((req) =>
-      req.query.before_ms
-        ? page(Array.from({ length: 4 }, (_, i) => candidate(40 + i, { work: [{ id: `wi-${40 + i}`, title: `Older task ${i + 1}`, state: 'closed' }] })))
-        : page(candidates, { captured_ms: -19_000_000, id: candidates[5].candidate.id }),
-    ),
-    act: async (page) => {
-      await page.getByRole('button', { name: 'Load more evidence' }).click()
-    },
-  },
-  {
-    id: 'insight-evidence-selected',
-    area: 'insight',
-    route: selectedRoute(candidates[0]),
-    title: 'Evidence: a candidate opened',
-    note: 'Selected card border, and the candidate summary at the bottom of the page.',
-    api: evidenceApi(page(candidates), {
-      '/api/evidence/candidates/*/summary': detail(candidates[0]),
-    }),
-  },
-  {
-    id: 'insight-evidence-selected-remote',
-    area: 'insight',
-    route: selectedRoute(candidates[2]),
-    title: 'Evidence: a peer-owned candidate opened, no owner session',
-    note: 'Owner names the peer; "Missing owner session" where the session id is null.',
-    api: evidenceApi(page(candidates), {
-      '/api/evidence/candidates/*/summary': { candidate: { ...detail(candidates[2]).candidate, owner_session_id: null } },
-    }),
-  },
-  {
-    id: 'insight-evidence-selected-not-found',
-    area: 'insight',
-    route: '/evidence?candidate=0123456789abcdef0123456789abcdef01234567%3Apersonal',
-    title: 'Evidence: technical lookup of an unknown candidate',
-    api: evidenceApi(page(candidates), {
-      '/api/evidence/candidates/*/summary': err(404, 'candidate was not found'),
-    }),
-  },
-  {
-    id: 'insight-evidence-technical-open',
-    area: 'insight',
-    route: '/evidence',
-    title: 'Evidence: technical lookup expanded and filled',
-    api: evidenceApi(page(candidates.slice(0, 2))),
-    act: async (page) => {
-      await page.getByText('Technical candidate lookup').click()
-      await page.getByPlaceholder('Candidate id (commit:channel)').fill(`${sha(77)}:personal`)
-    },
-  },
-
   // ---- Usage
   {
     id: 'insight-metrics-populated',

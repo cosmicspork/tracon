@@ -5,6 +5,7 @@ import {
   checksState,
   composerLabel,
   publishedChange,
+  requestName,
   publishedLabel,
   rereadDelay,
   rereadReviewer,
@@ -57,6 +58,13 @@ describe('verdict availability', () => {
     expect(publishedChange('pushed abc123')).toBeNull()
     expect(publishedChange(null)).toBeNull()
     expect(publishedChange('')).toBeNull()
+  })
+
+  test('a published request is named by its number, not by its address', () => {
+    expect(requestName('https://github.com/o/r/pull/149')).toBe('PR #149')
+    expect(requestName('https://gitlab.example/g/p/-/merge_requests/7')).toBe('MR !7')
+    expect(requestName('https://forge.example/o/r/compare/main...x')).toBeNull()
+    expect(requestName(null)).toBeNull()
   })
 })
 

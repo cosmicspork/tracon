@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { attemptState, carries, closeOffer, verbs } from './continuation'
+import { attemptState, carries, closeOffer, verbs, workLinks } from './continuation'
 import type { Continuation, ContinuationAttempt } from './types'
 
 const attempt = (over: Partial<ContinuationAttempt>): ContinuationAttempt => ({
@@ -50,6 +50,71 @@ test('the verbs follow what the node allows', () => {
     changeApproach: false,
     abandon: false,
   })
+})
+
+const item = (over: Partial<Continuation> = {}): Continuation => ({
+  kind: 'item',
+  id: 'wi-2',
+  channel: 'personal',
+  intent: { title: 'Rate-limit the export', body: '', source: 'item' },
+  attempts: [attempt({ id: 'aaaaaaaa-1', phase: 'plan', end_reason: 'phase_done' }), attempt({ id: 'bbbbbbbb-2' })],
+  blockers: [],
+  next: { kind: 'done', text: '', session_id: null },
+  workspace: { id: 'bbbbbbbb-2', branch: 'feat/rate-limits', session_id: 'bbbbbbbb-2' },
+  decisions: { plan: 'plan-wi-2', brief: null, answered: [] },
+  evidence: {
+    reviews: [
+      {
+        id: 'rev-7',
+        session_id: 'bbbbbbbb-2',
+        title: 'feat: rate limits',
+        state: 'published',
+        verdict_reason: null,
+        publish_result: 'https://github.com/o/r/pull/149',
+        forge_state: 'merged',
+        head_sha: 'abc',
+        created_ms: 5,
+      },
+    ],
+    shown: [],
+  },
+  actions: { continue_from: null, abandon: false, close: false },
+  follow: null,
+  ...over,
+})
+
+const read = (groups: ReturnType<typeof workLinks>) =>
+  groups.map((g) => [g.label, ...g.links.map((l) => [l.text, l.note ?? '', l.href ?? ''].filter(Boolean).join(' '))].filter(Boolean).join(': '))
+
+test('the links bar names everything linked to the work, in order', () => {
+  expect(read(workLinks(item(), { sessionId: 'bbbbbbbb-2' }))).toEqual([
+    'Task /tasks/wi-2',
+    'Plan doc /docs/personal/plan-wi-2',
+    'Sessions: plan aaaaaaaa /sessions/aaaaaaaa-1: execute bbbbbbbb /sessions/bbbbbbbb-2',
+    'Review published /reviews/rev-7',
+    'PR #149 merged https://github.com/o/r/pull/149',
+    'Branch: feat/rate-limits',
+  ])
+  const here = workLinks(item(), { sessionId: 'bbbbbbbb-2' }).find((g) => g.label === 'Sessions')!.links
+  expect(here.map((l) => l.here)).toEqual([false, true])
+})
+
+test('the links bar leaves out what the work does not have, and the task on its own page', () => {
+  const bare = item({
+    attempts: [],
+    workspace: null,
+    decisions: { plan: null, brief: null, answered: [] },
+    evidence: { reviews: [], shown: [] },
+  })
+  expect(read(workLinks(bare, { itemId: 'wi-2' }))).toEqual([])
+  // A review not yet published, or published without an address, has no PR.
+  const pushed = item({ evidence: { reviews: [{ ...item().evidence.reviews[0], state: 'approved', publish_result: 'pushed abc' }], shown: [] } })
+  expect(read(workLinks(pushed, { itemId: 'wi-2' }))).toEqual([
+    'Plan doc /docs/personal/plan-wi-2',
+    'Sessions: plan aaaaaaaa /sessions/aaaaaaaa-1: execute bbbbbbbb /sessions/bbbbbbbb-2',
+    'Review approved /reviews/rev-7',
+    'Branch: feat/rate-limits',
+  ])
 })
 
 test('closing the task is offered while it is open, prominently once its request is merged', () => {
