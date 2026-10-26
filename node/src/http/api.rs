@@ -1938,6 +1938,17 @@ pub async fn carry_on(
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 
+/// Close the task: the item closes and any session holding it ends, a
+/// suspended one at once. The operator's call alone; no session closes the
+/// item it holds.
+pub async fn close_task(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let item = crate::continuation::close_task(&s.manager, &id).await?;
+    Ok(Json(json!(item)))
+}
+
 #[derive(Deserialize)]
 pub struct AbandonBody {
     #[serde(default)]

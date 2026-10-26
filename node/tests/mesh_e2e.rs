@@ -1105,6 +1105,7 @@ fn held_review(id: &str, owner: &str) -> tracon::store::ReviewRow {
         ai_verdict_json: None,
         revision_patch: None,
         lane: None,
+        publication_failed: None,
     }
 }
 

@@ -4,7 +4,7 @@
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import { isNarrativeReport } from '../lib/reports'
   import { store } from '../lib/store.svelte'
-  import { reviewChecks, reviewVerdict, type Review } from '../lib/types'
+  import { publicationFailure, reviewChecks, reviewVerdict, type Review } from '../lib/types'
   import { checksState } from '../lib/verdicts'
   let { review }: { review: Review } = $props()
 
@@ -21,16 +21,18 @@
     }
   })
   const narrative = $derived(isNarrativeReport(review))
+  const failed = $derived(publicationFailure(review))
   const label = $derived.by(() => {
     if (isNarrativeReport(review)) {
       const state = review.state
       return state === 'acknowledged' ? 'Acknowledged report' : state === 'revising' ? 'Report changes requested' : 'Narrative report'
     }
+    if (failed !== null) return 'Publication failed'
     return review.state === 'revising' ? 'Changes requested' : review.state === 'publishing' ? 'Publishing — reconcile' : 'Review'
   })
 </script>
 
-<a class="row" class:revising={review.state === 'revising'} class:held={held !== null} href="/reviews/{review.id}">
+<a class="row" class:revising={review.state === 'revising'} class:failed={failed !== null} class:held={held !== null} href="/reviews/{review.id}">
   <span class="bar"></span>
   <span class="mono">{formatAge(review.created_ms, clock.now)}</span>
   <span class="t">
@@ -43,7 +45,7 @@
       {:else}
         · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
           ? ' · claimed'
-          : ''}{#if checks}{' · '}{checks === 'running' ? 'checks running' : checks === 'passed' ? 'checks ✓' : 'checks ✗'}{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}
+          : ''}{#if checks}{' · '}{checks === 'running' ? 'checks running' : checks === 'passed' ? 'checks ✓' : 'checks ✗'}{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}{#if failed}{' · '}<span class="why">{failed}</span>{/if}
       {/if}
     </small>
   </span>
@@ -77,6 +79,17 @@
   }
   .row.revising .t em {
     color: var(--acc);
+  }
+  /* Back with you after the forge refused it: say so in the alarm colour. */
+  .row.failed {
+    background: linear-gradient(90deg, var(--wash-crit), var(--s1) 42%);
+  }
+  .row.failed .bar {
+    background: var(--crit);
+  }
+  .row.failed .t em,
+  .why {
+    color: var(--crit);
   }
   .t {
     font-weight: 500;

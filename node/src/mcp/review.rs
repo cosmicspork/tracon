@@ -149,7 +149,9 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                  and, once it has given one, its `verdict`, `summary` and `findings`; a \
                  verdict arriving ends the wait early. That verdict is advisory: only the \
                  operator's decision publishes. On approval the node publishes the approved \
-                 text itself and returns where it landed. {}",
+                 text itself and returns where it landed; if that fails, it reads \
+                 `state: \"publish_failed\"` with the error under `publication`, back with \
+                 the operator to retry or reject. {}",
                  super::wait::pointer()
             ),
             "inputSchema": {
@@ -1094,6 +1096,7 @@ impl Submission {
             ai_verdict_json: None,
             revision_patch: None,
             lane: ctx.lane().map(str::to_string),
+            publication_failed: None,
         };
         let revision = ReviewRevisionRow {
             id: uuid::Uuid::now_v7().to_string(),
@@ -2282,6 +2285,7 @@ async fn submit_report(
         ai_verdict_json: None,
         revision_patch: None,
         lane: ctx.lane().map(str::to_string),
+        publication_failed: None,
     };
     store
         .insert_review(&report)
@@ -3897,6 +3901,35 @@ fn pushed_by_another(
     })
 }
 
+/// What `review_status` answers when the operator approved `r` but
+/// publishing it failed, and what a waiting session is told of it.
+pub(crate) fn publish_failed_view(
+    r: &ReviewRow,
+    failed: &crate::store::PublicationRow,
+    says: &str,
+    brought_back: &str,
+) -> Value {
+    let error = failed.note.clone().unwrap_or_default();
+    json!({
+        "review_id": r.id,
+        "state": "publish_failed",
+        "still_waiting": true,
+        "publication": {
+            "error": error,
+            "attempts": failed.attempts,
+            "branch": failed.branch,
+            "base": failed.base,
+        },
+        "message": format!(
+            "{says}The operator approved this review, but publishing it failed: \
+             {error}. It is back with the operator, who can retry the same \
+             publication or reject it. If the failure names something to change, \
+             change it and resubmit with the same review_id. Call review_status \
+             again with the same review_id to keep waiting.{brought_back}"
+        ),
+    })
+}
+
 /// What `review_status` answers for a review the operator has decided, or
 /// `None` while it waits on them.
 pub(crate) fn decided_review_view(r: &ReviewRow) -> Option<Value> {
@@ -4070,9 +4103,9 @@ async fn status(
         Some(session_id) => session_id.to_string(),
         None => external_caller(&id),
     };
-    // The verdict as of the review's last change, read again only when it
-    // changes rather than on every poll.
-    let mut read: Option<(i64, Option<Value>)> = None;
+    // The verdict and any failed publication as of the review's last change,
+    // read again only when it changes rather than on every poll.
+    let mut read: Option<(i64, Option<Value>, Option<crate::store::PublicationRow>)> = None;
     loop {
         let r = store
             .get_review(&id)
@@ -4093,19 +4126,34 @@ async fn status(
         }
         if read
             .as_ref()
-            .is_none_or(|(updated, _)| *updated != r.updated_ms)
+            .is_none_or(|(updated, ..)| *updated != r.updated_ms)
         {
-            read = Some((r.updated_ms, current_verdict(store, &r)));
+            read = Some((
+                r.updated_ms,
+                current_verdict(store, &r),
+                store.failed_publication(&r).map_err(|e| e.to_string())?,
+            ));
         }
-        let verdict = read.as_ref().and_then(|(_, verdict)| verdict.clone());
+        let (verdict, failed) = read
+            .as_ref()
+            .map(|(_, verdict, failed)| (verdict.clone(), failed.clone()))
+            .unwrap_or_default();
         let untold = verdict.as_ref().is_some_and(|verdict| {
             !manager.waits().was_told(
                 &caller,
                 &crate::session::waits::reviewer_key(&r.id, verdict),
             )
         });
+        // An approval that failed to publish put the review back with the
+        // operator. The submitter hears of it once per attempt, the way it
+        // hears of a verdict, so it can fix what the failure names.
+        let untold_failure = failed.as_ref().is_some_and(|row| {
+            !manager
+                .waits()
+                .was_told(&caller, &crate::session::waits::publication_key(row))
+        });
         let now = tokio::time::Instant::now();
-        if untold || now >= deadline {
+        if untold || untold_failure || now >= deadline {
             let says = match &verdict {
                 Some(verdict) => {
                     manager.waits().tell(
@@ -4116,12 +4164,31 @@ async fn status(
                 }
                 None => String::new(),
             };
+            let waited = if now >= deadline {
+                wait
+            } else {
+                (now - began).as_secs()
+            };
+            if let Some(failed) = &failed {
+                manager
+                    .waits()
+                    .tell(&caller, &crate::session::waits::publication_key(failed));
+                let mut view = publish_failed_view(
+                    &r,
+                    failed,
+                    &says,
+                    crate::session::waits::brought_back(ctx.session_id().is_some()),
+                );
+                view["waited_secs"] = json!(waited);
+                view["reviewer"] = reviewer_view(store, manager, &r);
+                return Ok(view);
+            }
             return Ok(json!({
                 "review_id": r.id,
                 "state": r.state,
                 "still_waiting": true,
                 // What it waited, which a verdict can cut short of the wait asked.
-                "waited_secs": if now >= deadline { wait } else { (now - began).as_secs() },
+                "waited_secs": waited,
                 "reviewer": reviewer_view(store, manager, &r),
                 "message": format!(
                     "{says}Still waiting on a human; the review is {}. The wait is capped at \
@@ -4309,6 +4376,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         }
     }
 

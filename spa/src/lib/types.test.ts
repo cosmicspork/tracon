@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { permissionOptions, type Permission } from './types'
+import { permissionOptions, publicationFailure, type Permission, type Review } from './types'
 
 const base: Permission = {
   id: 'p',
@@ -27,4 +27,12 @@ test('options parse from the wire camelCase the harness uses', () => {
 test('snake_case and malformed options are tolerated', () => {
   expect(permissionOptions({ ...base, options: '[{"option_id":"x","name":"X","kind":"k"}]' })[0].option_id).toBe('x')
   expect(permissionOptions({ ...base, options: 'not json' })).toEqual([])
+})
+
+test('a failed publication is named only while the review is back with the operator', () => {
+  const review = { state: 'claimed', publication_failed: 'feat/a is not a branch on the forge any more' } as Review
+  expect(publicationFailure(review)).toBe('feat/a is not a branch on the forge any more')
+  expect(publicationFailure({ ...review, state: 'new' })).toBe('feat/a is not a branch on the forge any more')
+  expect(publicationFailure({ ...review, state: 'publishing' })).toBeNull()
+  expect(publicationFailure({ ...review, publication_failed: undefined })).toBeNull()
 })

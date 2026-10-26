@@ -362,6 +362,7 @@ pub fn router(state: AppState) -> Router {
             get(api::session_continuation),
         )
         .route("/api/work/{id}/continuation", get(api::work_continuation))
+        .route("/api/work/{id}/close", post(api::close_task))
         .route("/api/continuation/continue", post(api::carry_on))
         .route("/api/continuation/abandon", post(api::abandon_work))
         .route("/api/sessions/{id}/archive", post(api::archive_session))
