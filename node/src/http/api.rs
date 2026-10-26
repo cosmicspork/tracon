@@ -4173,8 +4173,7 @@ pub async fn get_promotion(
             continue;
         };
         if let Some(m) = s.store().memory_get(&old)?.filter(|m| m.deleted == 0) {
-            item["replaces"] =
-                json!({ "id": m.id, "kind": m.kind, "body": m.body, "state": m.state });
+            item["replaces"] = json!({ "id": m.id, "kind": m.kind, "scope": m.scope, "scope_ref": m.scope_ref, "body": m.body, "state": m.state });
         }
     }
     let verdicts: serde_json::Value = p

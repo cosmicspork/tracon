@@ -810,7 +810,10 @@ async fn a_retained_correction_waits_for_the_operator_and_promoting_it_retires_t
     assert_eq!(out["state"], "candidate", "{out}");
     assert_eq!(out["supersedes"], old.as_str());
     let fix = out["id"].as_str().unwrap().to_string();
-    let v = retain(4, json!({"kind": "fact", "scope": "global", "body": "the deploy runs from main", "confidence": 0.95, "supersedes": kept})).await;
+    // Without a scope, a correction reaches as far as what it replaces: this
+    // session has no project, so the default scope would be refused.
+    let v = retain(4, json!({"kind": "fact", "body": "the deploy runs from main", "confidence": 0.95, "supersedes": kept})).await;
+    assert_eq!(v["result"]["isError"], false, "{v}");
     let wrong = made(&v);
 
     // Refused before anything is written: a directive, another channel's
@@ -833,9 +836,22 @@ async fn a_retained_correction_waits_for_the_operator_and_promoting_it_retires_t
     )
     .await;
     let elsewhere = v["id"].as_str().unwrap().to_string();
-    for (i, target) in [directive.as_str(), elsewhere.as_str(), "no-such-memory"]
-        .into_iter()
-        .enumerate()
+    // A memory still waiting for the operator is not one recall returns, so
+    // it cannot be superseded either.
+    let v = retain(
+        5,
+        json!({"kind": "lesson", "scope": "global", "body": "a lesson still waiting"}),
+    )
+    .await;
+    let waiting = made(&v);
+    for (i, target) in [
+        directive.as_str(),
+        elsewhere.as_str(),
+        "no-such-memory",
+        waiting.as_str(),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let v = retain(10 + i as u64, json!({"kind": "fact", "scope": "global", "body": "refused correction", "supersedes": target})).await;
         assert_eq!(v["result"]["isError"], true, "{target}: {v}");
@@ -855,6 +871,8 @@ async fn a_retained_correction_waits_for_the_operator_and_promoting_it_retires_t
     );
     let row = rows.iter().find(|m| m["id"] == fix.as_str()).unwrap();
     assert_eq!(row["supersedes"], old.as_str(), "the link is stored");
+    let row = rows.iter().find(|m| m["id"] == wrong.as_str()).unwrap();
+    assert_eq!(row["scope"], "global", "the scope of what it replaces");
 
     // Until it is decided, the old memory is still recalled, marked.
     let v = mcp(

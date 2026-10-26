@@ -1736,7 +1736,7 @@ export interface PromotionItem {
   /** The memory this correction would replace; promoting it retires that one. */
   supersedes?: string | null
   /** That memory as it reads now, added by GET /api/promotions/{id}. */
-  replaces?: { id: string; kind: string; body: string; state: string } | null
+  replaces?: { id: string; kind: string; scope: string; scope_ref: string | null; body: string; state: string } | null
 }
 
 /** A verdict on one item: the bare legacy form, or an object carrying an

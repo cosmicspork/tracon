@@ -209,13 +209,14 @@ pub fn plan_verdict(
 
 /// The live memory a candidate names in `supersedes`, if there is one that
 /// promotion may retire: on the same channel, not deleted, not a directive,
-/// and not already set aside.
+/// and live. A candidate is never retired, so a later verdict on it cannot
+/// bring it back beside its correction.
 fn superseded(conn: &Connection, candidate: &str, channel: &str) -> Result<Option<String>> {
     let old: Option<String> = conn
         .query_row(
             "SELECT old.id FROM memory new JOIN memory old ON old.id = new.supersedes
              WHERE new.id = ?1 AND old.channel = ?2 AND old.deleted = 0
-               AND old.kind != 'directive' AND old.state NOT IN ('rejected', 'retired')",
+               AND old.kind != 'directive' AND old.state IN ('active', 'promoted')",
             params![candidate, channel],
             |r| r.get(0),
         )
@@ -473,7 +474,8 @@ mod tests {
         };
         put("old-a", mem("active", 1_000));
         put("old-b", mem("promoted", 1_000));
-        for (new, old) in [("fix-a", "old-a"), ("fix-b", "old-b")] {
+        put("old-c", mem("candidate", 1_000));
+        for (new, old) in [("fix-a", "old-a"), ("fix-b", "old-b"), ("fix-c", "old-c")] {
             let mut row = mem("candidate", 1_000);
             row["supersedes"] = json!(old);
             put(new, row);
@@ -497,16 +499,18 @@ mod tests {
         let mut v = serde_json::Map::new();
         v.insert("fix-a".into(), json!("promote"));
         v.insert("fix-b".into(), json!("reject"));
+        v.insert("fix-c".into(), json!("promote"));
         let (prow, mems) = plan_verdict(&c, "p1", &v, "n", 6_000).unwrap().unwrap();
-        assert_eq!(prow["state"], "decided");
+        assert_eq!(prow["state"], "open", "old-c is still undecided");
         assert_eq!(
             mems,
             vec![
                 ("fix-a".to_string(), "promoted", None),
                 ("fix-b".to_string(), "rejected", None),
+                ("fix-c".to_string(), "promoted", None),
                 ("old-a".to_string(), "retired", None),
             ],
-            "only the promoted correction retires what it replaces"
+            "only a promoted correction of a live memory retires what it replaces"
         );
         let row = memory_row_with_state(&c, "fix-a", "promoted", None, 6_000)
             .unwrap()

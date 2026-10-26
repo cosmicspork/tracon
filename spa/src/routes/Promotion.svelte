@@ -110,8 +110,8 @@
         <span class="body">
           {#if it.supersedes}
             <span class="replaces">
-              replaces: <em>{it.replaces?.kind ?? 'memory'}</em>{it.replaces ? it.replaces.body : `${it.supersedes.slice(0, 8)} (no longer held)`}
-              {#if !done}<small>Promoting this retires it; rejecting leaves it as it is.</small>{/if}
+              replaces: <em>{it.replaces ? `${it.replaces.kind} · ${it.replaces.scope}` : 'memory'}</em>{it.replaces ? it.replaces.body : `${it.supersedes.slice(0, 8)} (no longer held)`}
+              {#if !done && it.replaces && ['active', 'promoted'].includes(it.replaces.state)}<small>Promoting this retires it; rejecting leaves it as it is.</small>{:else if !done}<small>Already {it.replaces?.state ?? 'gone'}; promoting this retires nothing.</small>{/if}
             </span>
           {/if}
           <em>{it.kind}</em>

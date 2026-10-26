@@ -857,6 +857,8 @@ function promotionStates() {
     replaces: {
       id: 'm-0199e7a2',
       kind: 'fact',
+      scope: 'project',
+      scope_ref: 'c3a91f0e7b24d6a8',
       body: 'The gateway integration tests need the fixture registry; inside the boundary they time out at 120s unless its host is in the repository egress.',
       state: 'active',
     },
