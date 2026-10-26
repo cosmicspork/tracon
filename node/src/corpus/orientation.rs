@@ -594,13 +594,17 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
                 "This is an **execute session**: do the work in your worktree, commit it, and \
                  call `submit_review`. You hold no forge token; the node snapshots the worktree \
                  and a human approves before anything is published. The title and body are \
-                 for the repository's reviewers (`submit_review` says how to write them); what \
-                 is for the operator alone, such as a screenshot or what to check, goes to \
-                 `show_work`. Work you find but should not do now goes to `work_discover`, \
-                 against this item. Submitting is not closing, and closing is not yours: the \
-                 item stays open through CI and review until the operator closes it. Once the \
-                 change is published and this session sits idle, the node suspends it, and \
-                 it is carried on when a CI failure or a review comment needs an answer.\n\n",
+                 for the repository's reviewers (`submit_review` says how to write them). Pass \
+                 `note` on every `submit_review`: your account for the operator of what you \
+                 changed, what you verified, what you did not, and what you want checked. It \
+                 is shown on the review and never published, and the operator does not read \
+                 your final chat message, so the summary goes there. A screenshot, a page or \
+                 files for the operator go to `show_work`. Work you find but should not do now \
+                 goes to `work_discover`, against this item. Submitting is not closing, and \
+                 closing is not yours: the item stays open through CI and review until the \
+                 operator closes it. Once the change is published and this session sits idle, \
+                 the node suspends it, and it is carried on when a CI failure or a review \
+                 comment needs an answer.\n\n",
             );
             if let Some(plan) = facts.plan_body {
                 out.push_str("### Plan\n\n");
@@ -2531,7 +2535,17 @@ mod tests {
             text.contains("`submit_review` says how to write them"),
             "{text}"
         );
-        assert!(text.contains("goes to `show_work`"), "{text}");
+        // The operator's account goes in the call the agent already makes,
+        // since a summary left as the last chat message is never read.
+        assert!(
+            text.contains("Pass `note` on every `submit_review`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the operator does not read your final chat message"),
+            "{text}"
+        );
+        assert!(text.contains("go to `show_work`"), "{text}");
     }
 
     /// The plan is the execute session's contract. One a little longer than

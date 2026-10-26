@@ -73,7 +73,8 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                  never heard of this node: write it for them (what changed, why, trade-offs, \
                  follow-ups, how it was verified), do not address the operator, and do not name \
                  tracon, the node, its tools, or where evidence is attached. What is for the \
-                 operator alone goes to `show_work`, which never reaches the forge."
+                 operator alone goes in `note`, shown on the review beside the diff; a \
+                 screenshot, a page or files go to `show_work`. Neither reaches the forge."
             ),
             "inputSchema": {
                 "type": "object",
@@ -81,6 +82,7 @@ pub fn definitions(browser: bool) -> Vec<Value> {
                     "worktree": { "type": "string", "description": "Only for a harness you run yourself: the absolute path of the worktree to review." },
                     "title": { "type": "string", "description": "The change's title, as it should appear." },
                     "body": { "type": "string", "description": "What is not obvious from the diff: intent, trade-offs, follow-ups, verification. The pull/merge request's description unless `forge.description` gives one, so written for the repository's reviewers, not the operator." },
+                    "note": { "type": "string", "description": "What you changed, what you verified, what you did not, and anything you want checked. Markdown, for the operator on the review at this commit; pass a new one with each resubmission." },
                     "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "In a session on a GitHub or GitLab repository, defaults to that repository's forge; required outside a session." },
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab. In a session on a GitHub or GitLab repository, defaults to that repository; required outside a session. Give both or neither when publishing somewhere else." },
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, or on a resubmission to the base it was last submitted with. Naming another base on a resubmission moves the change's base." },
@@ -333,6 +335,7 @@ async fn submit(
 
     let title = str_arg(args, "title")?;
     let body = str_arg(args, "body")?;
+    let note = super::show::note_arg(args)?;
     let provider = str_arg(args, "provider")?;
     let project = str_arg(args, "project")?;
     if review::publish::Provider::parse(&provider).is_none() {
@@ -436,6 +439,30 @@ async fn submit(
                             .is_ok_and(|target| target.base == asked)
                     }) =>
             {
+                // A retry with a note the review does not hold yet keeps it:
+                // the words that make this the same submission are the
+                // forge's, and the note is not one of them.
+                if let Some(note) = note.as_deref() {
+                    let held = store
+                        .shown_work_for_review(&existing)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .any(|shown| {
+                            shown.row.head_sha == head_sha
+                                && shown.row.title == super::show::NOTE_TITLE
+                                && shown.row.markdown == note
+                        });
+                    if !held {
+                        super::show::record_note(
+                            store,
+                            manager,
+                            ctx,
+                            &existing.id,
+                            &head_sha,
+                            note,
+                        )?;
+                    }
+                }
                 return publish_if_granted(manager, ctx, already_submitted(&existing)).await;
             }
             other => other,
@@ -779,6 +806,7 @@ async fn submit(
         worktree,
         title,
         body,
+        note,
         provider,
         target,
         base,
@@ -926,6 +954,8 @@ struct Submission {
     worktree: String,
     title: String,
     body: String,
+    /// The operator's note, kept as shown work once the review is recorded.
+    note: Option<String>,
     provider: String,
     target: Target,
     base: String,
@@ -956,6 +986,7 @@ impl Submission {
             worktree,
             title,
             body,
+            note,
             provider,
             target,
             base,
@@ -1027,6 +1058,15 @@ impl Submission {
                     "review {id} is currently being published and cannot be resubmitted; call \
                      review_status to wait for the verdict"
                 ));
+            }
+            if let Some(note) = note.as_deref() {
+                // Before the reviewer starts, which reads shown work; a note that
+                // cannot be stored does not undo the review it came with.
+                if let Err(error) =
+                    super::show::record_note(store, manager, ctx, &id, &capture.head_sha, note)
+                {
+                    tracing::warn!(%error, review = %id, "submitter's note not stored");
+                }
             }
             let reviewer = keep_and_review(
                 store,
@@ -1118,6 +1158,15 @@ impl Submission {
         store
             .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
+        if let Some(note) = note.as_deref() {
+            // Before the reviewer starts, which reads shown work; a note that
+            // cannot be stored does not undo the review it came with.
+            if let Err(error) =
+                super::show::record_note(store, manager, ctx, &id, &row.head_sha, note)
+            {
+                tracing::warn!(%error, review = %id, "submitter's note not stored");
+            }
+        }
         // The branch the review pushes to, named in place of the node's
         // placeholder, is the session's from here on: its row, the task's
         // workspace and every peer mirroring it show where the work went.

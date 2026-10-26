@@ -909,6 +909,9 @@
       {/if}
     </section>
   {/if}
+  <!-- The submitter's note and what it showed, before the evidence and files:
+       its account of what it verified and what it did not is read first. -->
+  <ShownWork items={shownWork} onReview reviewer={review.review_session_id} />
   {#if remoteOwner && !evidence}
     <!-- what the owner holds could not be read; the banner above says why -->
   {:else if !evidence}
@@ -990,8 +993,6 @@
       {/if}
     </section>
   {/if}
-
-  <ShownWork items={shownWork} onReview reviewer={review.review_session_id} />
 
   {#if criteria}
     <section class="criteria-block">

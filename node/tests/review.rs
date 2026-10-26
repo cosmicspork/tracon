@@ -5151,6 +5151,71 @@ async fn an_update_pushes_to_the_open_change_and_sends_what_was_asked() {
     );
 }
 
+/// The note a submission carries for the operator never leaves tracon:
+/// publication sends the forge the title, the body, the comment and the
+/// commit message, and nothing of the note.
+#[tokio::test]
+async fn publication_never_sends_the_operators_note() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    const NOTE: &str = "OPERATOR-ONLY: I did not run the manual check.";
+    let id = review_id(
+        &f.submit_update(json!({
+            "note": NOTE,
+            "forge": {
+                "description": { "title": "feat: the described thing", "body": "the described body" },
+                "comment": "the revision comment",
+            },
+        }))
+        .await,
+    );
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(body["shown_work"][0]["markdown"], NOTE, "{body}");
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    for sent in [
+        "title=feat: the described thing",
+        "body=the described body",
+        "the revision comment",
+    ] {
+        assert!(gh.contains(sent), "{sent} was not sent: {gh}");
+    }
+    let shipped = sh_out(
+        &f.dir,
+        "git --git-dir=origin.git log -1 --format=%B refs/heads/feat/x",
+    );
+    let written = sh_out(
+        std::path::Path::new(&f.worktree),
+        "git log -1 --format=%B HEAD",
+    );
+    assert_eq!(
+        shipped.trim(),
+        written.trim(),
+        "the commit ships as written"
+    );
+    assert!(!gh.contains("OPERATOR-ONLY"), "{gh}");
+    assert!(!f.git_log().contains("OPERATOR-ONLY"), "{}", f.git_log());
+    let pushed = sh_out(
+        &f.dir,
+        "git --git-dir=origin.git log --format=%B refs/heads/feat/x",
+    );
+    assert!(!pushed.contains("OPERATOR-ONLY"), "{pushed}");
+    let decision = f.store.review_decisions(&id).unwrap().pop().unwrap();
+    assert!(
+        !decision
+            .outputs_json
+            .unwrap_or_default()
+            .contains("OPERATOR-ONLY"),
+        "the outputs publication works from carry no note"
+    );
+}
+
 /// An update that asks for nothing on the forge only pushes: the review's
 /// title and body are the operator's, not the change's.
 #[tokio::test]
@@ -5869,6 +5934,90 @@ async fn shown_work_is_on_the_review_until_the_candidate_moves() {
         .map(|item| item["stale"].as_bool().unwrap())
         .collect();
     assert_eq!(stale, [true, false], "{body}");
+}
+
+/// `submit_review`'s note is the operator's account of the submission, kept
+/// as shown work on the review at the commit it was submitted with. It goes
+/// stale when the candidate moves, and a resubmission's note is a fresh entry
+/// beside the old one.
+#[tokio::test]
+async fn a_submission_note_is_shown_work_on_its_review_at_the_submitted_commit() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let worktree = std::path::Path::new(&f.worktree);
+    let head = sh_out(worktree, "git rev-parse HEAD");
+    let mut args = f.submit_args();
+    args["note"] = json!("Changed a.txt. Ran the tests; did not try it by hand.");
+    let id = review_id(&f.tool("s1", "submit_review", args.clone()).await);
+
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["shown_work"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{body}");
+    assert_eq!(items[0]["format"], "markdown", "{body}");
+    assert_eq!(items[0]["review_id"], id.as_str(), "{body}");
+    assert_eq!(items[0]["head_sha"], head.as_str(), "{body}");
+    assert_eq!(items[0]["stale"], false, "{body}");
+    assert!(items[0]["markdown"]
+        .as_str()
+        .unwrap()
+        .contains("did not try it by hand"));
+    assert!(f.event_kinds("s1").contains(&"work_shown".to_string()));
+    // The note is not the review's prose: the body stays the reviewers'.
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(review.body, "why");
+
+    // The same submission made again is answered with the same review, and
+    // the note it already holds is not added twice.
+    let again = f.tool("s1", "submit_review", args).await;
+    assert_eq!(again["already_submitted"], true, "{again}");
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(body["shown_work"].as_array().unwrap().len(), 1, "{body}");
+
+    sh(
+        worktree,
+        "echo more >> a.txt && git add a.txt && git commit -qm later",
+    );
+    let mut resubmit = f.submit_args();
+    resubmit["review_id"] = json!(id);
+    resubmit["note"] = json!("Now also handles the empty file.");
+    let again = f.tool("s1", "submit_review", resubmit).await;
+    assert_eq!(again["state"], "new", "{again}");
+    let (_, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let items: Vec<_> = body["shown_work"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["markdown"].as_str().unwrap().to_string(),
+                item["stale"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            (
+                "Changed a.txt. Ran the tests; did not try it by hand.".to_string(),
+                true
+            ),
+            ("Now also handles the empty file.".to_string(), false),
+        ],
+        "{body}"
+    );
+
+    let refused = f
+        .tool("s1", "submit_review", {
+            let mut args = f.submit_args();
+            args["note"] = json!(["not", "markdown"]);
+            args
+        })
+        .await;
+    assert!(
+        refused["error"].to_string().contains("note is a string"),
+        "{refused}"
+    );
 }
 
 /// Plain files come back under a listing the node writes; nothing is read
