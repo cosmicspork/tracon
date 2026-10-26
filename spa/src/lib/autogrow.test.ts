@@ -96,3 +96,20 @@ test('measuring keeps the page where it was scrolled', () => {
   expect(node.style.height).toBe('602px')
   expect(page.scrollTop).toBe(1880)
 })
+
+test('opening the details it sits in refits it, and destroy stops listening', () => {
+  const { box, node } = stub(100)
+  const toggles = new Map<string, () => void>()
+  const details = {
+    addEventListener: (type: string, f: () => void) => toggles.set(type, f),
+    removeEventListener: (type: string) => toggles.delete(type),
+  }
+  Object.assign(box, { closest: (sel: string) => (sel === 'details' ? details : null) })
+  const action = autogrow(node)
+  expect(node.style.height).toBe('102px')
+  box.content = 400
+  toggles.get('toggle')!()
+  expect(node.style.height).toBe('402px')
+  action.destroy()
+  expect(toggles.size).toBe(0)
+})

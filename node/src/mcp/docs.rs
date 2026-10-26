@@ -180,6 +180,62 @@ pub fn reserved_for_operator(args: &Value) -> Option<String> {
     }
 }
 
+/// The document a `doc_write` would replace, if one stands at its slug: the
+/// current value the operator weighs the proposed body against.
+pub fn replaced(
+    store: &crate::store::Store,
+    channel: &str,
+    args: &Value,
+) -> Result<Option<DocumentRow>, crate::store::StoreError> {
+    let slug = args["slug"].as_str().unwrap_or("").trim();
+    if !valid_slug(slug) {
+        return Ok(None);
+    }
+    store.doc_get(channel, slug)
+}
+
+/// An HTML document is replaced through import, never by `doc_write`, so a
+/// write over one is refused before it is held: the operator is not asked
+/// to allow a call that cannot run.
+pub fn html_refusal(document: Option<&DocumentRow>) -> Option<String> {
+    let document = document.filter(|d| d.format == "html")?;
+    Some(format!(
+        "`{}` is an HTML document, which `doc_write` cannot replace: HTML documents are \
+         replaced through import.",
+        document.slug
+    ))
+}
+
+/// What the approval page compares a held `doc_write` against: the document
+/// as it stands (`null` for a new slug) and whether the `if_hash` the agent
+/// sent no longer matches it, which the write would meet as a conflict. The
+/// corpus keeps no history, so the base is the current body, not the one the
+/// agent read; `stale` says when those differ.
+pub fn approval_context(document: Option<&DocumentRow>, args: &Value) -> Value {
+    let stale = args["if_hash"]
+        .as_str()
+        .is_some_and(|want| document.map(|d| d.hash.as_str()) != Some(want));
+    json!({
+        "document": document.map(|d| json!({
+            "body": d.body,
+            "hash": d.hash,
+            "format": d.format,
+            "title": d.title,
+            "updated_ms": d.updated_ms,
+        })),
+        "stale": stale,
+    })
+}
+
+/// The approval title's tail: whether the write creates the document or
+/// edits it, and for an edit the title it has now. Never the body.
+pub fn approval_title(summary: &str, document: Option<&DocumentRow>) -> String {
+    match document {
+        Some(d) => format!("{summary} · edit · \"{}\"", d.title),
+        None => format!("{summary} · new"),
+    }
+}
+
 /// The kind of the documents `show_work` stores its pages and files in.
 pub const SHOWN: &str = "shown";
 
@@ -440,6 +496,17 @@ pub fn delete_document(
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+
+    /// An `if_hash` for a document that no longer stands is as stale as one
+    /// for a document that changed: the write would meet either as a
+    /// conflict. Without an `if_hash` nothing is stale.
+    #[test]
+    fn an_if_hash_with_no_document_behind_it_is_stale() {
+        let ctx = approval_context(None, &json!({ "slug": "plan-foo", "if_hash": "h" }));
+        assert_eq!(ctx, json!({ "document": null, "stale": true }));
+        let ctx = approval_context(None, &json!({ "slug": "plan-foo" }));
+        assert_eq!(ctx, json!({ "document": null, "stale": false }));
+    }
 
     /// `pinned`, like `archived`, `kind`, and `title`, is operator-only: an
     /// agent calling `doc_write` must never be able to set it.

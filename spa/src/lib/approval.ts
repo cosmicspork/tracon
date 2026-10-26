@@ -1,7 +1,7 @@
 // A held call as the operator reads and edits it on its own page. Which
 // arguments are prose, how that prose is written, and which arguments name
 // the target all come from the node, so nothing here knows a tool by name.
-import { diffArguments } from './text-diff'
+import { diffArguments, diffLines, hunks, type Hunk } from './text-diff'
 import { formArguments, formFields, validate, type Field, type FieldValue, type JsonSchema } from './schema-form'
 
 export type ApprovalState =
@@ -53,6 +53,61 @@ export interface ApprovalDetails {
   /** When an operator last had it open before this load, or null. */
   claimed_before_ms: number | null
   options: { option_id: string; name: string; kind: string }[]
+  /**
+   * What the call would replace, as it stands now: the document a
+   * `doc_write` lands on, or null when the slug is new. Absent for a tool
+   * that replaces nothing.
+   */
+  document?: ReplacedDocument | null
+  /** The `if_hash` the agent sent no longer matches: Allow would conflict. */
+  stale?: boolean
+}
+
+export interface ReplacedDocument {
+  body: string
+  hash: string
+  /** `markdown` or `html`. */
+  format: string
+  title: string
+  updated_ms: number
+}
+
+/** The argument whose text replaces the current value. */
+export const REPLACING_FIELD = 'body'
+
+export interface Replacement {
+  key: string
+  /** Nothing stands there yet, so the proposal is all added. */
+  created: boolean
+  title: string | null
+  format: string | null
+  hunks: Hunk[]
+  added: number
+  removed: number
+}
+
+/**
+ * The proposal against what it replaces, as folded line hunks, or null when
+ * the node sent nothing to compare with. `args` is the operator's draft, so
+ * the diff follows their edit.
+ */
+export function replacement(
+  details: Pick<ApprovalDetails, 'document'>,
+  args: Record<string, unknown>,
+): Replacement | null {
+  if (details.document === undefined) return null
+  const current = details.document
+  const proposed = args[REPLACING_FIELD]
+  const lines = diffLines(current?.body ?? '', typeof proposed === 'string' ? proposed : '')
+  return {
+    key: REPLACING_FIELD,
+    created: current === null,
+    title: current?.title ?? null,
+    format: current?.format ?? null,
+    hunks: hunks(lines),
+    added: lines.filter((l) => l.kind === 'add').length,
+    removed: lines.filter((l) => l.kind === 'del').length,
+  }
 }
 
 /** One problem with the answer, as the node's 422 or `validate` names it. */

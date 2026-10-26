@@ -44,14 +44,39 @@ function toolArguments(p: Pick<Permission, 'kind' | 'raw_input'>): Record<string
   }
 }
 
+function isProse(value: unknown): value is string {
+  return typeof value === 'string' && (value.length > 40 || value.includes('\n'))
+}
+
 // Only the prose arguments of a brokered call are offered for editing; keys,
 // slugs and ids stay as the agent sent them and show in the full request.
-export function editableFields(p: Pick<Permission, 'kind' | 'raw_input'>): EditableField[] {
+// A held call is edited on its own page, against what it would change, so
+// its card offers nothing to edit; a peer's card cannot open that page, so it
+// keeps them.
+export function editableFields(p: Pick<Permission, 'kind' | 'raw_input'>, peer = false): EditableField[] {
+  if (isApproval(p) && !peer) return []
   const args = toolArguments(p)
   if (!args) return []
   return Object.entries(args)
-    .filter((e): e is [string, string] => typeof e[1] === 'string' && (e[1].length > 40 || e[1].includes('\n')))
+    .filter((e): e is [string, string] => isProse(e[1]))
     .map(([key, value]) => ({ key, value }))
+}
+
+/**
+ * The request a card shows under "Full request", or null for none. A held
+ * call's page shows it in full, so its card shows none; a peer's card cannot
+ * open that page, so it shows the whole request, since nowhere else does.
+ */
+export function cardRequest(p: Pick<Permission, 'kind' | 'raw_input'>, peer: boolean): string | null {
+  if (!p.raw_input) return null
+  let input: unknown
+  try {
+    input = JSON.parse(p.raw_input)
+  } catch {
+    return p.raw_input
+  }
+  if (isApproval(p) && !peer) return null
+  return JSON.stringify(input, null, 2)
 }
 
 export function editedArguments(

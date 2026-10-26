@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { editableFields, editedArguments, isEgress, stepUpOptions, withheldOptions } from './permission'
+import { cardRequest, editableFields, editedArguments, isEgress, stepUpOptions, withheldOptions } from './permission'
 
 const card = (args: unknown, kind: string | null = 'tool') => ({
   kind,
@@ -15,6 +15,28 @@ test('the prose arguments of a brokered call are editable, identifiers are not',
 test("a harness's own request is never editable", () => {
   expect(editableFields(card({ body: 'x'.repeat(80) }, 'execute'))).toEqual([])
   expect(editableFields({ kind: 'tool', raw_input: 'not json' })).toEqual([])
+})
+
+const approvalCard = (tool: string, args: unknown) => ({
+  kind: 'tool',
+  raw_input: JSON.stringify({ tool, arguments: args, approval_id: 'a1' }),
+})
+
+test('an approval card offers no field to edit: its page edits it, against what it changes', () => {
+  const body = '# Plan: foo\n\nA body long enough to be prose on any other card.\n'
+  expect(editableFields(approvalCard('doc_write', { slug: 'plan-foo', body }))).toEqual([])
+  expect(editableFields(approvalCard('pr_comment', { repo: 'o/r', number: 1, body: 'x'.repeat(80) }))).toEqual([])
+})
+
+test('an approval card shows no request; a peer’s, which cannot open its page, shows all of it', () => {
+  const body = '# Plan: foo\n\nOne line changed.\n'
+  const write = approvalCard('doc_write', { slug: 'plan-foo', body, if_hash: 'abc' })
+  expect(cardRequest(write, false)).toBeNull()
+  expect(JSON.parse(cardRequest(write, true)!).arguments).toEqual({ slug: 'plan-foo', body, if_hash: 'abc' })
+  expect(editableFields(write, true)).toEqual([{ key: 'body', value: body }])
+  // A harness's own permission keeps its full request.
+  expect(cardRequest(card({ body }), false)).toContain('One line changed')
+  expect(cardRequest({ kind: 'tool', raw_input: 'not json' }, false)).toBe('not json')
 })
 
 test('only a change is sent, merged over the original arguments', () => {

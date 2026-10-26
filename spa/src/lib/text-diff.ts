@@ -11,8 +11,17 @@ export interface ArgumentChange {
   lines: LineChange[]
 }
 
-/** A line-by-line diff of `before` against `after`, by longest common subsequence. */
+const MAX_CELLS = 1_000_000
+
+/**
+ * A line-by-line diff of `before` against `after`, by longest common
+ * subsequence. Empty text has no lines: against it, the other side is all
+ * added or all removed, as a new document is.
+ */
 export function diffLines(before: string, after: string): LineChange[] {
+  if (before === after && before === '') return []
+  if (before === '') return after.split('\n').map((text) => ({ kind: 'add', text }))
+  if (after === '') return before.split('\n').map((text) => ({ kind: 'del', text }))
   const a = before.split('\n')
   const b = after.split('\n')
   let start = 0
@@ -26,6 +35,16 @@ export function diffLines(before: string, after: string): LineChange[] {
 
   const n = endA - start
   const m = endB - start
+  // The table is n·m: past this (a rewrite of a long document, diffed again
+  // on every keystroke) the changed middle shows as removed then added.
+  if (n * m > MAX_CELLS) {
+    return [
+      ...a.slice(0, start).map((text) => ({ kind: 'same' as const, text })),
+      ...a.slice(start, endA).map((text) => ({ kind: 'del' as const, text })),
+      ...b.slice(start, endB).map((text) => ({ kind: 'add' as const, text })),
+      ...a.slice(endA).map((text) => ({ kind: 'same' as const, text })),
+    ]
+  }
   // lcs[i][j]: the common subsequence length of a[start+i..endA) and b[start+j..endB).
   const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1))
   for (let i = n - 1; i >= 0; i--) {
@@ -75,6 +94,45 @@ function reorder(lines: LineChange[]): LineChange[] {
     }
   }
   flush()
+  return out
+}
+
+/** A run of lines to show, or unchanged lines folded away between them. */
+export type Hunk = { kind: 'lines'; lines: LineChange[] } | { kind: 'skip'; count: number }
+
+/**
+ * A diff with long unchanged runs folded: each change keeps `context`
+ * unchanged lines either side, and what lies beyond is counted, not shown.
+ * A diff with no changes folds to a single skip.
+ */
+export function hunks(lines: LineChange[], context = 3): Hunk[] {
+  const out: Hunk[] = []
+  const push = (line: LineChange) => {
+    const last = out[out.length - 1]
+    if (last?.kind === 'lines') last.lines.push(line)
+    else out.push({ kind: 'lines', lines: [line] })
+  }
+  let i = 0
+  while (i < lines.length) {
+    if (lines[i]!.kind !== 'same') {
+      push(lines[i]!)
+      i++
+      continue
+    }
+    let end = i
+    while (end < lines.length && lines[end]!.kind === 'same') end++
+    // Context is kept only on a side that has a change.
+    const head = i === 0 ? 0 : context
+    const tail = end === lines.length ? 0 : context
+    if (end - i > head + tail) {
+      for (const line of lines.slice(i, i + head)) push(line)
+      out.push({ kind: 'skip', count: end - i - head - tail })
+      for (const line of lines.slice(end - tail, end)) push(line)
+    } else {
+      for (const line of lines.slice(i, end)) push(line)
+    }
+    i = end
+  }
   return out
 }
 

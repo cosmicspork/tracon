@@ -5,7 +5,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
-  import { editableFields, editedArguments, isApproval, isEgress, withheldOptions } from '../lib/permission'
+  import { cardRequest, editableFields, editedArguments, isApproval, isEgress, withheldOptions } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -30,7 +30,7 @@
   // A host a session asked to reach: its answers say how long it stays open,
   // and there is nothing in it to edit.
   const egress = $derived(isEgress(permission))
-  const fields = $derived(egress || allowElsewhere ? [] : editableFields(permission))
+  const fields = $derived(egress || allowElsewhere ? [] : editableFields(permission, peer))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
   // What the session was started to do. Answering "may I run this" without it
   // means opening the session to find out, which is most of the interruption.
@@ -42,14 +42,8 @@
   // A brokered call held for you rather than a harness waiting on you: the
   // node runs it when you allow it, and the caller reads the outcome later.
   const approval = $derived(isApproval(permission))
-  const request = $derived.by(() => {
-    if (!permission.raw_input) return null
-    try {
-      return JSON.stringify(JSON.parse(permission.raw_input), null, 2)
-    } catch {
-      return permission.raw_input
-    }
-  })
+  // A held call is read and edited on its own page; its card names it.
+  const request = $derived(cardRequest(permission, peer))
   const command = $derived.by(() => {
     try {
       const input = JSON.parse(permission.raw_input ?? 'null')
