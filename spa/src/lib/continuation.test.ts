@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { attemptState, carries, verbs, workLinks } from './continuation'
+import { attemptState, carries, closeOffer, verbs, workLinks } from './continuation'
 import type { Continuation, ContinuationAttempt } from './types'
 
 const attempt = (over: Partial<ContinuationAttempt>): ContinuationAttempt => ({
@@ -45,7 +45,7 @@ test('the verbs follow what the node allows', () => {
     changeApproach: true,
     abandon: true,
   })
-  expect(verbs({ ...base, actions: { continue_from: null, abandon: false } })).toEqual({
+  expect(verbs({ ...base, actions: { continue_from: null, abandon: false, close: false } })).toEqual({
     continue: false,
     changeApproach: false,
     abandon: false,
@@ -78,7 +78,8 @@ const item = (over: Partial<Continuation> = {}): Continuation => ({
     ],
     shown: [],
   },
-  actions: { continue_from: null, abandon: false },
+  actions: { continue_from: null, abandon: false, close: false },
+  follow: null,
   ...over,
 })
 
@@ -114,4 +115,19 @@ test('the links bar leaves out what the work does not have, and the task on its 
     'Review approved /reviews/rev-7',
     'Branch: feat/rate-limits',
   ])
+})
+
+test('closing the task is offered while it is open, prominently once its request is merged', () => {
+  const base = {
+    next: { kind: 'merge', text: 'PR #149 is open · merge it', session_id: 's' },
+    actions: { continue_from: 's', abandon: true, close: true },
+    follow: { url: 'u', label: 'PR #149', state: 'open', failed: [], new_comments: 0, changes_requested: false },
+  } as unknown as Continuation
+  expect(closeOffer(base)).toEqual({ prominent: false, text: null })
+  expect(closeOffer({ ...base, follow: { ...base.follow!, state: 'merged' } })).toEqual({
+    prominent: true,
+    text: 'PR #149 merged',
+  })
+  expect(closeOffer({ ...base, follow: null })).toEqual({ prominent: false, text: null })
+  expect(closeOffer({ ...base, actions: { ...base.actions, close: false } })).toBe(null)
 })

@@ -629,7 +629,7 @@ pub struct AbsentField {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BriefError {
-    #[error("no work item {0}")]
+    #[error("no task {0}")]
     MissingItem(String),
     #[error("{0} has no brief")]
     NoBrief(String),

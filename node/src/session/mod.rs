@@ -409,13 +409,13 @@ pub enum SessionError {
     UnknownChannel(String),
     #[error("channel {0} is archived: bring it back to start work on it again")]
     ChannelArchived(String),
-    #[error("a work item is required: pick one from the ready list")]
+    #[error("a task is required: pick one from the ready list")]
     WorkItemRequired,
-    #[error("work item is not ready: {0}")]
+    #[error("task is not ready: {0}")]
     NotReady(String),
-    #[error("work item is already held by session {0}")]
+    #[error("task is already held by session {0}")]
     InSession(String),
-    #[error("execute needs a plan: run a plan session for this item first ({0})")]
+    #[error("execute needs a plan: run a plan session for this task first ({0})")]
     PlanRequired(String),
     #[error("channel is at its daily ceiling: {0}")]
     Ceiling(String),
@@ -818,27 +818,44 @@ impl Manager {
         // A suspended session's work now lives in the new one; the operator
         // asked for that, so the old one ends, saying where it went.
         if suspended {
-            let closed = self.store.update_session_if(
+            self.end_suspended(
                 &old.id,
-                SessionState::Suspended.as_str(),
-                SessionPatch {
-                    state: Some(SessionState::Closed.as_str().into()),
-                    end_reason: Some(state::EndReason::Continued.as_str().into()),
-                    ..Default::default()
-                },
+                state::EndReason::Continued,
+                json!({ "continued_as": row.id }),
             )?;
-            if closed {
-                self.record_event(
-                    &old.id,
-                    ek::STATE,
-                    json!({ "state": "closed", "end_reason": "continued", "continued_as": row.id }),
-                );
-                if let Ok(Some(old)) = self.store.get_session(&old.id) {
-                    self.bus.publish(Frame::Session(Box::new(old)));
-                }
-            }
         }
         Ok(row)
+    }
+
+    /// End a suspended session, which has no supervisor to end it: the row
+    /// closes with `reason`, and its `state` event carries `detail` besides.
+    /// `false` when it was no longer suspended.
+    pub(crate) fn end_suspended(
+        &self,
+        id: &str,
+        reason: state::EndReason,
+        detail: serde_json::Value,
+    ) -> Result<bool, SessionError> {
+        let closed = self.store.update_session_if(
+            id,
+            SessionState::Suspended.as_str(),
+            SessionPatch {
+                state: Some(SessionState::Closed.as_str().into()),
+                end_reason: Some(reason.as_str().into()),
+                ..Default::default()
+            },
+        )?;
+        if closed {
+            let mut payload = json!({ "state": "closed", "end_reason": reason.as_str() });
+            if let (Some(payload), Some(detail)) = (payload.as_object_mut(), detail.as_object()) {
+                payload.extend(detail.clone());
+            }
+            self.record_event(id, ek::STATE, payload);
+            if let Ok(Some(row)) = self.store.get_session(id) {
+                self.bus.publish(Frame::Session(Box::new(row)));
+            }
+        }
+        Ok(closed)
     }
 
     /// A continuation takes over the reviews the attempt it continues left
@@ -1667,7 +1684,7 @@ impl Manager {
                 .into_iter()
                 .find(|v| v.item.id == item_id)
                 .ok_or_else(|| {
-                    SessionError::NotReady(format!("no work item {item_id} on {}", spec.channel))
+                    SessionError::NotReady(format!("no task {item_id} on {}", spec.channel))
                 })?;
             match &view.readiness {
                 tracon_sync::work::Readiness::Ready => {}
@@ -1679,10 +1696,10 @@ impl Manager {
                         .iter()
                         .map(|b| match b {
                             tracon_sync::work::Blocker::Open { id } => {
-                                format!("open item {}", &id[..8.min(id.len())])
+                                format!("open task {}", &id[..8.min(id.len())])
                             }
                             tracon_sync::work::Blocker::Unknown { id } => {
-                                format!("item {} not seen here", &id[..8.min(id.len())])
+                                format!("task {} not seen here", &id[..8.min(id.len())])
                             }
                             tracon_sync::work::Blocker::Cycle => "a dependency cycle".into(),
                         })
@@ -3040,7 +3057,8 @@ impl Manager {
     }
 
     /// The item a session holds was closed: record it and end the session
-    /// once its turn is over. A session not live here (ended, or another
+    /// once its turn is over. A suspended one here, which has no turn and no
+    /// supervisor, ends now. A session not live here (ended, or another
     /// node's) is left alone; the close itself has already replicated.
     pub async fn item_closed(&self, id: &str, summary: &str) {
         self.record(NewEvent {
@@ -3052,9 +3070,18 @@ impl Manager {
             at_ms: now_ms(),
             mono_ms: 0,
         });
-        let _ = self
+        if self
             .send(id, Command::EndAfterTurn(EndReason::ItemClose))
-            .await;
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if let Ok(Some(row)) = self.store.get_session(id) {
+            if row.node_id == self.node_id && row.state == SessionState::Suspended.as_str() {
+                let _ = self.end_suspended(id, EndReason::ItemClose, json!({}));
+            }
+        }
     }
 
     /// Mark a session as waiting on deterministic checks (or back to running)

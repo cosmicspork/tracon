@@ -8,7 +8,7 @@ const ENDED: Record<string, string> = {
   killed_user: 'stopped',
   budget: 'spent its budget',
   harness_exit: 'harness exited',
-  item_close: 'item closed',
+  item_close: 'task closed',
   phase_done: 'phase done',
   detached: 'detached',
   incompatible: 'harness incompatible',
@@ -103,4 +103,13 @@ export function workLinks(c: Continuation, here: { itemId?: string | null; sessi
   if (published.length) groups.push({ label: null, links: published })
   if (c.workspace?.branch) groups.push({ label: 'Branch', links: [{ text: c.workspace.branch, href: null }] })
   return groups
+}
+
+/** What the interface says about closing the task, or null when it is closed
+ *  already. Once the followed request is merged, closing is what is left, and
+ *  the offer says so prominently. */
+export function closeOffer(c: Continuation): { prominent: boolean; text: string | null } | null {
+  if (!c.actions.close) return null
+  const merged = c.follow?.state === 'merged'
+  return { prominent: merged, text: merged && c.follow ? `${c.follow.label} merged` : null }
 }

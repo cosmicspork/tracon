@@ -90,6 +90,7 @@ fn review(node: &str) -> ReviewRow {
         ai_verdict_json: None,
         revision_patch: None,
         lane: None,
+        publication_failed: None,
     }
 }
 

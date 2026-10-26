@@ -1647,8 +1647,12 @@ the item's id, minted from the project it began in, does not change.
 
 **Agents keep the ledger as the operator does.** `work_list` and `work_show` read
 it unattended; `work_update` and `work_delete` are put to the operator, and are
-scoped to the caller's channel. Neither closes or deletes an item another session
-holds: closing ends the holder, which is the holder's call or the operator's.
+scoped to the caller's channel. Neither closes or deletes an item a session holds:
+closing ends the holder, which is the operator's call alone. A session is not
+offered `work_close` and cannot close its own item through `work_update`, and
+publishing its change does not close it either; the item stays open through CI and
+review until the operator closes the task (`POST /api/work/{id}/close`), which ends
+the session holding it, a suspended one at once.
 
 **Work items are an opt-in structure, not a requirement.** A plain prompt starts
 an execute session claiming no item, plan, or review lifecycle at all. Naming an
@@ -1667,8 +1671,12 @@ it ended, what the operator decided (answered permissions and questions, and the
 and brief), what is in the way, the workspace the latest attempt left, and the
 reviews and shown work. It also gives the one next action. Every part of that is
 read from recorded state, and the next action follows fixed rules over those records,
-so it cannot claim more than they say. It offers three verbs. Continue carries the
-work on from the last ended attempt's workspace, in that attempt's phase, except
+so it cannot claim more than they say. Once the work is published, the next action
+follows the request through the `forge_follow` snapshots recorded on its sessions
+("PR #149 is open · merge it", "CI failed on `node` · continue", "2 new comments ·
+continue", "PR #149 merged · close the task"); following only reads, so none of
+that starts a session on its own. It offers three verbs. Continue carries the
+work on from the last ended or suspended attempt's workspace, in that attempt's phase, except
 that a plan session which wrote its plan is carried on by executing it. Change
 approach does the same and hands the operator's new direction, in their own words,
 to the next attempt.

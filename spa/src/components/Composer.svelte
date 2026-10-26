@@ -260,7 +260,7 @@
     <div class="on-item">
       <span class="lbl">{phase === 'plan' ? 'Plan' : 'Execute'}</span>
       <span class="ttl">{item.title}</span>
-      <a href="/tasks/{item.id}">open item</a>
+      <a href="/tasks/{item.id}">open task</a>
     </div>
   {:else}
     <textarea
@@ -365,9 +365,9 @@
               onclick={() => {
                 structured = true
                 phase = 'plan'
-              }}>Plan work item</button>
+              }}>Plan task</button>
           </div>
-          <small>{structured ? 'Writes a durable work item, then runs its plan phase.' : 'Starts directly; no work item or plan is created.'}</small>
+          <small>{structured ? 'Writes a durable task, then runs its plan phase.' : 'Starts directly; no task or plan is created.'}</small>
         </div>
       {/if}
       {#if item}
@@ -380,9 +380,9 @@
           <small
             >{phase === 'plan'
               ? 'Reads, thinks, and ends by writing the plan document.'
-              : "Does the work from the item's plan, then submits for review."}</small
+              : "Does the work from the task's plan, then submits for review."}</small
           >
-          {#if needsPlan}<small class="crit">This item has no plan yet: run a plan session first.</small>{/if}
+          {#if needsPlan}<small class="crit">This task has no plan yet: run a plan session first.</small>{/if}
         </div>
       {/if}
       <label>
@@ -454,7 +454,7 @@
   {#if error}
     <div class="banner crit">
       could not start <b>· {error}</b>
-      {#if savedItem}<i>What you typed is saved as a work item · <a href="/tasks/{savedItem}">open it</a></i>{/if}
+      {#if savedItem}<i>What you typed is saved as a task · <a href="/tasks/{savedItem}">open it</a></i>{/if}
     </div>
   {/if}
 </form>

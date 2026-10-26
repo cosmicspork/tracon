@@ -19,7 +19,7 @@ function receipt(over: Partial<ContextReceipt>): ContextReceipt {
 test('an attempt says whether its context moved and what did not arrive whole', () => {
   const full = { role: 'research', slug: 'ref-a', chars: 10, delivered_chars: 10, delivery: 'full' } as const
   const absent = { role: 'constraints', slug: 'guide-b', chars: 0, delivered_chars: 0, delivery: 'omitted', reason: 'absent' } as const
-  expect(attemptLine(receipt({ received: [full] }))).toBe('revision 1 · first attempt')
+  expect(attemptLine(receipt({ received: [full] }))).toBe('revision 1 · first session')
   expect(attemptLine(receipt({ received: [full], previous_revision: 1 }))).toBe('revision 1 · unchanged')
   expect(
     attemptLine(

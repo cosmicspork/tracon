@@ -88,8 +88,9 @@
       busy = false
     }
   }
+  /** Close the task: the item closes, and any session holding it ends. */
   function close() {
-    return act(() => api.putWork(id, { state: 'closed' }))
+    return act(() => api.closeTask(id))
   }
   function reopen() {
     return act(() => api.putWork(id, { state: 'open' }))
@@ -143,11 +144,11 @@
   <div class="empty">Loading…</div>
 {:else if !item && failed}
   <div class="banner crit" role="alert">
-    Could not load this work item <b>· {error}</b>
+    Could not load this task <b>· {error}</b>
     <button class="lnk" onclick={() => { error = null; void load() }}>Retry</button>
   </div>
 {:else if !item}
-  <div class="banner crit">not found <b>· {error ?? `no work item ${id.slice(0, 8)}`}</b></div>
+  <div class="banner crit">not found <b>· {error ?? `no task ${id.slice(0, 8)}`}</b></div>
 {:else}
   <div class="h4"><a class="lnk" href="/tasks">‹ Tasks</a></div>
   <div class="head {ws}">
@@ -241,7 +242,7 @@
   <ContextPanel {item} />
 
   {#if discovered.length}
-    <div class="h5">Discovered from this item <b>{discovered.length}</b></div>
+    <div class="h5">Discovered from this task <b>{discovered.length}</b></div>
     <div class="chain">
       {#each discovered as d (d.id)}
         <span>{short(item.id)}</span><span class="arr">→</span><a href="/tasks/{d.id}">{short(d.id)} {d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>
@@ -271,7 +272,7 @@
           <a class="btn p" href="/sessions/{item.session_id}">Open session</a>
         {/if}
         {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
-        <button class="lnk d" onclick={close} disabled={busy}>Close</button>
+        <button class="lnk d" onclick={close} disabled={busy}>Close task</button>
         {#if confirmingDelete}
           <span class="confirm">Delete this task for good? <button class="btn d" onclick={remove} disabled={busy}>Delete</button>
             <button class="lnk" onclick={() => (confirmingDelete = false)} disabled={busy}>Keep it</button></span

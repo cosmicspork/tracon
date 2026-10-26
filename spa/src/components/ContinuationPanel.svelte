@@ -8,10 +8,12 @@
   //
   // The three verbs: continue (carry on from the last attempt's workspace),
   // change approach (the same, with the operator's new direction handed to the
-  // next attempt), abandon (close the item, or put a plain lineage away).
+  // next attempt), abandon (close the item, or put a plain lineage away). Once
+  // the followed request is merged, closing the task is the next action, and
+  // it is offered here first.
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
-  import { verbs, workLinks } from '../lib/continuation'
+  import { closeOffer, verbs, workLinks } from '../lib/continuation'
   import { router } from '../lib/router.svelte'
   import type { Continuation } from '../lib/types'
 
@@ -55,6 +57,7 @@
   const links = $derived(view ? workLinks(view, { itemId, sessionId }) : [])
 
   const can = $derived(view ? verbs(view) : { continue: false, changeApproach: false, abandon: false })
+  const closing = $derived(view?.kind === 'item' && view.next.kind === 'close' ? closeOffer(view) : null)
 
   async function act(run: () => Promise<void>) {
     if (busy) return
@@ -77,6 +80,15 @@
         approach: withApproach ? approach.trim() : undefined,
       })
       router.go(`/sessions/${next.id}`)
+    })
+  }
+  function closeTask() {
+    if (!view) return
+    const id = view.id
+    return act(async () => {
+      await api.closeTask(id)
+      await load()
+      onchange?.()
     })
   }
   function abandon() {
@@ -127,10 +139,13 @@
       <div class="row"><span class="h5">In the way</span><span>{view.blockers.join(' · ')}</span></div>
     {/if}
 
-    {#if actions && (can.continue || can.changeApproach || can.abandon)}
+    {#if actions && (closing || can.continue || can.changeApproach || can.abandon)}
       <div class="verbs">
+        {#if closing}
+          <button class="btn p" disabled={busy} onclick={closeTask}>Close task</button>
+        {/if}
         {#if can.continue}
-          <button class="btn p" disabled={busy} onclick={() => carryOn(false)}>Continue</button>
+          <button class="btn" class:p={!closing} disabled={busy} onclick={() => carryOn(false)}>Continue</button>
         {/if}
         {#if can.changeApproach}
           <button class="btn" class:p={!can.continue} disabled={busy} onclick={() => (mode = mode === 'approach' ? '' : 'approach')}
@@ -148,7 +163,7 @@
             bind:value={approach}
             use:autogrow={approach}
             rows="3"
-            placeholder="How the next attempt should go about it instead"
+            placeholder="How the next session should go about it instead"
             aria-label="New approach"
           ></textarea>
           <button class="btn p" disabled={busy || !approach.trim()} onclick={() => carryOn(true)}>Continue this way</button>
@@ -157,7 +172,7 @@
         <div class="form">
           <input bind:value={reason} placeholder="Why (optional)" aria-label="Why it is abandoned" />
           <button class="btn" disabled={busy} onclick={abandon}
-            >{view.kind === 'item' ? 'Close the item' : 'Stop and put it away'}</button
+            >{view.kind === 'item' ? 'Close the task' : 'Stop and put it away'}</button
           >
         </div>
       {/if}

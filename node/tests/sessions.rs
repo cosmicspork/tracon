@@ -330,7 +330,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("blocked by open item"));
+        .contains("blocked by open task"));
     // Ready, but execute has no plan yet.
     let (st, body) = h
         .call(
@@ -356,7 +356,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("no work item"));
+        .contains("no task"));
 }
 
 #[tokio::test]
@@ -2644,6 +2644,7 @@ fn published_review(id: &str, session: &str) -> tracon::store::ReviewRow {
         ai_verdict_json: None,
         revision_patch: None,
         lane: None,
+        publication_failed: None,
     }
 }
 
@@ -4045,6 +4046,7 @@ async fn a_session_held_on_its_review_is_given_the_verdict() {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         })
         .unwrap();
 

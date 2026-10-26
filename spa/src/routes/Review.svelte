@@ -3,6 +3,7 @@
   import Diff from '../components/Diff.svelte'
   import CommitMessage from '../components/CommitMessage.svelte'
   import ShownWork from '../components/ShownWork.svelte'
+  import CloseTask from '../components/CloseTask.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -911,9 +912,9 @@
             {:else}
               <p>No additional requirement detail.</p>
             {/if}
-            <a href="/tasks/{requirements.id}">open work item</a>
+            <a href="/tasks/{requirements.id}">open task</a>
           {:else}
-            <p class="missing">No work item was linked when this review was captured.</p>
+            <p class="missing">No task was linked when this review was captured.</p>
           {/if}
         </div>
         <div class="evidence-panel">
@@ -1068,7 +1069,7 @@
 
   <dl class="prov">
     <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
-    <div><dt>Item</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
+    <div><dt>Task</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
     <div><dt>Policy</dt><dd>{session?.policy_version != null ? `working-agreements v${session.policy_version}` : '—'}</dd></div>
     <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}{reviewer && startedHow(reviewerView?.started_by) ? ` · ${startedHow(reviewerView?.started_by)}` : ''}</dd></div>
     <div><dt>Commit</dt><dd>{review.head_sha.slice(0, 8)}</dd></div>
@@ -1399,6 +1400,9 @@
         {review.state}{#if review.verdict_reason}<b>{` · ${review.verdict_reason}`}</b>{/if}
       {/if}
     </div>
+    {#if session?.work_item_id}
+      <CloseTask itemId={session.work_item_id} />
+    {/if}
   {:else}
   <!-- Everything that answers a verdict sits in the bar, so it is in view
        wherever on the page the verdict was given. -->

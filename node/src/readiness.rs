@@ -193,7 +193,7 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
     if facts.item_has_brief == Some(false) {
         publish_notes.push(gap(
             "brief",
-            "the work item has no brief, so its review shows no requirements to judge against",
+            "the task has no brief, so its review shows no requirements to judge against",
         ));
     }
 

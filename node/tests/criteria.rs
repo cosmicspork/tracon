@@ -894,6 +894,7 @@ async fn the_review_screen_carries_the_criteria_of_the_item_it_was_pinned_to() {
                 ai_verdict_json: None,
                 revision_patch: None,
                 lane: None,
+                publication_failed: None,
             },
             &ReviewRevisionRow {
                 id: "revision-1".into(),
@@ -1438,6 +1439,7 @@ async fn a_reviewers_finding_verifies_a_criterion_and_only_the_operator_judges_i
                 ai_verdict_json: None,
                 revision_patch: None,
                 lane: None,
+                publication_failed: None,
             },
             &ReviewRevisionRow {
                 id: "revision-1".into(),
@@ -1661,6 +1663,7 @@ async fn a_reviewer_started_on_one_candidate_does_not_find_on_the_next() {
         ai_verdict_json: None,
         revision_patch: None,
         lane: None,
+        publication_failed: None,
     };
     let first_revision = ReviewRevisionRow {
         id: "revision-1".into(),
