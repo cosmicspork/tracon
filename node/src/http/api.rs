@@ -3064,11 +3064,32 @@ pub async fn decide_review(
     Path(id): Path<String>,
     Json(b): Json<VerdictBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let decided = decide_review_inner(State(s.clone()), Path(id.clone()), Json(b)).await?;
+    let decided = detached(decide_review_inner(
+        State(s.clone()),
+        Path(id.clone()),
+        Json(b),
+    ))
+    .await?;
     if let Err(error) = s.store().clear_review_draft(&id) {
         tracing::warn!(%error, review = %id, "could not clear a decided review's draft");
     }
     Ok(decided)
+}
+
+/// Run work that may publish to completion even when the request that asked
+/// for it goes away. Dropped with the request, a publication is cut off
+/// between its side effects: the forge holds the change, the journal still
+/// says the attempt is running, and nothing on this process can retry or
+/// reconcile it until the node restarts.
+async fn detached<T: Send + 'static>(
+    work: impl std::future::Future<Output = ApiResult<T>> + Send + 'static,
+) -> ApiResult<T> {
+    tokio::spawn(work).await.map_err(|error| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the publication task ended without an answer: {error}"),
+        )
+    })?
 }
 
 #[derive(Deserialize)]
@@ -3445,6 +3466,14 @@ pub async fn recover_publication(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<RecoverBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    detached(recover_publication_here(s, id, b)).await
+}
+
+async fn recover_publication_here(
+    s: AppState,
+    id: String,
+    b: RecoverBody,
 ) -> ApiResult<Json<serde_json::Value>> {
     let r = s
         .store()
