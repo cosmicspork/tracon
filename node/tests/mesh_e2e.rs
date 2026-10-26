@@ -1282,7 +1282,10 @@ async fn a_peers_failed_publication_is_shown_here_until_its_owner_clears_it() {
     let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
-    assert_eq!(v["publication"]["latest"]["outcome"], "not_attempted", "{v}");
+    assert_eq!(
+        v["publication"]["latest"]["outcome"], "not_attempted",
+        "{v}"
+    );
     assert_eq!(v["publication"]["latest"]["note"], note, "{v}");
 
     // Retried on the owner, the failure is no longer the review's there.
