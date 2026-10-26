@@ -1,6 +1,7 @@
 //! Documents: long, named, read deliberately. `doc_search` finds by content,
-//! `doc_read` fetches by slug, `doc_write` creates or edits — the last is not
-//! named by the shipped policy, so it is asked.
+//! `doc_read` fetches by slug, `doc_write` creates or edits in either format,
+//! and `doc_delete` removes — the last two are not named by the shipped policy,
+//! so they are asked.
 
 use serde_json::{json, Value};
 
@@ -8,12 +9,44 @@ use crate::{
     config::DocKind,
     corpus,
     mcp::{CallContext, SessionAccess},
-    store::{DocumentRow, DocumentWrite},
+    store::{DocumentDelete, DocumentRow, DocumentWrite},
 };
 
 pub const DOC_READ: &str = "doc_read";
 pub const DOC_SEARCH: &str = "doc_search";
 pub const DOC_WRITE: &str = "doc_write";
+pub const DOC_DELETE: &str = "doc_delete";
+
+/// What a document is written as. HTML from `doc_write` is a single-file
+/// bundle, stored, validated and served exactly as an operator's import is:
+/// only from the preview origin, never on the operator's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Markdown,
+    Html,
+}
+
+impl Format {
+    pub const NAMES: [&'static str; 2] = ["markdown", "html"];
+
+    /// An omitted format is Markdown, which is what `doc_write` always wrote.
+    pub fn parse(format: Option<&str>) -> Result<Self, WriteError> {
+        match format.map(str::trim) {
+            None | Some("markdown") => Ok(Self::Markdown),
+            Some("html") => Ok(Self::Html),
+            Some(other) => Err(WriteError::Format(other.to_string())),
+        }
+    }
+
+    /// The format a call's arguments name. A JSON `null` is an omitted one.
+    pub fn of_args(args: &Value) -> Result<Self, WriteError> {
+        match &args["format"] {
+            Value::Null => Self::parse(None),
+            Value::String(f) => Self::parse(Some(f)),
+            other => Err(WriteError::Format(other.to_string())),
+        }
+    }
+}
 
 /// A reserved kind: one the node's own behaviour hangs on, so it is built in
 /// and no `[[docs.kind]]` entry removes or redefines it.
@@ -194,18 +227,6 @@ pub fn replaced(
     store.doc_get(channel, slug)
 }
 
-/// An HTML document is replaced through import, never by `doc_write`, so a
-/// write over one is refused before it is held: the operator is not asked
-/// to allow a call that cannot run.
-pub fn html_refusal(document: Option<&DocumentRow>) -> Option<String> {
-    let document = document.filter(|d| d.format == "html")?;
-    Some(format!(
-        "`{}` is an HTML document, which `doc_write` cannot replace: HTML documents are \
-         replaced through import.",
-        document.slug
-    ))
-}
-
 /// What the approval page compares a held `doc_write` against: the document
 /// as it stands (`null` for a new slug) and whether the `if_hash` the agent
 /// sent no longer matches it, which the write would meet as a conflict. The
@@ -239,6 +260,140 @@ pub fn approval_title(summary: &str, document: Option<&DocumentRow>) -> String {
 /// The kind of the documents `show_work` stores its pages and files in.
 pub const SHOWN: &str = "shown";
 
+/// What `doc_delete` refuses outright: every slug `doc_write` refuses, and a
+/// brief, which the work tools own and an item's criteria are read from.
+fn reserved_from_delete(args: &Value) -> Option<String> {
+    let slug = args["slug"].as_str().unwrap_or("").trim();
+    if reserved_kind_of(slug) == Some(corpus::brief::KIND) {
+        return Some(format!(
+            "`{slug}` is a work item's brief, which the work tools keep. Say why it should go \
+             with `ask_operator`."
+        ));
+    }
+    reserved_for_operator(args)
+}
+
+/// Everything a document call can be refused for that its arguments alone
+/// decide: a reserved slug, a slug that is not one, a format that is not
+/// one, or an HTML body over the per-file limit. Checked before the call is
+/// held, so the operator is never asked to allow a write that cannot run,
+/// and again when an allowed call runs, against the arguments as allowed.
+pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
+    let reserved = match name {
+        DOC_WRITE => reserved_for_operator(args),
+        DOC_DELETE => reserved_from_delete(args),
+        _ => return None,
+    };
+    if reserved.is_some() {
+        return reserved;
+    }
+    let slug = args["slug"].as_str().unwrap_or("").trim();
+    if !valid_slug(slug) {
+        return Some(WriteError::Slug(slug.to_string()).to_string());
+    }
+    if name == DOC_WRITE {
+        let format = match Format::of_args(args) {
+            Ok(format) => format,
+            Err(error) => return Some(error.to_string()),
+        };
+        if format == Format::Html && reserved_kind_of(slug) == Some(corpus::brief::KIND) {
+            return Some(format!(
+                "`{slug}` is a work item's brief, which the work tools read as Markdown only"
+            ));
+        }
+        let body = args["body"].as_str().unwrap_or("");
+        if format == Format::Html && body.len() > corpus::html::MAX_FILE_BYTES {
+            return Some(
+                WriteError::Html(corpus::html::HtmlBundleError::FileTooLarge(html_entry(
+                    slug, None,
+                )))
+                .to_string(),
+            );
+        }
+    }
+    None
+}
+
+/// The path of the single file an HTML `doc_write` stores: the existing
+/// document's entry when it is already HTML, so a replacement keeps it, else
+/// `<slug>.html`.
+fn html_entry(slug: &str, existing: Option<&DocumentRow>) -> String {
+    existing
+        .filter(|doc| doc.format == "html")
+        .and_then(|doc| doc.entry_path.clone())
+        .unwrap_or_else(|| format!("{slug}.html"))
+}
+
+/// The source name an HTML `doc_write` files its bundle under, by the same
+/// rule as [`html_entry`].
+fn html_source_name(slug: &str, existing: Option<&DocumentRow>) -> String {
+    existing
+        .filter(|doc| doc.format == "html")
+        .and_then(|doc| doc.source_name.clone())
+        .unwrap_or_else(|| format!("{slug}.html"))
+}
+
+/// What the operator should know about a `doc_write` beyond its slug: that it
+/// changes the document's format, and how many files of an HTML bundle it
+/// drops. `None` for an ordinary edit.
+pub fn write_consequence(
+    store: &crate::store::Store,
+    channel: &str,
+    args: &Value,
+) -> Option<String> {
+    let slug = args["slug"].as_str()?.trim();
+    let format = Format::of_args(args).ok()?;
+    let existing = store.doc_get(channel, slug).ok().flatten();
+    let was_html = existing.as_ref().is_some_and(|doc| doc.format == "html");
+    let kept = match format {
+        Format::Html => Some(html_entry(slug, existing.as_ref())),
+        Format::Markdown => None,
+    };
+    let dropped = match existing.as_ref().filter(|_| was_html) {
+        Some(doc) => store
+            .html_bundle_metadata(doc)
+            .map(|files| {
+                files
+                    .into_iter()
+                    .filter(|file| Some(&file.path) != kept.as_ref())
+                    .count()
+            })
+            .unwrap_or(0),
+        None => 0,
+    };
+    let files = |n: usize| format!("{n} file{}", if n == 1 { "" } else { "s" });
+    let drops = (dropped > 0).then(|| format!("drops {} of its HTML bundle", files(dropped)));
+    let converts = match (format, existing.as_ref()) {
+        (Format::Markdown, Some(_)) if was_html => Some("converts HTML to Markdown"),
+        (Format::Html, Some(_)) if !was_html => Some("converts Markdown to HTML"),
+        (Format::Html, None) => Some("as HTML"),
+        _ => None,
+    };
+    match (converts, drops) {
+        (Some(c), Some(d)) => Some(format!("{c}; {d}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, Some(d)) => Some(d),
+        (None, None) => None,
+    }
+}
+
+/// The call to hold for the operator: a write or delete that names no
+/// `if_hash` gets the hash of the document as it stands now, so what runs once
+/// allowed is what the card described, and a document changed in between (an
+/// import over it, a peer's edit) conflicts instead of being replaced unseen.
+/// `None` when there is nothing to pin.
+pub fn pinned(store: &crate::store::Store, channel: &str, args: &Value) -> Option<Value> {
+    if args["if_hash"].as_str().is_some_and(|h| !h.is_empty()) {
+        return None;
+    }
+    let slug = args["slug"].as_str()?.trim();
+    let doc = store.doc_get(channel, slug).ok().flatten()?;
+    let mut args = args.clone();
+    args.as_object_mut()?
+        .insert("if_hash".into(), Value::String(doc.hash));
+    Some(args)
+}
+
 pub fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 120
@@ -269,11 +424,14 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
         .collect();
     let write_description = format!(
         "Create or replace a document on this channel. Slugs are `<kind>-<name>` with kind one \
-         of {}; any other prefix is filed as `{OTHER}`. Pass if_hash (from doc_read) to refuse \
-         overwriting an edit you have not seen. The operator is asked before this runs, unless \
-         the policy writes it unattended (working notes): an asked call returns \
-         `awaiting_operator` with an `approval_id` at once, and approval_status reports the \
-         outcome.",
+         of {}; any other prefix is filed as `{OTHER}`. `format` is `markdown` (the default) or \
+         `html`; writing the other format converts the document in place, keeping its archived \
+         and pinned state. An HTML body is one self-contained page, stored as a single-file \
+         bundle and shown only in the sandboxed preview; replacing a multi-file bundle drops \
+         its other files. Pass if_hash (from doc_read) to refuse overwriting an edit you have \
+         not seen. The operator is asked before this runs, unless the policy writes it \
+         unattended (working notes): an asked call returns `awaiting_operator` with an \
+         `approval_id` at once, and approval_status reports the outcome.",
         writable.join(", ")
     );
     vec![
@@ -307,9 +465,27 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
                 "properties": {
                     "slug": { "type": "string" },
                     "body": { "type": "string" },
+                    "format": { "type": "string", "enum": Format::NAMES, "default": "markdown" },
                     "if_hash": { "type": "string" },
                 },
                 "required": ["slug", "body"],
+            },
+        }),
+        json!({
+            "name": DOC_DELETE,
+            "description": "Delete a document on this channel, in either format; an HTML \
+                document's bundle goes with it. Pass if_hash (from doc_read) to refuse deleting \
+                an edit you have not seen. A work item's brief, its selected context and shown \
+                work are refused. The operator is always asked: the call returns \
+                `awaiting_operator` with an `approval_id` at once, and approval_status reports \
+                the outcome.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "if_hash": { "type": "string" },
+                },
+                "required": ["slug"],
             },
         }),
     ]
@@ -366,13 +542,15 @@ pub async fn call(
             let body = args["body"].as_str().unwrap_or("");
             let node_id = access.manager.node_id().to_string();
             let kinds = tools.cfg.live().docs.kind.clone();
-            let doc = write_document(
+            let format = Format::of_args(args).map_err(|e| e.to_string())?;
+            let doc = write_document_as(
                 &access.store,
                 access.manager.bus(),
                 &kinds,
                 &node_id,
                 &ctx.channel,
                 slug,
+                format,
                 body,
                 args["if_hash"].as_str(),
                 false,
@@ -399,7 +577,23 @@ pub async fn call(
                 );
                 access.manager.phase_done(&session_id).await;
             }
-            Ok(json!({ "slug": doc.slug, "hash": doc.hash }))
+            Ok(json!({ "slug": doc.slug, "hash": doc.hash, "format": doc.format }))
+        }
+        DOC_DELETE => {
+            let slug = args["slug"].as_str().unwrap_or("").trim();
+            let removed = delete_document(
+                &access.store,
+                access.manager.bus(),
+                access.manager.node_id(),
+                &ctx.channel,
+                slug,
+                args["if_hash"].as_str(),
+            )
+            .map_err(|e| e.to_string())?;
+            if !removed {
+                return Err(format!("no document {slug} on channel {}", ctx.channel));
+            }
+            Ok(json!({ "slug": slug, "deleted": true }))
         }
         other => Err(format!("no tool named {other}")),
     }
@@ -409,20 +603,33 @@ pub async fn call(
 pub enum WriteError {
     #[error("slug {0:?} is not lowercase letters, digits, dots, dashes, and underscores")]
     Slug(String),
+    #[error("format {0} is not `markdown` or `html`")]
+    Format(String),
     #[error("the document changed since it was read; its hash is now {hash}")]
     Conflict { hash: String, body: String },
-    #[error("HTML documents must be replaced through import")]
-    HtmlDocument,
+    #[error(transparent)]
+    Html(#[from] corpus::html::HtmlBundleError),
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
 }
 
-/// Create or replace a document at a slug, on this node, as a sync write.
-/// `kinds` is the node's configured list: the kind stored with the row is a
-/// cache of what it classified as when written, never what it is read as.
-/// `if_hash` is the edit's precondition: the hash the caller last read.
-/// `create_only` is the HTTP `If-None-Match: *` precondition. `archived` and
-/// `pinned` of `None` leave the document as it was.
+impl From<crate::store::HtmlWriteError> for WriteError {
+    fn from(error: crate::store::HtmlWriteError) -> Self {
+        use crate::store::HtmlWriteError as E;
+        match error {
+            E::Bundle(error) => Self::Html(error),
+            E::Conflict { hash, body } => Self::Conflict { hash, body },
+            E::InvalidSourceName => {
+                Self::Store(crate::store::StoreError::Invalid(error.to_string()))
+            }
+            E::Sqlite(error) => Self::Store(error.into()),
+            E::Sync(error) => Self::Store(crate::store::corpus::sync_err(error)),
+        }
+    }
+}
+
+/// Create or replace a Markdown document at a slug, on this node, as a sync
+/// write: [`write_document_as`] with [`Format::Markdown`].
 #[allow(clippy::too_many_arguments)]
 pub fn write_document(
     store: &crate::store::Store,
@@ -437,59 +644,125 @@ pub fn write_document(
     archived: Option<bool>,
     pinned: Option<bool>,
 ) -> Result<DocumentRow, WriteError> {
-    if !valid_slug(slug) {
-        return Err(WriteError::Slug(slug.to_string()));
-    }
-    if store
-        .doc_get(channel, slug)?
-        .is_some_and(|document| document.format == "html")
-    {
-        return Err(WriteError::HtmlDocument);
-    }
-    let hash = corpus::hash_body(body);
-    match store.write_document_change(
+    write_document_as(
+        store,
+        bus,
+        kinds,
         site,
         channel,
         slug,
-        kind_of(kinds, slug),
-        &title_of(kinds, slug, body),
+        Format::Markdown,
         body,
-        &hash,
         if_hash,
         create_only,
-        &corpus::new_id(),
         archived,
         pinned,
-    )? {
-        DocumentWrite::Written { row, change } => {
-            let row = *row;
-            bus.publish(crate::stream::Frame::Changes {
-                channel: channel.to_string(),
-                changes: vec![change],
-            });
-            Ok(row)
-        }
-        DocumentWrite::Conflict { hash, body } => Err(WriteError::Conflict { hash, body }),
-        DocumentWrite::HtmlDocument => Err(WriteError::HtmlDocument),
-    }
+    )
 }
 
-/// Remove a document at a slug (a tombstone that travels).
+/// Create or replace a document at a slug in `format`, on this node, as a
+/// sync write. Writing the other format converts the document in place.
+/// `kinds` is the node's configured list: the kind stored with the row is a
+/// cache of what it classified as when written, never what it is read as.
+/// `if_hash` is the edit's precondition: the hash the caller last read,
+/// whatever format it was then. `create_only` is the HTTP `If-None-Match: *`
+/// precondition. `archived` and `pinned` of `None` leave the document as it
+/// was.
+#[allow(clippy::too_many_arguments)]
+pub fn write_document_as(
+    store: &crate::store::Store,
+    bus: &crate::stream::Bus,
+    kinds: &[DocKind],
+    site: &str,
+    channel: &str,
+    slug: &str,
+    format: Format,
+    body: &str,
+    if_hash: Option<&str>,
+    create_only: bool,
+    archived: Option<bool>,
+    pinned: Option<bool>,
+) -> Result<DocumentRow, WriteError> {
+    if !valid_slug(slug) {
+        return Err(WriteError::Slug(slug.to_string()));
+    }
+    let (row, changes) = match format {
+        Format::Markdown => {
+            let hash = corpus::hash_body(body);
+            match store.write_document_change(
+                site,
+                channel,
+                slug,
+                kind_of(kinds, slug),
+                &title_of(kinds, slug, body),
+                body,
+                &hash,
+                if_hash,
+                create_only,
+                &corpus::new_id(),
+                archived,
+                pinned,
+            )? {
+                DocumentWrite::Written { row, changes } => (*row, changes),
+                DocumentWrite::Conflict { hash, body } => {
+                    return Err(WriteError::Conflict { hash, body })
+                }
+            }
+        }
+        // Through the operator's own import writer: the same path checks,
+        // limits and generation hash, and so the same preview-only serving.
+        Format::Html => {
+            let existing = store.doc_get(channel, slug)?;
+            let entry = html_entry(slug, existing.as_ref());
+            store.write_html_document_change(
+                kinds,
+                site,
+                channel,
+                slug,
+                &html_source_name(slug, existing.as_ref()),
+                &entry,
+                vec![corpus::html::HtmlFile {
+                    path: entry.clone(),
+                    bytes: body.as_bytes().to_vec(),
+                }],
+                if_hash,
+                create_only,
+                archived,
+                pinned,
+            )?
+        }
+    };
+    // One frame, in the order written: a peer applies a generation's files
+    // before the document that names it, and its tombstones after.
+    bus.publish(crate::stream::Frame::Changes {
+        channel: channel.to_string(),
+        changes,
+    });
+    Ok(row)
+}
+
+/// Remove a document at a slug (a tombstone that travels), with its HTML
+/// bundle. `if_hash` refuses removing a version the caller has not read.
+/// `Ok(false)` when there is no such document.
 pub fn delete_document(
     store: &crate::store::Store,
     bus: &crate::stream::Bus,
     site: &str,
     channel: &str,
     slug: &str,
-) -> Result<bool, crate::store::StoreError> {
-    let Some(changes) = store.delete_document_change(site, channel, slug)? else {
-        return Ok(false);
-    };
-    bus.publish(crate::stream::Frame::Changes {
-        channel: channel.to_string(),
-        changes,
-    });
-    Ok(true)
+    if_hash: Option<&str>,
+) -> Result<bool, WriteError> {
+    match store.delete_document_change(site, channel, slug, if_hash)? {
+        DocumentDelete::Deleted(changes) => {
+            bus.publish(crate::stream::Frame::Changes {
+                channel: channel.to_string(),
+                changes,
+            });
+            Ok(true)
+        }
+        DocumentDelete::Missing => Ok(false),
+        DocumentDelete::Conflict { hash, body } => Err(WriteError::Conflict { hash, body }),
+    }
 }
 
 #[cfg(test)]
@@ -525,11 +798,35 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["slug", "body", "if_hash"].into_iter().collect(),
+            ["slug", "body", "format", "if_hash"].into_iter().collect(),
             "{props:?}"
         );
         assert!(!props.contains_key("pinned"), "{props:?}");
         assert!(!props.contains_key("archived"), "{props:?}");
+    }
+
+    #[test]
+    fn an_html_body_over_the_file_limit_is_refused_before_asking() {
+        let limit = corpus::html::MAX_FILE_BYTES;
+        let args = |body: String, format: &str| json!({ "slug": "ref-big", "body": body, "format": format });
+        let refused = refusal_before_asking(DOC_WRITE, &args("x".repeat(limit + 1), "html"));
+        assert!(
+            refused.as_deref().is_some_and(|r| r.contains("byte limit")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            refusal_before_asking(DOC_WRITE, &args("x".repeat(limit), "html")),
+            None
+        );
+        // Markdown has no such limit of its own.
+        assert_eq!(
+            refusal_before_asking(DOC_WRITE, &args("x".repeat(limit + 1), "markdown")),
+            None
+        );
+        assert_eq!(
+            refusal_before_asking(DOC_READ, &json!({ "slug": "Bad" })),
+            None
+        );
     }
 
     fn runbook() -> DocKind {

@@ -41,7 +41,9 @@ impl std::fmt::Display for FieldError {
 /// How a held call is laid out for the operator, per tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Presentation {
-    /// `jira_wiki` or `markdown`: how the prose fields are written.
+    /// `jira_wiki`, `markdown`, or `source`: how the prose fields are
+    /// written. `source` is shown as text and never rendered — what an HTML
+    /// `doc_write` carries, which runs only in the preview origin's sandbox.
     pub format: &'static str,
     /// The arguments that carry long prose, to render as a document.
     pub prose_fields: Vec<&'static str>,
@@ -60,7 +62,15 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (github::PR_REPLY, "markdown", &["body"], &["thread_id"]),
     (gitlab::MR_COMMENT, "markdown", &["body"], &[]),
     (gitlab::MR_REPLY, "markdown", &["body"], &["discussion_id"]),
-    (docs::DOC_WRITE, "markdown", &["body"], &["slug", "if_hash"]),
+    // The format is what the body is: Markdown edited into HTML, or back, is
+    // a different call.
+    (
+        docs::DOC_WRITE,
+        "markdown",
+        &["body"],
+        &["slug", "if_hash", "format"],
+    ),
+    (docs::DOC_DELETE, "markdown", &[], &["slug", "if_hash"]),
     (memory::RETAIN, "markdown", &["body"], &["kind"]),
     (work::BRIEF_NOTE, "markdown", &["text"], &[]),
     (work::CRITERIA_LINK, "markdown", &["value"], &["criterion"]),
@@ -111,6 +121,18 @@ pub fn presentation(tool: &str) -> Presentation {
         prose_fields: prose.to_vec(),
         locked_fields: IDENTIFYING.iter().chain(locked).copied().collect(),
     }
+}
+
+/// [`presentation`] for one held call: an HTML `doc_write` body is shown as
+/// source. It is a page meant only for the preview origin's sandbox, so the
+/// operator's origin never renders it, as Markdown or otherwise.
+pub fn presentation_for(tool: &str, args: &Value) -> Presentation {
+    let mut shown = presentation(tool);
+    if tool == docs::DOC_WRITE && docs::Format::of_args(args).is_ok_and(|f| f == docs::Format::Html)
+    {
+        shown.format = "source";
+    }
+    shown
 }
 
 /// The input schema of a tool by name.
@@ -335,6 +357,8 @@ mod tests {
         let doc = presentation("doc_write");
         assert_eq!(doc.prose_fields, ["body"]);
         assert!(doc.locked_fields.contains(&"slug") && doc.locked_fields.contains(&"key"));
+        assert!(doc.locked_fields.contains(&"format"));
+        assert!(presentation("doc_delete").locked_fields.contains(&"slug"));
         // A held service start has its schema with no catalogue to hand,
         // and the service it starts is what the call acts on.
         let service = input_schema("service_start").unwrap();
@@ -351,6 +375,27 @@ mod tests {
         assert_eq!(unknown.format, "markdown");
         assert!(unknown.prose_fields.is_empty());
         assert_eq!(unknown.locked_fields, IDENTIFYING);
+    }
+
+    #[test]
+    fn an_html_doc_write_body_is_shown_as_source_and_its_format_is_locked() {
+        let html = json!({ "slug": "ref-page", "body": "<script>x</script>", "format": "html" });
+        assert_eq!(presentation_for("doc_write", &html).format, "source");
+        let markdown = json!({ "slug": "ref-page", "body": "# Page" });
+        assert_eq!(presentation_for("doc_write", &markdown).format, "markdown");
+        assert_eq!(
+            presentation_for(
+                "doc_write",
+                &json!({ "slug": "ref-page", "format": "markdown" })
+            )
+            .format,
+            "markdown"
+        );
+        let to_html = json!({ "slug": "ref-page", "body": "# Page", "format": "html" });
+        assert_eq!(
+            check_edit("doc_write", &markdown, &to_html)[0].field,
+            "format"
+        );
     }
 
     #[test]

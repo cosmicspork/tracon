@@ -73,6 +73,7 @@ test('forge calls name the change, run or pipeline', () => {
 test('documents, memory, services, setup and the work item read as actions', () => {
   expect(nodeCallText('doc_read', { slug: 'note-tracon-dogfood' })).toBe('Read document note-tracon-dogfood')
   expect(nodeCallText('doc_search', { query: 'dogfood' })).toBe('Search documents · dogfood')
+  expect(nodeCallText('doc_delete', { slug: 'plan-hdr' })).toBe('Delete document plan-hdr')
   expect(nodeCallText('recall', { query: 'gateway' })).toBe('Recall · gateway')
   expect(nodeCallText('retain', { kind: 'lesson', body: 'x' })).toBe('Remember a lesson · x')
   expect(nodeCallText('query', { sql: 'SELECT 1' })).toBe('Query · SELECT 1')

@@ -754,6 +754,12 @@ pub fn write(
             return Err(ContextError::Conflict { hash: have });
         }
     }
+    // As for a brief: a selection never converts an HTML page it lands on.
+    if current.as_ref().is_some_and(|doc| doc.format != "markdown") {
+        return Err(ContextError::Write(format!(
+            "`{slug}` is an HTML document, not a selection"
+        )));
+    }
     if input.picks.len() > MAX_ENTRIES {
         return Err(ContextError::TooMany);
     }
@@ -1066,7 +1072,7 @@ mod tests {
         // and it says what went.
         let store_slug = slug_for(&item().id);
         store
-            .delete_document_change("n", "personal", &store_slug)
+            .delete_document_change("n", "personal", &store_slug, None)
             .unwrap();
         let (delivered, fourth) = prepare(&store, "s4", &item()).unwrap().unwrap();
         assert!(delivered.text.is_empty());

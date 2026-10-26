@@ -903,7 +903,7 @@ on your home; nothing has run. Allow it and the node runs the call itself;
 arguments before allowing: the edit is checked against the tool's input schema
 first, and one that does not fit, or that changes what the call acts on (`key`,
 `project`, `repo`, `number` and `iid` for every tool, plus the tool's own, such
-as `doc_write`'s `slug` and `if_hash` or `retain`'s `kind`), is refused field by
+as `doc_write`'s `slug`, `if_hash` and `format` or `retain`'s `kind`), is refused field by
 field while the card keeps waiting. Reject with a reason, or request changes with notes, and
 `approval_status` returns `rejected` with that reason or `changes_requested`
 with the notes. Neither runs anything; the agent revises and calls the tool
@@ -1058,7 +1058,7 @@ and revoked the moment the hub loses that key.
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
 | `tracon channel create\|list\|bind\|share` | channels and their bindings |
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
-| `tracon doc import\|ls\|get\|put\|rm\|export\|reindex` | Markdown documents, and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
+| `tracon doc import\|ls\|get\|put [--format html]\|rm\|export\|reindex` | documents (import and export are Markdown; `put` writes either format, converting a document in place), and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
 | `tracon session archive-legacy\|reopen --harness` | put sessions from a retired harness away read-only, and carry one forward onto a supported one |
 | `tracon session continue <id>` | carry on a session a node restart cut off, on its workspace and harness (also the session's **Continue** button) |
@@ -1416,9 +1416,19 @@ An entry that names one of them, `other`, or a prefix already listed, is refused
 `doc_write` and `doc_search` offer agents the list as it is, and the Documents screen
 groups and filters by it (`GET /api/docs/kinds`).
 
-CLI import, put, and export remain Markdown-only. Agents can read HTML through
-`doc_read`; HTML creation and replacement use the operator's import flow, not
-`doc_write`.
+CLI import and export are Markdown-only. Agents manage documents of either
+format: `doc_write` takes `format` (`markdown`, the default, or `html`), and
+writing the other format converts the document in place, keeping its id,
+archived and pinned state. HTML from `doc_write`, `PUT /api/docs/{ch}/{slug}`
+with `"format": "html"`, or `tracon doc put --format html` is one page, stored
+through the same writer, path checks and limits as an import and served only
+from the preview origin; replacing a multi-file bundle drops its other files,
+and the approval's title says how many. Markdown over an HTML document retires
+its bundle. `doc_delete` removes a document of either format with its bundle,
+is always asked, and refuses a brief, a selected context, and shown work. Both
+take `if_hash` from `doc_read`, across a change of format, and a reserved slug,
+an unknown format, or an HTML body over the per-file limit is refused before
+the call is held.
 
 ### Policy
 

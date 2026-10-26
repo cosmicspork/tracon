@@ -892,6 +892,13 @@ pub fn write_for_item(
             return Err(BriefError::Conflict { hash: have });
         }
     }
+    // Writing Markdown over an HTML page would convert it and drop its
+    // bundle: that is the operator's to do, by hand, not a brief edit's.
+    if current.as_ref().is_some_and(|doc| doc.format != "markdown") {
+        return Err(BriefError::Write(format!(
+            "`{slug}` is an HTML document, not a brief"
+        )));
+    }
     let base = match (&input.markdown, &current) {
         (Some(markdown), _) => Brief::parse(markdown),
         (None, Some(doc)) => Brief::parse(&doc.body),

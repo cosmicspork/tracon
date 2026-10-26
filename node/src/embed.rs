@@ -320,9 +320,13 @@ pub async fn rebuild(
     Ok(done)
 }
 
-/// Walk the corpus and embed whatever is missing or stale. Runs at startup and
-/// again whenever replication brings something in.
+/// Walk the corpus, forget what is no longer embedded, and embed whatever is
+/// missing or stale. Runs at startup and again whenever replication brings
+/// something in.
 async fn sweep(e: &Embedder, token: &str) {
+    if let Err(err) = e.store.vec_forget_unembedded_documents() {
+        tracing::warn!(error = %err, "could not forget vectors of documents no longer embedded");
+    }
     let docs = match e.store.rows_to_embed() {
         Ok(d) => d,
         Err(err) => {

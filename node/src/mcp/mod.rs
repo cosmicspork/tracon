@@ -392,22 +392,20 @@ impl Tools {
         let args = defaulted.as_ref().unwrap_or(args);
         // A plan session's own plan document is the phase's artifact: writing
         // that one slug is what the session exists to do, so it is not asked.
-        let plan_write = name == docs::DOC_WRITE && self.is_plan_artifact(ctx, args);
+        // A delete, and a write that converts a document or drops files of
+        // its bundle, are always the operator's, whatever the policy says.
+        let always_asked = name == docs::DOC_DELETE
+            || name == docs::DOC_WRITE
+                && self
+                    .session
+                    .get()
+                    .and_then(|access| docs::write_consequence(&access.store, &ctx.channel, args))
+                    .is_some();
+        let plan_write =
+            name == docs::DOC_WRITE && !always_asked && self.is_plan_artifact(ctx, args);
         let audience = self.audience(ctx);
         if !audience.offers(name) {
             return Err(audience.refusal(name));
-        }
-        if name == docs::DOC_WRITE {
-            if let Some(refusal) = docs::reserved_for_operator(args) {
-                return Err(refusal);
-            }
-            if let Some(access) = self.session.get() {
-                let current =
-                    docs::replaced(&access.store, &ctx.channel, args).map_err(|e| e.to_string())?;
-                if let Some(refusal) = docs::html_refusal(current.as_ref()) {
-                    return Err(refusal);
-                }
-            }
         }
         if matches!(
             name,
@@ -491,11 +489,22 @@ impl Tools {
         if !plan_write {
             let decision = self.decide(ctx, name, args);
             match decision.verdict {
-                Verdict::Allow => {}
+                Verdict::Allow if !always_asked => {}
                 Verdict::Deny => return Err(refusal(decision)),
                 // Nothing waits on the operator: the call is held as an
                 // approval and the caller is told so at once.
-                Verdict::Ask => return self.request_approval(ctx, name, args).await,
+                Verdict::Allow | Verdict::Ask => {
+                    let pinned = match name {
+                        docs::DOC_WRITE | docs::DOC_DELETE => self
+                            .session
+                            .get()
+                            .and_then(|access| docs::pinned(&access.store, &ctx.channel, args)),
+                        _ => None,
+                    };
+                    return self
+                        .request_approval(ctx, name, pinned.as_ref().unwrap_or(args))
+                        .await;
+                }
             }
         }
         if let Some(access) = self.session.get() {
@@ -689,7 +698,7 @@ impl Tools {
                     .ok_or_else(|| "node not ready".to_string())?;
                 work::call(&self.cfg, access, ctx, name, args).await
             }
-            docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE => {
+            docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE | docs::DOC_DELETE => {
                 let access = self
                     .session
                     .get()
@@ -1107,10 +1116,12 @@ impl Tools {
     }
 
     /// What the node's own configuration refuses whatever the policy or the
-    /// operator says: a workflow `[github] dispatch` does not list, or a
-    /// `ready` that is not true or false.
+    /// operator says: a workflow `[github] dispatch` does not list, a
+    /// `ready` that is not true or false, or a document call that cannot run
+    /// (`docs::refusal_before_asking`).
     fn refusal_before_asking(&self, name: &str, args: &Value) -> Option<String> {
         match name {
+            docs::DOC_WRITE | docs::DOC_DELETE => docs::refusal_before_asking(name, args),
             github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.live().github, args),
             // The card names the direction, so a `ready` it cannot read is
             // refused before it is shown.
@@ -1227,8 +1238,9 @@ impl Tools {
     /// What the operator reads on the card and in the push for a held call:
     /// [`summarize`], except that a Jira transition is named by the status it
     /// leads to, which only Jira can say, and a document write says whether
-    /// it creates or edits, and what. A lookup that fails or is slow leaves
-    /// the plain summary rather than holding the request.
+    /// it creates or edits, and what, and when it changes the document's
+    /// format or drops files of its bundle. A lookup that fails or is slow
+    /// leaves the plain summary rather than holding the request.
     async fn approval_title(&self, ctx: &CallContext, name: &str, args: &Value) -> String {
         if name == jira::ISSUE_TRANSITION {
             let lookup = jira::transition_target(&self.broker, &self.http, ctx, args);
@@ -1240,6 +1252,11 @@ impl Tools {
             if let Some(access) = self.session.get() {
                 if let Ok(current) = docs::replaced(&access.store, &ctx.channel, args) {
                     let mut title = docs::approval_title(&summarize(name, args), current.as_ref());
+                    if let Some(consequence) =
+                        docs::write_consequence(&access.store, &ctx.channel, args)
+                    {
+                        title = format!("{title} ({consequence})");
+                    }
                     bound(&mut title);
                     return title;
                 }
@@ -2111,7 +2128,7 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             format!("{name} {}!{}", id("project"), id("iid")),
             first_line("body"),
         ),
-        docs::DOC_WRITE => format!("{name} {}", id("slug")),
+        docs::DOC_WRITE | docs::DOC_DELETE => format!("{name} {}", id("slug")),
         memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
         work::WORK_UPDATE => {
             let fields: Vec<String> = [

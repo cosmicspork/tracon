@@ -1229,40 +1229,6 @@ async fn a_new_document_card_says_new_and_details_carry_no_document() {
     );
 }
 
-/// `doc_write` cannot replace an HTML document, so it is refused before it
-/// is held rather than put to the operator as a call that cannot run.
-#[tokio::test]
-async fn a_document_write_over_an_html_document_is_refused_before_it_is_held() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    h.store
-        .write_html_document_change(
-            &[],
-            "n1",
-            "work",
-            "ref-page",
-            "page.html",
-            "page.html",
-            vec![tracon::corpus::html::HtmlFile {
-                path: "page.html".into(),
-                bytes: b"<title>Page</title><p>page</p>".to_vec(),
-            }],
-            None,
-            true,
-        )
-        .unwrap();
-    let (_, v) = mcp(
-        &h.operator,
-        "work",
-        tool_call("doc_write", json!({ "slug": "ref-page", "body": "# Page" })),
-    )
-    .await;
-    let (err, out) = outcome(&v);
-    assert!(err, "{out}");
-    assert!(out.to_string().contains("HTML document"), "{out}");
-    assert!(h.store.open_approval_cards("[]").unwrap().is_empty());
-}
-
 /// `retain` runs unattended under the shipped agreements, but a node's policy
 /// can ask for it; then its kind is locked and its body is the prose.
 #[tokio::test]
@@ -2320,4 +2286,340 @@ async fn an_item_in_use_takes_its_sessions_project_and_is_not_closed_or_deleted_
     assert_eq!(now.state, "open");
     assert_eq!(now.title, "held, renamed");
     tracon::session::materialize::remove(&session.id);
+}
+
+/// A two-file HTML plan on `work`, archived, as Docs → Import HTML and the
+/// archive toggle leave one.
+fn archived_html_plan(h: &Harness, slug: &str) -> tracon::store::DocumentRow {
+    use tracon::corpus::html::HtmlFile;
+    let (row, _) = h
+        .store
+        .write_html_document_change(
+            &[],
+            "n1",
+            "work",
+            slug,
+            "plan-folder",
+            "index.html",
+            vec![
+                HtmlFile {
+                    path: "index.html".into(),
+                    bytes: b"<title>October</title><link rel=stylesheet href=style.css>".to_vec(),
+                },
+                HtmlFile {
+                    path: "style.css".into(),
+                    bytes: b"body { color: red }".to_vec(),
+                },
+            ],
+            None,
+            true,
+            Some(true),
+            None,
+        )
+        .unwrap();
+    row
+}
+
+/// Bundle rows still live for one generation of a document.
+fn live_bundle_rows(h: &Harness, hash: &str) -> i64 {
+    h.store
+        .conn()
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM document_bundle_file
+                     WHERE document_hash = ?1 AND deleted = 0) +
+                    (SELECT COUNT(*) FROM document_bundle_chunk
+                     WHERE document_hash = ?1 AND deleted = 0)",
+            [hash],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// The case that was refused after approval: Markdown, with the hash
+/// `doc_read` gave, over an archived HTML plan. The card says what goes;
+/// allowing it converts the document in place and retires its bundle.
+#[tokio::test]
+async fn markdown_written_over_an_archived_html_plan_converts_it_and_keeps_it_archived() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let html = archived_html_plan(&h, "plan-hdr-october-2026");
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("doc_read", json!({ "slug": "plan-hdr-october-2026" })),
+    )
+    .await;
+    let (_, read) = outcome(&v);
+    assert_eq!(read["format"], "html", "{read}");
+    assert_eq!(read["hash"], html.hash.as_str(), "{read}");
+
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-hdr-october-2026", "body": "# Markdown", "if_hash": read["hash"] }),
+    )
+    .await;
+    let row = h.store.get_approval(&id).unwrap().unwrap();
+    assert_eq!(
+        row.title,
+        "doc_write plan-hdr-october-2026 · edit · \"October\" (converts HTML to Markdown; drops 2 files of its HTML bundle)"
+    );
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["format"], "markdown", "{out}");
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("doc_read", json!({ "slug": "plan-hdr-october-2026" })),
+    )
+    .await;
+    let (_, read) = outcome(&v);
+    assert_eq!(read["format"], "markdown", "{read}");
+    assert_eq!(read["archived"], true, "{read}");
+    assert_eq!(read["body"], "# Markdown", "{read}");
+    assert_eq!(read["entry_path"], Value::Null, "{read}");
+    assert_eq!(live_bundle_rows(&h, &html.hash), 0);
+    assert_eq!(
+        h.store
+            .doc_get("work", "plan-hdr-october-2026")
+            .unwrap()
+            .unwrap()
+            .id,
+        html.id
+    );
+}
+
+/// An agent's HTML is stored as the operator's import is, and the card shows
+/// it as source with its format locked.
+#[tokio::test]
+async fn an_html_doc_write_is_a_single_file_bundle_shown_on_its_card_as_source() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let page = "<!doctype html><title>Report</title><script>document.title = 'x'</script>";
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "ref-report", "body": page, "format": "html" }),
+    )
+    .await;
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(
+        v["approval"]["title"],
+        "doc_write ref-report · new (as HTML)"
+    );
+    assert_eq!(v["format"], "source", "{v}");
+    assert!(
+        v["locked_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("format")),
+        "{v}"
+    );
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled(&h, &id).await["state"], "succeeded");
+
+    let doc = h.store.doc_get("work", "ref-report").unwrap().unwrap();
+    assert_eq!(doc.format, "html");
+    assert_eq!(doc.title, "Report");
+    assert_eq!(doc.entry_path.as_deref(), Some("ref-report.html"));
+    assert_eq!(doc.source_name.as_deref(), Some("ref-report.html"));
+    let files = h.store.read_html_bundle(&doc).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "ref-report.html");
+    assert_eq!(files[0].bytes, page.as_bytes());
+
+    // Replacing a multi-file bundle keeps its entry and says what it drops.
+    let html = archived_html_plan(&h, "plan-folder");
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-folder", "body": "<title>One</title>", "format": "html",
+                "if_hash": html.hash }),
+    )
+    .await;
+    assert_eq!(
+        h.store.get_approval(&id).unwrap().unwrap().title,
+        "doc_write plan-folder · edit · \"October\" (drops 1 file of its HTML bundle)"
+    );
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled(&h, &id).await["state"], "succeeded");
+    let doc = h.store.doc_get("work", "plan-folder").unwrap().unwrap();
+    assert_eq!(doc.entry_path.as_deref(), Some("index.html"));
+    assert_eq!(doc.source_name.as_deref(), Some("plan-folder"));
+    assert_eq!(doc.archived, 1);
+    assert_eq!(h.store.read_html_bundle(&doc).unwrap().len(), 1);
+    assert_eq!(live_bundle_rows(&h, &html.hash), 0);
+}
+
+/// A write that could not run once allowed is refused before it is held:
+/// nothing reaches the operator's queue.
+#[tokio::test]
+async fn a_document_call_that_cannot_run_is_refused_before_it_is_held() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    // An over-limit HTML body is refused the same way
+    // (`docs::tests::an_html_body_over_the_file_limit_is_refused_before_asking`);
+    // this door's own request limit is lower still.
+    for (name, args, says) in [
+        (
+            "doc_write",
+            json!({ "slug": "ref-x", "body": "x", "format": "pdf" }),
+            "format",
+        ),
+        ("doc_write", json!({ "slug": "Ref X", "body": "x" }), "slug"),
+        ("doc_delete", json!({ "slug": "../x" }), "slug"),
+        (
+            "doc_delete",
+            json!({ "slug": "context-0192f3a17c4e" }),
+            "selected context",
+        ),
+        ("doc_delete", json!({ "slug": "shown-abc" }), "show_work"),
+        ("doc_delete", json!({ "slug": "brief-abc" }), "brief"),
+        (
+            "doc_write",
+            json!({ "slug": "brief-abc", "body": "<p>x</p>", "format": "html" }),
+            "Markdown only",
+        ),
+    ] {
+        let (_, v) = mcp(&h.operator, "work", tool_call(name, args)).await;
+        let (err, out) = outcome(&v);
+        assert!(err, "{name}: {out}");
+        assert!(
+            out.as_str().is_some_and(|m| m.contains(says)),
+            "{name}: {out}"
+        );
+    }
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+}
+
+/// `doc_delete` is always asked, refuses a version the agent has not read,
+/// and takes an HTML document's bundle with it.
+#[tokio::test]
+async fn doc_delete_is_asked_conflicts_on_a_stale_hash_and_removes_the_bundle() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let html = archived_html_plan(&h, "note-page");
+
+    // Working notes are written unattended; deleting one still asks.
+    let id = ask(
+        &h,
+        "doc_delete",
+        json!({ "slug": "note-page", "if_hash": "stale" }),
+    )
+    .await;
+    assert_eq!(
+        h.store.get_approval(&id).unwrap().unwrap().title,
+        "doc_delete note-page"
+    );
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert!(
+        out["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("changed since it was read")),
+        "{out}"
+    );
+    assert!(h.store.doc_get("work", "note-page").unwrap().is_some());
+
+    let id = ask(
+        &h,
+        "doc_delete",
+        json!({ "slug": "note-page", "if_hash": html.hash }),
+    )
+    .await;
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["deleted"], true, "{out}");
+    assert!(h.store.doc_get("work", "note-page").unwrap().is_none());
+    assert_eq!(live_bundle_rows(&h, &html.hash), 0);
+}
+
+/// A working note is written unattended, but not when the write would
+/// convert an HTML page or drop files of its bundle: that is always asked,
+/// and the held call is pinned to the document it was asked about.
+#[tokio::test]
+async fn a_working_note_write_that_reshapes_an_html_page_is_asked_and_pinned() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "doc_write",
+            json!({ "slug": "note-plain", "body": "# Plain" }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err && out["state"] != "awaiting_operator", "{out}");
+
+    let html = archived_html_plan(&h, "note-page");
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "note-page", "body": "# Markdown" }),
+    )
+    .await;
+    let row = h.store.get_approval(&id).unwrap().unwrap();
+    assert!(
+        row.title.contains("converts HTML to Markdown"),
+        "{}",
+        row.title
+    );
+    let held: Value = serde_json::from_str(&row.arguments).unwrap();
+    assert_eq!(held["if_hash"], html.hash.as_str(), "{held}");
+}
+
+/// A call held without an `if_hash` runs against the document it was asked
+/// about: a change made while it waited conflicts rather than being replaced.
+#[tokio::test]
+async fn a_held_write_conflicts_when_the_document_changed_while_it_waited() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let allow = |id: String| {
+        let h = &h;
+        async move {
+            let (status, _) = answer(h, &id, json!({ "option_id": "allow_once" })).await;
+            assert_eq!(status, StatusCode::OK);
+            settled(h, &id).await
+        }
+    };
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-pin", "body": "# One" }),
+    )
+    .await;
+    assert_eq!(allow(id).await["state"], "succeeded");
+    let first = h.store.doc_get("work", "plan-pin").unwrap().unwrap();
+
+    let waiting = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-pin", "body": "# Two" }),
+    )
+    .await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-pin", "body": "# Three", "if_hash": first.hash }),
+    )
+    .await;
+    assert_eq!(allow(id).await["state"], "succeeded");
+
+    let out = allow(waiting).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert_eq!(
+        h.store.doc_get("work", "plan-pin").unwrap().unwrap().body,
+        "# Three"
+    );
 }

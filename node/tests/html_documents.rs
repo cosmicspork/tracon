@@ -78,25 +78,20 @@ async fn multipart_folder_import_round_trips_exact_files() {
         .unwrap();
     assert_eq!(stale_replace.status(), StatusCode::PRECONDITION_FAILED);
 
-    let edit = h
+    // A Markdown body over it is a conversion, held to the same precondition.
+    let stale_edit = h
         .operator
         .clone()
         .oneshot(
             Request::put("/api/docs/personal/ref-bundle")
                 .header("content-type", "application/json")
-                .header("if-match", response["hash"].as_str().unwrap())
+                .header("if-match", "stale-generation")
                 .body(Body::from("{\"body\":\"# overwritten\"}"))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(edit.status(), StatusCode::CONFLICT);
-    let error: serde_json::Value =
-        serde_json::from_slice(&edit.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(
-        error["error"]["message"],
-        "HTML documents must be replaced through import"
-    );
+    assert_eq!(stale_edit.status(), StatusCode::PRECONDITION_FAILED);
 
     let archive = h
         .operator
@@ -207,6 +202,8 @@ async fn preview_capability_is_document_bound_and_replacement_invalidates_it() {
             }],
             None,
             true,
+            None,
+            None,
         )
         .unwrap();
     h.store
@@ -223,6 +220,8 @@ async fn preview_capability_is_document_bound_and_replacement_invalidates_it() {
             }],
             None,
             true,
+            None,
+            None,
         )
         .unwrap();
 
@@ -290,6 +289,8 @@ async fn preview_capability_is_document_bound_and_replacement_invalidates_it() {
             }],
             Some(&first.hash),
             false,
+            None,
+            None,
         )
         .unwrap();
     let stale = preview
@@ -301,4 +302,139 @@ async fn preview_capability_is_document_bound_and_replacement_invalidates_it() {
         .await
         .unwrap();
     assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+}
+
+async fn json_of(response: axum::response::Response) -> serde_json::Value {
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+/// `PUT` with a body converts an HTML document to Markdown in place, and
+/// `format: "html"` converts it back as a single-file bundle. Once it is
+/// Markdown there is nothing to download as a bundle and no page to preview.
+#[tokio::test]
+async fn a_put_body_converts_an_html_document_to_markdown_and_back() {
+    use tracon::corpus::html::HtmlFile;
+
+    let h = support::harness::harness().await;
+    let (html, _) = h
+        .store
+        .write_html_document_change(
+            &[],
+            "n1",
+            "personal",
+            "ref-flip",
+            "flip",
+            "index.html",
+            vec![
+                HtmlFile {
+                    path: "index.html".into(),
+                    bytes: b"<title>Flip</title><link rel=stylesheet href=a.css>".to_vec(),
+                },
+                HtmlFile {
+                    path: "a.css".into(),
+                    bytes: b"p {}".to_vec(),
+                },
+            ],
+            None,
+            true,
+            None,
+            Some(true),
+        )
+        .unwrap();
+    let minted = h
+        .operator
+        .clone()
+        .oneshot(
+            Request::post("/api/docs/personal/ref-flip/preview")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(minted.status(), StatusCode::OK);
+    let preview_url = url::Url::parse(json_of(minted).await["url"].as_str().unwrap()).unwrap();
+
+    let put = |body: &'static str, if_match: String| {
+        Request::put("/api/docs/personal/ref-flip")
+            .header("content-type", "application/json")
+            .header("if-match", if_match)
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let converted = h
+        .operator
+        .clone()
+        .oneshot(put(
+            r##"{"body":"# Flip\n\nNow Markdown."}"##,
+            html.hash.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(converted.status(), StatusCode::OK);
+    let converted = json_of(converted).await;
+    assert_eq!(converted["format"], "markdown");
+    assert_eq!(converted["id"], html.id.as_str());
+    assert_eq!(converted["pinned"], 1);
+    assert_eq!(converted["entry_path"], serde_json::Value::Null);
+
+    let download = h
+        .operator
+        .clone()
+        .oneshot(
+            Request::get("/api/docs/personal/ref-flip/download")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::CONFLICT);
+    let preview = tracon::http::preview::router(h.store.clone(), h.manager.previews().clone());
+    let stale = preview
+        .oneshot(
+            Request::get(preview_url.path())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+
+    let back = h
+        .operator
+        .clone()
+        .oneshot(put(
+            r#"{"body":"<title>Back</title>","format":"html"}"#,
+            converted["hash"].as_str().unwrap().to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(back.status(), StatusCode::OK);
+    let back = json_of(back).await;
+    assert_eq!(back["format"], "html");
+    assert_eq!(back["id"], html.id.as_str());
+    assert_eq!(back["entry_path"], "ref-flip.html");
+    let doc = h.store.doc_get("personal", "ref-flip").unwrap().unwrap();
+    assert_eq!(h.store.read_html_bundle(&doc).unwrap().len(), 1);
+
+    let unknown = h
+        .operator
+        .clone()
+        .oneshot(put(
+            r#"{"body":"x","format":"pdf"}"#,
+            back["hash"].as_str().unwrap().to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    let stale_delete = h
+        .operator
+        .oneshot(
+            Request::delete("/api/docs/personal/ref-flip")
+                .header("if-match", "stale")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_delete.status(), StatusCode::PRECONDITION_FAILED);
 }

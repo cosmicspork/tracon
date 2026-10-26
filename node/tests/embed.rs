@@ -313,6 +313,57 @@ async fn deleting_a_document_removes_its_vectors() {
         .is_empty());
 }
 
+/// A Markdown document that becomes HTML keeps its id, and HTML is never
+/// embedded: its old vectors must neither answer a search with text the
+/// document no longer has nor stay in the index.
+#[tokio::test]
+async fn a_document_that_becomes_html_leaves_no_stale_vector_hit() {
+    state::isolate();
+    let (_stub, base) = stub().await;
+    let (store, e) = setup(&base);
+    let d1 = doc(
+        &store,
+        "d1",
+        "personal",
+        "guide-a",
+        "A",
+        "# A\n\nTesting the suite with pest, at enough length to be its own section.\n",
+    );
+    indexed(&e, &store).await;
+    assert!(store.vec_count().unwrap() > 0);
+    let (html, _) = store
+        .write_html_document_change(
+            &[],
+            "n1",
+            "personal",
+            "guide-a",
+            "guide-a.html",
+            "guide-a.html",
+            vec![tracon::corpus::html::HtmlFile {
+                path: "guide-a.html".into(),
+                bytes: b"<title>A</title><p>now a page</p>".to_vec(),
+            }],
+            Some("h"),
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(html.id, d1);
+
+    let question = "testing the suite";
+    let q = e.embed_query(question, "t").await.unwrap();
+    let near = store.vec_search(Some("personal"), &q, 5).unwrap();
+    assert!(near.iter().any(|n| n.source_id == d1), "{near:?}");
+    let hits = store
+        .doc_search_hybrid(Some("personal"), None, "pest suite", 5, &near)
+        .unwrap();
+    assert!(hits.is_empty(), "{hits:#?}");
+
+    assert!(store.vec_forget_unembedded_documents().unwrap() > 0);
+    assert_eq!(store.vec_count().unwrap(), 0);
+}
+
 /// An endpoint that is not running is the normal case on a node where nobody
 /// started one. It must cost search quality and nothing else.
 #[tokio::test]

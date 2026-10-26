@@ -68,6 +68,7 @@ export const NODE_TOOLS = new Set([
   'doc_read',
   'doc_search',
   'doc_write',
+  'doc_delete',
   'recall',
   'retain',
   'query',
@@ -270,6 +271,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return line('Search documents', clip(str(a.query), 56))
     case 'doc_write':
       return sp('Write document', str(a.slug))
+    case 'doc_delete':
+      return sp('Delete document', str(a.slug))
     case 'recall':
       return line('Recall', clip(str(a.query), 56))
     case 'retain':
