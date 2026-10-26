@@ -2406,7 +2406,10 @@ async fn an_html_doc_write_is_a_single_file_bundle_shown_on_its_card_as_source()
     )
     .await;
     let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
-    assert_eq!(v["approval"]["title"], "doc_write ref-report · new (as HTML)");
+    assert_eq!(
+        v["approval"]["title"],
+        "doc_write ref-report · new (as HTML)"
+    );
     assert_eq!(v["format"], "source", "{v}");
     assert!(
         v["locked_fields"]

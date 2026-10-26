@@ -87,6 +87,16 @@ export interface Replacement {
 }
 
 /**
+ * The format worth naming: the document's, or the change between it and the
+ * format the call writes (`markdown` when it names none).
+ */
+function formatLabel(current: string | null, requested: unknown): string | null {
+  const to = typeof requested === 'string' && requested !== '' ? requested : 'markdown'
+  if (current === null) return to
+  return current === to ? current : `${current} → ${to}`
+}
+
+/**
  * The proposal against what it replaces, as folded line hunks, or null when
  * the node sent nothing to compare with. `args` is the operator's draft, so
  * the diff follows their edit.
@@ -103,7 +113,7 @@ export function replacement(
     key: REPLACING_FIELD,
     created: current === null,
     title: current?.title ?? null,
-    format: current?.format ?? null,
+    format: formatLabel(current?.format ?? null, args.format),
     hunks: hunks(lines),
     added: lines.filter((l) => l.kind === 'add').length,
     removed: lines.filter((l) => l.kind === 'del').length,

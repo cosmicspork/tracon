@@ -2166,10 +2166,8 @@ pub async fn get_approval(
         }
         _ => None,
     };
-    let shown = crate::mcp::schema::presentation_for(
-        &a.tool,
-        arguments.as_ref().unwrap_or(&Value::Null),
-    );
+    let shown =
+        crate::mcp::schema::presentation_for(&a.tool, arguments.as_ref().unwrap_or(&Value::Null));
     let mut details = json!({
         "approval": a,
         "arguments": arguments,

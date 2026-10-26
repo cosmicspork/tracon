@@ -146,3 +146,11 @@ test('a document write diffs the draft against the document as it stands, or as 
   // A tool that replaces nothing sends no document at all.
   expect(replacement({}, { body: 'x' })).toBeNull()
 })
+
+test('the diff names a change of format, from the document to what the call writes', () => {
+  const html = { body: '<p>x</p>', hash: 'h', format: 'html', title: 'Page', updated_ms: 1 }
+  expect(replacement({ document: html }, { body: '# x' })!.format).toBe('html → markdown')
+  expect(replacement({ document: html }, { body: '<p>y</p>', format: 'html' })!.format).toBe('html')
+  expect(replacement({ document: null }, { body: '<p>y</p>', format: 'html' })!.format).toBe('html')
+  expect(replacement({ document: null }, { body: '# y' })!.format).toBe('markdown')
+})
