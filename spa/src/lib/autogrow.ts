@@ -6,11 +6,16 @@
 export function autogrow(node: HTMLTextAreaElement, _value?: string) {
   const view = node.ownerDocument.defaultView
   const fit = () => {
+    // Collapsing the box to measure it shortens the page for a moment, and
+    // Firefox clamps the page's scroll to that and keeps it: put it back.
+    const page = node.ownerDocument.scrollingElement
+    const top = page?.scrollTop
     node.style.height = 'auto'
     const full = node.scrollHeight + node.offsetHeight - node.clientHeight
     // `none` parses to NaN: no cap, so the whole of it.
     const cap = parseFloat(view?.getComputedStyle(node).maxHeight ?? '')
     node.style.height = `${Number.isFinite(cap) ? Math.min(full, cap) : full}px`
+    if (page && top !== undefined && page.scrollTop !== top) page.scrollTop = top
   }
   fit()
   node.addEventListener('input', fit)

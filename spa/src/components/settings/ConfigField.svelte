@@ -91,7 +91,6 @@
       class="grow"
       {id}
       use:autogrow={String(current.v)}
-      rows={Math.min(6, Math.max(2, String(current.v).split('\n').length))}
       value={String(current.v)}
       disabled={off || current.reset}
       spellcheck="false"

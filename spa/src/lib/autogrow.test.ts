@@ -74,3 +74,25 @@ test('a destroyed box stops listening to typing and to the window', () => {
   expect(listeners.size).toBe(0)
   expect(windowListeners.size).toBe(0)
 })
+
+test('measuring keeps the page where it was scrolled', () => {
+  const { box, node } = stub(600)
+  // A layout engine that clamps the page's scroll while the box is collapsed.
+  const page = { scrollTop: 1880 }
+  let height = ''
+  Object.assign(box, {
+    ownerDocument: { ...box.ownerDocument, scrollingElement: page },
+    style: {
+      get height() {
+        return height
+      },
+      set height(v: string) {
+        height = v
+        if (v === 'auto') page.scrollTop = 1300
+      },
+    },
+  })
+  autogrow(node)
+  expect(node.style.height).toBe('602px')
+  expect(page.scrollTop).toBe(1880)
+})

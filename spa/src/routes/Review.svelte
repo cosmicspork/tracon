@@ -1444,7 +1444,7 @@
       {/if}
       <label class="composer">
         <span>{composerLabel(composing, editedFiles)}</span>
-        <textarea class="grow" bind:this={reasonInput} bind:value={reason} use:autogrow={reason} disabled={busy || publishing}></textarea>
+        <textarea class="grow compact" bind:this={reasonInput} bind:value={reason} use:autogrow={reason} disabled={busy || publishing}></textarea>
       </label>
       <div class="row">
         <button
