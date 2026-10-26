@@ -647,8 +647,12 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
 
 /// The request these attempts' work was published as, as `follow` last saw
 /// it: the one looked at most recently. What is new is measured from the
-/// last look before `since`, when the latest attempt started, or from the
-/// first look, which is what the request already was when following began.
+/// last look before `since`, when the latest attempt started (or a later one
+/// that counted only comments made before it), or from the first look, which
+/// is what the request already was when following began. A request for
+/// changes is new when it was made after `since`, whatever the looks saw: a
+/// reviewer asking again leaves the decision as it was, and one already
+/// standing at the first look still needs the work carried on.
 fn followed(store: &Store, ids: &[String], since: i64) -> Result<Option<Followed>> {
     let looks = store.forge_follows_of_sessions(ids)?;
     let Some((publication, _, last)) = looks.last() else {
@@ -661,10 +665,20 @@ fn followed(store: &Store, ids: &[String], since: i64) -> Result<Option<Followed
         return Ok(None);
     };
     let of_it: Vec<_> = looks.iter().filter(|(p, ..)| p == publication).collect();
-    let before = of_it
+    let known = of_it
         .iter()
         .rev()
         .find(|(_, at, _)| *at <= since)
+        .and_then(|(_, _, payload)| snapshot(payload));
+    // A comment made before the latest attempt started was there for it to
+    // read, though no look had counted it yet.
+    let read = of_it.iter().rev().find(|(_, at, payload)| {
+        *at <= since
+            || snapshot(payload)
+                .and_then(|s| s.commented_ms)
+                .is_some_and(|commented| commented <= since)
+    });
+    let before = read
         .or(of_it.first())
         .and_then(|(_, _, payload)| snapshot(payload))
         .unwrap_or_default();
@@ -674,7 +688,14 @@ fn followed(store: &Store, ids: &[String], since: i64) -> Result<Option<Followed
         Some(n) => format!("PR #{n}"),
         None => "The request".to_string(),
     };
-    let changes = |s: &crate::follow::Snapshot| s.decision.as_deref() == Some("changes_requested");
+    let asked = |s: &crate::follow::Snapshot| s.decision.as_deref() == Some("changes_requested");
+    // A look recorded before snapshots kept the request's time: only the
+    // looks can say whether it is new.
+    let changes_requested = asked(&now)
+        && match now.changes_requested_ms {
+            Some(at) => at > since,
+            None => !known.as_ref().is_some_and(asked),
+        };
     Ok(Some(Followed {
         url,
         label,
@@ -685,7 +706,7 @@ fn followed(store: &Store, ids: &[String], since: i64) -> Result<Option<Followed
             .map(|(name, _)| name.clone())
             .collect(),
         new_comments: now.comments.saturating_sub(before.comments),
-        changes_requested: changes(&now) && !changes(&before),
+        changes_requested,
         state: now.state,
     }))
 }

@@ -772,3 +772,101 @@ async fn a_failed_attempt_is_not_hidden_behind_its_open_request() {
     let v = next_of(&h, &item.id).await;
     assert_eq!(v["next"]["kind"], "close", "{v}");
 }
+
+/// `pr`, with a reviewer's request for changes standing, made at `asked_ms`
+/// (`None`: a look recorded before the time was).
+fn asked(state: &str, comments: u64, asked_ms: Option<i64>) -> Value {
+    let mut snapshot = pr(state, "passed", comments);
+    snapshot["decision"] = json!("changes_requested");
+    if let Some(at) = asked_ms {
+        snapshot["changes_requested_ms"] = json!(at);
+        snapshot["commented_ms"] = json!(at);
+    }
+    snapshot
+}
+
+/// The request for changes a continuation was carried on to answer is not
+/// new to it; a reviewer asking again afterwards is, though the forge's
+/// decision read `changes_requested` all along.
+#[tokio::test]
+async fn a_second_round_of_changes_after_a_continuation_is_surfaced() {
+    let h = harness().await;
+    let item = new_item(&h, "Fix the invoices", vec![]);
+    let mut first = ended("a", 1, "continued", None);
+    first.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&first).unwrap();
+    followed(&h, "a", 10, asked("open", 1, Some(5)));
+    let mut second = session_row("b", "n1", "personal");
+    second.state = "suspended".into();
+    second.work_item_id = Some(item.id.clone());
+    second.created_ms = 25;
+    second.continued_from = Some("a".into());
+    h.store.insert_session(&second).unwrap();
+
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["text"], "PR #149 is open · merge it", "{v}");
+    followed(&h, "b", 40, asked("open", 2, Some(35)));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(
+        v["next"]["text"], "Changes requested on PR #149 · continue",
+        "{v}"
+    );
+    assert_eq!(v["follow"]["changes_requested"], true);
+}
+
+/// A request for changes already standing when following began is not the
+/// baseline: the attempt that published the work has not answered it. So
+/// for a look recorded before the request's time was.
+#[tokio::test]
+async fn a_request_for_changes_on_the_first_look_is_surfaced() {
+    let h = harness().await;
+    for (title, look) in [
+        ("Fix the invoices", asked("open", 1, Some(5))),
+        ("Fix the receipts", asked("open", 1, None)),
+    ] {
+        let item = new_item(&h, title, vec![]);
+        let session = format!("s-{}", &item.id[..8]);
+        let mut s = session_row(&session, "n1", "personal");
+        s.state = "suspended".into();
+        s.work_item_id = Some(item.id.clone());
+        s.created_ms = 1;
+        h.store.insert_session(&s).unwrap();
+        followed(&h, &session, 10, look);
+        let v = next_of(&h, &item.id).await;
+        assert_eq!(
+            v["next"]["text"], "Changes requested on PR #149 · continue",
+            "{title}: {v}"
+        );
+    }
+}
+
+/// A comment made just before a continuation started, which no look had
+/// counted yet, was there for the continuation to read: the next look does
+/// not count it as new. One made after it started is.
+#[tokio::test]
+async fn a_comment_made_before_a_continuation_started_is_not_new_to_it() {
+    let h = harness().await;
+    let item = new_item(&h, "Fix the invoices", vec![]);
+    let mut first = ended("a", 1, "continued", None);
+    first.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&first).unwrap();
+    followed(&h, "a", 10, pr("open", "passed", 0));
+    let mut second = session_row("b", "n1", "personal");
+    second.state = "suspended".into();
+    second.work_item_id = Some(item.id.clone());
+    second.created_ms = 20;
+    second.continued_from = Some("a".into());
+    h.store.insert_session(&second).unwrap();
+
+    let mut look = pr("open", "passed", 1);
+    look["commented_ms"] = json!(15);
+    followed(&h, "b", 30, look);
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["text"], "PR #149 is open · merge it", "{v}");
+
+    let mut look = pr("open", "passed", 2);
+    look["commented_ms"] = json!(35);
+    followed(&h, "b", 40, look);
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["text"], "1 new comment · continue", "{v}");
+}

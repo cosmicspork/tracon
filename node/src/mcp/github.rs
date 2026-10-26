@@ -357,6 +357,17 @@ pub async fn call(
                 .await
                 .unwrap_or(Value::Null);
             let (decision, latest) = review_decision(&reviews);
+            // The newest comment is the last page of one.
+            let last_comment_at = match pr["comments"].as_u64() {
+                Some(count) if count > 0 => gh
+                    .get(&format!(
+                        "{base}/issues/{n}/comments?per_page=1&page={count}"
+                    ))
+                    .await
+                    .map(|page| page[0]["created_at"].clone())
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            };
             Ok(json!({
                 "number": pr["number"],
                 "title": pr["title"],
@@ -368,6 +379,7 @@ pub async fn call(
                 "head": pr["head"]["ref"],
                 "base": pr["base"]["ref"],
                 "comments": pr["comments"],
+                "last_comment_at": last_comment_at,
                 "url": pr["html_url"],
                 "checks": rollup(&runs),
                 "review_decision": decision,
