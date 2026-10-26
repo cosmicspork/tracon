@@ -70,7 +70,7 @@
 
   {#if !brief && item.brief_slug}
     <div class="notice">
-      This item points at <b>{item.brief_slug}</b>, which this node cannot read as a brief. The
+      This task points at <b>{item.brief_slug}</b>, which this node cannot read as a brief. The
       document may not have arrived from another node, or it may have been deleted or replaced.
     </div>
     {#if !surface.phone}
@@ -78,7 +78,7 @@
     {/if}
   {:else if !brief}
     <div class="empty">
-      No brief. This item is worked from its description and its plan, which is the ordinary case.
+      No brief. This task is worked from its description and its plan, which is the ordinary case.
       A brief adds who the work is for, what would make it good, and what is still open.
     </div>
     {#if !surface.phone && item.state === 'open'}
