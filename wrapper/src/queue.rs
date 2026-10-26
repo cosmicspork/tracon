@@ -5,10 +5,11 @@
 //! does not have: a dropped connection is a reconnect and a refetch.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
@@ -36,8 +37,33 @@ pub struct Queue {
 #[derive(Deserialize)]
 struct Permission {
     id: String,
-    session_id: String,
+    /// None for an approval an external harness asked for: no session holds it.
+    #[serde(default)]
+    session_id: Option<String>,
     title: String,
+    /// The call as JSON; an approval card names itself here.
+    #[serde(default)]
+    raw_input: Option<String>,
+}
+
+impl Permission {
+    /// The approval this card stands for, when it is one. The same test the
+    /// window makes (`isApproval` in the SPA): a string `approval_id`.
+    fn approval_id(&self) -> Option<String> {
+        let raw: serde_json::Value = serde_json::from_str(self.raw_input.as_deref()?).ok()?;
+        Some(raw.get("approval_id")?.as_str()?.to_string())
+    }
+
+    /// An approval is edited and answered on its own page, whoever asked;
+    /// anything else is answered in its session. Home lists every card, so it
+    /// is where one with neither goes.
+    fn path(&self) -> String {
+        match (self.approval_id(), &self.session_id) {
+            (Some(id), _) => format!("/approvals/{id}"),
+            (None, Some(sid)) => format!("/sessions/{sid}"),
+            (None, None) => "/".to_string(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -64,30 +90,74 @@ struct Promotion {
     channel: String,
 }
 
+/// One kind of row, read a row at a time: a row this wrapper cannot read is
+/// dropped and remembered, rather than failing the whole body and leaving the
+/// tray on whatever it last read.
+struct Rows<T> {
+    rows: Vec<T>,
+    skipped: Vec<String>,
+}
+
+impl<T> Default for Rows<T> {
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+}
+
+impl<'de, T: DeserializeOwned> Deserialize<'de> for Rows<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut out = Self::default();
+        for value in Vec::<serde_json::Value>::deserialize(d)? {
+            match serde_json::from_value(value) {
+                Ok(row) => out.rows.push(row),
+                Err(e) => out.skipped.push(e.to_string()),
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct QueueBody {
     #[serde(default)]
-    waiting: Vec<Permission>,
+    waiting: Rows<Permission>,
     #[serde(default)]
-    reviews: Vec<Review>,
+    reviews: Rows<Review>,
     #[serde(default)]
-    promotions: Vec<Promotion>,
+    promotions: Rows<Promotion>,
     #[serde(default)]
-    running: Vec<Session>,
+    running: Rows<Session>,
 }
 
 impl QueueBody {
+    /// Why each dropped row was dropped, named by its kind.
+    fn skipped(&self) -> Vec<String> {
+        let kinds = [
+            ("waiting", &self.waiting.skipped),
+            ("reviews", &self.reviews.skipped),
+            ("promotions", &self.promotions.skipped),
+            ("running", &self.running.skipped),
+        ];
+        kinds
+            .into_iter()
+            .flat_map(|(kind, why)| why.iter().map(move |w| format!("a {kind} row: {w}")))
+            .collect()
+    }
+
     fn into_queue(self) -> Queue {
         let mut waiting = Vec::new();
-        for p in self.waiting {
+        for p in self.waiting.rows {
             waiting.push(Item {
                 id: format!("perm:{}", p.id),
+                path: p.path(),
                 label: p.title,
-                path: format!("/sessions/{}", p.session_id),
-                session_id: Some(p.session_id),
+                session_id: p.session_id,
             });
         }
-        for r in self.reviews {
+        for r in self.reviews.rows {
             waiting.push(Item {
                 id: format!("review:{}", r.id),
                 label: format!("{} (+{} −{})", r.title, r.added, r.removed),
@@ -95,7 +165,7 @@ impl QueueBody {
                 session_id: None,
             });
         }
-        for p in self.promotions {
+        for p in self.promotions.rows {
             waiting.push(Item {
                 id: format!("promo:{}", p.id),
                 label: format!("Memory promotions on {}", p.channel),
@@ -105,6 +175,7 @@ impl QueueBody {
         }
         let running = self
             .running
+            .rows
             .into_iter()
             .filter(|s| s.state != "closed")
             .map(|s| Item {
@@ -124,6 +195,17 @@ fn client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Say why the queue could not be read in full, once for each reason: the
+/// queue is refetched on every event, and a row that cannot be read stays
+/// unreadable until it is answered.
+fn complain(why: String) {
+    static SAID: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut said = SAID.get_or_init(Default::default).lock().unwrap();
+    if said.insert(why.clone()) {
+        eprintln!("tracon: the tray cannot read {why}");
+    }
+}
+
 /// Ask the node what is waiting right now.
 async fn fetch(http: &reqwest::Client) -> Option<Queue> {
     let res = http
@@ -134,7 +216,15 @@ async fn fetch(http: &reqwest::Client) -> Option<Queue> {
     if !res.status().is_success() {
         return None;
     }
-    Some(res.json::<QueueBody>().await.ok()?.into_queue())
+    let body = match res.json::<QueueBody>().await {
+        Ok(body) => body,
+        Err(e) => {
+            complain(format!("the queue: {e}"));
+            return None;
+        }
+    };
+    body.skipped().into_iter().for_each(complain);
+    Some(body.into_queue())
 }
 
 /// Announce anything that has appeared since the last look.
@@ -296,5 +386,69 @@ mod tests {
             "something_new": [1, 2, 3],
         }));
         assert_eq!(q.waiting.len(), 1);
+    }
+
+    /// An external harness's approval has no session; reading it as one used
+    /// to fail the whole body, and the tray stopped updating while it waited.
+    #[test]
+    fn an_approval_without_a_session_opens_its_own_page() {
+        let q = body(serde_json::json!({
+            "waiting": [{
+                "id": "a1",
+                "session_id": null,
+                "title": "doc_write plan-foo",
+                "raw_input": r#"{"tool":"doc_write","approval_id":"a1","lane":"external"}"#,
+            }],
+        }));
+        assert_eq!(q.waiting.len(), 1);
+        assert_eq!(q.waiting[0].path, "/approvals/a1");
+        assert_eq!(q.waiting[0].session_id, None);
+    }
+
+    /// The approval page is where the call is edited, so a session's
+    /// approval goes there too, not to the session.
+    #[test]
+    fn an_approval_a_session_holds_opens_its_own_page() {
+        let q = body(serde_json::json!({
+            "waiting": [{
+                "id": "a2",
+                "session_id": "s1",
+                "title": "pr_comment",
+                "raw_input": r#"{"tool":"pr_comment","approval_id":"a2"}"#,
+            }],
+        }));
+        assert_eq!(q.waiting[0].path, "/approvals/a2");
+        assert_eq!(q.waiting[0].session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn a_permission_that_is_not_an_approval_still_opens_its_session() {
+        let q = body(serde_json::json!({
+            "waiting": [{
+                "id": "p1",
+                "session_id": "s1",
+                "title": "run just check",
+                "raw_input": r#"{"command":"just check"}"#,
+            }],
+        }));
+        assert_eq!(q.waiting[0].path, "/sessions/s1");
+    }
+
+    #[test]
+    fn a_row_that_cannot_be_read_is_dropped_and_the_rest_still_land() {
+        let parsed = serde_json::from_value::<QueueBody>(serde_json::json!({
+            "waiting": [
+                {"id": "p1", "session_id": "s1", "title": 7},
+                {"id": "p2", "session_id": "s1", "title": "run just check"},
+            ],
+            "reviews": [{"id": "r1", "title": "feat: the thing"}],
+            "promotions": [{"id": "m1", "channel": "personal"}],
+        }))
+        .unwrap();
+        assert_eq!(parsed.skipped().len(), 1);
+        assert!(parsed.skipped()[0].starts_with("a waiting row: "));
+        let q = parsed.into_queue();
+        let ids: Vec<&str> = q.waiting.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["perm:p2", "review:r1", "promo:m1"]);
     }
 }
