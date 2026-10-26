@@ -2369,23 +2369,11 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     // Where the latest published request stands on the forge, as following
     // it last saw: `open`, `merged` or `closed`, and whether it is a draft.
     // Node-local: the owner opened it and is the one following it.
-    let forge_state = match (&remote_owner, publications.first(), r.session_id.as_deref()) {
-        (None, Some(row), Some(session)) => s
-            .store()
-            .latest_event_payload(
-                session,
-                crate::session::state::event_kind::FORGE_FOLLOW,
-                &row.id,
-            )?
-            .and_then(|payload| {
-                let snapshot = &payload["snapshot"];
-                snapshot["state"].as_str().map(|state| {
-                    json!({ "state": state, "draft": snapshot["draft"].as_bool().unwrap_or(false) })
-                })
-            })
-            .unwrap_or(serde_json::Value::Null),
-        _ => serde_json::Value::Null,
-    };
+    let forge_state = match &remote_owner {
+        None => crate::follow::forge_state(s.store(), r)?,
+        Some(_) => None,
+    }
+    .unwrap_or(serde_json::Value::Null);
     // What the agent showed of its work, each marked stale once the candidate
     // moved past the commit it was shown at. Node-local, like the checks: a
     // mirror never had the workspace it was read from.

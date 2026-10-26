@@ -174,6 +174,34 @@ pub fn changes(before: &Snapshot, now: &Snapshot) -> Vec<String> {
     said
 }
 
+/// Where `review`'s request stands on the forge, as following it last saw:
+/// `{state, draft}` for its newest publication that opened one, or `None`
+/// before the first look. A later attempt that failed leaves the request it
+/// opened as it was.
+pub fn forge_state(
+    store: &crate::store::Store,
+    review: &crate::store::ReviewRow,
+) -> Result<Option<Value>, crate::store::StoreError> {
+    let Some(session) = review.session_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(publication) = store
+        .publications_for_review(&review.id)?
+        .into_iter()
+        .find(|row| row.state == "opened")
+    else {
+        return Ok(None);
+    };
+    Ok(store
+        .latest_event_payload(session, ek::FORGE_FOLLOW, &publication.id)?
+        .and_then(|payload| {
+            let snapshot = &payload["snapshot"];
+            snapshot["state"].as_str().map(|state| {
+                json!({ "state": state, "draft": snapshot["draft"].as_bool().unwrap_or(false) })
+            })
+        }))
+}
+
 /// The request's number on its forge, from the URL publication recorded.
 pub fn number_of(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
