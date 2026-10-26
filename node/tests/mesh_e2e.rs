@@ -1168,6 +1168,164 @@ async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
     assert!(v["evidence"].is_null());
 }
 
+/// A review leaves its owner's listing as soon as it is decided, so a peer
+/// that held it open reads it again from the owner: approved and published
+/// there, it is approved here, with the owner's result and checks. Only one
+/// the owner says it does not hold is gone.
+#[tokio::test]
+async fn a_peers_decided_review_is_read_again_from_its_owner_and_only_a_lost_one_is_gone() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let checks = json!([{ "command": "just check", "ok": true }]).to_string();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut held = held_review(&id, &bi);
+    held.state = "new".into();
+    held.checks_json = Some(checks.clone());
+    b.store.insert_review(&held).unwrap();
+    a.store
+        .insert_review(&tracon::store::ReviewRow {
+            checks_json: None,
+            ..held.clone()
+        })
+        .unwrap();
+    let lost = uuid::Uuid::now_v7().to_string();
+    let mut lost_row = held_review(&lost, &bi);
+    lost_row.state = "new".into();
+    a.store.insert_review(&lost_row).unwrap();
+
+    let url = "https://github.test/o/r/pull/149";
+    assert!(b
+        .store
+        .resolve_review(&id, "approved", None, None, None, Some(url), 1, None)
+        .unwrap());
+    // The owner's listing of its open reviews, which no longer has either.
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+
+    wait_for("A to read the decided review again from B", || {
+        a.store
+            .get_review(&id)
+            .unwrap()
+            .is_some_and(|r| r.state == "approved")
+    })
+    .await;
+    let mirrored = a.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(mirrored.publish_result.as_deref(), Some(url));
+    assert_eq!(mirrored.checks_json.as_deref(), Some(checks.as_str()));
+    wait_for("A to mark the review B does not hold gone", || {
+        a.store
+            .get_review(&lost)
+            .unwrap()
+            .is_some_and(|r| r.state == "gone")
+    })
+    .await;
+}
+
+/// A peer's session is checked on the node that runs it, and its outcome
+/// here says what that node's checks found on the review's commit; a node
+/// that cannot be read is said to be, never shown as one where no check ran.
+#[tokio::test]
+async fn a_peers_session_outcome_reads_its_checks_from_the_node_that_runs_it() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let sid = uuid::Uuid::now_v7().to_string();
+    let mut session = support::rows::session_row(&sid, &bi, "personal");
+    session.state = "closed".into();
+    b.store.insert_session(&session).unwrap();
+    a.store.upsert_session_mirror(&session).unwrap();
+
+    let head = "8597e1d618ba".repeat(3) + "abcd";
+    let rid = uuid::Uuid::now_v7().to_string();
+    let mut review = held_review(&rid, &bi);
+    review.state = "approved".into();
+    review.session_id = Some(sid.clone());
+    review.head_sha = head.clone();
+    let candidate = tracon::store::candidate_id(&head, "personal");
+    b.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: candidate.clone(),
+            head_sha: head.clone(),
+            tree_sha: None,
+            channel: "personal".into(),
+            owner_session_id: Some(sid.clone()),
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: "{}".into(),
+        })
+        .unwrap();
+    b.store
+        .insert_review_with_revision(
+            &review,
+            &tracon::store::ReviewRevisionRow {
+                id: uuid::Uuid::now_v7().to_string(),
+                review_id: rid.clone(),
+                candidate_id: candidate.clone(),
+                title: review.title.clone(),
+                body: review.body.clone(),
+                diff: review.diff.clone(),
+                files: review.files.clone(),
+                head_sha: head.clone(),
+                context_json: "[]".into(),
+                requirements_work_item_id: None,
+                requirements_title: None,
+                requirements_body: None,
+                requirements_hash: None,
+                created_ms: 1,
+                intent_json: None,
+            },
+        )
+        .unwrap();
+    b.store
+        .insert_check_run(&tracon::store::CheckRunRow {
+            id: "run-on-b".into(),
+            candidate_id: Some(candidate),
+            session_id: Some(sid.clone()),
+            command: Some("just check".into()),
+            definition_json: "{}".into(),
+            definition_hash: None,
+            execution_image: None,
+            inputs_json: None,
+            reuse_key: None,
+            outcome: "passed".into(),
+            source_outcome: None,
+            exit_code: Some(0),
+            log: String::new(),
+            duration_ms: Some(1),
+            started_ms: 1,
+            finished_ms: Some(2),
+            rerun_of: None,
+            reused_from_id: None,
+            metadata_json: "{}".into(),
+        })
+        .unwrap();
+    a.store.upsert_review_mirror(&review).unwrap();
+
+    let uri = format!("/api/sessions/{sid}/outcome");
+    let (st, v) = call(&a.app, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_checks"]["read"], true, "{v}");
+    let check = &v["verified"][0];
+    assert_eq!(check["check_id"], "run-on-b", "{v}");
+    assert_eq!(check["passed"], true, "{v}");
+    assert_eq!(check["current"], true, "{v}");
+    assert_eq!(v["claims"][0]["backed"], true, "{v}");
+    assert!(
+        !v["uncertain"].to_string().contains("No check has run"),
+        "{v}"
+    );
+
+    a.store.set_reachable(&bi, false).unwrap();
+    let (st, v) = call(&a.app, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_checks"]["read"], false, "{v}");
+    let uncertain = v["uncertain"].to_string();
+    assert!(uncertain.contains("could not be read"), "{v}");
+    assert!(!uncertain.contains("No check has run"), "{v}");
+}
+
 /// Being on the mesh is not being in a channel. A sealed command proves which
 /// node sent it; the owner still holds the sender to the channel of what it
 /// would drive, records the refusal, and lets a member through.

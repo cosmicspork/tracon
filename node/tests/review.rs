@@ -1189,6 +1189,46 @@ async fn operator_required_checks_refuse_submission_and_record_each_outcome() {
     assert_eq!(checks[1]["ok"], true);
 }
 
+/// A session still on the node's placeholder branch has its first review
+/// push to a branch named from the title, and from then on that is the
+/// session's branch: its row, which the task's workspace line, the session
+/// header and every peer mirroring it read, says where the work went.
+#[tokio::test]
+async fn a_placeholder_branch_renamed_by_submit_is_the_sessions_branch_from_then_on() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let placeholder = "feat/tracon-0123456789ab";
+    assert!(f
+        .store
+        .rename_session_branch("s1", "feat/x", placeholder)
+        .unwrap());
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    let target: Value = serde_json::from_str(&review.target).unwrap();
+    let named = tracon::review::prose::branch_from_title("feat: the thing").unwrap();
+    assert_eq!(target["branch"], named.as_str(), "{target}");
+    assert_eq!(f.store.get_session("s1").unwrap().unwrap().branch, named);
+
+    // A later new review is a change of its own, not a push onto the first's.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more > more.txt && git add -A && git commit -qm more",
+    );
+    let mut args = f.submit_args();
+    args["title"] = json!("fix: another thing");
+    let v = f.tool("s1", "submit_review", args).await;
+    let second = v["review_id"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert_ne!(second, id);
+    let review = f.store.get_review(second).unwrap().unwrap();
+    let target: Value = serde_json::from_str(&review.target).unwrap();
+    let other = tracon::review::prose::branch_from_title("fix: another thing").unwrap();
+    assert_eq!(target["branch"], other.as_str(), "{target}");
+}
+
 /// A required check whose command the check image does not have is the
 /// environment's failing, not the candidate's. The submission still stops —
 /// nothing was verified — but the refusal names the missing tool and the image
