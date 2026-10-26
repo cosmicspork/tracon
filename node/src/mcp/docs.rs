@@ -296,6 +296,11 @@ pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
             Ok(format) => format,
             Err(error) => return Some(error.to_string()),
         };
+        if format == Format::Html && reserved_kind_of(slug) == Some(corpus::brief::KIND) {
+            return Some(format!(
+                "`{slug}` is a work item's brief, which the work tools read as Markdown only"
+            ));
+        }
         let body = args["body"].as_str().unwrap_or("");
         if format == Format::Html && body.len() > corpus::html::MAX_FILE_BYTES {
             return Some(
@@ -347,10 +352,13 @@ pub fn write_consequence(
     let dropped = match existing.as_ref().filter(|_| was_html) {
         Some(doc) => store
             .html_bundle_metadata(doc)
-            .ok()?
-            .into_iter()
-            .filter(|file| Some(&file.path) != kept.as_ref())
-            .count(),
+            .map(|files| {
+                files
+                    .into_iter()
+                    .filter(|file| Some(&file.path) != kept.as_ref())
+                    .count()
+            })
+            .unwrap_or(0),
         None => 0,
     };
     let files = |n: usize| format!("{n} file{}", if n == 1 { "" } else { "s" });
@@ -367,6 +375,23 @@ pub fn write_consequence(
         (None, Some(d)) => Some(d),
         (None, None) => None,
     }
+}
+
+/// The call to hold for the operator: a write or delete that names no
+/// `if_hash` gets the hash of the document as it stands now, so what runs once
+/// allowed is what the card described, and a document changed in between (an
+/// import over it, a peer's edit) conflicts instead of being replaced unseen.
+/// `None` when there is nothing to pin.
+pub fn pinned(store: &crate::store::Store, channel: &str, args: &Value) -> Option<Value> {
+    if args["if_hash"].as_str().is_some_and(|h| !h.is_empty()) {
+        return None;
+    }
+    let slug = args["slug"].as_str()?.trim();
+    let doc = store.doc_get(channel, slug).ok().flatten()?;
+    let mut args = args.clone();
+    args.as_object_mut()?
+        .insert("if_hash".into(), Value::String(doc.hash));
+    Some(args)
 }
 
 pub fn valid_slug(slug: &str) -> bool {

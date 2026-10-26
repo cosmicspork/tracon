@@ -392,7 +392,17 @@ impl Tools {
         let args = defaulted.as_ref().unwrap_or(args);
         // A plan session's own plan document is the phase's artifact: writing
         // that one slug is what the session exists to do, so it is not asked.
-        let plan_write = name == docs::DOC_WRITE && self.is_plan_artifact(ctx, args);
+        // A delete, and a write that converts a document or drops files of
+        // its bundle, are always the operator's, whatever the policy says.
+        let always_asked = name == docs::DOC_DELETE
+            || name == docs::DOC_WRITE
+                && self
+                    .session
+                    .get()
+                    .and_then(|access| docs::write_consequence(&access.store, &ctx.channel, args))
+                    .is_some();
+        let plan_write =
+            name == docs::DOC_WRITE && !always_asked && self.is_plan_artifact(ctx, args);
         let audience = self.audience(ctx);
         if !audience.offers(name) {
             return Err(audience.refusal(name));
@@ -479,11 +489,22 @@ impl Tools {
         if !plan_write {
             let decision = self.decide(ctx, name, args);
             match decision.verdict {
-                Verdict::Allow => {}
+                Verdict::Allow if !always_asked => {}
                 Verdict::Deny => return Err(refusal(decision)),
                 // Nothing waits on the operator: the call is held as an
                 // approval and the caller is told so at once.
-                Verdict::Ask => return self.request_approval(ctx, name, args).await,
+                Verdict::Allow | Verdict::Ask => {
+                    let pinned = match name {
+                        docs::DOC_WRITE | docs::DOC_DELETE => self
+                            .session
+                            .get()
+                            .and_then(|access| docs::pinned(&access.store, &ctx.channel, args)),
+                        _ => None,
+                    };
+                    return self
+                        .request_approval(ctx, name, pinned.as_ref().unwrap_or(args))
+                        .await;
+                }
             }
         }
         if let Some(access) = self.session.get() {

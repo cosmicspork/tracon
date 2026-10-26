@@ -754,6 +754,12 @@ pub fn write(
             return Err(ContextError::Conflict { hash: have });
         }
     }
+    // As for a brief: a selection never converts an HTML page it lands on.
+    if current.as_ref().is_some_and(|doc| doc.format != "markdown") {
+        return Err(ContextError::Write(format!(
+            "`{slug}` is an HTML document, not a selection"
+        )));
+    }
     if input.picks.len() > MAX_ENTRIES {
         return Err(ContextError::TooMany);
     }

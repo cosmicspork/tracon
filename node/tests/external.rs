@@ -2477,6 +2477,11 @@ async fn a_document_call_that_cannot_run_is_refused_before_it_is_held() {
         ),
         ("doc_delete", json!({ "slug": "shown-abc" }), "show_work"),
         ("doc_delete", json!({ "slug": "brief-abc" }), "brief"),
+        (
+            "doc_write",
+            json!({ "slug": "brief-abc", "body": "<p>x</p>", "format": "html" }),
+            "Markdown only",
+        ),
     ] {
         let (_, v) = mcp(&h.operator, "work", tool_call(name, args)).await;
         let (err, out) = outcome(&v);
@@ -2533,4 +2538,85 @@ async fn doc_delete_is_asked_conflicts_on_a_stale_hash_and_removes_the_bundle() 
     assert_eq!(out["result"]["deleted"], true, "{out}");
     assert!(h.store.doc_get("work", "note-page").unwrap().is_none());
     assert_eq!(live_bundle_rows(&h, &html.hash), 0);
+}
+
+/// A working note is written unattended, but not when the write would
+/// convert an HTML page or drop files of its bundle: that is always asked,
+/// and the held call is pinned to the document it was asked about.
+#[tokio::test]
+async fn a_working_note_write_that_reshapes_an_html_page_is_asked_and_pinned() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "doc_write",
+            json!({ "slug": "note-plain", "body": "# Plain" }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err && out["state"] != "awaiting_operator", "{out}");
+
+    let html = archived_html_plan(&h, "note-page");
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "note-page", "body": "# Markdown" }),
+    )
+    .await;
+    let row = h.store.get_approval(&id).unwrap().unwrap();
+    assert!(
+        row.title.contains("converts HTML to Markdown"),
+        "{}",
+        row.title
+    );
+    let held: Value = serde_json::from_str(&row.arguments).unwrap();
+    assert_eq!(held["if_hash"], html.hash.as_str(), "{held}");
+}
+
+/// A call held without an `if_hash` runs against the document it was asked
+/// about: a change made while it waited conflicts rather than being replaced.
+#[tokio::test]
+async fn a_held_write_conflicts_when_the_document_changed_while_it_waited() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let allow = |id: String| {
+        let h = &h;
+        async move {
+            let (status, _) = answer(h, &id, json!({ "option_id": "allow_once" })).await;
+            assert_eq!(status, StatusCode::OK);
+            settled(h, &id).await
+        }
+    };
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-pin", "body": "# One" }),
+    )
+    .await;
+    assert_eq!(allow(id).await["state"], "succeeded");
+    let first = h.store.doc_get("work", "plan-pin").unwrap().unwrap();
+
+    let waiting = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-pin", "body": "# Two" }),
+    )
+    .await;
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-pin", "body": "# Three", "if_hash": first.hash }),
+    )
+    .await;
+    assert_eq!(allow(id).await["state"], "succeeded");
+
+    let out = allow(waiting).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert_eq!(
+        h.store.doc_get("work", "plan-pin").unwrap().unwrap().body,
+        "# Three"
+    );
 }
