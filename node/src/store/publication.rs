@@ -219,10 +219,12 @@ impl Store {
         let latest = self
             .latest_review_revision(&review.id)?
             .map(|revision| revision.id);
+        // The last attempted, not the last created: retrying an older
+        // publication updates its row in place.
         Ok(self
             .publications_for_review(&review.id)?
             .into_iter()
-            .next()
+            .max_by_key(|row| row.updated_ms)
             .filter(|row| row.state == "failed" && row.revision_id == latest))
     }
 

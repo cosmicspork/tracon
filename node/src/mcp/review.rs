@@ -3859,6 +3859,35 @@ pub(crate) fn decided_report_view(report: &ReviewRow) -> Option<Value> {
     }
 }
 
+/// What `review_status` answers when the operator approved `r` but
+/// publishing it failed, and what a waiting session is told of it.
+pub(crate) fn publish_failed_view(
+    r: &ReviewRow,
+    failed: &crate::store::PublicationRow,
+    says: &str,
+    brought_back: &str,
+) -> Value {
+    let error = failed.note.clone().unwrap_or_default();
+    json!({
+        "review_id": r.id,
+        "state": "publish_failed",
+        "still_waiting": true,
+        "publication": {
+            "error": error,
+            "attempts": failed.attempts,
+            "branch": failed.branch,
+            "base": failed.base,
+        },
+        "message": format!(
+            "{says}The operator approved this review, but publishing it failed: \
+             {error}. It is back with the operator, who can retry the same \
+             publication or reject it. If the failure names something to change, \
+             change it and resubmit with the same review_id. Call review_status \
+             again with the same review_id to keep waiting.{brought_back}"
+        ),
+    })
+}
+
 /// What `review_status` answers for a review the operator has decided, or
 /// `None` while it waits on them.
 pub(crate) fn decided_review_view(r: &ReviewRow) -> Option<Value> {
@@ -4102,28 +4131,15 @@ async fn status(
                 manager
                     .waits()
                     .tell(&caller, &crate::session::waits::publication_key(failed));
-                let error = failed.note.clone().unwrap_or_default();
-                return Ok(json!({
-                    "review_id": r.id,
-                    "state": "publish_failed",
-                    "still_waiting": true,
-                    "waited_secs": waited,
-                    "reviewer": reviewer_view(store, manager, &r),
-                    "publication": {
-                        "error": error,
-                        "attempts": failed.attempts,
-                        "branch": failed.branch,
-                        "base": failed.base,
-                    },
-                    "message": format!(
-                        "{says}The operator approved this review, but publishing it failed: \
-                         {error}. It is back with the operator, who can retry the same \
-                         publication or reject it. If the failure names something to change, \
-                         change it and resubmit with the same review_id. Call review_status \
-                         again with the same review_id to keep waiting.{}",
-                        crate::session::waits::brought_back(ctx.session_id().is_some())
-                    ),
-                }));
+                let mut view = publish_failed_view(
+                    &r,
+                    failed,
+                    &says,
+                    crate::session::waits::brought_back(ctx.session_id().is_some()),
+                );
+                view["waited_secs"] = json!(waited);
+                view["reviewer"] = reviewer_view(store, manager, &r);
+                return Ok(view);
             }
             return Ok(json!({
                 "review_id": r.id,

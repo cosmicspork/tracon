@@ -5378,6 +5378,14 @@ async fn a_stacked_review_whose_base_is_gone_is_refused_before_its_branch_is_pus
     let review = f.store.get_review(&id).unwrap().unwrap();
     assert_eq!(review.state, "claimed");
 
+    // A session that ended its turn on the review is brought the failure.
+    let waits = f.manager.waits().of("s1");
+    let failure = waits
+        .iter()
+        .find(|w| w.key.starts_with("publication:"))
+        .expect("a wait on the failed publication");
+    assert_eq!(failure.decided.as_ref().unwrap()["state"], "publish_failed");
+
     // The submitter hears of it at once, not after the wait it asked for.
     let told = f
         .tool(
@@ -5387,6 +5395,7 @@ async fn a_stacked_review_whose_base_is_gone_is_refused_before_its_branch_is_pus
         )
         .await;
     assert_eq!(told["state"], "publish_failed", "{told}");
+    assert_eq!(told["waited_secs"], 0, "{told}");
     assert!(
         told["publication"]["error"]
             .as_str()

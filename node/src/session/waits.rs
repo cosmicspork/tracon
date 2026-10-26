@@ -324,6 +324,20 @@ fn collect(
                 })),
             });
         }
+        // An approval that failed to publish put the review back with the
+        // operator: told once per attempt, as review_status tells it.
+        if let Some(failed) = (decided.is_none() && !report)
+            .then(|| store.failed_publication(&row).ok().flatten())
+            .flatten()
+        {
+            waits.push(Wait {
+                key: publication_key(&failed),
+                tool: review::STATUS,
+                id: row.id.clone(),
+                about: format!("the publication of {}", row.title),
+                decided: Some(review::publish_failed_view(&row, &failed, "", "")),
+            });
+        }
         waits.push(Wait {
             key: review_key(&row),
             tool: if report {
