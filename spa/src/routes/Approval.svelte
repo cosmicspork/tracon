@@ -10,6 +10,7 @@
     grantsAccess,
     outcome,
     problemsByField,
+    amendsNothing,
     replacement,
     resultRows,
     schemaFor,
@@ -269,6 +270,12 @@
     {/if}
   {/if}
 
+  {#if pending && amendsNothing(details)}
+    <div class="banner crit" role="alert">
+      the memory is gone or no longer live <b>· there is nothing left to amend; Allow will fail, so reject</b>
+    </div>
+  {/if}
+
   {#if replacing}
     {#if details.stale}
       <div class="banner crit" role="alert">
@@ -279,8 +286,8 @@
       </div>
     {/if}
     <div class="h4">
-      Changes to the document <b
-        >{replacing.created ? 'new document' : `edit · “${replacing.title}”`}{replacing.format &&
+      Changes to the {replacing.subject} <b
+        >{replacing.label}{replacing.format &&
         replacing.format !== 'markdown'
           ? ` · ${replacing.format}`
           : ''} · +{replacing.added} −{replacing.removed}</b

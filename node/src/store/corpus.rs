@@ -302,6 +302,15 @@ impl MemoryRow {
             "created_ms": self.created_ms, "updated_ms": self.updated_ms,
         })
     }
+
+    /// The row with its body replaced and nothing else about it changed: an
+    /// edit in place, the operator's own or an amendment they allowed.
+    pub fn with_body(&self, body: &str, now_ms: i64) -> Value {
+        let mut row = self.to_change_row();
+        row["body"] = json!(body);
+        row["updated_ms"] = json!(now_ms);
+        row
+    }
 }
 
 impl PromotionRow {

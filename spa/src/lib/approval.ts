@@ -61,6 +61,21 @@ export interface ApprovalDetails {
   document?: ReplacedDocument | null
   /** The `if_hash` the agent sent no longer matches: Allow would conflict. */
   stale?: boolean
+  /**
+   * The memory a `memory_amend` rewrites, as it stands now, or null when it
+   * is no longer one the call could amend. Absent for any other tool.
+   */
+  memory?: ReplacedMemory | null
+}
+
+export interface ReplacedMemory {
+  id: string
+  kind: string
+  scope: string
+  scope_ref: string | null
+  body: string
+  state: string
+  updated_ms: number
 }
 
 export interface ReplacedDocument {
@@ -77,6 +92,10 @@ export const REPLACING_FIELD = 'body'
 
 export interface Replacement {
   key: string
+  /** What the call replaces the text of, for the heading. */
+  subject: 'document' | 'memory'
+  /** How the heading names the change: new, or an edit of what. */
+  label: string
   /** Nothing stands there yet, so the proposal is all added. */
   created: boolean
   title: string | null
@@ -102,22 +121,40 @@ function formatLabel(current: string | null, requested: unknown): string | null 
  * the diff follows their edit.
  */
 export function replacement(
-  details: Pick<ApprovalDetails, 'document'>,
+  details: Pick<ApprovalDetails, 'document' | 'memory'>,
   args: Record<string, unknown>,
 ): Replacement | null {
+  const proposed = args[REPLACING_FIELD]
+  const diff = (before: string) => {
+    const lines = diffLines(before, typeof proposed === 'string' ? proposed : '')
+    return {
+      key: REPLACING_FIELD,
+      hunks: hunks(lines),
+      added: lines.filter((l) => l.kind === 'add').length,
+      removed: lines.filter((l) => l.kind === 'del').length,
+    }
+  }
+  // A memory no longer there has nothing to diff against: the page says so.
+  if (details.memory) {
+    const m = details.memory
+    const title = `${m.kind} · ${m.scope}`
+    return { ...diff(m.body), subject: 'memory', label: `edit · ${title}`, created: false, title, format: null }
+  }
   if (details.document === undefined) return null
   const current = details.document
-  const proposed = args[REPLACING_FIELD]
-  const lines = diffLines(current?.body ?? '', typeof proposed === 'string' ? proposed : '')
   return {
-    key: REPLACING_FIELD,
+    ...diff(current?.body ?? ''),
+    subject: 'document',
+    label: current === null ? 'new document' : `edit · “${current.title}”`,
     created: current === null,
     title: current?.title ?? null,
     format: formatLabel(current?.format ?? null, args.format),
-    hunks: hunks(lines),
-    added: lines.filter((l) => l.kind === 'add').length,
-    removed: lines.filter((l) => l.kind === 'del').length,
   }
+}
+
+/** A held `memory_amend` whose memory is gone or no longer live: Allow would fail. */
+export function amendsNothing(details: Pick<ApprovalDetails, 'memory'>): boolean {
+  return details.memory === null
 }
 
 /** One problem with the answer, as the node's 422 or `validate` names it. */

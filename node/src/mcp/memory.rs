@@ -3,7 +3,9 @@
 //! lesson, or a fact the agent is not sure of, enters as `proposed` and waits
 //! for the nightly batch rather than becoming context on its own. So does a
 //! correction: a memory retained with `supersedes` replaces the one it names
-//! only when the operator promotes it.
+//! only when the operator promotes it. A small wording fix to a memory that
+//! stands is `memory_amend`, which rewrites it in place and so is always put
+//! to the operator first.
 
 use serde_json::{json, Value};
 use tracon_sync::ChangeOp;
@@ -11,11 +13,14 @@ use tracon_sync::ChangeOp;
 use crate::{
     corpus,
     mcp::{CallContext, SessionAccess},
-    store::{now_ms, KIND_DIRECTIVE, KIND_EPISODE, KIND_FACT, KIND_LESSON},
+    store::{
+        now_ms, MemoryRow, Store, StoreError, KIND_DIRECTIVE, KIND_EPISODE, KIND_FACT, KIND_LESSON,
+    },
 };
 
 pub const RECALL: &str = "recall";
 pub const RETAIN: &str = "retain";
+pub const AMEND: &str = "memory_amend";
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -55,7 +60,104 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["kind", "body"],
             },
         }),
+        json!({
+            "name": AMEND,
+            "description": "Fix the wording of a recalled memory in place: a typo, a stale name, a \
+                            sentence that misleads. The operator is always asked, and sees your body \
+                            as a diff against the memory as it stands; nothing changes until they \
+                            allow it. Only the body changes: kind and scope stay. When the memory is \
+                            wrong rather than badly worded, retain a correction with supersedes \
+                            instead. Directives are the operator's.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The id of the memory (from recall) to amend." },
+                    "body": { "type": "string", "description": "The whole amended body, not just the changed words." },
+                    "reason": { "type": "string", "description": "Why the wording should change, for the operator." },
+                },
+                "required": ["id", "body", "reason"],
+            },
+        }),
     ]
+}
+
+/// Whether `m` is a memory an agent on `channel` may point at: one recall
+/// returns there, live and not deleted.
+fn live_on(m: &MemoryRow, channel: &str) -> bool {
+    m.deleted == 0 && m.channel == channel && matches!(m.state.as_str(), "active" | "promoted")
+}
+
+/// The memory a `memory_amend` rewrites, or why it cannot: the same rules as a
+/// correction's target (a live memory on this channel, never a directive),
+/// plus a body and a reason that say something. Checked before the call is
+/// held, so the operator is never asked about one that cannot run, and again
+/// when it runs, since the memory may have changed in between.
+pub fn amend_target(store: &Store, channel: &str, args: &Value) -> Result<MemoryRow, String> {
+    let id = args["id"].as_str().unwrap_or("").trim();
+    if id.is_empty() {
+        return Err("memory_amend needs the id of the memory to amend".into());
+    }
+    let body = args["body"].as_str().unwrap_or("").trim();
+    if body.is_empty() {
+        return Err("memory_amend needs the amended body".into());
+    }
+    if args["reason"].as_str().unwrap_or("").trim().is_empty() {
+        return Err("memory_amend needs a reason the operator can weigh".into());
+    }
+    let m = store
+        .memory_get(id)
+        .map_err(|e| e.to_string())?
+        .filter(|m| live_on(m, channel))
+        .ok_or_else(|| format!("no live memory {id:?} on this channel to amend"))?;
+    if m.kind == KIND_DIRECTIVE {
+        return Err("directives are the operator's; an agent cannot amend one".into());
+    }
+    if m.body.trim() == body {
+        return Err("the amended body is the memory as it stands; nothing to change".into());
+    }
+    Ok(m)
+}
+
+/// What the approval page shows a held `memory_amend` against: the memory as
+/// it stands now, or `null` when it is no longer one the call could amend.
+pub fn approval_context(store: &Store, channel: &str, args: &Value) -> Result<Value, StoreError> {
+    let id = args["id"].as_str().unwrap_or("").trim();
+    let m = store.memory_get(id)?.filter(|m| live_on(m, channel));
+    Ok(json!({
+        "memory": m.map(|m| json!({
+            "id": m.id,
+            "kind": m.kind,
+            "scope": m.scope,
+            "scope_ref": m.scope_ref,
+            "body": m.body,
+            "state": m.state,
+            "updated_ms": m.updated_ms,
+        })),
+    }))
+}
+
+/// Run an amendment the operator allowed: the body is replaced in place, as
+/// the operator's own edit (`PATCH /api/memories/{id}`) replaces it, and
+/// nothing else about the memory changes.
+pub fn amend(access: &SessionAccess, ctx: &CallContext, args: &Value) -> Result<Value, String> {
+    let m = amend_target(&access.store, &ctx.channel, args)?;
+    let body = args["body"].as_str().unwrap_or("").trim();
+    corpus::write(
+        &access.store,
+        access.manager.bus(),
+        access.manager.node_id(),
+        &m.channel,
+        "memory",
+        ChangeOp::Upsert,
+        &m.id,
+        m.with_body(body, now_ms()),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "id": m.id,
+        "state": m.state,
+        "note": "amended: later sessions recall the new wording",
+    }))
 }
 
 pub async fn call(

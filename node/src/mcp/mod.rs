@@ -240,6 +240,7 @@ impl Tools {
     pub const PLAN_TOOLS: &'static [&'static str] = &[
         memory::RECALL,
         memory::RETAIN,
+        memory::AMEND,
         docs::DOC_READ,
         docs::DOC_SEARCH,
         docs::DOC_WRITE,
@@ -393,8 +394,11 @@ impl Tools {
         // A plan session's own plan document is the phase's artifact: writing
         // that one slug is what the session exists to do, so it is not asked.
         // A delete, and a write that converts a document or drops files of
-        // its bundle, are always the operator's, whatever the policy says.
+        // its bundle, are always the operator's, whatever the policy says;
+        // so is an amendment, which rewrites a memory in place with no
+        // nightly batch behind it.
         let always_asked = name == docs::DOC_DELETE
+            || name == memory::AMEND
             || name == docs::DOC_WRITE
                 && self
                     .session
@@ -406,6 +410,13 @@ impl Tools {
         let audience = self.audience(ctx);
         if !audience.offers(name) {
             return Err(audience.refusal(name));
+        }
+        // A directive, another channel's memory, or one no longer live is
+        // refused before it is held, as a correction's target is.
+        if name == memory::AMEND {
+            if let Some(access) = self.session.get() {
+                memory::amend_target(&access.store, &ctx.channel, args)?;
+            }
         }
         if matches!(
             name,
@@ -656,6 +667,16 @@ impl Tools {
                     .get()
                     .ok_or("memory is not available on this node")?;
                 memory::call(self, access, ctx, name, args).await
+            }
+            memory::AMEND => {
+                if !gated.one_shot {
+                    return Err(format!("{name} runs only once the operator allows it"));
+                }
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("memory is not available on this node")?;
+                memory::amend(access, ctx, args)
             }
             setup::PROPOSE => {
                 if !gated.one_shot {
@@ -2041,6 +2062,7 @@ pub fn approval_context(
             let current = docs::replaced(store, channel, args)?;
             Ok(Some(docs::approval_context(current.as_ref(), args)))
         }
+        memory::AMEND => Ok(Some(memory::approval_context(store, channel, args)?)),
         _ => Ok(None),
     }
 }
@@ -2130,6 +2152,10 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         ),
         docs::DOC_WRITE | docs::DOC_DELETE => format!("{name} {}", id("slug")),
         memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
+        memory::AMEND => with(
+            format!("{name} {}", id("id").chars().take(8).collect::<String>()),
+            first_line("reason"),
+        ),
         work::WORK_UPDATE => {
             let fields: Vec<String> = [
                 "title", "body", "priority", "deps", "project", "worktree", "state",

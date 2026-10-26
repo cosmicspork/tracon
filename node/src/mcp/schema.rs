@@ -72,6 +72,8 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     ),
     (docs::DOC_DELETE, "markdown", &[], &["slug", "if_hash"]),
     (memory::RETAIN, "markdown", &["body"], &["kind"]),
+    // Which memory is the call; the operator rewrites its body, not its target.
+    (memory::AMEND, "markdown", &["body"], &["id"]),
     (work::BRIEF_NOTE, "markdown", &["text"], &[]),
     (work::CRITERIA_LINK, "markdown", &["value"], &["criterion"]),
     // Which item is the call; an edit to it would be a different call.
