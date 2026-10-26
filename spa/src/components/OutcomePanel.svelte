@@ -5,7 +5,7 @@
   // read as a verified one.
   import { api } from '../lib/api'
   import { formatTokens } from '../lib/format'
-  import { checkLabel, claimStanding, headline } from '../lib/outcome'
+  import { checkLabel, claimStanding, headline, noChecks } from '../lib/outcome'
   import type { SessionOutcome } from '../lib/types'
 
   let { id, open = false }: { id: string; open?: boolean } = $props()
@@ -71,7 +71,7 @@
         {/each}
       </ul>
     {:else}
-      <p class="dim">No check has run.</p>
+      <p class="dim">{noChecks(view)}</p>
     {/if}
 
     {#if view.needs_decision.length}

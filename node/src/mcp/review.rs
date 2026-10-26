@@ -632,7 +632,11 @@ async fn submit(
             }
             target.branch = asked.to_string();
         }
-    } else if resubmission.is_none() && review::prose::placeholder_branch(&target.branch) {
+    } else if resubmission.is_none()
+        && (review::prose::placeholder_branch(&target.branch)
+            || (asked_change.is_none()
+                && pushed_by_another(store, session.as_ref(), &target.branch)))
+    {
         if let Some(named) = review::prose::branch_from_title(&title) {
             target.branch = named;
         }
@@ -1161,6 +1165,27 @@ impl Submission {
                 super::show::record_note(store, manager, ctx, &id, &row.head_sha, note)
             {
                 tracing::warn!(%error, review = %id, "submitter's note not stored");
+            }
+        }
+        // The branch the review pushes to, named in place of the node's
+        // placeholder, is the session's from here on: its row, the task's
+        // workspace and every peer mirroring it show where the work went.
+        if let Some(session) = session
+            .as_ref()
+            .filter(|s| s.branch != target.branch && review::prose::placeholder_branch(&s.branch))
+        {
+            match store.rename_session_branch(&session.id, &session.branch, &target.branch) {
+                Ok(true) => {
+                    if let Ok(Some(renamed)) = store.get_session(&session.id) {
+                        manager
+                            .bus()
+                            .publish(crate::stream::Frame::Session(Box::new(renamed)));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, session = %session.id, "session branch not renamed")
+                }
             }
         }
         let reviewer = keep_and_review(
@@ -3906,6 +3931,23 @@ pub(crate) fn decided_report_view(report: &ReviewRow) -> Option<Value> {
         })),
         _ => None,
     }
+}
+
+/// Whether another of `session`'s reviews already pushes to `branch`. The
+/// first review renames the session's placeholder branch to its own; a later
+/// new review is a change of its own, not an update of that one's.
+fn pushed_by_another(
+    store: &Store,
+    session: Option<&crate::store::SessionRow>,
+    branch: &str,
+) -> bool {
+    session.is_some_and(|s| {
+        store
+            .reviews_of_session(&s.id)
+            .unwrap_or_default()
+            .iter()
+            .any(|r| serde_json::from_str::<Target>(&r.target).is_ok_and(|t| t.branch == branch))
+    })
 }
 
 /// What `review_status` answers when the operator approved `r` but

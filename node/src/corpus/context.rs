@@ -695,7 +695,7 @@ pub fn read(store: &Store, item: &WorkItem) -> Result<Option<SelectionView>, Sto
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContextError {
-    #[error("no work item {0}")]
+    #[error("no task {0}")]
     MissingItem(String),
     #[error("{0:?} is not a document slug")]
     Slug(String),
