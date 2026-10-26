@@ -349,7 +349,22 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
             Some(latest),
         );
     }
-    if let Some(f) = s.follow.as_ref().filter(|_| latest.phase != "plan") {
+    // A session that failed says so while its request is still open; once
+    // the request merged or closed, that is what matters.
+    let failed = latest.end_reason.is_some_and(|r| {
+        ![
+            EndReason::PhaseDone,
+            EndReason::ItemClose,
+            EndReason::Continued,
+        ]
+        .iter()
+        .any(|ok| r == ok.as_str())
+    });
+    if let Some(f) = s
+        .follow
+        .as_ref()
+        .filter(|f| latest.phase != "plan" && (!failed || f.state != "open"))
+    {
         return follow_next(f, latest);
     }
     let reason = latest.end_reason.unwrap_or_default();
@@ -984,6 +999,7 @@ pub async fn carry_on(
         .unwrap_or(&old.id)
         .to_string();
     let carried = store.carried_reviews(&old.id)?;
+    let published = store.session_publications(&old.id)?;
     let spec = NewSession {
         channel: old.channel.clone(),
         repo_path: old.repo_path.clone(),
@@ -996,6 +1012,7 @@ pub async fn carry_on(
             approach.as_deref(),
             plan.as_deref(),
             &carried,
+            &published,
         )),
         node_id: Some(old.node_id.clone()),
         // A written plan is carried on by executing it; an unfinished plan
@@ -1030,12 +1047,14 @@ pub async fn carry_on(
 /// it inherits the workspace and nothing else, and the operator's changed
 /// approach when there is one. After a written plan, `plan` names it and the
 /// new attempt is told to carry it out. Either way it is told about each
-/// review it takes over, `carried`.
+/// review it takes over, `carried`, and where the old one's work was
+/// `published`.
 fn handoff(
     old: &SessionRow,
     approach: Option<&str>,
     plan: Option<&str>,
     carried: &[crate::store::ReviewRow],
+    published: &[(String, String)],
 ) -> String {
     if let Some(slug) = plan {
         let item = old.work_item_id.as_deref().unwrap_or_default();
@@ -1083,6 +1102,17 @@ fn handoff(
     if let Some(item) = old.work_item_id.as_deref() {
         note.push_str(&format!(
             "\n\nIt was working on item {item}, which is still open."
+        ));
+    }
+    if !published.is_empty() {
+        let landed = published
+            .iter()
+            .map(|(_, url)| format!("- {url}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        note.push_str(&format!(
+            "\n\nIts work was published:\n\n{landed}\n\nRead the change on the forge \
+             before changing anything, and carry that change on rather than opening another."
         ));
     }
     note.push_str(&crate::session::carried_note(carried));

@@ -552,7 +552,7 @@ pub async fn call(
                 .map_err(|e| e.to_string())?
             {
                 return Err(format!(
-                    "session {} is working on {}; let it finish, or kill it first",
+                    "session {} holds {}; the operator closes it from the task page",
                     s.id, item.id
                 ));
             }

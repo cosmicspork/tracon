@@ -667,3 +667,55 @@ async fn continuing_a_suspended_attempt_carries_it_on_and_ends_it() {
     assert_eq!(old.state, "closed");
     assert_eq!(old.end_reason.as_deref(), Some("continued"));
 }
+
+/// Changing the approach on a suspended attempt whose work was published
+/// tells the new one where it landed, as a plain Continue does.
+#[tokio::test]
+async fn a_changed_approach_on_published_work_is_told_where_it_landed() {
+    let h = harness().await;
+    ready(&h).await;
+    let mut s = session_row("s", "n1", "personal");
+    s.state = "suspended".into();
+    h.store.insert_session(&s).unwrap();
+    let mut published = review_row("rv", "s", "approved");
+    published.publish_result = Some("https://github.test/me/repo/pull/149".into());
+    h.store.insert_review(&published).unwrap();
+
+    let (st, row) = call(
+        &h.operator,
+        "POST",
+        "/api/continuation/continue",
+        Some(json!({ "session_id": "s", "approach": "Answer the review comment." })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{row}");
+    let note = h
+        .store
+        .get_draft(row["id"].as_str().unwrap())
+        .unwrap()
+        .map(|(text, _)| text)
+        .unwrap_or_default();
+    assert!(
+        note.contains("https://github.test/me/repo/pull/149"),
+        "{note}"
+    );
+    assert!(note.contains("Answer the review comment."), "{note}");
+}
+
+/// A continuation that failed says so while its request is open, rather
+/// than offering the merge.
+#[tokio::test]
+async fn a_failed_attempt_is_not_hidden_behind_its_open_request() {
+    let h = harness().await;
+    let item = new_item(&h, "Fix the invoices", vec![]);
+    let mut first = ended("a", 1, "budget", None);
+    first.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&first).unwrap();
+    followed(&h, "a", 10, pr("open", "passed", 0));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["kind"], "change_approach", "{v}");
+
+    followed(&h, "a", 20, pr("merged", "passed", 0));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["kind"], "close", "{v}");
+}
