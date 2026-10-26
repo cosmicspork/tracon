@@ -4165,7 +4165,17 @@ pub async fn get_promotion(
         .store()
         .promotion_get(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such batch".into()))?;
-    let items: serde_json::Value = serde_json::from_str(&p.items_json).unwrap_or(json!([]));
+    let mut items: serde_json::Value = serde_json::from_str(&p.items_json).unwrap_or(json!([]));
+    // A correction is shown beside the memory it would replace, as that
+    // memory reads now, so the operator decides the pair rather than one half.
+    for item in items.as_array_mut().into_iter().flatten() {
+        let Some(old) = item["supersedes"].as_str().map(str::to_string) else {
+            continue;
+        };
+        if let Some(m) = s.store().memory_get(&old)?.filter(|m| m.deleted == 0) {
+            item["replaces"] = json!({ "id": m.id, "kind": m.kind, "scope": m.scope, "scope_ref": m.scope_ref, "body": m.body, "state": m.state });
+        }
+    }
     let verdicts: serde_json::Value = p
         .verdicts_json
         .as_deref()

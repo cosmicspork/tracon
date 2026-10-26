@@ -843,6 +843,26 @@ function promotionStates() {
   const promote = (page, i) => page.locator('.item').nth(i).getByRole('button', { name: 'Promote' }).click()
   const reject = (page, i) => page.locator('.item').nth(i).getByRole('button', { name: 'Reject' }).click()
 
+  const correction = {
+    memory_id: 'm-0199f0c5',
+    kind: 'fact',
+    scope: 'project',
+    scope_ref: 'c3a91f0e7b24d6a8',
+    body: 'The gateway integration tests read the fixture registry from FIXTURE_REGISTRY_URL; the repository egress no longer matters since #412 vendored it.',
+    confidence: 0.9,
+    source_session: '0199f2c4-5e1a-7b3d-9c8e-2f4a6b8d0e13',
+    source_node: NODE,
+    created_ms: -28000000,
+    supersedes: 'm-0199e7a2',
+    replaces: {
+      id: 'm-0199e7a2',
+      kind: 'fact',
+      scope: 'project',
+      scope_ref: 'c3a91f0e7b24d6a8',
+      body: 'The gateway integration tests need the fixture registry; inside the boundary they time out at 120s unless its host is in the repository egress.',
+      state: 'active',
+    },
+  }
   const partial = {
     'm-0199f0c1': { verdict: 'promote', body: 'In acme/orbit, run `just check` (clippy -D warnings) before submit_review.' },
     'm-0199f0c3': 'reject',
@@ -905,6 +925,10 @@ function promotionStates() {
         note: '"· decided" in the heading, chips on every row, no Send row and no Back link.',
       },
     ),
+    st('approvals-promotion-correction', body({}, [correction, items[3]]), {
+      title: 'A correction beside the memory it replaces',
+      note: '"replaces:" with the old memory above the new one; promoting retires the old, rejecting leaves it live.',
+    }),
     st('approvals-promotion-single', body({}, [items[3]]), {
       title: 'One item: no bulk links',
       sizes: ['desktop', 'phone'],

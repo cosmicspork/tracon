@@ -776,3 +776,205 @@ async fn active_memories_are_browsed_edited_in_place_and_retired() {
         "{v}"
     );
 }
+
+/// A correction names the memory it replaces. It always waits for the
+/// operator, recall marks the old memory meanwhile, and promoting it retires
+/// the old one while rejecting leaves it live.
+#[tokio::test]
+async fn a_retained_correction_waits_for_the_operator_and_promoting_it_retires_the_old_memory() {
+    state::isolate();
+    let h = harness().await;
+    let token = h
+        .manager
+        .register_tool_token_for_test("s1", "personal")
+        .await;
+    let retain = |id: u64, args: Value| {
+        let (app, token) = (h.harness.clone(), token.clone());
+        async move { mcp(&app, "s1", &token, tool_call(id, "retain", args)).await }
+    };
+    let made = |v: &Value| {
+        serde_json::from_str::<Value>(&text(v)).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let v = retain(1, json!({"kind": "fact", "scope": "global", "body": "the gateway tests need the fixture registry in egress", "confidence": 0.95})).await;
+    let old = made(&v);
+    let v = retain(2, json!({"kind": "fact", "scope": "global", "body": "the deploy runs from the release branch", "confidence": 0.95})).await;
+    let kept = made(&v);
+
+    // A confident fact would be active on its own; as a correction it waits.
+    let v = retain(3, json!({"kind": "fact", "scope": "global", "body": "the gateway tests vendor the fixture registry now", "confidence": 0.95, "supersedes": old})).await;
+    assert_eq!(v["result"]["isError"], false, "{v}");
+    let out: Value = serde_json::from_str(&text(&v)).unwrap();
+    assert_eq!(out["state"], "candidate", "{out}");
+    assert_eq!(out["supersedes"], old.as_str());
+    let fix = out["id"].as_str().unwrap().to_string();
+    // Without a scope, a correction reaches as far as what it replaces: this
+    // session has no project, so the default scope would be refused.
+    let v = retain(4, json!({"kind": "fact", "body": "the deploy runs from main", "confidence": 0.95, "supersedes": kept})).await;
+    assert_eq!(v["result"]["isError"], false, "{v}");
+    let wrong = made(&v);
+
+    // Refused before anything is written: a directive, another channel's
+    // memory, or one that does not exist.
+    let (_, v) = call_with(
+        &h.operator,
+        "POST",
+        "/api/memories",
+        Some(json!({"channel": "personal", "body": "never push to main"})),
+        &[],
+    )
+    .await;
+    let directive = v["id"].as_str().unwrap().to_string();
+    let (_, v) = call_with(
+        &h.operator,
+        "POST",
+        "/api/memories",
+        Some(json!({"channel": "work", "kind": "fact", "body": "work fact", "state": "active"})),
+        &[],
+    )
+    .await;
+    let elsewhere = v["id"].as_str().unwrap().to_string();
+    // A memory still waiting for the operator is not one recall returns, so
+    // it cannot be superseded either.
+    let v = retain(
+        5,
+        json!({"kind": "lesson", "scope": "global", "body": "a lesson still waiting"}),
+    )
+    .await;
+    let waiting = made(&v);
+    for (i, target) in [
+        directive.as_str(),
+        elsewhere.as_str(),
+        "no-such-memory",
+        waiting.as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let v = retain(10 + i as u64, json!({"kind": "fact", "scope": "global", "body": "refused correction", "supersedes": target})).await;
+        assert_eq!(v["result"]["isError"], true, "{target}: {v}");
+    }
+    let (_, v) = call_with(
+        &h.operator,
+        "GET",
+        "/api/memories?channel=personal",
+        None,
+        &[],
+    )
+    .await;
+    let rows = v["memories"].as_array().unwrap();
+    assert!(
+        !rows.iter().any(|m| m["body"] == "refused correction"),
+        "{v}"
+    );
+    let row = rows.iter().find(|m| m["id"] == fix.as_str()).unwrap();
+    assert_eq!(row["supersedes"], old.as_str(), "the link is stored");
+    let row = rows.iter().find(|m| m["id"] == wrong.as_str()).unwrap();
+    assert_eq!(row["scope"], "global", "the scope of what it replaces");
+
+    // Until it is decided, the old memory is still recalled, marked.
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(20, "recall", json!({"query": "gateway fixture registry"})),
+    )
+    .await;
+    let hits: Value = serde_json::from_str(&text(&v)).unwrap();
+    let hit = hits["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == old.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("{hits}"));
+    assert_eq!(hit["correction_pending"], fix.as_str());
+
+    // The batch shows each correction beside what it replaces.
+    let (_, v) = call_with(&h.operator, "POST", "/api/promotions/batch", None, &[]).await;
+    let pid = v["created"][0].as_str().unwrap().to_string();
+    let (_, p) = call_with(
+        &h.operator,
+        "GET",
+        &format!("/api/promotions/{pid}"),
+        None,
+        &[],
+    )
+    .await;
+    let item = p["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["memory_id"] == fix.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(item["supersedes"], old.as_str());
+    assert_eq!(
+        item["replaces"]["body"],
+        "the gateway tests need the fixture registry in egress"
+    );
+
+    // One decision each: the promoted correction retires the old memory, the
+    // rejected one leaves its target live.
+    let (st, v) = call_with(
+        &h.operator,
+        "POST",
+        &format!("/api/promotions/{pid}/verdict"),
+        Some(json!({"verdicts": {fix.clone(): "promote", wrong.clone(): "reject"}})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, v) = call_with(
+        &h.operator,
+        "GET",
+        "/api/memories?channel=personal",
+        None,
+        &[],
+    )
+    .await;
+    let state_of = |id: &str| {
+        v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .map(|m| m["state"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    assert_eq!(state_of(&old), "retired");
+    assert_eq!(state_of(&fix), "promoted");
+    assert_eq!(state_of(&kept), "active");
+    assert_eq!(state_of(&wrong), "rejected");
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(21, "recall", json!({"query": "gateway fixture registry"})),
+    )
+    .await;
+    let hits: Value = serde_json::from_str(&text(&v)).unwrap();
+    let ids: Vec<&str> = hits["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![fix.as_str()], "one memory where there were two");
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(22, "recall", json!({"query": "deploy release branch"})),
+    )
+    .await;
+    let hits: Value = serde_json::from_str(&text(&v)).unwrap();
+    let hit = &hits["hits"][0];
+    assert_eq!(hit["id"], kept.as_str());
+    assert!(
+        hit.get("correction_pending").is_none(),
+        "a rejected correction is no longer pending: {hit}"
+    );
+}

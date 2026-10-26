@@ -109,6 +109,12 @@
       <div class="item" class:promote={v === 'promote' || doneVerdict === 'promote'} class:reject={v === 'reject' || doneVerdict === 'reject'}>
         <span class="bar"></span>
         <span class="body">
+          {#if it.supersedes}
+            <span class="replaces">
+              replaces: <em>{it.replaces ? `${it.replaces.kind} · ${it.replaces.scope}` : 'memory'}</em>{it.replaces ? it.replaces.body : `${it.supersedes.slice(0, 8)} (no longer held)`}
+              {#if !done && it.replaces && ['active', 'promoted'].includes(it.replaces.state)}<small>Promoting this retires it; rejecting leaves it as it is.</small>{:else if !done}<small>Already {it.replaces?.state ?? 'gone'}; promoting this retires nothing.</small>{/if}
+            </span>
+          {/if}
           <em>{it.kind}</em>
           {#if !done && v === 'promote'}
             <textarea
@@ -205,6 +211,16 @@
     color: var(--dim);
     margin-top: 3px;
     white-space: normal;
+  }
+  .replaces {
+    display: block;
+    color: var(--ink2);
+    border-left: 2px solid var(--dim);
+    padding-left: 8px;
+    margin-bottom: 8px;
+  }
+  .replaces em {
+    color: var(--dim);
   }
   .body textarea {
     display: block;

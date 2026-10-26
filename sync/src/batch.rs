@@ -3,7 +3,7 @@
 //! batch (a node for its channels, the hub for the ones shared with it) via
 //! their own `write_change`, so every row travels like any other.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -21,6 +21,10 @@ pub struct Item {
     pub source_session: Option<String>,
     pub source_node: Option<String>,
     pub created_ms: i64,
+    /// The memory this one would replace, when the agent retained it as a
+    /// correction. Promoting it retires that memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
 }
 
 /// A batch to write: the `promotion` row and the memories it holds.
@@ -56,7 +60,7 @@ pub fn plan_promotion(
     min_age_ms: i64,
 ) -> Result<Option<Plan>> {
     let mut stmt = conn.prepare(
-        "SELECT id, kind, scope, scope_ref, body, confidence, source_session, source_node, created_ms
+        "SELECT id, kind, scope, scope_ref, body, confidence, source_session, source_node, created_ms, supersedes
          FROM memory WHERE channel = ?1 AND deleted = 0 AND state = 'candidate' AND created_ms <= ?2
          ORDER BY created_ms ASC LIMIT 200",
     )?;
@@ -72,6 +76,7 @@ pub fn plan_promotion(
                 source_session: r.get(6)?,
                 source_node: r.get(7)?,
                 created_ms: r.get(8)?,
+                supersedes: r.get(9)?,
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -98,7 +103,7 @@ pub fn memory_row_with_state(
 ) -> Result<Option<Value>> {
     let row: Option<Value> = conn
         .query_row(
-            "SELECT channel, scope, scope_ref, kind, body, source_session, source_node, confidence, created_ms
+            "SELECT channel, scope, scope_ref, kind, body, source_session, source_node, confidence, created_ms, supersedes
              FROM memory WHERE id = ?1 AND deleted = 0",
             [memory_id],
             |r| {
@@ -108,7 +113,8 @@ pub fn memory_row_with_state(
                     "scope_ref": r.get::<_, Option<String>>(2)?, "kind": r.get::<_, String>(3)?,
                     "body": body_override.unwrap_or(&body), "source_session": r.get::<_, Option<String>>(5)?,
                     "source_node": r.get::<_, Option<String>>(6)?, "confidence": r.get::<_, f64>(7)?,
-                    "state": state, "created_ms": r.get::<_, i64>(8)?, "updated_ms": now_ms,
+                    "state": state, "supersedes": r.get::<_, Option<String>>(9)?,
+                    "created_ms": r.get::<_, i64>(8)?, "updated_ms": now_ms,
                 }))
             },
         )
@@ -125,6 +131,11 @@ pub type VerdictPlan = (Value, Vec<(String, &'static str, Option<String>)>);
 /// carry an edit alongside the verdict. Returns the decided `promotion` row
 /// and each memory's new state, for the caller to write. An item not named
 /// keeps waiting: the batch stays open until every item is decided.
+///
+/// Promoting a correction (an item that `supersedes` another memory) also
+/// retires the memory it names, in the same set of writes, so the operator's
+/// one decision leaves one live memory. Rejecting it leaves that memory as it
+/// was. Only a live, non-directive memory on the batch's channel is retired.
 pub fn plan_verdict(
     conn: &Connection,
     promotion_id: &str,
@@ -149,6 +160,7 @@ pub fn plan_verdict(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     let mut memories = Vec::new();
+    let mut retired = Vec::new();
     for (id, v) in verdicts {
         if !items.iter().any(|i| &i.memory_id == id) {
             continue;
@@ -173,8 +185,15 @@ pub fn plan_verdict(
             .then_some(edited_body)
             .flatten()
             .map(str::to_string);
+        if state == "promoted" {
+            if let Some(old) = superseded(conn, id, &channel)? {
+                retired.push((old, "retired", None));
+            }
+        }
         memories.push((id.clone(), state, body_override));
     }
+    // After every verdict, so a retirement is the last word on its memory.
+    memories.extend(retired);
     let complete = items.iter().all(|i| all.contains_key(&i.memory_id));
     let row = json!({
         "channel": channel,
@@ -186,6 +205,23 @@ pub fn plan_verdict(
         "created_ms": conn.query_row("SELECT created_ms FROM promotion WHERE id = ?1", [promotion_id], |r| r.get::<_, i64>(0)).unwrap_or(now_ms),
     });
     Ok(Some((row, memories)))
+}
+
+/// The live memory a candidate names in `supersedes`, if there is one that
+/// promotion may retire: on the same channel, not deleted, not a directive,
+/// and live. A candidate is never retired, so a later verdict on it cannot
+/// bring it back beside its correction.
+fn superseded(conn: &Connection, candidate: &str, channel: &str) -> Result<Option<String>> {
+    let old: Option<String> = conn
+        .query_row(
+            "SELECT old.id FROM memory new JOIN memory old ON old.id = new.supersedes
+             WHERE new.id = ?1 AND old.channel = ?2 AND old.deleted = 0
+               AND old.kind != 'directive' AND old.state IN ('active', 'promoted')",
+            params![candidate, channel],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(old)
 }
 
 #[cfg(test)]
@@ -328,7 +364,7 @@ mod tests {
                 "items_json": serde_json::to_string(&[Item {
                     memory_id: "m1".into(), kind: "lesson".into(), scope: "global".into(),
                     scope_ref: None, body: "b".into(), confidence: 0.8, source_session: None,
-                    source_node: None, created_ms: 1_000,
+                    source_node: None, created_ms: 1_000, supersedes: None,
                 }]).unwrap(),
                 "state": "open", "verdicts_json": Value::Null, "decided_by": Value::Null,
                 "decided_ms": Value::Null, "created_ms": 1_000,
@@ -375,10 +411,10 @@ mod tests {
                 "items_json": serde_json::to_string(&[
                     Item { memory_id: "m1".into(), kind: "lesson".into(), scope: "global".into(),
                         scope_ref: None, body: "b".into(), confidence: 0.8, source_session: None,
-                        source_node: None, created_ms: 1_000 },
+                        source_node: None, created_ms: 1_000, supersedes: None },
                     Item { memory_id: "m2".into(), kind: "lesson".into(), scope: "global".into(),
                         scope_ref: None, body: "b".into(), confidence: 0.8, source_session: None,
-                        source_node: None, created_ms: 1_000 },
+                        source_node: None, created_ms: 1_000, supersedes: None },
                 ]).unwrap(),
                 "state": "open", "verdicts_json": Value::Null, "decided_by": Value::Null,
                 "decided_ms": Value::Null, "created_ms": 1_000,
@@ -415,5 +451,70 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row["body"], "b", "a rejected item's body is never edited");
+    }
+
+    /// Promoting a correction retires the memory it names in the same plan;
+    /// rejecting one leaves that memory live.
+    #[test]
+    fn promoting_a_correction_retires_the_memory_it_replaces() {
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::schema::install(&c).unwrap();
+        let mut put = |id: &str, row: Value| {
+            write_change(
+                &mut c,
+                "n",
+                "personal",
+                "memory",
+                ChangeOp::Upsert,
+                id,
+                row,
+                5_000,
+            )
+            .unwrap();
+        };
+        put("old-a", mem("active", 1_000));
+        put("old-b", mem("promoted", 1_000));
+        put("old-c", mem("candidate", 1_000));
+        for (new, old) in [("fix-a", "old-a"), ("fix-b", "old-b"), ("fix-c", "old-c")] {
+            let mut row = mem("candidate", 1_000);
+            row["supersedes"] = json!(old);
+            put(new, row);
+        }
+        let plan = plan_promotion(&c, "personal", "p1", 5_000, 0)
+            .unwrap()
+            .unwrap();
+        let fix_a = plan.items.iter().find(|i| i.memory_id == "fix-a").unwrap();
+        assert_eq!(fix_a.supersedes.as_deref(), Some("old-a"));
+        write_change(
+            &mut c,
+            "n",
+            "personal",
+            "promotion",
+            ChangeOp::Upsert,
+            "p1",
+            plan.promotion_row(5_000),
+            5_000,
+        )
+        .unwrap();
+        let mut v = serde_json::Map::new();
+        v.insert("fix-a".into(), json!("promote"));
+        v.insert("fix-b".into(), json!("reject"));
+        v.insert("fix-c".into(), json!("promote"));
+        let (prow, mems) = plan_verdict(&c, "p1", &v, "n", 6_000).unwrap().unwrap();
+        assert_eq!(prow["state"], "open", "old-c is still undecided");
+        assert_eq!(
+            mems,
+            vec![
+                ("fix-a".to_string(), "promoted", None),
+                ("fix-b".to_string(), "rejected", None),
+                ("fix-c".to_string(), "promoted", None),
+                ("old-a".to_string(), "retired", None),
+            ],
+            "only a promoted correction of a live memory retires what it replaces"
+        );
+        let row = memory_row_with_state(&c, "fix-a", "promoted", None, 6_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["supersedes"], "old-a", "the link travels with the row");
     }
 }

@@ -1684,7 +1684,9 @@ export interface Memory {
   source_session: string | null
   source_node: string | null
   confidence: number
-  state: 'candidate' | 'proposed' | 'active' | 'promoted' | 'rejected' | string
+  state: 'candidate' | 'proposed' | 'active' | 'promoted' | 'rejected' | 'retired' | string
+  /** The memory this one would replace: a correction an agent retained. */
+  supersedes?: string | null
   site: string
   hlc_ms: number
   deleted: number
@@ -1703,6 +1705,8 @@ export interface RecallHit {
   scope: string | null
   confidence: number | null
   rank: number
+  /** Memories only: a correction waiting for the operator would replace this. */
+  correction_pending?: string
 }
 
 /** A promotion batch as the node keeps it; `items_json` holds the memories. */
@@ -1729,6 +1733,10 @@ export interface PromotionItem {
   source_session: string | null
   source_node: string | null
   created_ms: number
+  /** The memory this correction would replace; promoting it retires that one. */
+  supersedes?: string | null
+  /** That memory as it reads now, added by GET /api/promotions/{id}. */
+  replaces?: { id: string; kind: string; scope: string; scope_ref: string | null; body: string; state: string } | null
 }
 
 /** A verdict on one item: the bare legacy form, or an object carrying an
