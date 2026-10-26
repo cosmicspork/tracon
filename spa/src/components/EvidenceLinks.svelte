@@ -90,7 +90,7 @@
     <div class="notice">Evidence could not be loaded · {error}</div>
   {:else if items.length === 0}
     {#if workItemId}
-      <div class="empty">No candidate-bound evidence is recorded for this work item. A session must submit its committed change for review before the node can capture it here.</div>
+      <div class="empty">No candidate-bound evidence is recorded for this task. A session must submit its committed change for review before the node can capture it here.</div>
     {:else}
       <div class="empty">No candidate-bound evidence is recorded for this {reviewId ? 'review' : 'session'}.</div>
     {/if}

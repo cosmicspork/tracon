@@ -489,7 +489,7 @@
       {/if}
     </div>
   {:else if session.end_reason === 'item_close'}
-    <div class="banner ok">ended at item close <b>· the work item is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
+    <div class="banner ok">ended at task close <b>· the task is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
   {:else if session.end_reason === 'phase_done'}
     <div class="banner ok">{session.phase === 'plan' ? 'plan written' : 'verdict given'} <b>· this {session.phase} session is done</b></div>
   {/if}

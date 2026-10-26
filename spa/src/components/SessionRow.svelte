@@ -46,7 +46,7 @@
               : session.end_reason === 'continued'
                 ? 'Continued'
             : session.end_reason === 'item_close'
-              ? 'Ended · item closed'
+              ? 'Ended · task closed'
               : session.end_reason === 'phase_done'
                 ? session.phase === 'plan'
                   ? 'Planned'

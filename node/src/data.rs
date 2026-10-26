@@ -149,15 +149,15 @@ const KINDS: &[Kind] = &[
     },
     Kind {
         kind: "work",
-        label: "Work items",
-        unit: "work item",
+        label: "Tasks",
+        unit: "task",
         tables: &["work_item"],
         dirs: &[],
         delete: Some(Delete {
             path: "/tasks",
-            label: "Tasks, one item at a time",
+            label: "Tasks, one at a time",
         }),
-        propagation: "A delete replicates to every node on the item's channel and to the hub, \
+        propagation: "A delete replicates to every node on the task's channel and to the hub, \
                       each keeping a tombstone. Sessions that worked on it keep their record.",
     },
     Kind {

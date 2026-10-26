@@ -330,7 +330,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("blocked by open item"));
+        .contains("blocked by open task"));
     // Ready, but execute has no plan yet.
     let (st, body) = h
         .call(
@@ -356,7 +356,7 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("no work item"));
+        .contains("no task"));
 }
 
 #[tokio::test]
