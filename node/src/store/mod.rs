@@ -1936,13 +1936,13 @@ impl Store {
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed, state,
                 verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms, lane, checks_json)
+                resolved_mono_ms, updated_ms, lane, checks_json, publication_failed)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27)
+                ?23,?24,?25,?26,?27,?28)
              ON CONFLICT(id) DO UPDATE SET title=?6, body=?7, edited_title=?8, edited_body=?9,
                 diff=?12, files=?13, head_sha=?14, added=?16, removed=?17, state=?18,
                 verdict_reason=?19, publish_result=?20, claimed_ms=?21, resolved_mono_ms=?24,
-                updated_ms=?25, checks_json=?27
+                updated_ms=?25, checks_json=?27, publication_failed=?28
              WHERE node_id=excluded.node_id AND channel=excluded.channel
                 AND session_id IS excluded.session_id AND kind=excluded.kind",
             rusqlite::params![
@@ -1972,7 +1972,8 @@ impl Store {
                 r.resolved_mono_ms,
                 r.updated_ms,
                 r.lane,
-                r.checks_json
+                r.checks_json,
+                r.publication_failed
             ],
         )?;
         Ok(changed == 1)
@@ -2872,8 +2873,9 @@ mod records {
         #[serde(default)]
         pub lane: Option<String>,
         /// Why the latest approval failed to publish, while the review is
-        /// back with the operator. Not a column: `open_reviews` reads it off
-        /// the publication record, so the queue can say so.
+        /// back with the operator. `open_reviews` reads it off the publication
+        /// record for a review of this node's; the column holds only what a
+        /// peer's owner listed for its own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub publication_failed: Option<String>,
     }
@@ -2920,7 +2922,7 @@ mod records {
                 ai_verdict_json: r.get("ai_verdict_json")?,
                 revision_patch: r.get("revision_patch")?,
                 lane: r.get("lane")?,
-                publication_failed: None,
+                publication_failed: r.get("publication_failed")?,
             })
         }
     }
@@ -3616,29 +3618,50 @@ impl Store {
             rows
         };
         for row in &mut rows {
-            row.publication_failed = self
-                .failed_publication(row)?
-                .map(|failed| failed.note.unwrap_or_default());
+            self.read_publication_failure(row)?;
         }
         Ok(rows)
+    }
+
+    /// Set why `row` last failed to publish: off this node's publication
+    /// record for a review it owns, or as the owner listed it for a peer's,
+    /// which has no record here.
+    fn read_publication_failure(&self, row: &mut ReviewRow) -> Result<()> {
+        let mirrored = row
+            .publication_failed
+            .take()
+            .filter(|_| matches!(row.state.as_str(), "new" | "claimed"));
+        row.publication_failed = match self.failed_publication(row)? {
+            Some(failed) => Some(failed.note.unwrap_or_default()),
+            None => mirrored,
+        };
+        Ok(())
     }
 
     /// Reviews that must cross the mesh. This intentionally includes
     /// acknowledged narrative reports so peers retain their terminal receipt,
     /// but keeps them out of the operator's waiting queue.
     pub fn mirrored_reviews(&self) -> Result<Vec<ReviewRow>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM review
-             WHERE state IN ('new','claimed','revising','publishing')
-                OR (kind=?1 AND state=?2)
-             ORDER BY created_ms ASC",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![reports::KIND, reports::ACKNOWLEDGED],
-            ReviewRow::from_row,
-        )?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let mut rows: Vec<ReviewRow> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT * FROM review
+                 WHERE state IN ('new','claimed','revising','publishing')
+                    OR (kind=?1 AND state=?2)
+                 ORDER BY created_ms ASC",
+            )?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![reports::KIND, reports::ACKNOWLEDGED],
+                    ReviewRow::from_row,
+                )?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for row in &mut rows {
+            self.read_publication_failure(row)?;
+        }
+        Ok(rows)
     }
 
     /// Claim on open, as the design decided: a metric, not a lock.
