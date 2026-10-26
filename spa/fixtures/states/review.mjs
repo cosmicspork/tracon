@@ -1352,6 +1352,19 @@ export default [
     },
   }),
 
+  state('edit-diff-left-out-file', 'Editing, with a file the editor cannot take clicked in the list', {
+    note: 'A stale file is shown read-only below the editors with why; the file list scrolls to it.',
+    sizes: ['desktop'],
+    full: false,
+    detail: raw(details({ stale: ['tests/rate_limit.rs'] })),
+    act: async (page) => {
+      await click(page, 'Edit the diff')
+      await page.locator('.cm-editor').first().waitFor({ timeout: 8000 })
+      await page.locator('.files button', { hasText: 'tests/rate_limit.rs' }).click()
+      await settle(page, 900)
+    },
+  }),
+
   state('edit-diff-edited', 'An edit, ready to go back with a request for changes', {
     note: 'The edited chip, the count beside Discard, and the composer labelled for edits.',
     sizes: ['desktop'],

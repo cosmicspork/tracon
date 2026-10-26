@@ -1,6 +1,7 @@
 <script lang="ts">
   import ReportReview from '../components/ReportReview.svelte'
   import Diff from '../components/Diff.svelte'
+  import { splitDiff } from '../lib/diff'
   import CommitMessage from '../components/CommitMessage.svelte'
   import ShownWork from '../components/ShownWork.svelte'
   import CheckDetail from '../components/CheckDetail.svelte'
@@ -37,7 +38,7 @@
     type AiFinding,
     type ReviewerView,
   } from '../lib/types'
-  import { baseFromDiff, buildPatch, fileSection } from '../lib/patch'
+  import { buildPatch, fileSection, openForEdit } from '../lib/patch'
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { draftedMessage, draftForRevision, ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
@@ -306,6 +307,8 @@
   let fileError = $state<string | null>(null)
   /** path → { original: before the change, head: as submitted, now: edited } */
   let editable = $state<Map<string, { original: string; head: string; now: string }>>(new Map())
+  /** The files the editor left out, shown read-only so the file list still reaches them. */
+  let readOnly = $state<{ path: string; why: string }[]>([])
 
   // Keyed on the revision, not the commit: a resubmission may carry the same
   // commit, and an edit written against the revision it replaced is not an
@@ -392,6 +395,7 @@
       return
     }
     const next = new Map<string, { original: string; head: string; now: string }>()
+    const left: { path: string; why: string }[] = []
     try {
       let drafts: Record<string, string> = {}
       try {
@@ -400,17 +404,22 @@
         /* blocked or corrupt storage: start from the submitted text */
       }
       for (const f of files) {
-        if (stale.includes(f.path)) continue
+        if (stale.includes(f.path)) {
+          left.push({ path: f.path, why: 'changed since submit' })
+          continue
+        }
         const got = await api.reviewFile(id, f.path)
-        if (got.text === null) continue
-        const section = fileSection(review.diff, f.path)
-        // Without a base the change cannot be shown, so the file is left to
-        // the read-only diff below rather than opened with a guess.
-        const original = section ? baseFromDiff(got.text, section) : null
-        if (original === null) continue
-        next.set(f.path, { original, head: got.text, now: drafts[f.path] ?? got.text })
+        // Without a base the change cannot be shown, so the file is shown
+        // read-only rather than opened with a guess.
+        const opened = openForEdit(got.text, fileSection(review.diff, f.path))
+        if ('why' in opened) {
+          left.push({ path: f.path, why: opened.why })
+          continue
+        }
+        next.set(f.path, { ...opened, now: drafts[f.path] ?? opened.head })
       }
       editable = next
+      readOnly = left
     } catch (e) {
       fileError = e instanceof Error ? e.message : String(e)
     } finally {
@@ -489,6 +498,7 @@
    * commit message changes it.
    */
   const ships = $derived(shipping(intent, shippedMessage(outputs, intent), reworded))
+  const diffFiles = $derived(splitDiff(review?.diff ?? ''))
   const files = $derived.by(() => {
     try {
       return JSON.parse(review?.files ?? '[]') as { path: string; blob: string }[]
@@ -1332,11 +1342,12 @@
       <div class="empty">Opening the files…</div>
     {:else if fileError}
       <div class="banner crit">could not open the files <b>· {fileError}</b></div>
-    {:else if editable.size === 0}
-      <div class="banner dim">
-        nothing here can be edited <b>· every file changed since submit, or is new or binary</b>
-      </div>
     {:else}
+      {#if editable.size === 0}
+        <div class="banner dim">
+          nothing here can be edited <b>· each file below says why</b>
+        </div>
+      {/if}
       {#each [...editable] as [path, f] (path)}
         <div class="filehead" data-path={path}>
           <span class="p">{path}</span>
@@ -1346,12 +1357,14 @@
           <DiffEditor {path} original={f.original} head={f.head} onchange={onFileChange} />
         {/if}
       {/each}
-      {#if stale.length > 0}
-        <p class="note">
-          {stale.length} file{stale.length === 1 ? '' : 's'} changed since submit and cannot be
-          edited; {stale.join(', ')}
-        </p>
-      {/if}
+      {#each readOnly as r (r.path)}
+        {@const block = diffFiles.find((d) => d.path === r.path)}
+        <div class="filehead" data-path={r.path}>
+          <span class="p">{r.path}</span>
+          <span class="chip" class:warn={stale.includes(r.path)}>read-only · {r.why}</span>
+        </div>
+        {#if block}<Diff diff={block.lines.join('\n')} />{/if}
+      {/each}
     {/if}
   {:else}
     {#if sinceReviewed?.diff}
