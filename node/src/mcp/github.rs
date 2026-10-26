@@ -126,7 +126,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": PR_COMMENT,
             "description": "Post one comment on a GitHub pull request. For a GitHub issue use \
-                            github_issue_comment. The operator is asked before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            github_issue_comment. The operator is asked before it posts. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -141,7 +141,7 @@ pub fn definitions() -> Vec<Value> {
             "name": ISSUE_COMMENT,
             "description": "Post one comment on a GitHub issue (`number` is the issue's number \
                             in `repo`). Not for Jira issues, and not for pull requests, which are \
-                            pr_comment. The operator is asked before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            pr_comment. The operator is asked before it posts. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -185,9 +185,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": RUN_RERUN,
             "description": "Rerun a GitHub Actions run's failed jobs, as the web UI's \"Re-run \
-                            failed jobs\" does. The operator is asked before this runs: the call \
-                            returns `awaiting_operator` with an `approval_id` at once, and \
-                            approval_status reports the outcome. Once it ran, the node follows \
+                            failed jobs\" does. The operator is asked before this runs. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome. Once it ran, the node follows \
                             the new attempt and run_wait waits for it.",
             "inputSchema": {
                 "type": "object",
@@ -204,9 +202,7 @@ pub fn definitions() -> Vec<Value> {
                             workflow_dispatch trigger, as the web UI's \"Run workflow\" does. \
                             Only a workflow the node's configuration lists for this repository, \
                             never on a tag, and never with an input naming production: those \
-                            are run by hand. The operator is asked before this runs: the call \
-                            returns `awaiting_operator` with an `approval_id` at once, and \
-                            approval_status reports the outcome. Once it ran, the node follows \
+                            are run by hand. The operator is asked before this runs. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome. Once it ran, the node follows \
                             the run it started and run_wait waits for it.",
             "inputSchema": {
                 "type": "object",
@@ -263,7 +259,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": PR_REPLY,
             "description": "Reply to one review thread on a GitHub pull request, and optionally \
-                            resolve it. The operator is asked before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            resolve it. The operator is asked before it posts. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -294,7 +290,7 @@ pub fn definitions() -> Vec<Value> {
             "description": "Mark a draft GitHub pull request ready for review, or with `ready: \
                             false` turn it back into a draft. A pull request already in that \
                             state is left as it is (`already: true`); a closed or merged one is \
-                            refused. The operator is asked before it changes: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            refused. The operator is asked before it changes. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

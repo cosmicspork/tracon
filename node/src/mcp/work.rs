@@ -193,7 +193,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "The item to close. Only for a harness you run yourself." },
+                    "id": { "type": "string", "description": "Only for a harness you run yourself: the item to close." },
                     "summary": { "type": "string" },
                 },
             },
@@ -203,7 +203,7 @@ pub fn definitions() -> Vec<Value> {
             "description": "The work ledger on this channel in the order sessions take it: each \
                             item's id, title, state, what blocks it, priority (with its level's \
                             name), project and the session holding it. No bodies; work_show reads \
-                            one. A session sees its own project unless it names another; a harness \
+                            one. A session sees its own project unless it names another. A harness \
                             you run yourself sees the whole channel, or one project by `project` or \
                             by a `worktree` of its repository.",
             "inputSchema": {
@@ -238,8 +238,10 @@ pub fn definitions() -> Vec<Value> {
             "name": WORK_UPDATE,
             "description": "Change a work item on this channel: its title, body, priority, the \
                             items it waits on, its project, or reopen or close it. Only the fields \
-                            given change. The operator is asked first. Closing an item a session \
-                            is working on is refused unless it is this session's own.",
+                            given change. Closing an item a session is working on is refused unless \
+                            it is this session's own. The operator is asked first. An asked call \
+                            returns `awaiting_operator` with an `approval_id` at once, and \
+                            approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -259,8 +261,10 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": WORK_DELETE,
             "description": "Delete a work item on this channel, for one recorded by mistake or \
-                            twice. Close finished work instead. The operator is asked first, and \
-                            an item a session is working on cannot be deleted.",
+                            twice. Close finished work instead. An item a session is working on \
+                            cannot be deleted. The operator is asked first. An asked call returns \
+                            `awaiting_operator` with an `approval_id` at once, and approval_status \
+                            reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

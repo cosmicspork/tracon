@@ -88,7 +88,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": MR_COMMENT,
             "description": "Post one comment on a GitLab merge request. The operator is asked \
-                            before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            before it posts. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -117,7 +117,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": MR_REPLY,
             "description": "Reply to one discussion on a GitLab merge request, and optionally \
-                            resolve it. The operator is asked before it posts: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            resolve it. The operator is asked before it posts. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -206,7 +206,7 @@ pub fn definitions() -> Vec<Value> {
             "name": JOB_PLAY,
             "description": "Play a manual job, as the web UI's Play button does. Never with a \
                             variable naming production: those deploys are run by hand. The \
-                            operator is asked before this runs: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            operator is asked before this runs. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -221,7 +221,7 @@ pub fn definitions() -> Vec<Value> {
             "name": PIPELINE_RUN,
             "description": "Run a pipeline on a branch, as the web UI's Run pipeline does. Never a \
                             tag, and never with a variable naming production: those deploys are \
-                            run by hand. The operator is asked before this runs: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            run by hand. The operator is asked before this runs. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -237,8 +237,7 @@ pub fn definitions() -> Vec<Value> {
             "description": "Retry a pipeline's failed and canceled jobs, as the web UI's Retry \
                             does. Never a pipeline on a tag, or one whose variables name \
                             production: those deploys are run by hand. The operator is asked \
-                            before this runs: the call returns `awaiting_operator` with an \
-                            `approval_id` at once, and approval_status reports the outcome. Once \
+                            before this runs. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome. Once \
                             it ran, the node follows the pipeline and pipeline_wait waits for it.",
             "inputSchema": {
                 "type": "object",
@@ -254,7 +253,7 @@ pub fn definitions() -> Vec<Value> {
             "description": "Mark a draft GitLab merge request ready, or with `ready: false` turn \
                             it back into a draft. A merge request already in that state is left \
                             as it is (`already: true`); a closed or merged one is refused. The \
-                            operator is asked before it changes: the call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            operator is asked before it changes. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

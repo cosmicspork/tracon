@@ -315,8 +315,22 @@ fn push_node(out: &mut String, facts: &Facts) {
     if facts.tools.is_empty() {
         out.push_str("- No node tools are offered on this channel.\n");
     }
+    push_asked(out, facts);
     push_waiting(out, facts);
     out.push('\n');
+}
+
+/// How a call the operator decides answers, said once here rather than in
+/// each such tool's description (`mcp::aside`).
+fn push_asked(out: &mut String, facts: &Facts) {
+    if !offered(facts, crate::mcp::approvals::STATUS) {
+        return;
+    }
+    out.push_str(
+        "- Asked calls: a tool whose description says the operator is asked returns \
+         `awaiting_operator` with an `approval_id` at once and has not run; `approval_status` \
+         says what became of it, and the result of the call once it ran.\n",
+    );
 }
 
 /// How to wait, said once for every tool that waits, so each of their
