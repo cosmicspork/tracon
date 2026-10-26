@@ -47,7 +47,7 @@ export function deliveryLine(r: ContextReceived): string {
 export function attemptLine(a: ContextReceipt): string {
   const parts = [`revision ${a.revision}`]
   if (a.previous_revision === undefined || a.previous_revision === null) {
-    parts.push('first attempt')
+    parts.push('first session')
   } else if (a.changes.length === 0) {
     parts.push('unchanged')
   } else {

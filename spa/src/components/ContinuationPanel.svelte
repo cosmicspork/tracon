@@ -130,7 +130,7 @@
             bind:value={approach}
             use:autogrow={approach}
             rows="3"
-            placeholder="How the next attempt should go about it instead"
+            placeholder="How the next session should go about it instead"
             aria-label="New approach"
           ></textarea>
           <button class="btn p" disabled={busy || !approach.trim()} onclick={() => carryOn(true)}>Continue this way</button>
@@ -139,14 +139,14 @@
         <div class="form">
           <input bind:value={reason} placeholder="Why (optional)" aria-label="Why it is abandoned" />
           <button class="btn" disabled={busy} onclick={abandon}
-            >{view.kind === 'item' ? 'Close the item' : 'Stop and put it away'}</button
+            >{view.kind === 'item' ? 'Close the task' : 'Stop and put it away'}</button
           >
         </div>
       {/if}
     {/if}
 
     {#if view.attempts.length}
-      <div class="h5">Attempts <b>{view.attempts.length}</b></div>
+      <div class="h5">Sessions <b>{view.attempts.length}</b></div>
       <ol class="attempts">
         {#each view.attempts as a (a.id)}
           {@const from = carries(a, view.attempts)}

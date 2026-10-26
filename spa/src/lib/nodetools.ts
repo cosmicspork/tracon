@@ -296,7 +296,7 @@ function callLine(tool: string, rawInput: unknown): string {
     case 'work_discover':
       return line('Record new work', clip(str(a.title)))
     case 'work_close':
-      return line('Close the work item', clip(str(a.summary), 56))
+      return line('Close the task', clip(str(a.summary), 56))
     case 'work_list':
       return line('Tasks', [str(a.project), str(a.state), str(a.query) && `“${clip(str(a.query), 40)}”`].filter(Boolean).join(' · '))
     case 'work_show':

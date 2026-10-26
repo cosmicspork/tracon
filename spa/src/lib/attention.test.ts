@@ -274,7 +274,7 @@ test('a card says what the session was started to do, and copes when it cannot',
     'Make the attention count mean something · execute · main · tracon/p1',
   )
   expect(intentLabel(permission({ intent: { ...permission().intent!, work_item_title: null } }))).toContain(
-    'no work item',
+    'no task',
   )
   expect(intentLabel(permission({ intent: null }))).toBe('intent unavailable')
 })

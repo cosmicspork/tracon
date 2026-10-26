@@ -911,9 +911,9 @@
             {:else}
               <p>No additional requirement detail.</p>
             {/if}
-            <a href="/tasks/{requirements.id}">open work item</a>
+            <a href="/tasks/{requirements.id}">open task</a>
           {:else}
-            <p class="missing">No work item was linked when this review was captured.</p>
+            <p class="missing">No task was linked when this review was captured.</p>
           {/if}
         </div>
         <div class="evidence-panel">

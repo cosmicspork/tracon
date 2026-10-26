@@ -409,13 +409,13 @@ pub enum SessionError {
     UnknownChannel(String),
     #[error("channel {0} is archived: bring it back to start work on it again")]
     ChannelArchived(String),
-    #[error("a work item is required: pick one from the ready list")]
+    #[error("a task is required: pick one from the ready list")]
     WorkItemRequired,
-    #[error("work item is not ready: {0}")]
+    #[error("task is not ready: {0}")]
     NotReady(String),
-    #[error("work item is already held by session {0}")]
+    #[error("task is already held by session {0}")]
     InSession(String),
-    #[error("execute needs a plan: run a plan session for this item first ({0})")]
+    #[error("execute needs a plan: run a plan session for this task first ({0})")]
     PlanRequired(String),
     #[error("channel is at its daily ceiling: {0}")]
     Ceiling(String),
@@ -1667,7 +1667,7 @@ impl Manager {
                 .into_iter()
                 .find(|v| v.item.id == item_id)
                 .ok_or_else(|| {
-                    SessionError::NotReady(format!("no work item {item_id} on {}", spec.channel))
+                    SessionError::NotReady(format!("no task {item_id} on {}", spec.channel))
                 })?;
             match &view.readiness {
                 tracon_sync::work::Readiness::Ready => {}
@@ -1679,10 +1679,10 @@ impl Manager {
                         .iter()
                         .map(|b| match b {
                             tracon_sync::work::Blocker::Open { id } => {
-                                format!("open item {}", &id[..8.min(id.len())])
+                                format!("open task {}", &id[..8.min(id.len())])
                             }
                             tracon_sync::work::Blocker::Unknown { id } => {
-                                format!("item {} not seen here", &id[..8.min(id.len())])
+                                format!("task {} not seen here", &id[..8.min(id.len())])
                             }
                             tracon_sync::work::Blocker::Cycle => "a dependency cycle".into(),
                         })

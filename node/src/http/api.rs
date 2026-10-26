@@ -5042,10 +5042,10 @@ pub async fn get_work(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let item = s.store().work_get(&id)?.ok_or(ApiError(
-        StatusCode::NOT_FOUND,
-        format!("no work item {id}"),
-    ))?;
+    let item = s
+        .store()
+        .work_get(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, format!("no task {id}")))?;
     let view = s
         .store()
         .work_status(&item.channel, None)?
@@ -5079,10 +5079,10 @@ pub async fn get_brief(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let item = s.store().work_get(&id)?.ok_or(ApiError(
-        StatusCode::NOT_FOUND,
-        format!("no work item {id}"),
-    ))?;
+    let item = s
+        .store()
+        .work_get(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, format!("no task {id}")))?;
     let brief = crate::corpus::brief::for_item(s.store(), &id).map_err(brief_err)?;
     // `linked_slug` without a brief is a link this node cannot follow: the
     // document may be on another node, or it may have been deleted. Said,
@@ -5298,10 +5298,10 @@ pub async fn get_context(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let item = s.store().work_get(&id)?.ok_or(ApiError(
-        StatusCode::NOT_FOUND,
-        format!("no work item {id}"),
-    ))?;
+    let item = s
+        .store()
+        .work_get(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, format!("no task {id}")))?;
     Ok(Json(context_json(&s, &item)?))
 }
 
@@ -5324,10 +5324,10 @@ pub async fn put_context(
             }
         },
     )?;
-    let item = s.store().work_get(&id)?.ok_or(ApiError(
-        StatusCode::NOT_FOUND,
-        format!("no work item {id}"),
-    ))?;
+    let item = s
+        .store()
+        .work_get(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, format!("no task {id}")))?;
     Ok(Json(context_json(&s, &item)?))
 }
 
@@ -5377,10 +5377,7 @@ pub async fn delete_work(
     let removed = crate::corpus::work::remove(s.store(), s.manager.bus(), &s.node_id, &id)
         .map_err(work_err)?;
     if !removed {
-        return Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("no work item {id}"),
-        ));
+        return Err(ApiError(StatusCode::NOT_FOUND, format!("no task {id}")));
     }
     Ok(Json(json!({ "ok": true })))
 }

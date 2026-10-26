@@ -311,7 +311,7 @@ pub struct CriteriaView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CriteriaError {
-    #[error("no work item {0}")]
+    #[error("no task {0}")]
     MissingItem(String),
     #[error("{0} has no brief")]
     NoBrief(String),
@@ -339,7 +339,7 @@ pub enum CriteriaError {
     FindingEvidence(String),
     #[error("no revision {0}")]
     MissingRevision(String),
-    #[error("revision does not match the work item and candidate")]
+    #[error("revision does not match the task and candidate")]
     RevisionMismatch,
     #[error(transparent)]
     Brief(#[from] BriefError),

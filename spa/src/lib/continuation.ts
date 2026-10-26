@@ -7,7 +7,7 @@ const ENDED: Record<string, string> = {
   killed_user: 'stopped',
   budget: 'spent its budget',
   harness_exit: 'harness exited',
-  item_close: 'item closed',
+  item_close: 'task closed',
   phase_done: 'phase done',
   detached: 'detached',
   incompatible: 'harness incompatible',

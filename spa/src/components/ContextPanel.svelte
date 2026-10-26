@@ -100,8 +100,8 @@
 
   {#if !selection}
     <div class="empty">
-      Nothing selected. Attempts at this item start from its description, its brief pointer and its plan. Select the
-      brief, research, decisions and constraints that every attempt should start with, in full.
+      Nothing selected. Sessions on this task start from its description, its brief pointer and its plan. Select the
+      brief, research, decisions and constraints that every session should start with, in full.
     </div>
     {#if !surface.phone && item.state === 'open'}
       <div class="actions"><button class="btn" onclick={start} disabled={busy}>Select context</button></div>
@@ -109,7 +109,7 @@
   {:else}
     <div class="meta">
       <a href="/docs/{selection.channel}/{selection.slug}">{selection.slug}</a>
-      · edited {formatAge(selection.updated_ms, clock.now)} ago · changes apply to the next attempt
+      · edited {formatAge(selection.updated_ms, clock.now)} ago · changes apply to the next session
     </div>
 
     {#each ROLES as r (r)}
@@ -125,7 +125,7 @@
                 {#if res?.title}<span class="slug">{p.slug}</span>{/if}
                 {#if p.note}<span class="note">{p.note}</span>{/if}
                 {#if !surface.phone}<button class="lnk d" onclick={() => remove(p.slug)} disabled={busy} aria-label="remove {p.slug}">×</button>{/if}
-                {#if res?.reason}<span class="warn">next attempt will not get it · {reasonLine(res.reason)}</span>{/if}
+                {#if res?.reason}<span class="warn">next session will not get it · {reasonLine(res.reason)}</span>{/if}
               </li>
             {/each}
           </ul>
@@ -133,7 +133,7 @@
       {/if}
     {/each}
     {#if picks.length === 0}
-      <div class="absent">No documents in the selection. The next attempt is told its context is empty.</div>
+      <div class="absent">No documents in the selection. The next session is told its context is empty.</div>
     {/if}
     {#if selection.extra}
       <div class="section">
@@ -170,7 +170,7 @@
   {/if}
 
   {#if ctx && ctx.attempts.length}
-    <div class="h5 later">Received by each attempt <b>{ctx.attempts.length}</b></div>
+    <div class="h5 later">Received by each session <b>{ctx.attempts.length}</b></div>
     <ul class="attempts">
       {#each ctx.attempts as a (a.session_id)}
         <li>

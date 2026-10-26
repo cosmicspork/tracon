@@ -150,11 +150,11 @@
   <div class="empty">Loading…</div>
 {:else if !item && failed}
   <div class="banner crit" role="alert">
-    Could not load this work item <b>· {error}</b>
+    Could not load this task <b>· {error}</b>
     <button class="lnk" onclick={() => { error = null; void load() }}>Retry</button>
   </div>
 {:else if !item}
-  <div class="banner crit">not found <b>· {error ?? `no work item ${id.slice(0, 8)}`}</b></div>
+  <div class="banner crit">not found <b>· {error ?? `no task ${id.slice(0, 8)}`}</b></div>
 {:else}
   <div class="h4"><a class="lnk" href="/tasks">‹ Tasks</a></div>
   <div class="head {ws}">
@@ -258,7 +258,7 @@
   <EvidenceLinks workItemId={item.id} channel={item.channel} />
 
   {#if discovered.length}
-    <div class="h5">Discovered from this item <b>{discovered.length}</b></div>
+    <div class="h5">Discovered from this task <b>{discovered.length}</b></div>
     <div class="chain">
       {#each discovered as d (d.id)}
         <span>{short(item.id)}</span><span class="arr">→</span><a href="/tasks/{d.id}">{short(d.id)} {d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>

@@ -199,7 +199,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
     if s.item_closed {
         return at(
             "done",
-            "The item is closed; nothing is left to do.".into(),
+            "The task is closed; nothing is left to do.".into(),
             None,
         );
     }
@@ -553,9 +553,9 @@ fn blockers_of(store: &Store, item: &WorkItem) -> Result<Vec<String>> {
         out.push(match b {
             Blocker::Open { id } => match store.work_get(&id)? {
                 Some(dep) => format!("“{}” ({})", dep.title, short(&id)),
-                None => format!("item {}", short(&id)),
+                None => format!("task {}", short(&id)),
             },
-            Blocker::Unknown { id } => format!("item {} not seen on this node", short(&id)),
+            Blocker::Unknown { id } => format!("task {} not seen on this node", short(&id)),
             Blocker::Cycle => "a dependency cycle".into(),
         });
     }
@@ -620,6 +620,14 @@ mod tests {
             })
             .kind,
             "done"
+        );
+        assert_eq!(
+            next(Situation {
+                item_closed: true,
+                ..Default::default()
+            })
+            .text,
+            "The task is closed; nothing is left to do."
         );
         assert_eq!(
             next(Situation {
@@ -739,7 +747,7 @@ pub async fn carry_on(
         .ok_or(SessionError::NotFound)?;
     if !SessionState::from_stored(&old.state).is_terminal() {
         return Err(SessionError::Rejected(
-            "this attempt is still live; resume or stop it first".into(),
+            "this session is still live; resume or stop it first".into(),
         ));
     }
     if old.harness_id == external::HARNESS_ID {
@@ -928,7 +936,7 @@ pub async fn abandon(
     if let Some(item_id) = item_id {
         let item = store.work_get(&item_id)?.ok_or(SessionError::NotFound)?;
         if item.state == tracon_sync::work::CLOSED {
-            return Err(SessionError::Rejected("the item is already closed".into()));
+            return Err(SessionError::Rejected("the task is already closed".into()));
         }
         let holder = store.session_holding(&item_id)?;
         crate::corpus::work::close(

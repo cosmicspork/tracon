@@ -93,7 +93,7 @@
 
   {#if !criteria}
     <div class="empty">
-      No brief, so no criteria are stated. What would make this good is worked out from the item and
+      No brief, so no criteria are stated. What would make this good is worked out from the task and
       its plan, and nothing here claims the customer agreed to a standard.
     </div>
   {:else}
@@ -101,7 +101,7 @@
       {#if criteria.candidate}
         against candidate <b>{criteria.candidate.head_sha.slice(0, 8)}</b>
       {:else}
-        nothing has been captured for this item yet, so no check has a result to report
+        nothing has been captured for this task yet, so no check has a result to report
       {/if}
       · <a href="/docs/{criteria.channel}/{criteria.brief_slug}">{criteria.brief_slug}</a>
     </div>
@@ -200,7 +200,7 @@
                   <input placeholder="what you looked at, in one sentence" bind:value={note} />
                   {#if !criteria.candidate}
                     <div class="notice">
-                      Nothing has been captured for this item, so this verdict is about the criterion itself and not
+                      Nothing has been captured for this task, so this verdict is about the criterion itself and not
                       about any attempt at it.
                     </div>
                   {/if}

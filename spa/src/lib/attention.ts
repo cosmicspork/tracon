@@ -232,7 +232,7 @@ export function intentLabel(p: Permission): string {
   const intent = p.intent
   if (!intent) return 'intent unavailable'
   const parts = [
-    intent.work_item_title ?? 'no work item',
+    intent.work_item_title ?? 'no task',
     intent.phase,
     intent.channel,
     intent.branch,
