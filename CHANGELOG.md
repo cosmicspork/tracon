@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.40.1](https://github.com/cosmicspork/tracon/compare/v0.40.0...v0.40.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **continuation:** surface every round of requested changes ([#693](https://github.com/cosmicspork/tracon/issues/693)) ([a993e12](https://github.com/cosmicspork/tracon/commit/a993e12b67e5ddd1d0e7c37027279bd8f5bfbe4a))
+* **mesh:** restore peer reviews wrongly marked gone ([#690](https://github.com/cosmicspork/tracon/issues/690)) ([71d5d2d](https://github.com/cosmicspork/tracon/commit/71d5d2df1bcbc58531e370a1134b4fd0a9db927c))
+* **mesh:** show a peer's failed publication on the hub ([#689](https://github.com/cosmicspork/tracon/issues/689)) ([46335c7](https://github.com/cosmicspork/tracon/commit/46335c7cccec4f5c459c454226fb54335b92fcc5))
+* **review:** finish a publication whose approving request went away ([#691](https://github.com/cosmicspork/tracon/issues/691)) ([cc1a008](https://github.com/cosmicspork/tracon/commit/cc1a00825de29bb0cde56172b589e2685a782312))
+* **session:** close and continue a suspended session exactly once ([#692](https://github.com/cosmicspork/tracon/issues/692)) ([b7aff96](https://github.com/cosmicspork/tracon/commit/b7aff96695fe6889a13710244dae947653d47e05))
+* **spa:** clicking a file the editor can't take still shows it ([#688](https://github.com/cosmicspork/tracon/issues/688)) ([0d9d89d](https://github.com/cosmicspork/tracon/commit/0d9d89d7b77829701b568268b75749cd55ccf94e))
+* **spa:** link a session's page to what it may do ([#687](https://github.com/cosmicspork/tracon/issues/687)) ([eae4535](https://github.com/cosmicspork/tracon/commit/eae45350e9b5df0d5af74eeabf53a257eca3803e))
+
 ## [0.40.0](https://github.com/cosmicspork/tracon/compare/v0.39.0...v0.40.0) (2026-10-26)
 
 
