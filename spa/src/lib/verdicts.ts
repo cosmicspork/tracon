@@ -75,12 +75,13 @@ export function publishedChange(result: string | null | undefined): { url: strin
 }
 
 /**
- * "PR #149": a published request by its number, so a link to it says which
+ * "PR #149" (or "MR !12" on GitLab): a published request by its number, so a link to it says which
  * request it is rather than "open". Null for an address that names none.
  */
 export function requestName(result: string | null | undefined): string | null {
-  const n = publishedChange(result)?.number
-  return n == null ? null : `PR #${n}`
+  const change = publishedChange(result)
+  if (change?.number == null) return null
+  return /\/merge_requests\//.test(change.url) ? `MR !${change.number}` : `PR #${change.number}`
 }
 
 /** What the review page offers of its reviewer, from what happened to the latest revision. */

@@ -1724,6 +1724,9 @@ impl Supervisor {
     /// Start a turn with `text`. `queued` names the queued messages it
     /// carries, when it is their delivery.
     async fn dispatch_prompt(&mut self, text: String, queued: Vec<String>) -> Result<(), String> {
+        // Whose words these are holds for this prompt only, sent or not: a
+        // refused kickoff must not label the operator's next prompt.
+        let origin = self.next_prompt_origin.take();
         let s = self
             .store
             .get_session(&self.session_id)
@@ -1779,7 +1782,7 @@ impl Supervisor {
         if !queued.is_empty() {
             payload["queued"] = json!(queued);
         }
-        if let Some(origin) = self.next_prompt_origin.take() {
+        if let Some(origin) = origin {
             payload["origin"] = json!(origin);
         }
         self.record(ek::USER_PROMPT, None, payload);
