@@ -350,8 +350,9 @@ async fn pr_status_rolls_up_the_checks_on_the_head_commit() {
     assert_eq!(v["checks"]["pending"], 1);
     assert_eq!(v["review_decision"], "changes_requested");
     assert_eq!(v["reviews"].as_array().unwrap().len(), 2);
+    assert_eq!(v["last_comment_at"], "t");
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 3);
+    assert_eq!(seen.len(), 4);
     assert!(seen
         .iter()
         .all(|(_, _, auth, _)| auth == "Bearer gh-secret"));

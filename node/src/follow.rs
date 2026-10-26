@@ -58,6 +58,14 @@ pub struct Snapshot {
     pub decision: Option<String>,
     /// Comments and reviews, counted together.
     pub comments: u64,
+    /// When the newest of them was made, as the forge stamps it (epoch ms).
+    #[serde(default)]
+    pub commented_ms: Option<i64>,
+    /// When the newest request for changes still standing was made: a
+    /// reviewer asking again is a new round, though the decision reads the
+    /// same. GitHub only; GitLab's status says nothing of one.
+    #[serde(default)]
+    pub changes_requested_ms: Option<i64>,
 }
 
 impl Snapshot {
@@ -95,13 +103,27 @@ impl Snapshot {
             }
             _ => None,
         };
-        let reviews = status["reviews"].as_array().map_or(0, Vec::len) as u64;
+        let reviews = status["reviews"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let at = |v: &Value| v.as_str().and_then(crate::session::exhaustion::rfc3339_ms);
+        // The newest of the reviews, or of those in `state`.
+        let submitted = |state: Option<&str>| {
+            reviews
+                .iter()
+                .filter(|r| state.is_none_or(|state| r["state"] == state))
+                .filter_map(|r| at(&r["submitted_at"]))
+                .max()
+        };
         Self {
             state: state.into(),
             draft: status["draft"] == true,
             checks,
             decision,
-            comments: status["comments"].as_u64().unwrap_or(0) + reviews,
+            comments: status["comments"].as_u64().unwrap_or(0) + reviews.len() as u64,
+            commented_ms: submitted(None).max(at(&status["last_comment_at"])),
+            changes_requested_ms: submitted(Some("CHANGES_REQUESTED")),
         }
     }
 
@@ -127,6 +149,10 @@ impl Snapshot {
             checks,
             decision: (status["approved"] == true).then(|| "approved".to_string()),
             comments: status["notes"].as_u64().unwrap_or(0),
+            commented_ms: status["last_note_at"]
+                .as_str()
+                .and_then(crate::session::exhaustion::rfc3339_ms),
+            changes_requested_ms: None,
         }
     }
 }
@@ -157,7 +183,11 @@ pub fn changes(before: &Snapshot, now: &Snapshot) -> Vec<String> {
     if all_passed(&now.checks) && !all_passed(&before.checks) {
         said.push("CI passed".into());
     }
-    if before.decision != now.decision {
+    let again = matches!(
+        (before.changes_requested_ms, now.changes_requested_ms),
+        (Some(was), Some(is)) if is > was
+    );
+    if before.decision != now.decision || again {
         match now.decision.as_deref() {
             Some("approved") => said.push("approved".into()),
             Some("changes_requested") => said.push("changes requested".into()),
@@ -766,6 +796,7 @@ mod tests {
                 .collect(),
             decision: None,
             comments,
+            ..Default::default()
         }
     }
 
@@ -789,6 +820,20 @@ mod tests {
     }
 
     #[test]
+    fn a_reviewer_asking_again_is_a_new_round() {
+        let mut first = snap("open", false, &[], 2);
+        first.decision = Some("changes_requested".into());
+        first.changes_requested_ms = Some(10);
+        let mut again = first.clone();
+        again.changes_requested_ms = Some(20);
+        assert_eq!(changes(&first, &again), ["changes requested"]);
+        // A look from before the time was recorded is no round.
+        let mut older = first.clone();
+        older.changes_requested_ms = None;
+        assert!(changes(&older, &again).is_empty());
+    }
+
+    #[test]
     fn a_forges_status_reads_as_one_snapshot() {
         let github = Snapshot::from_github(&json!({
             "state": "closed", "merged": true, "draft": false, "comments": 2,
@@ -803,9 +848,22 @@ mod tests {
         assert_eq!(github.checks["lint"], "pending");
         assert_eq!(github.decision.as_deref(), Some("approved"));
         assert_eq!(github.comments, 4);
+        assert_eq!(github.commented_ms, None);
+        let asked = Snapshot::from_github(&json!({
+            "state": "open", "comments": 1, "last_comment_at": "2026-10-26T12:00:03Z",
+            "review_decision": "changes_requested", "reviews": [
+                { "user": "a", "state": "CHANGES_REQUESTED", "submitted_at": "2026-10-26T12:00:01Z" },
+                { "user": "b", "state": "COMMENTED", "submitted_at": "2026-10-26T12:00:02Z" },
+            ],
+        }));
+        let at = |s: &str| crate::session::exhaustion::rfc3339_ms(s);
+        assert_eq!(asked.changes_requested_ms, at("2026-10-26T12:00:01Z"));
+        assert_eq!(asked.commented_ms, at("2026-10-26T12:00:03Z"));
         let gitlab = Snapshot::from_gitlab(&json!({
             "state": "opened", "draft": true, "pipeline": "failed", "notes": 5, "approved": false,
+            "last_note_at": "2026-10-26T12:00:04.123Z",
         }));
+        assert_eq!(gitlab.commented_ms, at("2026-10-26T12:00:04.123Z"));
         assert_eq!(gitlab.state, "open");
         assert!(gitlab.draft);
         assert_eq!(gitlab.checks["pipeline"], "failed");

@@ -507,14 +507,15 @@ async fn the_token_reaches_only_the_stub_and_only_on_the_read_and_comment_endpoi
         vec![
             "GET /api/v4/projects/g%2Fp/merge_requests/7",
             "GET /api/v4/projects/g%2Fp/merge_requests/7/approvals",
+            "GET /api/v4/projects/g%2Fp/merge_requests/7/notes",
             "POST /api/v4/projects/g%2Fp/merge_requests/7/notes",
             "GET /rest/api/2/issue/WRK-1",
             "POST /rest/api/2/issue/WRK-1/comment",
         ]
     );
     // Every GitLab call carried the token as a header; every Jira call basic auth.
-    assert!(seen.iter().take(3).all(|(_, _, a)| a == "glpat-secret"));
-    assert!(seen.iter().skip(3).all(|(_, _, a)| a.starts_with("Basic ")));
+    assert!(seen.iter().take(4).all(|(_, _, a)| a == "glpat-secret"));
+    assert!(seen.iter().skip(4).all(|(_, _, a)| a.starts_with("Basic ")));
     // And nothing in the surface can merge or transition.
     assert!(!paths
         .iter()

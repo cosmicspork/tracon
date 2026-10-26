@@ -160,7 +160,7 @@ pub fn reset_ms(headers: &HeaderMap, now_ms: i64) -> Option<i64> {
 
 /// `2026-10-07T12:00:00Z`, with optional fractional seconds and a `Z` or a
 /// `±HH:MM` offset.
-fn rfc3339_ms(text: &str) -> Option<i64> {
+pub(crate) fn rfc3339_ms(text: &str) -> Option<i64> {
     let text = text.trim();
     let (date, time) = text.split_once(['T', 't', ' '])?;
     let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());

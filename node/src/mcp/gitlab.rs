@@ -919,6 +919,25 @@ async fn merge_request(
         let approvals = get(http, token, &format!("{base}/approvals"))
             .await
             .unwrap_or(Value::Null);
+        // The newest note a person left; the count leaves out system notes.
+        let last_note_at = match mr["user_notes_count"].as_u64() {
+            Some(count) if count > 0 => get(
+                http,
+                token,
+                &format!("{base}/notes?sort=desc&order_by=created_at&per_page=20"),
+            )
+            .await
+            .ok()
+            .and_then(|notes| {
+                notes
+                    .as_array()?
+                    .iter()
+                    .find(|note| note["system"] != true)
+                    .map(|note| note["created_at"].clone())
+            })
+            .unwrap_or(Value::Null),
+            _ => Value::Null,
+        };
         return Ok(json!({
             "iid": mr["iid"],
             "title": mr["title"],
@@ -930,6 +949,7 @@ async fn merge_request(
             "has_conflicts": mr["has_conflicts"],
             "pipeline": mr["head_pipeline"]["status"],
             "notes": mr["user_notes_count"],
+            "last_note_at": last_note_at,
             "approved": approvals["approved"],
             "approved_by": approvals["approved_by"]
                 .as_array()
