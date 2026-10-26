@@ -39,6 +39,19 @@ pub struct Outcome {
     pub needs_decision: Vec<Pending>,
     pub uncertain: Vec<String>,
     pub cost: Cost,
+    /// For a session another node runs, whether its checks were read from
+    /// that node. None for this node's own.
+    pub owner_checks: Option<OwnerChecks>,
+}
+
+/// Where a peer's session's checks were read from: they run and stay on the
+/// node that runs the session.
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnerChecks {
+    pub node_id: String,
+    pub read: bool,
+    /// Why they could not be read, when they were not.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -130,6 +143,8 @@ pub struct Facts {
     pub uncertainty: Option<Value>,
     pub interrupted_turns: usize,
     pub usage: Value,
+    /// For a session another node runs: whether `checks` are that node's.
+    pub owner_checks: Option<OwnerChecks>,
 }
 
 pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
@@ -188,6 +203,7 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
         uncertainty,
         interrupted_turns,
         usage: crate::metrics::session_usage(store, &id),
+        owner_checks: None,
         session,
     })
 }
@@ -396,7 +412,19 @@ pub fn derive(facts: &Facts) -> Outcome {
             facts.interrupted_turns
         ));
     }
-    if let Some(head) = &head_sha {
+    let unread = facts.owner_checks.as_ref().filter(|owner| !owner.read);
+    if let Some(owner) = unread.filter(|_| head_sha.is_some()) {
+        uncertain.push(format!(
+            "The checks are held by {}, which runs this session, and could not be read from it{}",
+            owner.node_id,
+            owner
+                .reason
+                .as_deref()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(head) = head_sha.as_ref().filter(|_| unread.is_none()) {
         let current: Vec<&Verification> = verified.iter().filter(|v| v.current).collect();
         if current.is_empty() {
             if verified.is_empty() {
@@ -463,6 +491,7 @@ pub fn derive(facts: &Facts) -> Outcome {
         needs_decision,
         uncertain,
         cost,
+        owner_checks: facts.owner_checks.clone(),
     }
 }
 
@@ -524,6 +553,7 @@ mod tests {
             uncertainty: None,
             interrupted_turns: 0,
             usage: serde_json::json!({ "gateway_tokens": 40, "unmetered_turns": 1 }),
+            owner_checks: None,
         }
     }
 
@@ -588,5 +618,23 @@ mod tests {
         assert!(out.uncertain.iter().any(|u| u.contains("No check has run")));
         assert_eq!(out.cost.gateway_tokens, 40);
         assert_eq!(out.cost.tokens_used, 40);
+    }
+
+    #[test]
+    fn a_peer_session_whose_checks_could_not_be_read_says_so_rather_than_that_none_ran() {
+        let mut unread = facts(vec![review("rv1", "pr", "bbb", "new")], Vec::new());
+        unread.owner_checks = Some(OwnerChecks {
+            node_id: "n2".into(),
+            read: false,
+            reason: Some("the node that holds it is unreachable".into()),
+        });
+        let out = derive(&unread);
+        let text = out.uncertain.join("\n");
+        assert!(!text.contains("No check has run"), "{text}");
+        assert!(
+            text.contains("held by n2") && text.contains("unreachable"),
+            "{text}"
+        );
+        assert!(out.owner_checks.is_some_and(|owner| !owner.read));
     }
 }

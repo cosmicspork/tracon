@@ -643,6 +643,18 @@ impl Store {
         patch.apply_unless(&conn, id, excluded)
     }
 
+    /// Rename a session's branch from `from` to `to`, only while it is still
+    /// `from`: the push target its first review chose in place of the node's
+    /// placeholder. Returns whether it was renamed.
+    pub fn rename_session_branch(&self, id: &str, from: &str, to: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE session SET branch=?3, updated_ms=?4 WHERE id=?1 AND branch=?2",
+            rusqlite::params![id, from, to, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn set_draft(&self, id: &str, text: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1924,13 +1936,13 @@ impl Store {
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed, state,
                 verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms, lane)
+                resolved_mono_ms, updated_ms, lane, checks_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26)
+                ?23,?24,?25,?26,?27)
              ON CONFLICT(id) DO UPDATE SET title=?6, body=?7, edited_title=?8, edited_body=?9,
                 diff=?12, files=?13, head_sha=?14, added=?16, removed=?17, state=?18,
                 verdict_reason=?19, publish_result=?20, claimed_ms=?21, resolved_mono_ms=?24,
-                updated_ms=?25
+                updated_ms=?25, checks_json=?27
              WHERE node_id=excluded.node_id AND channel=excluded.channel
                 AND session_id IS excluded.session_id AND kind=excluded.kind",
             rusqlite::params![
@@ -1959,36 +1971,57 @@ impl Store {
                 r.created_mono_ms,
                 r.resolved_mono_ms,
                 r.updated_ms,
-                r.lane
+                r.lane,
+                r.checks_json
             ],
         )?;
         Ok(changed == 1)
     }
 
-    /// Open reviews of `node_id` in `channel` not in `keep` are marked gone:
-    /// the owner no longer lists them.
-    pub fn gone_absent_reviews(
+    /// Code reviews of `node_id` in `channel` held open here that are not in
+    /// `keep`, the owner's current listing of its open ones. The owner listing
+    /// them no more says only that they left its queue: one approved and
+    /// published there leaves it too, so these are read again from the owner
+    /// rather than written off. An open report absent from the listing is
+    /// gone here at once, since its owner keeps listing it once received.
+    pub fn absent_open_reviews(
         &self,
         node_id: &str,
         channel: &str,
         keep: &[String],
-    ) -> Result<usize> {
+    ) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id FROM review WHERE node_id=?1 AND channel=?2
+            "SELECT id, kind FROM review WHERE node_id=?1 AND channel=?2
              AND state IN ('new','claimed','revising','publishing')",
         )?;
-        let open: Vec<String> = stmt
-            .query_map([node_id, channel], |r| r.get(0))?
+        let open: Vec<(String, String)> = stmt
+            .query_map([node_id, channel], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<std::result::Result<_, _>>()?;
-        let mut n = 0;
-        for id in open.into_iter().filter(|id| !keep.contains(id)) {
-            n += conn.execute(
-                "UPDATE review SET state='gone', updated_ms=?2 WHERE id=?1",
-                rusqlite::params![id, now_ms()],
-            )?;
+        let mut absent = Vec::new();
+        for (id, kind) in open.into_iter().filter(|(id, _)| !keep.contains(id)) {
+            if kind == reports::KIND {
+                conn.execute(
+                    "UPDATE review SET state='gone', updated_ms=?2 WHERE id=?1",
+                    rusqlite::params![id, now_ms()],
+                )?;
+            } else {
+                absent.push(id);
+            }
         }
-        Ok(n)
+        Ok(absent)
+    }
+
+    /// A peer's review its owner says it does not hold is gone here, if it is
+    /// still open. Returns whether it was.
+    pub fn gone_mirrored_review(&self, node_id: &str, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET state='gone', updated_ms=?3 WHERE id=?1 AND node_id=?2
+             AND state IN ('new','claimed','revising','publishing')",
+            rusqlite::params![id, node_id, now_ms()],
+        )?;
+        Ok(n == 1)
     }
 
     pub fn sessions_of_node(&self, node_id: &str) -> Result<Vec<SessionRow>> {

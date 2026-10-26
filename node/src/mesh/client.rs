@@ -3,7 +3,7 @@
 //! hub's SSE stream is only a hint to pull sooner. A hub outage therefore
 //! costs latency, never state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -128,6 +128,10 @@ pub struct MeshClient {
     /// handoffs for channels it is not in cannot make this node ask the hub
     /// on every frame.
     handoff_refresh: Mutex<HashMap<String, i64>>,
+    /// Peers' reviews being read again from their owner because its listing
+    /// left them out, so a review is asked about once however many listings
+    /// arrive meanwhile.
+    rereading: Mutex<HashSet<String>>,
 }
 
 /// How often a refused handoff from one sender may have the member list read
@@ -182,6 +186,7 @@ impl MeshClient {
             on_handoff: std::sync::OnceLock::new(),
             on_revoke: std::sync::OnceLock::new(),
             handoff_refresh: Mutex::new(HashMap::new()),
+            rereading: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1134,10 +1139,24 @@ impl MeshClient {
                 .ok()
                 .flatten()
                 .is_some_and(|n| n.reachable != 0);
+        // The reviews a listing names, read before the payload is consumed:
+        // those it leaves out are asked of their owner once it is applied.
+        let listed = match &payload {
+            Payload::Reviews { waiting: rows } | Payload::Snapshot { reviews: rows, .. } => Some(
+                rows.iter()
+                    .filter_map(|row| row.get("id").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
         match self.mirror.apply(sender, &env.channel, payload) {
             Applied::Stored => {
                 if returning {
                     self.reconcile_deliveries(Some(sender));
+                }
+                if let Some(listed) = listed {
+                    self.reread_unlisted_reviews(sender, &env.channel, &listed);
                 }
                 Opened::Applied
             }
@@ -1242,6 +1261,82 @@ impl MeshClient {
                 ));
             }
         });
+    }
+
+    /// Read again from `sender` each review of its on `channel` held open
+    /// here that its listing no longer names. Leaving the listing means only
+    /// that the review left the owner's queue: approved and published, or
+    /// rejected, it is refreshed to what the owner holds, checks and all. It
+    /// is gone here only when the owner says it holds no such review; an
+    /// owner that cannot be read leaves it as it was, to be asked again at
+    /// the next listing.
+    fn reread_unlisted_reviews(&self, sender: &str, channel: &str, listed: &[String]) {
+        let unlisted = match self.store.absent_open_reviews(sender, channel, listed) {
+            Ok(unlisted) => unlisted,
+            Err(error) => {
+                tracing::warn!(%error, "mirrored review absence reconciliation failed");
+                return;
+            }
+        };
+        let Some(this) = self.weak.upgrade() else {
+            return;
+        };
+        for id in unlisted {
+            if !self.rereading.lock().unwrap().insert(id.clone()) {
+                continue;
+            }
+            let (this, sender, channel) = (this.clone(), sender.to_string(), channel.to_string());
+            tokio::spawn(async move {
+                this.reread_review(&sender, &channel, &id).await;
+                this.rereading.lock().unwrap().remove(&id);
+            });
+        }
+    }
+
+    async fn reread_review(&self, owner: &str, channel: &str, id: &str) {
+        let request = serde_json::json!({ "review_id": id, "channel": channel, "owner": owner });
+        let answer = self
+            .command(
+                owner,
+                proto::frame::Command::ReviewDetail { request },
+                Duration::from_secs(self.cfg.mesh.command_timeout_secs.max(1)),
+            )
+            .await;
+        match answer {
+            Ok(detail) => {
+                let row = serde_json::from_value::<crate::store::ReviewRow>(
+                    detail.get("review").cloned().unwrap_or_default(),
+                );
+                match row {
+                    Ok(row) if row.id == id && row.node_id == owner && row.channel == channel => {
+                        match self.store.upsert_review_mirror(&row) {
+                            Ok(true) => self.mirror.publish_queue(),
+                            Ok(false) => {
+                                tracing::warn!(review = %id, from = %owner, "a reread review names another owner; not stored")
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, review = %id, "reread review not stored")
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(review = %id, from = %owner, "the owner's answer is not that review; not stored")
+                    }
+                }
+            }
+            Err(super::forward::CommandError::Refused(why))
+                if why == crate::http::api::NO_SUCH_REVIEW =>
+            {
+                match self.store.gone_mirrored_review(owner, id) {
+                    Ok(true) => self.mirror.publish_queue(),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, review = %id, "review not marked gone"),
+                }
+            }
+            Err(error) => {
+                tracing::debug!(%error, review = %id, from = %owner, "unlisted review not read from its owner; asked again at the next listing")
+            }
+        }
     }
 
     // ------------------------------------------------------------ presence

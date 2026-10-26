@@ -1342,6 +1342,10 @@ export interface SessionOutcome {
     unmetered_turns: number
     mismatched_turns: number
   }
+  /** For a session another node runs: whether its checks were read from that
+   *  node, which runs and keeps them. Null for this node's own; absent from an
+   *  older node. */
+  owner_checks?: { node_id: string; read: boolean; reason: string | null } | null
 }
 
 export interface OutcomeCheck {

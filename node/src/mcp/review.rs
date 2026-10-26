@@ -1111,6 +1111,27 @@ impl Submission {
         store
             .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
+        // The branch the review pushes to, named in place of the node's
+        // placeholder, is the session's from here on: its row, the task's
+        // workspace and every peer mirroring it show where the work went.
+        if let Some(session) = session
+            .as_ref()
+            .filter(|s| s.branch != target.branch && review::prose::placeholder_branch(&s.branch))
+        {
+            match store.rename_session_branch(&session.id, &session.branch, &target.branch) {
+                Ok(true) => {
+                    if let Ok(Some(renamed)) = store.get_session(&session.id) {
+                        manager
+                            .bus()
+                            .publish(crate::stream::Frame::Session(Box::new(renamed)));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, session = %session.id, "session branch not renamed")
+                }
+            }
+        }
         let reviewer = keep_and_review(
             store,
             manager,

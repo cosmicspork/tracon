@@ -316,12 +316,11 @@ impl Mirror {
     }
 
     fn apply_reviews(&self, sender: &str, channel: &str, rows: &[Value]) -> Applied {
-        let mut keep = Vec::new();
         for v in rows {
             match serde_json::from_value::<ReviewRow>(v.clone()) {
                 Ok(r) if r.node_id == sender && r.channel == channel => {
                     match self.store.upsert_review_mirror(&r) {
-                        Ok(true) => keep.push(r.id.clone()),
+                        Ok(true) => {}
                         // The sender owns the payload row, but it tried to
                         // reuse an ID already bound to another owner/channel.
                         Ok(false) => return Applied::Impersonation,
@@ -335,10 +334,9 @@ impl Mirror {
                 Err(_) => return Applied::Malformed,
             }
         }
-        if let Err(error) = self.store.gone_absent_reviews(sender, channel, &keep) {
-            tracing::warn!(%error, "mirrored review absence reconciliation failed");
-            return Applied::Malformed;
-        }
+        // What the listing leaves out is read again from the owner by the
+        // client (`reread_unlisted_reviews`): a review leaves an owner's
+        // listing as soon as it is decided, so absence is not loss.
         Applied::Stored
     }
 
@@ -392,7 +390,7 @@ impl Mirror {
         }
     }
 
-    fn publish_queue(&self) {
+    pub(super) fn publish_queue(&self) {
         if let Ok(waiting) = self.store.open_permission_views() {
             self.bus.publish_untapped(Frame::Queue { waiting });
         }
