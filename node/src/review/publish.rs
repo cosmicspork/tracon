@@ -364,6 +364,12 @@ pub enum PublishError {
          more; resubmit on top of what it holds now"
     )]
     SquashBaseGone { branch: String, onto: String },
+    #[error(
+        "{base}, which this change would merge into, is not a branch on the forge any more \
+         (was its change merged and the branch deleted?), so nothing was pushed; rebase onto \
+         the branch it merged into (main, for instance) and resubmit with that as the base"
+    )]
+    BaseGone { base: String },
     #[error("{0}")]
     Unknown(String),
     #[error("invalid publication target: {0}")]
@@ -732,6 +738,21 @@ async fn attempt(
             )));
         }
         _ => {
+            // A new change merges into its base, so the base has to be there
+            // before anything is pushed: a stacked change whose base was
+            // merged and deleted since it was submitted would otherwise leave
+            // its branch on the forge with nothing for a change to open into.
+            if p.target.change.is_none() && !p.target.initial {
+                let base = format!("refs/heads/{}", p.target.base);
+                if ls_remote(cfg, &publisher, &credential, &base)
+                    .await?
+                    .is_none()
+                {
+                    return Err(PublishError::BaseGone {
+                        base: p.target.base.clone(),
+                    });
+                }
+            }
             let refspec = format!("{}:refs/heads/{}", pushing, p.target.branch);
             // A rewrite is forced only over the commit it was reviewed
             // against; anything else there makes the forge refuse it.
@@ -1569,19 +1590,32 @@ async fn remote_sha(
     credential: &Credential<'_>,
     refname: &str,
 ) -> Result<Option<String>, PublishError> {
+    ls_remote(cfg, publisher, credential, refname)
+        .await
+        .map_err(|error| {
+            PublishError::Unknown(format!(
+                "the forge could not be asked what {refname} holds ({error}); \
+                 the push may or may not have landed — verify the branch before retrying"
+            ))
+        })
+}
+
+/// What the forge's `refname` holds, or `None` when it has no such ref. A
+/// failure to ask is returned as it is: before anything was pushed, it is
+/// not an unknown outcome, only a failed one.
+async fn ls_remote(
+    cfg: &Config,
+    publisher: &Path,
+    credential: &Credential<'_>,
+    refname: &str,
+) -> Result<Option<String>, PublishError> {
     let listed = publisher_git_with_credential(
         &cfg.publish.git,
         publisher,
         credential,
         ["ls-remote", "origin", refname],
     )
-    .await
-    .map_err(|error| {
-        PublishError::Unknown(format!(
-            "the forge could not be asked what {refname} holds ({error}); \
-             the push may or may not have landed — verify the branch before retrying"
-        ))
-    })?;
+    .await?;
     Ok(listed
         .lines()
         .find_map(|line| line.split_whitespace().next())

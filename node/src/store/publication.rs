@@ -209,6 +209,23 @@ impl Store {
         Ok(rows)
     }
 
+    /// The latest publication of a review's latest revision, when it failed
+    /// and the review went back to the operator. A failure of an earlier
+    /// revision, or one a later attempt replaced, is not this review's now.
+    pub fn failed_publication(&self, review: &super::ReviewRow) -> Result<Option<PublicationRow>> {
+        if !matches!(review.state.as_str(), "new" | "claimed") {
+            return Ok(None);
+        }
+        let latest = self
+            .latest_review_revision(&review.id)?
+            .map(|revision| revision.id);
+        Ok(self
+            .publications_for_review(&review.id)?
+            .into_iter()
+            .next()
+            .filter(|row| row.state == "failed" && row.revision_id == latest))
+    }
+
     /// The commits this node pushed as `sha` to `project` on `channel`,
     /// whichever review pushed them: what a squash was made from.
     pub fn publications_that_pushed(

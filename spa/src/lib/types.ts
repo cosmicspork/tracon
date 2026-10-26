@@ -469,6 +469,8 @@ export interface Review {
   ai_verdict_json: string | null
   /** A diff the operator edited by hand, carried back with the notes. */
   revision_patch?: string | null
+  /** Why the latest approval failed to publish. Absent unless it did. */
+  publication_failed?: string | null
 }
 
 export interface ReviewContext {
@@ -905,6 +907,15 @@ export function reviewChecks(r: Review): CheckResult[] {
   } catch {
     return []
   }
+}
+
+/**
+ * Why the latest approval of a review failed to publish, while it is back
+ * with the operator to retry or reject; null otherwise.
+ */
+export function publicationFailure(r: Review): string | null {
+  if (r.state !== 'new' && r.state !== 'claimed') return null
+  return r.publication_failed ?? null
 }
 
 export function reviewVerdict(r: Review): AiVerdict | null {

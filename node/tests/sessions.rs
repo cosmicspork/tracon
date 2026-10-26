@@ -2644,6 +2644,7 @@ fn published_review(id: &str, session: &str) -> tracon::store::ReviewRow {
         ai_verdict_json: None,
         revision_patch: None,
         lane: None,
+        publication_failed: None,
     }
 }
 
@@ -4037,6 +4038,7 @@ async fn a_session_held_on_its_review_is_given_the_verdict() {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         })
         .unwrap();
 
