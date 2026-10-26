@@ -3296,8 +3296,11 @@ async fn the_page_shows_the_trigger_a_revision_was_submitted_under() {
     assert_eq!(polled["state"], detail["review"]["state"], "{polled}");
 }
 
+/// Publishing is not finishing: the item stays open through CI and review,
+/// so a CI failure or a comment has a session to come back to, until the
+/// operator closes the task.
 #[tokio::test]
-async fn publishing_closes_the_item_the_session_holds() {
+async fn publishing_leaves_the_item_open_until_the_operator_closes_the_task() {
     state::isolate();
     let f = fixture(test_name!(), WITH_GH).await;
     let item = tracon::corpus::work::create(
@@ -3333,15 +3336,28 @@ async fn publishing_closes_the_item_the_session_holds() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let closed = f.store.work_get(&item.id).unwrap().unwrap();
-    assert_eq!(closed.state, "closed");
-    assert_eq!(closed.closed_by_session.as_deref(), Some("s1"));
-    assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
-    // And the session says where its work went, not only the review.
+    let open = f.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(open.state, "open");
+    assert!(!f.event_kinds("s1").contains(&"work_closed".to_string()));
+    // The session says where its work went, not only the review.
     assert!(f.event_kinds("s1").contains(&"published".to_string()));
     let published = f.store.session_publications("s1").unwrap();
     assert_eq!(published.len(), 1, "{published:?}");
     assert_eq!(published[0].0, id);
+
+    // Closing the task is the operator's, and it is not a session's close.
+    let (status, body) = f
+        .call("POST", &format!("/api/work/{}/close", item.id), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let closed = f.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(closed.state, "closed");
+    assert_eq!(closed.closed_by_session, None);
+    assert!(f.event_kinds("s1").contains(&"work_closed".to_string()));
+    let (status, _) = f
+        .call("POST", &format!("/api/work/{}/close", item.id), None)
+        .await;
+    assert_ne!(status, StatusCode::OK, "a closed task is not closed twice");
 }
 
 /// An edited diff is a request for changes carrying a patch. What matters is

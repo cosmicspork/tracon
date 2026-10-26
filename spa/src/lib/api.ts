@@ -409,6 +409,8 @@ export const api = {
     call<Session>('POST', '/api/continuation/continue', body),
   abandonWork: (body: { item_id?: string; session_id?: string; reason: string }) =>
     call<{ abandoned: boolean }>('POST', '/api/continuation/abandon', body),
+  /** Close the task: the item closes and any session holding it ends. The operator's call alone. */
+  closeTask: (id: string) => call<WorkItem>('POST', `/api/work/${id}/close`),
   /** One prompt: the work item and the session that starts on it. */
   compose: (c: {
     channel: string

@@ -503,3 +503,167 @@ async fn continuing_an_attempt_hands_its_review_in_revision_to_the_next() {
     let decided = h.store.get_review("rv-done").unwrap().unwrap();
     assert_eq!(decided.session_id.as_deref(), Some("a"));
 }
+
+/// One look `follow` recorded at request #149, as `follow::tick` records it.
+fn followed(h: &Harness, session: &str, at: i64, snapshot: Value) {
+    h.store
+        .append_event(&NewEvent {
+            session_id: session.into(),
+            work_item_id: None,
+            kind: "forge_follow".into(),
+            ref_id: Some("pub1".into()),
+            payload: json!({
+                "review_id": "r1",
+                "url": "https://github.test/me/repo/pull/149",
+                "changes": [],
+                "snapshot": snapshot,
+            }),
+            at_ms: at,
+            mono_ms: 0,
+        })
+        .unwrap();
+}
+
+fn pr(state: &str, check: &str, comments: u64) -> Value {
+    json!({
+        "state": state, "draft": false, "checks": { "Backend Checks": check },
+        "decision": null, "comments": comments,
+    })
+}
+
+async fn next_of(h: &Harness, item: &str) -> Value {
+    let (st, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/work/{item}/continuation"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v
+}
+
+/// Once its change is published the task follows the request: the next
+/// action is what the request needs, the suspended attempt is what carries
+/// it on, and the task stays open until the operator closes it, which ends
+/// the suspended session holding it. Archiving it from Home changes none of
+/// that.
+#[tokio::test]
+async fn a_published_task_follows_its_request_until_the_operator_closes_it() {
+    let h = harness().await;
+    let item = new_item(&h, "Fix the invoices", vec![]);
+    let mut s = session_row("s", "n1", "personal");
+    s.state = "suspended".into();
+    s.work_item_id = Some(item.id.clone());
+    s.created_ms = 1;
+    s.archived_ms = Some(5);
+    h.store.insert_session(&s).unwrap();
+
+    followed(&h, "s", 10, pr("open", "pending", 0));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["kind"], "merge", "{v}");
+    assert_eq!(v["next"]["text"], "PR #149 is open · merge it");
+    assert_eq!(v["follow"]["label"], "PR #149");
+    assert_eq!(
+        v["actions"]["continue_from"], "s",
+        "an archived task is still continued"
+    );
+    assert_eq!(v["actions"]["close"], true);
+
+    followed(&h, "s", 20, pr("open", "failed", 0));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["kind"], "continue");
+    assert_eq!(
+        v["next"]["text"],
+        "CI failed on `Backend Checks` · continue"
+    );
+    assert_eq!(v["next"]["session_id"], "s");
+
+    followed(&h, "s", 30, pr("open", "passed", 2));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["text"], "2 new comments · continue");
+
+    // Following only reads: nothing it saw started a session.
+    assert_eq!(h.store.sessions_of_work_item(&item.id).unwrap().len(), 1);
+
+    followed(&h, "s", 40, pr("merged", "passed", 2));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["kind"], "close");
+    assert_eq!(v["next"]["text"], "PR #149 merged · close the task");
+    assert_eq!(
+        h.store.work_get(&item.id).unwrap().unwrap().state,
+        tracon_sync::work::OPEN,
+        "a merge does not close the task; the operator does"
+    );
+
+    let (st, v) = call(
+        &h.operator,
+        "POST",
+        &format!("/api/work/{}/close", item.id),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["state"], "closed");
+    let s = h.store.get_session("s").unwrap().unwrap();
+    assert_eq!(s.state, "closed");
+    assert_eq!(s.end_reason.as_deref(), Some("item_close"));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["kind"], "done");
+    assert_eq!(v["actions"]["close"], false);
+    assert_eq!(v["actions"]["continue_from"], Value::Null);
+}
+
+/// What arrived before the latest attempt started is not new to it: comments
+/// a continuation was carried on to answer are not counted again.
+#[tokio::test]
+async fn comments_are_new_since_the_latest_attempt_started() {
+    let h = harness().await;
+    let item = new_item(&h, "Fix the invoices", vec![]);
+    let mut first = ended("a", 1, "continued", None);
+    first.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&first).unwrap();
+    followed(&h, "a", 10, pr("open", "passed", 0));
+    followed(&h, "a", 20, pr("open", "passed", 3));
+    let mut second = session_row("b", "n1", "personal");
+    second.state = "suspended".into();
+    second.work_item_id = Some(item.id.clone());
+    second.created_ms = 25;
+    second.continued_from = Some("a".into());
+    h.store.insert_session(&second).unwrap();
+
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["text"], "PR #149 is open · merge it", "{v}");
+    followed(&h, "b", 30, pr("open", "passed", 4));
+    let v = next_of(&h, &item.id).await;
+    assert_eq!(v["next"]["text"], "1 new comment · continue");
+    assert_eq!(v["next"]["session_id"], "b");
+}
+
+/// Continue on a suspended attempt carries it on, told where its work
+/// landed, and the suspended one ends as continued.
+#[tokio::test]
+async fn continuing_a_suspended_attempt_carries_it_on_and_ends_it() {
+    let h = harness().await;
+    ready(&h).await;
+    let item = new_item(&h, "Fix the invoices", vec![]);
+    write_plan(&h, &item.id);
+    let mut s = session_row("s", "n1", "personal");
+    s.state = "suspended".into();
+    s.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&s).unwrap();
+
+    let (st, row) = call(
+        &h.operator,
+        "POST",
+        "/api/continuation/continue",
+        Some(json!({ "session_id": "s" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{row}");
+    assert_eq!(row["continued_from"], "s");
+    assert_eq!(row["work_item_id"], item.id.as_str());
+    let old = h.store.get_session("s").unwrap().unwrap();
+    assert_eq!(old.state, "closed");
+    assert_eq!(old.end_reason.as_deref(), Some("continued"));
+}

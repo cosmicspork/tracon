@@ -210,6 +210,11 @@ impl Audience {
                          execute session says what would settle a criterion",
                         work::CRITERIA_LINK
                     )
+                } else if name == work::WORK_CLOSE {
+                    format!(
+                        "{refusal}: the operator closes the item a session holds, once its \
+                         change is merged; until then it stays open for CI and review"
+                    )
                 } else if name == review::VERDICT {
                     format!(
                         "{refusal}: only a review session gives a verdict; an execute session \
@@ -274,8 +279,10 @@ impl Tools {
 
     /// What an execute session is not offered: everything else is its to use.
     /// A verdict and findings are a review session's account of someone
-    /// else's change.
-    pub const NOT_EXECUTE: &'static [&'static str] = &[review::VERDICT, review::FINDING];
+    /// else's change, and closing the item is the operator's call: the item
+    /// stays open through CI and review until they close it.
+    pub const NOT_EXECUTE: &'static [&'static str] =
+        &[review::VERDICT, review::FINDING, work::WORK_CLOSE];
 
     /// The tools a review session gets: what it needs to read, what it needs
     /// to exercise the candidate and show what it saw, its findings, and its
@@ -532,7 +539,7 @@ impl Tools {
         }
         // A workflow the node does not start is refused before the operator
         // is asked about it, not after.
-        if let Some(refusal) = self.refusal_before_asking(name, args) {
+        if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
             return Err(refusal);
         }
         if !plan_write {
@@ -585,7 +592,7 @@ impl Tools {
                 "consequential calls require a valid operation_id and canonical arguments".into(),
             );
         }
-        if let Some(refusal) = self.refusal_before_asking(name, args) {
+        if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
             return Err(refusal);
         }
         self.revalidate_consequential(ctx, name, args, gated.one_shot)?;
@@ -1187,8 +1194,9 @@ impl Tools {
     /// operator says: a workflow `[github] dispatch` does not list, a
     /// `ready` that is not true or false, or a document call that cannot run
     /// (`docs::refusal_before_asking`).
-    fn refusal_before_asking(&self, name: &str, args: &Value) -> Option<String> {
+    fn refusal_before_asking(&self, ctx: &CallContext, name: &str, args: &Value) -> Option<String> {
         match name {
+            work::WORK_UPDATE => work::refusal_before_asking(self.session.get()?, ctx, args),
             docs::DOC_WRITE | docs::DOC_DELETE => docs::refusal_before_asking(name, args),
             github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.live().github, args),
             // The card names the direction, so a `ready` it cannot read is

@@ -2224,6 +2224,19 @@ export type NextActionKind =
   | 'execute'
   | 'continue'
   | 'change_approach'
+  | 'merge'
+  | 'close'
+
+/** The request the work's change was published as, as the node last saw it. */
+export interface ContinuationFollow {
+  url: string
+  /** `PR #149`, or `MR !12` on GitLab. */
+  label: string
+  state: 'open' | 'merged' | 'closed'
+  failed: string[]
+  new_comments: number
+  changes_requested: boolean
+}
 
 /** The work-level continuation view, as the node derives it from recorded state. */
 export interface Continuation {
@@ -2253,5 +2266,7 @@ export interface Continuation {
     }[]
     shown: { id: string; session_id: string | null; title: string; head_sha: string; stale: boolean; created_ms: number }[]
   }
-  actions: { continue_from: string | null; abandon: boolean }
+  follow: ContinuationFollow | null
+  /** `close`: the task is open and the operator may close it. */
+  actions: { continue_from: string | null; abandon: boolean; close: boolean }
 }
