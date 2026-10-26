@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
-import { unifiedDiff, buildPatch, fileSection, baseFromDiff } from './patch'
+import { unifiedDiff, buildPatch, fileSection, baseFromDiff, openForEdit } from './patch'
 
 /**
  * Write `before`, apply the generated patch with git, return the result.
@@ -289,5 +289,25 @@ describe('rebuilding the base side from a diff', () => {
     // Hunk claims to start past the end of a one-line file.
     const bogus = '@@ -1,3 +40,3 @@\n context\n-gone\n+new\n'
     expect(baseFromDiff('one line\n', bogus)).toBeNull()
+  })
+})
+
+describe('openForEdit', () => {
+  test('a file whose diff fits its text opens on the rebuilt base', () => {
+    const section = '@@ -1,2 +1,2 @@\n-old\n+new\n same\n'
+    expect(openForEdit('new\nsame\n', section)).toEqual({ original: 'old\nsame\n', head: 'new\nsame\n' })
+  })
+
+  test('a new file opens on an empty base', () => {
+    expect(openForEdit('a\nb\n', '@@ -0,0 +1,2 @@\n+a\n+b\n')).toEqual({ original: '', head: 'a\nb\n' })
+  })
+
+  test('a file with no text is left out, saying why', () => {
+    expect(openForEdit(null, '@@ -1 +1 @@\n-a\n+b\n')).toEqual({ why: 'binary or deleted' })
+  })
+
+  test('a file with no section, or one that does not fit, is left out, saying why', () => {
+    expect(openForEdit('a\n', null)).toEqual({ why: 'no base to edit against' })
+    expect(openForEdit('one line\n', '@@ -1,3 +40,3 @@\n context\n-gone\n+new\n')).toEqual({ why: 'no base to edit against' })
   })
 })
