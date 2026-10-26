@@ -141,6 +141,10 @@ const HANDOFF_REFRESH_MS: i64 = 60_000;
 /// How long an unlisted review the owner could not be read for waits before
 /// the next listing asks again.
 const REREAD_BACKOFF_MS: i64 = 5 * 60_000;
+/// How many of an owner's reviews held gone here but never confirmed gone
+/// one listing starts reading again, so a peer with a long history of them
+/// is repaired over several listings rather than all at once.
+const GONE_REREADS_PER_LISTING: usize = 8;
 
 impl MeshClient {
     pub fn new(
@@ -1274,6 +1278,11 @@ impl MeshClient {
     /// is gone here only when the owner says it holds no such review; an
     /// owner that cannot be read leaves it as it was, to be asked again at
     /// the next listing.
+    ///
+    /// Copies an earlier build marked gone on absence alone, never confirmed
+    /// by the owner, are read again the same way, a few per listing
+    /// ([`GONE_REREADS_PER_LISTING`]): restored to what the owner holds, or
+    /// confirmed gone when it refuses, and then not asked about again.
     fn reread_unlisted_reviews(&self, sender: &str, channel: &str, listed: &[String]) {
         let unlisted = match self.store.absent_open_reviews(sender, channel, listed) {
             Ok(unlisted) => unlisted,
@@ -1282,11 +1291,26 @@ impl MeshClient {
                 return;
             }
         };
+        let unconfirmed = self
+            .store
+            .unconfirmed_gone_reviews(sender, channel)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "unconfirmed gone reviews not read");
+                Vec::new()
+            });
         let Some(this) = self.weak.upgrade() else {
             return;
         };
         let now = now_ms();
-        for id in unlisted {
+        let mut gone_asked = 0;
+        let asks = unlisted
+            .into_iter()
+            .map(|id| (id, false))
+            .chain(unconfirmed.into_iter().map(|id| (id, true)));
+        for (id, gone) in asks {
+            if gone && gone_asked >= GONE_REREADS_PER_LISTING {
+                break;
+            }
             {
                 let mut rereading = self.rereading.lock().unwrap();
                 if rereading.get(&id).is_some_and(|after| *after > now) {
@@ -1294,6 +1318,7 @@ impl MeshClient {
                 }
                 rereading.insert(id.clone(), i64::MAX);
             }
+            gone_asked += usize::from(gone);
             let (this, sender, channel) = (this.clone(), sender.to_string(), channel.to_string());
             tokio::spawn(async move {
                 let settled = this.reread_review(&sender, &channel, &id).await;
@@ -1356,6 +1381,11 @@ impl MeshClient {
                 tracing::debug!(%error, review = %id, from = %owner, "unlisted review not read from its owner; asked again later");
                 return false;
             }
+        }
+        // The owner has answered for it: a copy still gone here (one it
+        // refused, or whose answer could not be stored) is not asked again.
+        if let Err(error) = self.store.confirm_gone_mirrored_review(owner, id) {
+            tracing::warn!(%error, review = %id, "gone review not confirmed");
         }
         true
     }
