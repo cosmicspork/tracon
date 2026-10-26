@@ -709,6 +709,67 @@ async fn an_external_item_named_by_a_worktree_outside_the_roots_is_refused() {
     assert!(h.store.work_ready("work", None).unwrap().is_empty());
 }
 
+/// A fact an external harness retains about a repository is that project's,
+/// named by a worktree as an item is, and is recalled through the same
+/// worktree, not by every caller on the channel.
+#[tokio::test]
+async fn an_external_fact_named_by_its_worktree_is_its_projects() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("retain");
+    let h = harness_with(with_roots(&root)).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "work_discover",
+            json!({ "title": "find the project", "worktree": wt }),
+        ),
+    )
+    .await;
+    let project = outcome(&v).1["project_id"].clone();
+    assert!(project.is_string(), "{v}");
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "retain",
+            json!({ "kind": "fact", "body": "checks run with just check", "confidence": 0.9, "worktree": wt }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    let m = h
+        .store
+        .memory_get(out["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.scope, "project");
+    assert_eq!(m.scope_ref.as_deref(), project.as_str());
+
+    let recalled = |v: &Value| {
+        outcome(v)
+            .1
+            .to_string()
+            .contains("checks run with just check")
+    };
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("recall", json!({ "query": "checks", "worktree": wt })),
+    )
+    .await;
+    assert!(recalled(&v), "{v}");
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("recall", json!({ "query": "checks" })),
+    )
+    .await;
+    assert!(!recalled(&v), "{v}");
+}
+
 /// Without a worktree an external item belongs to the whole channel, and an
 /// unlabelled harness is still marked as one, not taken for the operator.
 #[tokio::test]

@@ -1078,7 +1078,9 @@ fn push_known(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<
         } else {
             "fact"
         };
-        let line = format!("- ({tag}) {}\n", m.body.trim());
+        // Continuation lines indented under the bullet: a memory with a list
+        // of its own otherwise reads as several memories, untagged.
+        let line = format!("- ({tag}) {}\n", m.body.trim().replace('\n', "\n  "));
         // A directive is the operator speaking. Keep it whole or leave it
         // out: a half-sentence can reverse what the operator asked for.
         if used + line.len() > KNOWN_CHARS {
@@ -1737,6 +1739,53 @@ mod tests {
         // The system orientation comes first and says so.
         assert!(i("## This node") < i("## Operator notes"));
         assert!(i("is tracon's own") < i("## This node"));
+    }
+
+    #[test]
+    fn a_multi_line_memory_stays_under_its_own_bullet() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .write_change(
+                "n",
+                "personal",
+                "memory",
+                ChangeOp::Upsert,
+                "d",
+                json!({
+                "channel": "personal", "scope": "global", "scope_ref": null, "kind": "directive",
+                "body": "Two rules:\n- one\n- two", "source_session": null, "source_node": null,
+                "confidence": 1.0, "state": "active", "created_ms": 1, "updated_ms": 1}),
+            )
+            .unwrap();
+        let facts = Facts {
+            node_name: "n",
+            node_id: "id",
+            backend: "local",
+            harness: "fake",
+            harness_version: "1",
+            channel: "personal",
+            project_id: None,
+            project_name: None,
+            tools: &[],
+            services: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: &crate::manifest::LaunchManifest::default(),
+            context: None,
+            egress: None,
+            forge_repo: None,
+            prepared: None,
+            stale_base: None,
+        };
+        let (text, _) = assemble(&store, &Policy::default(), &facts);
+        assert!(
+            text.contains("- (directive) Two rules:\n  - one\n  - two\n"),
+            "{text}"
+        );
     }
 
     #[test]

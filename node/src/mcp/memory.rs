@@ -22,6 +22,12 @@ pub const RECALL: &str = "recall";
 pub const RETAIN: &str = "retain";
 pub const AMEND: &str = "memory_amend";
 
+/// How a harness outside the boundary says which project it means: it has no
+/// session to have been launched on one.
+const WORKTREE: &str = "Only for a harness you run yourself: the absolute path of a worktree of \
+                        the repository you mean, which gives you its project scope. Its \
+                        repository must be under [external] repo_roots.";
+
 pub fn definitions() -> Vec<Value> {
     vec![
         json!({
@@ -36,6 +42,7 @@ pub fn definitions() -> Vec<Value> {
                     "query": { "type": "string" },
                     "kinds": { "type": "array", "items": { "type": "string", "enum": ["directive", "fact", "lesson", "episode", "document"] } },
                     "limit": { "type": "integer", "default": 8 },
+                    "worktree": { "type": "string", "description": WORKTREE },
                 },
                 "required": ["query"],
             },
@@ -45,7 +52,9 @@ pub fn definitions() -> Vec<Value> {
             "description": "Remember something for later sessions. A fact is a durable truth about \
                             the code (say how sure you are); a lesson is a generalised gotcha and is \
                             proposed to the operator before it is ever injected; an episode records \
-                            what happened and is only ever searched. Directives are the operator's. \
+                            what happened and is only ever searched. A confident project fact is told \
+                            to every later session on that project; a global one belongs to the \
+                            whole channel and is only recalled. Directives are the operator's. \
                             When a recalled memory is wrong or stale, pass its id as supersedes: the \
                             correction waits for the operator and, once promoted, replaces it.",
             "inputSchema": {
@@ -56,6 +65,7 @@ pub fn definitions() -> Vec<Value> {
                     "body": { "type": "string" },
                     "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.8 },
                     "supersedes": { "type": "string", "description": "The id of a memory (from recall) this one corrects. Without a scope, the correction takes that memory's." },
+                    "worktree": { "type": "string", "description": WORKTREE },
                 },
                 "required": ["kind", "body"],
             },
@@ -167,10 +177,27 @@ pub async fn call(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let project_id = ctx
-        .session_id()
-        .and_then(|id| access.store.get_session(id).ok().flatten())
-        .and_then(|s| s.project_id);
+    let worktree = args["worktree"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    // A session's project is the one it was launched on; a harness outside
+    // the boundary names one by a worktree of it, as `work_discover` does.
+    let project_id = match (ctx.is_external(), worktree) {
+        (false, Some(_)) => {
+            return Err("worktree is for a harness you run yourself; \
+                        this session's project is the one it was launched on"
+                .into())
+        }
+        (true, Some(path)) => Some(
+            super::work::external_project(&tools.cfg, &access.store, &ctx.channel, path).await?,
+        ),
+        (true, None) => None,
+        (false, None) => ctx
+            .session_id()
+            .and_then(|id| access.store.get_session(id).ok().flatten())
+            .and_then(|s| s.project_id),
+    };
     match name {
         RECALL => {
             let query = args["query"].as_str().unwrap_or("").trim();
@@ -268,7 +295,8 @@ pub async fn call(
                     Some(p) => Some(p.clone()),
                     None if ctx.is_external() => {
                         return Err(
-                            "a harness you run yourself has no project identity; use scope global"
+                            "a harness you run yourself names its project with worktree; \
+                             without one, use scope global"
                                 .into(),
                         )
                     }

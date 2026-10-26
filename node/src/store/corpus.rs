@@ -1527,7 +1527,10 @@ impl Store {
     }
 
     /// What a session is always told: the channel's directives, global and for
-    /// its project, plus its high-confidence facts. Empty query, no FTS.
+    /// its project, plus its project's high-confidence facts. A fact retained
+    /// for the whole channel is not told to every session on it: it is about
+    /// whatever its author was working on, which is rarely this session's
+    /// repository, and `recall` still finds it. Empty query, no FTS.
     pub fn directives_for(
         &self,
         channel: &str,
@@ -1537,8 +1540,9 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT * FROM memory WHERE channel = ?1 AND deleted = 0
                AND state IN ('active', 'promoted')
-               AND (scope = 'global' OR scope = 'client' OR (scope = 'project' AND scope_ref = ?2))
-               AND (kind = 'directive' OR (kind = 'fact' AND confidence >= ?3))
+               AND ((kind = 'directive'
+                     AND (scope = 'global' OR scope = 'client' OR (scope = 'project' AND scope_ref = ?2)))
+                 OR (kind = 'fact' AND confidence >= ?3 AND scope = 'project' AND scope_ref = ?2))
              ORDER BY CASE kind WHEN 'directive' THEN 0 ELSE 1 END, confidence DESC, created_ms DESC",
         )?;
         let rows = stmt
@@ -2284,6 +2288,23 @@ mod tests {
         assert_eq!(eps.len(), 1);
         assert_eq!(eps[0].kind, "episode");
 
+        s.write_change(
+            "A",
+            "personal",
+            "memory",
+            ChangeOp::Upsert,
+            "m-fact-channel",
+            mem(
+                KIND_FACT,
+                "global",
+                None,
+                "usage is counted at the gateway",
+                0.9,
+                "active",
+                now,
+            ),
+        )
+        .unwrap();
         let always = s.directives_for("personal", Some("p1")).unwrap();
         let ids: Vec<&str> = always.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["m-dir", "m-fact-new", "m-fact-old"]);

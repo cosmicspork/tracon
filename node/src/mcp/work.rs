@@ -368,7 +368,7 @@ fn project_arg(
 /// The project a harness outside the boundary means by `path`: the
 /// repository of that worktree, found as `submit_review` finds it and named as
 /// a session launched on it would name it, so its items sit with theirs.
-async fn external_project(
+pub(crate) async fn external_project(
     cfg: &Config,
     store: &crate::store::Store,
     channel: &str,
