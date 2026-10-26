@@ -16,7 +16,6 @@
   import Session from './routes/Session.svelte'
   import Enroll from './routes/Enroll.svelte'
   import Login from './routes/Login.svelte'
-  import Evidence from './routes/Evidence.svelte'
   import DeviceApproval from './routes/DeviceApproval.svelte'
   import PasskeyOffer from './components/PasskeyOffer.svelte'
   import StepUpPrompt from './components/StepUpPrompt.svelte'
@@ -117,16 +116,14 @@
             ? 'tasks'
             : router.path.startsWith('/sessions')
               ? 'sessions'
-              : router.path.startsWith('/evidence')
-                ? 'evidence'
-                : router.path === '/usage'
-                  ? 'usage'
-                  : router.path === '/more'
-                    ? 'more'
-                    : 'home'
+              : router.path === '/usage'
+                ? 'usage'
+                : router.path === '/more'
+                  ? 'more'
+                  : 'home'
   )
   /** The phone's More tab stands for every entry its bar has no room for. */
-  const more = $derived(['memories', 'evidence', 'usage', 'settings', 'more'].includes(nav))
+  const more = $derived(['memories', 'usage', 'settings', 'more'].includes(nav))
   const cannotRun = $derived(servingBanner(store.nodes))
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const staleVersion = $derived(
@@ -188,10 +185,6 @@
     <a href="/memories" class:on={nav === 'memories'}>
       <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
       <span class="lbl">Memories</span>
-    </a>
-    <a href="/evidence" class:on={nav === 'evidence'}>
-      <svg viewBox="0 0 24 24"><path d="M9 4h6l1 3H8z" /><path d="M6 7h12v13H6z" /><path d="M9 12l2 2 4-4" /></svg>
-      <span class="lbl">Evidence</span>
     </a>
     <a href="/usage" class:on={nav === 'usage'}>
       <svg viewBox="0 0 24 24"><path d="M5 19V11M10 19V5M15 19v-6M20 19V8" /></svg>
@@ -279,8 +272,6 @@
       <Work />
     {:else if screen.name === 'more'}
       <More />
-    {:else if screen.name === 'evidence'}
-      <Evidence />
     {:else if screen.name === 'doc'}
       <Doc channel={screen.channel} slug={screen.slug} edit={screen.edit} />
     {:else if screen.name === 'docs'}

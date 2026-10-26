@@ -3,17 +3,16 @@
   import ContextPanel from '../components/ContextPanel.svelte'
   import ContinuationPanel from '../components/ContinuationPanel.svelte'
   import CriteriaPanel from '../components/CriteriaPanel.svelte'
-  import EvidenceLinks from '../components/EvidenceLinks.svelte'
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
-  import { formatAge, formatBudget } from '../lib/format'
+  import { formatAge } from '../lib/format'
   import { isNotFound } from '../lib/load'
   import { renderMessage } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
-  import type { Brief, Criteria, Project, Session, WorkView } from '../lib/types'
+  import type { Brief, Criteria, Project, WorkView } from '../lib/types'
   import {
     blockersLine,
     pickableProjects,
@@ -30,7 +29,6 @@
   let item = $state<WorkView | null>(null)
   let brief = $state<Brief | null>(null)
   let criteria = $state<Criteria | null>(null)
-  let sessions = $state<Session[]>([])
   let discovered = $state<{ id: string; title: string; state: string }[]>([])
   let titles = $state<Map<string, string>>(new Map())
   let error = $state<string | null>(null)
@@ -53,7 +51,6 @@
       item = d.item
       brief = d.brief
       criteria = d.criteria
-      sessions = d.sessions
       discovered = d.discovered
       if (d.item) {
         const [all, known] = await Promise.all([
@@ -140,10 +137,6 @@
       editing = false
     })
   }
-  function phaseLabel(s: Session): string {
-    const end = s.end_reason === 'phase_done' ? (s.phase === 'plan' ? 'planned' : 'reviewed') : s.end_reason ?? s.state
-    return `${s.phase} ${short(s.id)} · ${end}`
-  }
 </script>
 
 {#if !loaded}
@@ -165,6 +158,10 @@
       <small>{short(item.id, 12)} · {item.channel} · added {formatAge(item.created_ms, clock.now)}</small>
     </span>
   </div>
+
+  <!-- Everything linked to the item, and what to do next, under its title:
+       the sessions are in the links bar, not a row of their own. -->
+  <ContinuationPanel itemId={item.id} onchange={load} />
 
   <dl class="kv">
     <dt>Priority</dt>
@@ -195,14 +192,6 @@
       <dt>Discovered by</dt>
       <dd class="m">lane {item.discovered_by_lane} · a harness you run yourself</dd>
     {/if}
-    <dt>Sessions</dt>
-    <dd class="m">
-      {#if sessions.length === 0}none yet{:else}
-        {#each sessions as s (s.id)}
-          <span class="dep"><a href="/sessions/{s.id}">{phaseLabel(s)}</a> · {formatBudget(s.tokens_used, s.budget_tokens)}</span>
-        {/each}
-      {/if}
-    </dd>
     {#if item.closed_by_session}
       <dt>Closed</dt>
       <dd class="m">by session <a href="/sessions/{item.closed_by_session}">{short(item.closed_by_session)}</a> · {formatAge(item.updated_ms, clock.now)} ago</dd>
@@ -247,15 +236,9 @@
     <div class="body md">{@html renderMessage(item.body)}</div>
   {/if}
 
-  <ContinuationPanel itemId={item.id} showIntent={false} onchange={load} />
-
   <BriefPanel {item} {brief} onchange={load} />
   <CriteriaPanel {item} {criteria} onchange={load} />
   <ContextPanel {item} />
-
-  <!-- One list for the item: the node's work item filter covers every
-       candidate its sessions captured, and each card names its session. -->
-  <EvidenceLinks workItemId={item.id} channel={item.channel} />
 
   {#if discovered.length}
     <div class="h5">Discovered from this item <b>{discovered.length}</b></div>

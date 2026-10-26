@@ -79,7 +79,6 @@ import type {
   WorkItem,
   WorkView,
   Project,
-  CandidateDetail,
   UsageTotal,
   ManifestView,
   ReviewerView,
@@ -1006,11 +1005,4 @@ export const api = {
   /** What the gateway counted, grouped; `params` is `usageParams`'s query. */
   usage: (params: URLSearchParams) =>
     call<{ since_ms: number; until_ms: number | null; totals: UsageTotal[] }>('GET', `/api/usage?${params}`),
-  candidateDetail: (candidateId: string, source: { owner?: string; channel?: string } = {}) => {
-    const query = new URLSearchParams()
-    if (source.owner) query.set('owner', source.owner)
-    if (source.channel) query.set('channel', source.channel)
-    const suffix = query.size ? `?${query}` : ''
-    return call<CandidateDetail>('GET', `/api/evidence/candidates/${encodeURIComponent(candidateId)}/summary${suffix}`)
-  },
 }

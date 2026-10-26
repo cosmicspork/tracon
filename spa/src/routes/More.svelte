@@ -10,10 +10,6 @@
     <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
     <span><b>Memories</b><small>What sessions learned, kept for the next one</small></span>
   </a>
-  <a href="/evidence">
-    <svg viewBox="0 0 24 24"><path d="M9 4h6l1 3H8z" /><path d="M6 7h12v13H6z" /><path d="M9 12l2 2 4-4" /></svg>
-    <span><b>Evidence</b><small>Captured changes and where they came from</small></span>
-  </a>
   <a href="/usage">
     <svg viewBox="0 0 24 24"><path d="M5 19V11M10 19V5M15 19v-6M20 19V8" /></svg>
     <span><b>Usage</b><small>Sessions, tokens and cost by channel</small></span>

@@ -319,6 +319,16 @@ impl Supervisor {
         self
     }
 
+    /// A first prompt that is the node's kickoff for the phase, not the
+    /// operator's words: its `user_prompt` says so, so the transcript does
+    /// not show it as something the operator typed.
+    pub fn with_kickoff(mut self, kickoff: bool) -> Self {
+        if kickoff {
+            self.next_prompt_origin = Some("kickoff");
+        }
+        self
+    }
+
     /// The node's view of what its sessions wait on: the checks it runs and
     /// what each session has been told. Without it a supervisor still sees
     /// what the store holds.

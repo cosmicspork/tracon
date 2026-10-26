@@ -5,6 +5,9 @@ test('old top-level addresses lead to where the screen moved', () => {
   expect(redirect('/metrics')).toBe('/usage')
   expect(redirect('/work')).toBe('/tasks')
   expect(redirect('/nodes')).toBe('/settings#mesh')
+  // Evidence is gone: a bookmark to it, or to one of its candidates, opens the tasks.
+  expect(redirect('/evidence')).toBe('/tasks')
+  expect(redirect('/evidence', '?candidate=abc%3Apersonal')).toBe('/tasks')
 })
 
 test('a task bookmarked under Work opens the same task', () => {

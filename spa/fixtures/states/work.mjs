@@ -1,11 +1,10 @@
-// The work ledger (/work), one work item (/work/:id) with its continuation,
-// brief, criteria, context and evidence panels, and the composer a work item
+// The work ledger (/work), one work item (/work/:id) with its links bar and
+// continuation, brief, criteria and context panels, and the composer a work item
 // sends a phase to (/?item=…&phase=…) with its readiness banner and preparation
 // preview.
 //
 // Every item state overrides /api/work (the item page reads it for dependency
-// titles), /api/work/:id, its continuation and context, and the evidence list,
-// so no state leans on the baseline's single item.
+// titles), /api/work/:id, and its continuation and context, so no state leans on the baseline's single item.
 
 import { readFileSync } from 'node:fs'
 
@@ -118,7 +117,6 @@ const continuation = (it, o) => ({
 })
 
 const noContext = { slug: '', selection: null, attempts: [], roles: ['brief', 'research', 'decisions', 'constraints', 'documents'] }
-const noEvidence = { items: [], next_before: null }
 
 // The node's order: open items by priority desc then age, closed by last update.
 const order = (items) => [
@@ -157,7 +155,6 @@ function itemApi(it, o = {}) {
     },
     [`${path}/continuation`]: o.continuation ?? (it === planned ? plannedContinuation : continuation(it)),
     [`${path}/context`]: o.context ?? noContext,
-    '/api/evidence/candidates': o.evidence ?? noEvidence,
     '/api/sessions': sessionsWithRun,
     ...(o.api ?? {}),
   }
@@ -335,33 +332,6 @@ const contextFull = (it) => ({
     },
   ],
 })
-
-const evidence = (it, n = 2) => ({
-  items: Array.from({ length: n }, (_, i) => ({
-    candidate: {
-      id: `cand-${i}`,
-      head_sha: ['e4b19c07a2d35f86e4b1', '7a0c2e9f41d8b36c5e2a', '19d4f7a3c0e2b85d6f41'][i % 3],
-      channel: it.channel,
-      owner_session_id: SID.exec2,
-      owner_node_id: null,
-      source_kind: 'review',
-      captured_ms: -(50 + i * 180) * M,
-    },
-    work_items: [{ id: it.id, title: it.title, state: it.state }],
-    more_work_items: false,
-    reviews: [{ id: `rv-${i}`, title: `${i ? 'wip: ' : ''}${it.title.toLowerCase()}`, state: i ? 'changes_requested' : it.state === 'closed' ? 'approved' : 'pending' }],
-    more_reviews: false,
-  })),
-  next_before: null,
-})
-
-// Evidence by the session that captured it. An item page asks once for the
-// item, which the node answers with every candidate its sessions captured; a
-// session's own page asks for that session.
-const evidenceBy = (bySession) => (req) =>
-  req.query.session_id
-    ? (bySession[req.query.session_id] ?? noEvidence)
-    : { items: Object.values(bySession).flatMap((page) => page.items), next_before: null }
 
 // The planned, worked-on item most panels are shown on.
 const planned = item({
@@ -668,7 +638,7 @@ const states = [
     route: `/tasks/${ID.export}`,
     title: 'New item: no plan, nothing run, no brief or context',
     since: '#385',
-    note: 'continuation says plan it, and nothing else, since Execute is disabled with "needs a plan"; empty brief, criteria, context and evidence; discovered-from line',
+    note: 'continuation says plan it, and nothing else, since Execute is disabled with "needs a plan"; empty brief, criteria and context; discovered-from line',
     api: itemApi(ledger.find((i) => i.id === ID.export), {
       continuation: continuation(ledger.find((i) => i.id === ID.export), { decisions: { plan: null, brief: null, answered: [] } }),
     }),
@@ -727,9 +697,9 @@ const states = [
     id: 'work-item-planned',
     area: 'work',
     route: `/tasks/${ID.limits}`,
-    title: 'Planned item with brief, criteria, context, evidence',
+    title: 'Planned item with brief, criteria and context',
     since: '#385',
-    note: 'continuation "The plan is written: execute it." — the node offers continue_from the plan session, so the primary button is Continue, which the node carries on as an execute session in the plan\'s workspace. Brief, criteria, context populated; evidence empty (only a plan ran)',
+    note: 'continuation "The plan is written: execute it." — the node offers continue_from the plan session, so the primary button is Continue, which the node carries on as an execute session in the plan\'s workspace. Links bar: Plan doc and the plan session. Brief, criteria, context populated',
     api: itemApi(planned, {
       sessions: [planSession],
       brief: brief(planned),
@@ -839,7 +809,7 @@ const states = [
     route: `/tasks/${ID.limits}`,
     title: 'Cut off by a node restart: continue offered',
     since: '#375',
-    note: 'Continue primary, Change approach secondary, Abandon; attempt reads "node restarted"',
+    note: 'Continue primary, Change approach secondary, Abandon; hovering the session in the links bar reads "node restarted"',
     api: itemApi(planned, {
       sessions: [planSession, session({ id: SID.exec1, phase: 'execute', model: 'opus', state: 'closed', end_reason: 'node_restart', tokens_used: 512_000, budget_tokens: 2_000_000, created_ms: -6 * H })],
       brief: brief(planned),
@@ -859,7 +829,7 @@ const states = [
     route: `/tasks/${ID.limits}`,
     title: 'Attempt failed: change approach comes first',
     since: '#385',
-    note: 'next "change_approach" edge, Change approach primary, no plain Continue; continued lineage "continues 8b4e0d2a"; reviews in evidence',
+    note: 'next "change_approach" edge, Change approach primary, no plain Continue; links bar lists three Sessions and Review changes requested',
     api: itemApi(planned, {
       sessions: [
         planSession,
@@ -869,7 +839,6 @@ const states = [
       brief: brief(planned),
       criteria: criteria(planned),
       context: contextFull(planned),
-      evidence: evidenceBy({ [SID.exec2]: evidence(planned, 3) }),
       continuation: continuation(planned, {
         attempts: [
           planAttempt,
@@ -950,7 +919,7 @@ const states = [
     route: `/tasks/${ID.limits}`,
     title: 'Attempt ended because the provider was exhausted',
     since: '#384',
-    note: 'attempt state reads "provider exhausted"; next asks for a change of approach',
+    note: 'hovering the session in the links bar reads "provider exhausted"; next asks for a change of approach',
     api: itemApi(planned, {
       sessions: [planSession, session({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'provider_exhausted', last_error: 'anthropic: weekly limit reached', tokens_used: 940_000, budget_tokens: 2_000_000, created_ms: -5 * H })], brief: brief(planned),
       continuation: continuation(planned, {
@@ -967,7 +936,7 @@ const states = [
     route: `/tasks/${ID.cookies}`,
     title: 'Closed by its session, published',
     since: '#385',
-    note: 'green head, Closed by session line, next "done", published review in evidence, Reopen only',
+    note: 'green head, Closed by session line, next "done"; links bar with Plan doc (no Task link on its own page), three Sessions, Review published, "PR #212 merged" and the branch; Reopen only',
     api: (() => {
       const it = ledger.find((i) => i.id === ID.cookies)
       return itemApi(it, {
@@ -980,7 +949,6 @@ const states = [
           { id: ID.export, title: 'Nightly export of the docs corpus to object storage', state: 'open' },
           { id: ID.docsync, title: 'Sync document edits between peers', state: 'closed' },
         ],
-        evidence: evidenceBy({ [SID.exec2]: evidence(it, 1) }),
         continuation: continuation(it, {
           attempts: [
             attempt({ id: SID.plan, created_ms: -4 * D }),
@@ -990,7 +958,7 @@ const states = [
           next: { kind: 'done', text: 'The item is closed; nothing is left to do.', session_id: null },
           workspace: { id: SID.review.slice(0, 12), branch: 'feat/session-cookies', session_id: SID.review },
           evidence: {
-            reviews: [{ id: 'rv-9', session_id: SID.exec2, title: 'feat(auth): session cookies over remember-me tokens', state: 'approved', verdict_reason: null, publish_result: 'published as #212', head_sha: '19d4f7a3c0e2', created_ms: -30 * H }],
+            reviews: [{ id: 'rv-9', session_id: SID.exec2, title: 'feat(auth): session cookies over remember-me tokens', state: 'published', verdict_reason: null, publish_result: 'https://github.com/cosmic-example/orbit/pull/212', forge_state: 'merged', head_sha: '19d4f7a3c0e2', created_ms: -30 * H }],
             shown: [],
           },
           actions: { continue_from: null, abandon: false },
@@ -1058,7 +1026,7 @@ const states = [
     route: `/tasks/${ID.long}`,
     title: 'Long title, body, deps, branch and many attempts',
     since: '#385',
-    note: 'wrapping of the head, Waits on list, attempt rows, workspace branch and the discovered chain',
+    note: 'wrapping of the head, Waits on list, the links bar wrapping its sessions and long branch, and the discovered chain',
     api: (() => {
       const deps = ledger.filter((l) => l.state === 'open' && l.id !== ID.long).map((l) => l.id)
       const it = item({

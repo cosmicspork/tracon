@@ -1871,7 +1871,8 @@ impl Manager {
         {
             self.store.set_draft(&id, Some(prompt))?;
         }
-        if kickoff.is_some() {
+        let from_node = kickoff.is_some();
+        if from_node {
             spec.initial_prompt = kickoff;
         }
         let row = self.store.get_session(&id)?.ok_or(SessionError::NotFound)?;
@@ -1889,6 +1890,7 @@ impl Manager {
                     adapter,
                     started,
                     (model_source, harness_source),
+                    from_node,
                 )
                 .await
             {
@@ -2036,6 +2038,7 @@ impl Manager {
         adapter: Arc<dyn HarnessAdapter>,
         started: Instant,
         (model_source, harness_source): (&'static str, &'static str),
+        kickoff: bool,
     ) -> anyhow::Result<()> {
         if !self.startable(id)? {
             return Ok(());
@@ -2712,7 +2715,8 @@ impl Manager {
             None => sup,
         }
         .with_checks(environment.checks)
-        .with_waits(self.waits());
+        .with_waits(self.waits())
+        .with_kickoff(kickoff);
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let waits = self.waits();
