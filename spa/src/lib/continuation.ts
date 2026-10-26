@@ -43,3 +43,12 @@ export function verbs(c: Continuation): { continue: boolean; changeApproach: boo
     abandon: c.actions.abandon,
   }
 }
+
+/** What the interface says about closing the task, or null when it is closed
+ *  already. Once the followed request is merged, closing is what is left, and
+ *  the offer says so prominently. */
+export function closeOffer(c: Continuation): { prominent: boolean; text: string | null } | null {
+  if (!c.actions.close) return null
+  const merged = c.follow?.state === 'merged'
+  return { prominent: merged, text: merged && c.follow ? `${c.follow.label} merged` : null }
+}
