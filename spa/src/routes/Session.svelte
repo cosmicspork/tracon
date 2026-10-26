@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte'
   import Log from '../components/Log.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import OutcomePanel from '../components/OutcomePanel.svelte'
@@ -82,6 +83,15 @@
   }
 
   const unreachable = $derived(session ? unreachableReason(store.nodes, store.mesh, session.node_id) : null)
+
+  // The panel renders below the log, and an in-app hash change does not
+  // scroll: bring it into view whenever a link opens it.
+  const shown = $derived(session !== undefined)
+  $effect(() => {
+    if (!shown || router.hash !== '#authority') return
+    void router.revision
+    void tick().then(() => document.getElementById('authority')?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+  })
 
   $effect(() => {
     void store.open(id)
@@ -346,6 +356,9 @@
         >manifest {session.manifest_digest.slice(0, 8)}</span
       >
     {/if}
+    <a class="mono" href="#authority" title="where it runs, what it can reach, what it must ask about and what is refused"
+      >what it may do</a
+    >
     {#if controls?.resume}
       <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
         >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
@@ -533,10 +546,13 @@
     <PermissionCard permission={p} inline />
   {/each}
 
-  <!-- Not part of the page: only the "why this is asked" link on a
-       permission card opens it, so the answer is one tap from the request. -->
+  <!-- Not part of the page until asked for: the header's "what it may do" or
+       a permission card's "why this is asked" opens it. Keyed on navigation so
+       following either link again reopens a panel the operator collapsed. -->
   {#if router.hash === '#authority'}
-    <SessionAuthorityPanel {id} open />
+    {#key router.revision}
+      <SessionAuthorityPanel {id} open />
+    {/key}
   {/if}
 
   {#if error}
