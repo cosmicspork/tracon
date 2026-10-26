@@ -1303,6 +1303,89 @@ async fn a_peers_failed_publication_is_shown_here_until_its_owner_clears_it() {
     assert!(card(&v)["publication_failed"].is_null(), "{v}");
 }
 
+/// Builds before the owner was asked wrote a peer's review off as gone as soon
+/// as the owner's listing left it out, decided ones included. Such a copy is
+/// read again from the owner at its next listing: restored, outcome and
+/// checks, when the owner holds it, and confirmed gone when the owner refuses,
+/// after which it is not asked about again.
+#[tokio::test]
+async fn a_review_an_earlier_build_marked_gone_is_restored_or_confirmed_once() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let url = "https://github.test/o/r/pull/150";
+    let checks = json!([{ "command": "just check", "ok": true }]).to_string();
+    // Approved and published on B, the owner.
+    let decided = |id: &str| {
+        let mut r = held_review(id, &bi);
+        r.state = "approved".into();
+        r.publish_result = Some(url.into());
+        r.checks_json = Some(checks.clone());
+        r
+    };
+    // Held on A as an earlier build left it: gone, with none of the outcome.
+    let written_off = |id: &str| {
+        let mut r = held_review(id, &bi);
+        r.state = "gone".into();
+        r
+    };
+    let both = |id: &str| {
+        b.store.insert_review(&decided(id)).unwrap();
+        a.store.insert_review(&written_off(id)).unwrap();
+    };
+    let listing = || {
+        b.bus.publish(tracon::stream::Frame::Reviews {
+            waiting: b.store.open_reviews().unwrap(),
+        })
+    };
+    let approved_on_a = |id: &str| {
+        a.store
+            .get_review(id)
+            .unwrap()
+            .is_some_and(|r| r.state == "approved")
+    };
+
+    let restored = uuid::Uuid::now_v7().to_string();
+    both(&restored);
+    let refused = uuid::Uuid::now_v7().to_string();
+    a.store.insert_review(&written_off(&refused)).unwrap();
+    listing();
+
+    wait_for("A to restore the review B decided", || {
+        approved_on_a(&restored)
+    })
+    .await;
+    let mirrored = a.store.get_review(&restored).unwrap().unwrap();
+    assert_eq!(mirrored.publish_result.as_deref(), Some(url));
+    assert_eq!(mirrored.checks_json.as_deref(), Some(checks.as_str()));
+    wait_for("A to confirm the review B refuses gone", || {
+        !a.store
+            .unconfirmed_gone_reviews(&bi, "personal")
+            .unwrap()
+            .contains(&refused)
+    })
+    .await;
+    assert_eq!(a.store.get_review(&refused).unwrap().unwrap().state, "gone");
+
+    // B now holds it, so A asking again would restore it. Two more listings,
+    // each with a review of its own to restore, show A was not asked again.
+    b.store.insert_review(&decided(&refused)).unwrap();
+    for n in 0..2 {
+        let later = uuid::Uuid::now_v7().to_string();
+        both(&later);
+        listing();
+        wait_for(&format!("A to restore later review {n}"), || {
+            approved_on_a(&later)
+        })
+        .await;
+    }
+    assert_eq!(
+        a.store.get_review(&refused).unwrap().unwrap().state,
+        "gone",
+        "a review its owner confirmed gone is not asked about again"
+    );
+}
+
 /// A peer's session is checked on the node that runs it, and its outcome
 /// here says what that node's checks found on the review's commit; a node
 /// that cannot be read is said to be, never shown as one where no check ran.

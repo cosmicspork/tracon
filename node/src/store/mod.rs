@@ -2014,12 +2014,46 @@ impl Store {
     }
 
     /// A peer's review its owner says it does not hold is gone here, if it is
-    /// still open. Returns whether it was.
+    /// still open, and confirmed so. Returns whether it was.
     pub fn gone_mirrored_review(&self, node_id: &str, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let now = now_ms();
         let n = conn.execute(
-            "UPDATE review SET state='gone', updated_ms=?3 WHERE id=?1 AND node_id=?2
-             AND state IN ('new','claimed','revising','publishing')",
+            "UPDATE review SET state='gone', updated_ms=?3, gone_confirmed_ms=?3
+             WHERE id=?1 AND node_id=?2 AND state IN ('new','claimed','revising','publishing')",
+            rusqlite::params![id, node_id, now],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Code reviews of `node_id` in `channel` held here as gone that the owner
+    /// never confirmed gone, the most recently changed first. Earlier builds
+    /// wrote a peer's review off as soon as the owner's listing left it out,
+    /// which deciding it also does, so these are read again from the owner
+    /// once. A report is gone at once by design and is not among them.
+    pub fn unconfirmed_gone_reviews(&self, node_id: &str, channel: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM review WHERE node_id=?1 AND channel=?2 AND state='gone'
+             AND gone_confirmed_ms IS NULL AND kind != ?3
+             ORDER BY updated_ms DESC",
+        )?;
+        let ids = stmt
+            .query_map(rusqlite::params![node_id, channel, reports::KIND], |r| {
+                r.get(0)
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
+    }
+
+    /// The owner of a peer's review answered for it, so a copy still gone
+    /// here is gone for good and is not asked about again. Returns whether a
+    /// copy was confirmed.
+    pub fn confirm_gone_mirrored_review(&self, node_id: &str, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET gone_confirmed_ms=?3 WHERE id=?1 AND node_id=?2
+             AND state='gone' AND gone_confirmed_ms IS NULL",
             rusqlite::params![id, node_id, now_ms()],
         )?;
         Ok(n == 1)

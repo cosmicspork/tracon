@@ -1750,6 +1750,14 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE review ADD COLUMN publication_failed TEXT;
     "#,
+    // 76: when a peer's review held here as `gone` was confirmed gone by its
+    // owner. Builds before this one marked a peer's code review gone as soon
+    // as the owner's listing left it out, which a decided review also does;
+    // a gone copy with this NULL is read again from its owner once, and
+    // either restored to what the owner holds or confirmed here.
+    r#"
+    ALTER TABLE review ADD COLUMN gone_confirmed_ms INTEGER;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered
