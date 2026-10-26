@@ -728,6 +728,51 @@ async fn an_external_review_publishes_from_the_worktree_it_names() {
     assert!(!log.contains("tracon-publication"), "{log}");
 }
 
+/// An approval whose request goes away mid-publish (a reload, a dropped
+/// connection) still finishes and records where it landed: cut off between
+/// opening the change and writing it down, the attempt would read as running
+/// for as long as the node did, and neither a retry nor a reconcile could
+/// settle it.
+#[tokio::test]
+async fn an_approval_dropped_mid_publish_still_records_the_change_it_opened() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    std::fs::write(
+        f.dir.join("bin/gh"),
+        "#!/bin/sh\n\
+         { echo \"ARGS: $*\"; echo \"GH_TOKEN=$GH_TOKEN\"; } >> \"$(dirname \"$0\")/../gh.log\"\n\
+         sleep 1\n\
+         echo https://github.test/pull/1\n",
+    )
+    .unwrap();
+    let id = f.submit().await;
+
+    let verdict = format!("/api/reviews/{id}/verdict");
+    let approve = f.call("POST", &verdict, Some(json!({ "verdict": "approve" })));
+    let gone = tokio::time::timeout(std::time::Duration::from_millis(300), approve).await;
+    assert!(
+        gone.is_err(),
+        "the request was meant to be dropped mid-publish"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let review = loop {
+        let review = f.store.get_review(&id).unwrap().unwrap();
+        if review.state == "approved" || std::time::Instant::now() > deadline {
+            break review;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(review.state, "approved", "{review:?}");
+    assert_eq!(
+        review.publish_result.as_deref(),
+        Some("https://github.test/pull/1")
+    );
+    let publications = f.store.publications_for_review(&id).unwrap();
+    assert_eq!(publications.len(), 1);
+    assert_eq!(publications[0].state, "opened", "{:?}", publications[0]);
+}
+
 #[tokio::test]
 async fn approving_publishes_the_approved_bytes_with_the_brokered_credential() {
     state::isolate();
