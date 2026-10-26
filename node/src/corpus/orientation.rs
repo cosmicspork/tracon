@@ -600,10 +600,11 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
                  is shown on the review and never published, and the operator does not read \
                  your final chat message, so the summary goes there. A screenshot, a page or \
                  files for the operator go to `show_work`. Work you find but should not do now \
-                 goes to `work_discover`, \
-                 against this item. Submitting is not closing: `work_close` closes the item and \
-                 ends this session, so call it only when the item itself is finished, not \
-                 while its change is under review.\n\n",
+                 goes to `work_discover`, against this item. Submitting is not closing, and \
+                 closing is not yours: the item stays open through CI and review until the \
+                 operator closes it. Once the change is published and this session sits idle, \
+                 the node suspends it, and it is carried on when a CI failure or a review \
+                 comment needs an answer.\n\n",
             );
             if let Some(plan) = facts.plan_body {
                 out.push_str("### Plan\n\n");
@@ -2505,11 +2506,7 @@ mod tests {
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
 
-        for tool in [
-            crate::mcp::review::SUBMIT,
-            crate::mcp::work::WORK_DISCOVER,
-            crate::mcp::work::WORK_CLOSE,
-        ] {
+        for tool in [crate::mcp::review::SUBMIT, crate::mcp::work::WORK_DISCOVER] {
             assert!(
                 text.contains(&format!("`{tool}`")),
                 "{tool} not named:\n{text}"
@@ -2524,6 +2521,10 @@ mod tests {
         // Closing is not what submitting does, and the roadmap moves work
         // further away from closing merely because a change was published.
         assert!(text.contains("Submitting is not closing"), "{text}");
+        // Nor is closing the session's to do: the operator closes the item
+        // once its change is merged, so the tool is not named at all.
+        assert!(!text.contains("`work_close`"), "{text}");
+        assert!(text.contains("until the operator closes it"), "{text}");
 
         // The review's prose is the pull request's description: the agent is
         // told who reads it, and where a note for the operator goes instead.
@@ -2853,6 +2854,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         };
         store
             .insert_review_with_revision(&row, &revision(store, id, head))

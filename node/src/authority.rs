@@ -803,30 +803,10 @@ pub async fn publish_review(
                     serde_json::json!({ "url": published, "review_id": review.id }),
                 );
             }
-            let submitter = match review.session_id.as_deref() {
-                Some(id) => ctx
-                    .store
-                    .get_session(id)
-                    .map_err(|e| PublishError::External(e.to_string()))?,
-                None => None,
-            };
-            if let Some((session_id, item)) =
-                submitter.and_then(|s| s.work_item_id.map(|item| (s.id, item)))
-            {
-                if crate::corpus::work::close(
-                    ctx.store,
-                    ctx.manager.bus(),
-                    ctx.node_id,
-                    &item,
-                    Some(&session_id),
-                )
-                .is_ok()
-                {
-                    ctx.manager
-                        .item_closed(&session_id, &format!("published: {published}"))
-                        .await;
-                }
-            }
+            // Publishing is not finishing: the item stays open through CI
+            // and review until the operator closes it, and the session goes
+            // on, suspended once it sits idle, so a CI failure or a comment
+            // has somewhere to go.
             Ok(Published {
                 url: published,
                 outputs,
@@ -852,6 +832,7 @@ pub async fn publish_review(
                 | crate::review::publish::PublishError::NoReviewedTree
                 | crate::review::publish::PublishError::LeaseLost { .. }
                 | crate::review::publish::PublishError::SquashBaseGone { .. }
+                | crate::review::publish::PublishError::BaseGone { .. }
                 | crate::review::publish::PublishError::Target(_) => {
                     PublishError::Conflict(error.to_string())
                 }

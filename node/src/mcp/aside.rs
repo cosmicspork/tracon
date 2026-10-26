@@ -43,7 +43,6 @@ const EXTERNAL_ONLY: &[&str] = &[
 const SESSION_ONLY: &[&str] = &[
     "In a session the node started it is linked to this session's item as discovered-from and \
      bound to this session's project, so it survives the session.",
-    "In a session the node started that is the session's own item, and the session ends with it.",
     "A session sees its own project unless it names another.",
     "In a review session it goes on the review you are reviewing, marked with that review's \
      candidate, and is what review_finding cites as evidence.",

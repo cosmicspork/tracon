@@ -91,8 +91,9 @@
       busy = false
     }
   }
+  /** Close the task: the item closes, and any session holding it ends. */
   function close() {
-    return act(() => api.putWork(id, { state: 'closed' }))
+    return act(() => api.closeTask(id))
   }
   function reopen() {
     return act(() => api.putWork(id, { state: 'open' }))
@@ -288,7 +289,7 @@
           <a class="btn p" href="/sessions/{item.session_id}">Open session</a>
         {/if}
         {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
-        <button class="lnk d" onclick={close} disabled={busy}>Close</button>
+        <button class="lnk d" onclick={close} disabled={busy}>Close task</button>
         {#if confirmingDelete}
           <span class="confirm">Delete this task for good? <button class="btn d" onclick={remove} disabled={busy}>Delete</button>
             <button class="lnk" onclick={() => (confirmingDelete = false)} disabled={busy}>Keep it</button></span
