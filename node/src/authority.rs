@@ -852,6 +852,7 @@ pub async fn publish_review(
                 | crate::review::publish::PublishError::NoReviewedTree
                 | crate::review::publish::PublishError::LeaseLost { .. }
                 | crate::review::publish::PublishError::SquashBaseGone { .. }
+                | crate::review::publish::PublishError::BaseGone { .. }
                 | crate::review::publish::PublishError::Target(_) => {
                     PublishError::Conflict(error.to_string())
                 }

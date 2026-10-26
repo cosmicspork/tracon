@@ -108,6 +108,7 @@ fn review(id: &str, session: &str, sha: &str, state: &str, reviewer: Option<&str
             .map(|_| r#"{"verdict":"approve","summary":"fine","findings":[]}"#.into()),
         revision_patch: None,
         lane: None,
+        publication_failed: None,
     }
 }
 

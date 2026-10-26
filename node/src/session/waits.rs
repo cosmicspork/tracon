@@ -124,6 +124,11 @@ pub fn reviewer_key(review_id: &str, verdict: &Value) -> String {
     format!("reviewer:{review_id}:{}", verdict["at_ms"])
 }
 
+/// An approval of a review that failed to publish: told once per attempt.
+pub fn publication_key(row: &crate::store::PublicationRow) -> String {
+    format!("publication:{}:{}:{}", row.review_id, row.id, row.attempts)
+}
+
 pub fn approval_key(row: &ApprovalRow) -> String {
     format!("approval:{}:{}", row.id, row.state)
 }
@@ -189,8 +194,11 @@ impl Waits {
             if let Some(review) = session.strip_prefix("external:") {
                 return open.contains(review);
             }
-            match key.strip_prefix("reviewer:") {
-                Some(rest) => open.contains(rest.rsplit_once(':').map_or(rest, |(id, _)| id)),
+            if let Some(rest) = key.strip_prefix("reviewer:") {
+                return open.contains(rest.rsplit_once(':').map_or(rest, |(id, _)| id));
+            }
+            match key.strip_prefix("publication:") {
+                Some(rest) => open.contains(rest.split_once(':').map_or(rest, |(id, _)| id)),
                 None => true,
             }
         });
@@ -314,6 +322,20 @@ fn collect(
                     },
                     "message": review::reviewer_verdict_says(&verdict),
                 })),
+            });
+        }
+        // An approval that failed to publish put the review back with the
+        // operator: told once per attempt, as review_status tells it.
+        if let Some(failed) = (decided.is_none() && !report)
+            .then(|| store.failed_publication(&row).ok().flatten())
+            .flatten()
+        {
+            waits.push(Wait {
+                key: publication_key(&failed),
+                tool: review::STATUS,
+                id: row.id.clone(),
+                about: format!("the publication of {}", row.title),
+                decided: Some(review::publish_failed_view(&row, &failed, "", "")),
             });
         }
         waits.push(Wait {

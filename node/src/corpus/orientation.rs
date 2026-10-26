@@ -2839,6 +2839,7 @@ mod tests {
             ai_verdict_json: None,
             revision_patch: None,
             lane: None,
+            publication_failed: None,
         };
         store
             .insert_review_with_revision(&row, &revision(store, id, head))
