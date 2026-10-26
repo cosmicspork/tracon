@@ -8,6 +8,7 @@ import {
   grantsAccess,
   outcome,
   problemsByField,
+  amendsNothing,
   replacement,
   resultRows,
   schemaFor,
@@ -153,4 +154,44 @@ test('the diff names a change of format, from the document to what the call writ
   expect(replacement({ document: html }, { body: '<p>y</p>', format: 'html' })!.format).toBe('html')
   expect(replacement({ document: null }, { body: '<p>y</p>', format: 'html' })!.format).toBe('html')
   expect(replacement({ document: null }, { body: '# y' })!.format).toBe('markdown')
+})
+
+test('a memory amendment diffs the draft against the memory as it stands, and says when it is gone', () => {
+  const memory = {
+    id: 'm1',
+    kind: 'fact',
+    scope: 'global',
+    scope_ref: null,
+    body: 'The importer retries twice.\nIt logs each retry.',
+    state: 'active',
+    updated_ms: 1,
+  }
+  const edit = replacement({ memory }, { id: 'm1', body: 'The importer retries three times.\nIt logs each retry.' })!
+  expect(edit).toMatchObject({
+    subject: 'memory',
+    label: 'edit · fact · global',
+    created: false,
+    format: null,
+    added: 1,
+    removed: 1,
+  })
+  expect(edit.hunks).toEqual([
+    {
+      kind: 'lines',
+      lines: [
+        { kind: 'del', text: 'The importer retries twice.' },
+        { kind: 'add', text: 'The importer retries three times.' },
+        { kind: 'same', text: 'It logs each retry.' },
+      ],
+    },
+  ])
+  expect(amendsNothing({ memory })).toBe(false)
+  // Gone while it waited: nothing to diff, and the page says Allow would fail.
+  expect(replacement({ memory: null }, { body: 'x' })).toBeNull()
+  expect(amendsNothing({ memory: null })).toBe(true)
+  // A document write is headed as one, and nothing else is a memory.
+  const document = { body: 'a', hash: 'h', format: 'markdown', title: 'Plan', updated_ms: 1 }
+  expect(replacement({ document }, { body: 'b' })).toMatchObject({ subject: 'document', label: 'edit · “Plan”' })
+  expect(replacement({ document: null }, { body: 'b' })).toMatchObject({ label: 'new document' })
+  expect(amendsNothing({})).toBe(false)
 })

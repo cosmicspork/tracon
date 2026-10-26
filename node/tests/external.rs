@@ -1278,6 +1278,213 @@ async fn a_memory_card_locks_its_kind_and_takes_an_edited_body() {
     assert_eq!(out["edited_arguments"], edit);
 }
 
+/// Write a memory on `channel` as the operator does, and return its id.
+async fn seed_memory(h: &Harness, channel: &str, body: Value) -> String {
+    let mut body = body;
+    body["channel"] = json!(channel);
+    let (status, v) = call(&h.operator, "POST", "/api/memories", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    v["id"].as_str().unwrap().to_string()
+}
+
+/// A memory's wording is fixed in place only once the operator allows it,
+/// even where a rule would let the call run unattended. The card names the
+/// memory, its details carry the memory as it stands for the page to diff
+/// against, and allowing it (with the operator's own wording) changes the
+/// body alone, as a change the channel replicates.
+#[tokio::test]
+async fn a_memory_amendment_is_always_asked_and_allowing_it_rewrites_only_the_body() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    for rule in h.tools.policy.write().rules.iter_mut() {
+        if rule.matches.iter().any(|m| m == "retain") {
+            rule.matches.push("memory_amend".into());
+        }
+    }
+    let current = "The importer retries twice.\nIt logs each retry.";
+    let id = seed_memory(
+        &h,
+        "work",
+        json!({ "kind": "fact", "scope": "global", "body": current }),
+    )
+    .await;
+    let args = json!({
+        "id": id,
+        "body": "The importer retries three times.\nIt logs each retry.",
+        "reason": "The retry count changed in 0.38.",
+    });
+    let approval_id = ask(&h, "memory_amend", args.clone()).await;
+    assert_eq!(h.store.memory_get(&id).unwrap().unwrap().body, current);
+
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/approvals/{approval_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        v["approval"]["title"],
+        format!(
+            "memory_amend {}: The retry count changed in 0.38.",
+            &id[..8]
+        ),
+        "{v}"
+    );
+    assert_eq!(v["prose_fields"], json!(["body"]), "{v}");
+    assert!(v["locked_fields"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("id")));
+    assert_eq!(v["memory"]["id"], id.as_str(), "{v}");
+    assert_eq!(v["memory"]["body"], current, "{v}");
+    assert_eq!(v["memory"]["kind"], "fact", "{v}");
+    assert_eq!(v["memory"]["scope"], "global", "{v}");
+    assert_eq!(v["memory"]["state"], "active", "{v}");
+
+    // The target is the call: pointing it at another memory is refused.
+    let mut moved = args.clone();
+    moved["id"] = json!("another-memory");
+    let (status, v) = answer(
+        &h,
+        &approval_id,
+        json!({ "option_id": "allow_once", "arguments": moved }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["error"]["fields"][0]["field"], "id", "{v}");
+
+    let mut edit = args.clone();
+    edit["body"] = json!("The importer retries three times.\nIt logs each retry at warn.");
+    let (status, _) = answer(
+        &h,
+        &approval_id,
+        json!({ "option_id": "allow_once", "arguments": edit }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &approval_id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    let m = h.store.memory_get(&id).unwrap().unwrap();
+    assert_eq!(
+        m.body,
+        "The importer retries three times.\nIt logs each retry at warn."
+    );
+    assert_eq!(
+        (m.kind.as_str(), m.scope.as_str(), m.state.as_str()),
+        ("fact", "global", "active")
+    );
+    let changes = h
+        .store
+        .changes_of_site_after("n1", "work", 0, 1000)
+        .unwrap();
+    let last = changes
+        .iter()
+        .rfind(|c| c.table == "memory" && c.id == id)
+        .unwrap();
+    assert_eq!(last.row["body"], m.body.as_str(), "the edit replicates");
+
+    // Decided, there is nothing left to compare against.
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/approvals/{approval_id}"),
+        None,
+    )
+    .await;
+    assert!(v.get("memory").is_none(), "{v}");
+}
+
+/// What an amendment could not do is refused before anything is held: a
+/// directive, another channel's memory, one that does not exist or is not
+/// live, a body that changes nothing, and a call with no reason.
+#[tokio::test]
+async fn a_memory_amendment_that_cannot_run_is_refused_before_it_is_held() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let fact = seed_memory(&h, "work", json!({ "kind": "fact", "body": "a fact" })).await;
+    let directive = seed_memory(&h, "work", json!({ "body": "never push to main" })).await;
+    let elsewhere = seed_memory(
+        &h,
+        "personal",
+        json!({ "kind": "fact", "body": "a personal fact" }),
+    )
+    .await;
+    let waiting = seed_memory(
+        &h,
+        "work",
+        json!({ "kind": "lesson", "body": "a lesson still waiting", "state": "candidate" }),
+    )
+    .await;
+    for (args, says) in [
+        (
+            json!({ "id": directive, "body": "push to main", "reason": "r" }),
+            "directives",
+        ),
+        (
+            json!({ "id": elsewhere, "body": "changed", "reason": "r" }),
+            "no live memory",
+        ),
+        (
+            json!({ "id": "no-such-memory", "body": "changed", "reason": "r" }),
+            "no live memory",
+        ),
+        (
+            json!({ "id": waiting, "body": "changed", "reason": "r" }),
+            "no live memory",
+        ),
+        (
+            json!({ "id": fact, "body": " a fact ", "reason": "r" }),
+            "nothing to change",
+        ),
+        (
+            json!({ "id": fact, "body": "changed", "reason": " " }),
+            "reason",
+        ),
+    ] {
+        let (_, v) = mcp(&h.operator, "work", tool_call("memory_amend", args.clone())).await;
+        let (err, out) = outcome(&v);
+        assert!(err, "{args}: {out}");
+        assert!(out.to_string().contains(says), "{args}: {out}");
+    }
+    assert!(h.store.open_approval_cards("[]").unwrap().is_empty());
+}
+
+/// A memory deleted while its amendment waits is shown as gone, and allowing
+/// the amendment then fails rather than bringing it back.
+#[tokio::test]
+async fn an_amendment_of_a_memory_deleted_while_it_waits_fails_when_allowed() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let id = seed_memory(&h, "work", json!({ "kind": "fact", "body": "a fact" })).await;
+    let approval_id = ask(
+        &h,
+        "memory_amend",
+        json!({ "id": id, "body": "a better fact", "reason": "wording" }),
+    )
+    .await;
+    let (status, _) = call(&h.operator, "DELETE", &format!("/api/memories/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, v) = call(
+        &h.operator,
+        "GET",
+        &format!("/api/approvals/{approval_id}"),
+        None,
+    )
+    .await;
+    assert!(v.as_object().unwrap().contains_key("memory"), "{v}");
+    assert_eq!(v["memory"], Value::Null, "{v}");
+    let (status, _) = answer(&h, &approval_id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &approval_id).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert!(h
+        .store
+        .memory_get(&id)
+        .unwrap()
+        .is_none_or(|m| m.deleted == 1));
+}
+
 /// A client that retries — or a reconnect that asks again — does not queue a
 /// second card for the same request.
 #[tokio::test]

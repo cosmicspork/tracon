@@ -5535,9 +5535,7 @@ pub async fn edit_memory(
         .store()
         .memory_get(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such memory".into()))?;
-    let mut change_row = row.to_change_row();
-    change_row["body"] = json!(m.body.trim());
-    change_row["updated_ms"] = json!(crate::store::now_ms());
+    let change_row = row.with_body(m.body.trim(), crate::store::now_ms());
     crate::corpus::write(
         s.store(),
         s.manager.bus(),
