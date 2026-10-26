@@ -158,7 +158,14 @@ const run = (command, outcome, seconds, o = {}) => ({
   definition_json: JSON.stringify({ command, timeout_s: 900 }),
   definition_hash: 'b6e1f3a0c9d2',
   execution_image: 'ghcr.io/example-org/orbit-ci@sha256:4e9a1c7d0b3f6e2a8c5d1b9f4e7a0c3d6b2e8f5a1c4d7b0e3a6f9c2d5b8e1a4',
-  inputs_json: JSON.stringify({ tree: TREE.slice(0, 12), lockfile: 'Cargo.lock@91c4e2', toolchain: '1.91.0' }),
+  inputs_json: JSON.stringify({
+    runtime: 'podman',
+    timeout_secs: 900,
+    dependency_inputs: { 'Cargo.lock': '91c4e2', toolchain: '1.91.0' },
+    prepare: ['cargo fetch --locked'],
+    egress: ['index.crates.io', 'static.crates.io'],
+    env: [['CARGO_HOME', '/cache/cargo'], ['CARGO_NET_OFFLINE', 'true'], ['UV_NO_CACHE', '1']],
+  }),
   reuse_key: null,
   outcome,
   source_outcome: null,
@@ -1266,8 +1273,66 @@ export default [
       details({
         review: { state: 'approved', publish_result: 'https://github.com/example-org/orbit/pull/418' },
         publication: { readiness: READY, latest: publication({ outcome: 'published', url: 'https://github.com/example-org/orbit/pull/418', remedy: '', recoverable: false }) },
+        forge_state: { state: 'merged', draft: false },
       }),
     ),
+  }),
+
+  state('approved-unfollowed', 'Approved and published, the forge not read yet', {
+    note: 'The header links "PR #418" with no state until following it has looked once.',
+    since: '#671',
+    detail: raw(
+      details({
+        review: { state: 'approved', publish_result: 'https://github.com/example-org/orbit/pull/418' },
+        publication: { readiness: READY, latest: publication({ outcome: 'published', url: 'https://github.com/example-org/orbit/pull/418', remedy: '', recoverable: false }) },
+        forge_state: null,
+      }),
+    ),
+  }),
+
+  state('checks-failed', 'Runtime evidence with a failed check', {
+    note: 'One line per check with its dot, command and duration; the summary says "1 of 4 failed" and the failed one is open on its failures.',
+    since: '#671',
+    detail: raw(
+      details({
+        evidence: evidence({
+          checks: [
+            run('just check', 'passed', 94),
+            run('cargo nextest run --workspace', 'failed', 61),
+            run('just lint', 'passed', 38),
+            run('just e2e', 'reused', 0, { source_outcome: 'passed', reused_from_id: 'run-9c1e7a04', duration_ms: null }),
+          ],
+        }),
+      }),
+    ),
+  }),
+
+  state('check-detail', 'A check opened: its log, image and inputs', {
+    note: 'The dialog a check line opens: the log, the execution image, and the inputs as a table (egress hosts, prepare commands, runtime, timeout, env).',
+    since: '#671',
+    full: false,
+    detail: raw(
+      details({
+        evidence: evidence({
+          checks: [run('just check', 'passed', 94), run('cargo nextest run --workspace', 'failed', 61)],
+        }),
+      }),
+    ),
+    act: async (page) => {
+      await page.locator('.runs .line').nth(1).click()
+      await settle(page, 400)
+    },
+  }),
+
+  state('files-scroll', 'A file in the list, scrolled to in the diff', {
+    note: 'Clicking an entry under Files brings that file to the top of the diff.',
+    since: '#671',
+    sizes: ['desktop'],
+    full: false,
+    act: async (page) => {
+      await page.locator('.files button').nth(2).click()
+      await settle(page, 900)
+    },
   }),
 
   state('rejected', 'Rejected', {

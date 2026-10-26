@@ -6,6 +6,7 @@ import {
   composerLabel,
   publishedChange,
   requestName,
+  publishedLabel,
   rereadDelay,
   rereadReviewer,
   reviewerControl,
@@ -64,6 +65,16 @@ describe('verdict availability', () => {
     expect(requestName('https://gitlab.example/g/p/-/merge_requests/7')).toBe('MR !7')
     expect(requestName('https://forge.example/o/r/compare/main...x')).toBeNull()
     expect(requestName(null)).toBeNull()
+  })
+})
+
+describe('the published change in the review header', () => {
+  test('names the change, and where it stands once the forge was read', () => {
+    expect(publishedLabel('github', { number: 149 }, null)).toBe('PR #149')
+    expect(publishedLabel('github', { number: 149 }, { state: 'merged', draft: false })).toBe('PR #149 · merged')
+    expect(publishedLabel('github', { number: 149 }, { state: 'open', draft: true })).toBe('PR #149 · open · draft')
+    expect(publishedLabel('gitlab', { number: 7 }, { state: 'closed', draft: false })).toBe('MR !7 · closed')
+    expect(publishedLabel('gitlab', { number: null }, undefined)).toBe('MR')
   })
 })
 

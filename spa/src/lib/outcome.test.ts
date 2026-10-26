@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { checkLabel, claimStanding, headline } from './outcome'
+import { checkLabel, claimStanding, headline, noChecks } from './outcome'
 import type { OutcomeCheck, SessionOutcome } from './types'
 
 const check = (over: Partial<OutcomeCheck>): OutcomeCheck => ({
@@ -70,4 +70,12 @@ test('a claim says what stands behind it', () => {
   expect(claimStanding({ ...base, source: 'review', backed: true, backed_by: ['c1'] })).toBe(
     'backed by 1 passing check on its commit',
   )
+})
+
+test('a peer session whose node could not be read is not said to have no checks', () => {
+  const unread = outcome({ owner_checks: { node_id: 'n2', read: false, reason: 'the node that holds it is unreachable' } })
+  expect(headline(unread)).toBe('its checks could not be read from the node that runs it')
+  expect(noChecks(unread)).toContain('could not be read from it: the node that holds it is unreachable')
+  expect(noChecks(outcome({ owner_checks: { node_id: 'n2', read: true, reason: null } }))).toBe('No check has run.')
+  expect(noChecks(outcome({}))).toBe('No check has run.')
 })

@@ -1569,7 +1569,63 @@ pub async fn session_outcome(
         .store()
         .get_session(&id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
-    Ok(Json(crate::outcome::outcome(s.store(), session)?))
+    let remote = session.node_id != s.node_id;
+    let mut facts = crate::outcome::read(s.store(), session)?;
+    if remote {
+        owner_checks(&s, &mut facts).await;
+    }
+    Ok(Json(crate::outcome::derive(&facts)))
+}
+
+/// A peer's session's checks, which run and stay on the node that runs it:
+/// read from that node through each of the session's code reviews, as the
+/// review page reads them, with the commit each review stands at there. What
+/// could not be read is said, so a session nobody here could check is never
+/// shown as one no check ran on.
+async fn owner_checks(s: &AppState, facts: &mut crate::outcome::Facts) {
+    let node_id = facts.session.node_id.clone();
+    let code: Vec<crate::store::ReviewRow> = facts
+        .reviews
+        .iter()
+        // A review gone from its owner has nothing left to read there.
+        .filter(|review| review.kind != crate::store::reports::KIND && review.state != "gone")
+        .cloned()
+        .collect();
+    let mut unread = None;
+    if code.is_empty() {
+        unread = Some("the session submitted no review to read its checks through".to_string());
+    }
+    // Asked together, so one owner that does not answer costs one timeout.
+    let details =
+        futures_util::future::join_all(code.iter().map(|review| owner_review_detail(s, review)))
+            .await;
+    for (review, detail) in code.iter().zip(details) {
+        let detail = match detail {
+            Ok(detail) => detail,
+            Err(reason) => {
+                unread = Some(reason);
+                continue;
+            }
+        };
+        let checks: Vec<crate::store::CheckRunRow> =
+            serde_json::from_value(detail["evidence"]["checks"].clone()).unwrap_or_default();
+        for check in checks {
+            if !facts.checks.iter().any(|held| held.id == check.id) {
+                facts.checks.push(check);
+            }
+        }
+        if let Some(head) = detail["revision"]["head_sha"].as_str() {
+            match facts.heads.iter_mut().find(|(id, _)| *id == review.id) {
+                Some((_, held)) => *held = head.to_string(),
+                None => facts.heads.push((review.id.clone(), head.to_string())),
+            }
+        }
+    }
+    facts.owner_checks = Some(crate::outcome::OwnerChecks {
+        node_id,
+        read: unread.is_none(),
+        reason: unread,
+    });
 }
 
 /// What this session may do, and what it would still have to ask about.
@@ -2377,6 +2433,14 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
                 .map(|row| crate::authority::publication_view(s.store(), r, row)),
         }),
     };
+    // Where the latest published request stands on the forge, as following
+    // it last saw: `open`, `merged` or `closed`, and whether it is a draft.
+    // Node-local: the owner opened it and is the one following it.
+    let forge_state = match &remote_owner {
+        None => crate::follow::forge_state(s.store(), r)?,
+        Some(_) => None,
+    }
+    .unwrap_or(serde_json::Value::Null);
     // What the agent showed of its work, each marked stale once the candidate
     // moved past the commit it was shown at. Node-local, like the checks: a
     // mirror never had the workspace it was read from.
@@ -2484,6 +2548,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         "legacy_check_events": legacy_check_events,
         "publications": publications,
         "publication": publication,
+        "forge_state": forge_state,
         "shown_work": shown_work,
         "authorship": authorship,
     }))
@@ -2511,7 +2576,36 @@ const OWNER_FIELDS: &[&str] = &[
     "requirements",
     "surrounding_code",
     "publications",
+    "forge_state",
 ];
+
+/// A mirrored review's detail as the node that owns it holds it, over the
+/// mesh; the error says why it could not be read.
+async fn owner_review_detail(
+    s: &AppState,
+    r: &crate::store::ReviewRow,
+) -> Result<serde_json::Value, String> {
+    let mesh = s
+        .mesh
+        .as_ref()
+        .ok_or("this node has no mesh connection to the node that holds it")?;
+    if !mesh.peer_reachable(&r.node_id) {
+        return Err("the node that holds it is unreachable; reload when it returns".into());
+    }
+    let request = serde_json::to_value(ReviewDetailRequest {
+        review_id: r.id.clone(),
+        channel: r.channel.clone(),
+        owner: r.node_id.clone(),
+    })
+    .map_err(|error| error.to_string())?;
+    mesh.command(
+        &r.node_id,
+        proto::frame::Command::ReviewDetail { request },
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
 
 /// Fill a mirrored review's detail from the node that owns it, over the
 /// mesh, as candidate evidence is read. `owner_detail` says how that went:
@@ -2524,29 +2618,7 @@ async fn read_from_owner(
     r: &crate::store::ReviewRow,
     detail: &mut serde_json::Value,
 ) {
-    let fetched = async {
-        let mesh = s
-            .mesh
-            .as_ref()
-            .ok_or("this node has no mesh connection to the node that holds it")?;
-        if !mesh.peer_reachable(&r.node_id) {
-            return Err("the node that holds it is unreachable; reload when it returns".into());
-        }
-        let request = serde_json::to_value(ReviewDetailRequest {
-            review_id: r.id.clone(),
-            channel: r.channel.clone(),
-            owner: r.node_id.clone(),
-        })
-        .map_err(|error| error.to_string())?;
-        mesh.command(
-            &r.node_id,
-            proto::frame::Command::ReviewDetail { request },
-            std::time::Duration::from_secs(15),
-        )
-        .await
-        .map_err(|error| error.to_string())
-    };
-    let state = match fetched.await {
+    let state = match owner_review_detail(s, r).await {
         Err(reason) => json!({ "state": "unreachable", "reason": reason }),
         Ok(owned) => {
             let mirrored = detail["revision"]["id"].as_str().map(str::to_string);
@@ -2572,6 +2644,10 @@ async fn read_from_owner(
     };
     detail["owner_detail"] = state;
 }
+
+/// What the owner answers a peer asking for a review it does not hold: the
+/// one refusal that tells the peer its copy is gone, not merely unread.
+pub const NO_SUCH_REVIEW: &str = "no review this node holds on that channel";
 
 /// A peer reading a review this node owns. The sender and this node must
 /// both be on the review's channel, and this node must be the owner it was
@@ -2605,12 +2681,7 @@ pub async fn forwarded_review_detail(
         .store()
         .get_review(&request.review_id)?
         .filter(|r| r.channel == request.channel && r.node_id == s.node_id)
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "no review this node holds on that channel",
-            )
-        })?;
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_SUCH_REVIEW))?;
     if r.kind == crate::store::reports::KIND {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,

@@ -531,6 +531,9 @@ async fn a_published_review_carries_the_forge_state_of_its_request() {
             instance: "i",
         })
         .unwrap();
+    h.store
+        .publication_opened("p1", "https://github.test/owner/name/pull/149")
+        .unwrap();
     let (_, v) = call(&h.operator, "GET", "/api/sessions/a/continuation", None).await;
     assert_eq!(
         v["evidence"]["reviews"][0]["forge_state"],

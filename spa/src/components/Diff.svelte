@@ -5,6 +5,15 @@
 
   const files = $derived(splitDiff(diff))
   const whole = $derived(classifyLines(diff.split('\n')))
+  /** The line each file starts on, by index, so a file list can scroll to it. */
+  const starts = $derived.by(() => {
+    const at = new Map<number, string>()
+    let n = 0
+    whole.forEach((line, i) => {
+      if (line.text.startsWith('diff --git ') && files[n]) at.set(i, files[n++].path)
+    })
+    return at
+  })
 </script>
 
 {#if perFile}
@@ -12,7 +21,7 @@
        and the hunks are there when they do not. -->
   <div class="files">
     {#each files as f (f.path)}
-      <details>
+      <details data-path={f.path}>
         <summary>
           <span class="path">{f.path}</span>
           <span class="stat">+{f.added} −{f.removed}</span>
@@ -28,7 +37,7 @@
 {:else}
   <div class="diff whole">
     {#each whole as line, i (i)}
-      <div class={line.kind}>{line.text || ' '}</div>
+      <div class={line.kind} data-path={starts.get(i)}>{line.text || ' '}</div>
     {/each}
   </div>
 {/if}

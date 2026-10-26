@@ -560,9 +560,10 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
 
     let mut reviews = Vec::new();
     for r in store.reviews_of_sessions(&ids)? {
-        let forge_state = match (&r.session_id, &r.publish_result) {
-            (Some(session_id), Some(_)) => forge_state(store, session_id, &r.id)?,
-            _ => None,
+        let forge_state = match &r.publish_result {
+            Some(_) => crate::follow::forge_state(store, &r)?
+                .and_then(|forge| forge["state"].as_str().map(str::to_string)),
+            None => None,
         };
         reviews.push(ReviewSummary {
             title: r.approved_title().to_string(),
@@ -642,17 +643,6 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
         follow,
         actions,
     }))
-}
-
-/// What the forge last said of a review's latest publication, as the node's
-/// follow recorded it on the session.
-fn forge_state(store: &Store, session_id: &str, review_id: &str) -> Result<Option<String>> {
-    let Some(publication) = store.publications_for_review(review_id)?.into_iter().next() else {
-        return Ok(None);
-    };
-    Ok(store
-        .latest_event_payload(session_id, ek::FORGE_FOLLOW, &publication.id)?
-        .and_then(|p| p["snapshot"]["state"].as_str().map(str::to_string)))
 }
 
 /// The request these attempts' work was published as, as `follow` last saw
