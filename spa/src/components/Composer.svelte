@@ -526,6 +526,11 @@
     content: '· ';
     color: var(--dim);
   }
+  /* A flex link drops the trailing space, so the gap is a margin instead. */
+  .ctx > span + .lnk::before {
+    content: '·';
+    margin-right: 1ch;
+  }
   .ctx .lnk {
     font: 12px var(--mono);
   }
