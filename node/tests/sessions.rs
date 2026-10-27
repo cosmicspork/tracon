@@ -6229,3 +6229,435 @@ async fn closing_the_task_while_its_session_suspends_ends_the_session() {
     assert_eq!(s.state, "closed", "{s:?}");
     assert_eq!(s.end_reason.as_deref(), Some("item_close"));
 }
+
+// ---- asking a session that ended in its own conversation ----------------
+
+/// The fake harness, as one whose conversations outlive its process: it can
+/// be launched again on a conversation it had, and compact one on request.
+struct Reopening {
+    inner: FakeAdapter,
+    /// The conversation each launch was asked to carry on, if any.
+    resumed: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    /// Whether the record a reopening reads is still there.
+    kept: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Reopening {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: FakeAdapter {
+                tx: Arc::new(Mutex::new(None)),
+                tokens: Arc::new(Mutex::new(100)),
+            },
+            resumed: Default::default(),
+            kept: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        })
+    }
+}
+
+/// A handle that compacts by saying so, the way an adapter reports the
+/// harness's own compaction.
+struct CompactingHandle {
+    inner: Box<dyn HarnessHandle>,
+    tx: mpsc::Sender<HarnessEvent>,
+}
+
+#[async_trait]
+impl HarnessHandle for CompactingHandle {
+    fn harness_session_id(&self) -> &str {
+        self.inner.harness_session_id()
+    }
+    fn compat(&self) -> tracon::adapter::HarnessCompat {
+        self.inner.compat()
+    }
+    async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
+        self.inner.prompt(text).await
+    }
+    async fn compact(&self) -> Result<TurnResult, AdapterError> {
+        let _ = self
+            .tx
+            .send(HarnessEvent::Other(json!({
+                "sessionUpdate": "context_compacted",
+                "trigger": "manual",
+                "tokensBefore": 48_000,
+                "tokensAfter": 3_100,
+                "summary": "The ledger table is written; the view is next.",
+            })))
+            .await;
+        Ok(TurnResult {
+            stop_reason: "end_turn".into(),
+            usage: Default::default(),
+        })
+    }
+    async fn cancel(&self) -> Result<(), AdapterError> {
+        self.inner.cancel().await
+    }
+    async fn close(&self) -> Result<(), AdapterError> {
+        self.inner.close().await
+    }
+}
+
+#[async_trait]
+impl HarnessAdapter for Reopening {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+    fn pinned_version(&self) -> &str {
+        self.inner.pinned_version()
+    }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        self.inner.protocol()
+    }
+    fn reopens(&self) -> bool {
+        true
+    }
+    fn compacts(&self) -> bool {
+        true
+    }
+    async fn has_conversation(
+        &self,
+        _runner: &dyn Runner,
+        _spec: &tracon::adapter::LaunchSpec,
+        _harness_session_id: &str,
+    ) -> Result<bool, AdapterError> {
+        Ok(self.kept.load(std::sync::atomic::Ordering::SeqCst))
+    }
+    async fn version(
+        &self,
+        r: &dyn Runner,
+    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
+        self.inner.version(r).await
+    }
+    async fn probe_models(
+        &self,
+        r: &dyn Runner,
+        wiring: &tracon::gateway::model::Wiring,
+    ) -> Result<Vec<tracon::adapter::ModelOption>, AdapterError> {
+        self.inner.probe_models(r, wiring).await
+    }
+    async fn launch(
+        &self,
+        r: &dyn Runner,
+        spec: tracon::adapter::LaunchSpec,
+    ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
+        self.resumed
+            .lock()
+            .unwrap()
+            .push(spec.resume.as_ref().map(|r| r.harness_session_id.clone()));
+        let (inner, rx) = self.inner.launch(r, spec).await?;
+        let tx = self.inner.tx.lock().await.clone().expect("launched");
+        Ok((Box::new(CompactingHandle { inner, tx }), rx))
+    }
+}
+
+/// An execute session on a reopening harness, idle after its kickoff, and
+/// the operator's API.
+async fn reopening(tag: &str) -> (Orientation, Arc<Reopening>, axum::Router) {
+    let adapter = Reopening::new();
+    let o = orientation_setup(tag, Some(adapter.clone()), 0, false, &[], Phase::Execute).await;
+    o.manager.set_adapter(adapter.clone());
+    for _ in 0..1200 {
+        let s = o.store.get_session(&o.row.id).unwrap().unwrap();
+        if s.state == "running"
+            && s.turn_active == 0
+            && o.store.has_event(&o.row.id, "turn_end").unwrap()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let operator = tracon::http::router(AppState {
+        manager: o.manager.clone(),
+        cfg: o.cfg.clone(),
+        adapter: adapter.clone(),
+        node_id: "n1".into(),
+        tools: o.tools.clone(),
+        mesh: None,
+        auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
+    });
+    (o, adapter, operator)
+}
+
+async fn until_row(
+    store: &Store,
+    id: &str,
+    what: &str,
+    ok: impl Fn(&tracon::store::SessionRow) -> bool,
+) -> tracon::store::SessionRow {
+    for _ in 0..1200 {
+        let s = store.get_session(id).unwrap().unwrap();
+        if ok(&s) {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("session never {what}: {:?}", store.get_session(id).unwrap());
+}
+
+fn events_of(store: &Store, id: &str, kind: &str) -> Vec<Value> {
+    store
+        .events_after(id, 0, 2000)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == kind)
+        .map(|e| e.payload)
+        .collect()
+}
+
+/// A session the operator stopped is asked again in its own conversation:
+/// the same row, its harness relaunched on the conversation it recorded, and
+/// the message delivered as an operator's prompt. Nothing joins the lineage.
+#[tokio::test]
+async fn an_ended_session_is_asked_again_in_its_own_conversation() {
+    state::isolate();
+    let (o, adapter, operator) = reopening("ask-ended").await;
+    let id = o.row.id.clone();
+    o.manager.kill(&id).await.unwrap();
+    until_row(&o.store, &id, "closed", |s| {
+        s.state == "closed" && !tracon::session::materialize::holds_state(&s.id)
+    })
+    .await;
+
+    let (st, v) =
+        support::http::call(&operator, "GET", &format!("/api/sessions/{id}/ask"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["restorable"], true, "{v}");
+    assert_eq!(v["compacts"], true, "{v}");
+
+    let (st, v) = support::http::call(
+        &operator,
+        "POST",
+        &format!("/api/sessions/{id}/ask"),
+        Some(json!({ "text": "Why did you pick a table over a view?" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(v["id"], id.as_str(), "the same session, not a new one");
+
+    let s = until_row(&o.store, &id, "answered", |s| {
+        s.state == "running"
+            && s.turn_active == 0
+            && events_of(&o.store, &s.id, "user_prompt")
+                .iter()
+                .any(|p| p["text"] == "Why did you pick a table over a view?")
+    })
+    .await;
+    assert_eq!(s.end_reason, None);
+    assert_eq!(s.continued_from, None);
+    assert_eq!(s.parent_session, None);
+    assert_eq!(s.draft, None, "the message left the box once it was sent");
+    let asked = events_of(&o.store, &id, "user_prompt")
+        .into_iter()
+        .find(|p| p["text"] == "Why did you pick a table over a view?")
+        .unwrap();
+    assert!(
+        asked.get("origin").is_none(),
+        "the operator's words: {asked}"
+    );
+    assert_eq!(
+        *adapter.resumed.lock().unwrap(),
+        [None, Some("fake".to_string())],
+        "the relaunch carries on the conversation the row recorded"
+    );
+    let resumed = events_of(&o.store, &id, "conversation_resumed");
+    assert_eq!(resumed.len(), 1, "{resumed:?}");
+    assert_eq!(resumed[0]["outcome"], "resumed");
+    assert_eq!(resumed[0]["from_state"], "closed");
+    assert_eq!(resumed[0]["end_reason"], "killed_user");
+    assert_eq!(
+        o.store.list_sessions(None).unwrap().len(),
+        1,
+        "nothing was added to the lineage"
+    );
+    tracon::session::materialize::remove(&id);
+}
+
+/// Each reason a conversation cannot be restored is said, and none touches
+/// the session: a live one takes a prompt, a record the harness no longer has
+/// leaves it as it ended, and so does a workspace that was removed.
+#[tokio::test]
+async fn a_conversation_that_cannot_be_restored_says_why() {
+    state::isolate();
+    let (o, adapter, _operator) = reopening("ask-refused").await;
+    let id = o.row.id.clone();
+    let live = o.manager.askable(&id).await.unwrap();
+    assert!(!live.restorable);
+    assert!(live.reason.unwrap().contains("send it a prompt"));
+
+    o.manager.kill(&id).await.unwrap();
+    until_row(&o.store, &id, "closed", |s| {
+        s.state == "closed" && !tracon::session::materialize::holds_state(&s.id)
+    })
+    .await;
+
+    // The harness no longer has the record: the reopening is refused before
+    // the harness runs, and the row goes back to how it ended.
+    adapter
+        .kept
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    o.manager
+        .ask(&id, tracon::session::Ask::Message("still there?".into()))
+        .await
+        .unwrap();
+    let failed = loop {
+        if let Some(p) = events_of(&o.store, &id, "conversation_resumed").pop() {
+            break p;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(failed["outcome"], "failed");
+    assert_eq!(failed["gone"], true);
+    let s = until_row(&o.store, &id, "closed again", |s| s.state == "closed").await;
+    assert_eq!(s.end_reason.as_deref(), Some("killed_user"));
+    assert_eq!(
+        adapter.resumed.lock().unwrap().len(),
+        1,
+        "nothing was launched"
+    );
+    let gone = o.manager.askable(&id).await.unwrap();
+    assert!(!gone.restorable);
+    assert!(
+        gone.reason
+            .as_deref()
+            .unwrap()
+            .contains("no longer has a record"),
+        "{gone:?}"
+    );
+    let refused = o
+        .manager
+        .ask(&id, tracon::session::Ask::Message("and now?".into()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("cannot be restored"), "{refused}");
+
+    // A removed workspace is said as that.
+    o.store
+        .conn()
+        .execute("DELETE FROM event WHERE kind = 'conversation_resumed'", [])
+        .unwrap();
+    let backend = tracon::runner::local::LocalBackend;
+    tracon::boundary::Backend::remove_volume(&backend, &tracon::workspace::volume_name(&id))
+        .await
+        .unwrap();
+    let removed = o.manager.askable(&id).await.unwrap();
+    assert_eq!(removed.reason.as_deref(), Some("its workspace was removed"));
+    tracon::session::materialize::remove(&id);
+}
+
+/// Compact on a live session runs the harness's own compaction as a turn of
+/// its own and records it as automatic compaction is; on an ended one it
+/// reopens the conversation to compact it, leaving it live to be asked.
+#[tokio::test]
+async fn compacting_records_the_harnesss_compaction_live_or_ended() {
+    state::isolate();
+    let (o, adapter, operator) = reopening("compact").await;
+    let id = o.row.id.clone();
+    let prompts = events_of(&o.store, &id, "user_prompt").len();
+    let (st, v) = support::http::call(
+        &operator,
+        "POST",
+        &format!("/api/sessions/{id}/compact"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let compacted = loop {
+        if let Some(p) = events_of(&o.store, &id, "context_compacted").pop() {
+            break p;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(compacted["trigger"], "manual");
+    assert_eq!(compacted["tokens_before"], 48_000);
+    assert_eq!(
+        compacted["summary"],
+        "The ledger table is written; the view is next."
+    );
+    until_row(&o.store, &id, "idle", |s| s.turn_active == 0).await;
+    assert_eq!(
+        events_of(&o.store, &id, "user_prompt").len(),
+        prompts,
+        "a compaction is nobody's prompt"
+    );
+    assert!(events_of(&o.store, &id, "turn_end")
+        .iter()
+        .any(|p| p["compact"] == true));
+
+    o.manager.kill(&id).await.unwrap();
+    until_row(&o.store, &id, "closed", |s| {
+        s.state == "closed" && !tracon::session::materialize::holds_state(&s.id)
+    })
+    .await;
+    o.manager.compact(&id).await.unwrap();
+    until_row(&o.store, &id, "compacted again", |_| {
+        events_of(&o.store, &id, "context_compacted").len() == 2
+    })
+    .await;
+    let s = until_row(&o.store, &id, "live", |s| {
+        s.state == "running" && s.turn_active == 0
+    })
+    .await;
+    assert_eq!(s.end_reason, None);
+    assert_eq!(
+        adapter.resumed.lock().unwrap().last().cloned(),
+        Some(Some("fake".to_string()))
+    );
+    let resumed = events_of(&o.store, &id, "conversation_resumed");
+    assert_eq!(resumed[0]["compact"], true, "{resumed:?}");
+    tracon::session::materialize::remove(&id);
+}
+
+/// A suspended session is asked the same way: it wakes as itself, on its
+/// workspace and in its conversation, and is not carried on as a new one.
+#[tokio::test]
+async fn a_suspended_session_is_asked_again_rather_than_continued() {
+    state::isolate();
+    let (o, adapter, _operator) = reopening("ask-suspended").await;
+    let id = o.row.id.clone();
+    o.store
+        .insert_review(&published_review("rv-ask", &id))
+        .unwrap();
+    for _ in 0..1000 {
+        if o.store.get_session(&id).unwrap().unwrap().state == "suspended" {
+            break;
+        }
+        o.manager.suspend_idle_published(Duration::ZERO).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    until_row(&o.store, &id, "suspended", |s| {
+        s.state == "suspended" && !tracon::session::materialize::holds_state(&s.id)
+    })
+    .await;
+
+    o.manager
+        .ask(
+            &id,
+            tracon::session::Ask::Message("Is the PR ready?".into()),
+        )
+        .await
+        .unwrap();
+    let s = until_row(&o.store, &id, "answered", |s| {
+        s.state == "running"
+            && s.turn_active == 0
+            && events_of(&o.store, &s.id, "user_prompt")
+                .iter()
+                .any(|p| p["text"] == "Is the PR ready?")
+    })
+    .await;
+    assert_eq!(s.continued_from, None);
+    assert_eq!(
+        adapter.resumed.lock().unwrap().last().cloned(),
+        Some(Some("fake".into()))
+    );
+    assert!(
+        !o.store
+            .list_sessions(None)
+            .unwrap()
+            .iter()
+            .any(|other| other.continued_from.as_deref() == Some(id.as_str())),
+        "nothing continues it"
+    );
+    tracon::session::materialize::remove(&id);
+}

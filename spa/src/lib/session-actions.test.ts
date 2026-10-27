@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
-import { composerState, sessionControls } from './session-actions'
+import { askMode, compactOffered, composerState, sessionControls } from './session-actions'
+import type { Session } from './types'
 
 test('a suspended or ended session offers no Pause or Stop', () => {
   expect(sessionControls({ state: 'suspended' })).toEqual({ pause: false, resume: false, stop: false })
@@ -32,4 +33,30 @@ test('a running turn takes a message to queue rather than refusing it', () => {
   expect(typing.placeholder).toBe(
     'A turn is running. Queue a message: the agent gets it in its next tracon tool result, or when the turn ends.',
   )
+})
+
+const can = { restorable: true, reason: null, compacts: true }
+const cannot = { restorable: false, reason: 'its workspace was removed', compacts: true }
+
+test('an ended or suspended session is asked again where its conversation can be restored', () => {
+  const ended: Pick<Session, 'state' | 'harness_id' | 'legacy_ms'> = { state: 'closed', harness_id: 'claude', legacy_ms: null }
+  expect(askMode(ended, can)).toEqual({ kind: 'ask' })
+  expect(askMode({ ...ended, state: 'suspended' }, can)).toEqual({ kind: 'ask' })
+  expect(askMode(ended, cannot)).toEqual({ kind: 'unrestorable', reason: 'its workspace was removed' })
+  // A live session has its own box, and nothing is said before the node answers.
+  expect(askMode({ ...ended, state: 'running' }, can)).toEqual({ kind: 'live' })
+  expect(askMode(ended, null)).toEqual({ kind: 'none' })
+  expect(askMode({ ...ended, harness_id: 'external' }, can)).toEqual({ kind: 'none' })
+  expect(askMode({ ...ended, legacy_ms: 1 }, can)).toEqual({ kind: 'none' })
+})
+
+test('Compact is offered on an idle live session or one that can be asked again', () => {
+  expect(compactOffered({ state: 'running', turn_active: 0 }, can)).toBe(true)
+  expect(compactOffered({ state: 'running', turn_active: 1 }, can)).toBe(false)
+  expect(compactOffered({ state: 'closed', turn_active: 0 }, can)).toBe(true)
+  expect(compactOffered({ state: 'suspended', turn_active: 0 }, can)).toBe(true)
+  expect(compactOffered({ state: 'closed', turn_active: 0 }, cannot)).toBe(false)
+  expect(compactOffered({ state: 'paused', turn_active: 0 }, can)).toBe(false)
+  expect(compactOffered({ state: 'running', turn_active: 0 }, { ...can, compacts: false })).toBe(false)
+  expect(compactOffered({ state: 'running', turn_active: 0 }, null)).toBe(false)
 })

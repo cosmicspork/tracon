@@ -1683,6 +1683,20 @@ to the next attempt.
 Abandon closes the item, or stops a plain lineage and puts it away, and records the
 reason. Abandon deletes nothing.
 
+Continue starts a new session that inherits the workspace and not the conversation.
+To ask an attempt that ended or was suspended about its own work, the operator writes
+to it instead: the same session row is reopened (no `continued_from`, nothing added to
+the lineage), its harness starts again on its workspace with `--resume` of the
+conversation it recorded, and the message is its next turn, through the usual prompt
+path with the budget and policy applied (`conversation_resumed`). Claude Code keeps
+conversations under its state directory, which is the node-wide harness state volume,
+so the record outlives the container. When it cannot be restored (the harness kept no
+record, the workspace was removed, another session is on that workspace or task, the
+harness cannot resume) the page says which and offers Continue. Compact runs the
+harness's own compaction (`/compact` for Claude Code) on a live session between turns,
+or on one that ended by reopening it for that, and records `context_compacted` as
+automatic compaction does.
+
 ### The product brief
 
 An item may point at one document that says what the work is for: intended user,

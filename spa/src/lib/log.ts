@@ -474,7 +474,13 @@ export function eventLine(e: Event): EventLine | null {
         summarised > 0 ? `${summarised} earlier messages summarised` : '',
         pruned > 0 ? `${pruned} old tool ${pruned === 1 ? 'output' : 'outputs'} cut` : '',
       ].filter(Boolean)
-      const why = str(p.trigger) === 'overflow' ? 'context compacted after the model refused it as too long' : 'context compacted'
+      const trigger = str(p.trigger)
+      const why =
+        trigger === 'overflow'
+          ? 'context compacted after the model refused it as too long'
+          : trigger === 'manual'
+            ? 'context compacted on request'
+            : 'context compacted'
       return line('sys', [why, size, what.join(', ')])
     }
     case 'budget_changed': {
@@ -520,6 +526,22 @@ export function eventLine(e: Event): EventLine | null {
     case 'published': {
       const url = str(p.url)
       return line('ok', ['published', url ? forgePath(url) : ''], url || undefined, url ? 'open' : undefined)
+    }
+    case 'conversation_resumed': {
+      // The operator asked a session that had ended or was put away: the same
+      // session, its harness started again in its own conversation.
+      const suspended = str(p.from_state) === 'suspended'
+      if (str(p.outcome) === 'resumed') {
+        return line('mark', [
+          suspended ? 'asked again after it was suspended' : 'asked again after it ended',
+          p.compact === true ? 'compacting its conversation first' : 'in its own conversation',
+        ])
+      }
+      return line(p.gone === true ? 'crit' : 'wait', [
+        p.gone === true ? 'its conversation cannot be restored' : 'could not be asked again',
+        str(p.reason),
+        suspended ? 'left suspended' : 'left as it ended',
+      ])
     }
     case 'session_suspended': {
       const idle = num(p.idle_ms)

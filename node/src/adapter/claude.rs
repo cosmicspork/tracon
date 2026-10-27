@@ -171,7 +171,15 @@ impl ClaudeAdapter {
             // incidental.
             "--setting-sources".into(),
             "project".into(),
-            "--session-id".into(),
+            // A reopened session names the conversation it carries on, which
+            // the CLI keeps its id for; `--session-id` alongside it is refused
+            // ("can only be used with --continue or --resume if
+            // --fork-session is also specified", seen from 2.1.311).
+            if spec.resume.is_some() {
+                "--resume".into()
+            } else {
+                "--session-id".into()
+            },
             session_id.into(),
             "--add-dir".into(),
             spec.cwd_in_runner.clone(),
@@ -366,6 +374,18 @@ impl Writer {
     }
 }
 
+/// The CLI's built-in command that compacts the conversation. Sent as a user
+/// message it runs the CLI's own compaction rather than reaching the model as
+/// text: a `compact_boundary` frame, the summary as a synthetic user message,
+/// and a `result` of no turns (seen from 2.1.311 in stream-json mode).
+const COMPACT_COMMAND: &str = "/compact";
+
+/// What the CLI says, in the `result` that ends the first turn, when
+/// `--resume` names a conversation it has no record of (2.1.311: "No
+/// conversation found with session ID: <id>", with no `system/init` before
+/// it).
+const NO_CONVERSATION: &str = "No conversation found";
+
 pub struct ClaudeHandle {
     writer: Writer,
     session_id: String,
@@ -391,6 +411,37 @@ impl HarnessHandle for ClaudeHandle {
     }
 
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
+        self.turn(text).await
+    }
+
+    async fn compact(&self) -> Result<TurnResult, AdapterError> {
+        self.turn(COMPACT_COMMAND.into()).await
+    }
+
+    async fn cancel(&self) -> Result<(), AdapterError> {
+        // An interrupt is a control request like any other; the CLI advertises
+        // `interrupt_receipt_v1` for it. Killing the process is the
+        // supervisor's fallback and stays that.
+        self.writer
+            .send(json!({
+                "type": "control_request",
+                "request_id": format!("cancel-{}", uuid::Uuid::now_v7()),
+                "request": { "subtype": "interrupt" },
+            }))
+            .await
+    }
+
+    async fn close(&self) -> Result<(), AdapterError> {
+        // Closing stdin ends the run: there is no more input, so the harness
+        // finishes what it has and exits.
+        drop(self.writer.0.clone());
+        Ok(())
+    }
+}
+
+impl ClaudeHandle {
+    /// One user message and the `result` that answers it.
+    async fn turn(&self, text: String) -> Result<TurnResult, AdapterError> {
         if let Some(fault) = self.fault.lock().unwrap().take() {
             return Err(fault);
         }
@@ -415,26 +466,6 @@ impl HarnessHandle for ClaudeHandle {
                 .unwrap_or_else(|| AdapterError::Protocol("the harness ended mid-turn".into()))),
         }
     }
-
-    async fn cancel(&self) -> Result<(), AdapterError> {
-        // An interrupt is a control request like any other; the CLI advertises
-        // `interrupt_receipt_v1` for it. Killing the process is the
-        // supervisor's fallback and stays that.
-        self.writer
-            .send(json!({
-                "type": "control_request",
-                "request_id": format!("cancel-{}", uuid::Uuid::now_v7()),
-                "request": { "subtype": "interrupt" },
-            }))
-            .await
-    }
-
-    async fn close(&self) -> Result<(), AdapterError> {
-        // Closing stdin ends the run: there is no more input, so the harness
-        // finishes what it has and exits.
-        drop(self.writer.0.clone());
-        Ok(())
-    }
 }
 
 /// Reads the harness's stdout and turns it into the events the supervisor
@@ -458,6 +489,43 @@ struct Pump {
 
 fn text_of(block: &Value) -> String {
     block["text"].as_str().unwrap_or_default().to_string()
+}
+
+/// A compaction as the supervisor records one (`context_compacted`), from the
+/// CLI's `compact_boundary` metadata and the summary that follows it. The
+/// CLI's `manual` is the operator's `/compact`; its `auto` is the threshold.
+fn compaction(metadata: &Value, summary: Option<&str>) -> Value {
+    let trigger = match metadata["trigger"].as_str() {
+        Some("auto") => "threshold",
+        Some(other) => other,
+        None => "threshold",
+    };
+    json!({
+        "sessionUpdate": "context_compacted",
+        "trigger": trigger,
+        "tokensBefore": metadata["pre_tokens"],
+        "tokensAfter": metadata["post_tokens"],
+        "summary": summary.map(compact_summary),
+    })
+}
+
+/// The summary itself, out of the message the CLI hands the model in its
+/// place: without the preamble that says a summary follows, the reminder
+/// block, and the closing instructions that name the transcript's path inside
+/// the runner (2.1.311's wording; text it does not recognize is kept whole).
+fn compact_summary(text: &str) -> String {
+    let body = match text.find("</system-reminder>") {
+        Some(at) => &text[at + "</system-reminder>".len()..],
+        None => text
+            .strip_prefix("This session is being continued from a previous conversation")
+            .and_then(|rest| rest.split_once("\n\n").map(|(_, body)| body))
+            .unwrap_or(text),
+    };
+    let body = body
+        .split("\n\nIf you need specific details from before compaction")
+        .next()
+        .unwrap_or(body);
+    body.trim().to_string()
 }
 
 impl Pump {
@@ -514,6 +582,8 @@ impl Pump {
         // the ask, so a call is known to have been let through unasked only
         // when its result arrives while it is still here.
         let mut unasked: HashMap<String, (String, Value)> = HashMap::new();
+        // A `compact_boundary` whose summary has not arrived yet.
+        let mut compacting: Option<Value> = None;
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim();
             if line.is_empty() {
@@ -599,6 +669,26 @@ impl Pump {
                         }
                     }
                 }
+                // The CLI compacted the conversation, on its own or for a
+                // `/compact`: the summary is the user message that follows.
+                "system" if v["subtype"] == "compact_boundary" => {
+                    compacting = Some(v["compact_metadata"].clone());
+                }
+                // The summary the model works from now. The CLI's own echo
+                // of the command (`<local-command-stdout>`) follows it.
+                "user"
+                    if compacting.is_some()
+                        && v["message"]["content"]
+                            .as_str()
+                            .is_some_and(|text| !text.starts_with("<local-command")) =>
+                {
+                    if let Some(metadata) = compacting.take() {
+                        let summary = v["message"]["content"].as_str();
+                        let _ = tx
+                            .send(HarnessEvent::Other(compaction(&metadata, summary)))
+                            .await;
+                    }
+                }
                 // A tool's result comes back as a synthetic user message.
                 "user" => {
                     for block in v["message"]["content"].as_array().into_iter().flatten() {
@@ -661,6 +751,26 @@ impl Pump {
                     // A turn's calls have all answered by its end; one that
                     // never did (an interrupt) has nothing left to record.
                     unasked.clear();
+                    if let Some(metadata) = compacting.take() {
+                        let _ = tx
+                            .send(HarnessEvent::Other(compaction(&metadata, None)))
+                            .await;
+                    }
+                    // A reopening whose conversation the CLI has no record
+                    // of: the turn fails saying so, not as a turn in error.
+                    if let Some(gone) = v["errors"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .find(|e| e.contains(NO_CONVERSATION))
+                    {
+                        *fault.lock().unwrap() = Some(AdapterError::ConversationGone(format!(
+                            "Claude Code has no record of this conversation to resume ({gone})"
+                        )));
+                        drop(turn.lock().unwrap().take());
+                        continue;
+                    }
                     let usage = usage_of(&v);
                     let _ = tx
                         .send(HarnessEvent::Usage {
@@ -895,6 +1005,51 @@ impl HarnessAdapter for ClaudeAdapter {
         vec![Self::PLUGIN_DIR.to_string()]
     }
 
+    /// The CLI records each conversation under its state directory, which is
+    /// the node-wide harness state volume rather than the session's scratch
+    /// (`materialize::state_mounts`), so the record outlives the container.
+    /// `--resume <id>` in stream-json mode carries it on under the same id
+    /// (seen from 2.1.311).
+    fn reopens(&self) -> bool {
+        true
+    }
+
+    fn compacts(&self) -> bool {
+        true
+    }
+
+    /// The CLI keeps a conversation at `projects/<cwd, escaped>/<id>.jsonl`
+    /// under its state directory. Looked for under any project directory,
+    /// since the CLI finds it there from any working directory too. Only a
+    /// plain "not there" says it is gone: a shell that would not run says
+    /// nothing, and the CLI is left to say it.
+    async fn has_conversation(
+        &self,
+        runner: &dyn Runner,
+        spec: &LaunchSpec,
+        harness_session_id: &str,
+    ) -> Result<bool, AdapterError> {
+        let projects = format!(
+            "{}/projects",
+            crate::session::materialize::state_target(&spec.harness_home, Self::layout())
+        );
+        let out = runner
+            .run_probe(RunnerCommand {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    r#"for f in "$1"/*/"$2".jsonl; do [ -f "$f" ] && exit 0; done; exit 1"#.into(),
+                    "sh".into(),
+                    projects,
+                    harness_session_id.into(),
+                ],
+                name: format!("{}-conversation", spec.container_name),
+                ..Default::default()
+            })
+            .await?;
+        Ok(out.status.code() != Some(1))
+    }
+
     /// `--setting-sources project` is what loads the repository's `CLAUDE.md`,
     /// and it loads `.claude/settings.json` with it: permission rules that
     /// allow tools without the node seeing the ask, and hooks and a status
@@ -968,8 +1123,12 @@ impl HarnessAdapter for ClaudeAdapter {
     ) -> Result<(Box<dyn HarnessHandle>, mpsc::Receiver<HarnessEvent>), AdapterError> {
         // The node picks the session id rather than discovering it, so the row
         // it has already written and the harness's own id are the same string
-        // even if the handshake fails.
-        let session_id = uuid::Uuid::now_v7().to_string();
+        // even if the handshake fails. A reopened session keeps the one its
+        // conversation was recorded under.
+        let session_id = match &spec.resume {
+            Some(resume) => resume.harness_session_id.clone(),
+            None => uuid::Uuid::now_v7().to_string(),
+        };
         let mut spec = spec;
         spec.model = claude_model(&spec.model)?.to_string();
         let Spawned {
@@ -1256,6 +1415,53 @@ mod tests {
             failed.raw_output,
             Some(json!("Error: worktree is for a harness you run yourself"))
         );
+    }
+
+    /// A reopened session names its own conversation with `--resume`, never
+    /// `--session-id` beside it, which the CLI refuses.
+    #[test]
+    fn a_reopened_session_resumes_its_conversation_by_id() {
+        let mut resumed = spec();
+        resumed.resume = Some(crate::adapter::Resume {
+            harness_session_id: "sid".into(),
+            last_seq: 0,
+        });
+        let argv = ClaudeAdapter::cmd("c", &resumed, "sid").argv;
+        let at = argv.iter().position(|a| a == "--resume").expect("--resume");
+        assert_eq!(argv[at + 1], "sid");
+        assert!(!argv.iter().any(|a| a == "--session-id"), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "--fork-session"), "{argv:?}");
+        let fresh = ClaudeAdapter::cmd("c", &spec(), "sid").argv;
+        assert!(!fresh.iter().any(|a| a == "--resume"), "{fresh:?}");
+    }
+
+    /// The CLI's compaction reaches the supervisor as the event automatic
+    /// compaction is recorded from, with the summary and not the
+    /// instructions wrapped around it.
+    #[test]
+    fn a_compaction_is_told_with_its_summary_alone() {
+        let text = "This session is being continued from a previous conversation that ran out \
+                    of context. The summary below covers the earlier portion of the \
+                    conversation.\n\n<system-reminder>\n<tools-used-before-summary>\
+                    </tools-used-before-summary>\n</system-reminder>\nThe ledger is half \
+                    done.\n\nIf you need specific details from before compaction (like exact \
+                    code snippets), read the full transcript at: /root/.claude/projects/-work/\
+                    s.jsonl\nContinue the conversation from where it left off.";
+        let event = compaction(
+            &json!({ "trigger": "manual", "pre_tokens": 48_000, "post_tokens": 3_100 }),
+            Some(text),
+        );
+        assert_eq!(event["sessionUpdate"], "context_compacted");
+        assert_eq!(event["trigger"], "manual");
+        assert_eq!(event["tokensBefore"], 48_000);
+        assert_eq!(event["tokensAfter"], 3_100);
+        assert_eq!(event["summary"], "The ledger is half done.");
+
+        let auto = compaction(&json!({ "trigger": "auto" }), None);
+        assert_eq!(auto["trigger"], "threshold");
+        assert!(auto["summary"].is_null());
+        // Wording it does not know is kept whole rather than guessed at.
+        assert_eq!(compact_summary("  just a summary "), "just a summary");
     }
 
     #[test]

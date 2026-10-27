@@ -19,11 +19,12 @@
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { usageNote as usageNoteFor } from '../lib/usage'
   import { repetitionHint } from '../lib/log'
-  import { composerState, sessionControls } from '../lib/session-actions'
+  import { askMode, compactOffered, composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import {
     isTerminal,
+    type Askable,
     type CeilingInfo,
     type OperatorQuestion,
     type SessionExhaustion,
@@ -127,6 +128,55 @@
     box.typed(draft)
   }
 
+  // Whether a session that ended or was suspended can be asked again in its
+  // own conversation, read again whenever its state moves.
+  let askable = $state<Askable | null>(null)
+  const askStamp = $derived(session ? `${id}:${session.state}` : '')
+  $effect(() => {
+    if (!askStamp) return
+    let current = true
+    api
+      .askable(id)
+      .then((a) => {
+        if (current) askable = a
+      })
+      .catch(() => {
+        if (current) askable = null
+      })
+    return () => {
+      current = false
+    }
+  })
+  const ask = $derived(session ? askMode(session, askable) : ({ kind: 'none' } as const))
+  const canCompact = $derived(session ? compactOffered(session, askable) : false)
+  let compacting = $state(false)
+  async function compact() {
+    if (compacting) return
+    compacting = true
+    error = null
+    try {
+      await api.compact(id)
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    } finally {
+      compacting = false
+    }
+  }
+  /** Today's Continue, for an ended session whose conversation cannot be restored. */
+  async function continueInstead() {
+    if (continuing) return
+    continuing = true
+    error = null
+    try {
+      const next = await api.carryOn({ session_id: id })
+      router.go(`/sessions/${next.id}`)
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    } finally {
+      continuing = false
+    }
+  }
+
   async function send(e?: SubmitEvent) {
     e?.preventDefault()
     const text = draft.trim()
@@ -138,7 +188,9 @@
     // save firing mid-request would resurrect the sent text into the box.
     box.sent()
     try {
-      await api.prompt(id, text)
+      // An ended or suspended session is asked again in its own
+      // conversation; a live one takes the prompt as it is.
+      await (ask.kind === 'ask' ? api.ask(id, text) : api.prompt(id, text))
       draft = ''
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
@@ -276,6 +328,7 @@
     if (!session) return 'loading'
     // The operator is already talking to this one, in its own terminal.
     if (session.harness_id === 'external') return 'a harness you run yourself'
+    if (ask.kind === 'ask') return null
     if (isTerminal(session.state)) return `session ${session.state.replace('_', ' ')}`
     if (atBudget) return 'held at its token budget; raise it to carry on'
     if (session.state === 'paused') return 'paused'
@@ -292,7 +345,11 @@
   // rather than refusing it.
   const composer = $derived(composerState(inputReason, busy || session?.state === 'waiting_on_check'))
   const placeholder = $derived(
-    unreachable !== null ? `${unreachable} — the prompt is sent when it returns` : composer.placeholder,
+    unreachable !== null
+      ? `${unreachable} — the prompt is sent when it returns`
+      : ask.kind === 'ask'
+        ? 'Ask it. Its harness starts again in its own conversation, on its workspace.'
+        : composer.placeholder,
   )
 </script>
 
@@ -359,6 +416,16 @@
     <a class="mono" href="#authority" title="where it runs, what it can reach, what it must ask about and what is refused"
       >what it may do</a
     >
+    {#if canCompact}
+      <button
+        class="lnk"
+        onclick={() => void compact()}
+        disabled={unreachable !== null || compacting}
+        title={isTerminal(session.state) || session.state === 'suspended'
+          ? 'start its harness again in its own conversation and compact it, so asking it costs less'
+          : "shrink its conversation with the harness's own compaction"}>Compact</button
+      >
+    {/if}
     {#if controls?.resume}
       <button class="lnk" onclick={() => void control('resume')} disabled={unreachable !== null || controlling}
         >{session.harness_id === 'external' ? 'Resume broker access' : 'Resume'}</button
@@ -501,6 +568,16 @@
   {:else if session.end_reason === 'phase_done'}
     <div class="banner ok">{session.phase === 'plan' ? 'plan written' : 'verdict given'} <b>· this {session.phase} session is done</b></div>
   {/if}
+  {#if ask.kind === 'unrestorable' && !continuedAs}
+    <div class="banner dim">
+      its conversation can't be restored <b>· {ask.reason}</b>
+      {#if isTerminal(session.state)}
+        <button class="lnk" onclick={() => void continueInstead()} disabled={continuing || unreachable !== null}
+          >Continue in a new session</button
+        >
+      {/if}
+    </div>
+  {/if}
   {#if budgetOpen && !atBudget}
     <div class="banner dim">
       budget <b
@@ -558,15 +635,15 @@
   {#if error}
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
-  {#if isTerminal(session.state) && session.draft}
+  {#if isTerminal(session.state) && session.draft && ask.kind !== 'ask'}
     <div class="banner dim">unsent prompt retained <b>· copy it before starting another session</b><pre class="draft">{session.draft}</pre></div>
   {/if}
 
-  {#if restored && !isTerminal(session.state)}
+  {#if restored && (!isTerminal(session.state) || ask.kind === 'ask')}
     <div class="banner dim">draft restored <b>· the node kept what you typed; it was never sent</b></div>
   {/if}
 
-  {#if !isTerminal(session.state)}
+  {#if !isTerminal(session.state) || ask.kind === 'ask'}
     <form class="prompt" onsubmit={send}>
       <textarea
         class="grow compact"
@@ -580,7 +657,7 @@
         }}
       ></textarea>
       <button class="btn p" type="submit" disabled={(inputReason !== null && !composer.queues) || !draft.trim()}>
-        {composer.queues ? 'Queue' : 'Send'}
+        {ask.kind === 'ask' ? 'Ask' : composer.queues ? 'Queue' : 'Send'}
       </button>
     </form>
   {/if}

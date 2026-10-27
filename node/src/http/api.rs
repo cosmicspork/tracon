@@ -1698,6 +1698,35 @@ pub async fn prompt(
     };
     Ok((StatusCode::ACCEPTED, Json(body)))
 }
+/// Whether a session that ended or was suspended can be asked again in its
+/// own conversation, and why not when it cannot.
+pub async fn askable(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(s.manager.askable(&id).await?)))
+}
+
+/// Ask a session that ended or was suspended: the same session, its harness
+/// started again in its own conversation, the message its next turn.
+pub async fn ask_session(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<PromptBody>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let row = s
+        .manager
+        .ask(&id, crate::session::Ask::Message(b.text))
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(json!(row))))
+}
+
+/// Compact a session's conversation with its harness's own compaction.
+pub async fn compact(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    s.manager.compact(&id).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
 #[derive(Deserialize)]
 pub struct SessionControlBody {
     #[serde(default)]

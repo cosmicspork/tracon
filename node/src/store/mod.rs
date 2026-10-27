@@ -643,6 +643,42 @@ impl Store {
         patch.apply_unless(&conn, id, excluded)
     }
 
+    /// Put a session that ended or was suspended back to `starting`, the
+    /// same row, for the operator to ask it again in its own conversation:
+    /// its ending is cleared, and nothing else about it changes. Only while it
+    /// is still `from` and neither archived nor legacy; returns whether it
+    /// was.
+    pub fn reopen_session(&self, id: &str, from: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE session SET state='starting', end_reason=NULL, last_error=NULL, \
+             ended_mono_ms=NULL, turn_active=0, updated_ms=?3 \
+             WHERE id=?1 AND state=?2 AND archived_ms IS NULL AND legacy_ms IS NULL",
+            rusqlite::params![id, from, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Undo `reopen_session` for a relaunch that did not start: the row goes
+    /// back to how it ended, or to `suspended`. Only while it is still
+    /// `starting`, so a Stop that landed meanwhile stands.
+    pub fn restore_session(&self, id: &str, was: &SessionRow) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE session SET state=?2, end_reason=?3, last_error=?4, ended_mono_ms=?5, \
+             turn_active=0, updated_ms=?6 WHERE id=?1 AND state='starting'",
+            rusqlite::params![
+                id,
+                was.state,
+                was.end_reason,
+                was.last_error,
+                was.ended_mono_ms,
+                now_ms()
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
     /// Rename a session's branch from `from` to `to`, only while it is still
     /// `from`: the push target its first review chose in place of the node's
     /// placeholder. Returns whether it was renamed.

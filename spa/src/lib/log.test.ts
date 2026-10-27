@@ -444,6 +444,23 @@ test('a compaction says how much smaller the context got and what went', () => {
   expect(pruned?.text).toContain('1 old tool output cut')
 })
 
+test('a compaction the operator asked for says so', () => {
+  const manual = eventLine(ev('context_compacted', null, { trigger: 'manual', tokens_before: 48_000, tokens_after: 3_100, summary: 'the ledger is half done' }))
+  expect(manual?.text).toBe(`context compacted on request · ~${formatTokens(48_000)} → ~${formatTokens(3_100)} tokens`)
+})
+
+test('asking an ended session again says it is the same conversation, or why it is not', () => {
+  const resumed = eventLine(ev('conversation_resumed', null, { outcome: 'resumed', from_state: 'closed', end_reason: 'killed_user' }))
+  expect(resumed?.text).toBe('asked again after it ended · in its own conversation')
+  const compacting = eventLine(ev('conversation_resumed', null, { outcome: 'resumed', from_state: 'suspended', compact: true }))
+  expect(compacting?.text).toBe('asked again after it was suspended · compacting its conversation first')
+  const gone = eventLine(
+    ev('conversation_resumed', null, { outcome: 'failed', gone: true, from_state: 'closed', reason: 'the claude harness no longer has a record of conversation c1' }),
+  )
+  expect(gone?.tone).toBe('crit')
+  expect(gone?.text).toBe('its conversation cannot be restored · the claude harness no longer has a record of conversation c1 · left as it ended')
+})
+
 test("a subagent's calls and asks sit under the spawn, not in the parent's run", () => {
   const log = groupLog([
     ev('tool_call', 'c1', { title: 'subagent: look', kind: 'think' }),

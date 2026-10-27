@@ -156,6 +156,44 @@ fn handoff_note(old: &SessionRow, harness: &str, carried: &[ReviewRow]) -> Strin
     handoff(old, &why, carried)
 }
 
+/// What the operator asks a session that ended or was suspended with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ask {
+    /// A message, delivered as its next turn.
+    Message(String),
+    /// A compaction of its conversation, before anything is asked.
+    Compact,
+}
+
+/// Whether a session can be asked again in its own conversation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Askable {
+    /// Its harness can be started again in the conversation it had.
+    pub restorable: bool,
+    /// Why it cannot, when it cannot.
+    pub reason: Option<String>,
+    /// Its harness compacts on request.
+    pub compacts: bool,
+}
+
+/// A launch that reopens a session rather than starting one: the
+/// conversation it resumes, the row as it was, and whether the operator
+/// asked for a compaction.
+struct Reopened {
+    resume: crate::adapter::Resume,
+    from: SessionRow,
+    compact: bool,
+}
+
+/// The workspace a session works on: one it carried on names it in its path;
+/// one seeded for it has its own id.
+fn workspace_of(row: &SessionRow) -> String {
+    row.repo_path
+        .strip_prefix("workspace://")
+        .unwrap_or(&row.id)
+        .to_string()
+}
+
 /// What a session carrying on a suspended, published one is told: where its
 /// work landed, and that what brings it back (a CI failure, a review comment)
 /// is on the forge to read.
@@ -849,6 +887,267 @@ impl Manager {
             self.hand_over_suspended(&old.id, &row.id).await?;
         }
         Ok(row)
+    }
+
+    /// Why `row`'s own conversation cannot be picked up again, for the
+    /// operator to read, or the adapter that would pick it up. Asked of a
+    /// session that ended or was suspended; anything here refuses before the
+    /// row is touched, and the operator is offered a continuation instead.
+    async fn reopenable(&self, row: &SessionRow) -> Result<Arc<dyn HarnessAdapter>, String> {
+        if row.node_id != self.node_id {
+            return Err(format!(
+                "it ran on node {}; ask it there",
+                &row.node_id[..8.min(row.node_id.len())]
+            ));
+        }
+        if row.legacy_ms.is_some() {
+            return Err(format!(
+                "it ran the `{}` harness, which this node no longer has",
+                row.harness_id
+            ));
+        }
+        if row.archived_ms.is_some() {
+            return Err("it is archived; bring it back to ask it".into());
+        }
+        let state = SessionState::from_stored(&row.state);
+        if state != SessionState::Suspended && !state.is_terminal() {
+            return Err(format!("it is {}; send it a prompt", row.state));
+        }
+        // Its last harness is still being put away, and holds the state a
+        // relaunch would stage.
+        if self.live.lock().await.contains_key(&row.id) || materialize::holds_state(&row.id) {
+            return Err("it is still stopping; ask it again in a moment".into());
+        }
+        if row.harness_id == external::HARNESS_ID {
+            return Err("an external agent's conversation is held where it runs".into());
+        }
+        if row.phase == Phase::Review.as_str() {
+            return Err("a review session is started by its review, not asked again".into());
+        }
+        let adapter = self
+            .adapter_by_id(&row.harness_id)
+            .map_err(|e| e.to_string())?;
+        if !adapter.reopens() {
+            return Err(format!(
+                "the `{}` harness cannot pick a conversation up again once its process is gone",
+                row.harness_id
+            ));
+        }
+        if row.harness_session_id.is_none() {
+            return Err("its harness never started a conversation".into());
+        }
+        if row.budget_tokens > 0 && row.tokens_used >= row.budget_tokens {
+            return Err(format!(
+                "it spent its token budget ({} of {} tokens)",
+                row.tokens_used, row.budget_tokens
+            ));
+        }
+        if !self.bindings(&row.channel)["archived"].is_null() {
+            return Err(format!("its channel {} is archived", row.channel));
+        }
+        // A conversation the harness was asked for and had no record of
+        // stays gone; anything else that failed a reopening may not.
+        if let Ok(Some(last)) = self
+            .store
+            .last_event_payload(&row.id, ek::CONVERSATION_RESUMED)
+        {
+            if last["gone"] == true {
+                return Err(last["reason"]
+                    .as_str()
+                    .unwrap_or("the harness has no record of its conversation")
+                    .to_string());
+            }
+        }
+        let workspace = workspace_of(row);
+        let others = self.store.list_sessions(None).map_err(|e| e.to_string())?;
+        if let Some(other) = others.iter().find(|other| {
+            other.id != row.id
+                && other.node_id == self.node_id
+                && !SessionState::from_stored(&other.state).is_terminal()
+                && (workspace_of(other) == workspace
+                    || (row.work_item_id.is_some() && other.work_item_id == row.work_item_id))
+        }) {
+            return Err(format!(
+                "session {} is {} on its workspace or its task now",
+                &other.id[..8.min(other.id.len())],
+                other.state.replace('_', " ")
+            ));
+        }
+        if !self
+            .backend
+            .volume_exists(&crate::workspace::volume_name(&workspace))
+            .await
+        {
+            return Err("its workspace was removed".into());
+        }
+        Ok(adapter)
+    }
+
+    /// Whether the operator can ask `id` again in its own conversation, and
+    /// compact it; with the reason when it cannot be asked.
+    pub async fn askable(&self, id: &str) -> Result<Askable, SessionError> {
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        let compacts = row.harness_id != external::HARNESS_ID
+            && self
+                .adapter_by_id(&row.harness_id)
+                .is_ok_and(|adapter| adapter.compacts());
+        let reason = self.reopenable(&row).await.err();
+        Ok(Askable {
+            restorable: reason.is_none(),
+            reason,
+            compacts,
+        })
+    }
+
+    /// Ask a session that ended or was suspended: the same row is reopened,
+    /// its harness started again in its own conversation on its own
+    /// workspace, and `ask` delivered as its first turn through the
+    /// supervisor's usual path, so the budget and policy apply as to any
+    /// other. Not a continuation: `continued_from` stays empty and nothing is
+    /// added to the lineage.
+    pub async fn ask(&self, id: &str, ask: Ask) -> Result<SessionRow, SessionError> {
+        self.refuse_while_restarting()?;
+        let was = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        Self::refuse_legacy(&was)?;
+        let adapter = self.reopenable(&was).await.map_err(|why| {
+            SessionError::Rejected(format!("its conversation cannot be restored: {why}"))
+        })?;
+        if matches!(ask, Ask::Compact) && !adapter.compacts() {
+            return Err(SessionError::Rejected(format!(
+                "the `{}` harness does not compact on request",
+                adapter.id()
+            )));
+        }
+        let harness_session_id = was
+            .harness_session_id
+            .clone()
+            .ok_or_else(|| SessionError::Rejected("its harness never started".into()))?;
+        let message = match &ask {
+            Ask::Message(text) if text.trim().is_empty() => {
+                return Err(SessionError::Rejected("say what to ask it".into()))
+            }
+            Ask::Message(text) => Some(text.clone()),
+            Ask::Compact => None,
+        };
+        if !self.store.reopen_session(id, &was.state)? {
+            return Err(SessionError::Rejected(
+                "it changed while it was being reopened; look again".into(),
+            ));
+        }
+        // Kept as the box's text until the supervisor takes it, as a new
+        // session's first prompt is.
+        if let Some(text) = &message {
+            self.store.set_draft(id, Some(text))?;
+        }
+        let spec = NewSession {
+            channel: was.channel.clone(),
+            repo_path: was.repo_path.clone(),
+            branch: Some(was.branch.clone()),
+            work_item_id: was.work_item_id.clone(),
+            model: was.model.clone(),
+            budget_tokens: Some(was.budget_tokens),
+            initial_prompt: message,
+            node_id: None,
+            phase: Phase::from_row(&was.phase),
+            review_id: was.review_id.clone(),
+            base_sha: None,
+            workspace_id: Some(workspace_of(&was)),
+            parent_session: None,
+            continued_from: None,
+            harness: Some(was.harness_id.clone()),
+            on_exhaustion: None,
+            told_reviews: Vec::new(),
+        };
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        self.bus.publish(Frame::Session(Box::new(row.clone())));
+        let reopened = Reopened {
+            resume: crate::adapter::Resume {
+                harness_session_id,
+                last_seq: 0,
+            },
+            from: was.clone(),
+            compact: matches!(ask, Ask::Compact),
+        };
+        let this = self.clone();
+        let id = id.to_string();
+        let started = Instant::now();
+        let slug = id.split('-').next_back().unwrap_or("session").to_string();
+        tokio::spawn(async move {
+            let branch = spec.branch.clone().unwrap_or_default();
+            let Err(e) = this
+                .start(
+                    &id,
+                    spec,
+                    branch,
+                    slug,
+                    adapter,
+                    started,
+                    ("session", "session"),
+                    false,
+                    Some(reopened),
+                )
+                .await
+            else {
+                return;
+            };
+            tracing::warn!(session = %id, error = %e, "the session could not be asked again");
+            materialize::release_state(&id);
+            this.tokens.lock().await.remove(&id);
+            // Back to how it ended: a reopening that never started changed
+            // nothing about the session, and its ending is still the one
+            // that stands. A Stop that landed meanwhile stands instead.
+            let _ = this.store.restore_session(&id, &was);
+            let gone = matches!(
+                e.downcast_ref::<crate::adapter::AdapterError>(),
+                Some(crate::adapter::AdapterError::ConversationGone(_))
+            );
+            this.record(NewEvent {
+                session_id: id.clone(),
+                work_item_id: None,
+                kind: ek::CONVERSATION_RESUMED.into(),
+                ref_id: None,
+                payload: json!({
+                    "outcome": "failed",
+                    "reason": e.to_string(),
+                    "gone": gone,
+                    "from_state": was.state,
+                    "end_reason": was.end_reason,
+                }),
+                at_ms: now_ms(),
+                mono_ms: started.elapsed().as_millis() as i64,
+            });
+            if let Ok(Some(row)) = this.store.get_session(&id) {
+                this.bus.publish(Frame::Session(Box::new(row)));
+            }
+        });
+        Ok(row)
+    }
+
+    /// Compact a session's conversation: a live one's at once, between
+    /// turns; one that ended or was suspended by reopening it to compact
+    /// (`ask`), after which it is live and takes the operator's question.
+    pub async fn compact(&self, id: &str) -> Result<(), SessionError> {
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        let state = SessionState::from_stored(&row.state);
+        if state == SessionState::Suspended || state.is_terminal() {
+            return self.ask(id, Ask::Compact).await.map(|_| ());
+        }
+        self.ensure_active(id)?;
+        self.refuse_turn_while_restarting(id)?;
+        if !self
+            .adapter_by_id(&row.harness_id)
+            .is_ok_and(|adapter| adapter.compacts())
+        {
+            return Err(SessionError::Rejected(format!(
+                "the `{}` harness does not compact on request",
+                row.harness_id
+            )));
+        }
+        let (ack, wait) = oneshot::channel();
+        self.send(id, Command::Compact { ack }).await?;
+        wait.await
+            .map_err(|_| SessionError::Rejected("session stopped".into()))?
+            .map_err(SessionError::Rejected)
     }
 
     /// End the suspended session `old` as continued by `new`. One that ended
@@ -1990,6 +2289,7 @@ impl Manager {
                     started,
                     (model_source, harness_source),
                     from_node,
+                    None,
                 )
                 .await
             {
@@ -2138,6 +2438,7 @@ impl Manager {
         started: Instant,
         (model_source, harness_source): (&'static str, &'static str),
         kickoff: bool,
+        reopened: Option<Reopened>,
     ) -> anyhow::Result<()> {
         if !self.startable(id)? {
             return Ok(());
@@ -2713,8 +3014,27 @@ impl Manager {
             env: harness_env,
             secret_env: harness_secret_env,
             system_prompt_file: Some(scratch.orientation_path.clone()),
-            resume: None,
+            resume: reopened.as_ref().map(|r| r.resume.clone()),
         };
+        // Asked before anything runs in it, so a conversation the harness
+        // has no record of refuses the reopening rather than its first turn.
+        if let Some(reopened) = &reopened {
+            let kept = adapter
+                .has_conversation(
+                    runner.as_ref(),
+                    &launch_spec,
+                    &reopened.resume.harness_session_id,
+                )
+                .await;
+            if let Ok(false) = kept {
+                return Err(crate::adapter::AdapterError::ConversationGone(format!(
+                    "the {} harness no longer has a record of conversation {}",
+                    adapter.id(),
+                    reopened.resume.harness_session_id
+                ))
+                .into());
+            }
+        }
         // Kept for a harness that can be started again on this session when
         // its process dies.
         let relaunch = adapter.restorable().then(|| supervisor::Relaunch {
@@ -2780,16 +3100,41 @@ impl Manager {
                 "image_source": image.source(),
                 "toolchain_image": image.toolchain_image,
                 "image_note": image.note,
+                "resumed": reopened.is_some(),
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
         });
+        if let Some(reopened) = &reopened {
+            self.record(NewEvent {
+                session_id: id.to_string(),
+                work_item_id: None,
+                kind: ek::CONVERSATION_RESUMED.into(),
+                ref_id: None,
+                payload: json!({
+                    "outcome": "resumed",
+                    "harness_session_id": reopened.resume.harness_session_id,
+                    "from_state": reopened.from.state,
+                    "end_reason": reopened.from.end_reason,
+                    "compact": reopened.compact,
+                }),
+                at_ms: now_ms(),
+                mono_ms: started.elapsed().as_millis() as i64,
+            });
+        }
 
         let cmd_tx_for_turns = cmd_tx.clone();
         if let Some(text) = spec.initial_prompt.filter(|text| !text.trim().is_empty()) {
             let (ack, _wait) = oneshot::channel();
             cmd_tx_for_turns
                 .send(Command::Prompt { text, ack })
+                .await
+                .map_err(|_| anyhow::anyhow!("session supervisor did not start"))?;
+        }
+        if reopened.as_ref().is_some_and(|r| r.compact) {
+            let (ack, _wait) = oneshot::channel();
+            cmd_tx_for_turns
+                .send(Command::Compact { ack })
                 .await
                 .map_err(|_| anyhow::anyhow!("session supervisor did not start"))?;
         }
