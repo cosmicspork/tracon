@@ -129,26 +129,37 @@
   }
 
   // Whether a session that ended or was suspended can be asked again in its
-  // own conversation, read again whenever its state moves.
+  // own conversation, read again whenever its state moves, and again shortly
+  // while what refuses it is passing on its own (its harness still stopping).
   let askable = $state<Askable | null>(null)
-  const askStamp = $derived(session ? `${id}:${session.state}` : '')
+  // Whose answer `askable` is, so another session's never decides this one's box.
+  let askableFor = $state('')
+  let askRetry = $state(0)
+  const askStamp = $derived(session ? `${id}:${session.state}:${askRetry}` : '')
   $effect(() => {
     if (!askStamp) return
     let current = true
+    let again: ReturnType<typeof setTimeout> | undefined
+    const asked = id
     api
-      .askable(id)
+      .askable(asked)
       .then((a) => {
-        if (current) askable = a
+        if (!current) return
+        askable = a
+        askableFor = asked
+        if (!a.restorable && a.retry) again = setTimeout(() => askRetry++, 2000)
       })
       .catch(() => {
         if (current) askable = null
       })
     return () => {
       current = false
+      clearTimeout(again)
     }
   })
-  const ask = $derived(session ? askMode(session, askable) : ({ kind: 'none' } as const))
-  const canCompact = $derived(session ? compactOffered(session, askable) : false)
+  const askableHere = $derived(askableFor === id ? askable : null)
+  const ask = $derived(session ? askMode(session, askableHere) : ({ kind: 'none' } as const))
+  const canCompact = $derived(session ? compactOffered(session, askableHere) : false)
   let compacting = $state(false)
   async function compact() {
     if (compacting) return
@@ -169,6 +180,7 @@
     error = null
     try {
       const next = await api.carryOn({ session_id: id })
+      await store.refetch()
       router.go(`/sessions/${next.id}`)
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)

@@ -174,7 +174,13 @@ pub struct Askable {
     pub reason: Option<String>,
     /// Its harness compacts on request.
     pub compacts: bool,
+    /// What refuses it now passes on its own in a moment, so it is worth
+    /// asking again without anything else changing.
+    pub retry: bool,
 }
+
+/// Why a session cannot be asked while its last harness is put away.
+const STILL_STOPPING: &str = "it is still stopping; ask it again in a moment";
 
 /// A launch that reopens a session rather than starting one: the
 /// conversation it resumes, the row as it was, and whether the operator
@@ -916,7 +922,7 @@ impl Manager {
         // Its last harness is still being put away, and holds the state a
         // relaunch would stage.
         if self.live.lock().await.contains_key(&row.id) || materialize::holds_state(&row.id) {
-            return Err("it is still stopping; ask it again in a moment".into());
+            return Err(STILL_STOPPING.into());
         }
         if row.harness_id == external::HARNESS_ID {
             return Err("an external agent's conversation is held where it runs".into());
@@ -944,6 +950,20 @@ impl Manager {
         }
         if !self.bindings(&row.channel)["archived"].is_null() {
             return Err(format!("its channel {} is archived", row.channel));
+        }
+        // Closing the task ends its sessions; asking one again would run it
+        // on a task that is done.
+        if let Some(item_id) = row.work_item_id.as_deref().filter(|i| !i.trim().is_empty()) {
+            let closed = self
+                .store
+                .work_status(&row.channel, None)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|v| v.item.id == item_id)
+                .is_some_and(|v| matches!(v.readiness, tracon_sync::work::Readiness::Closed));
+            if closed {
+                return Err("its task is closed".into());
+            }
         }
         // A conversation the harness was asked for and had no record of
         // stays gone; anything else that failed a reopening may not.
@@ -987,13 +1007,17 @@ impl Manager {
     /// compact it; with the reason when it cannot be asked.
     pub async fn askable(&self, id: &str) -> Result<Askable, SessionError> {
         let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        // A peer's live session is compacted where it runs; the mesh carries
+        // no compaction to forward.
         let compacts = row.harness_id != external::HARNESS_ID
+            && row.node_id == self.node_id
             && self
                 .adapter_by_id(&row.harness_id)
                 .is_ok_and(|adapter| adapter.compacts());
         let reason = self.reopenable(&row).await.err();
         Ok(Askable {
             restorable: reason.is_none(),
+            retry: reason.as_deref() == Some(STILL_STOPPING),
             reason,
             compacts,
         })
@@ -1007,6 +1031,9 @@ impl Manager {
     /// added to the lineage.
     pub async fn ask(&self, id: &str, ask: Ask) -> Result<SessionRow, SessionError> {
         self.refuse_while_restarting()?;
+        // Held from the checks to the reopening, so two asks of sessions on
+        // one workspace, or an ask and a Continue, cannot each find it free.
+        let continuing = self.continuing().await;
         let was = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         Self::refuse_legacy(&was)?;
         let adapter = self.reopenable(&was).await.map_err(|why| {
@@ -1034,6 +1061,7 @@ impl Manager {
                 "it changed while it was being reopened; look again".into(),
             ));
         }
+        drop(continuing);
         // Kept as the box's text until the supervisor takes it, as a new
         // session's first prompt is.
         if let Some(text) = &message {
@@ -1134,6 +1162,12 @@ impl Manager {
         }
         self.ensure_active(id)?;
         self.refuse_turn_while_restarting(id)?;
+        if row.node_id != self.node_id {
+            return Err(SessionError::Rejected(format!(
+                "it runs on node {}; compact it there",
+                &row.node_id[..8.min(row.node_id.len())]
+            )));
+        }
         if !self
             .adapter_by_id(&row.harness_id)
             .is_ok_and(|adapter| adapter.compacts())

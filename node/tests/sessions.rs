@@ -6546,6 +6546,35 @@ async fn a_conversation_that_cannot_be_restored_says_why() {
     tracon::session::materialize::remove(&id);
 }
 
+/// Closing the task ends its session, and the session stays ended: it is not
+/// asked again on a task that is done.
+#[tokio::test]
+async fn a_session_whose_task_closed_is_not_asked_again() {
+    state::isolate();
+    let (o, _adapter, _operator) = reopening("ask-closed-task").await;
+    let id = o.row.id.clone();
+    tracon::continuation::close_task(&o.manager, &o.item.id)
+        .await
+        .unwrap();
+    let s = until_row(&o.store, &id, "closed", |s| {
+        s.state == "closed" && !tracon::session::materialize::holds_state(&s.id)
+    })
+    .await;
+    assert_eq!(s.end_reason.as_deref(), Some("item_close"));
+    let askable = o.manager.askable(&id).await.unwrap();
+    assert!(!askable.restorable, "{askable:?}");
+    assert_eq!(askable.reason.as_deref(), Some("its task is closed"));
+    let refused = o
+        .manager
+        .ask(&id, tracon::session::Ask::Message("one more thing".into()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("its task is closed"), "{refused}");
+    assert_eq!(o.store.get_session(&id).unwrap().unwrap().state, "closed");
+    tracon::session::materialize::remove(&id);
+}
+
 /// Compact on a live session runs the harness's own compaction as a turn of
 /// its own and records it as automatic compaction is; on an ended one it
 /// reopens the conversation to compact it, leaving it live to be asked.

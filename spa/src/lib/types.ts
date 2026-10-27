@@ -1434,6 +1434,8 @@ export interface Askable {
   /** Why it cannot be asked, when it cannot. */
   reason: string | null
   compacts: boolean
+  /** What refuses it passes on its own shortly: worth asking again. */
+  retry?: boolean
 }
 
 export interface SessionUsage {

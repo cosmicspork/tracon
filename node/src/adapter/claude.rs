@@ -1021,8 +1021,9 @@ impl HarnessAdapter for ClaudeAdapter {
     /// The CLI keeps a conversation at `projects/<cwd, escaped>/<id>.jsonl`
     /// under its state directory. Looked for under any project directory,
     /// since the CLI finds it there from any working directory too. Only a
-    /// plain "not there" says it is gone: a shell that would not run says
-    /// nothing, and the CLI is left to say it.
+    /// plain "not there" says it is gone: a shell that would not run, or a
+    /// state directory with no `projects` at all (not mounted where the
+    /// probe looked), says nothing, and the CLI is left to say it.
     async fn has_conversation(
         &self,
         runner: &dyn Runner,
@@ -1038,7 +1039,7 @@ impl HarnessAdapter for ClaudeAdapter {
                 argv: vec![
                     "/bin/sh".into(),
                     "-c".into(),
-                    r#"for f in "$1"/*/"$2".jsonl; do [ -f "$f" ] && exit 0; done; exit 1"#.into(),
+                    r#"[ -d "$1" ] || exit 2; for f in "$1"/*/"$2".jsonl; do [ -f "$f" ] && exit 0; done; exit 1"#.into(),
                     "sh".into(),
                     projects,
                     harness_session_id.into(),
