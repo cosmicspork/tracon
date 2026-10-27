@@ -1,6 +1,7 @@
 <script lang="ts">
   // A plain session is the default: its first message is queued after the
   // harness starts. Creating durable work items and plans is explicit.
+  import Help from './Help.svelte'
   import ModelPicker from './ModelPicker.svelte'
   import PreparationPreview from './PreparationPreview.svelte'
   import ReadinessBanner from './ReadinessBanner.svelte'
@@ -280,7 +281,8 @@
       {#if channel}<span>{channel}</span>{/if}
       {#if repo}<span title={repo}>{repoLabel(repo)}</span>{/if}
       {#if planLabel || execLabel}
-        <span>{planLabel ? `plans on ${planLabel}` : 'no plan model'}{execLabel ? `, builds on ${execLabel}` : ''}</span>
+        <span>Plan: {planLabel || 'none'}</span>
+        {#if execLabel}<span>Build: {execLabel}</span>{/if}
       {/if}
       <button type="button" class="lnk" onclick={() => (open = !open)}>{open ? 'close' : 'adjust'}</button>
     </div>
@@ -313,14 +315,14 @@
       {#if selectedNode && !selectedNode.is_self}
         <div class="field">
           <label>
-            <span>Forge repository</span>
+            <span
+              >Forge repository <Help label="About the forge repository"
+                >{selectedNode.name} clones it with its own forge credential if it has not yet. Files uploaded here stay on
+                {store.node?.name ?? 'this controller'}.</Help
+              ></span
+            >
             <input bind:value={repo} placeholder="github.com/owner/name" spellcheck="false" />
           </label>
-          <small
-            >{selectedNode.name} starts from its own clone of it, cloning it with its own forge credential when the session
-            starts if it has not yet. Browser-file uploads on {store.node?.name ?? 'this controller'} are not transferred to
-            a peer.</small
-          >
           <RepoPicker
             bind:value={repo}
             {channel}
@@ -349,7 +351,7 @@
       {/if}
       <label>
         <span>Branch</span>
-        <input bind:value={branch} placeholder="feat/…  (a name is generated if empty)" spellcheck="false" />
+        <input bind:value={branch} placeholder="feat/…  (optional)" spellcheck="false" />
       </label>
       {#if !item}
         <div class="field">
@@ -370,7 +372,7 @@
                 phase = 'plan'
               }}>Plan task</button>
           </div>
-          <small>{structured ? 'Writes a durable task, then runs its plan phase.' : 'Starts directly; no task or plan is created.'}</small>
+          <small>{structured ? 'Creates a task, then plans it.' : 'No task or plan.'}</small>
         </div>
       {/if}
       {#if item}
@@ -380,24 +382,20 @@
             <button type="button" class:on={phase === 'plan'} onclick={() => (phase = 'plan')}>Plan</button>
             <button type="button" class:on={phase === 'execute'} onclick={() => (phase = 'execute')}>Execute</button>
           </div>
-          <small
-            >{phase === 'plan'
-              ? 'Reads, thinks, and ends by writing the plan document.'
-              : "Does the work from the task's plan, then submits for review."}</small
-          >
+          <small>{phase === 'plan' ? 'Writes the plan.' : 'Follows the plan, then submits for review.'}</small>
           {#if needsPlan}<small class="crit">This task has no plan yet: run a plan session first.</small>{/if}
         </div>
       {/if}
       <label>
-        <span>Model <em>{bound.model ? `${channel} binds one to ${sessionPhase}` : 'automatic by default'}</em></span>
+        <span>Model <em>{bound.model ? `bound by ${channel}` : 'automatic'}</em></span>
         <ModelPicker bind:value={model} {models} recent={recentModels} none="Automatic (channel or node default)" harnessTags />
         {#if models.length === 0}
-          <small class="crit">No model is available for this channel. Declare one on a provider and check its channel scope; refresh only if a declared model has not appeared.</small>
+          <small class="crit">No model for this channel · declare one on a provider</small>
         {/if}
       </label>
       {#if harnessOptions.length > 1}
         <label>
-          <span>Harness <em>this model's credential runs on either</em></span>
+          <span>Harness</span>
           <select bind:value={harness}>
             <option value="">Automatic{defaultHarness ? ` (node default: ${defaultHarness})` : ''}</option>
             {#each harnessOptions as option (option)}
@@ -407,7 +405,10 @@
         </label>
       {/if}
       <label>
-        <span>Budget <em>{budget.trim() === '' ? 'channel or node default' : Number(budget) ? `${formatTokens(Number(budget))} tokens` : 'no cap'}</em></span>
+        <span
+          >Budget <em>{budget.trim() === '' ? 'channel or node default' : Number(budget) ? `${formatTokens(Number(budget))} tokens` : 'no cap'}</em>
+          <Help label="About the budget">Counts input, output and cached-read tokens. The session stops when it reaches the cap.</Help></span
+        >
         <input
           value={budget ? formatGrouped(Number(budget)) : ''}
           placeholder="No cap"
@@ -418,7 +419,6 @@
             budget = raw.replace(/\D/g, '') ? String(digits(raw)) : ''
           }}
         />
-        <small>Optional cap across input, output, and cached-read tokens. A session is stopped only when a cap is set and reached.</small>
       </label>
       <div class="field">
         <span>Runs on</span>

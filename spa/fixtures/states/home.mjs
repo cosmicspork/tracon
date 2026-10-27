@@ -1229,6 +1229,18 @@ export default [
     act: async (page) => page.locator('.banner.ready').waitFor(),
   },
   {
+    id: 'home-composer-help-open',
+    area: 'home',
+    route: '/',
+    title: 'Composer: a help icon opened',
+    note: 'The circled ? beside Budget opens a short note under it; Esc or a click elsewhere closes it.',
+    api: base(),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'adjust' }).click()
+      await page.getByRole('button', { name: 'About the budget' }).click()
+    },
+  },
+  {
     id: 'home-start-error',
     area: 'home',
     route: '/',
