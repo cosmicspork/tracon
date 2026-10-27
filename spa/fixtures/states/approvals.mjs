@@ -448,7 +448,7 @@ export default [
   at(ID.comment, prComment(ID.comment), {
     id: 'approvals-pr-comment',
     title: 'PR comment waiting: rendered Markdown, locked target',
-    note: 'Prose renders as a document above the form; repo and number are locked chips; three buttons plus the reason input in the decide row. Form order is alphabetical (body, number, repo) because the node serialises the schema sorted.',
+    note: 'Prose renders as a document above the form; repo and number are locked chips; three buttons plus the reason input in the decide row. Locked fields come first (number, repo), then the editable body.',
   }),
   at(ID.comment, prComment(ID.comment), {
     id: 'approvals-pr-comment-raw',
@@ -652,7 +652,7 @@ export default [
     {
       id: 'approvals-succeeded-edited',
       title: 'Allowed with edits and ran',
-      note: 'Green banner with the note, decided and finished times, the result with its link, the document shows what ran, "What the operator changed" diff, and the agent\'s original arguments expanded.',
+      note: 'Accent banner with the note, decided and finished times, the result with its link, the document shows what ran, "What the operator changed" diff, and the agent\'s original arguments expanded.',
       act: async (page) => {
         await page.locator('details.request summary').click()
       },
@@ -661,7 +661,7 @@ export default [
   at(ID.merge, settled(merge, { state: 'running', answer_option_id: 'allow_once', finished_ms: null }), {
     id: 'approvals-running',
     title: 'Allowed, running now',
-    note: 'Green "Allowed · running now" banner; collapsed original arguments.',
+    note: 'Accent "Allowed · running now" banner; collapsed original arguments.',
   }),
   at(
     ID.rerun,
@@ -676,7 +676,7 @@ export default [
       id: 'approvals-failed',
       since: '#399',
       title: 'Allowed but failed, long reason',
-      note: 'Red banner with a long reason; the reason is in italics inside the banner.',
+      note: 'Red banner with a long reason.',
     },
   ),
   at(

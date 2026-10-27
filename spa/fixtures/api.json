@@ -1006,11 +1006,52 @@
     ],
     "managed": [
       {
+        "repo_path": "/home/op/src/orbit",
+        "full_name": "op/orbit",
+        "host": "github.com"
+      },
+      {
         "repo_path": "/var/lib/tracon/repos/github.com/op/infra",
         "full_name": "op/infra",
         "host": "github.com"
       }
     ]
+  },
+  "/api/sessions/s-run/continuation": {
+    "kind": "item",
+    "id": "wi-2",
+    "channel": "personal",
+    "intent": { "title": "Add per-channel rate limits", "body": "", "source": "item" },
+    "attempts": [
+      { "id": "s-run", "phase": "execute", "model": "sonnet", "harness": "claude", "state": "waiting_on_you", "end_reason": null, "last_error": null, "tokens_used": 412000, "created_ms": -2700000, "continued_from": null, "parent_session": null, "archived": false }
+    ],
+    "blockers": [],
+    "next": { "kind": "answer", "text": "The session is waiting on you.", "session_id": "s-run" },
+    "workspace": { "id": "ws-s-run", "branch": "feat/rate-limits", "session_id": "s-run" },
+    "decisions": { "plan": "plan-rate-limits", "brief": null, "answered": [] },
+    "evidence": { "reviews": [], "shown": [] },
+    "actions": { "continue_from": null, "abandon": true }
+  },
+  "/api/work/wi-2/continuation": {
+    "kind": "item",
+    "id": "wi-2",
+    "channel": "personal",
+    "intent": { "title": "Add per-channel rate limits", "body": "", "source": "item" },
+    "attempts": [
+      { "id": "s-run", "phase": "execute", "model": "sonnet", "harness": "claude", "state": "waiting_on_you", "end_reason": null, "last_error": null, "tokens_used": 412000, "created_ms": -2700000, "continued_from": null, "parent_session": null, "archived": false }
+    ],
+    "blockers": [],
+    "next": { "kind": "answer", "text": "The session is waiting on you.", "session_id": "s-run" },
+    "workspace": { "id": "ws-s-run", "branch": "feat/rate-limits", "session_id": "s-run" },
+    "decisions": { "plan": "plan-rate-limits", "brief": null, "answered": [] },
+    "evidence": { "reviews": [], "shown": [] },
+    "actions": { "continue_from": null, "abandon": true }
+  },
+  "/api/usage": {
+    "since_ms": -2592000000,
+    "until_ms": null,
+    "totals": [],
+    "codex_limits": []
   },
   "/api/forge/repos": {
     "forges": [

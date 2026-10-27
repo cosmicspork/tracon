@@ -837,7 +837,7 @@ export default [
     since: '#384',
     note: 'Switching personal-less "work" to a fallback policy holds it as a draft until a fallback model is picked.',
     act: async (page) => {
-      await page.locator('.exh select').nth(1).selectOption('fallback')
+      await page.locator('.exh select:has(option[value=fallback])').nth(1).selectOption('fallback')
     },
   }),
   S('channels-model-picker-open', '/settings#channels', 'Channels: fallback model picker open', {
