@@ -27,7 +27,7 @@
   {:else if previewUrl}
     <iframe title={slug} src={previewUrl} sandbox="allow-scripts"></iframe>
   {:else}
-    <div class="failure">Loading preview…</div>
+    <div class="loading">Loading preview…</div>
   {/if}
 </div>
 
@@ -38,4 +38,5 @@
   header span { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   iframe { width: 100%; height: 100%; min-height: 0; border: 0; background: white; }
   .failure { padding: 2rem; color: var(--crit); }
+  .loading { padding: 2rem; color: var(--dim); }
 </style>

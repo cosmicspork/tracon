@@ -98,8 +98,9 @@
           : ''}{command &&
       command !== permission.title
         ? ` · ${command}`
-        : ''}{error ? ` · ${error}` : ''}</small
+        : ''}</small
     >
+    {#if error}<small class="err" role="alert">{error}</small>{/if}
     {#if permission.session_id}
       <small class="intent"
         >{intent} · <a href="/sessions/{permission.session_id}">open the session</a
@@ -300,6 +301,10 @@
   }
   .t small.intent a {
     color: var(--acc);
+  }
+  .t small.err {
+    color: var(--crit);
+    white-space: normal;
   }
   .act {
     display: flex;

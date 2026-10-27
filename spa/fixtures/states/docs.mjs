@@ -985,7 +985,7 @@ export default [
     area,
     route: '/sessions/s-run',
     title: 'Continue on another node, refused',
-    note: 'The error should read as an error; `.transfer > p` overrides `.bad`, so it is grey.',
+    note: 'The refusal reads as an error, in crit red.',
     api: {
       '/api/sessions/s-run/draft': noDraft,
       'POST /api/transfers': {

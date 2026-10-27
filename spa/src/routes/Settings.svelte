@@ -1568,6 +1568,11 @@
   .log li.bad {
     color: var(--crit);
   }
+  /* What the mismatch stops, on its own line under the harness. */
+  .checks small.crit {
+    display: block;
+    color: var(--crit);
+  }
   .issued {
     display: grid;
     gap: 8px;

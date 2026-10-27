@@ -5,6 +5,8 @@
 
   let transfers = $state<TransferInboxItem[]>([])
   let loading = $state(true)
+  // Whether the list was ever read: an unreadable inbox is not an empty one.
+  let listed = $state(false)
   let busy = $state<string | null>(null)
   let model = $state('')
   let notice = $state<string | null>(null)
@@ -14,6 +16,7 @@
     loading = true
     try {
       transfers = (await api.transfers()).transfers
+      listed = true
       error = null
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
@@ -82,6 +85,8 @@
   </label>
   {#if loading}
     <p>Reading staged packages…</p>
+  {:else if !listed}
+    <!-- the error below says why there is no list -->
   {:else if transfers.length === 0}
     <div class="empty">No staged packages on this node. Choose a signed package from the source node or a portable download to inspect and start it here.</div>
   {:else}
@@ -166,7 +171,7 @@
   strong { color: var(--ink); font: 600 12px var(--mono); }
   .ghost { background: transparent; color: var(--ink2); }
   .ok { color: var(--ok); }
-  .bad { color: var(--crit); }
+  .inbox > p.bad { color: var(--crit); }
   @media (max-width: 700px) {
     li {
       align-items: stretch;

@@ -58,8 +58,10 @@
     up to date, and opens its interface.
   </p>
 
-  {#if status === null}
+  {#if status === null && !error}
     <p class="dim">Looking at this machine…</p>
+  {:else if status === null}
+    <!-- the error below says why nothing was found -->
   {:else}
     <ol>
       {#each steps as s (s.id)}

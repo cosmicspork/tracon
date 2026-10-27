@@ -133,5 +133,5 @@
   input, select, textarea { width: 100%; }
   .transfer > .btn { margin-top: 12px; }
   .ok { color: var(--ok); }
-  .bad { color: var(--crit); }
+  .transfer > p.bad { color: var(--crit); }
 </style>

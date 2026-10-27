@@ -212,7 +212,8 @@
     <a class="lnk" href="/docs">Documents</a>
     <span class="sep">/</span>
     {slug}
-    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : missing ? ' · new' : ''}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}{error && !editing ? ` · ${error}` : ''}</b>
+    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : missing ? ' · new' : ''}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}</b>
+    {#if error && !editing}<span class="err" role="alert">{error}</span>{/if}
     {#if doc?.format === 'html' && !loadError}
       <span class="r">
         <button class="lnk" onclick={() => (replacing = !replacing)}>{replacing ? 'Cancel replace' : 'Replace bundle'}</button>
@@ -308,6 +309,10 @@
 {/if}
 
 <style>
+  .h4 .err {
+    font: 12px var(--mono);
+    color: var(--crit);
+  }
   .h4 .sep {
     color: var(--dim);
     margin: 0 4px;
