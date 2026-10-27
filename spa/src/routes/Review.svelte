@@ -1878,9 +1878,7 @@
     margin: 0;
     font: 12.5px var(--mono);
     color: var(--ink2);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
   }
   .verdict {
     display: grid;
