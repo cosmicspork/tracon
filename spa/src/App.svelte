@@ -135,9 +135,11 @@
       : null,
   )
   /** No hub is a thing to do something about, so it links to doing it. */
-  const noHub = $derived(!store.mesh?.hub || store.mesh.hub.state === 'disabled')
+  const noHub = $derived(store.mesh !== null && (!store.mesh.hub || store.mesh.hub.state === 'disabled'))
   const hubLabel = $derived.by(() => {
-    const hub = store.mesh?.hub
+    // Not known yet: no hub to pair, and none down.
+    if (store.mesh === null) return '…'
+    const hub = store.mesh.hub
     if (!hub || hub.state === 'disabled') return 'no hub'
     if (hub.state === 'connected') return 'hub ok'
     return `hub down ${formatAge(hub.since_ms, clock.now)}`
@@ -197,7 +199,7 @@
     </a>
     <div class="foot lbl" title="{store.node?.name ?? 'this node'} · {store.connected ? 'connected' : 'offline'} · {hubLabel}">
       <span>{store.node?.name ?? '…'}</span>
-      <span
+      <span class="st"
         >{store.connected ? 'connected' : 'offline'} ·
         {#if noHub}<a href="/settings#mesh">pair a hub</a>{:else}{hubLabel}{/if}</span
       >
@@ -211,7 +213,7 @@
       {/if}
       {#if store.awake?.last_suspend && clock.now - store.awake.last_suspend.woke_ms < 3_600_000}
         <span class="warn" title="Sessions that were live recorded the interruption"
-          >slept {Math.round(store.awake.last_suspend.asleep_ms / 60_000)} min · {formatAge(store.awake.last_suspend.woke_ms, clock.now)}</span
+          >slept {Math.round(store.awake.last_suspend.asleep_ms / 60_000)} min · woke {formatAge(store.awake.last_suspend.woke_ms, clock.now)} ago</span
         >
       {/if}
     </div>
@@ -334,7 +336,10 @@
      it grows; this must not. */
   .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: none; }
   .foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .foot a { color: var(--acc); text-decoration: none; }
+  /* What is wrong wraps rather than lose its point to an ellipsis. */
+  .foot .st, .foot .warn { white-space: normal; overflow-wrap: anywhere; }
+  /* Undo the nav row the rail's links are drawn as. */
+  .foot a { display: inline; padding: 0; font: inherit; color: var(--acc); text-decoration: none; }
   .foot .awake { color: var(--acc); }
   .foot .awake .why { display: block; white-space: normal; overflow-wrap: anywhere; color: var(--ink2); }
   .foot .warn { color: var(--wait); }
