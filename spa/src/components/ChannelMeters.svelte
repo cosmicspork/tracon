@@ -42,12 +42,12 @@
              than letting those turns read as a quiet afternoon. -->
         {#if c.ceiling.unmetered_turns > 0}<em
             class="unsure"
-            title="Turns today whose model calls this node could not count: the provider returned no usage. Not counted above — unknown, not free."
+            title="Turns whose usage the provider did not report. Not in the count above."
             >· {c.ceiling.unmetered_turns} unmetered</em
           >{/if}</span
       >
       {#each limits.filter((l) => l.channel === c.name) as l (l.provider)}
-        <div class="plan" title="What the subscription last reported through this node's gateway. The ChatGPT workspace admin console remains the authoritative credit ledger.">
+        <div class="plan" title="Last reported by the subscription. The ChatGPT admin console is authoritative.">
           {codexLimitLabel(l)}: {#each formatCodexLimits(l) as line, i (i)}<span class:crit={line.startsWith('limit reached')}>{i ? ' · ' : ''}{line}</span>{/each}
         </div>
       {/each}

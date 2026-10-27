@@ -44,10 +44,8 @@
 </script>
 
 <Card
-  title="Nodes"
-  note={meshed
-    ? `${nodes.length} enrolled · ${reachable} reachable. Readiness and harness versions as each node reports them.`
-    : 'This machine only; pair a hub above to add others. Readiness and harness versions as this node reports them.'}
+  title={meshed ? `Nodes · ${reachable} of ${nodes.length} reachable` : 'Nodes'}
+  note={meshed ? 'Readiness and harness versions as each node reports them.' : 'This machine only. Pair a hub to add others.'}
 >
   {#snippet actions()}
     {#if meshed}<a class="lnk" href="/nodes/enroll">Enroll a new node</a>{/if}

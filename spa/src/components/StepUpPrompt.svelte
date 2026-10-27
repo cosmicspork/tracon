@@ -28,8 +28,7 @@
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="step-up-title" data-testid="step-up">
       <h2 id="step-up-title">{viaDevice ? 'Confirm in a browser with your passkey' : 'Confirm with your passkey'}</h2>
       <p>
-        This changes who can use this node or what it holds for them, so it is confirmed with a
-        passkey each time.
+        Confirm with your passkey.
       </p>
       {#if what?.headline}<p class="what" data-testid="step-up-summary">{what.headline}</p>{/if}
       {#if what?.detail}<code class="action">{what.detail}</code>{/if}

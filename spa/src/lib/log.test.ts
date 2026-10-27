@@ -133,9 +133,9 @@ test('a provider error reads as a retry in progress', () => {
 
 test('repetition reads as a signal to look at, not as a verdict', () => {
   expect(repetitionLine({ count: 3, title: 'run just test' })).toBe(
-    'same call 3× in a row · run just test · recorded, not paused',
+    'same call 3× in a row · run just test',
   )
-  expect(repetitionLine({})).toBe('same call 0× in a row · the same tool call · recorded, not paused')
+  expect(repetitionLine({})).toBe('same call 0× in a row · the same tool call')
 })
 
 test('the worktree line says the workspace is prepared, and only what needs the operator', () => {
@@ -171,7 +171,7 @@ test('the start line says which image the harness is in only when it matters', (
     " · in the repository's image",
   )
   expect(sessionImage({ image: null, image_note: 'podman build exited 1' })).toBe(
-    " · in the harness image, not the repository's: podman build exited 1",
+    " · in the harness image: podman build exited 1",
   )
   expect(sessionImage({ image: null, image_note: null })).toBe('')
   expect(sessionImage({})).toBe('')
@@ -180,7 +180,7 @@ test('the start line says which image the harness is in only when it matters', (
 test('the repetition hint stands only until the harness moves on', () => {
   const signal = ev('repetition', null, { count: 3, title: 'run just test' })
   expect(repetitionHint([ev('tool_call'), signal])).toBe(
-    'same call 3× in a row · run just test · recorded, not paused',
+    'same call 3× in a row · run just test',
   )
   // A turn ending, a pause or a resume all end the run it was describing.
   expect(repetitionHint([signal, ev('turn_end')])).toBeNull()

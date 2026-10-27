@@ -58,14 +58,14 @@
       </label>
       <button class="btn p" type="submit" disabled={busy || !token.trim()}>{busy ? 'Unlocking…' : 'Unlock'}</button>
     </form>
-    <p>Sign in with this node’s operator token to unlock administration in this browser.</p>
+    <p>Unlock with this node's operator token.</p>
   {:else if !access?.authenticated}
-    <p>Create an operator token on this node to unlock administration. Remote clients cannot create the first token.</p>
+    <p>No operator token yet. Create the first one on the node itself.</p>
     {#if access?.local}<a class="lnk" href="/settings#access">Create operator access in Access &amp; devices</a>{/if}
   {/if}
 
   {#if access && !access.local}
-    <p class="note">Remote administration: mesh and rollout status are available here. Open the node locally for host recovery or signing.</p>
+    <p class="note">Remote: mesh and rollouts only. Recovery and signing need the node itself.</p>
   {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </Card>

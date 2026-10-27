@@ -265,7 +265,7 @@
       {:else if e.kind === 'check_not_runnable'}
         <div class="mark crit">
           not runnable · {e.payload.command} · {e.payload.missing_tool ?? 'its command'} is not in
-          {e.payload.image} ({e.payload.image_source}) · the environment, not the change
+          {e.payload.image} ({e.payload.image_source}) · an environment problem
         </div>
       {:else if e.kind === 'repetition'}
         <div class="mark wait">{repetitionLine(e.payload)}</div>
@@ -295,7 +295,7 @@
       {:else if e.kind === 'review_verdict'}
         <div class="mark ok">verdict · {e.payload.verdict} · {e.payload.summary}</div>
       {:else if e.kind === 'review_finding'}
-        <div class="mark" class:crit={e.payload.outcome === 'contradicted'}>finding · {String(e.payload.outcome ?? '').replace('_', ' ')} · {e.payload.criterion_text} · {e.payload.note} · inferred, not a verdict</div>
+        <div class="mark" class:crit={e.payload.outcome === 'contradicted'}>finding · {String(e.payload.outcome ?? '').replace('_', ' ')} · {e.payload.criterion_text} · {e.payload.note} · inferred</div>
       {:else if e.kind === 'provider_error'}
         {#if typeof e.payload.frame === 'string' && e.payload.frame}
           <!-- A retry that named no cause keeps what the harness sent. -->

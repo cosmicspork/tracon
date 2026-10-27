@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte'
+  import Help from '../Help.svelte'
 
   let {
     title,
@@ -18,9 +19,8 @@
 
 <section class="card" class:acc={tone === 'acc'} class:crit={tone === 'crit'}>
   <header>
-    <h3>{title}</h3>
+    <h3>{title}{#if note}{' '}<Help label="About {title}">{note}</Help>{/if}</h3>
     {#if actions}<div class="actions">{@render actions()}</div>{/if}
-    {#if note}<p>{note}</p>{/if}
   </header>
   {@render children?.()}
 </section>
@@ -58,13 +58,6 @@
     flex-wrap: wrap;
     align-items: baseline;
     gap: 6px 12px;
-  }
-  p {
-    grid-column: 1 / -1;
-    margin: 0;
-    max-width: 90ch;
-    color: var(--ink2);
-    font-size: 13px;
   }
   .card > :global(:is(button, .btn, .lnk)) {
     justify-self: start;

@@ -78,8 +78,7 @@
     {/if}
   {:else if !brief}
     <div class="empty">
-      No brief. This task is worked from its description and its plan, which is the ordinary case.
-      A brief adds who the work is for, what would make it good, and what is still open.
+      No brief. Optional: who it's for, what good looks like, what's open.
     </div>
     {#if !surface.phone && item.state === 'open'}
       <div class="actions"><button class="btn" onclick={start} disabled={busy}>Start a brief</button></div>

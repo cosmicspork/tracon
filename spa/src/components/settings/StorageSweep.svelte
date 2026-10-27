@@ -41,7 +41,7 @@
 
 <Card
   title="Runtime storage"
-  note="Volumes and state directories whose session, workspace or check is over. A session's workspace and harness state outlive it until it is archived; archiving and removing here gives up resuming, exporting and restoring it."
+  note="Volumes and directories of finished sessions, workspaces and checks. Removing one ends resuming, exporting and restoring it."
 >
   {#if !local}
     <p class="blocked">Storage is reclaimed on the node itself.</p>

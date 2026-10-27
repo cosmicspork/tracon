@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Help from '../components/Help.svelte'
   import LoadGate from '../components/LoadGate.svelte'
   import { api } from '../lib/api'
   import { codexLimitLabel, formatCodexLimits, formatTokens } from '../lib/format'
@@ -65,11 +66,17 @@
   <label>From <input type="date" value={view.from ?? localDate(usageWindow(view).since)} onchange={(e) => range(e.currentTarget.value, view.to ?? '')} /></label>
   <label>To <input type="date" value={view.to ?? localDate(Date.now())} onchange={(e) => range(view.from ?? '', e.currentTarget.value)} /></label>
 </div>
-<p class="scope">{note || 'Grouped by channel; values are limited to activity this node can observe.'} Only model calls made through this node's gateway are counted: sessions run by an external harness on an external agent lane call their model directly, Tracon never sees those calls, and they are not included. Turns the gateway could not count are shown as unmetered, not as zero.{#if view.to} The channel outcomes below run from the first day to now.{/if}</p>
+<p class="scope">
+  {note || "This node's view."}{#if view.to} Channel outcomes run to now.{/if}
+  <Help label="About what is counted"
+    >Only calls through this node's gateway count. External agent lanes call their models directly and are left out. Turns the
+    gateway couldn't count show as unmetered.</Help
+  >
+</p>
 
 <LoadGate status={usage} what="usage" onretry={() => usage.retry()} retrying={usage.pending}>
   {#if rows.length === 0}
-    <div class="empty">No usage is recorded for this window. <a class="lnk" href="/tasks">Open Tasks</a> to create a clear outcome, then start a session.</div>
+    <div class="empty">No usage in this window.</div>
   {:else}
     <div class="workflow">
       {#each rows as r (r.channel)}
@@ -83,7 +90,7 @@
             <div><dt>Request waiting</dt><dd>{dur(r.human_wait_seconds)}</dd></div>
             {#if r.codex_limits}
               <div class="limits">
-                <dt title="What the subscription last reported on an answer through this node's gateway. The ChatGPT workspace admin console remains the authoritative credit ledger.">{r.codex_limits.limit_id === 'codex' ? `${r.codex_limits.provider} plan` : codexLimitLabel(r.codex_limits)}</dt>
+                <dt title="Last reported by the subscription. The ChatGPT admin console is authoritative.">{r.codex_limits.limit_id === 'codex' ? `${r.codex_limits.provider} plan` : codexLimitLabel(r.codex_limits)}</dt>
                 <dd>{#each formatCodexLimits(r.codex_limits) as line, i (i)}<span class:crit={line.startsWith('limit reached')}>{line}</span>{/each}</dd>
               </div>
             {/if}
@@ -138,7 +145,7 @@
 </div>
 <LoadGate status={breakdown} what="usage by provider" onretry={() => breakdown.retry()} retrying={breakdown.pending}>
   {#if totals.length === 0}
-    <div class="empty">The gateway counted no model calls{view.provider ? ` to ${view.provider}` : ''} in this window.</div>
+    <div class="empty">No model calls{view.provider ? ` to ${view.provider}` : ''} in this window.</div>
   {:else}
     <div class="scroll">
       <table>
@@ -167,7 +174,16 @@
 
 <details class="methodology">
   <summary>How Usage is calculated</summary>
-  <p>Time to verified work is the mean session creation→first candidate with all required checks passing; missing verification is not zero. Setup failures are recorded sessions that failed before their harness started. Interventions include permission answers, review decisions, answered questions and operator pause/resume. Request waiting adds each answered request's delay and review submission→decision; overlapping waits are additive, not human working hours. Tokens per accepted change cover the sessions behind accepted reviews. Cost is shown only for priced providers. Human time in the table uses request→answer and review claim→decision; agent time is session start→end. The breakdown by provider counts each model call the gateway forwarded, in local days; input excludes cache reads, which are shown on their own and never charged. Calls a session's harness made around the gateway, as external agents on the external lanes do, are not in these numbers.</p>
+  <dl>
+    <dt>Time to verified work</dt><dd>Mean time from session start to its first candidate passing every required check.</dd>
+    <dt>Setup failures</dt><dd>Sessions that failed before their harness started.</dd>
+    <dt>Interventions</dt><dd>Permission answers, review decisions, answered questions, pause and resume.</dd>
+    <dt>Request waiting</dt><dd>Each request's wait plus review submit→decision. Overlaps add up.</dd>
+    <dt>Tokens per accepted</dt><dd>Tokens of the sessions behind accepted reviews.</dd>
+    <dt>Cost</dt><dd>Priced providers only.</dd>
+    <dt>Human · agent time</dt><dd>Request→answer and review claim→decision · session start→end.</dd>
+    <dt>By provider</dt><dd>Each call the gateway forwarded, by local day. Input excludes cache reads, which are free.</dd>
+  </dl>
 </details>
 
 <style>
@@ -287,16 +303,33 @@
     max-width: 78ch;
     padding: 0 14px;
   }
+  .methodology dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 16px;
+    margin: 0 0 12px;
+  }
+  .methodology dt {
+    color: var(--ink);
+  }
+  .methodology dd {
+    margin: 0;
+  }
+  @media (max-width: 700px) {
+    .methodology dl {
+      grid-template-columns: 1fr;
+      gap: 2px;
+    }
+    .methodology dd {
+      margin-bottom: 6px;
+    }
+  }
   .methodology summary {
     color: var(--ink);
     cursor: pointer;
     font: 600 12px var(--mono);
     letter-spacing: 0.04em;
     padding: 11px 0;
-  }
-  .methodology p {
-    margin: 0;
-    padding: 0 0 14px;
   }
   @media (max-width: 700px) {
     .h4 {

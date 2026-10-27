@@ -91,8 +91,7 @@
     <b>{promotion.channel} · {formatAge(promotion.created_ms, clock.now)} · {items.length} proposed{promotion.state === 'decided' ? ' · decided' : ''}</b>
   </div>
   <p class="lede">
-    What agents retained and were told would wait. Promoted lessons are recalled by later sessions;
-    rejected ones are never injected. Nothing here is context until you say so.
+    Lessons agents proposed. Promoted ones reach later sessions.
   </p>
   {#if promotion.state === 'open' && pending.length > 1}
     <div class="bulk">
@@ -112,7 +111,7 @@
           {#if it.supersedes}
             <span class="replaces">
               replaces: <em>{it.replaces ? `${it.replaces.kind} · ${it.replaces.scope}` : 'memory'}</em>{it.replaces ? it.replaces.body : `${it.supersedes.slice(0, 8)} (no longer held)`}
-              {#if !done && it.replaces && ['active', 'promoted'].includes(it.replaces.state)}<small>Promoting this retires it; rejecting leaves it as it is.</small>{:else if !done}<small>Already {it.replaces?.state ?? 'gone'}; promoting this retires nothing.</small>{/if}
+              {#if !done && it.replaces && ['active', 'promoted'].includes(it.replaces.state)}<small>Promoting this retires it; rejecting leaves it as it is.</small>{:else if !done}<small>Already {it.replaces?.state ?? 'gone'}.</small>{/if}
             </span>
           {/if}
           <em>{it.kind}</em>

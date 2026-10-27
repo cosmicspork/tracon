@@ -16,7 +16,7 @@ export function usageNote(usage: SessionUsage | null): UsageNote | null {
   if (!usage || usage.state === null) return null
   // Cache reads are the model rereading context it already paid for: shown,
   // so a long session's context is visible, and never part of the charge.
-  const cached = usage.cache_read_tokens ? ` · ${formatTokens(usage.cache_read_tokens)} cached, not charged` : ''
+  const cached = usage.cache_read_tokens ? ` · cached ${formatTokens(usage.cache_read_tokens)}` : ''
   // Only a harness that reports each request (the native one) is matched
   // request by request; the others carry null and say nothing here.
   const matched = usage.requests_matched ?? null

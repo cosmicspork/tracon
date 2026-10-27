@@ -865,7 +865,7 @@
       {#if intent.rewrite}
         <span
           class="chip warn"
-          title="the push replaces what the branch held at submit instead of adding to it"
+          title="Force-push over the branch as submitted"
           >rewrites history · replaces {intent.lease?.slice(0, 8)}</span
         >
       {/if}
@@ -979,11 +979,11 @@
               {/each}
             </ul>
           {:else if checksRunning}
-            <p class="missing">The node is running this candidate's required checks; they gate nothing{reviewerWaits ? ', and the reviewer starts once they are done' : ''}.</p>
+            <p class="missing">Checks running{reviewerWaits ? ' · reviewer starts after' : ''}</p>
           {:else if unrun}
             <p class="missing">{unrun.tail}</p>
           {:else if target?.worktree}
-            <p class="missing">Submitted from a harness you run yourself: the node ran no checks on this candidate.</p>
+            <p class="missing">From your own harness · no checks run</p>
           {:else}
             <p class="missing">No required checks were configured for this candidate.</p>
           {/if}
@@ -998,7 +998,7 @@
               <span class="chip warn" title="the document has changed since this was attached">stale</span>
             {/if}
           {/each}
-          <small>These linked documents are human-curated context; opening a review never executes them.</small>
+          <small>Linked context documents.</small>
         </div>
       {/if}
     </section>
@@ -1014,7 +1014,7 @@
         <p class="missing">{criteria.absent ?? 'the brief states no success criteria'}</p>
       {:else}
         <p class="left">
-          {whatIsLeft(criteria)} · the checks are this node's; whether the criterion was met is yours.
+          {whatIsLeft(criteria)} 
         </p>
         <ul>
           {#each criteria.criteria as c, i (i)}
@@ -1040,7 +1040,7 @@
                   {#each c.finding.evidence as ev, n (ev)}
                     {' · '}<a href="#shown-{ev}">{shownTitle(ev) ?? `evidence ${n + 1}`}</a>
                   {/each}
-                  · the reviewer's account, not a verdict
+                  · reviewer's view
                 </small>
               {/if}
               {#if c.judgement}
@@ -1050,8 +1050,7 @@
               {:else if c.earlier_judgement}
                 <small class="earlier">
                   judged {c.earlier_judgement.verdict.replace('_', ' ')}
-                  {c.earlier_judgement.candidate_id ? 'for another attempt' : 'with no attempt named'} — it does not
-                  settle this one
+                  {c.earlier_judgement.candidate_id ? 'on another attempt' : 'on no named attempt'}
                 </small>
               {/if}
               {#if c.duplicate}
@@ -1235,7 +1234,7 @@
 
   <div class="h4">On the forge <b>{closed ? 'as decided' : remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
   {#if remoteOwner}
-    <div class="note dim">Approving publishes what the agent asked the forge to show; to change it, open this review on the node that holds it.</div>
+    <div class="note dim">Publishes as the agent wrote it. Edit on the node that holds it.</div>
   {:else}
   <label class="toggle">
     <input type="checkbox" bind:checked={describe} disabled={busy || publishing || closed || surface.phone} />
@@ -1257,7 +1256,7 @@
   {/if}
   {/if}
   {#if edited && !closed}
-    <div class="note">Edited. Approving publishes what is written here, not what was submitted.</div>
+    <div class="note">Edited · approving publishes this version</div>
   {/if}
 
   {#if intent.commits?.length || squashing}
@@ -1279,7 +1278,7 @@
         </div>
       {:else}
         <div class="note">
-          Ships a new commit, not the agent's <code>{review.head_sha.slice(0, 8)}</code>{ships.dropped.length
+          Ships a new commit replacing <code>{review.head_sha.slice(0, 8)}</code>{ships.dropped.length
             ? `. ${ships.dropped.length > 1 ? 'The signatures on' : 'The signature on'} ${ships.dropped.map((sha) => sha.slice(0, 8)).join(', ')} ${ships.dropped.length > 1 ? 'are' : 'is'} dropped: a commit the node makes is never signed`
             : ''}.{squashing && intent.as_written !== undefined ? " The agent's own message would ship its commit as written." : ''}
         </div>
@@ -1404,7 +1403,7 @@
       {/if}
     </div>
   {:else}
-    <p class="note">Editing a diff needs a keyboard and a wide screen — open this on the desktop.</p>
+    <p class="note">Edit diffs on a desktop.</p>
   {/if}
 
   {#if readiness?.ready && readiness.note && !closed}

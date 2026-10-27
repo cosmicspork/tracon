@@ -101,8 +101,7 @@
 
   {#if !selection}
     <div class="empty">
-      Nothing selected. Sessions on this task start from its description, its brief pointer and its plan. Select the
-      brief, research, decisions and constraints that every session should start with, in full.
+      Nothing selected. Sessions start from the description, brief and plan; add documents every session should read in full.
     </div>
     {#if !surface.phone && item.state === 'open'}
       <div class="actions"><button class="btn" onclick={start} disabled={busy}>Select context</button></div>

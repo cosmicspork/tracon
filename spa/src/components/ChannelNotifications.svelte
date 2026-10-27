@@ -48,7 +48,7 @@
   }
 </script>
 
-<Card title="Shared notifications" note="Whether a channel's member nodes push its events to their registered devices. Shared with every member; this browser's own subscription is under Devices.">
+<Card title="Shared notifications" note="Whether member nodes push this channel's events to their devices. Shared by every member.">
   {#if failure}<small class="delivery bad" role="alert">{failure}</small>{/if}
   {#if channels.length === 0}
     <small>No active channels yet.</small>
@@ -67,7 +67,7 @@
             {#if pending?.name === channel.name}
               <span class="confirm" role="status">
                 {pending.enabled ? 'Enable' : 'Disable'} notifications for every listed node’s registered
-                devices? This changes the shared channel, not a device subscription.
+                devices? This changes the channel for every member.
                 <button class="btn p" onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Confirm change'}</button>
                 <button class="lnk" onclick={() => (pending = null)} disabled={busy}>Cancel</button>
               </span>
@@ -80,15 +80,15 @@
           {#if delivery}
             <small class:bad={delivery.state === 'failed'} class="delivery">
               {#if delivery.state === 'local'}
-                Saved on the serving node only; no member propagation was reported.
+                Saved here only.
               {:else if delivery.state === 'queued'}
                 {#if delivery.handed_to !== null}
-                  Saved on the serving node and queued for {delivery.handed_to} node{delivery.handed_to === 1 ? '' : 's'}; it is not applied there until that node receives it.
+                  Saved · queued for {delivery.handed_to} node{delivery.handed_to === 1 ? '' : 's'}
                 {:else}
-                  Saved on the serving node and queued for member nodes; it is not applied there until each node receives it.
+                  Saved · queued for members
                 {/if}
               {:else}
-                Saved on the serving node; distribution is incomplete, and some peers may already have received this change{delivery.error ? `: ${delivery.error}` : ''}.
+                Saved · distribution incomplete{delivery.error ? `: ${delivery.error}` : ''}
               {/if}
             </small>
           {/if}

@@ -137,9 +137,9 @@
     {:else}
       {#if hint}<span>{hint}.</span>{/if}
       {#if current.reset}
-        <span>{field.control === 'secret' ? 'Removed from node.toml on save.' : 'Taken out of node.toml on save; the node’s default applies.'}</span>
+        <span>{field.control === 'secret' ? 'Removed on save.' : 'Reset to default on save.'}</span>
       {:else if field.control !== 'secret'}
-        <span>{field.written ? 'Set in node.toml.' : field.value === undefined ? 'Not set.' : 'The node’s default.'}</span>
+        <span>{field.written ? 'Set in node.toml.' : field.value === undefined ? 'Not set.' : 'Default.'}</span>
       {/if}
       {#if dirty && !current.reset && field.control !== 'secret'}<span>Was {shown(field.value)}.</span>{/if}
       {#if field.help}<span>{field.help}</span>{/if}

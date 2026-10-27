@@ -27,7 +27,7 @@
 
 <Card
   title="Data on this node"
-  note={`What ${store.node?.name ?? 'the serving node'} holds. It keeps everything until you delete it; each kind says where it is deleted, if it can be, and what a delete does beyond this node.`}
+  note={`What ${store.node?.name ?? 'the serving node'} holds. Nothing is removed until you delete it.`}
 >
   {#snippet actions()}
     <button class="btn" onclick={() => void load()} disabled={busy}>{busy ? 'Counting…' : 'Count again'}</button>
@@ -58,7 +58,6 @@
         </li>
       {/each}
     </ul>
-    <p class="dim">Rows weigh what their values carry; directories weigh what their files take on disk.</p>
   {/if}
 </Card>
 

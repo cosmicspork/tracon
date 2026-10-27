@@ -277,26 +277,26 @@ fn supervisor_state(
     match main_pid {
         Ok(Some(pid)) if *pid == std::process::id() => ServiceState {
             state: "running",
-            detail: format!("the fixed user service reports this serving process (PID {pid}) active"),
+            detail: format!("running as this process (PID {pid})"),
         },
         Ok(Some(pid)) => ServiceState {
             state: "running",
             detail: format!(
-                "the fixed user service targets PID {pid}, not this serving process (PID {}); lifecycle changes are refused",
+                "the service runs PID {pid}, another process than this one (PID {}); changes refused",
                 std::process::id()
             ),
         },
         Ok(None) => ServiceState {
             state: "stopped",
             detail: if unit_installed {
-                "the fixed user-service unit is installed but not active".into()
+                "installed, inactive".into()
             } else {
-                "no user-service unit is installed".into()
+                "not installed".into()
             },
         },
         Err(error) => ServiceState {
             state: "unknown",
-            detail: format!("the user supervisor target could not be verified: {error}"),
+            detail: format!("couldn't verify the supervisor: {error}"),
         },
     }
 }
@@ -308,16 +308,16 @@ fn lifecycle_capability(
 ) -> LifecycleCapability {
     let (reason, recovery) = match action {
         LifecycleAction::Install => (
-            "this node can install and start its fixed user-service unit after this response",
-            "The page disconnects while the service starts. Reconnect here after the node answers.",
+            "installs and starts the user service",
+            "This page disconnects until the node is back.",
         ),
         LifecycleAction::Uninstall => (
-            "this node can disable and remove its fixed user-service unit after this response",
-            "The page disconnects. Node state and credentials remain; start the node another supported way to return.",
+            "disables and removes the user service",
+            "This page disconnects. State and credentials stay.",
         ),
         LifecycleAction::Restart => (
-            "this node can ask its own user supervisor to restart it after this response",
-            "The page disconnects while the node restarts; reconnect here after the service answers.",
+            "restarts the node",
+            "This page disconnects until the node is back.",
         ),
     };
     let check = match environment {
@@ -336,7 +336,7 @@ fn lifecycle_capability(
         Err(error) => LifecycleCapability {
             available: false,
             reason: error,
-            recovery: "This node cannot safely operate that host service from here.".into(),
+            recovery: "Not available from here.".into(),
         },
     }
 }

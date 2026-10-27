@@ -15,7 +15,7 @@
   <span class="t">
     <em>Recipe offer</em>
     {offer.sender_name} offers a recipe for <code>{offer.repo}</code>
-    <small>on {offer.channel} · lapses in {formatDuration(Math.max(0, offer.expires_ms - clock.now))} · nothing changes until you accept</small>
+    <small>on {offer.channel} · lapses in {formatDuration(Math.max(0, offer.expires_ms - clock.now))} </small>
   </span>
   <span class="act">Review</span>
 </a>

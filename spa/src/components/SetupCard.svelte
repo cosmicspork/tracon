@@ -43,13 +43,12 @@
     <div class="existing">
       <span class="eyebrow">Use an existing setup</span>
       <p>
-        Already have a node that should run this work? <a class="optional" href="/settings#mesh">Connect it to this mesh</a>.
-        Once it is a ready member of an open channel, its model makes the composer available here; choose a checkout that node can access.
+        Have a node already? <a class="optional" href="/settings#mesh">Connect it to this mesh</a>.
       </p>
     </div>
     <details>
       <summary>Optional device setup</summary>
-      <p><a class="optional" href="/settings#access">Register this browser for notifications</a> after a task path is available. It does not make a runtime or model ready.</p>
+      <p><a class="optional" href="/settings#access">Register this browser for notifications</a> for prompts.</p>
     </details>
   </div>
 

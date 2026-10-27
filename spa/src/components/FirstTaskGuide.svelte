@@ -90,7 +90,7 @@
         </div>
       {:else}
         <p>
-          No channel member is ready to run work. <a href="/settings#mesh">Connect an existing node</a>; this controller does not need a local provider to use a ready peer.
+          No channel member can run work. <a href="/settings#mesh">Connect a node</a>.
         </p>
       {/if}
     </div>
@@ -112,16 +112,16 @@
       <p><b>{channel?.name ?? 'Selected channel'}</b> · {dailyLimit}</p>
       <details class="device">
         <summary>Budgets, approvals and recovery</summary>
-        <p>Set a session token cap in the composer, or leave it blank to use channel or node defaults.</p>
-        <p>Policy-denied actions do not run. Approval requests wait in the session; allowing one applies only to that request.</p>
-        <p><b>Stop</b> ends the harness, not its isolated workspace or records. A submitted candidate waits for review before publication. “Discard edits” clears only changes made in the review editor.</p>
+        <p>Token caps are set in the composer.</p>
+        <p>Denied actions don't run. Allowing a request covers only that request.</p>
+        <p><b>Stop</b> ends the harness; the workspace and records stay. Nothing publishes before review.</p>
       </details>
     </div>
   {/if}
 
   <details class="device">
     <summary>Optional device setup</summary>
-    <p><a href="/settings#access">Register this browser for notifications</a> if you want permission and review prompts here. It does not add a model or make a node eligible to run work.</p>
+    <p><a href="/settings#access">Register this browser for notifications</a> for permission and review prompts.</p>
   </details>
 </section>
 

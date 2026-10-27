@@ -1189,16 +1189,16 @@ export default [
       '/api/readiness': readiness({
         verify: pathReady(
           'verify',
-          [{ key: 'checks', message: 'no required checks are configured for this repository, so nothing the node runs can verify a result; add `checks` to its [[repo]] entry' }],
-          [{ key: 'image', message: "checks run in the node's harness image (ghcr.io/cosmicspork/tracon-harness:0.29.0); the repository names no toolchain of its own" }],
+          [{ key: 'checks', message: 'no required checks; add `checks` to its [[repo]] entry' }],
+          [{ key: 'image', message: "checks run in the harness image (ghcr.io/cosmicspork/tracon-harness:0.29.0)" }],
         ),
         publish: pathReady(
           'publish',
           [
-            { key: 'checks', message: 'no required checks are configured for this repository, so nothing the node runs can verify a result; add `checks` to its [[repo]] entry' },
+            { key: 'checks', message: 'no required checks; add `checks` to its [[repo]] entry' },
             { key: 'credential', message: 'GitHub credential `gh`: not bound to channel personal on this node' },
           ],
-          [{ key: 'brief', message: 'the work item has no brief, so its review shows no requirements to judge against' }],
+          [{ key: 'brief', message: 'no brief, so the review has no requirements to judge' }],
         ),
       }),
     }),
@@ -1219,14 +1219,26 @@ export default [
           channel: req.query.channel,
           repo: req.query.repo,
           investigate: pathReady('investigate', [gap]),
-          verify: pathReady('verify', [gap, { key: 'checks', message: 'no required checks are configured for this repository, so nothing the node runs can verify a result; add `checks` to its [[repo]] entry' }]),
-          publish: pathReady('publish', [gap, { key: 'remote', message: 'the repository has no `origin` remote to publish to' }]),
+          verify: pathReady('verify', [gap, { key: 'checks', message: 'no required checks; add `checks` to its [[repo]] entry' }]),
+          publish: pathReady('publish', [gap, { key: 'remote', message: 'no `origin` remote' }]),
         }
       },
       '/api/queue': queue({ ended: [session({ id: 's-gone', repo_path: LONG_REPO, branch: 'feat/old', state: 'closed', end_reason: 'item_close', created_ms: -100000, updated_ms: -50000 })] }),
       '/api/sessions': [session({ id: 's-gone', repo_path: LONG_REPO, branch: 'feat/old', state: 'closed', end_reason: 'item_close', created_ms: -100000, updated_ms: -50000 })],
     }),
     act: async (page) => page.locator('.banner.ready').waitFor(),
+  },
+  {
+    id: 'home-composer-help-open',
+    area: 'home',
+    route: '/',
+    title: 'Composer: a help icon opened',
+    note: 'The circled ? beside Budget opens a short note under it; Esc or a click elsewhere closes it.',
+    api: base(),
+    act: async (page) => {
+      await page.getByRole('button', { name: 'adjust' }).click()
+      await page.getByRole('button', { name: 'About the budget' }).click()
+    },
   },
   {
     id: 'home-start-error',

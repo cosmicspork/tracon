@@ -72,7 +72,7 @@
 
 <Card
   title="Passkeys"
-  note="Away from the node, credentials, tokens, grants and mesh changes are confirmed with one of these. At the node itself none is needed."
+  note="Confirm credential, token, grant and mesh changes made away from the node."
 >
   {#if loadError}
     <span class="note crit">{loadError}</span>

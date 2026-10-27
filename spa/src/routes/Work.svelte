@@ -241,11 +241,11 @@
         Nothing ready matches this search. <button class="lnk" type="button" onclick={() => show({ project: 'all', q: '' })}>Show every task</button>
       </div>
     {:else if items.length === closedCount}
-      <div class="empty">No open work on {channel || 'this channel'}{closedCount ? '' : ' yet'}. <button class="lnk" type="button" onclick={openForm}>Add a task</button> to give a session a clear outcome.</div>
+      <div class="empty">No open work on {channel || 'this channel'}{closedCount ? '' : ' yet'}. <button class="lnk" type="button" onclick={openForm}>Add a task</button></div>
     {:else if blocked.length}
-      <div class="empty">Every open task here is blocked. Review each blocker below or <button class="lnk" type="button" onclick={openForm}>add unblocked work</button>.</div>
+      <div class="empty">Everything open is blocked. <button class="lnk" type="button" onclick={openForm}>Add a task</button></div>
     {:else if inSession.length}
-      <div class="empty">An open session is already working. Follow it below or <button class="lnk" type="button" onclick={openForm}>add another task</button>.</div>
+      <div class="empty">A session is on it. <button class="lnk" type="button" onclick={openForm}>Add a task</button></div>
     {:else}
       <div class="empty">Nothing open here.</div>
     {/if}

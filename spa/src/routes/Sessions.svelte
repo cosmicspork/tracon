@@ -82,8 +82,7 @@
       >
     </div>
     <div class="empty">
-      These ran a harness this node no longer has. They stay readable — transcript, evidence and
-      workspace all kept — and can never be launched again. To carry one forward:
+      Their harness is gone; read-only. To carry one forward:
       <code>tracon session reopen &lt;id&gt; --harness claude</code>.
     </div>
     {#if showLegacy}

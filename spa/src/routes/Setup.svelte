@@ -54,8 +54,7 @@
 <main>
   <h1>tracon</h1>
   <p class="lede">
-    The node runs in the background under your user's service manager. This app installs it, keeps it
-    up to date, and opens its interface.
+    Installs, updates and opens the background node.
   </p>
 
   {#if status === null && !error}

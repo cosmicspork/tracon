@@ -68,9 +68,7 @@
       {/if}
       {#if !done}
         <p class="warn">
-          Type the code the window you are {view.kind === 'sign-in' ? 'signing in' : 'using'} shows. If
-          you did not just ask, or no window of yours shows a code, deny it: someone sent you this link
-          to get your access.
+          Type the code the window you are {view.kind === 'sign-in' ? 'signing in' : 'using'} shows. Didn't just ask? Deny it.
         </p>
         <label class="code">
           <span>Code from that window</span>

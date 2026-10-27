@@ -68,8 +68,7 @@
 <details class="inbox">
   <summary>Import a session</summary>
   <p class="consequence">
-    Choose a signed package to stage it here. Starting it creates a new isolated workspace and session; the source
-    session remains unchanged, and neither credentials nor a live harness are transferred.
+    Stage a signed package. Starting it creates a new workspace and session.
   </p>
   <div class="actions">
     <label class="upload">
@@ -88,7 +87,7 @@
   {:else if !listed}
     <!-- the error below says why there is no list -->
   {:else if transfers.length === 0}
-    <div class="empty">No staged packages on this node. Choose a signed package from the source node or a portable download to inspect and start it here.</div>
+    <div class="empty">No staged packages.</div>
   {:else}
     <ul>
       {#each transfers as transfer (transfer.id)}

@@ -66,9 +66,9 @@
 </script>
 
 {#if enabled && (Object.keys(summaries).length || unavailable)}
-  <Card title="Hub summaries" note="Optional aggregates the hub computes for channels shared with it.">
+  <Card title="Hub summaries" note="Aggregates the hub computes for shared channels.">
     {#if unavailable}
-      <p class="off">Hub summary unavailable · {unavailable}. Local metrics and work remain on this node.</p>
+      <p class="off">Hub summary unavailable · {unavailable}</p>
     {/if}
     {#each Object.values(summaries) as rollup (rollup.channel)}
       <article class:complete={rollup.state === 'current_complete'} class:warn={rollup.state !== 'current_complete'}>

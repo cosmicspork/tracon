@@ -53,7 +53,7 @@
 
   async function toggle(event: Event) {
     const box = event.currentTarget as HTMLInputElement
-    await act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. A test reports push-service acceptance, not device display.')
+    await act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. Tests confirm the push service accepted it.')
     // `checked={on}` only writes to the box when `on` changes. A failed
     // enrolment leaves `on` false, so the tick the click put there stays
     // unless it is taken back here; the note says why.
@@ -78,7 +78,7 @@
   })
 </script>
 
-<Card title="This device" note="Only affects this browser.">
+<Card title="This device" note="This browser only.">
   <div class="v">
     {#if desktop}
       <span class="dim">The desktop app uses this device’s tray. Browser push subscriptions are managed by the serving node.</span>
@@ -98,7 +98,7 @@
   {#if note}<span class="note" class:crit={failed}>{note}</span>{/if}
 </Card>
 
-<Card title="Registered devices" note={`Push subscriptions registered on ${servingNode}. Forgetting one stops only that device; shared channel settings are unchanged.`}>
+<Card title="Registered devices" note={`Push subscriptions on ${servingNode}. Forgetting one stops only that device.`}>
   {#if devices.length}
     <div class="devs">
       {#each devices as d (d.id)}

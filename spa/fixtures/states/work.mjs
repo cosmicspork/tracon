@@ -1304,14 +1304,14 @@ const states = [
         verify: {
           purpose: 'verify',
           ready: false,
-          missing: [{ key: 'checks', message: 'no required checks are configured for this repository, so nothing the node runs can verify a result; add `checks` to its [[repo]] entry' }],
-          notes: [{ key: 'image', message: 'checks run in the node\'s harness image (ghcr.io/cosmicspork/tracon-harness-claude:2.5.0); the repository names no toolchain of its own' }],
+          missing: [{ key: 'checks', message: 'no required checks; add `checks` to its [[repo]] entry' }],
+          notes: [{ key: 'image', message: 'checks run in the harness image (ghcr.io/cosmicspork/tracon-harness-claude:2.5.0)' }],
         },
         publish: {
           purpose: 'publish',
           ready: false,
           missing: [
-            { key: 'checks', message: 'no required checks are configured for this repository, so nothing the node runs can verify a result; add `checks` to its [[repo]] entry' },
+            { key: 'checks', message: 'no required checks; add `checks` to its [[repo]] entry' },
             { key: 'credential', message: 'GitHub credential `github`: not bound to channel personal on this node' },
           ],
           notes: [],
@@ -1345,9 +1345,9 @@ const states = [
           ready: false,
           missing: [
             { key: 'launch', message: 'this node is degraded: the gateway container is not running' },
-            { key: 'remote', message: 'the repository has no `origin` remote to publish to' },
+            { key: 'remote', message: 'no `origin` remote' },
           ],
-          notes: [{ key: 'brief', message: 'the work item has no brief, so its review shows no requirements to judge against' }],
+          notes: [{ key: 'brief', message: 'no brief, so the review has no requirements to judge' }],
         },
       },
     }),

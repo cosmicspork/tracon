@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Help from '../Help.svelte'
   import Card from './Card.svelte'
   import RecipeOffers from './RecipeOffers.svelte'
   import { api } from '../../lib/api'
@@ -249,11 +250,11 @@
 
 <Card
   title="Repository environments"
-  note="What the node does for one repository: the image its sessions and checks run in, the checks themselves, and how its dependencies get there. These are yours and live in node.toml, never in the repository — a candidate that could edit them could choose its own checks."
+  note="Image, checks and dependency setup per repository. Kept in node.toml so a candidate can't choose its own checks."
 >
   {#if moved}
     <div class="held" role="alert">
-      <p>The repository table changed on the node while you were editing it here.</p>
+      <p>Changed on the node while you were editing.</p>
       <div class="acts">
         <button class="btn" type="button" onclick={keepMine} disabled={busy !== ''}>Keep my edits</button>
         <button class="lnk" type="button" onclick={() => void load(true)} disabled={busy !== ''}>Discard them and reload</button>
@@ -265,7 +266,7 @@
 
   {#if loaded}
     {#if forms.length === 0}
-      <p class="dim">No repository has an environment of its own: every one runs in the harness image, with the node-wide checks and no preparation.</p>
+      <p class="dim">None. Every repository uses the harness image and node-wide checks.</p>
     {/if}
     {#each forms as form, index (index)}
       {@const built = builds(form.path)}
@@ -282,7 +283,7 @@
           <label class="wide">
             <span>Repository</span>
             <input bind:value={form.path} spellcheck="false" placeholder="github.com/owner/name, or /an/absolute/checkout" />
-            <small>An absolute path is that repository's root. A relative one matches the end of a path, so a clone the node manages is named without the clone root. The first matching entry wins.</small>
+            <small>First match wins. <Help label="About repository matching">An absolute path is a repository root. A relative one matches the end of a path, so managed clones need no clone root.</Help></small>
           </label>
 
           <label>
@@ -293,9 +294,9 @@
               <option value="harness">The harness image</option>
             </select>
             <small>
-              {#if form.source === 'dockerfile'}Built from the default branch, never from a candidate. Only the Dockerfile is honoured; a devcontainer's hooks and services are not.
-              {:else if form.source === 'image'}Digest-pinned. You build it and keep it current.
-              {:else}No project toolchain: a check whose command is missing is reported as not runnable.{/if}
+              {#if form.source === 'dockerfile'}From the default branch. Devcontainer hooks and services are ignored.
+              {:else if form.source === 'image'}Digest-pinned; you keep it current.
+              {:else}No project toolchain.{/if}
             </small>
           </label>
           {#if form.source === 'dockerfile'}
@@ -319,7 +320,7 @@
             <label class="toggle"><input type="checkbox" bind:checked={form.ownChecks} /> This repository has its own</label>
             {#if form.ownChecks}
               <textarea class="grow" bind:value={form.checks} use:autogrow={form.checks} rows="2" spellcheck="false" placeholder="just check" aria-label="Required checks, one per line"></textarea>
-              <small>One command per line. Left empty, this repository has no required checks.</small>
+              <small>One per line. Empty: no required checks.</small>
             {:else}
               <small>The node-wide checks run.</small>
             {/if}
@@ -328,13 +329,13 @@
           <label class="wide">
             <span>Preparation</span>
             <textarea class="grow" bind:value={form.prepare} use:autogrow={form.prepare} rows="2" spellcheck="false" placeholder="cargo fetch --locked"></textarea>
-            <small>One command per line, run once before a run's checks with the registries below reachable. The checks that follow have no network.</small>
+            <small>One per line, before checks, with registries reachable. Checks run offline.</small>
           </label>
 
           <label>
             <span>Registries</span>
             <input bind:value={form.egress} spellcheck="false" placeholder={presets.map(([name]) => name).join(' ')} />
-            <small>A preset ({presets.map(([name]) => name).join(', ')}) or a host name. Empty reaches nothing.</small>
+            <small>Presets: {presets.map(([name]) => name).join(', ')} · or a host</small>
           </label>
           <label>
             <span>Time limit (seconds)</span>
@@ -344,9 +345,9 @@
 
           <div class="wide sessions">
             <label class="toggle"><input type="checkbox" bind:checked={form.sessionEgress} /> Open these registries to this repository's sessions</label>
-            <small>So an agent can add a dependency and run what it installed. A session is long-lived and runs what a model decides: anything it can reach that accepts uploads, it can upload to.</small>
+            <small>Lets an agent install dependencies. <Help label="About session registries">Sessions run what a model decides; anything reachable that accepts uploads can receive them.</Help></small>
             {#if form.sessionEgress && uploads.length}
-              <p class="caution">{uploads.join(', ')} reach{uploads.length === 1 ? 'es' : ''} GitHub, which accepts uploads from anyone holding a token.</p>
+              <p class="caution">{uploads.join(', ')} reach{uploads.length === 1 ? 'es' : ''} GitHub, which accepts uploads.</p>
             {/if}
           </div>
         </div>
@@ -356,8 +357,8 @@
         {#if hold}
           <div class="held" role="status">
             <p>
-              Held: this entry keeps lending {hold.credentials.join(', ')} to a preparation a peer's recipe changed, so
-              nothing is built or warmed for it until you start it. Checks and sessions use the image it last built.
+              Held: a peer's recipe changed a preparation that gets {hold.credentials.join(', ')}. Start it to build; until
+              then the last image is used.
             </p>
             <button class="btn p" type="button" onclick={() => void startHeld(form.path, hold.lending_hash)} disabled={busy !== '' || dirty}>
               {busy === `start:${form.path}` ? 'Starting…' : `Start the build, lending ${hold.credentials.join(', ')}`}
@@ -385,7 +386,7 @@
           </ul>
         {:else if form.source === 'dockerfile' && form.path}
           <p class="dim">
-            Not built yet: the first session or check on it builds it, and waits.
+            Not built · builds on first use.
             {#if loaded.can_build}
               <button class="lnk" type="button" onclick={() => void build(form.path)} disabled={busy !== '' || dirty}>
                 {busy === `build:${form.path}` ? 'Starting…' : 'Build now'}
@@ -400,8 +401,7 @@
           <div class="offer">
             <span class="heading">Offer this recipe</span>
             <small>
-              Its Dockerfile, preparation, checks and registries go to the nodes you pick, which each stage it for their
-              operator. Never its pinned image, credentials, path or publication settings.
+              Sends its Dockerfile, preparation, checks and registries. Not its image, credentials or path.
             </small>
             <div class="grid">
               <label>

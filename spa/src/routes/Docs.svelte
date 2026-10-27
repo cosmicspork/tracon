@@ -158,7 +158,7 @@
 
 {#if hits !== null}
   {#if hits.length === 0}
-    <div class="empty">Nothing matches this search. <button class="lnk" type="button" onclick={() => (query = '')}>Clear search</button> or use different words.</div>
+    <div class="empty">Nothing matches this search. <button class="lnk" type="button" onclick={() => (query = '')}>Clear search</button></div>
   {:else}
     <div class="rows">
       {#each hits as h (h.id)}

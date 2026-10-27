@@ -10,6 +10,7 @@
   import ChannelNotifications from '../components/ChannelNotifications.svelte'
   import CredentialSettings from '../components/CredentialSettings.svelte'
   import Credentials from '../components/Credentials.svelte'
+  import Help from '../components/Help.svelte'
   import Notifications from '../components/Notifications.svelte'
   import ProviderCard from '../components/ProviderCard.svelte'
   import AddProviderChooser from '../components/settings/AddProviderChooser.svelte'
@@ -648,7 +649,7 @@
 {/if}
 
 {#if activeSection === 'general'}
-  <Card title="Appearance" note="Applies to this browser only.">
+  <Card title="Appearance" note="This browser only.">
     <div class="segmented" role="radiogroup" aria-label="Colour scheme">
       {#each themes as t (t)}
         <button type="button" role="radio" aria-checked={theme === t} class:on={theme === t} onclick={() => chooseTheme(t)}>
@@ -659,24 +660,24 @@
   </Card>
 
   {#if desktopPrefs}
-    <Card title="Desktop app" note="How the app behaves on this machine. Stored beside node.toml, not in it.">
+    <Card title="Desktop app" note="How the app behaves on this machine. Stored beside node.toml.">
       <div class="toggles">
         <label class="toggle">
           <input type="checkbox" checked={desktopPrefs.open_window_at_launch} onchange={(e) => setDesktopPref({ open_window_at_launch: e.currentTarget.checked })} />
-          <span><b>Open the window at launch</b><small>Off starts tracon in the menu bar only, which suits a login item.</small></span>
+          <span><b>Open the window at launch</b><small>Off: menu bar only.</small></span>
         </label>
         {#if desktopSetup?.platform !== 'linux'}
           <label class="toggle">
             <input type="checkbox" checked={desktopPrefs.cmd_q_quits} onchange={(e) => setDesktopPref({ cmd_q_quits: e.currentTarget.checked })} />
-            <span><b>⌘Q quits</b><small>Off closes to the menu bar; Quit in the menu bar icon still ends the app.</small></span>
+            <span><b>⌘Q quits</b><small>Off: closes to the menu bar.</small></span>
           </label>
           <label class="toggle">
             <input type="checkbox" checked={desktopPrefs.hide_dock_when_closed} onchange={(e) => setDesktopPref({ hide_dock_when_closed: e.currentTarget.checked })} />
-            <span><b>Hide the dock icon while closed</b><small>The menu bar icon stays either way.</small></span>
+            <span><b>Hide the dock icon while closed</b></span>
           </label>
         {/if}
       </div>
-      <p class="hint">Show or hide the window from anywhere with <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>T</kbd>.</p>
+      <p class="hint">Show or hide: <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>T</kbd></p>
       {#if desktopPrefsError}<small class="bad">{desktopPrefsError}</small>{/if}
     </Card>
   {/if}
@@ -741,8 +742,8 @@
   <Card
     title="Providers"
     note={selectedNodeIsServing
-      ? `Sign-ins and keys held by ${selectedNodeName}, the node serving this page.`
-      : `Managing ${selectedNodeName}. Commands are sealed to that peer; its credentials stay on it.`}
+      ? `Sign-ins and keys on ${selectedNodeName}.`
+      : `Managing ${selectedNodeName}. Its credentials stay on it.`}
   >
     {#snippet actions()}
       {#if store.nodes.length > 1}
@@ -791,11 +792,11 @@
       <div class="empty">{selectedNodeName} has not advertised provider capability. It may be an older peer; update it or manage providers on that node directly.</div>
     {:else if selectedNodeIsServing}
       <div class="empty onboard">
-        <p>No providers connected. A session needs at least one before it can run.</p>
+        <p>No providers. Sessions need one.</p>
         <button class="btn p" onclick={openAddProvider}>Add a provider</button>
       </div>
     {:else}
-      <div class="empty">No provider connections are configured for {selectedNodeName}.</div>
+      <div class="empty">No providers on {selectedNodeName}.</div>
     {/if}
     {#if addProviderNote}<small>{addProviderNote}</small>{/if}
     {#if selectedNodeIsServing}
@@ -803,20 +804,20 @@
         <button class="lnk" onclick={refreshModels} disabled={busy !== ''}>
           {busy === 'models' ? 'Asking the harness…' : 'Refresh models'}
         </button>
-        <small>{modelNote || 'Models are declared, not probed: the harness is told exactly this list. Refresh re-reads what’s currently declared — ask again when a connected provider’s models never appeared.'}</small>
+        {#if modelNote}<small>{modelNote}</small>{:else}<Help label="About refreshing models">The harness gets exactly the declared list. Refresh re-reads it.</Help>{/if}
       </div>
     {/if}
   </Card>
 
   <Credentials version={credentialsVersion} onchange={() => (credentialsVersion += 1)} />
 
-  <Card title="Forge tokens" note={`GitHub and GitLab tokens on ${store.node?.name ?? 'the serving node'}, and the channels each may serve. Values are never shown.`}>
+  <Card title="Forge tokens" note={`GitHub and GitLab tokens on ${store.node?.name ?? 'the serving node'} and the channels each serves.`}>
     <CredentialSettings version={credentialsVersion} onchange={() => (credentialsVersion += 1)} />
   </Card>
 {/if}
 
 {#if activeSection === 'channels'}
-  <Card title="Channels" note="A channel is a shared key: a node that was never handed it cannot read its work. Each one names the models that plan and execute by default, and the model that reviews a submitted candidate in a fresh session.">
+  <Card title="Channels" note="A channel is a shared key; only nodes holding it read its work. Each sets default plan, execute and review models.">
     <form class="inline-form" onsubmit={(event) => { event.preventDefault(); void addChannel() }}>
       <input bind:value={channelName} placeholder="New channel name" aria-label="New channel name" spellcheck="false" />
       <button class="btn" type="submit" disabled={!channelName.trim() || busy !== ''}>Create channel</button>
@@ -845,7 +846,7 @@
                   value={b.model ?? ''}
                   {models}
                   recent={recentModels}
-                  none={ph === 'review' ? 'none · no review session' : 'none · the session names one'}
+                  none={ph === 'review' ? 'none' : 'per session'}
                   disabled={busy !== ''}
                   onchange={(v) => bindModel(c.name, ph, v)}
                 />
@@ -864,12 +865,12 @@
                     disabled={busy !== ''}
                     onchange={(e) => bindTrigger(c, source, e.currentTarget.value as ReviewTrigger)}
                   >
-                    <option value="auto">auto · a reviewer starts on submission</option>
-                    <option value="manual">manual · you start one from the review</option>
+                    <option value="auto">auto · on submission</option>
+                    <option value="manual">manual · from the review</option>
                   </select>
                 </label>
               {/each}
-              {#if !review.model}<small class="note">no review model: neither starts a reviewer until one is chosen</small>{/if}
+              {#if !review.model}<small class="note">no review model chosen</small>{/if}
             </div>
             <div class="exh">
               <label>
@@ -880,9 +881,9 @@
                   onchange={(e) =>
                     bindExhaustion(c.name, { policy: e.currentTarget.value as ExhaustionPolicy, fallback: exh.fallback })}
                 >
-                  <option value="pause">pause, resume when its limit resets</option>
+                  <option value="pause">pause until reset</option>
                   <option value="fallback">fall back, else wait for you</option>
-                  <option value="fallback_then_wait">fall back, else resume when its limit resets</option>
+                  <option value="fallback_then_wait">fall back, else pause until reset</option>
                 </select>
               </label>
               {#if exh.policy !== 'pause'}
@@ -892,12 +893,12 @@
                     value={exh.fallback ?? ''}
                     {models}
                     recent={recentModels}
-                    none="choose the model to carry on with"
+                    none="choose a model"
                     disabled={busy !== ''}
                     onchange={(v) => bindExhaustion(c.name, { policy: exh.policy, fallback: v })}
                   />
                 </label>
-                {#if !exh.fallback}<small class="note">not saved until a fallback model is chosen</small>{/if}
+                {#if !exh.fallback}<small class="note">needs a fallback model</small>{/if}
               {/if}
             </div>
           </div>
@@ -907,7 +908,7 @@
   </Card>
 
   {#if archived_channels.length}
-    <Card title="Archived channels" note="Their work stays in history; no new session starts on them.">
+    <Card title="Archived channels" note="Kept in history. No new sessions.">
       <div class="channel-table">
         {#each archived_channels as c (c.name)}
           <div class="ch off">
@@ -941,7 +942,7 @@
 {/if}
 
 {#if activeSection === 'access'}
-  <Card title="Operator access" note="A token for reaching this node from another device. Creating a new one signs every other client out; this browser signs in with it.">
+  <Card title="Operator access" note="For reaching this node from another device. Rotating it signs out every other client.">
     <label class="field">
       <span>Address other devices use</span>
       <input bind:value={publicUrl} placeholder="https://node.tailnet.ts.net" spellcheck="false" />
@@ -960,13 +961,13 @@
 
   <Notifications />
 
-  <Card title="Your own harness" note="Connect a terminal harness to this node's tools. It runs outside tracon's isolation boundary and never receives credentials.">
+  <Card title="Your own harness" note="Connect a terminal harness to this node's tools. It runs outside the isolation boundary and gets no credentials.">
     {#if !cfg && configError}
-      <small>Not known: <code>node.toml</code> could not be read, and it says whether this is on. Node configuration, under System, says why.</small>
+      <small>Unknown: <code>node.toml</code> unreadable. See System › Configuration.</small>
     {:else if !cfg}
       <small>Loading…</small>
     {:else if !cfg.external.enabled}
-      <small>Off. Turn on <code>enabled</code> under <a href="#config">Configuration</a> › <code>[external]</code>, then restart the node.</small>
+      <small>Off. Enable <a href="#config">Configuration</a> › <code>[external]</code>, then restart.</small>
     {:else if externalChannels.length === 0}
       <small>Create a shared channel first.</small>
     {:else}
@@ -979,7 +980,7 @@
                 <span class="chip bad">broker access stopped</span>
                 <button class="lnk" onclick={() => setExternalStopped(name, false)} disabled={busy !== ''}>Start broker access</button>
               {:else if stoppingExternal === name}
-                <small>Refuse every external agent's calls on {name} until started again?</small>
+                <small>Refuse all external calls on {name}?</small>
                 <button class="btn d" onclick={() => setExternalStopped(name, true)} disabled={busy !== ''}>Stop broker access</button>
                 <button class="lnk" onclick={() => (stoppingExternal = '')} disabled={busy !== ''}>Cancel</button>
               {:else}
@@ -989,13 +990,18 @@
           </div>
         {/each}
       </div>
-      <small>Use <code>submit_report</code> for an operator report and notification without Git or publication; <code>report_status</code> reads feedback. A <code>report_issue</code> draft against tracon is followed with <code>issue_report_status</code>.{#if !local} From another machine, add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>.{/if}</small>
+      <small
+        >Reporting tools <Help label="About reporting tools"
+          ><code>submit_report</code> sends a report; <code>report_status</code> reads its feedback. <code>report_issue</code> drafts an
+          issue against tracon; <code>issue_report_status</code> follows it.</Help
+        >{#if !local} · from another machine add <code>--header "Authorization: Bearer &lt;operator token&gt;"</code>{/if}</small
+      >
     {/if}
   </Card>
 {/if}
 
 {#if activeSection === 'mesh'}
-  <Card title="Hub" note={`The relay ${store.node?.name ?? 'this node'} dials out to. Without one, this node is reachable only where it is.`}>
+  <Card title="Hub" note={`The relay ${store.node?.name ?? 'this node'} dials out to. Without one, it's reachable only locally.`}>
     {#snippet actions()}
       <span class="chip" class:off={hubState !== 'connected'} class:bad={hubState === 'unreachable'}>{hubState}</span>
     {/snippet}
@@ -1035,7 +1041,7 @@
         <label class="field">
           <span>Join an existing hub</span>
           <input bind:value={invitation} placeholder="full invitation URL" spellcheck="false" />
-          <small>Paste the URL from <code>tracon mesh invite</code>, or receive it from an operator who already manages that mesh.</small>
+          <small>From <code>tracon mesh invite</code>.</small>
         </label>
         <div class="acts">
           <button class="btn" onclick={startEnroll} disabled={!invitation.trim() || busy !== ''}>
@@ -1048,7 +1054,7 @@
             {#if enroll.error}<li class="bad">{enroll.error}</li>{/if}
           </ul>
           {#if enroll.done && enroll.channels.length}<small>Channels received: {enroll.channels.join(', ')}.</small>{/if}
-          {#if enroll.done && enroll.restart_required}<small class="good">Joined. Restart the serving node to connect it to the hub.</small>{/if}
+          {#if enroll.done && enroll.restart_required}<small class="good">Joined. Restart the node to connect.</small>{/if}
         {/if}
         {#if enrollPollError}<small class="bad">{enrollPollError}</small>{/if}
         <details class="first-node">
@@ -1057,7 +1063,7 @@
             <label class="field">
               <span>Hub URL</span>
               <input bind:value={hubUrl} placeholder="https://hub.example.com" spellcheck="false" />
-              <small>Creates the mesh channel here and saves the hub the serving node will trust.</small>
+              <small>Creates the mesh channel and trusts this hub.</small>
             </label>
             <div class="acts">
               <button class="btn" onclick={initMesh} disabled={!hubUrl.trim() || busy !== ''}>{busy === 'mesh' ? 'Preparing…' : 'Prepare first node'}</button>
@@ -1087,7 +1093,7 @@
 {#if activeSection === 'policies'}
   <PolicyManagement onapplied={loadAuthority} />
 
-  <Card title="Local grants" note={`Narrow exceptions that apply only on ${store.node?.name ?? 'the serving node'}. Consequential actions no grant matches still ask.`}>
+  <Card title="Local grants" note={`Exceptions on ${store.node?.name ?? 'the serving node'} only. Consequential actions no grant matches still ask.`}>
     {#if !authority}
       <div class="empty">Reading signed policy and local grants…</div>
     {:else}
@@ -1118,7 +1124,7 @@
   </Card>
 
   {#if authority}
-    <Card title="New local grant" note={authority.policy.trusted ? `Signed policy v${authority.policy.version} is trusted. A local grant cannot change signing keys, trust roots, or a signed denial.` : undefined}>
+    <Card title="New local grant" note={authority.policy.trusted ? `Signed policy v${authority.policy.version} is trusted. A local grant can't change signing keys, trust roots or a signed denial.` : undefined}>
       {#if grantConfirmation}
         <div class="grant-confirmation">
           <b>Confirm this exact local grant</b>
@@ -1135,21 +1141,21 @@
           <label><span>Decision</span><select bind:value={grant.verdict}><option value="ask">ask · safe default</option><option value="allow">allow</option><option value="deny">deny</option></select></label>
           <label><span>Resource type</span><select bind:value={grantResource}><option value="repository">pull or merge request</option><option value="deployment">GitLab deployment</option><option value="ticket">ticket transition</option><option value="advanced">advanced canonical target</option></select></label>
           <label><span>Channel scope</span><input bind:value={grant.channel} placeholder={store.node?.default_channel ?? 'personal'} /></label>
-          <label class="wide"><span>Exact target</span><input bind:value={grant.target} placeholder={grantTargetHint} spellcheck="false" /><small>One canonical identifier, no spaces. This is the only target the grant can match.</small></label>
+          <label class="wide"><span>Exact target</span><input bind:value={grant.target} placeholder={grantTargetHint} spellcheck="false" /><small>One identifier; the grant matches only this.</small></label>
           <label class="wide"><span>Reason</span><input bind:value={grant.reason} placeholder="why this exact scoped action is needed" /></label>
         </div>
         <details class="advanced-grant">
           <summary>Advanced scope and expiry</summary>
           <div class="grid">
             <label><span>Session (optional)</span><input bind:value={grant.session_id} placeholder="limit to one session id" /></label>
-            <label><span>Immutable revision (optional)</span><input bind:value={grant.revision} placeholder="commit SHA" /><small>Required for allow grants to merge, publish, or deploy.</small></label>
+            <label><span>Immutable revision (optional)</span><input bind:value={grant.revision} placeholder="commit SHA" /><small>Required to allow merge, publish or deploy.</small></label>
             <label><span>Expires at (optional)</span><input type="datetime-local" value={grant.expires_ms ? new Date(grant.expires_ms).toISOString().slice(0, 16) : ''} onchange={(event) => grant.expires_ms = event.currentTarget.value ? Date.parse(event.currentTarget.value) : null} /></label>
           </div>
         </details>
         {#if grant.action === 'terminal'}
-          <p class="why">A terminal grant opens an interactive shell inside one session's workspace. Target is <code>terminal:&lt;session id&gt;:&lt;workspace path&gt;</code> and the session field is required, because the grant is of a terminal in that directory. It is not a per-command ledger: everything typed at the prompt afterwards runs without a further decision and raises no tool call. The node records that a terminal was opened, with what shell and where, and how much traffic crossed it — not what was run in it.</p>
+          <p class="why">Target: <code>terminal:&lt;session id&gt;:&lt;workspace path&gt;</code>. Session required. <Help label="About terminal grants">Opens a shell in that session's workspace. Commands typed there run without further decisions; the node records the shell, where, and traffic volume only.</Help></p>
         {/if}
-        <div class="acts"><button class="btn p" onclick={reviewGrant} disabled={busy !== ''}>Review grant</button><small>An empty channel uses the serving node default. Ask keeps an explicit operator decision.</small></div>
+        <div class="acts"><button class="btn p" onclick={reviewGrant} disabled={busy !== ''}>Review grant</button><small>Empty channel: node default.</small></div>
       {/if}
     </Card>
   {/if}
@@ -1173,7 +1179,7 @@
       {/if}
       {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok}>{c.ok ? 'ok' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
       {#if store.node && nodeHarnesses(store.node).length}
-        <p class="dim">Harnesses. A session runs the one its model's credential allows; the default breaks the tie for a model either runs.</p>
+        <p class="dim">Harnesses <Help label="About harnesses">A session runs the harness its model's credential allows. The default breaks ties.</Help></p>
         <ul class="checks">
           {#each nodeHarnesses(store.node) as h (h.id)}
             <li>

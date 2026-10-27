@@ -421,7 +421,7 @@
     {#if session.manifest_digest}
       <span
         class="mono"
-        title="the launch manifest this session was staged from — its skills, instructions and agents. A later revision is for the next session, not this one."
+        title="Launch manifest: skills, instructions and agents"
         >manifest {session.manifest_digest.slice(0, 8)}</span
       >
     {/if}
@@ -487,7 +487,7 @@
       continues <a class="lnk" href="/sessions/{session.continued_from}"
         >{session.continued_from.slice(0, 8)}</a
       >
-      <b>· this session inherited that one's workspace, not its context</b>
+      <b>· workspace inherited</b>
     </div>
   {/if}
 

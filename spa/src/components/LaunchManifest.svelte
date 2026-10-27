@@ -99,7 +99,7 @@
   }
 </script>
 
-<Card title="Customization" note="The operator notes, skills and agents a channel's sessions launch with. A change applies at the next launch, never to a running session.">
+<Card title="Customization" note="Operator notes, skills and agents a channel's sessions launch with. Changes apply at the next launch.">
 
   <label class="pick">
     <span>Channel</span>
@@ -144,19 +144,13 @@
       </div>
     {:else}
       <div class="empty">
-        No skills or agents imported. Sessions here launch with the node's orientation and
-        whatever notes are below.
+        No skills or agents.
       </div>
     {/if}
 
     <div class="notes">
       <h4>Operator notes</h4>
-      <small>
-        Standing notes every session on this channel reads. They are their own section of a
-        session's orientation, kept apart from what the node says about itself: tracon's half is
-        the node, the work, the tools and what is refused; this half is yours. Saving under an
-        existing name replaces that note.
-      </small>
+      <small>Every session on this channel reads these. Same name replaces.</small>
       {#each notes as n (n.name)}
         <div class="note-row">
           <span class="name">{n.name}</span>
@@ -200,11 +194,7 @@
         spellcheck="false"
         placeholder="/path/to/skill-package, or /path#git-rev"
       />
-      <small>
-        A directory on the node's own machine holding a SKILL.md, so this is done there. A URL is refused: the node stages bytes it
-        has read, never a fetch the harness makes. Skill content is code — its scripts run in the
-        runner and its body is also a slash command.
-      </small>
+      <small>A directory with a SKILL.md on the node's machine. No URLs. Its scripts run as code.</small>
     </label>
     <div class="acts">
       <button

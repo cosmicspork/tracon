@@ -46,7 +46,7 @@
 
 <Card
   title={only ? 'A peer’s repositories' : 'A peer’s node.toml'}
-  note="Read and change another node’s configuration from here. Only a peer that names this node in its [mesh] admin_peers answers; each change is confirmed here and checked again there."
+  note="Edit another node's configuration. The peer must list this node in [mesh] admin_peers."
 >
   {#if peers.length === 0}
     <div class="empty">No peers. Pair a hub and enroll another node to administer it from here.</div>
