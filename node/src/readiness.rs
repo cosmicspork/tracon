@@ -128,39 +128,29 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
     if facts.checks.is_empty() {
         verifying.push(gap(
             "checks",
-            "no required checks are configured for this repository, so nothing the node runs \
-             can verify a result; add `checks` to its [[repo]] entry",
+            "no required checks; add `checks` to its [[repo]] entry",
         ));
     }
     let mut verify_notes = Vec::new();
     if facts.image_source.contains("not built") {
         verifying.push(gap(
             "image",
-            "the repository's Dockerfile has not been built on this node yet, so its checks \
-             have no image to run in",
+            "its Dockerfile isn't built yet, so checks have no image",
         ));
     } else if facts.image_source == HARNESS_IMAGE {
         verify_notes.push(gap(
             "image",
-            format!(
-                "checks run in the node's harness image ({}); the repository names no \
-                 toolchain of its own",
-                facts.image
-            ),
+            format!("checks run in the harness image ({})", facts.image),
         ));
     }
 
     let mut publishing = verifying.clone();
     let forge = facts.remote.as_deref().and_then(forge_of);
     match (&facts.remote, forge) {
-        (None, _) => publishing.push(gap(
-            "remote",
-            "the repository has no `origin` remote to publish to",
-        )),
-        (Some(remote), None) => publishing.push(gap(
-            "remote",
-            format!("{remote} is not on a forge the node publishes to (GitHub or GitLab)"),
-        )),
+        (None, _) => publishing.push(gap("remote", "no `origin` remote")),
+        (Some(remote), None) => {
+            publishing.push(gap("remote", format!("{remote} isn't on GitHub or GitLab")))
+        }
         (Some(_), Some(forge)) => {
             if let Some(reason) = &facts.credential_refused {
                 publishing.push(gap(
@@ -178,7 +168,7 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
                 publishing.push(gap(
                     "cli",
                     format!(
-                        "the {} CLI cannot be run, so no {} could be opened: {reason}",
+                        "the {} CLI can't run, so no {} opens: {reason}",
                         forge.name(),
                         match forge {
                             Forge::Github => "pull request",
@@ -193,7 +183,7 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
     if facts.item_has_brief == Some(false) {
         publish_notes.push(gap(
             "brief",
-            "the task has no brief, so its review shows no requirements to judge against",
+            "no brief, so the review has no requirements to judge",
         ));
     }
 
@@ -462,7 +452,7 @@ mod tests {
                 ..ready()
             },
         );
-        assert!(r.verify.missing[0].message.contains("not been built"));
+        assert!(r.verify.missing[0].message.contains("isn't built"));
 
         let r = assess(
             "personal",

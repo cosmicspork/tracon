@@ -60,7 +60,7 @@ struct Kind {
 
 const RUNTIME_STORAGE: Delete = Delete {
     path: "/settings#system",
-    label: "System, under Runtime storage, once the session is archived",
+    label: "System › Runtime storage, after archiving",
 };
 
 const KINDS: &[Kind] = &[
@@ -83,8 +83,7 @@ const KINDS: &[Kind] = &[
         ],
         dirs: &[],
         delete: None,
-        propagation: "Nothing deletes a session yet: its record is what its reviews, approvals \
-                      and usage point at. Archiving one ends it and frees its workspace.",
+        propagation: "Archiving ends a session and frees its workspace.",
     },
     Kind {
         kind: "events",
@@ -93,7 +92,7 @@ const KINDS: &[Kind] = &[
         tables: &["event", "external_event"],
         dirs: &[],
         delete: None,
-        propagation: "Nothing deletes a log entry yet; a log is kept whole or not at all.",
+        propagation: "Kept whole.",
     },
     Kind {
         kind: "evidence",
@@ -117,8 +116,7 @@ const KINDS: &[Kind] = &[
         ],
         dirs: &[],
         delete: None,
-        propagation: "Nothing deletes evidence yet: a verdict is only as good as what it was \
-                      given, and a review may already be published.",
+        propagation: "Kept; a review may already be published.",
     },
     Kind {
         kind: "documents",
@@ -130,9 +128,7 @@ const KINDS: &[Kind] = &[
             path: "/docs",
             label: "Documents, one at a time",
         }),
-        propagation: "A delete replicates to every node on the document's channel and to the \
-                      hub. Each keeps a tombstone, the row with its content cleared, so the \
-                      delete wins over an older copy arriving later.",
+        propagation: "Deletes replicate to the channel's nodes and the hub.",
     },
     Kind {
         kind: "memories",
@@ -144,8 +140,7 @@ const KINDS: &[Kind] = &[
             path: "/memories",
             label: "Memories, one at a time",
         }),
-        propagation: "A delete replicates to every node on the memory's channel and to the \
-                      hub, each keeping a tombstone, and drops it from recall.",
+        propagation: "Deletes replicate to the channel's nodes and the hub, and leave recall.",
     },
     Kind {
         kind: "work",
@@ -157,8 +152,8 @@ const KINDS: &[Kind] = &[
             path: "/tasks",
             label: "Tasks, one at a time",
         }),
-        propagation: "A delete replicates to every node on the task's channel and to the hub, \
-                      each keeping a tombstone. Sessions that worked on it keep their record.",
+        propagation:
+            "Deletes replicate to the channel's nodes and the hub. Sessions keep their record.",
     },
     Kind {
         kind: "index",
@@ -167,8 +162,7 @@ const KINDS: &[Kind] = &[
         tables: &["embedding"],
         dirs: &[],
         delete: None,
-        propagation: "Derived from documents and memories on this node: deleting one of them \
-                      drops its vectors. Never replicated.",
+        propagation: "Rebuilt from documents and memories. Not replicated.",
     },
     Kind {
         kind: "workspaces",
@@ -177,8 +171,7 @@ const KINDS: &[Kind] = &[
         tables: &[],
         dirs: &["workspaces", "workspace-staging"],
         delete: Some(RUNTIME_STORAGE),
-        propagation: "On this node only; nothing replicates a workspace. Removing one gives up \
-                      resuming, exporting and restoring its session.",
+        propagation: "This node only. Removing one ends resuming, exporting and restoring.",
     },
     Kind {
         kind: "harness",
@@ -193,8 +186,7 @@ const KINDS: &[Kind] = &[
         ],
         dirs: &["sessions", "harness-state"],
         delete: Some(RUNTIME_STORAGE),
-        propagation: "On this node only. Removing a session's directory gives up resuming it; \
-                      the rows the node mirrored from the harness stay with the session.",
+        propagation: "This node only. Removing one ends resuming the session.",
     },
 ];
 
