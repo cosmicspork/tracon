@@ -21,7 +21,7 @@
   import { formatAge, formatExpiry } from '../lib/format'
   import { isNotFound } from '../lib/load'
   import { renderJiraWiki } from '../lib/jira-wiki'
-  import { render } from '../lib/markdown'
+  import { codeSpans, render } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
   import { formValues, type Field, type FieldValue } from '../lib/schema-form'
   import { store } from '../lib/store.svelte'
@@ -410,7 +410,7 @@
                 oninput={(e) => set(f.key, e.currentTarget.value)}
               />
             {/if}
-            {#if f.description}<small>{f.description}</small>{/if}
+            {#if f.description}<small>{@html codeSpans(f.description)}</small>{/if}
             {#each msgs as m, i (i)}<small class="err">{m}</small>{/each}
           </label>
         {/if}

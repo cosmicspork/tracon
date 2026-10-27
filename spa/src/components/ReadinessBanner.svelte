@@ -9,6 +9,7 @@
   import { allGaps, headline, remedy, unready } from '../lib/readiness'
   import { repoLabel } from '../lib/repo'
   import type { RepoReadiness } from '../lib/types'
+  import { codeSpans } from '../lib/markdown'
 
   let {
     channel,
@@ -49,7 +50,7 @@
     {headline(view)} <b>· {repoLabel(view.repo)} on {view.channel}</b>
     {#each allGaps(view) as { purpose, gap } (purpose + gap.key)}
       {@const fix = remedy(gap.key)}
-      <i><span class="path">{purpose}</span> {gap.message}{#if fix}. <a href={fix.href}>{fix.label}</a>{/if}</i>
+      <i><span class="path">{purpose}</span> {@html codeSpans(gap.message)}{#if fix}. <a href={fix.href}>{fix.label}</a>{/if}</i>
     {/each}
   </div>
 {/if}

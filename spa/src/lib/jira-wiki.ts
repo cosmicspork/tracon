@@ -33,6 +33,10 @@ function inline(src: string): string {
   const hold = (html: string) => `\u0000${held.push(html) - 1}\u0000`
   let s = src.replace(/\u0000/g, '')
   s = s.replace(/\{\{(.+?)\}\}/g, (_, code: string) => hold(`<code>${escapeHtml(code)}</code>`))
+  // Only a colour name or hex value reaches the style attribute.
+  s = s.replace(/\{color:([^}]*)\}(.+?)\{color\}/g, (_, color: string, text: string) =>
+    hold(/^(#[0-9a-f]{3}|#[0-9a-f]{6}|[a-z]+)$/i.test(color.trim()) ? `<span style="color: ${color.trim()}">${inline(text)}</span>` : inline(text)),
+  )
   s = s.replace(/\[([^[\]]+)\]/g, (whole, inner: string) => {
     const html = link(inner)
     return html === null ? whole : hold(html)

@@ -12,6 +12,7 @@
   import { formatAge } from '../lib/format'
   import { surface } from '../lib/surface.svelte'
   import type { ContextPick, ContextRole, Document, WorkContext, WorkView } from '../lib/types'
+  import { codeSpans } from '../lib/markdown'
 
   let { item }: { item: WorkView } = $props()
 
@@ -181,7 +182,7 @@
             </summary>
             {#if a.changes.length}
               <ul class="changes">
-                {#each a.changes as c, i (i)}<li class={c.kind}>{c.says}</li>{/each}
+                {#each a.changes as c, i (i)}<li class={c.kind}>{@html codeSpans(c.says)}</li>{/each}
               </ul>
             {/if}
             <ul class="received">

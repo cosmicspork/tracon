@@ -101,3 +101,12 @@ message.use({
 export function renderMessage(md: string): string {
   return message.parse(md, { async: false }) as string
 }
+
+/**
+ * A one-line message from the node or a forge, escaped, with its `code`
+ * spans set as code: the only Markdown such lines use, and the backticks
+ * read as noise when shown raw.
+ */
+export function codeSpans(text: string): string {
+  return escapeHtml(text).replace(/`([^`\n]+)`/g, '<code>$1</code>')
+}
