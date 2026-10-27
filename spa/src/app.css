@@ -189,6 +189,12 @@ textarea.grow.compact { max-height: 40dvh; }
     padding-block: 11px;
   }
   .empty { padding: 18px; }
+  /* A link inside a sentence is exempt from the 44px target (WCAG 2.5.8):
+     growing it would push the sentence's lines apart. */
+  :is(p, small, .empty, .banner) .lnk {
+    min-height: 0;
+    display: inline;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

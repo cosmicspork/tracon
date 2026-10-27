@@ -1437,14 +1437,14 @@
     {/if}
     {#if draftState === 'conflict'}
       <div class="banner crit draft-conflict">
-        changed on another device <b>· {draftTheirs?.reason ? `it says “${draftTheirs.reason}”` : 'its draft differs from this one'}</b>
+        <span>changed on another device <b>· {draftTheirs?.reason ? `it says “${draftTheirs.reason}”` : 'its draft differs from this one'}</b></span>
         <button class="btn" onclick={takeTheirs}>Use theirs</button>
         <button class="btn" onclick={keepMine}>Keep mine</button>
       </div>
     {/if}
     {#if draftMessage !== null}
       <div class="banner crit draft-conflict">
-        commit message drafted against an earlier revision <b>· it says “{draftMessage.split('\n')[0]}”; this revision's is in the box</b>
+        <span>commit message drafted against an earlier revision <b>· it says “{draftMessage.split('\n')[0]}”; this revision's is in the box</b></span>
         <button class="btn" onclick={() => settleDraftMessage(true)}>Use the draft's</button>
         <button class="btn" onclick={() => settleDraftMessage(false)}>Keep this revision's</button>
       </div>
