@@ -1113,7 +1113,6 @@ pub async fn clone_repo(
     State(s): State<AppState>,
     Json(b): Json<CloneBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    use crate::forge::CloneError;
     let forge = crate::forge::Forge::parse(&b.forge)
         .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "no such forge"))?;
     let dest = crate::forge::ensure_clone(
@@ -1124,16 +1123,19 @@ pub async fn clone_repo(
         (&b.host, &b.owner, &b.name),
     )
     .await
-    .map_err(|e| {
-        let status = match &e {
-            CloneError::Name(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            CloneError::Credential(_) => StatusCode::CONFLICT,
-            CloneError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-            CloneError::Failed(_) => StatusCode::BAD_GATEWAY,
-        };
-        ApiError::new(status, e.to_string())
-    })?;
+    .map_err(|e| ApiError::new(clone_status(&e), e.to_string()))?;
     Ok(Json(json!({ "repo_path": dest })))
+}
+
+/// The status a clone that could not be made is answered with.
+pub(super) fn clone_status(e: &crate::forge::CloneError) -> StatusCode {
+    use crate::forge::CloneError;
+    match e {
+        CloneError::Name(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        CloneError::Credential(_) => StatusCode::CONFLICT,
+        CloneError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        CloneError::Failed(_) => StatusCode::BAD_GATEWAY,
+    }
 }
 
 /// Import explicitly uploaded files into a new durable workspace. Browser

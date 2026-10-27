@@ -1362,6 +1362,9 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             .await?;
             let repo = started["repo"].as_str().unwrap_or_default().to_string();
             let since = started["since_ms"].as_i64().unwrap_or(0);
+            if started["cloned"].as_bool() == Some(true) {
+                println!("cloned {repo}");
+            }
             println!(
                 "{} {repo} from {} ({:.12}); a first build can take several minutes",
                 match started["joined"].as_bool() {

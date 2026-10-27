@@ -466,6 +466,9 @@ fails leaves the last image that worked in place and is not retried until you as
 build runs on this machine's Podman with the network, outside the boundary — the same
 trust `devcontainer up` asks for, which is why it is per repository and yours to name.
 `tracon repo ls` shows each repository's image and any command it has no tool for.
+`tracon repo build host/owner/name` on a repository no session has cloned yet clones it
+first, with the node's forge credential or anonymously, so `repo set` then `repo build`
+works on a fresh node.
 
 The table is edited where you would look for it: **Settings → Repositories**, or
 `tracon repo set <path> --dockerfile .devcontainer/Dockerfile --check "just check"

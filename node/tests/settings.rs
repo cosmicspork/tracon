@@ -1814,6 +1814,12 @@ async fn repository_environments_are_listed_and_built_only_from_this_machine() {
     for (repo, why) in [
         ("/definitely/not/here", "not a directory"),
         ("owner/unknown", "no managed clone"),
+        // A forge identity is cloned for a build only once an entry that
+        // builds matches it, so nothing is fetched for one no entry names.
+        (
+            "github.com/owner/unknown",
+            "no [[repo]] entry with a dockerfile matches",
+        ),
     ] {
         let (s, v) = call(
             &n,

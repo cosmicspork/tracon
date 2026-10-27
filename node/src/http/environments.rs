@@ -145,7 +145,17 @@ pub async fn build(
     )
     .await?;
     let unprocessable = |message: String| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, message);
-    let repo = repo_root(&body.repo).map_err(unprocessable)?;
+    // A repository named by its forge identity that is not on this node yet
+    // is cloned, once its entry is known to build: the usual order is `repo
+    // set` and then `repo build`, before any session has made the clone.
+    let state_dir = Config::state_dir();
+    let (repo, uncloned) = match repo_root(&body.repo) {
+        Ok(repo) => (repo, None),
+        Err(error) => match uncloned(&crate::forge::managed_root(&state_dir), &body.repo) {
+            Some((identity, dest)) => (dest, Some(identity)),
+            None => return Err(unprocessable(error).into()),
+        },
+    };
     let entry = repo_image::building_entry(&s.cfg, &repo).ok_or_else(|| {
         unprocessable(format!(
             "no [[repo]] entry with a dockerfile matches {}",
@@ -169,18 +179,32 @@ pub async fn build(
         ))
         .into());
     }
-    // A managed clone is fetched first: its default branch is otherwise
-    // whatever the last session fetched, and a Dockerfile change that just
-    // merged would not be built. Refused rather than built from a branch
-    // that may be stale, which would look like a build of the new one.
-    crate::forge::refresh_for_build(&s.tools.broker, &repo, &s.node_id)
-        .await
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                format!("the managed clone could not be fetched, so nothing was built: {error}"),
-            )
-        })?;
+    if let Some(identity) = &uncloned {
+        crate::forge::ensure_clone_for_build(&s.tools.broker, &s.node_id, identity)
+            .await
+            .map_err(|error| {
+                ApiError::new(
+                    super::api::clone_status(&error),
+                    format!("{identity} could not be cloned, so nothing was built: {error}"),
+                )
+            })?;
+    } else {
+        // A managed clone is fetched first: its default branch is otherwise
+        // whatever the last session fetched, and a Dockerfile change that
+        // just merged would not be built. Refused rather than built from a
+        // branch that may be stale, which would look like a build of the
+        // new one.
+        crate::forge::refresh_for_build(&s.tools.broker, &repo, &s.node_id)
+            .await
+            .map_err(|error| {
+                ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "the managed clone could not be fetched, so nothing was built: {error}"
+                    ),
+                )
+            })?;
+    }
     let recipe = repo_image::recipe(&repo, &entry, &repo_image::RunAs::of(&s.cfg))
         .await
         .map_err(unprocessable)?;
@@ -203,6 +227,7 @@ pub async fn build(
         "source_ref": recipe.source_ref,
         "source_commit": recipe.source_commit,
         "joined": running.is_some(),
+        "cloned": uncloned.is_some(),
     })))
 }
 
@@ -230,9 +255,41 @@ pub(super) fn repo_root(given: &str) -> Result<PathBuf, String> {
         });
     match (matches.next(), matches.next()) {
         (Some(only), None) => Ok(only),
-        (None, _) => Err(format!("no managed clone ends in {given}")),
+        (None, _) => Err(format!(
+            "no managed clone ends in {given}; name the repository by its forge identity \
+             (host/owner/name) to clone it, or clone it from the repository picker"
+        )),
         (Some(_), Some(_)) => Err(format!(
             "more than one managed clone ends in {given}; name its host too"
         )),
+    }
+}
+
+/// A repository named by its forge identity, `host/owner/name`, with no
+/// managed clone under `root`: the identity and where its clone goes. A bare
+/// suffix names no forge to clone from, and is not one.
+fn uncloned(root: &Path, given: &str) -> Option<(String, PathBuf)> {
+    let identity = given.trim();
+    let (host, owner, name) = crate::forge::identity_parts(identity).ok()?;
+    let dest = crate::forge::clone_dest(root, host, owner, name).ok()?;
+    (!dest.join(".git").exists()).then(|| (identity.to_string(), dest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_forge_identity_without_a_clone_is_cloned_for_a_build() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let (identity, dest) = uncloned(root, " gitlab.com/group/sub/proj ").unwrap();
+        assert_eq!(identity, "gitlab.com/group/sub/proj");
+        assert_eq!(dest, root.join("gitlab.com/group/sub/proj"));
+        assert!(uncloned(root, "group/proj").is_none());
+        assert!(uncloned(root, "gitlab.com/proj").is_none());
+        assert!(uncloned(root, "gitlab.com/../proj").is_none());
+        std::fs::create_dir_all(dest.join(".git")).unwrap();
+        assert!(uncloned(root, "gitlab.com/group/sub/proj").is_none());
     }
 }

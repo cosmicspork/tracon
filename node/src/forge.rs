@@ -1066,6 +1066,37 @@ pub async fn ensure_clone_of(
     node_id: &str,
     identity: &str,
 ) -> Result<PathBuf, CloneError> {
+    let (host, owner, name) = identity_parts(identity)?;
+    let (forge, token) = {
+        let broker = broker.read().unwrap();
+        let env_of = |forge: Forge| broker.env_for(forge.credential(), channel, node_id).ok();
+        forge_and_token(host, env_of)
+    };
+    make_clone(forge, token.as_deref(), (host, owner, name)).await
+}
+
+/// The managed clone an image build the operator asked for starts from, for
+/// a repository named by its forge identity, made now when it is not on disk
+/// yet. A build has no channel, so the forge credential is the node's
+/// (`Broker::env_for_node`), as for the fetch before a build
+/// (`refresh_for_build`); without one the clone is anonymous.
+pub async fn ensure_clone_for_build(
+    broker: &SharedBroker,
+    node_id: &str,
+    identity: &str,
+) -> Result<PathBuf, CloneError> {
+    let (host, owner, name) = identity_parts(identity)?;
+    let (forge, token) = {
+        let broker = broker.read().unwrap();
+        let env_of = |forge: Forge| broker.env_for_node(forge.credential(), node_id).ok();
+        forge_and_token(host, env_of)
+    };
+    make_clone(forge, token.as_deref(), (host, owner, name)).await
+}
+
+/// `host/owner/name` split into its parts, the owner being every segment
+/// between the host and the name (a GitLab group path).
+pub fn identity_parts(identity: &str) -> Result<(&str, &str, &str), CloneError> {
     crate::mesh::recipe::valid_identity(identity).map_err(CloneError::Name)?;
     let (host, rest) = identity
         .split_once('/')
@@ -1073,12 +1104,7 @@ pub async fn ensure_clone_of(
     let (owner, name) = rest
         .rsplit_once('/')
         .ok_or_else(|| CloneError::Name(format!("{identity:?} names no owner")))?;
-    let (forge, token) = {
-        let broker = broker.read().unwrap();
-        let env_of = |forge: Forge| broker.env_for(forge.credential(), channel, node_id).ok();
-        forge_and_token(host, env_of)
-    };
-    make_clone(forge, token.as_deref(), (host, owner, name)).await
+    Ok((host, owner, name))
 }
 
 /// Make the managed clone of `host/owner/name` unless it is there already.
