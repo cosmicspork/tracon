@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { render, renderMessage, renderWithoutFetching } from './markdown'
+import { codeSpans, render, renderMessage, renderWithoutFetching } from './markdown'
 
 describe('markdown rendering', () => {
   test('escapes embedded HTML instead of trusting document authors', () => {
@@ -44,5 +44,11 @@ describe('markdown rendering', () => {
 
   test('a single newline in a message stays a line break', () => {
     expect(renderMessage('first\nsecond')).toBe('<p>first<br>second</p>\n')
+  })
+})
+
+describe('codeSpans', () => {
+  test('sets code spans as code and escapes the rest', () => {
+    expect(codeSpans('add `checks` to its [[repo]] <entry>')).toBe('add <code>checks</code> to its [[repo]] &lt;entry&gt;')
   })
 })

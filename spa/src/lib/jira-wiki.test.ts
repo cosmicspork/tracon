@@ -84,4 +84,9 @@ describe('jira wiki rendering', () => {
       '<p>one<br>two</p>\n<p>three</p>\n<hr>\n<blockquote>quoted</blockquote>',
     )
   })
+
+  test('colour markup keeps its text and only a plain colour value', () => {
+    expect(renderJiraWiki('{color:red}Do not{color} delete')).toBe('<p><span style="color: red">Do not</span> delete</p>')
+    expect(renderJiraWiki('{color:red;background:url(x)}hi{color}')).toBe('<p>hi</p>')
+  })
 })

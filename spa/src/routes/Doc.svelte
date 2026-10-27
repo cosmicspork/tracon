@@ -407,6 +407,10 @@
   .md :global(li) {
     margin: 0.2em 0;
   }
+  /* A task list's checkbox is its marker. */
+  .md :global(li:has(> input[type='checkbox'])) {
+    list-style: none;
+  }
   .md :global(code) {
     font: 12.5px var(--mono);
     background: var(--s1);

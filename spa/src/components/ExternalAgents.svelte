@@ -13,6 +13,7 @@
   } from '../lib/externalLanes'
   import { formatAge } from '../lib/format'
   import type { ExternalEvent, ExternalLane, ExternalView } from '../lib/types'
+  import { codeSpans } from '../lib/markdown'
 
   // Harnesses the operator runs themselves have no session: what they did is
   // grouped by the label each gives, for the last day, plus anything still
@@ -125,7 +126,7 @@
       {#if open === laneKey(lane)}
         <ol class="log">
           {#each log as e (e.seq)}
-            <li><span class="mono">{formatAge(e.at_ms, clock.now)}</span> {describe(e)}</li>
+            <li><span class="mono">{formatAge(e.at_ms, clock.now)}</span> {@html codeSpans(describe(e))}</li>
           {:else}
             <li class="dim">nothing logged</li>
           {/each}
