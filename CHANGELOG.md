@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.41.0](https://github.com/cosmicspork/tracon/compare/v0.40.1...v0.41.0) (2026-10-27)
+
+
+### Features
+
+* **session:** ask an old session in its own conversation, and compact it ([#695](https://github.com/cosmicspork/tracon/issues/695)) ([c9343b2](https://github.com/cosmicspork/tracon/commit/c9343b2a5b697817f24d6b253a6934e577b64a8a))
+* **spa:** cut narrative copy to labels and put explanation behind a help icon ([#707](https://github.com/cosmicspork/tracon/issues/707)) ([cf67c76](https://github.com/cosmicspork/tracon/commit/cf67c76b2cfddd4b5bd4c568a81d5f2daed0e730))
+
+
+### Bug Fixes
+
+* **repos:** clone a repository named by its identity before building it ([#697](https://github.com/cosmicspork/tracon/issues/697)) ([bf960fa](https://github.com/cosmicspork/tracon/commit/bf960fa052ab4b9524d1c566bfdabaa378dad196))
+* say counts, states and sources in words ([#704](https://github.com/cosmicspork/tracon/issues/704)) ([2f80905](https://github.com/cosmicspork/tracon/commit/2f809059012e8375c59287e8f1b5b92f75af47ad))
+* **spa:** draw errors as errors ([#702](https://github.com/cosmicspork/tracon/issues/702)) ([ba321fc](https://github.com/cosmicspork/tracon/commit/ba321fcdfedffe831df93659c907cb8faaa4a330))
+* **spa:** keep links inside a sentence inline on phones ([#700](https://github.com/cosmicspork/tracon/issues/700)) ([4be6e7d](https://github.com/cosmicspork/tracon/commit/4be6e7d0c77825ecb023671f1def311410e6b978))
+* **spa:** let the rail footer say what is wrong in full ([#701](https://github.com/cosmicspork/tracon/issues/701)) ([b6770e4](https://github.com/cosmicspork/tracon/commit/b6770e43e86cf485207e8bdb7215bba723502ad5))
+* **spa:** render the markup that messages and documents carry ([#705](https://github.com/cosmicspork/tracon/issues/705)) ([76e1829](https://github.com/cosmicspork/tracon/commit/76e1829c7e5cbef937bdfc0cd94e88ecd1d19b49))
+* **spa:** stop screens contradicting themselves ([#706](https://github.com/cosmicspork/tracon/issues/706)) ([e300f47](https://github.com/cosmicspork/tracon/commit/e300f47d52d77a2072a987642f46f0bde35bc957))
+* **spa:** wrap what was cut or pushed off-screen ([#703](https://github.com/cosmicspork/tracon/issues/703)) ([b516dad](https://github.com/cosmicspork/tracon/commit/b516dad9c992b619a99e0ca0edf630a305d1aa39))
+
 ## [0.40.1](https://github.com/cosmicspork/tracon/compare/v0.40.0...v0.40.1) (2026-10-26)
 
 
