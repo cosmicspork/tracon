@@ -96,8 +96,7 @@
       <p class="note">Sign in to see the request you were sent here to approve.</p>
     {/if}
     <p>
-      This node is reached from off its own machine, so it wants the operator token. Run
-      <code>tracon auth issue</code> on the node to mint one.
+      Remote access needs the operator token: <code>tracon auth issue</code> on the node.
     </p>
     <!-- svelte-ignore a11y_autofocus -->
     <input
@@ -113,13 +112,12 @@
     />
     {#if insecure}
       <p class="err">
-        This page is plain http, so the login cookie cannot be kept. Reach the
-        node over HTTPS — an ingress, a reverse proxy, or a tailnet name.
+        Plain HTTP can't keep the login cookie. Use HTTPS.
       </p>
     {/if}
     {#if error}<p class="err">{error}</p>{/if}
     <button type="submit" disabled={busy || !token.trim()}>{busy ? 'Checking…' : 'Log in'}</button>
-    <small>The token is exchanged for a cookie this browser holds. It is not stored here.</small>
+    <small>Exchanged for a cookie; the token isn't stored.</small>
     {#if !approving}
       <div class="or">
         {#if device}
@@ -128,8 +126,7 @@
         {:else}
           <p>
             {desktop
-              ? 'Or approve this window from a browser already signed in to the node, with its passkey.'
-              : 'Or approve this browser from another one already signed in to the node, with its passkey.'}
+              ? 'Or approve from a signed-in browser.' : 'Or approve from a signed-in browser.'}
           </p>
           <button class="alt" type="button" onclick={() => void signInElsewhere()} disabled={asking} data-testid="device-sign-in">
             {asking ? 'Asking…' : 'Sign in from another browser'}

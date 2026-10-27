@@ -231,7 +231,7 @@
 {#if notifications.length}
   <details class="deliveries">
     <summary>Notification delivery attempts</summary>
-    <p>Attempt and peer-acknowledgement records only; they do not prove a person saw a notification.</p>
+    <p>Delivery attempts only.</p>
     {#each notifications as notification (notification.notification_id)}
       <div class="mono">{notification.notification_id.slice(0, 8)} · {notification.attempts.length ? notification.attempts.map((attempt) => `${attempt.device_id.slice(0, 8)}: ${attempt.outcome}`).join(', ') : 'no matching live device'}</div>
     {/each}

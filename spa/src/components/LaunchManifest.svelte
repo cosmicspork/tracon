@@ -144,8 +144,7 @@
       </div>
     {:else}
       <div class="empty">
-        No skills or agents imported. Sessions here launch with the node's orientation and
-        whatever notes are below.
+        No skills or agents.
       </div>
     {/if}
 

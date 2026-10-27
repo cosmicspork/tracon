@@ -67,7 +67,7 @@
             {#if pending?.name === channel.name}
               <span class="confirm" role="status">
                 {pending.enabled ? 'Enable' : 'Disable'} notifications for every listed node’s registered
-                devices? This changes the shared channel, not a device subscription.
+                devices? This changes the channel for every member.
                 <button class="btn p" onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Confirm change'}</button>
                 <button class="lnk" onclick={() => (pending = null)} disabled={busy}>Cancel</button>
               </span>

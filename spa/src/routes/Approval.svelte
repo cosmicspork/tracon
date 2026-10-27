@@ -208,7 +208,7 @@
         >{a.tool} · {a.channel} · {pending
           ? lapsed
             ? 'expired · nothing ran'
-            : `${formatExpiry(a.expires_ms, clock.now)} · ${grant ? 'nothing is open yet; allowing it grants the request' : 'nothing is waiting; allowing it runs the call'}`
+            : `${formatExpiry(a.expires_ms, clock.now)} · ${grant ? 'allowing grants it' : 'allowing runs it'}`
           : a.state.replace('_', ' ')}</small
       >
     </span>
@@ -364,7 +364,7 @@
             <span class="name"
               >{f.key}{f.required ? '' : ' · optional'}{#if f.locked}<span
                   class="chip"
-                  title="names what this call acts on; reject it and ask for a new call to change it">locked</span
+                  title="Fixed by the call. Reject to change it.">locked</span
                 >{/if}</span
             >
             {#if f.locked}
@@ -418,7 +418,7 @@
       {#each unnamed as key (key)}
         <div class="field">
           <span class="name"
-            >{key}<span class="chip" title="the tool's schema does not name it, so it is sent as the agent wrote it"
+            >{key}<span class="chip" title="Not in the tool's schema; sent as written"
               >not in the schema</span
             ></span
           >

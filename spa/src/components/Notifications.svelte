@@ -53,7 +53,7 @@
 
   async function toggle(event: Event) {
     const box = event.currentTarget as HTMLInputElement
-    await act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. A test reports push-service acceptance, not device display.')
+    await act(() => (on ? push.disable() : push.enable()), on ? '' : 'On. Tests confirm the push service accepted it.')
     // `checked={on}` only writes to the box when `on` changes. A failed
     // enrolment leaves `on` false, so the tick the click put there stays
     // unless it is taken back here; the note says why.

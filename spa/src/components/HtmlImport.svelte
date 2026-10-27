@@ -91,7 +91,7 @@
     </label>
   </div>
   {#if !folderAvailable}
-    <small>Folder import is not available in this browser. Single-file import still works.</small>
+    <small>Folder import unsupported here; single files work.</small>
   {/if}
 
   {#if selection}

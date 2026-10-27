@@ -24,7 +24,7 @@ export function roleHeading(role: ContextRole): string {
 const REASONS: Record<ContextReason, string> = {
   absent: 'not on this node',
   archived: 'archived',
-  html: 'an HTML document, not carried in orientation',
+  html: 'HTML · not in orientation',
   cap: 'past the selected context’s allowance',
 }
 

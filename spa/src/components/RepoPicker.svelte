@@ -254,9 +254,9 @@
     {#if query && shownForges.every((f) => f.repos.length === 0)}
       <small>
         {(forges ?? []).some((f) => f.next_cursor)
-          ? 'No loaded repository matches; load more to continue searching'
+          ? 'No match yet · load more'
           : (forges ?? []).some((f) => !f.complete)
-            ? 'No loaded repository matches; the listing is incomplete'
+            ? 'No match · listing incomplete'
             : 'No repository matches'}
       </small>
     {/if}
@@ -315,9 +315,7 @@
     <span
       >{chosenUncloned.full_name}
       <small
-        >{chosenUncloned.host} · {peer === null
-          ? 'cloned on this node when the session starts'
-          : `cloned on ${peer} when the session starts, if it has not yet`}</small
+        >{chosenUncloned.host} · {peer === null ? 'clones at start' : `${peer} clones at start`}</small
       ></span
     >
     <button type="button" class="lnk" onclick={() => (value = '')}>change</button>

@@ -201,7 +201,7 @@ export function providerErrorLine(payload: Record<string, unknown>): string {
 export function repetitionLine(payload: Record<string, unknown>): string {
   const count = typeof payload.count === 'number' ? payload.count : 0
   const title = typeof payload.title === 'string' && payload.title ? toolName(payload.title) : 'the same tool call'
-  return `same call ${count}× in a row · ${title} · recorded, not paused`
+  return `same call ${count}× in a row · ${title}`
 }
 
 /// "workspace prepared" — the session's files are in place. Where they came
@@ -249,7 +249,7 @@ export function worktreeOrigin(payload: Record<string, unknown>): string {
 export function sessionImage(payload: Record<string, unknown>): string {
   if (typeof payload.image === 'string' && payload.image) return " · in the repository's image"
   if (typeof payload.image_note === 'string' && payload.image_note) {
-    return ` · in the harness image, not the repository's: ${payload.image_note}`
+    return ` · in the harness image: ${payload.image_note}`
   }
   return ''
 }
@@ -613,7 +613,7 @@ export function eventLine(e: Event): EventLine | null {
       return line('wait', ['outcome unknown', str(p.reason), 'new prompts refused until it settles'])
     }
     case 'child_session':
-      return line('wait', ['the harness started a session of its own', str(p.child), 'recorded, not driven'])
+      return line('wait', ['the harness started its own session', str(p.child)])
     case 'pty_opened': {
       if (str(p.phase) === 'attach') return line('wait', ['terminal attached', str(p.pty_id)])
       const args = Array.isArray(p.args) ? p.args.filter((a) => typeof a === 'string') : []

@@ -67,8 +67,7 @@
 <details class="transfer">
   <summary>Continue on another node</summary>
   <p class="consequence">
-    Continue one immutable candidate with only the named context. The source session stays unchanged; credentials and a
-    live harness are never transferred. The receiving node must confirm import, which creates a new isolated workspace.
+    Continue a candidate elsewhere with only the named context. No credentials travel; the receiver confirms the import.
   </p>
   <label>
     <span>Source candidate ID</span>
@@ -82,7 +81,7 @@
         <option value={node.id}>{node.name || node.id.slice(0, 12)}</option>
       {/each}
     </select>
-    <small>Only reachable nodes in {channel} are shown. Leave this blank to download a portable package.</small>
+    <small>Reachable nodes in {channel}. Blank downloads a package.</small>
   </label>
   <label>
     <span>Included document slugs</span>

@@ -10,7 +10,7 @@
 
 <div class="h4"><a class="lnk" href="/settings#mesh">‹ Mesh</a> Enroll a node</div>
 <p class="lede">
-  Add a peer to the mesh without granting it live access to this machine. A node always keeps its own host configuration, provider logins, browser subscriptions, and running sessions.
+  Add a peer to the mesh. It keeps its own configuration, logins and sessions.
 </p>
 
 <div class="steps" aria-label="Enrollment steps">
@@ -27,31 +27,31 @@
   <section class="enrollment">
     <div class="h5">Enrollment is managed in Settings › Mesh</div>
     <p>
-      This route intentionally does not create or keep a live invitation. The canonical Mesh administration panel requires an explicit administrator session on the serving node before it can issue, cancel, or admit a one-time invitation.
+      Invitations are issued from Mesh administration on the serving node.
     </p>
     <a class="btn p" href="/settings#mesh">Open Mesh administration</a>
     {#if !local}
-      <p class="note">You reached the serving node remotely. Open Mesh administration on that node to create or admit an invitation.</p>
+      <p class="note">Remote: open Mesh administration on the node itself.</p>
     {/if}
   </section>
 
   <section class="enrollment">
     <div class="h5">Choose exactly what the new node can read</div>
     <p>
-      <code>@mesh</code> is the required system coordination channel: it lets members identify and coordinate with one another. Select a work channel only when this peer should receive that channel’s shared work and data key.
+      <code>@mesh</code> is always included. Add a work channel only to share its work and key.
     </p>
     <p class="note">
-      An invitation never transfers a provider token, operator token, browser subscription, host credential, checkout, or running session. A peer needs its own local setup and provider connection before it can run work.
+      No tokens, credentials or sessions are transferred. The peer needs its own provider to run work.
     </p>
   </section>
 
   <section class="enrollment">
     <div class="h5">Verify trust before admitting the peer</div>
     <p>
-      Compare the joining node’s fingerprint with the fingerprint it prints through a separate trusted path. Admit only an exact match. Cancelling a mismatch leaves no persistent invitation or live connection.
+      Compare fingerprints over a trusted path. Admit only an exact match.
     </p>
     <p class="note">
-      Once admitted, the node is a connected mesh peer with only <code>@mesh</code> and the selected channel keys. It manages its own compatibility, providers, and readiness; view that operational state in <a href="/settings#mesh">Settings › Mesh</a>.
+      Once admitted, the node is a connected mesh peer with only <code>@mesh</code> and the selected channel keys. See its state in <a href="/settings#mesh">Settings › Mesh</a>.
     </p>
   </section>
 {/if}

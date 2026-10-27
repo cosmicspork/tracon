@@ -111,8 +111,7 @@
 
     {#if !view.policy.trusted}
       <p class="warn">
-        The signed bundle is unavailable or invalid, so no rule allows anything and every request is
-        asked. That is the fail-closed path, not a policy that happens to be strict.
+        No valid signed policy, so every request is asked.
       </p>
     {/if}
 
@@ -143,7 +142,7 @@
             {:else if scopeNote(action)}
               unattended only for {scopeNote(action)}; anything else is asked
             {:else}
-              no rule covers it, so it is yours to decide
+              yours to decide
             {/if}
           </small>
         </li>

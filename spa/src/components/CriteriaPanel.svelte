@@ -93,8 +93,7 @@
 
   {#if !criteria}
     <div class="empty">
-      No criteria are stated. What would make this good is worked out from the task and
-      its plan, and nothing here claims the customer agreed to a standard.
+      No criteria stated.
     </div>
   {:else}
     <div class="meta">
@@ -177,7 +176,7 @@
                     <select bind:value={linkProvenance} aria-label="who is behind this link">
                       <option value="decided">decided · you say this settles it</option>
                       <option value="observed">observed · the customer needed it</option>
-                      <option value="inferred">inferred · a proposal, not a standard</option>
+                      <option value="inferred">inferred · proposed</option>
                     </select>
                   </div>
                   <input

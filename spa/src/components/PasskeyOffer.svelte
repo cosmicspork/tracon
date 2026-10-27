@@ -41,14 +41,12 @@
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="passkey-offer-title" data-testid="passkey-offer">
       {#if done}
         <h2 id="passkey-offer-title">Passkey added</h2>
-        <p>Admin actions you make from this device will ask for it. Everyday use needs nothing more.</p>
+        <p>Admin actions from this device will ask for it.</p>
         <div class="acts"><button class="btn p" type="button" onclick={close}>Done</button></div>
       {:else}
         <h2 id="passkey-offer-title">Add a passkey for this device?</h2>
         <p>
-          This browser is signed in. Changing credentials, tokens, grants or the mesh from here needs a
-          passkey to confirm each change. Right after pairing you can add the first one without
-          confirming; later, adding one needs an existing passkey or the node itself.
+          Admin changes from this browser need a passkey. Add the first one now; later ones need an existing passkey or the node.
         </p>
         {#if enroller.problem}<p class="err" data-testid="passkey-problem">{enroller.problem}</p>{/if}
         <div class="acts">

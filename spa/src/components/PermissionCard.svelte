@@ -119,7 +119,7 @@
       <span class="why">{held} · cannot be decided until it returns</span>
     {:else if lapsed}
       <span class="why"
-        >{approval ? 'expired unanswered · nothing ran' : 'denied by default · the session was not made to wait'}</span
+        >{approval ? 'expired unanswered · nothing ran' : 'denied by default'}</span
       >
     {:else}
       {#each options.filter((o) => o.kind === 'reject_once') as o (o.option_id)}
@@ -135,7 +135,7 @@
         {/each}
       {/if}
       {#each options.filter((o) => o.kind === 'allow_repo') as o (o.option_id)}
-        <button class="lnk" disabled={busy} title="Opens it for this session and adds it to the repository's egress in node.toml, so later sessions start with it" onclick={() => answer(o.option_id)}
+        <button class="lnk" disabled={busy} title="Also adds it to the repository's egress for later sessions" onclick={() => answer(o.option_id)}
           >{label(o.kind, o.name)}</button
         >
       {/each}
@@ -150,7 +150,7 @@
         >
       {/each}
       {#if allowElsewhere}
-        <span class="why" data-testid="decide-on-owner" title="Allowing it is an admin action there, confirmed with that node's own passkey"
+        <span class="why" data-testid="decide-on-owner" title="Confirmed with that node's passkey"
           >allow on {nodeLabel(store.nodes, permission.node_id)}</span
         >
       {/if}
