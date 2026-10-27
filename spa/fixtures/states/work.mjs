@@ -356,7 +356,7 @@ const plannedContinuation = continuation(planned, {
 // preview answer for the repository the channel used last.
 const readinessAll = {
   channel: 'personal',
-  repo: '/home/op/src/orbit',
+  repo: 'github.com/op/orbit',
   investigate: { purpose: 'investigate', ready: true, missing: [], notes: [] },
   verify: { purpose: 'verify', ready: true, missing: [], notes: [] },
   publish: { purpose: 'publish', ready: true, missing: [], notes: [] },
@@ -577,7 +577,7 @@ const states = [
     area: 'work',
     route: '/tasks',
     title: 'New task refused',
-    note: 'an add that fails shows its error under the heading "Could not load work"',
+    note: 'an add that fails says "Could not add work" with the node\'s reason',
     api: {
       '/api/work': { items: ledger },
       'POST /api/work': err(409, 'channel personal is archived; it keeps its work and takes no new items'),
@@ -1016,9 +1016,9 @@ const states = [
     note: 'item actions are desktop-only',
     sizes: ['desktop'],
     api: itemApi(ledger.find((i) => i.id === ID.export), {
-      api: { [`PUT /api/work/${ID.export}`]: err(409, `session ${SID.run.slice(0, 8)} holds this item; stop it before closing`) },
+      api: { [`POST /api/work/${ID.export}/close`]: err(409, `session ${SID.run.slice(0, 8)} holds this item; stop it before closing`) },
     }),
-    act: async (page) => page.getByRole('button', { name: 'Close', exact: true }).click(),
+    act: async (page) => page.getByRole('button', { name: 'Close task', exact: true }).last().click(),
   },
   {
     id: 'work-item-long',
@@ -1299,7 +1299,7 @@ const states = [
     api: launchApi(planned, {
       readiness: {
         channel: 'personal',
-        repo: '/home/op/src/orbit',
+        repo: 'github.com/op/orbit',
         investigate: { purpose: 'investigate', ready: true, missing: [], notes: [] },
         verify: {
           purpose: 'verify',
@@ -1324,28 +1324,26 @@ const states = [
     id: 'work-launch-not-investigable',
     area: 'work',
     route: `/?item=${ID.limits}&phase=execute`,
-    title: 'Launch: nothing ready (repository missing, node not ready)',
+    title: 'Launch: nothing ready (node degraded)',
     since: '#387',
     note: 'Start reads "Cannot run here" and is disabled; the readiness banner says why.',
     api: launchApi(planned, {
       readiness: {
         channel: 'personal',
-        repo: '/home/op/src/orbit',
+        repo: 'github.com/op/orbit',
         investigate: {
           purpose: 'investigate',
           ready: false,
           missing: [
-            { key: 'repo', message: '/home/op/src/orbit is not a directory on this node' },
             { key: 'launch', message: 'this node is degraded: the gateway container is not running' },
           ],
-          notes: [],
+          notes: [{ key: 'repo', message: 'github.com/op/orbit is not cloned yet (will clone)' }],
         },
-        verify: { purpose: 'verify', ready: false, missing: [{ key: 'repo', message: '/home/op/src/orbit is not a directory on this node' }, { key: 'launch', message: 'this node is degraded: the gateway container is not running' }], notes: [] },
+        verify: { purpose: 'verify', ready: false, missing: [{ key: 'launch', message: 'this node is degraded: the gateway container is not running' }], notes: [] },
         publish: {
           purpose: 'publish',
           ready: false,
           missing: [
-            { key: 'repo', message: '/home/op/src/orbit is not a directory on this node' },
             { key: 'launch', message: 'this node is degraded: the gateway container is not running' },
             { key: 'remote', message: 'the repository has no `origin` remote to publish to' },
           ],

@@ -573,7 +573,7 @@ export default [
     area: 'home',
     route: '/',
     title: 'Setup checklist, fresh node',
-    note: 'No provider, no channel, no peer: SetupCard with every step outstanding. Check the divider above "Use an existing setup" (uses --line).',
+    note: 'No provider, no channel, no peer: SetupCard with the local steps outstanding. Check the divider above "Use an existing setup" (uses --line).',
     api: base({
       '/api/queue': queue(),
       '/api/nodes': [node({ models: [], providers: [] })],
@@ -720,7 +720,7 @@ export default [
     area: 'home',
     route: '/more',
     title: 'More: the destinations the phone bar has no room for',
-    note: 'Memories, Evidence, Usage and Settings; the More tab is lit.',
+    note: 'Memories, Usage and Settings; the More tab is lit.',
     api: base(),
     sizes: ['phone'],
   },
@@ -858,7 +858,7 @@ export default [
       '/api/operator/issues': {
         issues: [
           issue({ id: 'iss-9', state: 'uncertain', publish_error: 'POST /repos/cosmicspork/tracon/issues: timed out after 30 s; the issue may exist', created_ms: -5400000 }),
-          issue({ id: 'iss-10', state: 'publishing', title: 'pr_status shows a stale head after a force-push', created_ms: -60000 }),
+          issue({ id: 'iss-10', state: 'publishing', title: 'pr_status shows a stale head after a force-push', body: 'After a force-push, pr_status reports the previous head SHA until the next poll.\n\nExpected: the new head as soon as the push lands.', attachments_json: '[]', created_ms: -60000 }),
         ],
       },
     }),
@@ -1004,7 +1004,7 @@ export default [
     area: 'home',
     route: '/',
     title: 'Review cards: verdicts, checks, claimed, GitLab',
-    note: 'AI verdict "changes suggested", still reviewing, no checks, claimed, an MR, and an acknowledged-report label.',
+    note: 'AI verdict "changes suggested", still reviewing, no checks, claimed, and an MR.',
     api: base({
       '/api/queue': queue({
         reviews: [
@@ -1208,12 +1208,13 @@ export default [
     id: 'home-readiness-not-a-repo',
     area: 'home',
     route: '/',
-    title: 'Readiness: nothing ready (path is not a checkout)',
+    title: 'Readiness: nothing ready (the node cannot launch)',
     since: '#387',
-    note: 'A crit banner: the repository path does not exist on this node, a long path that must wrap; no link for gaps fixed in the repository itself.',
+    note: 'A crit banner: the node refuses to launch anything, a long reason that must wrap; no link for gaps fixed on the node itself.',
     api: base({
+      '/api/repos/recent': { repos: [], managed: [{ repo_path: LONG_REPO, full_name: 'acme-corporation/monorepo-with-a-very-long-name', host: 'gitlab.acme-corporation.example' }] },
       '/api/readiness': (req) => {
-        const gap = { key: 'repo', message: `${req.query.repo} is not a directory on this node` }
+        const gap = { key: 'launch', message: 'this node is degraded: the gateway container is not running, so no session can reach a model until `tracon node restart` brings it back' }
         return {
           channel: req.query.channel,
           repo: req.query.repo,

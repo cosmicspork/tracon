@@ -222,6 +222,36 @@ const metric = (channel, o = {}) => ({
 const NOTE = 'as seen from this node: usage is counted where the model call was made'
 const metricsBody = (channels) => ({ since_ms: -30 * 86_400_000, node_id: SELF, note: NOTE, channels })
 
+// What the gateway counted, as /api/usage groups it: by model unless the
+// request asks for `group=day` or `group=session`.
+const usageRow = (channel, provider, model, requests, input, output, cache, sessions, cost, o = {}) => ({
+  channel, provider, model, requests, input_tokens: input, output_tokens: output, cache_read_tokens: cache, cache_write_tokens: 0, sessions, cost_usd: cost, ...o,
+})
+const usageByModel = [
+  usageRow('personal', 'anthropic', 'claude-opus-5-5', 1_204, 9_820_000, 1_310_000, 14_600_000, 29, 61.12),
+  usageRow('personal', 'anthropic', 'claude-sonnet-5-5', 862, 3_140_000, 402_000, 2_130_000, 34, 23.25),
+  usageRow('work', 'openai', 'gpt-5.2-codex', 431, 4_910_000, 690_000, 2_420_000, 12, null),
+]
+const usageByDay = [-2, -1, 0].flatMap((d, i) => {
+  const day = new Date(Date.now() + d * 86_400_000).toISOString().slice(0, 10)
+  return [
+    usageRow('personal', 'anthropic', null, 140 + i * 30, 1_200_000 + i * 90_000, 160_000, 1_900_000, 4 + i, 9.8 + i * 1.7, { day }),
+    usageRow('work', 'openai', null, 61 + i * 12, 700_000, 98_000, 340_000, 2, null, { day }),
+  ]
+})
+const usageBySession = [
+  usageRow('personal', 'anthropic', null, 212, 2_410_000, 301_000, 3_900_000, 1, 18.4, { session_id: '8b4e0d2a-6f1c-4e3a-9d57-0c2b1f7a9e64', title: 'Add per-channel rate limits', review: 'accepted' }),
+  usageRow('work', 'openai', null, 96, 1_120_000, 140_000, 610_000, 1, null, { session_id: '3c9a7e10-58d2-4b6f-8e01-7d4c2a9b5f13', title: 'Export queue metrics per channel', review: 'rejected' }),
+  usageRow('personal', 'anthropic', null, 14, 88_000, 9_000, 0, 0, 0.41),
+]
+const usageBody = (byModel) => (req) => ({
+  since_ms: Number(req.query.since_ms) || -30 * 86_400_000,
+  until_ms: req.query.until_ms ? Number(req.query.until_ms) : null,
+  totals: (req.query.group === 'day' ? usageByDay : req.query.group === 'session' ? usageBySession : byModel).filter(
+    (t) => !req.query.provider || t.provider === req.query.provider,
+  ),
+})
+
 const typicalMetrics = [
   metric('personal', {
     accepted_changes: 23,
@@ -401,7 +431,7 @@ export default [
     route: '/usage',
     title: 'Usage: two channels',
     note: 'Cards, table, unpriced cost, the node note under the heading.',
-    api: { '/api/metrics': metricsBody(typicalMetrics) },
+    api: { '/api/metrics': metricsBody(typicalMetrics), '/api/usage': usageBody(usageByModel) },
   },
   {
     id: 'insight-metrics-loading',
@@ -409,7 +439,7 @@ export default [
     route: '/usage',
     title: 'Usage: request still in flight',
     note: 'Says it is loading, not that no usage is recorded.',
-    api: { '/api/metrics': hang },
+    api: { '/api/metrics': hang, '/api/usage': hang },
   },
   {
     id: 'insight-metrics-empty',
@@ -423,7 +453,7 @@ export default [
     area: 'insight',
     route: '/usage',
     title: 'Usage: request fails',
-    api: { '/api/metrics': err(500, 'metrics query failed: no such column: turn_usage.awake_ms') },
+    api: { '/api/metrics': err(500, 'metrics query failed: no such column: turn_usage.awake_ms'), '/api/usage': err(500, 'usage query failed: no such column: turn_usage.awake_ms') },
   },
   {
     id: 'insight-metrics-many',
@@ -431,7 +461,14 @@ export default [
     route: '/usage',
     title: 'Usage: many channels, huge and zero values',
     note: 'Long channel name in card heading and first column, billions of tokens, 1000h+ durations, all-null row.',
-    api: { '/api/metrics': metricsBody(manyMetrics) },
+    api: {
+      '/api/metrics': metricsBody(manyMetrics),
+      '/api/usage': usageBody([
+        ...usageByModel,
+        usageRow('a-channel-name-long-enough-to-crowd-its-column', 'openrouter', 'meta-llama/llama-4-maverick-17b-128e-instruct', 98_412, 4_212_000_000, 381_000_000, 9_870_000_000, 1_402, 18_204.77),
+        usageRow('quiet', 'anthropic', null, 0, 0, 0, 0, 0, null),
+      ]),
+    },
   },
   {
     id: 'insight-metrics-7d-methodology',
@@ -442,6 +479,7 @@ export default [
     api: {
       '/api/metrics': (req) =>
         metricsBody(Number(req.query.since_ms) > Date.now() - 8 * 86_400_000 ? [metric('personal', { ...typicalMetrics[0], accepted_changes: 5, sessions: 9, tokens: 6_900_000, cost_usd: 18.02 })] : typicalMetrics),
+      '/api/usage': usageBody(usageByModel),
     },
     act: async (page) => {
       await page.getByRole('button', { name: '7d', exact: true }).click()

@@ -788,7 +788,7 @@ export default [
     area,
     route: '/docs/personal/guide-release/edit',
     title: 'Editing, a change typed',
-    note: 'The editor is as tall as the document, with no scrollbar inside it, and no resize handle; Save and Cancel sit right under it.',
+    note: 'The editor grows with the document up to the visible page, then scrolls inside; no resize handle; Save and Cancel sit right under it.',
     api: { '/api/docs/personal/guide-release': rich },
     act: async (page) => {
       await page.locator('textarea').press('End')
