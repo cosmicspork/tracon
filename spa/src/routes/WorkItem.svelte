@@ -14,7 +14,6 @@
   import { surface } from '../lib/surface.svelte'
   import type { Brief, Criteria, Project, WorkView } from '../lib/types'
   import {
-    blockersLine,
     pickableProjects,
     priorityLabel,
     projectLabel,
@@ -31,6 +30,13 @@
   let criteria = $state<Criteria | null>(null)
   let discovered = $state<{ id: string; title: string; state: string }[]>([])
   let titles = $state<Map<string, string>>(new Map())
+  // Each listed dependency says itself why it still blocks; only a cycle,
+  // which belongs to no one of them, is said after the list.
+  const blockers = $derived(item?.readiness.state === 'blocked' ? item.readiness.by : [])
+  const blocking = $derived(
+    new Map(blockers.flatMap((b) => (b.kind === 'cycle' ? [] : [[b.id, b.kind === 'open' ? 'open' : 'not seen on this node'] as const]))),
+  )
+  const cycle = $derived(blockers.some((b) => b.kind === 'cycle'))
   let error = $state<string | null>(null)
   let loaded = $state(false)
   /** The last read failed for a reason other than the item not being there. */
@@ -181,10 +187,10 @@
     <dd class="m">
       {#if item.deps.length === 0}nothing{:else}
         {#each item.deps as d (d)}
-          <span class="dep"><a href="/tasks/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if !surface.phone && item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
+          <span class="dep"><a href="/tasks/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if blocking.has(d)}<span class="why">{` · ${blocking.get(d)}`}</span>{/if}{#if !surface.phone && item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
         {/each}
       {/if}
-      {#if item.readiness.state === 'blocked'}<span class="why"> · {blockersLine(item.readiness.by, titles)}</span>{/if}
+      {#if cycle}<span class="why">{' · part of a dependency cycle'}</span>{/if}
     </dd>
     {#if item.discovered_from}
       <dt>Discovered from</dt>

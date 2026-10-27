@@ -1085,7 +1085,8 @@
     </section>
   {/if}
 
-  {#if checks.length}
+  <!-- The older record of the same checks; the runtime evidence above is the node's own when there is any. -->
+  {#if checks.length && !authoritativeChecks.length}
     <div class="checks">
       {#each checks as c, index (index)}{@const running = c.outcome === 'running'}<span class="chip" class:ok={c.ok} class:bad={!c.ok && !running} title={c.ok ? undefined : c.tail}>{c.ok ? '✓' : running ? '…' : '✗'} {c.command}{running ? ' · running' : ` · ${Math.round(c.ms / 1000)}s`}</span>{/each}
     </div>
