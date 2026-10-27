@@ -73,14 +73,12 @@
 </script>
 
 <div class="form">
-  <p class="note">
-    The key is sealed on arrival and never shown again. tracon injects it; the harness never sees it directly.
-  </p>
+  <p class="note">Sealed on arrival; never shown again or passed to the harness.</p>
   <div class="form-grid">
     <label class="field">
       <span>Name</span>
       <input bind:value={name} placeholder="openrouter" spellcheck="false" disabled={busy} />
-      <small>Lowercase, how it appears in the model picker: {cleanName || '<name>'}/&lt;model&gt;.</small>
+      <small>Lowercase · shown as {cleanName || '<name>'}/&lt;model&gt;</small>
       {#each refusedAt('name') as message (message)}<small class="bad" role="alert">{message}</small>{/each}
     </label>
     <label class="field">
@@ -90,14 +88,14 @@
           <option value={s.value}>{s.label}</option>
         {/each}
       </select>
-      <small>Which headers and paths the key becomes.</small>
+      <small>Sets the key's headers and paths.</small>
       {#each refusedAt('shape') as message (message)}<small class="bad" role="alert">{message}</small>{/each}
     </label>
   </div>
   <label class="field">
     <span>Upstream</span>
     <input bind:value={upstream} placeholder="https://openrouter.ai/api/v1" spellcheck="false" disabled={busy} />
-    <small>Added to the egress allowlist automatically if it isn't already there.</small>
+    <small>Added to the egress allowlist.</small>
     {#each refusedAt('upstream') as message (message)}<small class="bad" role="alert">{message}</small>{/each}
   </label>
   <label class="field">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Help from '../Help.svelte'
   // Every node.toml table the bespoke screens do not edit, as a form built
   // from the node's description of each key. A table saves on its own: its
   // changed keys go as one request of per-key operations, decided against
@@ -341,12 +342,12 @@
 
 <div class="config" data-testid="config-form">
   <p class="lede">
-    Every key of node.toml the node reads, as {nodeId ? 'that peer' : (store.node?.name ?? 'the node')} describes it. A table saves on its
-    own; <b class="live">live</b> keys apply to the running node at once, the rest when it restarts.
-    {#if nodeId}Each save is confirmed here, with a prompt naming the peer and the keys, and checked again there.
-    {:else if !local}Off this machine each save is confirmed with your passkey, and the prompt names the keys it changes.{/if}
-    Repositories are under <a href="#channels">{BESPOKE.repo.split(' › ')[0]}</a> and providers under
-    <a href="#connections">{BESPOKE.providers.split(' › ')[0]}</a>.
+    node.toml on {nodeId ? 'that peer' : (store.node?.name ?? 'the node')} · <b class="live">live</b> keys apply at once, others on restart
+    <Help label="About configuration"
+      >Each table saves on its own.{#if nodeId} Saves are confirmed here and checked again on the peer.{:else if !local} Off this machine,
+        saves are confirmed with your passkey.{/if} Repositories are under <a href="#channels">{BESPOKE.repo.split(' › ')[0]}</a>,
+      providers under <a href="#connections">{BESPOKE.providers.split(' › ')[0]}</a>.</Help
+    >
   </p>
 
   {#if !cfg && loadError}
@@ -509,8 +510,7 @@
     <details class="section advanced" data-testid="config-advanced">
       <summary><code>Advanced</code><small>node.toml as the node reads it</small></summary>
       <p class="lede">
-        Read-only. Secrets, and keys this node does not read, are shown as <code>{cfg.redacted}</code>; the file's
-        comments are left out. A save is decided against this version.
+        Read-only. Secrets and unread keys show as <code>{cfg.redacted}</code>; comments are left out.
       </p>
       <dl class="facts">
         <div><dt>Version</dt><dd><code data-testid="config-hash">{cfg.hash}</code></dd></div>

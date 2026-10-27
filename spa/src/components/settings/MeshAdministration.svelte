@@ -147,9 +147,9 @@
     {/snippet}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if !data}
-      <p class="dim">Unlock administrator access to read the local membership snapshot.</p>
+      <p class="dim">Unlock administrator access to see members.</p>
     {:else}
-      <div class="empty">No running hub client is configured on this node. Pair a hub and restart the node before administering members.</div>
+      <div class="empty">No hub. Pair one and restart the node.</div>
     {/if}
   </Card>
 {:else}
@@ -158,7 +158,7 @@
       <button class="lnk" onclick={() => void load()} disabled={busy !== ''}>Refresh members</button>
     {/snippet}
     {#if !local}
-      <p class="source">Mesh changes are available remotely. Host service and runtime controls require access from the serving node.</p>
+      <p class="source">Remote: mesh changes only.</p>
     {/if}
     {#if feedbackFor('members')}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -192,7 +192,7 @@
             {#if !member.self && member.channels.includes('@mesh')}
               {#if removing === member.id}
                 <div class="remove-confirm">
-                  <p>Remove <b>{member.name || member.id}</b> from the hub? Future hub routing and local grants stop after refresh. Data already shared cannot be retracted.</p>
+                  <p>Remove <b>{member.name || member.id}</b> from the hub? Shared data can't be retracted.</p>
                   <button class="btn d" onclick={() => removeMember(member.id, member.name || member.id)} disabled={busy !== ''}>{busy === `remove:${member.id}` ? 'Removing…' : 'Confirm removal'}</button>
                   <button class="lnk" onclick={() => (removing = null)} disabled={busy !== ''}>Keep member</button>
                 </div>
@@ -208,7 +208,7 @@
     {/if}
   </Card>
 
-  <Card title="Add a member" note="Choose the existing channels this invitation may hand to the new member. The mesh coordination channel is always included.">
+  <Card title="Add a member" note="Channels the new member receives. Mesh coordination is always included.">
         {#if availableChannels.length}
       <div class="choices">
         {#each availableChannels as channel (channel.name)}
@@ -216,7 +216,7 @@
         {/each}
       </div>
     {:else}
-      <p class="dim">This node holds no ordinary channel keys to share yet.</p>
+      <p class="dim">No channel keys to share.</p>
     {/if}
     <button class="btn p" onclick={createInvitation} disabled={busy !== '' || invitationChannels.length === 0}>{busy === 'invite' ? 'Opening invitation…' : 'Create invitation for selected channels'}</button>
 
@@ -247,7 +247,7 @@
     {/if}
   </Card>
 
-  <Card title="Share a channel with the hub" note="The hub replica receives the selected channel keys so it can aggregate summaries. It does not become a member that can run work.">
+  <Card title="Share a channel with the hub" note="The hub gets these channel keys to aggregate summaries. It can't run work.">
     <div class="choices">
       {#each availableChannels as channel (channel.name)}
         <label><input type="checkbox" bind:group={shareChannels} value={channel.name} disabled={busy !== ''} /> {channel.name}</label>

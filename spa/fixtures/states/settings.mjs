@@ -1091,7 +1091,7 @@ export default [
     },
   }),
   S('policies-grant-confirm', '/settings#policies', 'Policies: terminal grant, then its confirmation', {
-    note: 'Terminal grant explanation, advanced scope open, then the exact-grant confirmation.',
+    note: 'Terminal grant target format with its help icon, advanced scope open, then the exact-grant confirmation.',
     act: async (page) => {
       const form = page.locator('.grid').last()
       await page.locator('select').filter({ hasText: 'ticket transition' }).first().selectOption('terminal')
@@ -1100,7 +1100,7 @@ export default [
       await page.getByPlaceholder('github:owner/repo:pr:42').fill('terminal:s-run:/workspaces/s-run/orbit')
       await page.getByPlaceholder('why this exact scoped action is needed').fill('Reproduce the flaky integration test by hand.')
       void form
-      await scrollTo(page, 'A terminal grant opens')
+      await scrollTo(page, 'Session required')
     },
   }),
   S('policies-grant-confirmed-step', '/settings#policies', 'Policies: confirm this exact local grant', {

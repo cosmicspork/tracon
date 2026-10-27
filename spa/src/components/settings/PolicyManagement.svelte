@@ -194,7 +194,7 @@
   })
 </script>
 
-<Card title="Signed policy" note="What this node has installed and is actually running. Edits apply only the exact signed preview you choose.">
+<Card title="Signed policy" note="Installed and running versions. An edit applies only the signed preview you pick.">
   {#snippet actions()}
     <button class="lnk" onclick={() => refresh(false)} disabled={loading || busy}>Refresh</button>
   {/snippet}
@@ -207,60 +207,60 @@
         <p class="eyebrow">Verified installed files</p>
         {#if status.installed}
           <h3>Version {status.installed.policy.version} · {status.installed.policy.rules.length} rules</h3>
-          <p>Verified bundle {short(status.installed.bundle_sha256)} is installed on disk. The running process policy is shown separately.</p>
+          <p>Bundle {short(status.installed.bundle_sha256)}</p>
         {:else}
           <h3>No verified signed policy installed</h3>
-          <p>New setups start with the shipped rules only after an explicit local confirmation.</p>
+          <p>Initialize below to install the shipped rules.</p>
         {/if}
       </div>
       <div>
         <p class="eyebrow">Running process policy</p>
         <h3>Version {status.running.version} · {status.running.rule_count} rules</h3>
         {#if status.running.trusted}
-          <p>Trusted policy currently used for decisions by this node.</p>
+          <p>Trusted · in use</p>
         {:else}
-          <p>No verified policy is running; unmatched actions ask.</p>
+          <p>Untrusted · unmatched actions ask</p>
         {/if}
       </div>
       <div class="identity" aria-label="Policy trust identity">
         <span>Installed trust identity</span>
         <code>{status.installed?.trust_identity ?? status.trust_identity ?? 'Not configured'}</code>
         {#if status.installation}
-          <small>Recorded source {status.installation.source_node ? short(status.installation.source_node) : 'not recorded'} · applied {when(status.installation.applied_ms)}</small>
+          <small>From {status.installation.source_node ? short(status.installation.source_node) : 'unknown'} · applied {when(status.installation.applied_ms)}</small>
         {:else}
-          <small>No matching installed-bundle record.</small>
+          <small>No install record.</small>
         {/if}
       </div>
     </section>
 
     {#if newer !== null && !status.installed_error}
       <div class="shipped" role="status">
-        <p>This build ships working agreements <b>v{newer}</b>; v{status.installed?.policy.version} is installed, and decisions follow the installed one.</p>
+        <p>Shipped: <b>v{newer}</b> · installed: v{status.installed?.policy.version}</p>
         {#if canSign}
           <button class="btn" onclick={previewShipped} disabled={busy}>Preview shipped v{newer}</button>
         {:else}
-          <p class="helper">{!local ? 'Open the signing node locally to preview and apply it.' : 'This node has no signing key. Apply it from the node that signed the installed policy.'}</p>
+          <p class="helper">{!local ? 'Apply it on the signing node.' : 'No signing key here. Apply it on the signing node.'}</p>
         {/if}
       </div>
     {/if}
 
     {#if status.installed_error}
-      <p class="bad" role="alert">The installed signed files cannot be verified: {status.installed_error}. They will not be overwritten by this panel.</p>
+      <p class="bad" role="alert">Installed files fail verification: {status.installed_error}. Left untouched.</p>
     {:else if !status.installed}
       <details class="initialize">
         <summary>Initialize the shipped policy</summary>
         <div class="details-body">
-        <p>This creates this node’s first signing identity and installs the shipped policy. Existing keys, signatures, and bundles are never replaced.</p>
+        <p>Creates this node's first signing identity and installs the shipped policy. Existing keys and bundles are kept.</p>
         <label class="confirm"><input type="checkbox" bind:checked={setupConfirmed} /> I understand this creates a new local signing identity.</label>
         <button class="btn primary" onclick={initialize} disabled={busy || !setupConfirmed || !local}>{busy ? 'Initializing…' : 'Create initial signed policy'}</button>
-        {#if !local}<p class="helper">Open this node locally to initialize its policy.</p>{/if}
+        {#if !local}<p class="helper">Needs the node itself.</p>{/if}
         </div>
       </details>
     {:else}
       <details class="edit-policy" bind:open={editOpen}>
         <summary>Edit policy</summary>
         <div class="details-body">
-        <p class="helper">{!local ? 'Open the signing node locally to edit its policy.' : !status.signing_key_present ? 'This node has no signing key. Edit on the node that signed this policy, then roll it out here.' : 'Preview with the existing signing key, then apply the exact signed bytes. The key never leaves this node.'}</p>
+        <p class="helper">{!local ? 'Edit on the signing node.' : !status.signing_key_present ? 'No signing key here. Edit on the signing node.' : 'Preview signs it; apply installs exactly that.'}</p>
         <label class="policy-editor">
           <span>Policy TOML</span>
           <textarea class="grow" bind:value={draft} use:autogrow={draft} oninput={discardPreview} spellcheck="false" disabled={busy}></textarea>
@@ -274,7 +274,7 @@
 
         <fieldset disabled={busy}>
           <legend>Mesh rollout targets</legend>
-          <p class="helper">Only selected nodes receive this exact preview. Delivery is encrypted; a node is never shown as applied until it returns an authenticated receipt.</p>
+          <p class="helper">Selected nodes get this preview. Applied once each returns a receipt.</p>
           {#if peers.length}
             <div class="targets">
               {#each peers as node (node.id)}
@@ -285,7 +285,7 @@
               {/each}
             </div>
           {:else}
-            <p class="dim">No peer nodes are available. Applying affects this managing node only.</p>
+            <p class="dim">No peers. Applies to this node only.</p>
           {/if}
         </fieldset>
 
@@ -293,7 +293,7 @@
           <button class="btn primary" onclick={apply} disabled={busy || !preview || !previewCurrent}>
             Apply exact preview{selected.length ? ` & roll out to ${selected.length}` : ''}
           </button>
-          <small>Applying replaces the local bundle only if verified installed files still match the baseline captured for this preview. A changed baseline requires a fresh preview. It never rotates a key.</small>
+          <small>Fails if the installed files changed since the preview.</small>
         </div>
         </div>
       </details>
@@ -305,7 +305,7 @@
 </Card>
 
 {#if status?.rollouts.length}
-<Card title="Rollout history" note="Durable receipts from the nodes each policy was sent to.">
+<Card title="Rollout history" note="Receipts from each node a policy was sent to.">
   <div class="rollouts">
     {#each status.rollouts as rollout (rollout.id)}
       <article>
@@ -331,7 +331,7 @@
               <div class="receipt">
                 <span>{targetLabel(target)}</span>
                 {#if target.detail}<small>{target.detail}</small>{/if}
-                <small>{target.compatibility === 'receipt_capable' ? 'Receipt-capable peer' : 'Legacy or unknown peer — no authenticated receipt yet.'}</small>
+                <small>{target.compatibility === 'receipt_capable' ? 'Sends receipts' : 'No receipt yet'}</small>
               </div>
             </li>
           {/each}

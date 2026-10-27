@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Help from '../Help.svelte'
   import { tick } from 'svelte'
   import { api } from '../../lib/api'
   import { formatAge, formatDuration } from '../../lib/format'
@@ -128,9 +129,10 @@
   <section class="offers" id={OFFERS_ANCHOR} aria-label="Recipes offered by other nodes">
     <h3>Offered by other nodes{#if pending}{' · '}<span class="count">{pending} waiting</span>{/if}</h3>
     <p class="dim">
-      A channel co-member offered how it builds, prepares and checks a repository. Nothing changes here until you
-      accept one; this node then builds and pins its own image. An offer never carries an image, a digest, a credential
-      or a path on the sender's machine.
+      Build, preparation and check recipes from channel members. <Help label="About offered recipes"
+        >Nothing changes until you accept one; this node then builds its own image. Offers carry no image, credential or
+        path.</Help
+      >
     </p>
     {#each ordered as offer (offer.id)}
       <article class="offer" class:decided={offer.state !== 'pending'}>
@@ -158,8 +160,7 @@
               <span>Apply to</span>
               <input bind:value={path} spellcheck="false" placeholder={offer.repo} disabled={busy !== ''} />
               <small>
-                {#if view}{view.target.exists ? 'The entry already answering for this repository.' : 'A new entry.'}{/if}
-                Name another entry's path, or an absolute checkout, to put it there.
+                {#if view}{view.target.exists ? 'Existing entry.' : 'New entry.'}{/if}
               </small>
             </label>
             {#if pinned}
@@ -189,7 +190,7 @@
                 />
                 Keep lending {view.credentials.names.join(', ')} to the preparation this offer changes
               </label>
-              <small>The offer changes what that preparation runs or reaches. Kept, this repository is held: nothing is built or warmed for it until you start its build here, and it says what it lends when you do.</small>
+              <small>Kept: the repository is held until you start its build.</small>
             {/if}
             <div class="acts">
               <button class="lnk" type="button" onclick={() => void compare(offer)} disabled={busy !== '' || !stale}>Compare</button>
@@ -209,12 +210,12 @@
                   </tbody>
                 </table>
               {:else}
-                <p class="dim">The entry already reads this way: accepting changes nothing.</p>
+                <p class="dim">No changes.</p>
               {/if}
               {#each view.notes as line (line)}<p class="caution">{line}</p>{/each}
-              {#if view.kept.length}<p class="dim">Kept as this node has them: {view.kept.join(', ')}.</p>{/if}
+              {#if view.kept.length}<p class="dim">Kept: {view.kept.join(', ')}</p>{/if}
               {#if !local}
-                <p class="dim">Accepting writes node.toml, so from off the node it asks for your passkey.</p>
+                <p class="dim">Accepting asks for your passkey.</p>
               {/if}
             {:else if view}
               <p class="dim">Compare again to see what this would write.</p>

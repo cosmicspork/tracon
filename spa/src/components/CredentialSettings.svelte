@@ -152,7 +152,7 @@
               onchange={(next) => (selected = { ...selected, [forge.forge]: next })}
             />
             {#if peerCopies}
-              <small class="warn">Replacing this source token does not update any peer’s sealed copy.</small>
+              <small class="warn">Peer copies keep the old token.</small>
             {/if}
             <div class="actions">
               <button

@@ -114,32 +114,32 @@
   })
 </script>
 
-<Card title="Runtime boundary" note="The isolated network, gateway and images sessions run inside, on the serving node.">
+<Card title="Runtime boundary" note="Network, gateway and images sessions run in.">
   {@render boundary?.()}
   {#if data}
     <div class="recheck">
       <p>Isolation checks: {data.boundary.state === 'ready' ? 'passed' : data.boundary.state}.</p>
       <button class="btn" onclick={recheckBoundary} disabled={busy !== '' || !local}>{busy === 'boundary' ? 'Checking boundary…' : 'Recheck runtime boundary'}</button>
       {#if data.boundary && typeof data.boundary === 'object'}
-        <p class="source">Checks describe this node only. <a href="/settings#mesh">Compare mesh versions and policies</a>.</p>
+        <p class="source">This node only · <a href="/settings#mesh">compare the mesh</a></p>
       {:else}
-        <p class="dim">No current boundary report is available.</p>
+        <p class="dim">No boundary report.</p>
       {/if}
     </div>
   {/if}
 </Card>
 
-<Card title="Service &amp; recovery" note="The user service that keeps this node running. Runtime details stay with the machine that reported them.">
+<Card title="Service &amp; recovery" note="The user service that keeps this node running.">
   {#snippet actions()}
     <button class="lnk" onclick={() => void load()} disabled={busy !== ''}>Refresh diagnostics</button>
   {/snippet}
   {#if !data}
-    <p class="dim">Unlock administrator access to inspect this serving node.</p>
+    <p class="dim">Unlock administrator access to see this.</p>
   {:else}
     {#if !local}
-      <p class="blocked">Host recovery and runtime checks must be opened on the node itself.</p>
+      <p class="blocked">Recovery and runtime checks need the node itself.</p>
     {/if}
-    <p class="source">{desktop ? 'Desktop actions wait for the node to answer before reporting completion.' : 'Service changes can disconnect this page. A scheduled action is not a completed restart.'}</p>
+    {#if !desktop}<p class="source">Service changes can disconnect this page.</p>{/if}
     <dl>
       <div><dt>Platform</dt><dd>{data.service.platform} · {data.service.supervisor}</dd></div>
       <div><dt>Unit</dt><dd>{data.service.unit_installed ? data.service.unit_path ?? 'installed at an unknown path' : 'not installed'}</dd></div>
@@ -156,7 +156,7 @@
         </details>
         {#if confirmInstall}
           <div class="restart-confirm">
-            <p>Install or replace this serving node's fixed {data.service.supervisor} unit? This starts or restarts the service after the response; active sessions are refused before the request.</p>
+            <p>Install or replace the {data.service.supervisor} unit? The service restarts; active sessions are refused first.</p>
             <button class="btn d" onclick={requestInstall} disabled={busy !== '' || !local || !install.available}>{busy === 'install' ? (desktopLocal ? 'Installing and waiting…' : 'Scheduling installation…') : 'Confirm service install'}</button>
             <button class="lnk" onclick={() => (confirmInstall = false)} disabled={busy !== ''}>Cancel</button>
           </div>
@@ -175,7 +175,7 @@
         </details>
         {#if confirmRestart}
           <div class="restart-confirm">
-            <p>Restart this serving node's fixed {data.service.supervisor} service now? {desktopLocal ? 'The desktop controller waits for the node to answer.' : 'The node schedules the request after replying; this is not proof that the supervisor restarted it.'}</p>
+            <p>Restart the {data.service.supervisor} service now?</p>
             <button class="btn d" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>{busy === 'restart' ? (desktopLocal ? 'Restarting and waiting…' : 'Scheduling restart…') : 'Confirm restart of this node'}</button>
             <button class="lnk" onclick={() => (confirmRestart = false)} disabled={busy !== ''}>Cancel</button>
           </div>
@@ -194,7 +194,7 @@
         </details>
         {#if confirmUninstall}
           <div class="restart-confirm">
-            <p>Remove this serving node's fixed user service? The interface disconnects after acceptance. Node state and credentials stay on disk.</p>
+            <p>Remove the user service? This page disconnects. State and credentials stay on disk.</p>
             <button class="btn d" onclick={requestUninstall} disabled={busy !== '' || !local || !uninstall.available}>{busy === 'uninstall' ? 'Scheduling removal…' : 'Confirm service removal'}</button>
             <button class="lnk" onclick={() => (confirmUninstall = false)} disabled={busy !== ''}>Cancel</button>
           </div>

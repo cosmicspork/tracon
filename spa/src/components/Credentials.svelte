@@ -88,7 +88,7 @@
   }
 </script>
 
-<Card title="Credentials" note="Every credential the serving node holds, by name and key only. Sharing sends a sealed copy to one named peer; no value is ever read back.">
+<Card title="Credentials" note="Credentials on the serving node, by name. Sharing seals a copy to one peer.">
   {#snippet actions()}<span class="count">{creds.length} held</span>{/snippet}
   <details class="import">
     <summary>Import credential</summary>
@@ -102,7 +102,7 @@
         spellcheck="false"
         placeholder={'[credentials.name]\nchannels = ["personal"]\n[credentials.name.env]\nTOKEN = "…"'}
       ></textarea>
-      <small>Sealed on arrival under the serving node’s identity. Share a peer-bound copy from its row below.</small>
+      <small>Sealed on arrival. Share to a peer from its row.</small>
     </label>
     <div class="import-actions">
       <button class="btn" onclick={importCredential} disabled={!toml.trim() || importing}>
