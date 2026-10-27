@@ -43,7 +43,7 @@
       {#if narrative}
         · Narrative report · no code publication · {review.channel}{review.claimed_ms ? ' · claimed' : ''}
       {:else}
-        · {noun} · {files} files · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
+        · {noun} · {files} file{files === 1 ? '' : 's'} · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
           ? ' · claimed'
           : ''}{#if checks}{' · '}{checks === 'running' ? 'checks running' : checks === 'passed' ? 'checks ✓' : 'checks ✗'}{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}{#if failed}{' · '}<span class="why">{failed}</span>{/if}
       {/if}

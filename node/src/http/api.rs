@@ -507,7 +507,7 @@ pub async fn metrics(
     }
     Ok(Json(json!({
         "since_ms": since, "node_id": s.node_id,
-        "note": "as seen from this node: usage is counted where the model call was made",
+        "note": "as seen from this node: usage is counted where the model call was made.",
         "channels": out,
     })))
 }

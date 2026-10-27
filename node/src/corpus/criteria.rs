@@ -688,6 +688,11 @@ fn summarize(criteria: &[CriterionView], gaps: &Gaps) -> String {
     ] {
         let n = count(state);
         if n > 0 {
+            let says = match (state, n) {
+                (Coverage::NothingPointsAtIt, 1) => "nothing points at it",
+                (Coverage::AwaitsJudgement, 1) => "awaits a person",
+                _ => says,
+            };
             parts.push(format!("{n} {says}"));
         }
     }
@@ -699,18 +704,31 @@ fn summarize(criteria: &[CriterionView], gaps: &Gaps) -> String {
         parts.push(format!("{proposed} not an agreed standard"));
     }
     if !gaps.assumptions.is_empty() {
-        parts.push(format!("{} assumptions", gaps.assumptions.len()));
+        parts.push(count_of(
+            gaps.assumptions.len(),
+            "assumption",
+            "assumptions",
+        ));
     }
     if !gaps.questions.is_empty() {
-        parts.push(format!("{} open questions", gaps.questions.len()));
+        parts.push(count_of(
+            gaps.questions.len(),
+            "open question",
+            "open questions",
+        ));
     }
     if !gaps.orphaned_judgements.is_empty() {
-        parts.push(format!(
-            "{} verdicts on criteria that were reworded",
-            gaps.orphaned_judgements.len()
+        parts.push(count_of(
+            gaps.orphaned_judgements.len(),
+            "verdict on a criterion that was reworded",
+            "verdicts on criteria that were reworded",
         ));
     }
     parts.join(" · ")
+}
+
+fn count_of(n: usize, one: &str, several: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { several })
 }
 
 /// What `orientation` needs about an item's criteria, without a config, a
@@ -1244,17 +1262,17 @@ mod tests {
         };
         let summary = summarize(&criteria, &gaps);
         assert!(summary.starts_with("2 criteria · "), "{summary}");
-        assert!(summary.contains("1 nothing points at them"), "{summary}");
+        assert!(summary.contains("1 nothing points at it"), "{summary}");
         assert!(summary.contains("1 only the agent's proposal"), "{summary}");
         assert!(summary.contains("1 not an agreed standard"), "{summary}");
-        assert!(summary.contains("1 open questions"), "{summary}");
+        assert!(summary.contains("1 open question"), "{summary}");
         assert!(
             !summary.contains("judged met") && !summary.contains("assumptions"),
             "nothing zero is mentioned: {summary}"
         );
         assert_eq!(
             summarize(&criteria[..1], &Gaps::default()),
-            "1 criterion · 1 nothing points at them",
+            "1 criterion · 1 nothing points at it",
             "one criterion is not 1 criteria"
         );
     }

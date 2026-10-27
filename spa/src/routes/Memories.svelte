@@ -103,7 +103,7 @@
 
 <div class="h4">
   Memories
-  <b>{memories.length} active on {channel || '…'}</b>
+  <b>{loaded ? memories.length : '…'} active on {channel || '…'}</b>
 </div>
 
 <div class="bar">

@@ -325,8 +325,8 @@ async fn what_points_at_a_criterion_lives_in_the_brief_beside_it() {
     let summary = view["summary"].as_str().unwrap();
     assert!(
         summary.contains("3 criteria")
-            && summary.contains("1 nothing points at them")
-            && summary.contains("1 open questions"),
+            && summary.contains("1 nothing points at it")
+            && summary.contains("1 open question"),
         "{summary}"
     );
 
@@ -808,7 +808,7 @@ async fn rewording_a_criterion_orphans_the_verdict_it_was_about() {
         view["summary"]
             .as_str()
             .unwrap()
-            .contains("1 verdicts on criteria that were reworded"),
+            .contains("1 verdict on a criterion that was reworded"),
         "{view}"
     );
 

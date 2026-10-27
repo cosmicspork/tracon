@@ -262,7 +262,7 @@
     </div>
     </div>
   {:else if missing}
-    <div class="empty">No document <code>{slug}</code> on {channel}.{#if !surface.phone} <button class="lnk" onclick={() => (editing = true)}>Write it.</button>{/if}</div>
+    <div class="empty">No document <code>{slug}</code> on {channel}.{#if !surface.phone}{' '}<button class="lnk" onclick={() => (editing = true)}>Write it.</button>{/if}</div>
   {:else if loadError}
     <div class="banner crit" role="alert">
       Could not load this document <b>· {loadError}</b>
