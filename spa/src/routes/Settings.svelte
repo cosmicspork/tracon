@@ -77,6 +77,12 @@
   // the section that holds them now by the router; see lib/routes.ts.
   const sections = SETTINGS_SECTIONS
   const activeSection = $derived(settingsSection(router.hash))
+  // A phone scrolls the tabs sideways; the open one must not be off-screen.
+  let sectionNav = $state<HTMLElement>()
+  $effect(() => {
+    void activeSection
+    tick().then(() => sectionNav?.querySelector('a.on')?.scrollIntoView({ inline: 'nearest', block: 'nearest' }))
+  })
   let adminRevision = $state(0)
   // Bumped when either credential card changes what the node holds, so the
   // other re-reads it.
@@ -622,7 +628,7 @@
   <b>{store.node?.name ?? 'this node'}</b>
 </div>
 
-<nav class="section-nav" aria-label="Settings sections">
+<nav class="section-nav" aria-label="Settings sections" bind:this={sectionNav}>
   {#each sections as [id, label] (id)}
     <a href="#{id}" class:on={activeSection === id} aria-current={activeSection === id ? 'page' : undefined}>{label}</a>
   {/each}

@@ -612,6 +612,7 @@
   }
   /* The lines that say why a check failed, read out of the whole output. */
   .fold > div.failures {
+    overflow-wrap: anywhere;
     border-left-color: var(--crit);
     color: var(--ink2);
   }

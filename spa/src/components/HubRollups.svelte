@@ -74,7 +74,7 @@
       <article class:complete={rollup.state === 'current_complete'} class:warn={rollup.state !== 'current_complete'}>
         <div class="head">
           <b>{rollup.channel}</b>
-          <span class="chip" class:off={rollup.state === 'stale'}>{rollup.state.replace('_', ' ')}</span>
+          <span class="chip" class:off={rollup.state === 'stale'} class:warn={rollup.state !== 'stale' && rollup.state !== 'current_complete'}>{rollup.state.replace('_', ' ')}</span>
           <small>
             {rollup.coverage.current_complete
               ? 'all members current'

@@ -258,9 +258,13 @@
     color: var(--ink2);
     white-space: nowrap;
   }
+  /* A long channel name wraps instead of pushing the numbers out of view. */
   td:first-child {
     font: 500 13.5px var(--sans);
     color: var(--ink);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-width: 12ch;
   }
   td.big {
     font: 600 16px var(--sans);

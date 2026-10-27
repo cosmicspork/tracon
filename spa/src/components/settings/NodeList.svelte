@@ -165,9 +165,6 @@
     font: 11.5px var(--mono);
     color: var(--dim);
     font-weight: 400;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .st {
     display: flex;

@@ -196,6 +196,7 @@
   .body {
     min-width: 0;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   .body em {
     font: 11.5px var(--mono);

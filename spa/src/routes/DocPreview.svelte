@@ -34,7 +34,7 @@
 <style>
   .preview-window { min-height: 100dvh; display: grid; grid-template-rows: auto 1fr; background: var(--bg); }
   header { min-width: 0; display: flex; align-items: center; gap: 1rem; padding: .65rem 1rem; border-bottom: 1px solid var(--rule); background: var(--s1); }
-  header a { font: 12px var(--mono); text-decoration: none; }
+  header a { font: 12px var(--mono); text-decoration: none; white-space: nowrap; flex-shrink: 0; }
   header span { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   iframe { width: 100%; height: 100%; min-height: 0; border: 0; background: white; }
   .failure { padding: 2rem; color: var(--crit); }

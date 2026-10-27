@@ -219,9 +219,26 @@
   .row.stale .t em {
     color: var(--dim);
   }
+  /* A phone gives the title the width: the owner chip takes only what its
+     name needs, the title wraps rather than cut the branch to "feat/…", and
+     a row with no button keeps no room for one. */
   @media (max-width: 700px) {
     .row {
-      grid-template-columns: 3px 84px minmax(0, 1fr);
+      grid-template-columns: 3px auto minmax(0, 1fr);
+      gap: 0 10px;
+    }
+    .chip {
+      max-width: 9ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .t {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .arch.gap {
+      display: none;
     }
     .age,
     .row > .mono:last-child {
