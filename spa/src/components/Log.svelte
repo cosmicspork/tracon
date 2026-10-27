@@ -561,10 +561,12 @@
   }
   .mark.crit,
   .tool.crit,
-  .fold > summary.crit {
+  .fold > summary.crit,
+  .fold[open] > summary.crit {
     color: var(--crit);
   }
-  .fold > summary.wait {
+  .fold > summary.wait,
+  .fold[open] > summary.wait {
     color: var(--wait);
   }
   /* What the session was not told, named above the text it was told. */
