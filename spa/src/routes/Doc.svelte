@@ -16,6 +16,8 @@
   let missing = $state(false)
   let editing = $state(false)
   let draft = $state('')
+  // What a new document's editor opens with: not yet a change to save.
+  let seed = $state('')
   let hash = $state<string | undefined>(undefined)
   let busy = $state(false)
   let error = $state<string | null>(null)
@@ -49,7 +51,8 @@
       if (e instanceof ApiError && e.status === 404) {
         missing = true
         if (!keepDraft) {
-          draft = `# ${slug.replace(/^[a-z]+-/, '').replace(/-/g, ' ')}\n\n`
+          seed = `# ${slug.replace(/^[a-z]+-/, '').replace(/-/g, ' ')}\n\n`
+          draft = seed
           hash = undefined
         }
       } else {
@@ -256,7 +259,7 @@
     {/if}
     <textarea class="grow" bind:value={draft} use:autogrow={draft} spellcheck="false"></textarea>
     <div class="send">
-      <button class="btn p" onclick={save} disabled={busy || loadError !== null || draft === (doc?.body ?? '')}>Save</button>
+      <button class="btn p" onclick={save} disabled={busy || loadError !== null || draft === (doc?.body ?? seed)}>Save</button>
       <button class="lnk" onclick={() => { editing = false; draft = doc?.body ?? draft; if (!doc) router.go('/docs') }}>Cancel</button>
       {#if error}<span class="err">{error}</span>{/if}
     </div>

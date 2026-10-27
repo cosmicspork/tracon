@@ -93,7 +93,7 @@
 
   {#if !criteria}
     <div class="empty">
-      No brief, so no criteria are stated. What would make this good is worked out from the task and
+      No criteria are stated. What would make this good is worked out from the task and
       its plan, and nothing here claims the customer agreed to a standard.
     </div>
   {:else}

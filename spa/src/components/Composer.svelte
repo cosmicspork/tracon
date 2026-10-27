@@ -289,6 +289,9 @@
     </button>
   </div>
 
+  {#if needsPlan && !open}
+    <small class="crit">This task has no plan yet: run a plan session first.</small>
+  {/if}
   {#if prepBlocked && !open}
     <small class="crit">{prepBlocked} · <button type="button" class="lnk" onclick={() => (open = true)}>show why</button></small>
   {/if}

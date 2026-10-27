@@ -236,8 +236,12 @@
       <div class="empty">
         Nothing here matches. <button class="lnk" type="button" onclick={() => show({ project: 'all', q: '' })}>Show every task</button>
       </div>
+    {:else if view.q.trim() !== ''}
+      <div class="empty">
+        Nothing ready matches this search. <button class="lnk" type="button" onclick={() => show({ project: 'all', q: '' })}>Show every task</button>
+      </div>
     {:else if items.length === closedCount}
-      <div class="empty">No open work on {channel || 'this channel'} yet. <button class="lnk" type="button" onclick={openForm}>Add a task</button> to give a session a clear outcome.</div>
+      <div class="empty">No open work on {channel || 'this channel'}{closedCount ? '' : ' yet'}. <button class="lnk" type="button" onclick={openForm}>Add a task</button> to give a session a clear outcome.</div>
     {:else if blocked.length}
       <div class="empty">Every open task here is blocked. Review each blocker below or <button class="lnk" type="button" onclick={openForm}>add unblocked work</button>.</div>
     {:else if inSession.length}
