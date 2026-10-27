@@ -267,6 +267,93 @@ async fn the_node_chooses_the_session_id() {
     assert!(uuid::Uuid::parse_str(id).is_ok(), "{id} is not a uuid");
 }
 
+fn resumed(env: Vec<(String, String)>) -> LaunchSpec {
+    let mut spec = spec_env(env);
+    spec.resume = Some(tracon::adapter::Resume {
+        harness_session_id: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b".into(),
+        last_seq: 0,
+    });
+    spec
+}
+
+/// A reopened session carries on under the conversation id it was recorded
+/// under, not a new one the node would have to write on the row again.
+#[tokio::test]
+async fn a_reopened_session_carries_on_its_own_conversation() {
+    state::isolate();
+    let a = ClaudeAdapter::new("2.1.295");
+    assert!(a.reopens() && a.compacts());
+    let (handle, mut rx) = a.launch(&FakeRunner, resumed(Vec::new())).await.unwrap();
+    assert_eq!(
+        handle.harness_session_id(),
+        "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+    );
+    let turn = tokio::spawn(async move { handle.prompt("what did you change?".into()).await });
+    let mut seen = Vec::new();
+    let HarnessEvent::Permission { reply, .. } = next_permission(&mut rx, &mut seen).await else {
+        unreachable!()
+    };
+    reply
+        .send(PermissionReply::Selected("allow_once".into()))
+        .unwrap();
+    let r = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+        .await
+        .expect("the turn finished")
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.stop_reason, "end_turn");
+}
+
+/// A conversation the CLI has no record of fails the first turn saying so,
+/// rather than as a turn that merely ended in error.
+#[tokio::test]
+async fn a_conversation_the_harness_has_no_record_of_fails_as_gone() {
+    state::isolate();
+    let a = ClaudeAdapter::new("2.1.295");
+    let spec = resumed(vec![("FAKE_CLAUDE_NO_CONVERSATION".into(), "1".into())]);
+    let (handle, _rx) = a.launch(&FakeRunner, spec).await.unwrap();
+    match handle.prompt("hello again".into()).await {
+        Err(AdapterError::ConversationGone(why)) => {
+            assert!(why.contains("No conversation found"), "{why}")
+        }
+        Err(other) => panic!("expected the conversation to be gone, got {other}"),
+        Ok(r) => panic!("expected the conversation to be gone, got a turn: {r:?}"),
+    }
+}
+
+/// `/compact` is the CLI's own compaction: a turn of its own, whose summary
+/// reaches the supervisor as the event automatic compaction is recorded from.
+#[tokio::test]
+async fn compacting_runs_the_harnesss_own_compaction_and_tells_its_summary() {
+    state::isolate();
+    let a = ClaudeAdapter::new("2.1.295");
+    let (handle, mut rx) = a.launch(&FakeRunner, spec()).await.unwrap();
+    let r = tokio::time::timeout(std::time::Duration::from_secs(5), handle.compact())
+        .await
+        .expect("the compaction finished")
+        .unwrap();
+    assert_eq!(r.stop_reason, "end_turn");
+    let deadline = tokio::time::Instant::now() + support::events::DEADLINE;
+    let compacted = loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("a compaction event")
+            .expect("the harness is still there");
+        if let HarnessEvent::Other(v) = ev {
+            if v["sessionUpdate"] == "context_compacted" {
+                break v;
+            }
+        }
+    };
+    assert_eq!(compacted["trigger"], "manual");
+    assert_eq!(compacted["tokensBefore"], 48000);
+    assert_eq!(compacted["tokensAfter"], 3100);
+    assert_eq!(
+        compacted["summary"],
+        "The ledger table is written; the view is next."
+    );
+}
+
 #[tokio::test]
 async fn a_session_takes_more_than_one_turn() {
     state::isolate();

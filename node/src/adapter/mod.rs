@@ -420,7 +420,8 @@ pub struct LaunchSpec {
     /// session's orientation.
     pub system_prompt_file: Option<String>,
     /// Carry on this harness session instead of starting one: set when the
-    /// node relaunches a harness whose process died (`restorable`).
+    /// node relaunches a harness whose process died (`restorable`), or
+    /// reopens a session's conversation for the operator (`reopens`).
     pub resume: Option<Resume>,
 }
 
@@ -455,6 +456,10 @@ pub enum AdapterError {
     /// thing that will never succeed.
     #[error("{0}")]
     ReconnectRequired(String),
+    /// A relaunch asked to carry on a conversation the harness has no record
+    /// of: the session can be continued in a new one, not asked again.
+    #[error("{0}")]
+    ConversationGone(String),
     #[error("{0}")]
     Protocol(String),
 }
@@ -520,6 +525,33 @@ pub trait HarnessAdapter: Send + Sync {
         false
     }
 
+    /// Whether a session that ended or was suspended can be started again in
+    /// its own conversation, on the operator's word: a launch with
+    /// `LaunchSpec::resume` picks the conversation up from the harness's own
+    /// record of it, by `harness_session_id` alone.
+    fn reopens(&self) -> bool {
+        false
+    }
+
+    /// Whether the operator can ask this harness to compact its conversation
+    /// (`HarnessHandle::compact`).
+    fn compacts(&self) -> bool {
+        false
+    }
+
+    /// Whether the record a relaunch with `spec` would resume
+    /// `harness_session_id` from is still there. Asked before the launch, so
+    /// a record that is gone refuses the reopening rather than a first turn.
+    /// `true` where the adapter cannot tell: the harness then says so itself.
+    async fn has_conversation(
+        &self,
+        _runner: &dyn Runner,
+        _spec: &LaunchSpec,
+        _harness_session_id: &str,
+    ) -> Result<bool, AdapterError> {
+        Ok(true)
+    }
+
     async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError>;
     /// The models this node can run through the harness: probed from it where
     /// it keeps a catalogue, declared by the node where it does not. The
@@ -549,6 +581,15 @@ pub trait HarnessHandle: Send + Sync {
         None
     }
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError>;
+    /// Compact the conversation now, as the harness would when its context
+    /// fills: a turn of its own, whose summary arrives as the event the
+    /// harness's automatic compaction sends. Only for an adapter that
+    /// `compacts`.
+    async fn compact(&self) -> Result<TurnResult, AdapterError> {
+        Err(AdapterError::Protocol(
+            "this harness does not compact on request".into(),
+        ))
+    }
     async fn cancel(&self) -> Result<(), AdapterError>;
     /// Establish an adapter-specific ordering barrier after a turn response.
     /// A harness whose events arrive on a queue of their own must drain the

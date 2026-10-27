@@ -1427,6 +1427,17 @@ export interface TurnUsage {
   requests_unmatched?: number | null
 }
 
+/** Whether a session that ended or was suspended can be asked again in its
+ *  own conversation, and whether its harness compacts on request. */
+export interface Askable {
+  restorable: boolean
+  /** Why it cannot be asked, when it cannot. */
+  reason: string | null
+  compacts: boolean
+  /** What refuses it passes on its own shortly: worth asking again. */
+  retry?: boolean
+}
+
 export interface SessionUsage {
   /** The last settled turn's verdict, or null before any turn has settled. */
   state: UsageState | null

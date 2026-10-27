@@ -43,8 +43,10 @@ impl SessionState {
         matches!(self, Self::Closed | Self::KilledBudget | Self::Failed)
     }
 
-    /// The stored spellings of the states a session never leaves, for the
-    /// guarded writes that refuse to resurrect one. Kept beside
+    /// The stored spellings of the states a session never leaves on its
+    /// own, for the guarded writes that refuse to resurrect one. Only the
+    /// operator asking it again in its own conversation (`Manager::ask`)
+    /// starts one of them again, through a write of its own. Kept beside
     /// `is_terminal`, and tested against it, so a new terminal state cannot
     /// be added to one and forgotten in the other.
     pub const TERMINAL: &'static [&'static str] = &["closed", "killed_budget", "failed"];
@@ -150,11 +152,20 @@ pub mod event_kind {
     /// `exit_code`, the `attempt`, and whether a turn was cut short).
     pub const HARNESS_RESTARTED: &str = "harness_restarted";
     /// The harness made its conversation smaller to fit the model's context
-    /// window (`trigger`: `threshold` or `overflow`; `tokens_before`,
-    /// `tokens_after`, both its estimates; `pruned_results`,
-    /// `summarised_messages`, the `first_kept_call` from which the session
-    /// was kept as it was, and the `summary` the model now works from).
+    /// window, or because the operator asked (`trigger`: `threshold`,
+    /// `overflow` or `manual`; `tokens_before`, `tokens_after`, both its
+    /// estimates; `pruned_results`, `summarised_messages`, the
+    /// `first_kept_call` from which the session was kept as it was, and the
+    /// `summary` the model now works from).
     pub const CONTEXT_COMPACTED: &str = "context_compacted";
+    /// The operator asked a session that had ended or was suspended, and its
+    /// harness was started again in its own conversation (`outcome`:
+    /// `resumed`, or `failed` with the `reason`, and `gone` when the
+    /// conversation itself cannot be restored; `from_state`, `end_reason`,
+    /// what the row was, and `compact` when the operator asked for a
+    /// compaction rather than with a message). The same session, not a
+    /// continuation.
+    pub const CONVERSATION_RESUMED: &str = "conversation_resumed";
     /// The operator changed the session's token budget (`from`, `to`, and the
     /// `tokens_used` it was changed against). `0` is no budget.
     pub const BUDGET_CHANGED: &str = "budget_changed";

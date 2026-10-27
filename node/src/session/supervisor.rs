@@ -81,6 +81,11 @@ pub enum Command {
         text: String,
         ack: oneshot::Sender<Result<Prompted, String>>,
     },
+    /// The operator asked the harness to compact its conversation: a turn of
+    /// its own, run only while none is.
+    Compact {
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     Answer {
         permission_id: String,
         option_id: String,
@@ -233,6 +238,12 @@ pub struct Supervisor {
     died_in_turn: bool,
     /// Said of the next prompt dispatched: who it is from, when not the operator.
     next_prompt_origin: Option<&'static str>,
+}
+
+/// What a turn does: answer a prompt, or compact the conversation.
+enum Work {
+    Prompt(String),
+    Compact,
 }
 
 /// What starting a session's harness again takes: the adapter, and the launch
@@ -489,6 +500,10 @@ impl Supervisor {
                     cmd = commands.recv() => match cmd {
                         Some(Command::Prompt { text, ack }) => {
                             let _ = ack.send(self.on_operator_prompt(text).await);
+                        }
+                        Some(Command::Compact { ack }) => {
+                            self.turn_relaunches = 0;
+                            let _ = ack.send(self.dispatch(Work::Compact, Vec::new()).await);
                         }
                         Some(Command::Answer { permission_id, option_id, arguments, ack }) => {
                             let _ = ack.send(self.on_answer(&permission_id, &option_id, arguments).await);
@@ -1724,9 +1739,19 @@ impl Supervisor {
     /// Start a turn with `text`. `queued` names the queued messages it
     /// carries, when it is their delivery.
     async fn dispatch_prompt(&mut self, text: String, queued: Vec<String>) -> Result<(), String> {
+        self.dispatch(Work::Prompt(text), queued).await
+    }
+
+    /// Start a turn doing `work`, under the same guards, budget and usage
+    /// ledger whatever it is.
+    async fn dispatch(&mut self, work: Work, queued: Vec<String>) -> Result<(), String> {
         // Whose words these are holds for this prompt only, sent or not: a
-        // refused kickoff must not label the operator's next prompt.
-        let origin = self.next_prompt_origin.take();
+        // refused kickoff must not label the operator's next prompt. A
+        // compaction is nobody's words and leaves it for the prompt it is.
+        let origin = match work {
+            Work::Prompt(_) => self.next_prompt_origin.take(),
+            Work::Compact => None,
+        };
         let s = self
             .store
             .get_session(&self.session_id)
@@ -1763,8 +1788,8 @@ impl Supervisor {
         // Sent is sent: the operator's box is empty from here, and a draft
         // save still in flight from the client must not resurrect it. Queued
         // messages left the box when they were queued; what is in it now is
-        // something newer.
-        if queued.is_empty() {
+        // something newer. A compaction leaves the box alone.
+        if queued.is_empty() && matches!(work, Work::Prompt(_)) {
             let _ = self.store.set_draft(&self.session_id, None);
         }
         // Open the turn's usage ledger before anything can spend against it.
@@ -1778,14 +1803,16 @@ impl Supervisor {
             .ok()
             .flatten()
             .and_then(|s| s.cost_usd);
-        let mut payload = json!({ "text": text });
-        if !queued.is_empty() {
-            payload["queued"] = json!(queued);
+        if let Work::Prompt(text) = &work {
+            let mut payload = json!({ "text": text });
+            if !queued.is_empty() {
+                payload["queued"] = json!(queued);
+            }
+            if let Some(origin) = origin {
+                payload["origin"] = json!(origin);
+            }
+            self.record(ek::USER_PROMPT, None, payload);
         }
-        if let Some(origin) = origin {
-            payload["origin"] = json!(origin);
-        }
-        self.record(ek::USER_PROMPT, None, payload);
         self.publish_session();
 
         let handle = self.handle.clone();
@@ -1795,8 +1822,15 @@ impl Supervisor {
         // The supervisor owns the result: a stalled harness cannot leave a
         // permanently active turn, and a late answer carries this turn id.
         tokio::spawn(async move {
+            let compact = matches!(work, Work::Compact);
+            let turn = async {
+                match work {
+                    Work::Prompt(text) => handle.prompt(text).await,
+                    Work::Compact => handle.compact().await,
+                }
+            };
             let (kind, mut payload, tokens) =
-                match until_silent(handle.prompt(text), &activity, TURN_IDLE, TURN_MAX).await {
+                match until_silent(turn, &activity, TURN_IDLE, TURN_MAX).await {
                     Ok(Ok(turn)) => (
                         ek::TURN_END,
                         json!({
@@ -1828,6 +1862,9 @@ impl Supervisor {
                         )
                     }
                 };
+            if compact {
+                payload["compact"] = json!(true);
+            }
             match tokio::time::timeout(CANCEL_TIMEOUT, handle.quiesce_events()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => payload["event_barrier_error"] = json!(error.to_string()),

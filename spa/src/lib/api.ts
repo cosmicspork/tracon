@@ -2,6 +2,7 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  Askable,
   Continuation,
   SessionExhaustion,
   ExternalEvent,
@@ -442,6 +443,12 @@ export const api = {
    *  this node until an unreachable owner returns (`owner`). */
   prompt: (id: string, text: string) =>
     call<{ queued: boolean; message_id?: string; owner?: string }>('POST', `/api/sessions/${id}/prompt`, { text }),
+  /** Whether a session that ended or was suspended can be asked again in its own conversation. */
+  askable: (id: string) => call<Askable>('GET', `/api/sessions/${id}/ask`),
+  /** Ask it: the same session, its harness started again in its own conversation. */
+  ask: (id: string, text: string) => call<Session>('POST', `/api/sessions/${id}/ask`, { text }),
+  /** Compact its conversation with the harness's own compaction; an ended one is reopened for it. */
+  compact: (id: string) => call<void>('POST', `/api/sessions/${id}/compact`),
   pause: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/pause`, { reason }),
   resume: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/resume`, { reason }),
   /** A session's token budget, 0 for none; one held at its budget carries on. */

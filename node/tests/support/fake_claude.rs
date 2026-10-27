@@ -22,9 +22,14 @@ fn main() {
     }
     let session_id = args
         .windows(2)
-        .find(|w| w[0] == "--session-id")
+        .find(|w| w[0] == "--session-id" || w[0] == "--resume")
         .map(|w| w[1].clone())
         .unwrap_or_else(|| "fake-session".into());
+    // A `--resume` of a conversation it has no record of, which the real
+    // one answers on the first user message with an error result and no
+    // init frame (2.1.311), then exits.
+    let resumed = args.iter().any(|a| a == "--resume");
+    let no_record = resumed && std::env::var("FAKE_CLAUDE_NO_CONVERSATION").is_ok();
     let model = args
         .windows(2)
         .find(|w| w[0] == "--model")
@@ -75,6 +80,23 @@ fn main() {
             continue;
         };
         match v["type"].as_str().unwrap_or_default() {
+            "user" if no_record => {
+                emit(serde_json::json!({
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": true,
+                    "num_turns": 0,
+                    "session_id": session_id,
+                    "errors": [format!("No conversation found with session ID: {session_id}")],
+                }));
+                std::process::exit(1);
+            }
+            "user" if v["message"]["content"][0]["text"] == "/compact" => {
+                if let Some(init) = init.take() {
+                    emit(init);
+                }
+                compact(&session_id);
+            }
             "user" => {
                 if let Some(init) = init.take() {
                     emit(init);
@@ -165,4 +187,38 @@ fn turn(session_id: &str) {
         },
     }));
     let _ = session_id;
+}
+
+/// `/compact`, as the CLI runs it in stream-json mode (2.1.311): a status, the
+/// boundary with its metadata, the summary as a synthetic user message, the
+/// command's own echo, and a result of no turns.
+fn compact(session_id: &str) {
+    emit(serde_json::json!({
+        "type": "system", "subtype": "status", "status": "compacting", "session_id": session_id,
+    }));
+    emit(serde_json::json!({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "session_id": session_id,
+        "compact_metadata": { "trigger": "manual", "pre_tokens": 48000, "post_tokens": 3100 },
+    }));
+    emit(serde_json::json!({
+        "type": "user",
+        "isSynthetic": true,
+        "message": { "role": "user", "content": "This session is being continued from a \
+            previous conversation that ran out of context. The summary below covers the \
+            earlier portion of the conversation.\n\n<system-reminder>\n</system-reminder>\n\
+            The ledger table is written; the view is next.\n\nIf you need specific details \
+            from before compaction, read the full transcript at: /root/.claude/projects/-work/\
+            s.jsonl" },
+    }));
+    emit(serde_json::json!({
+        "type": "user",
+        "isReplay": true,
+        "message": { "role": "user", "content": "<local-command-stdout>Compacted </local-command-stdout>" },
+    }));
+    emit(serde_json::json!({
+        "type": "result", "subtype": "success", "num_turns": 0, "session_id": session_id,
+        "usage": { "input_tokens": 0, "output_tokens": 0 },
+    }));
 }
