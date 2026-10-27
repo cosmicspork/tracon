@@ -262,7 +262,7 @@ const criteria = (it, o = {}) => ({
     questions: [],
     orphaned_judgements: [],
   },
-  summary: '4 criteria · 1 only the agent\'s proposal · 1 failing · 1 checks pass, unjudged · 1 judged met · 1 not an agreed standard · 1 assumptions',
+  summary: '4 criteria · 1 only the agent\'s proposal · 1 failing · 1 checks pass, unjudged · 1 judged met · 1 not an agreed standard · 1 assumption',
   ...o,
 })
 
@@ -1109,7 +1109,7 @@ const states = [
         candidate: undefined,
         criteria: [criterion({ key: 'c1', text: 'Bursts are smoothed.', provenance: 'unattributed', standard: 'unattributed' })],
         gaps: { uncovered: ['c1'], unjudged: ['c1'], assumptions: [{ field: 'problem', heading: 'Problem', text: 'Bursts from one channel likely delay others.', provenance: 'inferred' }], questions: [], orphaned_judgements: [] },
-        summary: '1 criterion · 1 nothing points at them · 1 not an agreed standard · 1 assumptions',
+        summary: '1 criterion · 1 nothing points at it · 1 not an agreed standard · 1 assumption',
       }),
     }),
   },
@@ -1170,7 +1170,7 @@ const states = [
           questions: ['Does the hub need the same limiter, or only nodes?', 'Is one second the right bound for a client channel?'],
           orphaned_judgements: [{ id: 'j-old', verdict: 'met', criterion_text: 'Bursts are smoothed.', judged_ms: -2 * D }],
         },
-        summary: '5 criteria · 1 nothing points at them · 1 no result yet · 1 await a person · 1 judged not met · 1 judged unclear · 2 open questions · 1 verdicts on criteria that were reworded',
+        summary: '5 criteria · 1 nothing points at it · 1 no result yet · 1 awaits a person · 1 judged not met · 1 judged unclear · 2 open questions · 1 verdict on a criterion that was reworded',
       }),
     }),
   },
@@ -1206,7 +1206,7 @@ const states = [
           criterion({ key: 'c2', text: 'The limit is configurable per channel in node.toml.', provenance: 'inferred', standard: 'proposed', coverage: 'nothing_points_at_it' }),
         ],
         gaps: { uncovered: ['c2'], unjudged: ['c1', 'c2'], assumptions: [], questions: [], orphaned_judgements: [] },
-        summary: '2 criteria · 1 nothing points at them · 1 no result yet · 1 not an agreed standard',
+        summary: '2 criteria · 1 nothing points at it · 1 no result yet · 1 not an agreed standard',
       }),
     }),
     act: async (page) => {

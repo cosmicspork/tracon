@@ -915,7 +915,7 @@
                 <button class="lnk" disabled={busy !== ''} onclick={() => (deleting = '')}>Keep channel</button>
               </div>
             {:else}
-              <span class="note">{c.nodes.length} node{c.nodes.length === 1 ? '' : 's'} still hold its key</span>
+              <span class="note">{c.nodes.length} node{c.nodes.length === 1 ? ' still holds' : 's still hold'} its key</span>
               <div class="end">
                 <button class="lnk" disabled={busy !== ''} onclick={() => archiveChannel(c.name, false)}>Restore</button>
                 <button class="lnk d" disabled={busy !== ''} onclick={() => (deleting = c.name)}>Delete</button>

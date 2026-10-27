@@ -69,7 +69,7 @@
         throw new Error(`The push service did not accept a request: ${attempts.map((attempt) => attempt.outcome).join(', ') || 'no registered devices'}`)
       }
       const refused = attempts.length - accepted.length
-      testNote = `Push service accepted ${accepted.length} request${accepted.length === 1 ? '' : 's'}${refused ? `; ${refused} were not accepted` : ''}. Phone display and person receipt are not confirmed; check the device directly.`
+      testNote = `Push service accepted ${accepted.length} request${accepted.length === 1 ? '' : 's'}${refused ? `; ${refused} ${refused === 1 ? 'was' : 'were'} not accepted` : ''}. Phone display and person receipt are not confirmed; check the device directly.`
     }, () => testNote)
   const forget = (d: PushDevice) => act(() => api.deletePushSubscription(d.id))
 

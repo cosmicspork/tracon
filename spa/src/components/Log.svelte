@@ -311,7 +311,7 @@
       {:else if e.kind === 'workspace_changed'}
         <div class="mark wait">workspace changed by the harness · {e.payload.action} · anything bound to the tree as it was no longer holds</div>
       {:else if e.kind === 'ceiling'}
-        <div class="mark crit">channel at its daily ceiling · {e.payload.usage_today} of {e.payload.ceiling} tokens · model calls refused</div>
+        <div class="mark crit">channel at its daily ceiling · {formatTokens(Number(e.payload.usage_today))} of {formatTokens(Number(e.payload.ceiling))} tokens · model calls refused</div>
       {:else if e.kind === 'usage_mismatch'}
         <div class="mark wait">{usageMismatchLine(e.payload)}</div>
       {:else if e.kind === 'usage_unmetered'}
@@ -350,7 +350,7 @@
             : ''} · waiting cards kept their time{e.payload.inhibitor_held ? ' · it was asked to stay awake' : ''}
         </div>
       {:else if e.kind === 'state'}
-        <div class="sys">→ {e.payload.state}</div>
+        <div class="sys">→ {e.payload.state === 'killed_budget' ? 'stopped at its budget' : String(e.payload.state).replaceAll('_', ' ')}</div>
       {:else if e.kind === 'error'}
         <div class="mark crit">{e.payload.error ?? JSON.stringify(e.payload)}</div>
       {:else if e.kind === 'tool_result'}

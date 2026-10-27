@@ -219,7 +219,7 @@ const metric = (channel, o = {}) => ({
   ...o,
 })
 
-const NOTE = 'as seen from this node: usage is counted where the model call was made'
+const NOTE = 'as seen from this node: usage is counted where the model call was made.'
 const metricsBody = (channels) => ({ since_ms: -30 * 86_400_000, node_id: SELF, note: NOTE, channels })
 
 // What the gateway counted, as /api/usage groups it: by model unless the

@@ -899,7 +899,7 @@
       </div>
       {#each sinceReviewed.responses as r, i (i)}
         <div class="response">
-          <span class="said">{r.source === 'operator' ? 'You' : r.source} · {r.decision === 'revise' ? 'asked' : r.decision}{r.sent_edit ? ' · with an edit' : ''}</span>
+          <span class="said">{r.source === 'operator' ? 'You' : r.source === 'authority' ? 'A standing grant' : 'Not recorded who'} · {r.decision === 'revise' ? 'asked' : r.decision}{r.sent_edit ? ' · with an edit' : ''}</span>
           <q>{r.reason || '(no reason given)'}</q>
           <span class="answer">
             {#if !r.answered_by}

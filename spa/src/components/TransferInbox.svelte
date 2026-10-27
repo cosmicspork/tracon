@@ -97,8 +97,8 @@
             <strong>{transfer.candidate_id}</strong>
             <span>
               {transfer.channel} · source node {transfer.origin_node.slice(0, 12)} ·
-              {new Date(transfer.created_ms).toLocaleString()} · {transfer.files} files ·
-              {transfer.documents} docs · {transfer.memories} memories
+              {new Date(transfer.created_ms).toLocaleString()} · {transfer.files} file{transfer.files === 1 ? '' : 's'} ·
+              {transfer.documents} doc{transfer.documents === 1 ? '' : 's'} · {transfer.memories} memor{transfer.memories === 1 ? 'y' : 'ies'}
               {#if transfer.note}{' · '}note: {transfer.note}{/if}
               {#if transfer.import_state === 'imported'}{' · '}continuation {transfer.session_id?.slice(0, 12)} started{/if}
               {#if transfer.import_state === 'preparing'}{' · '}import outcome unknown{/if}
