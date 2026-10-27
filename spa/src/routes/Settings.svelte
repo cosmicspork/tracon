@@ -1002,7 +1002,7 @@
         <span class="st">
           <span class="l" class:off={down}>
             {#if down && m.hub.state === 'unreachable'}
-              unreachable since {formatAge(m.hub.since_ms, clock.now)} ago
+              unreachable for {formatAge(m.hub.since_ms, clock.now)}
             {:else if m.last_ok_ms}
               heard {formatAge(m.last_ok_ms, clock.now)} ago
             {/if}
