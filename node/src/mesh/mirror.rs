@@ -12,7 +12,8 @@ use proto::frame::Payload;
 use serde_json::Value;
 
 use crate::store::{
-    now_ms, NewEvent, NodeRow, OperatorQuestionRow, PermissionRow, ReviewRow, SessionRow, Store,
+    now_ms, NewEvent, NodeRow, OperatorQuestionRow, PermissionRow, ReviewOutcome, ReviewRow,
+    SessionRow, Store,
 };
 use crate::stream::{Bus, Frame};
 
@@ -106,8 +107,11 @@ impl Mirror {
                 }
                 r
             }
-            Payload::Reviews { waiting } => {
-                let r = self.apply_reviews(sender, channel, &waiting);
+            Payload::Reviews { waiting, decided } => {
+                let mut r = self.apply_reviews(sender, channel, &waiting);
+                if r == Applied::Stored {
+                    r = self.apply_outcomes(sender, channel, &decided);
+                }
                 if r == Applied::Stored {
                     self.publish_queue();
                 }
@@ -125,6 +129,7 @@ impl Mirror {
                 waiting,
                 reviews,
                 questions,
+                decided,
             } => {
                 let mut keep = Vec::new();
                 let _ = self.store.ensure_peer_node(sender);
@@ -152,7 +157,10 @@ impl Mirror {
                     }
                 }
                 let p = self.apply_permissions(sender, channel, &waiting);
-                let r = self.apply_reviews(sender, channel, &reviews);
+                let mut r = self.apply_reviews(sender, channel, &reviews);
+                if r == Applied::Stored {
+                    r = self.apply_outcomes(sender, channel, &decided);
+                }
                 let q = self.apply_questions(sender, channel, &questions);
                 if [&p, &r, &q].contains(&&Applied::Impersonation) {
                     return Applied::Impersonation;
@@ -337,6 +345,23 @@ impl Mirror {
         // What the listing leaves out is read again from the owner by the
         // client (`reread_unlisted_reviews`): a review leaves an owner's
         // listing as soon as it is decided, so absence is not loss.
+        Applied::Stored
+    }
+
+    /// What became of a peer's decided code reviews on `channel`, taken onto
+    /// the copies held here still open. Only the sender's own copies change
+    /// (`apply_review_outcome` matches the owner), so an outcome naming
+    /// another node's review does nothing.
+    fn apply_outcomes(&self, sender: &str, channel: &str, rows: &[Value]) -> Applied {
+        for v in rows {
+            let Ok(outcome) = serde_json::from_value::<ReviewOutcome>(v.clone()) else {
+                return Applied::Malformed;
+            };
+            if let Err(error) = self.store.apply_review_outcome(sender, channel, &outcome) {
+                tracing::warn!(%error, review = %outcome.id, "mirrored review outcome not stored");
+                return Applied::Malformed;
+            }
+        }
         Applied::Stored
     }
 

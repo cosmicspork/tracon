@@ -2344,7 +2344,7 @@ pub async fn get_review(
 ) -> ApiResult<Json<serde_json::Value>> {
     // Claim on open, then read: a response that showed the row as it stood
     // before the claim would tell the operator something already untrue.
-    let _ = s.store().claim_review(&id);
+    let _ = s.store().claim_review(&s.node_id, &id);
     let r = s
         .store()
         .get_review(&id)?
@@ -2947,7 +2947,7 @@ pub async fn release_review(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    s.store().release_review(&id)?;
+    s.store().release_review(&s.node_id, &id)?;
     s.manager.publish_queue().await;
     Ok(StatusCode::NO_CONTENT)
 }

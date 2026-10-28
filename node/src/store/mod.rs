@@ -2082,6 +2082,104 @@ impl Store {
         Ok(ids)
     }
 
+    /// What became of the code reviews `node_id` owns on `channel` decided
+    /// since `since_ms`, the most recent first and at most `limit` of them.
+    pub fn decided_review_outcomes(
+        &self,
+        node_id: &str,
+        channel: &str,
+        since_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<ReviewOutcome>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, state, verdict_reason, publish_result, edited_title, edited_body,
+                claimed_ms, resolved_mono_ms, updated_ms, checks_json
+             FROM review WHERE node_id=?1 AND channel=?2 AND kind != ?3
+             AND state IN ('approved','rejected') AND updated_ms >= ?4
+             ORDER BY updated_ms DESC LIMIT ?5",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![node_id, channel, reports::KIND, since_ms, limit as i64],
+                |r| {
+                    Ok(ReviewOutcome {
+                        id: r.get(0)?,
+                        state: r.get(1)?,
+                        verdict_reason: r.get(2)?,
+                        publish_result: r.get(3)?,
+                        edited_title: r.get(4)?,
+                        edited_body: r.get(5)?,
+                        claimed_ms: r.get(6)?,
+                        resolved_mono_ms: r.get(7)?,
+                        updated_ms: r.get(8)?,
+                        checks_json: r.get(9)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// A decided outcome `node_id` listed for one of its code reviews on
+    /// `channel`, taken onto the copy held here while that copy is open, or
+    /// gone without the owner having said so. A copy already decided, one
+    /// of another owner or channel, and an outcome that is no decision are
+    /// left alone. Returns whether the copy changed.
+    pub fn apply_review_outcome(
+        &self,
+        node_id: &str,
+        channel: &str,
+        o: &ReviewOutcome,
+    ) -> Result<bool> {
+        if !matches!(o.state.as_str(), "approved" | "rejected") {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET state=?4, verdict_reason=?5, publish_result=?6, edited_title=?7,
+                edited_body=?8, claimed_ms=?9, resolved_mono_ms=?10, updated_ms=?11,
+                checks_json=?12, publication_failed=NULL
+             WHERE id=?1 AND node_id=?2 AND channel=?3 AND kind != ?13
+             AND (state IN ('new','claimed','revising','publishing')
+                  OR (state='gone' AND gone_confirmed_ms IS NULL))",
+            rusqlite::params![
+                o.id,
+                node_id,
+                channel,
+                o.state,
+                o.verdict_reason,
+                o.publish_result,
+                o.edited_title,
+                o.edited_body,
+                o.claimed_ms,
+                o.resolved_mono_ms,
+                o.updated_ms,
+                o.checks_json,
+                reports::KIND
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Code reviews of `node_id` held here that its listing may yet leave out
+    /// or that are read again from it: open ones, and gone ones it never
+    /// confirmed gone. With each one's channel.
+    pub fn rereadable_mirrored_reviews(&self, node_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, channel FROM review WHERE node_id=?1 AND kind != ?2
+             AND (state IN ('new','claimed','revising','publishing')
+                  OR (state='gone' AND gone_confirmed_ms IS NULL))",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![node_id, reports::KIND], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// The owner of a peer's review answered for it, so a copy still gone
     /// here is gone for good and is not asked about again. Returns whether a
     /// copy was confirmed.
@@ -2950,6 +3048,24 @@ mod records {
         pub publication_failed: Option<String>,
     }
 
+    /// What became of a decided code review, as its owner lists it to peers:
+    /// the verdict and what publishing it produced, without the diff a peer
+    /// holding the review already has.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ReviewOutcome {
+        pub id: String,
+        pub state: String,
+        pub verdict_reason: Option<String>,
+        pub publish_result: Option<String>,
+        pub edited_title: Option<String>,
+        pub edited_body: Option<String>,
+        pub claimed_ms: Option<i64>,
+        pub resolved_mono_ms: Option<i64>,
+        pub updated_ms: i64,
+        #[serde(default)]
+        pub checks_json: Option<String>,
+    }
+
     impl ReviewRow {
         /// The text a verdict approves: what the operator edited if they did,
         /// otherwise what the agent wrote.
@@ -3734,13 +3850,16 @@ impl Store {
         Ok(rows)
     }
 
-    /// Claim on open, as the design decided: a metric, not a lock.
-    pub fn claim_review(&self, id: &str) -> Result<()> {
+    /// Claim on open, as the design decided: a metric, not a lock. Only a
+    /// review `node_id` owns is claimed: a peer's copy holds what its owner
+    /// lists, and a claim here would be released here into an open review
+    /// the owner may long since have decided.
+    pub fn claim_review(&self, node_id: &str, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE review SET state='claimed', claimed_ms=COALESCE(claimed_ms, ?2), updated_ms=?2
-             WHERE id=?1 AND state='new'",
-            rusqlite::params![id, now_ms()],
+            "UPDATE review SET state='claimed', claimed_ms=COALESCE(claimed_ms, ?3), updated_ms=?3
+             WHERE id=?1 AND node_id=?2 AND state='new'",
+            rusqlite::params![id, node_id, now_ms()],
         )?;
         Ok(())
     }
@@ -3890,27 +4009,32 @@ impl Store {
 
     /// Release a claim: the operator navigated away or their client went quiet.
     /// A claim measures attention, so one that never releases would report every
-    /// review as attended forever.
-    pub fn release_review(&self, id: &str) -> Result<()> {
+    /// review as attended forever. Only a review `node_id` owns: a peer's
+    /// claim is its owner's to release.
+    pub fn release_review(&self, node_id: &str, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE review SET state='new', claimed_ms=NULL, updated_ms=?2
-             WHERE id=?1 AND state='claimed'",
-            rusqlite::params![id, now_ms()],
+            "UPDATE review SET state='new', claimed_ms=NULL, updated_ms=?3
+             WHERE id=?1 AND node_id=?2 AND state='claimed'",
+            rusqlite::params![id, node_id, now_ms()],
         )?;
         Ok(())
     }
 
     /// Claims older than the grace period, for the sweeper. A dropped socket
-    /// should not zero the attention count; a closed laptop should.
-    pub fn stale_claims(&self, older_than_ms: i64) -> Result<Vec<String>> {
+    /// should not zero the attention count; a closed laptop should. Only
+    /// claims on reviews `node_id` owns.
+    pub fn stale_claims(&self, node_id: &str, older_than_ms: i64) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let cutoff = now_ms() - older_than_ms;
         let mut stmt = conn.prepare(
-            "SELECT id FROM review WHERE state='claimed' AND COALESCE(updated_ms, 0) < ?1",
+            "SELECT id FROM review WHERE node_id=?1 AND state='claimed'
+             AND COALESCE(updated_ms, 0) < ?2",
         )?;
         let rows = stmt
-            .query_map([cutoff], |r| r.get::<_, String>(0))?
+            .query_map(rusqlite::params![node_id, cutoff], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
     }
@@ -4349,13 +4473,78 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(store.reconcile_publishing_without_record().unwrap(), 1);
+        assert_eq!(store.reconcile_publishing_without_record("n1").unwrap(), 1);
         assert_eq!(store.get_review("rv1").unwrap().unwrap().state, "claimed");
         assert_eq!(
             store.get_review("rv2").unwrap().unwrap().state,
             "publishing",
             "an attempt that recorded what it was about to do is not this call's to decide"
         );
+    }
+
+    /// A peer's review held here is what its owner last listed. Opening it
+    /// here, the claim sweeper and the restart's publish reconciliation all
+    /// leave it as it is: any of them would put back in the queue a review
+    /// the owner may have decided while this node was not listening.
+    #[test]
+    fn a_peers_review_is_neither_claimed_released_nor_requeued_here() {
+        let store = Store::open_in_memory().unwrap();
+        let nid = node(&store);
+        store.ensure_peer_node("peer").unwrap();
+        let held = |id: &str, state: &str| ReviewRow {
+            id: id.into(),
+            session_id: None,
+            node_id: "peer".into(),
+            channel: "ch".into(),
+            kind: "pr".into(),
+            title: "t".into(),
+            body: "b".into(),
+            edited_title: None,
+            edited_body: None,
+            provider: "github".into(),
+            target: "{}".into(),
+            diff: "d".into(),
+            files: "[]".into(),
+            head_sha: "sha1".into(),
+            base_ref: "main".into(),
+            added: 1,
+            removed: 0,
+            state: state.into(),
+            verdict_reason: None,
+            publish_result: None,
+            claimed_ms: None,
+            created_ms: 0,
+            created_mono_ms: 0,
+            resolved_mono_ms: None,
+            updated_ms: 0,
+            checks_json: None,
+            review_session_id: None,
+            ai_verdict_json: None,
+            revision_patch: None,
+            lane: None,
+            publication_failed: None,
+        };
+        for (id, state) in [
+            ("new", "new"),
+            ("claimed", "claimed"),
+            ("publishing", "publishing"),
+        ] {
+            store.upsert_review_mirror(&held(id, state)).unwrap();
+        }
+
+        store.claim_review(&nid, "new").unwrap();
+        assert!(store.stale_claims(&nid, -1).unwrap().is_empty());
+        store.release_review(&nid, "claimed").unwrap();
+        assert_eq!(store.reconcile_publishing_without_record(&nid).unwrap(), 0);
+        for (id, state) in [
+            ("new", "new"),
+            ("claimed", "claimed"),
+            ("publishing", "publishing"),
+        ] {
+            let row = store.get_review(id).unwrap().unwrap();
+            assert_eq!(row.state, state, "{id}");
+            assert_eq!(row.updated_ms, 0, "{id} was written here");
+        }
     }
 
     /// A resubmission cannot land once an approval has claimed the publish:

@@ -376,14 +376,16 @@ impl Store {
     /// nothing external can have happened, and the review belongs back in the
     /// queue rather than sitting in `publishing` with no way out.
     ///
-    /// Only safe at startup, when no publish of this node's is in flight.
-    pub fn reconcile_publishing_without_record(&self) -> Result<usize> {
+    /// Only safe at startup, when no publish of this node's is in flight,
+    /// and only for reviews `node_id` owns: a peer's review publishing on
+    /// its owner has its record there, never here.
+    pub fn reconcile_publishing_without_record(&self, node_id: &str) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute(
-            "UPDATE review SET state='claimed', updated_ms=?1
-              WHERE state='publishing'
+            "UPDATE review SET state='claimed', updated_ms=?2
+              WHERE node_id=?1 AND state='publishing'
                 AND id NOT IN (SELECT review_id FROM publication)",
-            params![now_ms()],
+            params![node_id, now_ms()],
         )?)
     }
 

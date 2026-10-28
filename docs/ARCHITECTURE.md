@@ -2014,6 +2014,11 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   opened, bounded like candidate evidence. The owner answers only for a review it holds,
   on a channel both nodes share. An owner that cannot be read, or that has moved on to
   a revision not yet mirrored, is said to be, rather than shown as an empty review.
+  A mirrored review's state is only ever what its owner sent: opening it, the claim
+  sweeper and a restart's publish reconciliation leave a peer's copy alone. The
+  owner's listings carry the outcome of its reviews decided in the last week, so a
+  node that slept through a decision learns it from the hub without asking an owner
+  that may be asleep in turn; one whose read failed asks again when the owner returns.
 - **The attention count is actionable human decisions, and nothing else.** Everything
   parked in the operator's bay is sorted into three lanes before it is counted: what a
   person can decide now; what the agent holds (a review being revised, a request that
