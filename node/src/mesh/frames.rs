@@ -11,6 +11,26 @@ use crate::stream::Frame;
 /// Changes per frame, well under the 4 MiB frame cap for ordinary rows.
 pub const CHANGES_PER_FRAME: usize = 200;
 
+/// How far back a listing names what became of this node's decided code
+/// reviews: long enough for a peer that slept through a decision, or was
+/// away when it could have asked, to learn it from the next listing.
+const DECIDED_LISTED_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// At most this many decided outcomes per channel in one listing, the most
+/// recent, so a busy week cannot push a listing toward the frame cap.
+const DECIDED_LISTED_MAX: usize = 200;
+
+/// What became of this node's code reviews on `channel` decided lately, for
+/// a listing.
+fn decided(store: &Store, self_id: &str, channel: &str) -> Vec<Value> {
+    let since = crate::store::now_ms() - DECIDED_LISTED_MS;
+    store
+        .decided_review_outcomes(self_id, channel, since, DECIDED_LISTED_MAX)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| json!(o))
+        .collect()
+}
+
 /// The `(channel, payload)` pairs a locally published frame becomes. Frames
 /// about other nodes' sessions (mirrored state) yield nothing; the bus only
 /// taps what this node publishes, but the filter is repeated here so a bug
@@ -91,7 +111,14 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
                     .filter(|r| r.channel == c)
                     .map(|r| json!(r))
                     .collect();
-                out.push((c, Payload::Reviews { waiting: rows }));
+                let decided = decided(store, self_id, &c);
+                out.push((
+                    c,
+                    Payload::Reviews {
+                        waiting: rows,
+                        decided,
+                    },
+                ));
             }
             out
         }
@@ -191,6 +218,7 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             .filter(|q| q.node_id == self_id && q.channel == c && q.session_id.is_some())
             .map(|q| json!(q))
             .collect();
+        let d = decided(store, self_id, &c);
         out.push((
             c,
             Payload::Snapshot {
@@ -198,6 +226,7 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
                 waiting: w,
                 reviews: r.into_iter().map(|review| json!(review)).collect(),
                 questions: q,
+                decided: d,
             },
         ));
     }

@@ -1150,18 +1150,21 @@ impl MeshClient {
         // The reviews a listing names, read before the payload is consumed:
         // those it leaves out are asked of their owner once it is applied.
         let listed = match &payload {
-            Payload::Reviews { waiting: rows } | Payload::Snapshot { reviews: rows, .. } => Some(
-                rows.iter()
-                    .filter_map(|row| row.get("id").and_then(Value::as_str))
-                    .map(str::to_string)
-                    .collect::<Vec<_>>(),
-            ),
+            Payload::Reviews { waiting: rows, .. } | Payload::Snapshot { reviews: rows, .. } => {
+                Some(
+                    rows.iter()
+                        .filter_map(|row| row.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            }
             _ => None,
         };
         match self.mirror.apply(sender, &env.channel, payload) {
             Applied::Stored => {
                 if returning {
                     self.reconcile_deliveries(Some(sender));
+                    self.reread_after_return(sender);
                 }
                 if let Some(listed) = listed {
                     self.reread_unlisted_reviews(sender, &env.channel, &listed);
@@ -1298,10 +1301,6 @@ impl MeshClient {
                 tracing::warn!(%error, "unconfirmed gone reviews not read");
                 Vec::new()
             });
-        let Some(this) = self.weak.upgrade() else {
-            return;
-        };
-        let now = now_ms();
         let mut gone_asked = 0;
         let asks = unlisted
             .into_iter()
@@ -1311,24 +1310,71 @@ impl MeshClient {
             if gone && gone_asked >= GONE_REREADS_PER_LISTING {
                 break;
             }
-            {
-                let mut rereading = self.rereading.lock().unwrap();
-                if rereading.get(&id).is_some_and(|after| *after > now) {
-                    continue;
-                }
-                rereading.insert(id.clone(), i64::MAX);
+            if self.reread(sender, channel, id) {
+                gone_asked += usize::from(gone);
             }
-            gone_asked += usize::from(gone);
-            let (this, sender, channel) = (this.clone(), sender.to_string(), channel.to_string());
-            tokio::spawn(async move {
-                let settled = this.reread_review(&sender, &channel, &id).await;
-                let mut rereading = this.rereading.lock().unwrap();
-                match settled {
-                    true => rereading.remove(&id),
-                    false => rereading.insert(id, now_ms() + REREAD_BACKOFF_MS),
-                };
-            });
         }
+    }
+
+    /// A peer heard from again: each of its reviews held here whose reading
+    /// again failed while it could not be reached is asked again now, rather
+    /// than once its backoff has run out and another listing has come.
+    fn reread_after_return(&self, owner: &str) {
+        let held = match self.store.rereadable_mirrored_reviews(owner) {
+            Ok(held) => held,
+            Err(error) => {
+                tracing::warn!(%error, "mirrored reviews of a returning peer not read");
+                return;
+            }
+        };
+        for (id, channel) in held {
+            let backed_off = {
+                let mut rereading = self.rereading.lock().unwrap();
+                match rereading.get(&id) {
+                    Some(&after) if after != i64::MAX => rereading.remove(&id).is_some(),
+                    _ => false,
+                }
+            };
+            if backed_off {
+                self.reread(owner, &channel, id);
+            }
+        }
+    }
+
+    /// Hold off reading review `id` again from its owner until `until_ms`,
+    /// as a failed read does: for tests that need the owner to have been
+    /// unreachable when it was last asked.
+    #[doc(hidden)]
+    pub fn defer_reread(&self, id: &str, until_ms: i64) {
+        self.rereading
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), until_ms);
+    }
+
+    /// Ask `owner` for review `id` unless it is being asked already or its
+    /// backoff has not run out. Whether it was asked.
+    fn reread(&self, owner: &str, channel: &str, id: String) -> bool {
+        let Some(this) = self.weak.upgrade() else {
+            return false;
+        };
+        {
+            let mut rereading = self.rereading.lock().unwrap();
+            if rereading.get(&id).is_some_and(|after| *after > now_ms()) {
+                return false;
+            }
+            rereading.insert(id.clone(), i64::MAX);
+        }
+        let (owner, channel) = (owner.to_string(), channel.to_string());
+        tokio::spawn(async move {
+            let settled = this.reread_review(&owner, &channel, &id).await;
+            let mut rereading = this.rereading.lock().unwrap();
+            match settled {
+                true => rereading.remove(&id),
+                false => rereading.insert(id, now_ms() + REREAD_BACKOFF_MS),
+            };
+        });
+        true
     }
 
     /// Whether the owner answered; `false` when it could not be read, to be

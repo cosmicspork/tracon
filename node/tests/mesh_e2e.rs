@@ -1386,6 +1386,80 @@ async fn a_review_an_earlier_build_marked_gone_is_restored_or_confirmed_once() {
     );
 }
 
+/// The owner's listing says what became of the reviews it decided lately, so
+/// a peer that held one open learns the outcome from the frame itself, even
+/// when it could not ask the owner: here A is still waiting out a failed
+/// read when the listing arrives.
+#[tokio::test]
+async fn a_peers_listing_carries_what_became_of_its_decided_reviews() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let checks = json!([{ "command": "just check", "ok": true }]).to_string();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut held = held_review(&id, &bi);
+    held.state = "new".into();
+    b.store.insert_review(&held).unwrap();
+    a.store.insert_review(&held).unwrap();
+    a.client
+        .defer_reread(&id, tracon::store::now_ms() + 3_600_000);
+
+    let url = "https://github.test/o/r/pull/151";
+    assert!(b
+        .store
+        .resolve_review(&id, "approved", None, None, None, Some(url), 1, None)
+        .unwrap());
+    b.store.set_checks(&id, Some(&checks)).unwrap();
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+
+    wait_for("A to take the outcome B listed", || {
+        a.store
+            .get_review(&id)
+            .unwrap()
+            .is_some_and(|r| r.state == "approved")
+    })
+    .await;
+    let mirrored = a.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(mirrored.publish_result.as_deref(), Some(url));
+    assert_eq!(mirrored.checks_json.as_deref(), Some(checks.as_str()));
+    assert_eq!(
+        mirrored.diff, held.diff,
+        "an outcome leaves the diff held here"
+    );
+}
+
+/// A review whose read from its owner failed while the owner was away is
+/// asked again as soon as the owner is heard from, not after its backoff and
+/// the listing after that.
+#[tokio::test]
+async fn a_failed_read_of_a_peers_review_is_retried_when_the_peer_returns() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut held = held_review(&id, &bi);
+    held.state = "new".into();
+    a.store.insert_review(&held).unwrap();
+    held.state = "approved".into();
+    b.store.insert_review(&held).unwrap();
+    // As A leaves it after asking B while B was away.
+    a.client
+        .defer_reread(&id, tracon::store::now_ms() + 3_600_000);
+    a.store.set_reachable(&bi, false).unwrap();
+
+    b.client.hello().await.unwrap();
+
+    wait_for("A to read the review again from B once B returns", || {
+        a.store
+            .get_review(&id)
+            .unwrap()
+            .is_some_and(|r| r.state == "approved")
+    })
+    .await;
+}
+
 /// A peer's session is checked on the node that runs it, and its outcome
 /// here says what that node's checks found on the review's commit; a node
 /// that cannot be read is said to be, never shown as one where no check ran.

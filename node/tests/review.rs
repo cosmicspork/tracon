@@ -1201,11 +1201,11 @@ async fn a_claim_from_a_vanished_client_lapses() {
     f.call("GET", &format!("/api/reviews/{id}"), None).await;
 
     // Nothing is stale within the grace period.
-    assert!(f.store.stale_claims(60_000).unwrap().is_empty());
+    assert!(f.store.stale_claims("n1", 60_000).unwrap().is_empty());
     // Past it, the sweeper finds it.
-    let stale = f.store.stale_claims(-1).unwrap();
+    let stale = f.store.stale_claims("n1", -1).unwrap();
     assert_eq!(stale, std::slice::from_ref(&id));
-    f.store.release_review(&id).unwrap();
+    f.store.release_review("n1", &id).unwrap();
     assert_eq!(f.store.get_review(&id).unwrap().unwrap().state, "new");
 }
 

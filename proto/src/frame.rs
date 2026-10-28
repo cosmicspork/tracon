@@ -146,6 +146,10 @@ pub enum Payload {
         /// older sender names none, and an older receiver ignores the field.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         questions: Vec<Value>,
+        /// What became of the sender's code reviews on the channel decided
+        /// lately, as on [`Payload::Reviews`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        decided: Vec<Value>,
     },
     Session(Value),
     Event {
@@ -162,6 +166,13 @@ pub enum Payload {
     },
     Reviews {
         waiting: Vec<Value>,
+        /// What became of the sender's code reviews on the channel decided
+        /// lately: the outcome only, no diff, so a peer that held one open
+        /// learns it from the frame without asking the sender, which may by
+        /// then be unreachable. Additive: an older sender names none, and an
+        /// older receiver ignores the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        decided: Vec<Value>,
     },
     /// The sender's open operator questions on one channel, possibly none: an
     /// empty list is how a peer learns one it mirrored was answered. An older

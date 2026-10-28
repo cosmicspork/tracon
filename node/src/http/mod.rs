@@ -737,7 +737,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         ),
         Err(e) => tracing::error!(error = %e, "could not reconcile interrupted publications"),
     }
-    match store.reconcile_publishing_without_record() {
+    match store.reconcile_publishing_without_record(&node_id) {
         Ok(0) => {}
         Ok(n) => tracing::warn!(
             reviews = n,
@@ -982,10 +982,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 // operator is carried on once they have decided.
                 manager.continue_held().await;
                 let stale = store
-                    .stale_claims(grace.as_millis() as i64)
+                    .stale_claims(&node_id, grace.as_millis() as i64)
                     .unwrap_or_default();
                 for id in &stale {
-                    let _ = store.release_review(id);
+                    let _ = store.release_review(&node_id, id);
                 }
                 let stale = store
                     .stale_approval_claims(grace.as_millis() as i64)
