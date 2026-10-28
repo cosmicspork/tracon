@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.1](https://github.com/cosmicspork/tracon/compare/v0.41.0...v0.41.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **mesh:** keep a peer's review as its owner last listed it ([#709](https://github.com/cosmicspork/tracon/issues/709)) ([4d1f9c6](https://github.com/cosmicspork/tracon/commit/4d1f9c60c919ea80dd5927b8e1bcddc155788e5b))
+
 ## [0.41.0](https://github.com/cosmicspork/tracon/compare/v0.40.1...v0.41.0) (2026-10-27)
 
 
