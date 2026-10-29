@@ -557,6 +557,15 @@ enum ChannelCommand {
     Create { name: String },
     /// The channels this node holds keys for.
     List,
+    /// Leave a channel: off this node's hub record, then its key and
+    /// membership here. Its sessions and documents stay as history.
+    Leave {
+        name: String,
+        /// Drop the key too. If no other node holds it, what the channel
+        /// sealed cannot be opened again.
+        #[arg(long)]
+        forget_key: bool,
+    },
     /// Share channels with the hub's replica: it can then open and index
     /// them, and run the nightly batch for them. Never do this for a work
     /// channel; the hub is rented infrastructure.
@@ -1175,6 +1184,13 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
                 Some(why) => println!("{why}"),
             }
             println!("created channel {name}; hand its key to other nodes with tracon mesh invite");
+            Ok(())
+        }
+        ChannelCommand::Leave { name, forget_key } => {
+            let (id, _) = tracon::mesh::identity::load_or_generate()?;
+            let cfg = config::Config::load();
+            tracon::mesh::channels::leave(&store, &id, &name, &cfg, forget_key).await?;
+            println!("left channel {name}");
             Ok(())
         }
         ChannelCommand::Bind { name, pairs } => {

@@ -175,6 +175,10 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v0/claims", post(routes::claim))
         .route("/v0/admit", post(routes::admit))
         .route("/v0/admit/{node_id}", delete(routes::remove_member))
+        .route(
+            "/v0/admit/{node_id}/channels/{channel}",
+            delete(routes::remove_member_channel),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

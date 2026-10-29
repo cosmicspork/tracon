@@ -373,6 +373,53 @@ async fn outbox_survives_a_hub_outage_and_members_are_learned() {
 }
 
 #[tokio::test]
+async fn a_node_leaves_a_channel_it_has_no_key_for() {
+    state::isolate();
+    let a_id = Identity::from_seed(&[1u8; 32]);
+    let hub =
+        support::mesh::start_hub_managed(&[(&a_id, &[MESH_CHANNEL, "personal", "old"][..])], 0)
+            .await;
+    let ring = || Keyring::genesis(&a_id.x25519_public(), &DataKey::generate());
+    let a = node(
+        1,
+        "alpha",
+        &hub.url,
+        &[(MESH_CHANNEL, ring()), ("personal", ring())],
+    );
+    // The hub lists `old` and the node copies that, but holds no key for it.
+    a.client.refresh_members().await.unwrap();
+    let mine = || a.store.node_channels(&a_id.node_id()).unwrap();
+    assert_eq!(mine(), vec![MESH_CHANNEL, "old", "personal"]);
+    assert_eq!(
+        a.store.node_channels_keyed(&a_id.node_id()).unwrap(),
+        vec![MESH_CHANNEL, "personal"]
+    );
+    // Nothing is attempted on `old`: there is no key to seal it with.
+    let snapshots: Vec<String> = tracon::mesh::frames::snapshots(&a.store, &a_id.node_id())
+        .into_iter()
+        .map(|(channel, _)| channel)
+        .collect();
+    assert_eq!(snapshots, vec![MESH_CHANNEL, "personal"]);
+
+    let mut cfg = Config::default();
+    cfg.mesh.hub_url = Some(hub.url.clone());
+    // A key held here is not dropped without being asked to.
+    let held = tracon::mesh::channels::leave(&a.store, &a_id, "personal", &cfg, false).await;
+    assert!(matches!(
+        held,
+        Err(tracon::mesh::channels::ChannelError::HoldsKey)
+    ));
+    tracon::mesh::channels::leave(&a.store, &a_id, "old", &cfg, false)
+        .await
+        .unwrap();
+    let on_hub = hub.members.get(&a_id.node_id()).unwrap().unwrap().channels;
+    assert_eq!(on_hub, vec![MESH_CHANNEL, "personal"]);
+    // The next copy of the hub's list does not put it back.
+    a.client.refresh_members().await.unwrap();
+    assert_eq!(mine(), vec![MESH_CHANNEL, "personal"]);
+}
+
+#[tokio::test]
 async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
     state::isolate();
     use tracon::session::{Manager, NewSession, SessionError};

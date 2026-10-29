@@ -1610,6 +1610,20 @@ impl Store {
         Ok(rows)
     }
 
+    /// The channels `node_id` is bound to that this node holds a key for:
+    /// the only ones it can seal a frame on.
+    pub fn node_channels_keyed(&self, node_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT nc.channel FROM node_channel nc JOIN channel c ON c.name = nc.channel
+             WHERE nc.node_id=?1 ORDER BY nc.channel",
+        )?;
+        let rows = stmt
+            .query_map([node_id], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     pub fn nodes_in_channel(&self, channel: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =

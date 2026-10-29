@@ -105,7 +105,7 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
             let mine: Vec<&ReviewRow> =
                 replicated.iter().filter(|r| r.node_id == self_id).collect();
             let mut out = Vec::new();
-            for c in store.node_channels(self_id).unwrap_or_default() {
+            for c in store.node_channels_keyed(self_id).unwrap_or_default() {
                 let rows: Vec<Value> = mine
                     .iter()
                     .filter(|r| r.channel == c)
@@ -188,7 +188,7 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
     let reviews = store.mirrored_reviews().unwrap_or_default();
     let questions = store.open_operator_questions().unwrap_or_default();
     let mut out = Vec::new();
-    for c in store.node_channels(self_id).unwrap_or_default() {
+    for c in store.node_channels_keyed(self_id).unwrap_or_default() {
         let r: Vec<&ReviewRow> = reviews
             .iter()
             .filter(|r| r.node_id == self_id && r.channel == c)
@@ -280,7 +280,7 @@ fn grouped<T: serde::Serialize>(
     channel_of_row: impl Fn(&T) -> Option<String>,
 ) -> Vec<(String, Vec<Value>)> {
     let mut out: Vec<(String, Vec<Value>)> = store
-        .node_channels(self_id)
+        .node_channels_keyed(self_id)
         .unwrap_or_default()
         .into_iter()
         .map(|c| (c, Vec::new()))

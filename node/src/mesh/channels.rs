@@ -1,5 +1,5 @@
 //! Creating a channel: minting its key here, and telling the hub this node
-//! holds it.
+//! holds it. Leaving one: the reverse.
 //!
 //! One place, because the CLI, `mesh init`, and the interface all do it and a
 //! channel that exists in the store but not in the hub's record cannot be
@@ -11,6 +11,14 @@ use crate::store::Store;
 pub enum ChannelError {
     #[error("channel names are lowercase [a-z0-9@._-], at most 64 characters")]
     Name,
+    #[error("@mesh is membership itself: `tracon mesh remove` takes a node off the mesh")]
+    Mesh,
+    #[error("{0} session(s) on this channel have not ended")]
+    OpenSessions(i64),
+    #[error("this node holds the channel's key; pass --forget-key to drop it too")]
+    HoldsKey,
+    #[error("the hub kept this node in the channel: {0}")]
+    Hub(String),
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
 }
@@ -67,4 +75,40 @@ pub async fn create_and_sync(
         )),
     };
     Ok((created, note))
+}
+
+/// Leave `name`: take it off this node's hub record, then forget its key and
+/// membership here. In that order, because the node copies its own channel
+/// list from the hub and would put back a membership the hub still lists.
+/// Sessions, work and documents keep their channel column as history.
+///
+/// Dropping a key this node holds is refused unless `forget_key`: if no other
+/// node holds it, what the channel sealed can no longer be opened anywhere.
+pub async fn leave(
+    store: &Store,
+    id: &proto::keys::Identity,
+    name: &str,
+    cfg: &crate::config::Config,
+    forget_key: bool,
+) -> Result<(), ChannelError> {
+    if !proto::frame::valid_channel(name) {
+        return Err(ChannelError::Name);
+    }
+    if name == proto::frame::MESH_CHANNEL {
+        return Err(ChannelError::Mesh);
+    }
+    let open = store.open_sessions_on_channel(name)?;
+    if open > 0 {
+        return Err(ChannelError::OpenSessions(open));
+    }
+    if store.channel_get(name)?.is_some() && !forget_key {
+        return Err(ChannelError::HoldsKey);
+    }
+    if let Some(hub) = &cfg.mesh.hub_url {
+        crate::mesh::enroll::leave_channel(id, hub, &id.node_id(), name)
+            .await
+            .map_err(|e| ChannelError::Hub(e.to_string()))?;
+    }
+    store.channel_delete(name)?;
+    Ok(())
 }

@@ -637,21 +637,58 @@ pub async fn remove_member(
 ) -> ApiResult {
     let me = member_of(&s, &owner)?;
     let node_id = node_id.to_ascii_lowercase();
-    // Removal is self, the sponsor recorded at admission, or the hub. A peer
-    // that is neither cannot evict the rest of the mesh.
-    let target = s.members.get(&node_id).map_err(io)?;
-    let allowed = node_id == me.node_id
-        || me.role == crate::store::MemberRole::Hub
-        || target.as_ref().is_some_and(|t| t.admitted_by == me.node_id);
-    if target.is_some() && !allowed {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "only the member itself or the node that admitted it may remove it",
-        ));
+    if let Some(target) = s.members.get(&node_id).map_err(io)? {
+        may_remove(&me, &target)?;
     }
     if s.members.remove(&node_id).map_err(io)? {
         Ok((StatusCode::NO_CONTENT, Json(Value::Null)))
     } else {
         Err(err(StatusCode::NOT_FOUND, "no such member"))
+    }
+}
+
+/// Take one channel off a member's record, for the callers that may remove
+/// the member outright. Admission only ever adds channels, so without this a
+/// channel a node no longer holds is routed to it, and it to the channel, for
+/// good. Idempotent: a member already out of the channel is left as it is.
+pub async fn remove_member_channel(
+    State(s): State<AppState>,
+    Extension(owner): Extension<Owner>,
+    Path((node_id, channel)): Path<(String, String)>,
+) -> ApiResult {
+    let me = member_of(&s, &owner)?;
+    let node_id = node_id.to_ascii_lowercase();
+    if channel == MESH_CHANNEL {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "@mesh is membership itself: remove the member instead",
+        ));
+    }
+    let mut target = s
+        .members
+        .get(&node_id)
+        .map_err(io)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such member"))?;
+    may_remove(&me, &target)?;
+    if target.channels.contains(&channel) {
+        target.channels.retain(|c| *c != channel);
+        s.members.put(&target).map_err(io)?;
+    }
+    Ok((StatusCode::NO_CONTENT, Json(Value::Null)))
+}
+
+/// Removal is self, the sponsor recorded at admission, or the hub. A peer
+/// that is neither cannot evict the rest of the mesh.
+fn may_remove(me: &Member, target: &Member) -> Result<(), (StatusCode, Json<Value>)> {
+    if target.node_id == me.node_id
+        || me.role == crate::store::MemberRole::Hub
+        || target.admitted_by == me.node_id
+    {
+        Ok(())
+    } else {
+        Err(err(
+            StatusCode::FORBIDDEN,
+            "only the member itself or the node that admitted it may remove it",
+        ))
     }
 }
