@@ -420,6 +420,24 @@ async fn a_node_leaves_a_channel_it_has_no_key_for() {
 }
 
 #[tokio::test]
+async fn a_refusal_leaves_the_hub_connected() {
+    state::isolate();
+    let (a, _b, hub) = pair_managed().await;
+    a.client.hello().await.unwrap();
+    assert!(matches!(a.client.snapshot().hub, HubState::Connected));
+
+    // The hub answers, and says no: it is up, and the refusal is recorded.
+    assert!(hub.members.remove(&a.id.node_id()).unwrap());
+    assert!(a.client.hello().await.is_err());
+    let snap = a.client.snapshot();
+    assert!(matches!(snap.hub, HubState::Connected));
+    assert_eq!(
+        snap.last_refusal.as_deref(),
+        Some(r#"403: {"error":"not a member of this hub"}"#)
+    );
+}
+
+#[tokio::test]
 async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
     state::isolate();
     use tracon::session::{Manager, NewSession, SessionError};

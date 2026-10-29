@@ -84,6 +84,21 @@ pub enum HubError {
     Local(String),
 }
 
+impl HubError {
+    /// The hub could not be reached or failed in itself. A hub that answered
+    /// and said no is up, and a local error says nothing about it either way.
+    pub fn is_unreachable(&self) -> bool {
+        matches!(
+            self,
+            HubError::Transport(_)
+                | HubError::Refused {
+                    status: 500..=599,
+                    ..
+                }
+        )
+    }
+}
+
 /// Told the names of the credentials a handoff stored.
 pub type OnHandoff = Box<dyn Fn(&[String]) + Send + Sync>;
 
@@ -634,7 +649,7 @@ impl MeshClient {
                         self.note_refusal(format!("{status}: {body}"));
                     }
                     Err(e) => {
-                        self.set_state_down(e.to_string());
+                        self.note_failure(&e);
                         return Err(e);
                     }
                 }
@@ -1469,7 +1484,7 @@ impl MeshClient {
                 Ok(())
             }
             Err(e) => {
-                self.set_state_down(e.to_string());
+                self.note_failure(&e);
                 Err(e)
             }
         }
@@ -1646,7 +1661,7 @@ impl MeshClient {
         let poll = Duration::from_secs(self.cfg.mesh.poll_secs.max(1));
         loop {
             if let Err(e) = self.pull_once().await {
-                self.set_state_down(e.to_string());
+                self.note_failure(&e);
             }
             tokio::select! {
                 _ = self.pull_wake.notified() => {}
@@ -1773,14 +1788,7 @@ impl MeshClient {
                 Ok(value)
             }
             Err(error) => {
-                if matches!(
-                    &error,
-                    HubError::Transport(_)
-                        | HubError::Refused {
-                            status: 500..=599,
-                            ..
-                        }
-                ) {
+                if error.is_unreachable() {
                     self.set_state_down(error.to_string());
                 }
                 Err(error)
@@ -1844,14 +1852,20 @@ impl MeshClient {
 
     fn set_state_ok(&self) {
         let now = now_ms();
+        let mut down_since = None;
         let was_down = self.state.send_if_modified(|s| {
-            let was_down = !matches!(s.hub, HubState::Connected);
+            if let HubState::Unreachable { since_ms } = s.hub {
+                down_since = Some(since_ms);
+            }
             s.hub = HubState::Connected;
             s.last_ok_ms = Some(now);
             s.last_error = None;
-            was_down
+            down_since.is_some()
         });
         if was_down {
+            // Every client starts unreachable, so this also marks each start.
+            let down_ms = now - down_since.unwrap_or(now);
+            tracing::info!(down_ms, "hub reachable");
             self.delivered.store(0, Ordering::Relaxed);
             self.bus
                 .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot())));
@@ -1866,6 +1880,7 @@ impl MeshClient {
         let was_up = self.state.send_if_modified(|s| {
             let was_up = matches!(s.hub, HubState::Connected);
             if was_up {
+                tracing::warn!(error = %error, "hub unreachable");
                 s.hub = HubState::Unreachable { since_ms: now };
             }
             s.last_error = Some(error);
@@ -1875,6 +1890,23 @@ impl MeshClient {
             self.bus
                 .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot())));
             self.presence_tick(now);
+        }
+    }
+
+    /// A request to the hub failed. Only an unreachable hub is marked down; a
+    /// refusal is recorded, and logged when it differs from the last one so a
+    /// refusal repeated every heartbeat is not repeated in the log.
+    fn note_failure(&self, error: &HubError) {
+        match error {
+            HubError::Refused { status, body } if *status < 500 => {
+                let what = format!("{status}: {body}");
+                if self.state.borrow().last_refusal.as_deref() != Some(what.as_str()) {
+                    tracing::warn!(status, body = %body, "hub refused a request");
+                }
+                self.note_refusal(what);
+            }
+            HubError::Local(e) => tracing::warn!(error = %e, "mesh request not sent"),
+            _ => self.set_state_down(error.to_string()),
         }
     }
 
