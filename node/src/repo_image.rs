@@ -486,8 +486,8 @@ fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
 /// - an environment that sets a `CLAUDE_*` or `ANTHROPIC_*` variable, other
 ///   than the three the session always sets for itself (`CLAUDE_CONFIG_DIR`
 ///   from this layer, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` from the
-///   gateway wiring), or `NODE_OPTIONS`, a `BUN_*` variable, `LD_PRELOAD`,
-///   `LD_AUDIT` or `LD_LIBRARY_PATH`. Claude Code's binary is Bun, and
+///   gateway wiring), or `NODE_OPTIONS`, a `BUN_*` variable, `LD_PRELOAD`
+///   or `LD_AUDIT`. Claude Code's binary is Bun, and
 ///   `BUN_OPTIONS=--preload` runs a script inside it (observed against the
 ///   pinned release).
 fn claude_layer(run_as: &RunAs) -> HarnessLayer {
@@ -512,7 +512,6 @@ fn claude_layer(run_as: &RunAs) -> HarnessLayer {
             "BUN_[A-Za-z0-9_]*",
             "LD_PRELOAD",
             "LD_AUDIT",
-            "LD_LIBRARY_PATH",
         ],
         &[
             "CLAUDE_CONFIG_DIR",
@@ -542,21 +541,15 @@ fn claude_layer(run_as: &RunAs) -> HarnessLayer {
 ///
 /// `layer_guard` refuses an image that sets a `TRACON_AGENT_*` variable (the
 /// agent reads its endpoint and key file from those when it is not given a
-/// providers file, which a session always is) or `LD_PRELOAD`, `LD_AUDIT`
-/// or `LD_LIBRARY_PATH`, and removes anything at the binary's path or the
-/// init's.
+/// providers file, which a session always is) or `LD_PRELOAD` or `LD_AUDIT`,
+/// and removes anything at the binary's path or the init's.
 fn native_layer(run_as: &RunAs) -> HarnessLayer {
     let binary = crate::adapter::native::NativeAdapter::BINARY;
     let guard = layer_guard(
         run_as,
         &LINKLESS_DIRS,
         &[binary, POD_INIT_DIR],
-        &[
-            "TRACON_AGENT_[A-Za-z0-9_]*",
-            "LD_PRELOAD",
-            "LD_AUDIT",
-            "LD_LIBRARY_PATH",
-        ],
+        &["TRACON_AGENT_[A-Za-z0-9_]*", "LD_PRELOAD", "LD_AUDIT"],
         &[],
     );
     let probe = format!(
@@ -2683,6 +2676,7 @@ mod tests {
                 "COPY --from=harness /usr/local/bin/tracon-agent /usr/local/bin/tracon-agent\n"
             ));
             assert!(layer.lines.contains("TRACON_AGENT_[A-Za-z0-9_]*"));
+            assert!(!layer.lines.contains("LD_LIBRARY_PATH"));
             assert!(layer
                 .lines
                 .contains("rm -rf /usr/local/bin/tracon-agent /usr/libexec/tracon"));
@@ -2694,7 +2688,7 @@ mod tests {
 
     /// Claude Code's guard, for a harness whose home is `home`.
     fn claude_guard(home: &str) -> String {
-        r#"RUN for d in /usr /usr/local /usr/local/bin /usr/libexec /usr/libexec/tracon; do if [ -L "$d" ]; then echo "tracon: the repository's image makes $d a symbolic link, which would let it choose what the harness runs" >&2; exit 1; fi; done && rm -rf /etc/claude-code /usr/local/bin/claude HOME/.claude HOME/.claude.json /usr/libexec/tracon && test ! -e /etc/claude-code && if [ -s /etc/ld.so.preload ]; then echo "tracon: the repository's image preloads libraries through /etc/ld.so.preload, which would load them into the harness" >&2; exit 1; fi && found=$(env | sed -n -e 's/^\(CLAUDE_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(ANTHROPIC_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(NODE_OPTIONS\)=.*/\1/p' -e 's/^\(BUN_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(LD_PRELOAD\)=.*/\1/p' -e 's/^\(LD_AUDIT\)=.*/\1/p' -e 's/^\(LD_LIBRARY_PATH\)=.*/\1/p' | grep -v -x -e CLAUDE_CONFIG_DIR -e ANTHROPIC_BASE_URL -e ANTHROPIC_API_KEY | tr '\n' ' ') && if [ -n "$found" ]; then echo "tracon: the repository's image sets ${found% }, which would reach the harness and change how it is configured or what it loads" >&2; exit 1; fi
+        r#"RUN for d in /usr /usr/local /usr/local/bin /usr/libexec /usr/libexec/tracon; do if [ -L "$d" ]; then echo "tracon: the repository's image makes $d a symbolic link, which would let it choose what the harness runs" >&2; exit 1; fi; done && rm -rf /etc/claude-code /usr/local/bin/claude HOME/.claude HOME/.claude.json /usr/libexec/tracon && test ! -e /etc/claude-code && if [ -s /etc/ld.so.preload ]; then echo "tracon: the repository's image preloads libraries through /etc/ld.so.preload, which would load them into the harness" >&2; exit 1; fi && found=$(env | sed -n -e 's/^\(CLAUDE_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(ANTHROPIC_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(NODE_OPTIONS\)=.*/\1/p' -e 's/^\(BUN_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(LD_PRELOAD\)=.*/\1/p' -e 's/^\(LD_AUDIT\)=.*/\1/p' | grep -v -x -e CLAUDE_CONFIG_DIR -e ANTHROPIC_BASE_URL -e ANTHROPIC_API_KEY | tr '\n' ' ') && if [ -n "$found" ]; then echo "tracon: the repository's image sets ${found% }, which would reach the harness and change how it is configured or what it loads" >&2; exit 1; fi
 "#
         .replace("HOME", home)
     }
