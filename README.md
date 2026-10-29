@@ -1724,21 +1724,24 @@ screen in every state worth checking, at phone and desktop widths in both themes
 from `cd spa && bun scripts/ui-audit.mjs`, which writes a contact sheet to
 `target/ui-audit/index.html`.
 
-To run an unreleased build as your own node on Linux, against your real state and
-credentials, use `just node-dev [ref]` (default `origin/main`). It builds the ref in a
-worktree under `~/.cache/tracon/node-dev` and refuses while a managed session is
-running. It then stops the node and copies its state and config directories to
-`~/.local/state/tracon-backups/`, then runs the build's `setup`. Finally it starts the
-service on `~/.local/bin/tracon-dev` through a systemd drop-in and runs
-`check-boundary --deep`. Running it again replaces the build and keeps the first
-backup. `just node-release` removes the drop-in, rebuilds the boundary from the
-release's own definitions and starts the release again. `just node-release restore`
-also puts back the backed-up state, keeping what the dev build wrote beside it.
+To run an unreleased build as your own node, against your real state and credentials, use
+`just node-dev [ref]` (default `origin/main`). It builds the ref in a worktree under
+`~/.cache/tracon/node-dev` and refuses while a managed session is running. It then stops
+the node and copies its state and config directories to `tracon-backups/` beside the state
+directory (`~/.local/state` on Linux, `~/Library/Application Support` on macOS), then runs
+the build's `setup`. Finally it starts the service on `tracon-dev` beside the installed
+binary and runs `check-boundary --deep`. On Linux that is a systemd drop-in; on macOS it
+rewrites the LaunchAgent's `ProgramArguments` and keeps the release's plist as
+`tracon-backups/release.plist`. Running it again replaces the build and keeps the first
+backup. `just node-release` removes the drop-in or puts the plist back, rebuilds the
+boundary from the release's own definitions and starts the release again. `just
+node-release restore` also puts back the backed-up state, keeping what the dev build wrote
+beside it.
 
-A drop-in is used instead of replacing `~/.local/bin/tracon` because the desktop
-app owns that path and reinstalls it whenever its version differs. Migrations run
-forward only, which is why the backup is taken. Podman volumes and images the dev
-build created are not backed up or removed.
+The build runs as `tracon-dev` instead of replacing `~/.local/bin/tracon` because the
+desktop app owns that path and reinstalls it whenever its version differs. Migrations run
+forward only, which is why the backup is taken. Podman volumes and images the dev build
+created are not backed up or removed.
 
 ## Escape hatch
 
