@@ -667,7 +667,8 @@ impl Default for Supervision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReviewLimits {
-    /// Added plus removed lines.
+    /// Added lines. Removed ones are not counted: taking a feature out is
+    /// mostly deletions, and those are not what a reviewer reads line by line.
     pub max_diff_lines: i64,
     pub max_files: usize,
 }
@@ -682,6 +683,34 @@ impl Default for ReviewLimits {
 }
 
 impl ReviewLimits {
+    /// How many times `max_diff_lines` the whole diff, added and removed
+    /// together, may be. Every line of it is stored with the review and drawn
+    /// on its screen, so deletions are bounded too, just far more loosely.
+    pub const TOTAL_LINES_FACTOR: i64 = 10;
+
+    /// Why a diff of this size is refused, or `None` when it is within the
+    /// cap.
+    pub fn refusal(&self, added: i64, removed: i64, files: usize) -> Option<String> {
+        let total = added + removed;
+        let max_total = self.max_diff_lines.saturating_mul(Self::TOTAL_LINES_FACTOR);
+        if added > self.max_diff_lines || files > self.max_files {
+            Some(format!(
+                "the diff adds {added} lines (removing {removed}) across {files} files; the cap \
+                 is {} added lines and {} files, and removed lines do not count toward it. \
+                 Split the change into smaller submissions.",
+                self.max_diff_lines, self.max_files
+            ))
+        } else if total > max_total {
+            Some(format!(
+                "the diff is {total} lines ({added} added, {removed} removed) across {files} \
+                 files; added and removed together are capped at {max_total} lines. Split the \
+                 change into smaller submissions."
+            ))
+        } else {
+            None
+        }
+    }
+
     /// The defaults before they were raised. Saves once wrote every key, so a
     /// node that never touched the cap has these in its `node.toml` and would
     /// otherwise keep them forever.
@@ -2674,6 +2703,33 @@ mod tests {
 
     /// The README's `node.toml` reference is checked, not trusted: every key it
     /// names must exist, and the values it shows as defaults must be them.
+    #[test]
+    fn a_mostly_deletion_diff_over_the_line_cap_is_within_it() {
+        let limits = ReviewLimits::default();
+        assert_eq!(limits.refusal(213, 11_925, 75), None);
+    }
+
+    #[test]
+    fn a_large_addition_is_still_over_the_line_cap() {
+        let limits = ReviewLimits::default();
+        let reason = limits.refusal(10_001, 0, 3).unwrap();
+        assert!(reason.contains("adds 10001 lines"), "{reason}");
+        assert!(reason.contains("10000 added lines"), "{reason}");
+        assert!(reason.contains("removed lines do not count"), "{reason}");
+    }
+
+    #[test]
+    fn deletions_past_the_total_bound_are_refused_and_say_what_was_counted() {
+        let limits = ReviewLimits::default();
+        assert_eq!(limits.refusal(0, 100_000, 1), None);
+        let reason = limits.refusal(1, 100_000, 1).unwrap();
+        assert!(
+            reason.contains("100001 lines (1 added, 100000 removed)"),
+            "{reason}"
+        );
+        assert!(reason.contains("capped at 100000 lines"), "{reason}");
+    }
+
     #[test]
     fn a_node_toml_carrying_the_retired_review_defaults_gets_the_new_ones() {
         let dir = std::env::temp_dir().join(format!("tracon-review-lift-{}", std::process::id()));

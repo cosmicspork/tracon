@@ -487,20 +487,18 @@ async fn submit(
     // The cap, before anything else: complexity accretes because nothing says
     // no at submission time. A resubmission is capped the same way.
     let limits = manager.cfg().live().review.clone();
-    let lines = capture.added + capture.removed;
-    if lines > limits.max_diff_lines || capture.files.len() > limits.max_files {
-        let reason = format!(
-            "the diff is {lines} lines across {} files; the cap is {} lines and {} files. \
-             Split the change into smaller submissions.",
-            capture.files.len(),
-            limits.max_diff_lines,
-            limits.max_files
-        );
+    if let Some(reason) = limits.refusal(capture.added, capture.removed, capture.files.len()) {
         manager.record_for(
             ctx,
             ek::REVIEW_REJECTED,
             None,
-            json!({ "reason": reason, "lines": lines, "files": capture.files.len() }),
+            json!({
+                "reason": reason,
+                "lines": capture.added + capture.removed,
+                "added": capture.added,
+                "removed": capture.removed,
+                "files": capture.files.len(),
+            }),
         );
         return Err(review::ReviewError::Rejected(reason).to_string());
     }

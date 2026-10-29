@@ -1333,7 +1333,8 @@ checks = ["just check"]             # run against a snapshot of the workspace be
 timeout_secs = 900
 
 [review]
-max_diff_lines = 10000              # added plus removed lines; a bigger submission is refused before any check runs
+max_diff_lines = 10000              # added lines (removed ones do not count, though the whole diff is held to
+                                    # ten times this); a bigger submission is refused before any check runs
 max_files = 200
 
 [notify]
