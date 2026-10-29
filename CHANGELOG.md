@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.42.0](https://github.com/cosmicspork/tracon/compare/v0.41.1...v0.42.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **work:** remove briefs, acceptance criteria and selected context ([#716](https://github.com/cosmicspork/tracon/issues/716))
+
+### Features
+
+* **egress:** ask the operator when a warm-up is refused a host ([#711](https://github.com/cosmicspork/tracon/issues/711)) ([72e0c3a](https://github.com/cosmicspork/tracon/commit/72e0c3a7ac2d360be576a670b76df1f79e13da59))
+* **spa:** replace the rail footer with node and hub status lights ([#717](https://github.com/cosmicspork/tracon/issues/717)) ([1cbee23](https://github.com/cosmicspork/tracon/commit/1cbee233d0dbd18241dc9bc33a6435d7abd317b9))
+
+
+### Bug Fixes
+
+* **outcome:** name the request a session's work was published as ([#719](https://github.com/cosmicspork/tracon/issues/719)) ([561d431](https://github.com/cosmicspork/tracon/commit/561d431f7d6aa529bed0596d6ba607c7aac4250f))
+* **session:** start a reviewer on a task its submitter still holds ([#718](https://github.com/cosmicspork/tracon/issues/718)) ([f1d8735](https://github.com/cosmicspork/tracon/commit/f1d87354a20ccdf5a55978bbb313bc3739faf676))
+* **spa:** head a plan session's outcome with the plan it wrote ([#712](https://github.com/cosmicspork/tracon/issues/712)) ([b9cccb3](https://github.com/cosmicspork/tracon/commit/b9cccb3ea409d699af7234d387bbf9687446b651))
+* **spa:** head a review session's outcome with the verdict it gave ([#715](https://github.com/cosmicspork/tracon/issues/715)) ([ff8a62b](https://github.com/cosmicspork/tracon/commit/ff8a62bc39d0f954010eefa7bcae213a027a9875))
+* **spa:** offer closing the task on a live session whose request merged ([#720](https://github.com/cosmicspork/tracon/issues/720)) ([3ca9935](https://github.com/cosmicspork/tracon/commit/3ca99351eb0357b5f1d38a550fbf97fa2d80eff5))
+
+
+### Code Refactoring
+
+* **work:** remove briefs, acceptance criteria and selected context ([#716](https://github.com/cosmicspork/tracon/issues/716)) ([358e12c](https://github.com/cosmicspork/tracon/commit/358e12c9670a411d603b8f8426f096381040cc51))
+
 ## [0.41.1](https://github.com/cosmicspork/tracon/compare/v0.41.0...v0.41.1) (2026-10-28)
 
 
