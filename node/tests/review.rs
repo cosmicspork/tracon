@@ -1771,12 +1771,45 @@ async fn a_diff_over_the_cap_is_refused_before_any_check_runs() {
     let f = fixture_with(test_name!(), WITH_GH, |c| c.review.max_diff_lines = 0).await;
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
     let err = v["error"].as_str().unwrap_or_default();
-    assert!(err.contains("the cap is 0 lines"), "{v}");
+    assert!(err.contains("the cap is 0 added lines"), "{v}");
     assert!(err.contains("Split the change"), "{v}");
     assert!(f.store.open_reviews().unwrap().is_empty());
     let kinds = f.event_kinds("s1");
     assert!(kinds.contains(&"review_rejected".to_string()));
     assert!(!kinds.contains(&"check_started".to_string()), "{kinds:?}");
+}
+
+/// A worktree whose branch takes out a file of `seq {base}` and adds one of
+/// `seq {added}`, against an origin holding the first.
+fn reshaping_clone(base: u32, added: u32) -> String {
+    format!(
+        "git clone -q origin.git wt && cd wt && git checkout -qB main \
+         && git config user.email t@e && git config user.name t \
+         && echo base > a.txt && seq {base} > old.txt && git add -A && git commit -qm base \
+         && git push -q origin main \
+         && git checkout -qb feat/x && git rm -q old.txt && seq {added} > new.txt \
+         && git add -A && git commit -qm work"
+    )
+}
+
+#[tokio::test]
+async fn a_mostly_deletion_diff_over_the_line_cap_is_accepted() {
+    state::isolate();
+    let f = fixture_cloned(test_name!(), WITH_GH, |_| {}, &reshaping_clone(12_000, 200)).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    assert!(v["review_id"].is_string(), "{v}");
+    assert!(!f.event_kinds("s1").contains(&"review_rejected".to_string()));
+}
+
+#[tokio::test]
+async fn a_large_addition_is_still_refused_at_the_line_cap() {
+    state::isolate();
+    let f = fixture_cloned(test_name!(), WITH_GH, |_| {}, &reshaping_clone(1, 10_001)).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("adds 10001 lines"), "{v}");
+    assert!(err.contains("removed lines do not count"), "{v}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
 }
 
 #[tokio::test]
