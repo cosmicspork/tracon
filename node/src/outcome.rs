@@ -35,6 +35,9 @@ pub struct Outcome {
     /// The document a plan session wrote as its plan, the latest if it
     /// revised it. None for other phases and a plan not yet written.
     pub plan: Option<PlanWritten>,
+    /// The verdict a review session gave, the latest if it gave more than
+    /// one. None for other phases and a verdict not yet given.
+    pub verdict: Option<VerdictGiven>,
     /// The commit the session's latest code review stands at. None when it
     /// submitted none: then nothing it changed is under review.
     pub head_sha: Option<String>,
@@ -53,6 +56,18 @@ pub struct Outcome {
 pub struct PlanWritten {
     pub slug: String,
     pub hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerdictGiven {
+    pub review_id: String,
+    /// `approve` or `request_changes`.
+    pub verdict: String,
+    pub summary: Option<String>,
+    pub findings: usize,
+    /// Given on an earlier revision after a later one's reviewer had
+    /// already given its own, so it did not replace that.
+    pub superseded: bool,
 }
 
 /// Where a peer's session's checks were read from: they run and stay on the
@@ -154,6 +169,8 @@ pub struct Facts {
     pub uncertainty: Option<Value>,
     /// The latest plan-artifact event's payload, if any.
     pub plan: Option<Value>,
+    /// The latest review-verdict event's payload, if any.
+    pub verdict: Option<Value>,
     pub interrupted_turns: usize,
     pub usage: Value,
     /// For a session another node runs: whether `checks` are that node's.
@@ -196,6 +213,10 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
         .session_events_of_kind(&id, ek::PLAN_ARTIFACT)?
         .pop()
         .map(|event| event.payload);
+    let verdict = store
+        .session_events_of_kind(&id, ek::REVIEW_VERDICT)?
+        .pop()
+        .map(|event| event.payload);
     let interrupted_turns = store
         .session_events_of_kind(&id, ek::TURN_END)?
         .iter()
@@ -219,6 +240,7 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
             .len(),
         uncertainty,
         plan,
+        verdict,
         interrupted_turns,
         usage: crate::metrics::session_usage(store, &id),
         owner_checks: None,
@@ -512,6 +534,19 @@ pub fn derive(facts: &Facts) -> Outcome {
                     .map(str::to_string),
             })
         }),
+        verdict: facts.verdict.as_ref().and_then(|payload| {
+            let text = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_string);
+            Some(VerdictGiven {
+                review_id: text("review_id")?,
+                verdict: text("verdict")?,
+                summary: text("summary"),
+                findings: payload
+                    .get("findings")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+                superseded: payload.get("superseded").and_then(Value::as_bool) == Some(true),
+            })
+        }),
         head_sha,
         changed,
         verified,
@@ -580,6 +615,7 @@ mod tests {
             workspace_changes: 2,
             uncertainty: None,
             plan: None,
+            verdict: None,
             interrupted_turns: 0,
             usage: serde_json::json!({ "gateway_tokens": 40, "unmetered_turns": 1 }),
             owner_checks: None,
@@ -664,6 +700,36 @@ mod tests {
             ("plan-w1", Some("h1"))
         );
         assert!(out.head_sha.is_none());
+    }
+
+    #[test]
+    fn a_review_session_names_the_verdict_it_gave() {
+        let mut reviewing = facts(Vec::new(), Vec::new());
+        reviewing.session.phase = "review".into();
+        assert!(derive(&reviewing).verdict.is_none());
+        reviewing.verdict = Some(serde_json::json!({
+            "review_id": "rv1", "verdict": "request_changes", "basis": "read",
+            "summary": "the migration is missing", "findings": [{ "path": "a.rs" }, { "path": "b.rs" }],
+        }));
+        let out = derive(&reviewing);
+        assert_eq!(out.phase, "review");
+        let verdict = out.verdict.unwrap();
+        assert_eq!(
+            (
+                verdict.review_id.as_str(),
+                verdict.verdict.as_str(),
+                verdict.findings
+            ),
+            ("rv1", "request_changes", 2)
+        );
+        assert_eq!(verdict.summary.as_deref(), Some("the migration is missing"));
+        assert!(!verdict.superseded);
+
+        reviewing.verdict = Some(serde_json::json!({
+            "review_id": "rv1", "verdict": "approve", "summary": "fine", "superseded": true,
+        }));
+        let verdict = derive(&reviewing).verdict.unwrap();
+        assert!(verdict.superseded && verdict.findings == 0);
     }
 
     #[test]

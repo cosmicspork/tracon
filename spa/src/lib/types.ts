@@ -1059,6 +1059,15 @@ export interface SessionOutcome {
   phase: 'plan' | 'execute' | 'review'
   /** The document a plan session wrote as its plan; null until it does, and for other phases. */
   plan: { slug: string; hash: string | null } | null
+  /** The verdict a review session gave; null until it gives one, and for other phases. */
+  verdict: {
+    review_id: string
+    verdict: 'approve' | 'request_changes'
+    summary: string | null
+    findings: number
+    /** Given on an earlier revision after a later one's reviewer had given its own. */
+    superseded: boolean
+  } | null
   head_sha: string | null
   changed: {
     reviews: {
