@@ -484,9 +484,10 @@ deletes what the harness would otherwise read from the image, and refuses an ima
 would configure the harness, or change what it loads, underneath the node.
 
 - **Both layers** refuse an image with a non-empty `/etc/ld.so.preload`, one whose
-  environment sets `LD_PRELOAD`, `LD_AUDIT` or `LD_LIBRARY_PATH`, and one where `/usr`,
-  `/usr/local`, `/usr/local/bin`, `/usr/libexec` or `/usr/libexec/tracon` is a symbolic
-  link.
+  environment sets `LD_PRELOAD` or `LD_AUDIT`, and one where `/usr`, `/usr/local`,
+  `/usr/local/bin`, `/usr/libexec` or `/usr/libexec/tracon` is a symbolic link.
+  `LD_LIBRARY_PATH` is allowed: it only changes where the loader looks, `tracon-agent` is
+  static, and the image is already trusted for every command a session runs.
 - **`tracon-agent`'s layer** refuses any `TRACON_AGENT_*` variable, which would steer the
   endpoint or key it reads.
 - **Claude Code's layer** deletes `/etc/claude-code` (its managed settings, which outrank
@@ -497,9 +498,8 @@ would configure the harness, or change what it loads, underneath the node.
 
 The session's note names what was found, and the session runs in the harness image. This
 is by design even where the value is harmless (a devcontainer that sets
-`NODE_OPTIONS=--max-old-space-size=4096` for its own user, or `LD_LIBRARY_PATH` for a
-toolkit): unset it in the image, or move it into the tool's own wrapper or the repository's
-`prepare` and `checks` commands. These checks catch an image that would change the harness
+`NODE_OPTIONS=--max-old-space-size=4096` for its own user): unset it in the image, or
+move it into the tool's own wrapper or the repository's `prepare` and `checks` commands. These checks catch an image that would change the harness
 by accident. They are not a boundary against a hostile
 Dockerfile. The image you name for a repository is trusted as you trust its Dockerfile,
 which already builds with the network and supplies every command the agent runs; what

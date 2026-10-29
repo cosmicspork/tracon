@@ -1028,11 +1028,13 @@ Podman's `--init`. The probe runs in a pod as the harness uid. Both harnesses ar
 layered. Claude Code is one binary and the environment its image sets; `tracon-agent` is
 one static binary and sets none. Each layer begins by refusing what would configure its
 harness underneath the node (`repo_image::layer_guard`): an image with a non-empty
-`/etc/ld.so.preload`, one whose environment sets `LD_PRELOAD`, `LD_AUDIT` or
-`LD_LIBRARY_PATH` (each would reach the harness wherever the launch sets no value of its
-own), and one where `/usr`, `/usr/local`, `/usr/local/bin`, `/usr/libexec` or
-`/usr/libexec/tracon` is a symbolic link that would send the copied files somewhere the
-image chose, such as the workspace. Claude Code's layer also removes `/etc/claude-code`,
+`/etc/ld.so.preload`, one whose environment sets `LD_PRELOAD` or `LD_AUDIT` (each would
+reach the harness wherever the launch sets no value of its own), and one where `/usr`,
+`/usr/local`, `/usr/local/bin`, `/usr/libexec` or `/usr/libexec/tracon` is a symbolic
+link that would send the copied files somewhere the image chose, such as the workspace.
+`LD_LIBRARY_PATH` is allowed: it only changes where the loader looks, `tracon-agent` is
+static, and the image is already trusted for every command a session runs.
+Claude Code's layer also removes `/etc/claude-code`,
 the managed-settings directory Claude Code reads on Linux whatever its environment says,
 whose policy outranks the node's flags, and any `.claude` or `.claude.json` in the
 harness's home. It refuses `CLAUDE_*` and `ANTHROPIC_*` variables other than the three
