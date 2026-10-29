@@ -29,6 +29,7 @@
   const note = $derived(usage.value?.note ?? '')
   const totals = $derived(breakdown.value ?? [])
   const providers = $derived(usageProviders(store.providers.map((p) => p.name), totals, view.provider))
+  const keyLabel = $derived(view.group === 'model' ? 'Model' : view.group === 'day' ? 'Day' : 'Session')
   const label = $derived(view.days !== null && !view.to ? `last ${view.days} days` : usageSpan(view))
 
   function show(next: Partial<UsageView>) {
@@ -107,15 +108,15 @@
           {#each rows as r (r.channel)}
             <tr>
               <td>{r.channel}</td>
-              <td class="big">{num(r.approvals_per_accepted_change)}</td>
-              <td class="big">{num(r.tokens_per_accepted_change, formatTokens)}</td>
-              <td>{r.accepted_changes}</td>
-              <td>{r.rejected_changes}</td>
-              <td>{formatTokens(r.tokens)}</td>
-              <td class:u={r.cost_usd === null}>{r.cost_usd === null ? 'unpriced' : `$${r.cost_usd.toFixed(2)}`}</td>
-              <td>{dur(r.human_seconds)}</td>
-              <td>{dur(r.agent_seconds)}</td>
-              <td>{r.sessions}</td>
+              <td class="big" data-label="Approvals / accepted">{num(r.approvals_per_accepted_change)}</td>
+              <td class="big" data-label="Tokens / accepted">{num(r.tokens_per_accepted_change, formatTokens)}</td>
+              <td data-label="Accepted">{r.accepted_changes}</td>
+              <td data-label="Rejected">{r.rejected_changes}</td>
+              <td data-label="Tokens">{formatTokens(r.tokens)}</td>
+              <td data-label="Cost" class:u={r.cost_usd === null}>{r.cost_usd === null ? 'unpriced' : `$${r.cost_usd.toFixed(2)}`}</td>
+              <td data-label="Human">{dur(r.human_seconds)}</td>
+              <td data-label="Agent">{dur(r.agent_seconds)}</td>
+              <td data-label="Sessions">{r.sessions}</td>
             </tr>
           {/each}
         </tbody>
@@ -150,20 +151,20 @@
     <div class="scroll">
       <table>
         <thead>
-          <tr><th>Channel</th><th>Provider</th><th>{view.group === 'model' ? 'Model' : view.group === 'day' ? 'Day' : 'Session'}</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache read</th><th>Sessions</th><th>Cost</th></tr>
+          <tr><th>Channel</th><th>Provider</th><th>{keyLabel}</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache read</th><th>Sessions</th><th>Cost</th></tr>
         </thead>
         <tbody>
           {#each totals as t, i (i)}
             <tr>
               <td>{t.channel}</td>
-              <td>{t.provider}</td>
-              <td title={t.session_id ?? undefined}>{#if view.group === 'session' && t.session_id}<a class="lnk" href={`/sessions/${t.session_id}`}>{usageKey(t, view)}</a>{:else}{usageKey(t, view)}{/if}</td>
-              <td>{t.requests}</td>
-              <td>{formatTokens(t.input_tokens)}</td>
-              <td>{formatTokens(t.output_tokens)}</td>
-              <td>{formatTokens(t.cache_read_tokens)}</td>
-              <td>{t.sessions}</td>
-              <td class:u={t.cost_usd === null}>{usageCost(t.cost_usd)}</td>
+              <td data-label="Provider">{t.provider}</td>
+              <td data-label={keyLabel} title={t.session_id ?? undefined}>{#if view.group === 'session' && t.session_id}<a class="lnk" href={`/sessions/${t.session_id}`}>{usageKey(t, view)}</a>{:else}{usageKey(t, view)}{/if}</td>
+              <td data-label="Requests">{t.requests}</td>
+              <td data-label="Input">{formatTokens(t.input_tokens)}</td>
+              <td data-label="Output">{formatTokens(t.output_tokens)}</td>
+              <td data-label="Cache read">{formatTokens(t.cache_read_tokens)}</td>
+              <td data-label="Sessions">{t.sessions}</td>
+              <td data-label="Cost" class:u={t.cost_usd === null}>{usageCost(t.cost_usd)}</td>
             </tr>
           {/each}
         </tbody>
@@ -251,6 +252,7 @@
   }
   .scroll {
     overflow-x: auto;
+    container-type: inline-size;
   }
   table {
     width: 100%;
@@ -265,7 +267,7 @@
     color: var(--dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--rule);
-    white-space: nowrap;
+    vertical-align: bottom;
   }
   td {
     padding: 8px 10px;
@@ -288,6 +290,46 @@
   }
   td.u {
     color: var(--dim);
+  }
+  td[data-label]::before {
+    content: attr(data-label);
+    display: none;
+    font: 500 10.5px var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 3px;
+  }
+  /* Too narrow for every column: each row becomes a card of labelled values. */
+  @container (max-width: 780px) {
+    table,
+    tbody,
+    td {
+      display: block;
+    }
+    thead {
+      display: none;
+    }
+    tr {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      gap: 10px 16px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    td {
+      padding: 0;
+      border: 0;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    td:first-child {
+      grid-column: 1 / -1;
+      font-weight: 600;
+    }
+    td[data-label]::before {
+      display: block;
+    }
   }
   .scope {
     color: var(--ink2);
