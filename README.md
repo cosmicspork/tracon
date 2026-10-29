@@ -340,8 +340,11 @@ repository selection; changing model scope clears stale model and budget overrid
 (the same one publishing uses) and the form lists your GitHub/GitLab repositories.
 A session names the one you pick by its identity (`github.com/owner/name`, the
 `repo_path` of `POST /api/sessions`); the node clones it into its own root when the
-first session on it starts, and fetches it fresh at every start, from the forge's
-default branch or the branch the session names. The token reaches git only
+first session on it starts, and fetches it fresh at every start. A session continues
+the branch it names when the forge has it; otherwise its new branch starts from the
+**Base** it names (the form offers the branches the clone last fetched, or type one), or
+from the forge's default branch. A base the forge has no branch for refuses the start,
+and a review of the work merges into the base. The token reaches git only
 through the environment, never argv, never `.git/config`, never the stored remote
 URL. A checkout on this machine is not a session source: upload its files, or run
 your own harness in it and submit the result with `submit_review`. `GH_HOST`/`GITHUB_API` and `GITLAB_HOST` in the credential point the same

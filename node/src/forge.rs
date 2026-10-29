@@ -1200,13 +1200,16 @@ pub fn clone_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
 pub struct Synced {
     /// The forge's default branch, as `origin/HEAD` names it.
     pub default: String,
-    /// The forge branch the session starts from: the default, or the branch
-    /// the session named when the forge has it.
+    /// The forge branch the session starts from: the branch the session
+    /// named when the forge has it, else the base it named, else the default.
     pub source: String,
     /// The clone's remote-tracking ref for `source` when that is not the
     /// default (`refs/remotes/origin/<branch>`), for the seed to start from.
     /// The clone's own working tree stays on the default branch either way.
     pub source_ref: Option<String>,
+    /// `source` is the base the session named for a new branch, not a
+    /// branch it continues: the work merges into it.
+    pub onto_base: bool,
     /// The commit the session starts from: `source`'s tip as last fetched.
     pub commit: String,
     /// When the clone last fetched from its forge successfully, as the node
@@ -1233,12 +1236,16 @@ pub struct Synced {
 /// the clone as the repository (a preview, image detection) still reads
 /// the default, and no local branch is made that a later forge branch could
 /// clash with. A name the forge has no branch for is a new branch, and
-/// starts from the default. Only a branch name will do: a revision such as
-/// `main~3` is not one, so no caller chooses an arbitrary commit this way.
+/// starts from the default, or from `base` when the session names one. A
+/// `base` the forge has no branch for fails the start rather than falling
+/// back to the default, since work meant for that line would land on another.
+/// Only a branch name will do: a revision such as `main~3` is not one, so no
+/// caller chooses an arbitrary commit this way.
 pub async fn sync_managed(
     repo: &Path,
     credential: &crate::git_remote::Credential<'_>,
     branch: Option<&str>,
+    base: Option<&str>,
 ) -> Result<Synced, String> {
     let repo = &managed_clone(repo)?;
     let fetched = tokio::time::timeout(Duration::from_secs(300), fetch_managed(repo, credential))
@@ -1272,17 +1279,20 @@ pub async fn sync_managed(
     local_git(repo, &["clean", "-ffdx"]).await?;
     let mut source = default.clone();
     let mut source_ref = None;
-    if let Some(named) = branch.filter(|named| *named != default && !named.starts_with('-')) {
-        let local = format!("refs/heads/{named}");
-        let remote = format!("refs/remotes/origin/{named}");
-        let on_forge = local_git(repo, &["check-ref-format", &local]).await.is_ok()
-            && local_git(repo, &["show-ref", "--verify", "--quiet", &remote])
-                .await
-                .is_ok();
-        if on_forge {
+    let mut onto_base = false;
+    if let Some(named) = branch.filter(|named| *named != default) {
+        if let Some(remote) = forge_branch(repo, named).await {
             source = named.to_string();
             source_ref = Some(remote);
         }
+    }
+    if let Some(base) = base.filter(|base| source_ref.is_none() && *base != default) {
+        let remote = forge_branch(repo, base)
+            .await
+            .ok_or_else(|| format!("the forge has no branch `{base}` to start from"))?;
+        source = base.to_string();
+        source_ref = Some(remote);
+        onto_base = true;
     }
     let commit = match &source_ref {
         Some(remote) => {
@@ -1301,10 +1311,58 @@ pub async fn sync_managed(
         default,
         source,
         source_ref,
+        onto_base,
         commit,
         fetched_ms,
         stale,
     })
+}
+
+/// A managed clone's forge branches as it last fetched them, without
+/// fetching: the default first (as `origin/HEAD` names it), then the rest by
+/// name. What a new session could name as its base.
+pub async fn remote_branches(repo: &Path) -> Result<(String, Vec<String>), String> {
+    let repo = &managed_clone(repo)?;
+    let head = local_git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await?;
+    let default = head.strip_prefix("origin/").unwrap_or(&head).to_string();
+    let listed = local_git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:strip=3)",
+            "refs/remotes/origin",
+        ],
+    )
+    .await?;
+    let mut branches: Vec<String> = listed
+        .lines()
+        .filter(|name| !name.is_empty() && *name != "HEAD" && *name != default)
+        .map(str::to_string)
+        .collect();
+    branches.sort();
+    branches.insert(0, default.clone());
+    Ok((default, branches))
+}
+
+/// The clone's remote-tracking ref for `name` when it is a branch the forge
+/// had at the last fetch.
+async fn forge_branch(repo: &Path, name: &str) -> Option<String> {
+    if name.starts_with('-') {
+        return None;
+    }
+    let remote = format!("refs/remotes/origin/{name}");
+    let valid = local_git(repo, &["check-ref-format", &format!("refs/heads/{name}")])
+        .await
+        .is_ok();
+    (valid
+        && local_git(repo, &["show-ref", "--verify", "--quiet", &remote])
+            .await
+            .is_ok())
+    .then_some(remote)
 }
 
 /// A Git command against a managed clone that never leaves the disk, so it
@@ -1852,9 +1910,14 @@ mod tests {
 
         let lock = clone_lock(&clone);
         let _guard = lock.lock().await;
-        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
-            .await
-            .unwrap();
+        let synced = sync_managed(
+            &clone,
+            &crate::git_remote::Credential::Anonymous,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(synced.default, "main");
         assert_eq!(synced.commit, tip);
         assert_eq!(synced.stale, None);
@@ -1863,9 +1926,10 @@ mod tests {
         // managed clone's untracked files are not overlaid.
         std::fs::write(clone.join("stray.txt"), "left behind").unwrap();
         let id = format!("seed-sync-{}", uuid::Uuid::now_v7());
-        let workspace = crate::workspace::seed_from_clone("git", &clone, "feat/x", None, &id)
-            .await
-            .unwrap();
+        let workspace =
+            crate::workspace::seed_from_clone("git", &clone, "feat/x", None, false, &id)
+                .await
+                .unwrap();
 
         let stage = crate::workspace::staging_path(&workspace.id);
         assert_eq!(sh(&stage, "git rev-parse HEAD"), tip);
@@ -1895,9 +1959,14 @@ mod tests {
             "git remote set-url origin /nonexistent/upstream.git",
         );
 
-        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
-            .await
-            .unwrap();
+        let synced = sync_managed(
+            &clone,
+            &crate::git_remote::Credential::Anonymous,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(synced.commit, fetched);
         assert!(synced.stale.is_some());
         // When the last fetch that succeeded ran, not when this one failed.
@@ -1918,9 +1987,14 @@ mod tests {
             "git branch -m main trunk && git symbolic-ref HEAD refs/heads/trunk",
         );
 
-        let synced = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
-            .await
-            .unwrap();
+        let synced = sync_managed(
+            &clone,
+            &crate::git_remote::Credential::Anonymous,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(synced.default, "trunk");
         assert_eq!(synced.commit, tip);
         assert_eq!(synced.stale, None);
@@ -1948,7 +2022,7 @@ mod tests {
         sh(&clone, "git branch fix");
         let anonymous = crate::git_remote::Credential::Anonymous;
 
-        let synced = sync_managed(&clone, &anonymous, Some("fix/thing"))
+        let synced = sync_managed(&clone, &anonymous, Some("fix/thing"), None)
             .await
             .unwrap();
         assert_eq!(synced.source, "fix/thing");
@@ -1978,6 +2052,7 @@ mod tests {
             &clone,
             "fix/thing",
             synced.source_ref.as_deref(),
+            synced.onto_base,
             &id,
         )
         .await
@@ -1992,11 +2067,127 @@ mod tests {
         let _ = std::fs::remove_dir_all(&stage);
 
         for other in ["feat/new-work", "main~1", "fix/thing~1"] {
-            let synced = sync_managed(&clone, &anonymous, Some(other)).await.unwrap();
+            let synced = sync_managed(&clone, &anonymous, Some(other), None)
+                .await
+                .unwrap();
             assert_eq!(synced.source, "main", "{other}");
             assert_eq!(synced.source_ref, None, "{other}");
             assert_eq!(synced.commit, tip, "{other}");
         }
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A new branch starts from the base the session names; a branch the
+    /// forge already has is continued whatever the base says; a base the
+    /// forge has no branch for is refused rather than silently replaced by
+    /// the default.
+    #[tokio::test]
+    async fn a_new_branch_starts_from_the_named_base() {
+        let (tmp, clone) = managed_fixture("base");
+        let legacy = sh(
+            &tmp.path().join("work"),
+            "git checkout -q -b legacy && echo legacy > a.txt \
+             && git -c user.name=t -c user.email=t@t commit -qam legacy \
+             && git push -q origin legacy && git rev-parse HEAD && git checkout -q main",
+        );
+        let pr = sh(
+            &tmp.path().join("work"),
+            "git checkout -q -b fix/thing && echo fix > a.txt \
+             && git -c user.name=t -c user.email=t@t commit -qam fix \
+             && git push -q origin fix/thing && git rev-parse HEAD && git checkout -q main",
+        );
+        let tip = advance(tmp.path(), "two");
+        let anonymous = crate::git_remote::Credential::Anonymous;
+
+        let synced = sync_managed(&clone, &anonymous, Some("feat/new"), Some("legacy"))
+            .await
+            .unwrap();
+        assert_eq!(synced.default, "main");
+        assert_eq!(synced.source, "legacy");
+        assert_eq!(
+            synced.source_ref.as_deref(),
+            Some("refs/remotes/origin/legacy")
+        );
+        assert_eq!(synced.commit, legacy);
+        assert!(synced.onto_base);
+        assert_eq!(sh(&clone, "git rev-parse HEAD"), tip);
+
+        let id = format!("seed-base-{}", uuid::Uuid::now_v7());
+        let workspace = crate::workspace::seed_from_clone(
+            "git",
+            &clone,
+            "feat/new",
+            synced.source_ref.as_deref(),
+            synced.onto_base,
+            &id,
+        )
+        .await
+        .unwrap();
+        let stage = crate::workspace::staging_path(&workspace.id);
+        assert_eq!(sh(&stage, "git rev-parse HEAD"), legacy);
+        assert_eq!(sh(&stage, "git branch --show-current"), "feat/new");
+        assert_eq!(sh(&stage, "git rev-parse origin/legacy"), legacy);
+        let worktree = stage.to_string_lossy().into_owned();
+        assert_eq!(
+            crate::review::default_base(&worktree).await.unwrap(),
+            "legacy"
+        );
+        let _ = std::fs::remove_dir_all(&stage);
+
+        let synced = sync_managed(&clone, &anonymous, None, Some("legacy"))
+            .await
+            .unwrap();
+        assert_eq!(synced.source, "legacy");
+
+        let synced = sync_managed(&clone, &anonymous, Some("fix/thing"), Some("legacy"))
+            .await
+            .unwrap();
+        assert_eq!(synced.source, "fix/thing");
+        assert!(!synced.onto_base);
+        assert_eq!(synced.commit, pr);
+
+        let synced = sync_managed(&clone, &anonymous, Some("feat/new"), Some("main"))
+            .await
+            .unwrap();
+        assert_eq!(synced.source, "main");
+        assert_eq!(synced.source_ref, None);
+        assert_eq!(synced.commit, tip);
+
+        for missing in ["nope", "legacy~1", "-x"] {
+            let error = sync_managed(&clone, &anonymous, Some("feat/new"), Some(missing))
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains(&format!("no branch `{missing}`")),
+                "{missing}: {error}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// The branches offered as a base are the clone's remote-tracking ones as
+    /// last fetched, the default first, without `HEAD` or a local branch.
+    #[tokio::test]
+    async fn remote_branches_lists_the_forge_branches_default_first() {
+        let (tmp, clone) = managed_fixture("branches");
+        sh(
+            &tmp.path().join("work"),
+            "git push -q origin main:legacy main:release/2026.1 main:alpha",
+        );
+        sync_managed(
+            &clone,
+            &crate::git_remote::Credential::Anonymous,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sh(&clone, "git branch local-only");
+        let (default, branches) = remote_branches(&clone).await.unwrap();
+        assert_eq!(default, "main");
+        assert_eq!(branches, ["main", "alpha", "legacy", "release/2026.1"]);
+        let outside = tempfile::tempdir().unwrap();
+        assert!(remote_branches(outside.path()).await.is_err());
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
     }
 
@@ -2176,9 +2367,14 @@ mod tests {
             host.canonicalize().unwrap()
         );
 
-        let error = sync_managed(&climbing, &crate::git_remote::Credential::Anonymous, None)
-            .await
-            .unwrap_err();
+        let error = sync_managed(
+            &climbing,
+            &crate::git_remote::Credential::Anonymous,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.contains("not a clone inside managed storage"),
             "{error}"
@@ -2207,7 +2403,7 @@ mod tests {
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&host, &link).unwrap();
 
-        let error = sync_managed(&link, &crate::git_remote::Credential::Anonymous, None)
+        let error = sync_managed(&link, &crate::git_remote::Credential::Anonymous, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -2255,9 +2451,14 @@ mod tests {
         std::fs::write(owner.join("work.txt"), "mine").unwrap();
         let before = repo_state(&enclosing);
 
-        let error = sync_managed(&owner, &crate::git_remote::Credential::Anonymous, None)
-            .await
-            .unwrap_err();
+        let error = sync_managed(
+            &owner,
+            &crate::git_remote::Credential::Anonymous,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.contains("not a clone inside managed storage"),
             "{error}"
@@ -2301,9 +2502,14 @@ mod tests {
         )
         .unwrap();
 
-        let error = sync_managed(&clone, &crate::git_remote::Credential::Anonymous, None)
-            .await
-            .unwrap_err();
+        let error = sync_managed(
+            &clone,
+            &crate::git_remote::Credential::Anonymous,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.contains("not a clone inside managed storage"),
             "{error}"

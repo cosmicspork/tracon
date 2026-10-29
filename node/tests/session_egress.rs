@@ -132,6 +132,7 @@ fn spec(repo: &str, model: &str) -> NewSession {
         channel: "personal".into(),
         repo_path: repo.into(),
         branch: None,
+        base: None,
         work_item_id: None,
         model: model.into(),
         budget_tokens: None,

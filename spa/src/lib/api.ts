@@ -310,6 +310,9 @@ export const api = {
   queue: () => call<Queue>('GET', '/api/queue'),
   recentRepos: () =>
     call<{ repos: RecentRepo[]; managed: ManagedRepo[] }>('GET', '/api/repos/recent'),
+  /** A managed repository's forge branches as its clone last fetched them, the default first. */
+  repoBranches: (repo: string) =>
+    call<{ default: string; branches: string[] }>('GET', `/api/repos/branches?${new URLSearchParams({ repo })}`),
   forgeRepos: (channel: string, forge?: string, cursor?: string) => {
     const query = new URLSearchParams({ channel })
     if (forge) query.set('forge', forge)
@@ -380,6 +383,7 @@ export const api = {
     repo_path: string
     workspace_id?: string
     branch?: string
+    base?: string
     work_item_id?: string
     model?: string
     budget_tokens?: number
@@ -408,6 +412,7 @@ export const api = {
     repo_path: string
     workspace_id?: string
     branch?: string
+    base?: string
     phase?: 'plan' | 'execute'
     model?: string
     budget_tokens?: number
