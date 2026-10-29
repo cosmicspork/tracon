@@ -1177,6 +1177,10 @@
       {#if refused && store.node}
         <p class="why"><b>{store.node.failed_check}: {store.node.failed_detail}</b><i>{remedy(store.node.failed_check)}</i></p>
       {/if}
+      <!-- Off the rail, which shows a light rather than this sentence. -->
+      {#if store.awake?.error}
+        <p class="why"><b>Cannot keep this machine awake: {store.awake.error}</b><i>A sleep interrupts live sessions.</i></p>
+      {/if}
       {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok}>{c.ok ? 'ok' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
       {#if store.node && nodeHarnesses(store.node).length}
         <p class="dim">Harnesses <Help label="About harnesses">A session runs the harness its model's credential allows. The default breaks ties.</Help></p>

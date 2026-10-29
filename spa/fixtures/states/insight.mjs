@@ -494,7 +494,7 @@ export default [
     route: '/settings#mesh',
     title: 'Nodes: this machine only, no hub',
     since: '#402',
-    note: '"holds 3.4 GB" link on the serving node; heading says no hub configured; rail foot "pair a hub".',
+    note: '"holds 3.4 GB" link on the serving node; heading says no hub configured; rail foot shows a node light and no hub line.',
     api: nodesApi({ nodes: [self], mesh: meshDisabled }),
   },
   {
@@ -646,7 +646,7 @@ export default [
     route: '/settings#mesh',
     title: 'Rail: keeping the machine awake',
     since: '#379',
-    note: 'Rail foot "keeping awake · <reason>" in the accent colour; check ellipsis on a long reason.',
+    note: 'Rail foot node light; hovering it lists "keeping awake: <reason>" in the tooltip.',
     api: nodesApi({
       awake: { held: true, reason: '2 sessions working, 1 permission waiting', method: 'logind', error: null, last_suspend: null },
     }),
