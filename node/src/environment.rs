@@ -517,7 +517,19 @@ impl PrepareSecrets {
 /// environment.
 pub struct ScopedEgress {
     _grant: Option<crate::boundary::EgressGrant>,
+    /// Where the grant is held, to read back what it refused.
+    held: Option<(crate::gateway::proxy::Grants, String)>,
     pub secret_env: crate::runner::SecretEnv,
+}
+
+impl ScopedEgress {
+    /// The hosts this preparation was refused so far, first refused first.
+    pub fn refused(&self) -> Vec<String> {
+        match &self.held {
+            Some((grants, token)) => grants.refused_by(token),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// What a session is told when it asks for a host its repository does not
@@ -602,6 +614,44 @@ pub fn save_session_host(
     Ok(path)
 }
 
+/// Add `host` to the `egress` of the `[[repo]]` entry for `repo`, whose
+/// warm-up it refused: the operator's "save to the repository's egress" on a
+/// warm-up's card. Unlike a session's, it leaves `session_egress` as it was,
+/// so it opens the host to sessions only where the entry already opens its
+/// egress to them. A repository with no entry gets one naming this host
+/// alone, open to its preparation only. Returns the entry's path, as written.
+pub fn save_preparation_host(
+    cfg: &Config,
+    store: &std::sync::Arc<Store>,
+    repo: &Path,
+    host: &str,
+) -> Result<String, String> {
+    let actor = format!("an approved warm-up egress ask ({})", repo.display());
+    let (path, _) = crate::config::edit::update_repos(cfg, store, &actor, |entries| {
+        let path = match entries.iter_mut().find(|entry| entry.matches(repo)) {
+            None => {
+                let path = crate::forge::entry_path(&Config::state_dir(), repo);
+                let shown = path.display().to_string();
+                entries.push(crate::config::Repo {
+                    path,
+                    egress: vec![host.to_string()],
+                    ..Default::default()
+                });
+                shown
+            }
+            Some(entry) => {
+                if !entry.egress_hosts()?.iter().any(|named| named == host) {
+                    entry.egress.push(host.to_string());
+                }
+                entry.path.display().to_string()
+            }
+        };
+        crate::config::validate_repos(entries)?;
+        Ok::<_, String>(path)
+    })?;
+    Ok(path)
+}
+
 /// What a preparation is told when it asks for a host its repository's entry
 /// does not name.
 pub const PREPARATION_REFUSAL: &str =
@@ -615,23 +665,36 @@ pub const PREPARATION_REFUSAL: &str =
 ///
 /// The grant filters by host, not by method: a host named here that accepts
 /// uploads accepts them from this preparation. That is the cost of naming it.
-pub fn scoped_egress(backend: &dyn Backend, hosts: &[String]) -> Result<ScopedEgress, String> {
+///
+/// `warming` names the repository when this is its default-branch warm-up,
+/// whose refusals ask the operator to save the host (`mcp::egress::PREPARE`).
+pub fn scoped_egress(
+    backend: &dyn Backend,
+    hosts: &[String],
+    warming: Option<&Path>,
+) -> Result<ScopedEgress, String> {
     if hosts.is_empty() {
         return Ok(ScopedEgress {
             _grant: None,
+            held: None,
             secret_env: Default::default(),
         });
     }
     let grant = backend
         .egress_grant(crate::gateway::proxy::GrantSpec {
             client: "prepare".into(),
+            warming: warming.map(Path::to_path_buf),
             hosts: hosts.to_vec(),
             refusal: PREPARATION_REFUSAL.into(),
             ..Default::default()
         })
         .map_err(|error| format!("could not open preparation egress: {error}"))?;
+    let held = backend
+        .egress_grants()
+        .map(|grants| (grants.clone(), grant.password.clone()));
     Ok(ScopedEgress {
         secret_env: grant.env(),
+        held,
         _grant: Some(grant),
     })
 }
@@ -740,7 +803,8 @@ pub async fn prepare(
     environment: &RepoEnvironment,
 ) -> Result<PreparedEnvironment, EnvironmentError> {
     let image = approved_image(environment, cfg, plan.image.as_deref())?;
-    let egress = scoped_egress(backend, &environment.egress).map_err(EnvironmentError::Runtime)?;
+    let egress =
+        scoped_egress(backend, &environment.egress, None).map_err(EnvironmentError::Runtime)?;
     let mut env = cache_env();
     env.push(("HOME".into(), "/cache/home".into()));
     let runner = backend.runner(Vec::new());

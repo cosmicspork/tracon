@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { cardRequest, editableFields, editedArguments, isEgress, stepUpOptions, withheldOptions } from './permission'
+import { cardRequest, editableFields, editedArguments, isEgress, isWarmUpEgress, stepUpOptions, withheldOptions } from './permission'
 
 const card = (args: unknown, kind: string | null = 'tool') => ({
   kind,
@@ -51,6 +51,10 @@ test('an egress ask is told apart from a held call', () => {
   expect(isEgress(ask)).toBe(true)
   expect(isEgress(card({ body: 'x' }))).toBe(false)
   expect(isEgress({ raw_input: null })).toBe(false)
+  const warmUp = { raw_input: JSON.stringify({ tool: 'prepare_egress', arguments: { host: 'files.example', repo: '/r' }, approval_id: 'a2' }) }
+  expect(isEgress(warmUp)).toBe(true)
+  expect(isWarmUpEgress(warmUp)).toBe(true)
+  expect(isWarmUpEgress(ask)).toBe(false)
 })
 
 test('a peer leaves the answers that need the owning node’s passkey to that node', () => {
@@ -58,6 +62,7 @@ test('a peer leaves the answers that need the owning node’s passkey to that no
   expect(stepUpOptions(held('repo_setup_propose'))).toEqual(['allow_once'])
   expect(stepUpOptions(held('repo_setup_try'))).toEqual(['allow_once'])
   expect(stepUpOptions(held('request_egress'))).toEqual(['allow_repo'])
+  expect(stepUpOptions(held('prepare_egress'))).toEqual(['allow_repo'])
   expect(stepUpOptions(held('pr_comment'))).toEqual([])
   expect(stepUpOptions({ raw_input: JSON.stringify({ tool: 'repo_setup_try' }) })).toEqual([])
   expect(stepUpOptions({ raw_input: 'not json' })).toEqual([])

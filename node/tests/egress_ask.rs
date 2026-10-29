@@ -368,3 +368,141 @@ async fn an_expired_ask_saves_nothing_to_the_repository() {
         "pending"
     );
 }
+
+/// A proxy holding one preparation's grant, `warming` the session
+/// repository's warm-up when asked to, whose refusals the node watches.
+async fn preparation_proxy(h: &Harness, warming: bool) -> Proxy {
+    let grants = Grants::default();
+    h.manager.watch_egress(&grants);
+    let token = grants
+        .issue(GrantSpec {
+            client: "prepare".into(),
+            warming: warming.then(session_repo),
+            hosts: vec!["repo.packagist.org".into()],
+            refusal: "not reachable from preparation; add it to this repository's egress".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(serve_granted(
+        listener,
+        Granted::dialling_any_address(grants.clone()),
+    ));
+    Proxy {
+        addr,
+        token,
+        grants,
+    }
+}
+
+/// A repository with a session on `personal`, so a warm-up's ask has a
+/// channel to go on, and an entry whose egress is open to preparation only.
+/// The entry names the repository by its forge identity, as an operator
+/// writes one, so it matches the clone wherever the state directory is.
+async fn warming_harness() -> Harness {
+    let h = harness_with(tracon::config::Config {
+        repo: vec![tracon::config::Repo {
+            path: "github.com/egress/r".into(),
+            egress: vec!["packagist".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .await;
+    let mut session = session_row("s1", "n1", "personal");
+    session.repo_path = session_repo().to_string_lossy().into_owned();
+    h.store.insert_session(&session).unwrap();
+    h
+}
+
+/// A warm-up's refused host asks once to be saved to the repository's
+/// egress; saving it adds the host and leaves the entry closed to sessions.
+#[tokio::test]
+async fn a_warm_up_asks_to_save_a_refused_host_to_the_repository() {
+    let h = warming_harness().await;
+    let proxy = preparation_proxy(&h, true).await;
+
+    let line = connect(&proxy, HOST).await;
+    assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+    assert!(line.contains("asked to save it"), "{line}");
+    let id = named_approval(&line);
+    assert_eq!(named_approval(&connect(&proxy, HOST).await), id);
+    assert_eq!(proxy.grants.refused_by(&proxy.token), [HOST]);
+
+    let cards = h.store.open_permission_views().unwrap();
+    assert_eq!(cards.len(), 1);
+    let card = &cards[0].request;
+    assert_eq!(
+        h.store.get_approval(&id).unwrap().unwrap().channel,
+        "personal"
+    );
+    assert!(card.session_id.is_none());
+    assert!(card.title.contains(HOST), "{}", card.title);
+    assert!(card.title.contains("github.com/egress/r"), "{}", card.title);
+    assert!(card.options.contains("allow_repo"), "{}", card.options);
+    for absent in ["allow_once", "allow_session"] {
+        assert!(!card.options.contains(absent), "{}", card.options);
+    }
+
+    // Nothing to open once: the warm-up that asked is over.
+    let (status, body) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert_eq!(h.store.get_approval(&id).unwrap().unwrap().state, "pending");
+
+    let (status, body) = answer(&h, &id, json!({ "option_id": "allow_repo" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let settled = h.store.get_approval(&id).unwrap().unwrap();
+    assert_eq!(settled.state, "succeeded", "{:?}", settled.reason);
+    let repos = h.manager.cfg().repos();
+    let entry = repos
+        .iter()
+        .find(|entry| entry.matches(&session_repo()))
+        .unwrap();
+    assert_eq!(entry.egress, ["packagist", HOST]);
+    assert!(!entry.session_egress, "a warm-up's answer opened sessions");
+    let file = tracon::config::Config::try_load().unwrap();
+    assert!(file
+        .repo
+        .iter()
+        .any(|entry| entry.egress.iter().any(|host| host == HOST)));
+}
+
+/// A declined host is not asked about again by the next warm-up.
+#[tokio::test]
+async fn a_declined_warm_up_host_is_not_asked_again() {
+    let h = warming_harness().await;
+    let proxy = preparation_proxy(&h, true).await;
+    let id = named_approval(&connect(&proxy, HOST).await);
+    let (status, body) = answer(&h, &id, json!({ "option_id": "reject_once" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let next = preparation_proxy(&h, true).await;
+    let line = connect(&next, HOST).await;
+    assert!(line.contains("declined"), "{line}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+}
+
+/// A candidate's preparation runs code an agent can change, so its refusal
+/// asks nobody; the grant still remembers the host for the failure to name.
+#[tokio::test]
+async fn another_preparation_is_refused_without_asking() {
+    let h = warming_harness().await;
+    let proxy = preparation_proxy(&h, false).await;
+    let line = connect(&proxy, HOST).await;
+    assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+    assert!(line.contains("not reachable from preparation"), "{line}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+    assert_eq!(proxy.grants.refused_by(&proxy.token), [HOST]);
+}
+
+/// With no session on the repository and no default channel there is
+/// nobody to ask, and the refusal is the grant's own.
+#[tokio::test]
+async fn a_warm_up_with_no_channel_asks_nobody() {
+    let h = harness().await;
+    let proxy = preparation_proxy(&h, true).await;
+    let line = connect(&proxy, HOST).await;
+    assert!(line.contains("not reachable from preparation"), "{line}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+}

@@ -5,7 +5,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
-  import { cardRequest, editableFields, editedArguments, isApproval, isEgress, withheldOptions } from '../lib/permission'
+  import { cardRequest, editableFields, editedArguments, isApproval, isEgress, isWarmUpEgress, withheldOptions } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -30,6 +30,7 @@
   // A host a session asked to reach: its answers say how long it stays open,
   // and there is nothing in it to edit.
   const egress = $derived(isEgress(permission))
+  const warmUp = $derived(isWarmUpEgress(permission))
   const fields = $derived(egress || allowElsewhere ? [] : editableFields(permission, peer))
   const held = $derived(unreachableReason(store.nodes, store.mesh, permission.node_id))
   // What the session was started to do. Answering "may I run this" without it
@@ -91,7 +92,9 @@
         ? approval
           ? 'expired · nothing ran'
           : 'expired · denied by default'
-        : formatExpiry(permission.expires_ms, clock.now)}{egress && !lapsed
+        : formatExpiry(permission.expires_ms, clock.now)}{warmUp && !lapsed
+        ? ' · the warm-up was refused; saving the host warms it again'
+        : egress && !lapsed
         ? ' · the session was refused and retries once you answer'
         : approval && !lapsed
           ? ' · nothing is waiting; allowing it runs the call'
@@ -135,7 +138,7 @@
         {/each}
       {/if}
       {#each options.filter((o) => o.kind === 'allow_repo') as o (o.option_id)}
-        <button class="lnk" disabled={busy} title="Also adds it to the repository's egress for later sessions" onclick={() => answer(o.option_id)}
+        <button class="lnk" disabled={busy} title={warmUp ? "Adds it to the repository's egress and warms the cache again" : "Also adds it to the repository's egress for later sessions"} onclick={() => answer(o.option_id)}
           >{label(o.kind, o.name)}</button
         >
       {/each}

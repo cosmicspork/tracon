@@ -136,6 +136,10 @@ pub struct PrepareFailure {
     pub message: String,
     /// What the command said: its failure lines and the end of its output.
     pub output: String,
+    /// Hosts the preparation's egress refused while it ran: usually why it
+    /// failed, and what the repository's `egress` should name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<String>,
 }
 
 impl PrepareFailure {
@@ -145,6 +149,7 @@ impl PrepareFailure {
             exit: None,
             message: message.into(),
             output: String::new(),
+            refused: Vec::new(),
         }
     }
 
@@ -152,9 +157,13 @@ impl PrepareFailure {
     /// the command and exit status where there are both.
     pub fn reason(&self) -> String {
         match (&self.command, self.exit) {
-            (Some(command), Some(exit)) => {
+            (Some(command), Some(exit)) if self.refused.is_empty() => {
                 format!("preparation failed: `{command}` (exit {exit})")
             }
+            (Some(command), Some(exit)) => format!(
+                "preparation failed: `{command}` (exit {exit}); egress refused {}",
+                self.refused.join(", ")
+            ),
             _ => format!("preparation failed: {}", self.message),
         }
     }
@@ -871,6 +880,7 @@ pub(crate) async fn run_preparation(
         cancel,
         unprepared,
         &PrepareSecrets::default(),
+        None,
     )
     .await
 }
@@ -878,7 +888,8 @@ pub(crate) async fn run_preparation(
 /// `run_preparation` with `secrets` in every command's environment and
 /// taken out of what a failure says. Only the default branch's preparation,
 /// which warms the base cache, is lent any: a candidate's or a session's runs
-/// code an agent can change.
+/// code an agent can change. `warming` names the repository when this is
+/// that warm-up, so a host its egress refuses is put to the operator.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_preparation_with(
     backend: &dyn Backend,
@@ -890,6 +901,7 @@ pub(crate) async fn run_preparation_with(
     cancel: &dyn Cancel,
     unprepared: &str,
     secrets: &PrepareSecrets,
+    warming: Option<&std::path::Path>,
 ) -> Result<(), Stopped> {
     let prepared = prepare_steps(
         backend,
@@ -901,6 +913,7 @@ pub(crate) async fn run_preparation_with(
         cancel,
         unprepared,
         secrets,
+        warming,
     )
     .await;
     match prepared {
@@ -912,6 +925,7 @@ pub(crate) async fn run_preparation_with(
                 exit: failure.exit,
                 message: secrets.redact(&failure.message),
                 output: secrets.redact(&failure.output),
+                refused: failure.refused,
             }))
         }
         prepared => prepared,
@@ -929,6 +943,7 @@ async fn prepare_steps(
     cancel: &dyn Cancel,
     unprepared: &str,
     secrets: &PrepareSecrets,
+    warming: Option<&std::path::Path>,
 ) -> Result<(), Stopped> {
     let stopped = |stop: Option<String>, killed: &str| match stop {
         Some(reason) => Stopped::Cancelled {
@@ -939,7 +954,7 @@ async fn prepare_steps(
     };
     // This preparation's own grant: nothing to wait for, and nothing another
     // run's hosts can widen.
-    let egress = scoped_egress(backend, &environment.egress)
+    let egress = scoped_egress(backend, &environment.egress, warming)
         .map_err(|error| Stopped::Unprepared(PrepareFailure::said(error)))?;
     for (step, command) in environment.prepare.iter().enumerate() {
         let name = format!("{runner_name}-p{step}");
@@ -979,17 +994,28 @@ async fn prepare_steps(
             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
             text.push_str(&String::from_utf8_lossy(&output.stderr));
             let code = output.status.code();
+            // A package manager reports a refused host as a download error, so
+            // the refusal is said here, where the fix (the entry's egress) is.
+            let refused = egress.refused();
+            let blocked = match refused.is_empty() {
+                true => String::new(),
+                false => format!(
+                    ", and egress refused {}, which the repository's egress does not name",
+                    refused.join(", ")
+                ),
+            };
             return Err(Stopped::Unprepared(PrepareFailure {
                 command: Some(command.clone()),
                 exit: code,
                 message: format!(
-                    "preparation `{command}` failed (exit {}) in {} ({}); {unprepared}.",
+                    "preparation `{command}` failed (exit {}) in {} ({}){blocked}; {unprepared}.",
                     code.map(|code| code.to_string())
                         .unwrap_or_else(|| "none".into()),
                     environment.image,
                     environment.image_source,
                 ),
                 output: output::with_failures(&output::failure_lines(&text), &tail(&text)),
+                refused,
             }));
         }
     }
@@ -1844,6 +1870,26 @@ mod tests {
         }
     }
 
+    /// The one line a not-run check carries names the refused hosts, which
+    /// are what the repository's egress should name.
+    #[test]
+    fn a_preparation_failure_names_the_hosts_egress_refused() {
+        let mut failure = PrepareFailure {
+            command: Some("composer install".into()),
+            exit: Some(100),
+            ..PrepareFailure::said("failed")
+        };
+        assert_eq!(
+            failure.reason(),
+            "preparation failed: `composer install` (exit 100)"
+        );
+        failure.refused = vec!["files.example".into(), "cdn.example".into()];
+        assert_eq!(
+            failure.reason(),
+            "preparation failed: `composer install` (exit 100); egress refused files.example, cdn.example"
+        );
+    }
+
     const TOOLCHAIN: &str =
         "localhost/tc@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
@@ -2121,6 +2167,7 @@ mod tests {
             &RunToCompletion,
             "the base cache stays as it was",
             &secrets,
+            None,
         )
         .await
         .unwrap_err();

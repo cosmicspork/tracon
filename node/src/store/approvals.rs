@@ -37,6 +37,11 @@ pub const CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allow once"
 /// host to the session's own grant rather than running a call.
 pub const EGRESS_TOOL: &str = "request_egress";
 
+/// The approval a repository's warm-up puts to the operator for a host its
+/// egress does not name. Its arguments name the host and the repository;
+/// allowing it saves the host to that repository's egress and warms again.
+pub const PREPARE_EGRESS_TOOL: &str = "prepare_egress";
+
 /// Open the host for the rest of the session. ("Allow once" opens it for
 /// the retry the refusal asked for, and no longer.)
 pub const OPTION_ALLOW_SESSION: &str = "allow_session";
@@ -47,12 +52,16 @@ pub const OPTION_ALLOW_REPO: &str = "allow_repo";
 /// What an egress card offers: how long the host stays open, or no.
 pub const EGRESS_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allow once","kind":"allow_once"},{"option_id":"allow_session","name":"For this session","kind":"allow_session"},{"option_id":"allow_repo","name":"Save to the repository's egress","kind":"allow_repo"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
 
+/// What a warm-up's egress card offers: the warm-up is over by the time
+/// anyone answers, so there is nothing to open once or for a session.
+pub const PREPARE_EGRESS_CARD_OPTIONS: &str = r#"[{"option_id":"allow_repo","name":"Save to the repository's egress","kind":"allow_repo"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
+
 /// The answers a card for `tool` offers.
 pub fn card_options(tool: &str) -> &'static str {
-    if tool == EGRESS_TOOL {
-        EGRESS_CARD_OPTIONS
-    } else {
-        CARD_OPTIONS
+    match tool {
+        EGRESS_TOOL => EGRESS_CARD_OPTIONS,
+        PREPARE_EGRESS_TOOL => PREPARE_EGRESS_CARD_OPTIONS,
+        _ => CARD_OPTIONS,
     }
 }
 
@@ -412,7 +421,7 @@ impl Store {
                     session_state: r.get("intent_session_state")?,
                 };
                 let options = match approval.tool.as_str() {
-                    EGRESS_TOOL => EGRESS_CARD_OPTIONS,
+                    EGRESS_TOOL | PREPARE_EGRESS_TOOL => card_options(&approval.tool),
                     _ => options,
                 };
                 Ok(approval.as_card(options, intent))

@@ -357,6 +357,19 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The channel of the newest session working in `repo_path`, spelled as
+    /// sessions record it.
+    pub fn newest_session_channel(&self, repo_path: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT channel FROM session WHERE repo_path=?1 ORDER BY created_ms DESC LIMIT 1",
+            [repo_path],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// The newest unfinished session an external client on `channel` acted
     /// as, found by the id it echoes (`None` for a client that echoes none).
     /// This is how a paused client is recognised after a restart dropped its

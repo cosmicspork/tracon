@@ -1388,6 +1388,18 @@ impl Tools {
                 return self.allow_egress(&approval, option_id, opened, notes).await;
             }
         }
+        // A warm-up's ask is saved or refused: the warm-up is over, so there
+        // is nothing to open once, and no call to run or to change.
+        if approval.tool == egress::PREPARE {
+            if option_id == crate::store::approvals::OPTION_ALLOW_REPO {
+                return self.save_warming_host(&approval, option_id, notes).await;
+            }
+            if option_id == OPTION_ALLOW_ONCE || option_id == OPTION_REQUEST_CHANGES {
+                return Err(rejected(
+                    "a warm-up's host is saved to the repository's egress or rejected",
+                ));
+            }
+        }
         if option_id != OPTION_ALLOW_ONCE {
             let (state, reason, note) = if option_id == OPTION_REQUEST_CHANGES {
                 let Some(notes) = notes.or(reason) else {
@@ -1549,6 +1561,59 @@ impl Tools {
         if let Some(settled) = access.store.get_approval(&approval.id)? {
             access.manager.approval_decided(&settled, state).await;
         }
+        Ok(())
+    }
+
+    /// Allow a warm-up's ask: save its host to the repository's egress, then
+    /// warm that repository's base cache again in the background. Saving is
+    /// done before anything is decided, so an entry that cannot take it
+    /// leaves the card waiting with the reason.
+    async fn save_warming_host(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        option_id: &str,
+        notes: Option<String>,
+    ) -> Result<(), crate::session::SessionError> {
+        use crate::session::SessionError;
+        use crate::store::approvals::{Decision, RUNNING, SUCCEEDED};
+        let access = self
+            .session
+            .get()
+            .ok_or_else(|| SessionError::Rejected("approvals are not available".into()))?;
+        let host = egress::host_of(approval).map_err(SessionError::Rejected)?;
+        let repo = egress::repo_of(approval).map_err(SessionError::Rejected)?;
+        let saved =
+            crate::environment::save_preparation_host(&self.cfg, &access.store, &repo, &host)
+                .map_err(SessionError::Rejected)?;
+        let decision = Decision {
+            state: RUNNING,
+            option_id,
+            note: notes.as_deref(),
+            ..Default::default()
+        };
+        if !access.store.decide_approval(&approval.id, &decision)? {
+            return Err(SessionError::Rejected(
+                "this approval is no longer waiting".into(),
+            ));
+        }
+        access.manager.approval_decided(approval, RUNNING).await;
+        let result = json!({ "host": host, "scope": "repository", "repository": saved });
+        access
+            .store
+            .finish_approval(&approval.id, SUCCEEDED, Some(&result.to_string()), None)?;
+        if let Some(settled) = access.store.get_approval(&approval.id)? {
+            access.manager.approval_decided(&settled, SUCCEEDED).await;
+        }
+        let manager = access.manager.clone();
+        tokio::spawn(async move {
+            crate::repo_image::warm_base_cache(
+                manager.backend().as_ref(),
+                manager.cfg(),
+                manager.store(),
+                &repo,
+            )
+            .await;
+        });
         Ok(())
     }
 
