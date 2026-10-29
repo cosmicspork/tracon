@@ -640,7 +640,7 @@ export default [
     route: '/',
     title: 'Footer: keeping the machine awake',
     since: '#379',
-    note: 'Rail footer line in the accent colour: "keeping awake · 1 session working, 1 permission waiting". Check truncation at 172px.',
+    note: 'Rail footer node light; its tooltip carries "keeping awake: 1 session working, 1 permission waiting".',
     api: base({
       '/api/awake': { held: true, reason: '1 session working, 1 permission waiting', method: 'logind', error: null, last_suspend: null },
     }),

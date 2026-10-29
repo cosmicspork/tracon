@@ -24,8 +24,8 @@
   import { stashToken, tokenFromHash } from './lib/auth'
   import { approvalFromHash, stashApproval, stashedApproval } from './lib/device'
   import { clock } from './lib/clock.svelte'
-  import { formatAge } from './lib/format'
   import { servingBanner } from './lib/nodes'
+  import { hubLight, nodeLight, runningHere } from './lib/railStatus'
   import { remedy } from './lib/refusal'
   import { router } from './lib/router.svelte'
   import { screenFor } from './lib/routes'
@@ -134,16 +134,18 @@
       ? versionLabel(store.node?.application_version, store.node?.application_build)
       : null,
   )
-  /** No hub is a thing to do something about, so it links to doing it. */
-  const noHub = $derived(store.mesh !== null && (!store.mesh.hub || store.mesh.hub.state === 'disabled'))
-  const hubLabel = $derived.by(() => {
-    // Not known yet: no hub to pair, and none down.
-    if (store.mesh === null) return '…'
-    const hub = store.mesh.hub
-    if (!hub || hub.state === 'disabled') return 'no hub'
-    if (hub.state === 'connected') return 'hub ok'
-    return `hub down ${formatAge(hub.since_ms, clock.now)}`
-  })
+  const nodeStatus = $derived(
+    nodeLight({
+      connected: store.connected,
+      node: store.node,
+      cannotRun: cannotRun !== null,
+      waiting,
+      running: runningHere(store.sessions.values(), store.node?.id),
+      awake: store.awake,
+      now: clock.now,
+    }),
+  )
+  const hubStatus = $derived(hubLight(store.mesh, clock.now))
 </script>
 
 {#if store.authRequired}
@@ -197,23 +199,15 @@
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
       <span class="lbl">Settings</span>
     </a>
-    <div class="foot lbl" title="{store.node?.name ?? 'this node'} · {store.connected ? 'connected' : 'offline'} · {hubLabel}">
-      <span>{store.node?.name ?? '…'}</span>
-      <span class="st"
-        >{store.connected ? 'connected' : 'offline'} ·
-        {#if noHub}<a href="/settings#mesh">pair a hub</a>{:else}{hubLabel}{/if}</span
+    <!-- The name is in Settings; a long one would wrap here. What is wrong is
+         in the banners; the light only says that something is. -->
+    <div class="foot">
+      <span class="light" title={[`node: ${nodeStatus.state}`, ...nodeStatus.detail].join('\n')} aria-label="node: {nodeStatus.state}"
+        ><i class="dot {nodeStatus.tone}"></i><span class="lbl">node</span></span
       >
-      {#if store.awake?.held}
-        <!-- The reason on its own lines: the rail is too narrow to cut it to "1 s…". -->
-        <span class="awake" title={`Keeping this machine awake: ${store.awake.reason ?? 'work in progress'}${store.awake.method ? ` (held with ${store.awake.method})` : ''}`}
-          >keeping awake{#if store.awake.reason}<span class="why">{store.awake.reason}</span>{/if}</span
-        >
-      {:else if store.awake?.error}
-        <span class="warn" title={store.awake.error}>cannot keep this machine awake</span>
-      {/if}
-      {#if store.awake?.last_suspend && clock.now - store.awake.last_suspend.woke_ms < 3_600_000}
-        <span class="warn" title="Sessions that were live recorded the interruption"
-          >slept {Math.round(store.awake.last_suspend.asleep_ms / 60_000)} min · woke {formatAge(store.awake.last_suspend.woke_ms, clock.now)} ago</span
+      {#if hubStatus}
+        <span class="light" title="hub: {hubStatus.state}" aria-label="hub: {hubStatus.state}"
+          ><i class="dot {hubStatus.tone}"></i><span class="lbl">hub</span></span
         >
       {/if}
     </div>
@@ -330,23 +324,19 @@
   .lbl { flex: 1; }
   .n { font: 12px var(--mono); color: var(--wait); }
   .sp { flex: 1; }
-  /* `lbl` is what hides this when the rail is narrow, and `lbl` also grows.
-     A footer that grows strands its own text at the top of the leftover
-     space, which is where it sat. It sits at the bottom because `sp` above
-     it grows; this must not. */
-  .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: none; }
-  .foot span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* What is wrong wraps rather than lose its point to an ellipsis. */
-  .foot .st, .foot .warn { white-space: normal; overflow-wrap: anywhere; }
-  /* Undo the nav row the rail's links are drawn as. */
-  .foot a { display: inline; padding: 0; font: inherit; color: var(--acc); text-decoration: none; }
-  .foot .awake { color: var(--acc); }
-  .foot .awake .why { display: block; white-space: normal; overflow-wrap: anywhere; color: var(--ink2); }
-  .foot .warn { color: var(--wait); }
-  .foot a:hover { text-decoration: underline; }
+  /* Sits at the bottom because `sp` above it grows; this must not. */
+  .foot { padding: 8px 16px; font: 11.5px var(--mono); color: var(--dim); display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: none; }
+  /* The dot centred under the nav icons, the word under their labels. */
+  .light { display: flex; align-items: center; gap: 15px; padding-left: 5px; cursor: default; }
+  .light .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--dim); opacity: 0.6; }
+  .light .dot.ok { background: var(--ok); opacity: 1; }
+  .light .dot.wait { background: var(--wait); opacity: 1; }
+  .light .dot.crit { background: var(--crit); opacity: 1; }
   .rail button { color: var(--dim); }
   .rail button:hover { color: var(--ink); }
   .narrow .lbl { display: none; }
+  .narrow .light { justify-content: center; padding-left: 0; }
+  .narrow .foot { padding-left: 0; padding-right: 0; }
   .narrow .rail a, .narrow .rail button, .narrow .brand { padding-left: 0; padding-right: 0; justify-content: center; }
   .narrow .n { position: absolute; top: 2px; right: 8px; font-size: 10px; }
   .narrow .collapse svg { transform: rotate(180deg); }

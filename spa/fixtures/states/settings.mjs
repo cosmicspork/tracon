@@ -1287,7 +1287,7 @@ export default [
   }),
   S('awake-held', '/settings', 'Rail: keeping the machine awake, slept recently', {
     since: '#379',
-    note: 'Rail footer lines: "keeping awake · <reason>" and "slept N min · ago". asleep_ms is a duration sent as a string here: the runner stamps every small *_ms number as an offset from now.',
+    note: 'Rail node light tooltip lines: "keeping awake: <reason>" and "slept N min, woke N ago". asleep_ms is a duration sent as a string here: the runner stamps every small *_ms number as an offset from now.',
     over: { '/api/awake': { held: true, reason: '2 sessions working on personal and work', method: 'logind', error: null, last_suspend: { woke_ms: -900000, asleep_ms: '2520000' } } },
     sizes: ['desktop'],
     full: false,
