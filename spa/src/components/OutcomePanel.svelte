@@ -5,7 +5,7 @@
   // read as a verified one.
   import { api } from '../lib/api'
   import { formatTokens } from '../lib/format'
-  import { checkLabel, claimStanding, headline, noChecks } from '../lib/outcome'
+  import { checkLabel, claimStanding, headline, noChecks, verdictLine } from '../lib/outcome'
   import type { SessionOutcome } from '../lib/types'
 
   let { id, open = false }: { id: string; open?: boolean } = $props()
@@ -15,6 +15,9 @@
   let view = $state<SessionOutcome | null>(null)
   let error = $state<string | null>(null)
   let loading = false
+  // Plan and review sessions commit nothing, so an empty Changed or Verified
+  // section says nothing about them.
+  const commits = $derived(view?.phase === 'execute')
 
   async function load() {
     if (loading) return
@@ -52,9 +55,20 @@
       {:else}
         <p class="dim">No plan written.</p>
       {/if}
+    {:else if view.phase === 'review'}
+      <h4>Verdict</h4>
+      {#if view.verdict}
+        <p class="dim">
+          {verdictLine(view)} on <a href="/reviews/{view.verdict.review_id}">review {view.verdict.review_id.slice(0, 8)}</a
+          >{view.verdict.superseded ? '; a later revision’s reviewer had already given its own' : ''}.
+        </p>
+        {#if view.verdict.summary}<p class="summary">{view.verdict.summary}</p>{/if}
+      {:else}
+        <p class="dim">No verdict given.</p>
+      {/if}
     {/if}
 
-    {#if view.phase !== 'plan' || view.changed.reviews.length}
+    {#if commits || view.changed.reviews.length}
       <h4>Changed</h4>
     {/if}
     {#if view.changed.reviews.length}
@@ -66,7 +80,7 @@
           </li>
         {/each}
       </ul>
-    {:else if view.phase !== 'plan'}
+    {:else if commits}
       <p class="dim">
         Nothing submitted for review{view.changed.workspace_changes
           ? `; the workspace changed ${view.changed.workspace_changes} time${view.changed.workspace_changes === 1 ? '' : 's'}`
@@ -74,7 +88,7 @@
       </p>
     {/if}
 
-    {#if view.phase !== 'plan' || view.verified.length}
+    {#if commits || view.verified.length}
       <h4>Verified by the node <b>{view.verified.filter((c) => c.current && c.passed).length}</b></h4>
     {/if}
     {#if view.verified.length}
@@ -86,7 +100,7 @@
           </li>
         {/each}
       </ul>
-    {:else if view.phase !== 'plan'}
+    {:else if commits}
       <p class="dim">{noChecks(view)}</p>
     {/if}
 
@@ -208,6 +222,11 @@
   .dim {
     color: var(--dim);
     font-size: 12px;
+  }
+  .summary {
+    font-size: 13px;
+    margin: 4px 0 0;
+    overflow-wrap: anywhere;
   }
   @media (max-width: 700px) {
     li {

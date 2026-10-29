@@ -8,8 +8,10 @@ export function headline(o: SessionOutcome): string {
   const passing = current.filter((c) => c.passed).length
   const pending = o.needs_decision.length
   const parts: string[] = []
-  // A plan session writes a document, not code: there is no commit to verify.
+  // Plan and review sessions write a document or a verdict, not code: there
+  // is no commit of theirs to verify.
   if (o.phase === 'plan') parts.push(o.plan ? 'plan written' : 'no plan written')
+  else if (o.phase === 'review') parts.push(verdictLine(o))
   else if (!o.head_sha) parts.push('nothing submitted for review')
   else if (failing) parts.push(`${failing} check${failing === 1 ? '' : 's'} failing on the latest commit`)
   else if (passing) parts.push(`checks pass on the latest commit`)
@@ -18,6 +20,15 @@ export function headline(o: SessionOutcome): string {
   if (pending) parts.push(`${pending} waiting on you`)
   if (o.uncertain.length) parts.push(`${o.uncertain.length} uncertain`)
   return parts.join(' · ')
+}
+
+/** What a review session concluded, or that it has not. */
+export function verdictLine(o: SessionOutcome): string {
+  const v = o.verdict
+  if (!v) return 'no verdict given'
+  const said = v.verdict === 'approve' ? 'approves' : 'requests changes'
+  const findings = v.findings ? `, ${v.findings} finding${v.findings === 1 ? '' : 's'}` : ''
+  return `${said}${findings}${v.superseded ? ' (superseded)' : ''}`
 }
 
 /** What stands in for the checks when there are none to list: a peer's

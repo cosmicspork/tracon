@@ -22,6 +22,7 @@ const outcome = (over: Partial<SessionOutcome>): SessionOutcome => ({
   end_reason: null,
   phase: 'execute',
   plan: null,
+  verdict: null,
   head_sha: 'a'.repeat(40),
   changed: { reviews: [], files: [], added: 0, removed: 0, workspace_changes: 0 },
   verified: [],
@@ -62,6 +63,19 @@ test('a plan session is headed by its plan, not by a review it was never asked f
   expect(
     headline(outcome({ ...plan, needs_decision: [{ kind: 'question', id: 'q', title: 't', since_ms: 0 }] })),
   ).toBe('no plan written · 1 waiting on you')
+})
+
+test('a review session is headed by its verdict', () => {
+  const verdict = { review_id: 'rv1', summary: null, findings: 0, superseded: false }
+  const review = { phase: 'review' as const, head_sha: null }
+  expect(headline(outcome(review))).toBe('no verdict given')
+  expect(headline(outcome({ ...review, verdict: { ...verdict, verdict: 'approve' } }))).toBe('approves')
+  expect(
+    headline(outcome({ ...review, verdict: { ...verdict, verdict: 'request_changes', findings: 2 } })),
+  ).toBe('requests changes, 2 findings')
+  expect(
+    headline(outcome({ ...review, verdict: { ...verdict, verdict: 'approve', findings: 1, superseded: true } })),
+  ).toBe('approves, 1 finding (superseded)')
 })
 
 test('a pass on an earlier commit does not count for the latest', () => {

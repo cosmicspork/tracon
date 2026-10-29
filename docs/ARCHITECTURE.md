@@ -1960,9 +1960,9 @@ from the turn ledger. The agent's own words appear only as claims, each beside w
 backs it, and the only thing that backs one is a passing check the node ran on the
 commit the claim was made at. A report has no commit, so nothing backs it; a review
 that describes a new commit as green is unbacked until a check runs there. However
-well the summary reads, prose never becomes verification. A plan session commits nothing, so
-its record leads with the plan document it wrote, or that it wrote none, rather than
-with a review it was never asked to submit.
+well the summary reads, prose never becomes verification. Plan and review sessions commit
+nothing, so their records lead with the plan document written or the verdict given,
+or that there is none yet, rather than with a review they were never asked to submit.
 
 ## Metrics
 
