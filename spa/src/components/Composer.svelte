@@ -15,7 +15,7 @@
   import { preparationBlock } from '../lib/preparation'
   import { cannotWork } from '../lib/readiness'
   import { eligibleNodes, harnessChoice, modelsForChannel, nodeHarnesses, nodeReadiness } from '../lib/nodes'
-  import { defaultRepo, managedFor, repoLabel } from '../lib/repo'
+  import { defaultRepo, managedFor, projectRepo, repoLabel } from '../lib/repo'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { ManagedRepo, NodeInfo, PreparationPreview as Preparation, RepoReadiness, WorkView } from '../lib/types'
@@ -195,8 +195,32 @@
       .then((d) => (managedRepos = d.managed))
       .catch(() => (managedRepos = []))
   })
+  // An item's project names its repository, on any runner: a peer is sent the
+  // identity and clones it itself. Undefined while it is looked up, so the
+  // channel's last repository does not get there first.
+  let itemRepo = $state<string | null | undefined>(undefined)
   $effect(() => {
-    if (!node?.is_self || repo !== '' || workspaceId !== null || !channel || managedRepos === null) return
+    const current = item
+    if (!current?.project_id) {
+      itemRepo = null
+      return
+    }
+    itemRepo = undefined
+    api
+      .projects(current.channel)
+      .then((d) => {
+        if (item?.id === current.id) itemRepo = projectRepo(d.projects, current.project_id)
+      })
+      .catch(() => {
+        if (item?.id === current.id) itemRepo = null
+      })
+  })
+  $effect(() => {
+    if (itemRepo && repo === '' && workspaceId === null) repo = itemRepo
+  })
+  $effect(() => {
+    if (!node?.is_self || repo !== '' || workspaceId !== null || !channel || managedRepos === null || itemRepo !== null)
+      return
     const last = defaultRepo(store.sessions.values(), node.id, channel, managedRepos)
     if (last) repo = last
   })

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { defaultRepo, isManagedPath, managedFor, repoIdentity, repoLabel, repoMatches } from './repo'
+import { defaultRepo, isManagedPath, managedFor, projectRepo, repoIdentity, repoLabel, repoMatches } from './repo'
 
 test('the last segment names an ordinary checkout', () => {
   expect(repoLabel('/Users/you/src/project')).toBe('project')
@@ -63,4 +63,17 @@ test('a repository choice names its clone by identity or by the path a row recor
   expect(managedFor('/state/repos/gitlab.example/g/sub/p', [clone])).toBe(clone)
   expect(managedFor('github.com/g/sub/p', [clone])).toBeNull()
   expect(repoLabel('github.com/cosmicspork/tracon')).toBe('tracon')
+})
+
+test("a work item starts in its project's repository", () => {
+  const projects = [
+    { id: 'p1', remote_url: 'gitlab.example/g/sub/app' },
+    { id: 'p2', remote_url: null },
+    { id: 'p3', remote_url: '  ' },
+  ]
+  expect(projectRepo(projects, 'p1')).toBe('gitlab.example/g/sub/app')
+  expect(projectRepo(projects, 'p2')).toBeNull()
+  expect(projectRepo(projects, 'p3')).toBeNull()
+  expect(projectRepo(projects, 'missing')).toBeNull()
+  expect(projectRepo(projects, null)).toBeNull()
 })

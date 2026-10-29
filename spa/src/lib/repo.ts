@@ -67,3 +67,17 @@ export function defaultRepo(
   const clone = last ? managedFor(last.repo_path, managed) : null
   return clone ? repoIdentity(clone) : null
 }
+
+/**
+ * The repository a work item's project names, by identity, when it has one:
+ * what a session on that item starts in, ahead of whatever the channel used
+ * last. A project recorded from an imported workspace names none.
+ */
+export function projectRepo(
+  projects: { id: string; remote_url: string | null }[],
+  projectId: string | null,
+): string | null {
+  if (!projectId) return null
+  const url = projects.find((p) => p.id === projectId)?.remote_url?.trim()
+  return url ? url : null
+}
