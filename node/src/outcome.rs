@@ -101,6 +101,17 @@ pub struct ChangedReview {
     pub added: i64,
     pub removed: i64,
     pub files: usize,
+    /// The pull or merge request approving it opened. None until it is
+    /// published.
+    pub request: Option<PublishedRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PublishedRequest {
+    pub url: String,
+    /// `open`, `merged` or `closed`, as the node last looked. None before
+    /// its first look.
+    pub state: Option<String>,
 }
 
 /// One check the node ran. `passed` is the node's verdict, reused or not.
@@ -171,6 +182,9 @@ pub struct Facts {
     pub plan: Option<Value>,
     /// The latest review-verdict event's payload, if any.
     pub verdict: Option<Value>,
+    /// The forge-follow events' payloads, oldest first: each look at a
+    /// request the session's work was published as.
+    pub follows: Vec<Value>,
     pub interrupted_turns: usize,
     pub usage: Value,
     /// For a session another node runs: whether `checks` are that node's.
@@ -217,6 +231,11 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
         .session_events_of_kind(&id, ek::REVIEW_VERDICT)?
         .pop()
         .map(|event| event.payload);
+    let follows = store
+        .session_events_of_kind(&id, ek::FORGE_FOLLOW)?
+        .into_iter()
+        .map(|event| event.payload)
+        .collect();
     let interrupted_turns = store
         .session_events_of_kind(&id, ek::TURN_END)?
         .iter()
@@ -241,6 +260,7 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
         uncertainty,
         plan,
         verdict,
+        follows,
         interrupted_turns,
         usage: crate::metrics::session_usage(store, &id),
         owner_checks: None,
@@ -299,6 +319,28 @@ fn backing(checks: &[CheckRunRow], head: &str) -> Vec<String> {
         .collect()
 }
 
+/// The request a review was published as, from where publishing it landed,
+/// or failing that from what following it saw.
+fn request_of(facts: &Facts, review: &ReviewRow) -> Option<PublishedRequest> {
+    let looked = facts
+        .follows
+        .iter()
+        .rev()
+        .find(|payload| payload.get("review_id").and_then(Value::as_str) == Some(&review.id));
+    let url = review
+        .publish_result
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .or_else(|| looked?.get("url")?.as_str())?;
+    Some(PublishedRequest {
+        url: url.to_string(),
+        state: looked
+            .and_then(|payload| payload.pointer("/snapshot/state")?.as_str())
+            .map(str::to_string),
+    })
+}
+
 pub fn derive(facts: &Facts) -> Outcome {
     let session = &facts.session;
     let head_of = |id: &str| {
@@ -333,6 +375,7 @@ pub fn derive(facts: &Facts) -> Outcome {
             added: review.added,
             removed: review.removed,
             files: paths.len(),
+            request: request_of(facts, review),
         });
         files.extend(paths);
     }
@@ -616,6 +659,7 @@ mod tests {
             uncertainty: None,
             plan: None,
             verdict: None,
+            follows: Vec::new(),
             interrupted_turns: 0,
             usage: serde_json::json!({ "gateway_tokens": 40, "unmetered_turns": 1 }),
             owner_checks: None,
@@ -700,6 +744,53 @@ mod tests {
             ("plan-w1", Some("h1"))
         );
         assert!(out.head_sha.is_none());
+    }
+
+    #[test]
+    fn a_published_review_names_its_request_and_where_following_left_it() {
+        let mut published = review("rv1", "pr", "aaa", "approved");
+        let mut f = facts(
+            vec![published.clone(), review("rv2", "pr", "bbb", "new")],
+            Vec::new(),
+        );
+        let requests = |out: &Outcome| {
+            out.changed
+                .reviews
+                .iter()
+                .map(|r| r.request.as_ref().map(|q| (q.url.clone(), q.state.clone())))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(requests(&derive(&f)), [None, None]);
+
+        let url = "https://github.com/o/r/pull/150";
+        published.publish_result = Some(url.into());
+        f.reviews[0] = published;
+        assert_eq!(
+            requests(&derive(&f)),
+            [Some((url.into(), None)), None],
+            "published but not looked at yet"
+        );
+
+        let look = |review: &str, state: &str| {
+            serde_json::json!({
+                "review_id": review, "url": url, "changes": [],
+                "snapshot": { "state": state, "checks": {}, "comments": 0, "draft": false },
+            })
+        };
+        f.follows = vec![
+            look("rv1", "open"),
+            look("rv2", "closed"),
+            look("rv1", "merged"),
+        ];
+        assert_eq!(
+            requests(&derive(&f)),
+            [
+                Some((url.into(), Some("merged".into()))),
+                Some((url.into(), Some("closed".into())))
+            ],
+            "the latest look at each review's own request; a review with no recorded \
+             address is named by the request following saw"
+        );
     }
 
     #[test]

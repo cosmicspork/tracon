@@ -298,7 +298,7 @@ const outcomeDone = (s) =>
   outcome(s, {
     head_sha: '8c4be91f03a2d6e7b5c1f0a9e3d4b2c7a6f5e1d0',
     changed: {
-      reviews: [{ id: 'rev-7', kind: 'pr', title: 'Per-channel rate limits in the gateway', state: 'published', head_sha: '8c4be91f03a2d6e7b5c1f0a9e3d4b2c7a6f5e1d0', added: 184, removed: 32, files: 4 }],
+      reviews: [{ id: 'rev-7', kind: 'pr', title: 'Per-channel rate limits in the gateway', state: 'published', head_sha: '8c4be91f03a2d6e7b5c1f0a9e3d4b2c7a6f5e1d0', added: 184, removed: 32, files: 4, request: { url: 'https://github.com/cosmic-example/orbit/pull/418', state: 'merged' } }],
       files: ['node/src/gateway/model.rs', 'node/src/metrics.rs', 'node/tests/gateway.rs', 'docs/ARCHITECTURE.md'],
       added: 184,
       removed: 32,

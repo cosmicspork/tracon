@@ -7,6 +7,7 @@
   import { formatTokens } from '../lib/format'
   import { checkLabel, claimStanding, headline, noChecks, verdictLine } from '../lib/outcome'
   import type { SessionOutcome } from '../lib/types'
+  import { requestName } from '../lib/verdicts'
 
   let { id, open = false }: { id: string; open?: boolean } = $props()
 
@@ -76,7 +77,16 @@
         {#each view.changed.reviews as r (r.id)}
           <li>
             <code>{r.head_sha.slice(0, 12)}</code>
-            <span>{r.title} <small>{r.state} · +{r.added} −{r.removed} · {r.files} file{r.files === 1 ? '' : 's'}</small></span>
+            <span
+              ><a href="/reviews/{r.id}">{r.title}</a>
+              <small
+                >{r.state}{#if r.request}{' · '}<a href={r.request.url} target="_blank" rel="noreferrer"
+                    >{requestName(r.request.url) ?? r.request.url}</a
+                  >{r.request.state ? ` ${r.request.state}` : ''}{/if} · +{r.added} −{r.removed} · {r.files} file{r.files === 1
+                  ? ''
+                  : 's'}</small
+              ></span
+            >
           </li>
         {/each}
       </ul>
