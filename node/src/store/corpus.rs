@@ -512,12 +512,13 @@ impl Store {
             .collect())
     }
 
-    /// Item id → the non-terminal session holding it, on any node.
+    /// Item id → the non-terminal session holding it, on any node. A review
+    /// session carries the item it reviews against but does not hold it.
     fn work_holders(&self, channel: &str) -> Result<std::collections::HashMap<String, String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT work_item_id, id FROM session
-             WHERE channel = ?1 AND work_item_id IS NOT NULL
+             WHERE channel = ?1 AND work_item_id IS NOT NULL AND phase != 'review'
                AND state NOT IN ('closed', 'killed_budget', 'failed')
              ORDER BY created_ms",
         )?;
@@ -536,7 +537,7 @@ impl Store {
     pub fn session_holding(&self, work_item_id: &str) -> Result<Option<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT * FROM session WHERE work_item_id = ?1
+            "SELECT * FROM session WHERE work_item_id = ?1 AND phase != 'review'
                AND state NOT IN ('closed', 'killed_budget', 'failed')
              ORDER BY created_ms LIMIT 1",
             [work_item_id],

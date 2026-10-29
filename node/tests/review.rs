@@ -2886,6 +2886,77 @@ async fn a_reviewer_can_be_started_by_hand_and_says_why_none_started() {
     assert!(body.to_string().contains("already decided"), "{body}");
 }
 
+/// The session that submitted still holds its task while it waits on the
+/// verdict; the reviewer reads that task and takes nothing from it.
+#[tokio::test]
+async fn a_reviewer_starts_on_a_task_its_submitter_still_holds() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let item = tracon::corpus::work::create(
+        &f.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "work".into(),
+            project_id: None,
+            title: "The thing".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+        },
+    )
+    .unwrap();
+    f.store
+        .conn()
+        .execute(
+            "UPDATE session SET work_item_id = ?1 WHERE id = 's1'",
+            [&item.id],
+        )
+        .unwrap();
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+
+    bind_review_model(&f);
+    let (status, body) = f
+        .call_at_node("POST", &format!("/api/reviews/{id}/review-session"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reviewer = body["session_id"].as_str().unwrap().to_string();
+    let rs = f.store.get_session(&reviewer).unwrap().unwrap();
+    assert_eq!(rs.work_item_id.as_deref(), Some(item.id.as_str()));
+    let held_by = |f: &Fixture| {
+        f.store
+            .work_status("work", None)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.item.id == item.id)
+            .and_then(|v| v.session_id)
+    };
+    assert_eq!(held_by(&f).as_deref(), Some("s1"));
+    assert_eq!(
+        f.store
+            .session_holding(&item.id)
+            .unwrap()
+            .map(|s| s.id)
+            .as_deref(),
+        Some("s1")
+    );
+
+    // Nor does it hold the task once the submitter is gone.
+    f.store
+        .conn()
+        .execute("UPDATE session SET state = 'closed' WHERE id = 's1'", [])
+        .unwrap();
+    assert_eq!(held_by(&f), None);
+    assert!(f.store.session_holding(&item.id).unwrap().is_none());
+}
+
 #[tokio::test]
 async fn a_reviewer_is_not_started_by_hand_while_another_start_is_pending() {
     state::isolate();
