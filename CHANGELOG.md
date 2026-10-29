@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.43.0](https://github.com/cosmicspork/tracon/compare/v0.42.0...v0.43.0) (2026-10-29)
+
+
+### Features
+
+* **mesh:** leave a channel, and send nothing on one without a key ([#728](https://github.com/cosmicspork/tracon/issues/728)) ([77dcfc4](https://github.com/cosmicspork/tracon/commit/77dcfc4ff9fcb4b259189744d48814c0db90b94f))
+* **sessions:** start a new session from a chosen base branch ([#727](https://github.com/cosmicspork/tracon/issues/727)) ([46c28eb](https://github.com/cosmicspork/tracon/commit/46c28eb04483cb217cc05ef7c9914d50f2b273ee))
+
+
+### Bug Fixes
+
+* **mesh:** mark the hub down only when it is unreachable, and log it ([#729](https://github.com/cosmicspork/tracon/issues/729)) ([3cdbfab](https://github.com/cosmicspork/tracon/commit/3cdbfab38ff6f1a3b46db52f3626901ea30eb8f3))
+* **repo-image:** allow LD_LIBRARY_PATH in a repository's image ([#724](https://github.com/cosmicspork/tracon/issues/724)) ([c0ff169](https://github.com/cosmicspork/tracon/commit/c0ff169bd1eb803266bbe4aa197c86ad2f100c4b))
+* **review:** count only added lines toward the submit_review line cap ([#721](https://github.com/cosmicspork/tracon/issues/721)) ([cf01c38](https://github.com/cosmicspork/tracon/commit/cf01c38daaabbd5db66af42c2fb07f36fdea19bd))
+* **spa:** reflow the usage tables instead of scrolling them ([#722](https://github.com/cosmicspork/tracon/issues/722)) ([178c285](https://github.com/cosmicspork/tracon/commit/178c285eaf8de5c7a2ec32f6fe53487e02ac70bd))
+* **spa:** start a work item's session in its project's repository ([#726](https://github.com/cosmicspork/tracon/issues/726)) ([669a2fc](https://github.com/cosmicspork/tracon/commit/669a2fca4c6e44b4ef4c8273f9cf3938160190e9))
+
 ## [0.42.0](https://github.com/cosmicspork/tracon/compare/v0.41.1...v0.42.0) (2026-10-29)
 
 
