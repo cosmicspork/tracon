@@ -8,7 +8,9 @@ export function headline(o: SessionOutcome): string {
   const passing = current.filter((c) => c.passed).length
   const pending = o.needs_decision.length
   const parts: string[] = []
-  if (!o.head_sha) parts.push('nothing submitted for review')
+  // A plan session writes a document, not code: there is no commit to verify.
+  if (o.phase === 'plan') parts.push(o.plan ? 'plan written' : 'no plan written')
+  else if (!o.head_sha) parts.push('nothing submitted for review')
   else if (failing) parts.push(`${failing} check${failing === 1 ? '' : 's'} failing on the latest commit`)
   else if (passing) parts.push(`checks pass on the latest commit`)
   else if (o.owner_checks && !o.owner_checks.read) parts.push('its checks could not be read from the node that runs it')
