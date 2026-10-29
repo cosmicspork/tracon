@@ -71,7 +71,8 @@ boundary:
 
 # Run an unreleased build as this machine's own node: build `ref` in its own
 # worktree, back up the node's state, and point the user service at the build
-# through a systemd drop-in. Refuses while a session is running. Linux only.
+# (a systemd drop-in on Linux, the LaunchAgent plist on macOS). Refuses while a
+# session is running.
 node-dev ref="origin/main":
     ./scripts/node-swap.sh dev {{ref}}
 
