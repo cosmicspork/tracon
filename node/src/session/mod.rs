@@ -985,7 +985,9 @@ impl Manager {
                 && other.node_id == self.node_id
                 && !SessionState::from_stored(&other.state).is_terminal()
                 && (workspace_of(other) == workspace
-                    || (row.work_item_id.is_some() && other.work_item_id == row.work_item_id))
+                    || (row.work_item_id.is_some()
+                        && other.phase != Phase::Review.as_str()
+                        && other.work_item_id == row.work_item_id))
         }) {
             return Err(format!(
                 "session {} is {} on its workspace or its task now",
@@ -2126,11 +2128,13 @@ impl Manager {
                 }
             }
             // A suspended session still holds its item; the session carrying
-            // it on takes the item over as the suspended one ends.
-            if let Some(holder) = view
-                .session_id
-                .filter(|holder| spec.continued_from.as_deref() != Some(holder.as_str()))
-            {
+            // it on takes the item over as the suspended one ends. A reviewer
+            // reads the item it reviews against and takes nothing: the session
+            // that submitted the change still holds it.
+            if let Some(holder) = view.session_id.filter(|holder| {
+                spec.phase != Phase::Review
+                    && spec.continued_from.as_deref() != Some(holder.as_str())
+            }) {
                 return Err(SessionError::InSession(holder));
             }
             let requires_plan = bindings["phases"]["execute"]["requires_plan"]
