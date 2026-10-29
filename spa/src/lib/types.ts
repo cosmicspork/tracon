@@ -1079,6 +1079,8 @@ export interface SessionOutcome {
       added: number
       removed: number
       files: number
+      /** The request approving it opened; null until it is published. `state` is the node's last look, null before one. */
+      request: { url: string; state: 'open' | 'merged' | 'closed' | null } | null
     }[]
     files: string[]
     added: number

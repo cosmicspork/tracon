@@ -1807,7 +1807,8 @@ the test suite would have reported.
 **What a session came to is read, not written.** Its outcome record
 (`GET /api/sessions/{id}/outcome`, the Outcome panel on the session) answers five
 questions from rows other paths recorded: what changed (its reviews, their files
-and line counts, how often the workspace moved), what the node verified (every
+and line counts, the request each was published as and its state at the node's last
+look, how often the workspace moved), what the node verified (every
 check it ran for the session, marked current only on the commit the latest review
 stands at), what needs a decision (open permissions, unanswered questions,
 undecided reviews and reports), what is uncertain (an unsettled dispatch, unmetered

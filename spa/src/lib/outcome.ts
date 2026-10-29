@@ -1,4 +1,5 @@
 import type { OutcomeCheck, OutcomeClaim, SessionOutcome } from './types'
+import { requestName } from './verdicts'
 
 /** One line saying where the session stands, worst news first. Built from the
     node's verdicts only; a claim's wording never changes it. */
@@ -8,6 +9,8 @@ export function headline(o: SessionOutcome): string {
   const passing = current.filter((c) => c.passed).length
   const pending = o.needs_decision.length
   const parts: string[] = []
+  const published = request(o)
+  if (published) parts.push(published)
   // Plan and review sessions write a document or a verdict, not code: there
   // is no commit of theirs to verify.
   if (o.phase === 'plan') parts.push(o.plan ? 'plan written' : 'no plan written')
@@ -20,6 +23,15 @@ export function headline(o: SessionOutcome): string {
   if (pending) parts.push(`${pending} waiting on you`)
   if (o.uncertain.length) parts.push(`${o.uncertain.length} uncertain`)
   return parts.join(' · ')
+}
+
+/** The request the session's latest published review opened, as the node
+    last saw it: "PR #150 merged". Null when none was published. */
+export function request(o: SessionOutcome): string | null {
+  const latest = [...o.changed.reviews].reverse().find((r) => r.request)?.request
+  if (!latest) return null
+  const name = requestName(latest.url) ?? 'request'
+  return latest.state ? `${name} ${latest.state}` : `${name} opened`
 }
 
 /** What a review session concluded, or that it has not. */
