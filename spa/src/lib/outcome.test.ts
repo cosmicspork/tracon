@@ -20,6 +20,8 @@ const outcome = (over: Partial<SessionOutcome>): SessionOutcome => ({
   channel: 'personal',
   state: 'closed',
   end_reason: null,
+  phase: 'execute',
+  plan: null,
   head_sha: 'a'.repeat(40),
   changed: { reviews: [], files: [], added: 0, removed: 0, workspace_changes: 0 },
   verified: [],
@@ -51,6 +53,15 @@ test('the headline leads with what the node verified, failures first', () => {
     ),
   ).toBe('1 check failing on the latest commit · 1 waiting on you · 1 uncertain')
   expect(headline(outcome({ head_sha: null }))).toBe('nothing submitted for review')
+})
+
+test('a plan session is headed by its plan, not by a review it was never asked for', () => {
+  const plan = { phase: 'plan' as const, head_sha: null }
+  expect(headline(outcome({ ...plan, plan: { slug: 'plan-w1', hash: 'h' } }))).toBe('plan written')
+  expect(headline(outcome(plan))).toBe('no plan written')
+  expect(
+    headline(outcome({ ...plan, needs_decision: [{ kind: 'question', id: 'q', title: 't', since_ms: 0 }] })),
+  ).toBe('no plan written · 1 waiting on you')
 })
 
 test('a pass on an earlier commit does not count for the latest', () => {

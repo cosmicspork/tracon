@@ -30,6 +30,11 @@ pub struct Outcome {
     pub channel: String,
     pub state: String,
     pub end_reason: Option<String>,
+    /// `plan`, `execute` or `review`: what the session was asked to produce.
+    pub phase: String,
+    /// The document a plan session wrote as its plan, the latest if it
+    /// revised it. None for other phases and a plan not yet written.
+    pub plan: Option<PlanWritten>,
     /// The commit the session's latest code review stands at. None when it
     /// submitted none: then nothing it changed is under review.
     pub head_sha: Option<String>,
@@ -42,6 +47,12 @@ pub struct Outcome {
     /// For a session another node runs, whether its checks were read from
     /// that node. None for this node's own.
     pub owner_checks: Option<OwnerChecks>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanWritten {
+    pub slug: String,
+    pub hash: Option<String>,
 }
 
 /// Where a peer's session's checks were read from: they run and stay on the
@@ -141,6 +152,8 @@ pub struct Facts {
     pub workspace_changes: usize,
     /// The latest uncertainty event's payload, if any.
     pub uncertainty: Option<Value>,
+    /// The latest plan-artifact event's payload, if any.
+    pub plan: Option<Value>,
     pub interrupted_turns: usize,
     pub usage: Value,
     /// For a session another node runs: whether `checks` are that node's.
@@ -179,6 +192,10 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
         .session_events_of_kind(&id, ek::UNCERTAIN)?
         .pop()
         .map(|event| event.payload);
+    let plan = store
+        .session_events_of_kind(&id, ek::PLAN_ARTIFACT)?
+        .pop()
+        .map(|event| event.payload);
     let interrupted_turns = store
         .session_events_of_kind(&id, ek::TURN_END)?
         .iter()
@@ -201,6 +218,7 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
             .session_events_of_kind(&id, ek::WORKSPACE_CHANGED)?
             .len(),
         uncertainty,
+        plan,
         interrupted_turns,
         usage: crate::metrics::session_usage(store, &id),
         owner_checks: None,
@@ -484,6 +502,16 @@ pub fn derive(facts: &Facts) -> Outcome {
         channel: session.channel.clone(),
         state: session.state.clone(),
         end_reason: session.end_reason.clone(),
+        phase: session.phase.clone(),
+        plan: facts.plan.as_ref().and_then(|payload| {
+            Some(PlanWritten {
+                slug: payload.get("slug")?.as_str()?.to_string(),
+                hash: payload
+                    .get("hash")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        }),
         head_sha,
         changed,
         verified,
@@ -551,6 +579,7 @@ mod tests {
             questions: Vec::new(),
             workspace_changes: 2,
             uncertainty: None,
+            plan: None,
             interrupted_turns: 0,
             usage: serde_json::json!({ "gateway_tokens": 40, "unmetered_turns": 1 }),
             owner_checks: None,
@@ -618,6 +647,23 @@ mod tests {
         assert!(out.uncertain.iter().any(|u| u.contains("No check has run")));
         assert_eq!(out.cost.gateway_tokens, 40);
         assert_eq!(out.cost.tokens_used, 40);
+    }
+
+    #[test]
+    fn a_plan_session_names_the_plan_it_wrote() {
+        let mut planned = facts(Vec::new(), Vec::new());
+        planned.session.phase = "plan".into();
+        assert!(derive(&planned).plan.is_none());
+        planned.plan =
+            Some(serde_json::json!({ "slug": "plan-w1", "hash": "h1", "work_item_id": "w1" }));
+        let out = derive(&planned);
+        assert_eq!(out.phase, "plan");
+        let plan = out.plan.unwrap();
+        assert_eq!(
+            (plan.slug.as_str(), plan.hash.as_deref()),
+            ("plan-w1", Some("h1"))
+        );
+        assert!(out.head_sha.is_none());
     }
 
     #[test]

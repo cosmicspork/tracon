@@ -42,7 +42,21 @@
   {:else if !view}
     <p class="dim">Reading what was recorded…</p>
   {:else}
-    <h4>Changed</h4>
+    {#if view.phase === 'plan'}
+      <h4>Plan</h4>
+      {#if view.plan}
+        <p class="dim">
+          Written as <a href="/docs/{view.channel}/{view.plan.slug}">{view.plan.slug}</a>; an execute session follows
+          from it.
+        </p>
+      {:else}
+        <p class="dim">No plan written.</p>
+      {/if}
+    {/if}
+
+    {#if view.phase !== 'plan' || view.changed.reviews.length}
+      <h4>Changed</h4>
+    {/if}
     {#if view.changed.reviews.length}
       <ul>
         {#each view.changed.reviews as r (r.id)}
@@ -52,7 +66,7 @@
           </li>
         {/each}
       </ul>
-    {:else}
+    {:else if view.phase !== 'plan'}
       <p class="dim">
         Nothing submitted for review{view.changed.workspace_changes
           ? `; the workspace changed ${view.changed.workspace_changes} time${view.changed.workspace_changes === 1 ? '' : 's'}`
@@ -60,7 +74,9 @@
       </p>
     {/if}
 
-    <h4>Verified by the node <b>{view.verified.filter((c) => c.current && c.passed).length}</b></h4>
+    {#if view.phase !== 'plan' || view.verified.length}
+      <h4>Verified by the node <b>{view.verified.filter((c) => c.current && c.passed).length}</b></h4>
+    {/if}
     {#if view.verified.length}
       <ul>
         {#each view.verified as c (c.check_id)}
@@ -70,7 +86,7 @@
           </li>
         {/each}
       </ul>
-    {:else}
+    {:else if view.phase !== 'plan'}
       <p class="dim">{noChecks(view)}</p>
     {/if}
 

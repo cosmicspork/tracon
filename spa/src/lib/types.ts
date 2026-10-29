@@ -1335,6 +1335,9 @@ export interface SessionOutcome {
   channel: string
   state: string
   end_reason: string | null
+  phase: 'plan' | 'execute' | 'review'
+  /** The document a plan session wrote as its plan; null until it does, and for other phases. */
+  plan: { slug: string; hash: string | null } | null
   head_sha: string | null
   changed: {
     reviews: {
