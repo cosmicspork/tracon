@@ -3572,6 +3572,7 @@ async fn start_review_session(
         channel: r.channel.clone(),
         repo_path: String::new(),
         branch: Some(branch),
+        base: None,
         // The item this revision was pinned to, not whatever the submitting
         // session holds now; a harness the operator runs has no session.
         work_item_id: revision.requirements_work_item_id.clone(),

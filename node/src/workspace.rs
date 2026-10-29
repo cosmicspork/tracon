@@ -662,7 +662,11 @@ pub fn write_context(selected: &Path, context: &serde_json::Value) -> Result<(),
 /// branch, or at `start` when the session continues another forge branch:
 /// the clone's remote-tracking ref for it (`refs/remotes/origin/<branch>`),
 /// fetched into the workspace by itself, so the clone's tree never moves
-/// off the default for it and no ref of the workspace can clash with it. Only what is committed travels:
+/// off the default for it and no ref of the workspace can clash with it.
+/// With `onto_start`, `start` is the base a new branch was started from
+/// rather than a branch being continued: the workspace keeps it as
+/// `origin/<base>` and its `origin/HEAD` names it, so a review of the work
+/// merges into the base and is compared against it. Only what is committed travels:
 /// the clone's tree is the node's, not anyone's uncommitted work, so there
 /// is nothing to overlay. `source` is read only; `git clone --no-local`
 /// keeps Git from hard-linking or writing back into it, and none of its Git
@@ -672,6 +676,7 @@ pub async fn seed_from_clone(
     source: &Path,
     branch: &str,
     start: Option<&str>,
+    onto_start: bool,
     id: &str,
 ) -> Result<Workspace, WorkspaceError> {
     if !source.is_dir() {
@@ -734,6 +739,22 @@ pub async fn seed_from_clone(
                 ["fetch", "--no-tags", "origin", start.as_str()],
             )
             .await?;
+            if onto_start {
+                run_git(
+                    git,
+                    Some(&stage),
+                    "update-ref",
+                    ["update-ref", start.as_str(), "FETCH_HEAD"],
+                )
+                .await?;
+                run_git(
+                    git,
+                    Some(&stage),
+                    "symbolic-ref",
+                    ["symbolic-ref", "refs/remotes/origin/HEAD", start.as_str()],
+                )
+                .await?;
+            }
             "FETCH_HEAD"
         }
         None => "HEAD",
@@ -1246,7 +1267,7 @@ mod tests {
         );
 
         let id = format!("seed-graft-{}", uuid::Uuid::now_v7());
-        match seed_from_clone("git", &source, "feat/x", None, &id).await {
+        match seed_from_clone("git", &source, "feat/x", None, false, &id).await {
             // Either outcome upholds the invariant: the clone asks for the
             // history the commits actually describe, so a source that will
             // only serve the grafted one is refused rather than quietly
@@ -1277,7 +1298,7 @@ mod tests {
         );
 
         let id = format!("seed-committed-{}", uuid::Uuid::now_v7());
-        let workspace = seed_from_clone("git", &source, "feat/x", None, &id)
+        let workspace = seed_from_clone("git", &source, "feat/x", None, false, &id)
             .await
             .unwrap();
         let stage = staging_path(&workspace.id);

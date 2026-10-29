@@ -210,6 +210,7 @@ fn spec(model: &str, harness: Option<&str>) -> NewSession {
         channel: "personal".into(),
         repo_path: "/nonexistent/repo".into(),
         branch: None,
+        base: None,
         work_item_id: None,
         model: model.into(),
         budget_tokens: None,

@@ -296,6 +296,7 @@ pub fn router(state: AppState) -> Router {
             get(api::list_channels).post(api::create_channel),
         )
         .route("/api/repos/recent", get(api::recent_repos))
+        .route("/api/repos/branches", get(api::repo_branches))
         .route("/api/repos/clone", post(api::clone_repo))
         .route(
             "/api/repos/environments",

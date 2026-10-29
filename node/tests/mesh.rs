@@ -407,6 +407,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         channel: "work".into(),
         repo_path: "/r".into(),
         branch: None,
+        base: None,
         work_item_id: None,
         model: "m".into(),
         budget_tokens: None,

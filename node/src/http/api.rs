@@ -829,6 +829,7 @@ pub async fn import_transfer(
         channel: transfer.payload.channel.clone(),
         repo_path: String::new(),
         branch: Some(branch.clone()),
+        base: None,
         work_item_id: None,
         model: body.model.clone(),
         budget_tokens: body.budget_tokens,
@@ -899,6 +900,7 @@ pub async fn import_transfer(
         channel: transfer.payload.channel.clone(),
         repo_path: String::new(),
         branch: Some(branch),
+        base: None,
         work_item_id: None,
         model: body.model,
         initial_prompt: None,
@@ -985,6 +987,32 @@ pub async fn recent_repos(State(s): State<AppState>) -> ApiResult<Json<serde_jso
         })
         .collect();
     Ok(Json(json!({ "repos": rows, "managed": managed })))
+}
+
+#[derive(Deserialize)]
+pub struct RepoBranchesQuery {
+    repo: String,
+}
+
+/// A managed repository's forge branches as its clone last fetched them, for
+/// the composer to offer as a base. Named by identity or by the clone's path,
+/// as a new session names it; a repository this node has not cloned yet has
+/// none to offer.
+pub async fn repo_branches(
+    Query(q): Query<RepoBranchesQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let clone = crate::forge::session_repo(&Config::state_dir(), q.repo.trim())
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    if !clone.join(".git").is_dir() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "this node has not cloned that repository yet",
+        ));
+    }
+    let (default, branches) = crate::forge::remote_branches(&clone)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    Ok(Json(json!({ "default": default, "branches": branches })))
 }
 
 #[derive(Deserialize)]
@@ -1419,6 +1447,8 @@ pub struct ComposeBody {
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default)]
     pub workspace_id: Option<String>,
     #[serde(default = "plan_phase")]
     pub phase: Phase,
@@ -1487,6 +1517,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         on_exhaustion: None,
         told_reviews: Vec::new(),
         branch: c.branch,
+        base: c.base,
         work_item_id: Some(item.id.clone()),
         model: c.model,
         budget_tokens: c.budget_tokens,

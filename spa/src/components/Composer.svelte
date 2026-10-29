@@ -41,6 +41,8 @@
   let workspaceId = $state<string | null>(null)
   let repoScope = $state<string | null>(null)
   let branch = $state('')
+  let base = $state('')
+  let baseBranches = $state<{ default: string; branches: string[] } | null>(null)
   let model = $state('')
   let harness = $state('')
   let budget = $state('')
@@ -200,6 +202,23 @@
     const last = defaultRepo(store.sessions.values(), node.id, channel, managedRepos)
     if (last) repo = last
   })
+  // What the forge had when this node last fetched: a suggestion, never a
+  // limit, so a branch pushed since can still be typed.
+  $effect(() => {
+    const named = repo.trim()
+    baseBranches = null
+    if (!node?.is_self || workspaceId !== null || named === '') return
+    let live = true
+    api
+      .repoBranches(named)
+      .then((d) => {
+        if (live) baseBranches = d
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  })
   $effect(() => {
     if (bound.budget_tokens && !budget) budget = String(bound.budget_tokens)
   })
@@ -216,6 +235,7 @@
         repo_path: workspaceId ? '' : repo.trim(),
         workspace_id: workspaceId ?? undefined,
         branch: branch.trim() || undefined,
+        base: base.trim() || undefined,
         phase: sessionPhase,
         model: model || undefined,
         budget_tokens: budget === '' ? undefined : Number(budget),
@@ -352,6 +372,25 @@
       <label>
         <span>Branch</span>
         <input bind:value={branch} placeholder="feat/…  (optional)" spellcheck="false" />
+      </label>
+      <label>
+        <span
+          >Base <Help label="About the base"
+            >A new branch starts from this forge branch instead of the default. A branch the forge already has is
+            continued as it is.</Help
+          ></span
+        >
+        <input
+          bind:value={base}
+          list="composer-base-branches"
+          placeholder={baseBranches ? `${baseBranches.default}  (default)` : 'default branch'}
+          spellcheck="false"
+        />
+        {#if baseBranches}
+          <datalist id="composer-base-branches">
+            {#each baseBranches.branches as name (name)}<option value={name}></option>{/each}
+          </datalist>
+        {/if}
       </label>
       {#if !item}
         <div class="field">

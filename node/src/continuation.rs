@@ -1040,6 +1040,7 @@ pub async fn carry_on(
         channel: old.channel.clone(),
         repo_path: old.repo_path.clone(),
         branch: Some(old.branch.clone()),
+        base: None,
         work_item_id: old.work_item_id.clone(),
         model: model.unwrap_or_else(|| old.model.clone()),
         budget_tokens: Some(old.budget_tokens),

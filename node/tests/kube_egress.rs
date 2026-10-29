@@ -514,6 +514,7 @@ async fn a_session_is_refused_without_the_secret_rights() {
                 channel: "personal".into(),
                 repo_path: "forge.invalid/o/r".into(),
                 branch: None,
+                base: None,
                 work_item_id: None,
                 model: "m/a".into(),
                 budget_tokens: None,

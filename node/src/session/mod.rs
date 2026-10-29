@@ -39,6 +39,10 @@ pub struct NewSession {
     pub repo_path: String,
     #[serde(default)]
     pub branch: Option<String>,
+    /// The forge branch a new branch starts from instead of the default. A
+    /// `branch` the forge already has is continued and this is not read.
+    #[serde(default)]
+    pub base: Option<String>,
     #[serde(default)]
     pub work_item_id: Option<String>,
     /// Empty resolves deterministically from the channel phase binding, then
@@ -751,6 +755,7 @@ impl Manager {
             channel: old.channel.clone(),
             repo_path: old.repo_path.clone(),
             branch: Some(old.branch.clone()),
+            base: None,
             work_item_id: old.work_item_id.clone(),
             model: String::new(),
             budget_tokens: Some(old.budget_tokens),
@@ -870,6 +875,7 @@ impl Manager {
             channel: old.channel.clone(),
             repo_path: old.repo_path.clone(),
             branch: Some(old.branch.clone()),
+            base: None,
             work_item_id: old.work_item_id.clone(),
             model: model.unwrap_or_else(|| old.model.clone()),
             budget_tokens: Some(old.budget_tokens),
@@ -1072,6 +1078,7 @@ impl Manager {
             channel: was.channel.clone(),
             repo_path: was.repo_path.clone(),
             branch: Some(was.branch.clone()),
+            base: None,
             work_item_id: was.work_item_id.clone(),
             model: was.model.clone(),
             budget_tokens: Some(was.budget_tokens),
@@ -2555,10 +2562,14 @@ impl Manager {
                     // so another session or a build cannot move it between.
                     let lock = crate::forge::clone_lock(&repo);
                     let _guard = lock.lock().await;
-                    let sync =
-                        crate::forge::sync_managed(&repo, &credential, spec.branch.as_deref())
-                            .await
-                            .map_err(anyhow::Error::msg)?;
+                    let sync = crate::forge::sync_managed(
+                        &repo,
+                        &credential,
+                        spec.branch.as_deref(),
+                        spec.base.as_deref(),
+                    )
+                    .await
+                    .map_err(anyhow::Error::msg)?;
                     if let Some(error) = &sync.stale {
                         tracing::warn!(
                             session = id, repo = %repo.display(), %error,
@@ -2566,9 +2577,17 @@ impl Manager {
                         );
                     }
                     let start = sync.source_ref.clone();
+                    let onto_base = sync.onto_base;
                     synced = Some(sync);
-                    crate::workspace::seed_from_clone(&git, &repo, &branch, start.as_deref(), id)
-                        .await?
+                    crate::workspace::seed_from_clone(
+                        &git,
+                        &repo,
+                        &branch,
+                        start.as_deref(),
+                        onto_base,
+                        id,
+                    )
+                    .await?
                 };
                 let stage = crate::workspace::staging_path(id);
                 let base = crate::workspace::head_of(&git, &stage).await?;
