@@ -61,6 +61,7 @@
   // A hint, deliberately not a banner state: the session is still running and
   // nothing has been decided for the operator.
   const repeating = $derived(repetitionHint(store.events))
+  const followLooks = $derived(store.events.filter((e) => e.kind === 'forge_follow').length)
   let questions = $state<OperatorQuestion[]>([])
   let shownWork = $state<ShownWorkItem[]>([])
   let publications = $state<{ review_id: string; url: string }[]>([])
@@ -463,8 +464,14 @@
 
   <!-- Everything linked to the work under the title: its task, plan,
        sessions, review, request and branch. Next and its verbs once this
-       attempt has ended; until then the header holds the controls. -->
-  <ContinuationPanel sessionId={id} actions={isTerminal(session.state)} stamp={`${session.state}:${publications.length}`} />
+       attempt has ended; until then the header holds the controls, and the
+       panel offers only closing the task once its request is merged. Each
+       look at the request is read again, since a merge moves no state here. -->
+  <ContinuationPanel
+    sessionId={id}
+    actions={isTerminal(session.state)}
+    stamp={`${session.state}:${publications.length}:${followLooks}`}
+  />
 
   {#if session.legacy_ms}
     <div class="banner dim">

@@ -26,7 +26,8 @@
   }: {
     itemId?: string | null
     sessionId?: string | null
-    /** Next and its verbs: a live session's page has its own controls. */
+    /** Next and its verbs: a live session's page has its own controls, all
+        but closing the task once its request is merged. */
     actions?: boolean
     /** Read the view again when this changes: the session's state, say. */
     stamp?: string
@@ -125,7 +126,7 @@
       </nav>
     {/if}
 
-    {#if actions}
+    {#if actions || closing}
       <div class="next {view.next.kind}">
         <span class="h5">Next</span>
         <span class="t">{view.next.text}</span>
@@ -139,20 +140,20 @@
       <div class="row"><span class="h5">In the way</span><span>{view.blockers.join(' · ')}</span></div>
     {/if}
 
-    {#if actions && (closing || can.continue || can.changeApproach || can.abandon)}
+    {#if closing || (actions && (can.continue || can.changeApproach || can.abandon))}
       <div class="verbs">
         {#if closing}
           <button class="btn p" disabled={busy} onclick={closeTask}>Close task</button>
         {/if}
-        {#if can.continue}
+        {#if actions && can.continue}
           <button class="btn" class:p={!closing} disabled={busy} onclick={() => carryOn(false)}>Continue</button>
         {/if}
-        {#if can.changeApproach}
+        {#if actions && can.changeApproach}
           <button class="btn" class:p={!can.continue} disabled={busy} onclick={() => (mode = mode === 'approach' ? '' : 'approach')}
             >Change approach</button
           >
         {/if}
-        {#if can.abandon}
+        {#if actions && can.abandon}
           <button class="lnk d" disabled={busy} onclick={() => (mode = mode === 'abandon' ? '' : 'abandon')}>Abandon</button>
         {/if}
       </div>

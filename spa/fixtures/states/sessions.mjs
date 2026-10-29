@@ -829,6 +829,27 @@ export default [
     }),
   },
   {
+    id: 'sessions-idle-merged',
+    area: 'sessions',
+    route: `/sessions/${S.idle.id}`,
+    title: 'Live, its request merged',
+    note: 'The header still holds Stop; the work panel offers only Close task, which ends the session as "task closed" rather than killed.',
+    since: 'fix/session-close-task',
+    api: page(S.idle, {
+      events: exact([
+        ...opening(S.idle.id),
+        ...workTurn(S.idle.id),
+        ev(S.idle.id, 'published', { url: 'https://github.com/cosmic-example/orbit/pull/418', review_id: 'rev-7' }, -900000),
+        ev(S.idle.id, 'forge_follow', { changes: ['merged', 'CI passed'], review_id: 'rev-7', url: 'https://github.com/cosmic-example/orbit/pull/418', snapshot: { state: 'merged', draft: false, checks: { ci: 'passed' }, comments: 0, decision: null } }, -60000),
+      ]),
+      continuation: continuation(S.idle, {
+        next: { kind: 'close', text: 'PR #418 merged · close the task', session_id: S.idle.id },
+        follow: { url: 'https://github.com/cosmic-example/orbit/pull/418', label: 'PR #418', state: 'merged', failed: [], new_comments: 0, changes_requested: false },
+        actions: { continue_from: null, abandon: true, close: true },
+      }),
+    }),
+  },
+  {
     id: 'sessions-send-refused',
     area: 'sessions',
     route: `/sessions/${S.idle.id}`,
