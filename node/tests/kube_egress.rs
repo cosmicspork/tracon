@@ -127,7 +127,7 @@ async fn a_preparation_grant_reaches_the_node_pod_and_never_a_pod_spec() {
     let backend = ready(&api, &cfg);
     let addr = serve(&backend).await;
 
-    let scoped = tracon::environment::scoped_egress(&backend, &[HOST.to_string()]).unwrap();
+    let scoped = tracon::environment::scoped_egress(&backend, &[HOST.to_string()], None).unwrap();
     let url = proxy_url(&scoped.secret_env);
     let (credentials, server) = url
         .strip_prefix("http://")
@@ -240,7 +240,7 @@ async fn no_grant_without_the_secret_rights_or_the_port() {
         .secret_env_refusal()
         .unwrap()
         .contains("may not patch secrets"));
-    let prepare = match tracon::environment::scoped_egress(&denied, &[HOST.to_string()]) {
+    let prepare = match tracon::environment::scoped_egress(&denied, &[HOST.to_string()], None) {
         Ok(_) => panic!("preparation egress was opened"),
         Err(error) => error,
     };

@@ -2128,7 +2128,9 @@ pub(crate) fn admin_answer(
                 format!("Build {dockerfile} for {repo} with the network")
             },
         }),
-        crate::mcp::egress::REQUEST if option_id == crate::store::approvals::OPTION_ALLOW_REPO => {
+        crate::mcp::egress::REQUEST | crate::mcp::egress::PREPARE
+            if option_id == crate::store::approvals::OPTION_ALLOW_REPO =>
+        {
             Some(AdminAnswer {
                 what: "allowing a host for the repository saves it to the repository's egress",
                 summary: format!("Save {} to the repository's egress", field("host")),

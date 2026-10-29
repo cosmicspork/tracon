@@ -17,6 +17,12 @@
 //! grants, for a Claude Code or a tracon-agent session: on Podman, or on
 //! Kubernetes once the policies open the egress port and the node may keep the
 //! grant in a Secret.
+//!
+//! A repository's default-branch warm-up asks too (`PREPARE`), since it is the
+//! one preparation that runs merged code and the one whose cache every session
+//! and check starts from. Its card offers only saving the host to the
+//! repository's egress, because the warm-up is over before anyone answers;
+//! saving it warms the cache again.
 
 use std::time::{Duration, Instant};
 
@@ -29,6 +35,9 @@ use crate::{
 };
 
 pub const REQUEST: &str = EGRESS_TOOL;
+
+/// The approval a warm-up's refused host puts to the operator.
+pub const PREPARE: &str = crate::store::approvals::PREPARE_EGRESS_TOOL;
 
 /// How long "Allow once" keeps a host open: the retry the refusal asked
 /// for, with room for a package manager's handful of connections, and no
@@ -197,6 +206,101 @@ pub fn ask(
     };
     store.insert_approval(&row).map_err(|e| e.to_string())?;
     Ok(Asked::Pending(row, true))
+}
+
+/// One ask per repository and host, however many warm-ups hit it.
+fn warming_key(repo: &std::path::Path, host: &str) -> String {
+    crate::corpus::hash_body(&format!("{PREPARE}\u{1f}{}\u{1f}{host}", repo.display()))
+}
+
+/// Find or raise the operator's ask to save `host` to the egress of `repo`,
+/// whose warm-up it refused. The card goes on the channel of the repository's
+/// newest session, else `[session] default_channel`; with neither there is
+/// nobody to ask, and the warm-up's failure names the host instead.
+pub fn ask_warming(
+    manager: &Manager,
+    repo: &std::path::Path,
+    host: &str,
+) -> Result<Option<Asked>, String> {
+    static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _asking = ASKING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let store = manager.store();
+    let shown = repo.display().to_string();
+    let channel = match store
+        .newest_session_channel(&shown)
+        .map_err(|e| e.to_string())?
+    {
+        Some(channel) => channel,
+        None => manager.cfg().live().session.default_channel.clone(),
+    };
+    if channel.trim().is_empty() {
+        return Ok(None);
+    }
+    let key = warming_key(repo, host);
+    let now = crate::store::now_ms();
+    match store
+        .latest_approval(&channel, &key)
+        .map_err(|e| e.to_string())?
+    {
+        Some(open) if open.state == PENDING && open.expires_ms > now => {
+            return Ok(Some(Asked::Pending(open, false)))
+        }
+        Some(refused) if refused.state == REJECTED => return Ok(Some(Asked::Declined(refused))),
+        _ => {}
+    }
+    let named = crate::forge::entry_path(&crate::config::Config::state_dir(), repo)
+        .display()
+        .to_string();
+    let row = ApprovalRow {
+        id: uuid::Uuid::now_v7().to_string(),
+        channel,
+        session_id: None,
+        node_id: manager.node_id().to_string(),
+        lane: None,
+        tool: PREPARE.to_string(),
+        arguments: json!({ "host": host, "repo": shown }).to_string(),
+        request_key: key,
+        title: format!("reach {host} from {named}'s warm-up"),
+        state: PENDING.into(),
+        answer_option_id: None,
+        edited_arguments: None,
+        result: None,
+        reason: None,
+        operator_note: None,
+        claimed_ms: None,
+        created_ms: now,
+        decided_ms: None,
+        finished_ms: None,
+        expires_ms: now + (manager.cfg().live().session.approval_expiry_secs.max(1) as i64) * 1000,
+    };
+    store.insert_approval(&row).map_err(|e| e.to_string())?;
+    Ok(Some(Asked::Pending(row, true)))
+}
+
+/// What a warm-up's refused CONNECT is told once the operator was asked.
+pub fn warming_refusal(host: &str, asked: &Asked) -> String {
+    match asked {
+        Asked::Pending(row, _) => format!(
+            "{host} is not in this repository's egress; the operator has been asked to save it \
+             (approval {}), and saving it warms the cache again",
+            row.id
+        ),
+        Asked::Declined(_) => {
+            format!("{host} is not in this repository's egress; the operator declined it")
+        }
+    }
+}
+
+/// The repository a warm-up's ask names.
+pub fn repo_of(approval: &ApprovalRow) -> Result<std::path::PathBuf, String> {
+    let arguments: Value = serde_json::from_str(&approval.arguments).map_err(|e| e.to_string())?;
+    arguments["repo"]
+        .as_str()
+        .filter(|repo| !repo.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "this ask names no repository".into())
 }
 
 /// What a refused CONNECT is told, once the operator has been asked: the

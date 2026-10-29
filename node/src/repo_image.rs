@@ -1093,8 +1093,14 @@ pub async fn ensure_base(
 ///
 /// One warm-up at a time per repository, in the image the node pins when it
 /// starts: one asked for while another runs waits, and warms nothing if that
-/// one already warmed the same image from the same commit.
-async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, repo: &Path) {
+/// one already warmed the same image from the same commit. Run again, without
+/// a rebuild, once the operator saves a host a warm-up was refused.
+pub(crate) async fn warm_base_cache(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    repo: &Path,
+) {
     let lock = warm_lock(repo);
     let _warming = lock.lock().await;
     let environment = crate::environment::environment_for(cfg, store, Some(repo));
@@ -1152,6 +1158,7 @@ async fn warm_base_cache(backend: &dyn Backend, cfg: &Config, store: &Store, rep
             &crate::review::checks::RunToCompletion,
             "the base cache stays as it was",
             &secrets,
+            Some(repo),
         )
         .await;
         let _ = backend.remove_volume(&work).await;

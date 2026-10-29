@@ -241,6 +241,10 @@ pub struct GrantSpec {
     pub client: String,
     /// The session a refusal should be recorded against, when there is one.
     pub session_id: Option<String>,
+    /// The repository whose default-branch warm-up this is, when it is one: a
+    /// refusal then asks the operator to save the host to that repository's
+    /// egress. No other preparation asks, because no other runs merged code.
+    pub warming: Option<std::path::PathBuf>,
     /// Literal host names, matched exactly.
     pub hosts: Vec<String>,
     /// Anchored patterns, as `[gateway] allow_hosts` writes them.
@@ -259,6 +263,7 @@ pub struct GrantSpec {
 pub struct Grant {
     pub client: String,
     pub session_id: Option<String>,
+    pub warming: Option<std::path::PathBuf>,
     hosts: Vec<String>,
     patterns: Allowlist,
     plain_http: bool,
@@ -266,7 +271,14 @@ pub struct Grant {
     /// Hosts the operator opened to this grant after it was issued: until it
     /// is revoked (`None`), or until a moment (`Some`).
     widened: parking_lot::RwLock<HashMap<String, Option<std::time::Instant>>>,
+    /// Hosts this grant refused, in the order first refused, so whoever held
+    /// it can say which when what it ran fails.
+    refused: parking_lot::Mutex<Vec<String>>,
 }
+
+/// How many refused hosts a grant remembers. A preparation that hits more
+/// than this is told about the first few, which is enough to act on.
+const REMEMBERED_REFUSALS: usize = 8;
 
 impl Grant {
     /// Whether this grant reaches `host`, as issued or as widened since.
@@ -278,6 +290,18 @@ impl Grant {
             Some(None) => true,
             Some(Some(until)) => std::time::Instant::now() < *until,
             None => false,
+        }
+    }
+
+    /// The hosts this grant refused, first refused first.
+    pub fn refused(&self) -> Vec<String> {
+        self.refused.lock().clone()
+    }
+
+    fn remember_refusal(&self, host: &str) {
+        let mut refused = self.refused.lock();
+        if refused.len() < REMEMBERED_REFUSALS && !refused.iter().any(|seen| seen == host) {
+            refused.push(host.to_string());
         }
     }
 
@@ -317,6 +341,7 @@ impl Grants {
         let grant = Grant {
             client: spec.client,
             session_id: spec.session_id,
+            warming: spec.warming,
             hosts: spec
                 .hosts
                 .iter()
@@ -326,6 +351,7 @@ impl Grants {
             plain_http: spec.plain_http,
             refusal: spec.refusal,
             widened: Default::default(),
+            refused: Default::default(),
         };
         self.live.write().insert(token.clone(), Arc::new(grant));
         Ok(token)
@@ -343,7 +369,16 @@ impl Grants {
         self.live.read().get(token).cloned()
     }
 
+    /// The hosts the grant behind `token` refused so far; none for a token
+    /// that is not live.
+    pub fn refused_by(&self, token: &str) -> Vec<String> {
+        self.holder(token)
+            .map(|grant| grant.refused())
+            .unwrap_or_default()
+    }
+
     fn refused(&self, grant: &Grant, host: &str) -> Option<String> {
+        grant.remember_refusal(host);
         let observer = self.on_refusal.read().clone();
         observer.and_then(|observer| observer(grant, host))
     }
@@ -910,6 +945,31 @@ mod tests {
     }
 
     /// In a cluster the proxy sits beside the API server and every service:
+    /// A grant remembers what it refused, once each and only the first few,
+    /// for whoever held it to name when what it ran fails.
+    #[test]
+    fn a_grant_remembers_what_it_refused() {
+        let grants = Grants::default();
+        let token = grants
+            .issue(GrantSpec {
+                client: "prepare".into(),
+                hosts: vec!["repo.packagist.org".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        let grant = grants.holder(&token).unwrap();
+        for host in ["a.example", "b.example", "a.example"] {
+            assert_eq!(grants.refused(&grant, host), None);
+        }
+        assert_eq!(grants.refused_by(&token), ["a.example", "b.example"]);
+        for n in 0..20 {
+            grants.refused(&grant, &format!("h{n}.example"));
+        }
+        assert_eq!(grants.refused_by(&token).len(), REMEMBERED_REFUSALS);
+        grants.revoke(&token);
+        assert!(grants.refused_by(&token).is_empty());
+    }
+
     /// none of it is dialled for a grant, by address or by name, and a
     /// public host still is.
     #[test]

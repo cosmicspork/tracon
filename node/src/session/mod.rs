@@ -3620,11 +3620,28 @@ impl Manager {
     /// operator's ask, or finds the one already waiting, and the refusal's
     /// reason says so; the event is recorded once per session and host, as a
     /// package manager retries and the operator needs to hear it once. A
-    /// grant that is no session's (a preparation's) is refused as it was.
+    /// repository's warm-up asks to save the host to its egress instead; any
+    /// other grant that is no session's (a candidate's preparation) is
+    /// refused as it was, and its failure names the host.
     pub fn egress_refusal_observer(&self) -> crate::gateway::proxy::OnRefusal {
         let manager = self.clone();
         let seen = std::sync::Mutex::new(std::collections::HashSet::new());
         Arc::new(move |grant, host| {
+            if let Some(repo) = &grant.warming {
+                let host = crate::mcp::egress::normalize_host(host).ok()?;
+                let asked = crate::mcp::egress::ask_warming(&manager, repo, &host)
+                    .map_err(|error| {
+                        tracing::warn!(repo = %repo.display(), %host, %error, "could not ask about egress");
+                    })
+                    .ok()
+                    .flatten()?;
+                if let crate::mcp::egress::Asked::Pending(row, true) = &asked {
+                    let manager = manager.clone();
+                    let row = row.clone();
+                    tokio::spawn(async move { manager.approval_requested(&row).await });
+                }
+                return Some(crate::mcp::egress::warming_refusal(&host, &asked));
+            }
             let session = grant.session_id.as_ref()?;
             let asked = match crate::mcp::egress::normalize_host(host) {
                 Ok(host) => crate::mcp::egress::ask(&manager, session, &host, None, false)

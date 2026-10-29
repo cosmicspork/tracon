@@ -629,6 +629,19 @@ refusal, and the orientation it starts with says all of this before its first co
 It works wherever grants are issued: on Podman, and on Kubernetes once the egress port
 is open and the node may manage Secrets (see [As a Kubernetes pod](#as-a-kubernetes-pod)).
 
+A repository's warm-up asks too. A registry often sends its downloads to another
+host (Nova's go to a Cloudflare R2 bucket), and the warm-up is the first thing to find
+out. Its refusal raises a card naming the repository and the host that offers only
+**Save to the repository's egress** or **Reject**, because the warm-up is over before
+anyone answers. Saving adds the host to the entry's `egress` without touching
+`session_egress`, so sessions reach it only if the entry already opens its egress to
+them, and then warms the cache again. The card goes on the channel of the repository's
+newest session, or `[session] default_channel`. With neither, nobody is asked and the
+warm-up's failure names the host. A candidate's or a session's preparation runs code an
+agent can change, so its refusal asks nobody. Every preparation's failure names the
+hosts it was refused, in the node's log, a check's "not run" line and a session's
+orientation, since a package manager reports a refused host only as a failed download.
+
 A check has no network. A repository whose checks need its dependencies names `prepare`
 commands (`bun install --frozen-lockfile`, `composer install`, `cargo fetch --locked`)
 and the registries they may reach (`egress = ["npm", "crates"]`). Those run once per

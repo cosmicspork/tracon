@@ -15,18 +15,32 @@ export function isApproval(p: Pick<Permission, 'raw_input'>): boolean {
   }
 }
 
+function rawTool(p: Pick<Permission, 'raw_input'>): unknown {
+  if (!p.raw_input) return undefined
+  try {
+    return JSON.parse(p.raw_input)?.tool
+  } catch {
+    return undefined
+  }
+}
+
 /**
- * A session's ask to reach a host. Allowing it opens the host to that
- * session's own grant, for as long as the chosen answer says; it runs nothing,
- * and its arguments are not the operator's to edit.
+ * An ask to reach a host: a session's, or a repository's warm-up's. Allowing
+ * it opens the host to the session's own grant, or saves it to the
+ * repository's egress; it runs nothing, and its arguments are not the
+ * operator's to edit.
  */
 export function isEgress(p: Pick<Permission, 'raw_input'>): boolean {
-  if (!p.raw_input) return false
-  try {
-    return JSON.parse(p.raw_input)?.tool === 'request_egress'
-  } catch {
-    return false
-  }
+  const tool = rawTool(p)
+  return tool === 'request_egress' || tool === 'prepare_egress'
+}
+
+/**
+ * A repository's warm-up was refused a host. The warm-up is over, so the
+ * only answers are to save the host, which warms it again, or to reject it.
+ */
+export function isWarmUpEgress(p: Pick<Permission, 'raw_input'>): boolean {
+  return rawTool(p) === 'prepare_egress'
 }
 
 export interface EditableField {
@@ -102,7 +116,7 @@ export function stepUpOptions(p: Pick<Permission, 'raw_input'>): string[] {
     const input = JSON.parse(p.raw_input)
     if (typeof input?.approval_id !== 'string') return []
     if (input.tool === 'repo_setup_propose' || input.tool === 'repo_setup_try') return ['allow_once']
-    if (input.tool === 'request_egress') return ['allow_repo']
+    if (input.tool === 'request_egress' || input.tool === 'prepare_egress') return ['allow_repo']
     return []
   } catch {
     return []
