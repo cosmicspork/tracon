@@ -513,6 +513,7 @@ mod tests {
     fn owner_with_acknowledged_report() -> Store {
         let owner = Store::open_in_memory().unwrap();
         owner.ensure_peer_node("owner").unwrap();
+        owner.channel_put("personal", b"", "{}").unwrap();
         owner.node_channel_add("owner", "personal").unwrap();
         owner.insert_session(&terminal_session()).unwrap();
         owner.insert_review(&acknowledged_report()).unwrap();
@@ -623,6 +624,7 @@ mod tests {
     fn a_peer_cannot_list_a_card_under_one_of_this_nodes_own_approval_ids() {
         let peer = Store::open_in_memory().unwrap();
         peer.ensure_peer_node("peer").unwrap();
+        peer.channel_put("personal", b"", "{}").unwrap();
         peer.node_channel_add("peer", "personal").unwrap();
         peer.insert_approval(&sessionless_approval("approval", "peer"))
             .unwrap();
@@ -658,6 +660,7 @@ mod tests {
     fn a_sessionless_approval_is_mirrored_by_channel_and_expired_once_unlisted() {
         let owner = Store::open_in_memory().unwrap();
         owner.ensure_peer_node("owner").unwrap();
+        owner.channel_put("personal", b"", "{}").unwrap();
         owner.node_channel_add("owner", "personal").unwrap();
         owner
             .insert_approval(&sessionless_approval("approval", "owner"))
@@ -701,6 +704,7 @@ mod tests {
         assert_eq!(peer.open_permission_views().unwrap()[0].node_id, "owner");
 
         // Nor does this node relay it as its own.
+        peer.channel_put("personal", b"", "{}").unwrap();
         peer.node_channel_add("peer", "personal").unwrap();
         let relayed = crate::mesh::frames::to_payloads(
             &Frame::Queue {

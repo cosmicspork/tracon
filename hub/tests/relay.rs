@@ -381,6 +381,34 @@ async fn enrollment_lifecycle_and_admit() {
     assert_eq!(st, StatusCode::NO_CONTENT);
 }
 
+#[tokio::test]
+async fn a_member_leaves_one_channel() {
+    let (a, b, _) = ids();
+    let h = hub_with(&[
+        (&a, &[MESH_CHANNEL, "personal", "old"]),
+        (&b, &[MESH_CHANNEL, "personal"]),
+    ]);
+    let channels = |id: &Identity| h.members.get(&id.node_id()).unwrap().unwrap().channels;
+    let leave =
+        |id: &Identity, channel: &str| format!("/v0/admit/{}/channels/{channel}", id.node_id());
+    // B neither is A nor admitted it.
+    let (st, _) = s(&h, &b, "DELETE", &leave(&a, "old"), "").await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = s(&h, &a, "DELETE", &leave(&a, "old"), "").await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert_eq!(channels(&a), vec![MESH_CHANNEL, "personal"]);
+    // Leaving again changes nothing and is not an error. Signed a second
+    // later, or the hub takes it for a replay of the first.
+    let again = signed(&a, "DELETE", &leave(&a, "old"), "", now() + 1);
+    let (st, _) = call(&h.app, again).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert_eq!(channels(&a), vec![MESH_CHANNEL, "personal"]);
+    // `@mesh` is membership itself.
+    let (st, _) = s(&h, &a, "DELETE", &leave(&a, MESH_CHANNEL), "").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(channels(&a), vec![MESH_CHANNEL, "personal"]);
+}
+
 /// The slot is a public write and the fingerprint the operator compares covers
 /// the node id alone, so the filler must sign its sealing key with its signing
 /// key. Anything else is the hub handing the inviter a pair to wrap channel

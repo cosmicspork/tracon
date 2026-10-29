@@ -97,6 +97,30 @@ pub async fn remove_member(
     }
 }
 
+/// Take `channel` off a member's hub record:
+/// `DELETE /v0/admit/{node_id}/channels/{channel}`. Allowed for the same
+/// callers as [`remove_member`]; leaving a channel already left succeeds.
+pub async fn leave_channel(
+    identity: &Identity,
+    hub_url: &str,
+    node_id: &str,
+    channel: &str,
+) -> Result<(), EnrollError> {
+    let path = format!(
+        "/v0/admit/{}/channels/{channel}",
+        node_id.to_ascii_lowercase()
+    );
+    let (st, text) = send(identity, hub_url, "DELETE", &path, None).await?;
+    if st == 204 {
+        Ok(())
+    } else {
+        Err(EnrollError::Refused {
+            status: st,
+            body: text,
+        })
+    }
+}
+
 // ----------------------------------------------------------------- transport
 
 async fn send(

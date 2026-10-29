@@ -1056,7 +1056,7 @@ and revoked the moment the hub loses that key.
 | `tracon external show\|detach\|stop\|clear <channel>` | a harness you run yourself, using this node's tools |
 | `tracon push ls\|rm <id>\|test` | the phones this node pushes to |
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
-| `tracon channel create\|list\|bind\|share` | channels and their bindings |
+| `tracon channel create\|list\|bind\|share\|leave` | channels and their bindings |
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
 | `tracon doc import\|ls\|get\|put [--format html]\|rm\|export\|reindex` | documents (import and export are Markdown; `put` writes either format, converting a document in place), and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
