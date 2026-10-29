@@ -14,7 +14,6 @@ export const NODE_TOOLS = new Set([
   'submit_review',
   'review_status',
   'review_verdict',
-  'review_finding',
   'submit_report',
   'report_status',
   // the operator
@@ -87,10 +86,6 @@ export const NODE_TOOLS = new Set([
   'work_show',
   'work_update',
   'work_delete',
-  'brief_read',
-  'brief_note',
-  'criteria_read',
-  'criteria_link',
 ])
 
 /// Which of the node's tools a harness's tool name is, or null when it is
@@ -171,8 +166,6 @@ function callLine(tool: string, rawInput: unknown): string {
       return sp('Wait for review', short(str(a.review_id)))
     case 'review_verdict':
       return line('Give a verdict', str(a.verdict))
-    case 'review_finding':
-      return line('Record a finding', str(a.outcome).replace('_', ' '), clip(str(a.criterion), 56))
     case 'submit_report':
       return line(str(a.report_id) ? 'Revise the report' : 'Submit a report', clip(str(a.title)))
     case 'report_status':
@@ -305,14 +298,6 @@ function callLine(tool: string, rawInput: unknown): string {
       return line(sp('Update task', str(a.id).slice(0, 8)), clip(str(a.title)))
     case 'work_delete':
       return sp('Delete task', str(a.id).slice(0, 8))
-    case 'brief_read':
-      return 'Read the brief'
-    case 'brief_note':
-      return sp('Note on the brief', str(a.field))
-    case 'criteria_read':
-      return 'Read the acceptance criteria'
-    case 'criteria_link':
-      return sp('Link evidence to', str(a.criterion))
     default:
       return spaced(tool)
   }

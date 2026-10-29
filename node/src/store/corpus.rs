@@ -193,7 +193,6 @@ pub fn work_from_row(r: &Row) -> rusqlite::Result<WorkItem> {
         discovered_by_session: r.get("discovered_by_session")?,
         discovered_by_lane: r.get("discovered_by_lane")?,
         phase_plan_slug: r.get("phase_plan_slug")?,
-        brief_slug: r.get("brief_slug")?,
         closed_by_session: r.get("closed_by_session")?,
         created_ms: r.get("created_ms")?,
         updated_ms: r.get("updated_ms")?,
@@ -207,7 +206,7 @@ pub fn work_change_row(w: &WorkItem) -> Value {
         "state": w.state, "priority": w.priority, "deps_json": serde_json::to_string(&w.deps).unwrap_or_else(|_| "[]".into()),
         "discovered_from": w.discovered_from, "discovered_by_session": w.discovered_by_session,
         "discovered_by_lane": w.discovered_by_lane,
-        "phase_plan_slug": w.phase_plan_slug, "brief_slug": w.brief_slug,
+        "phase_plan_slug": w.phase_plan_slug,
         "closed_by_session": w.closed_by_session,
         "created_ms": w.created_ms, "updated_ms": w.updated_ms,
     })

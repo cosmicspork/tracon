@@ -104,7 +104,7 @@ kinds = ["write"]
 [[rule]]
 id = "brokered-reads"
 verdict = "allow"
-reason = "A read-only query or lookup, a search, a pipeline or check read, or a report/review submission, verdict or finding that only enters the operator queue changes nothing the operator has not agreed to."
+reason = "A read-only query or lookup, a search, a pipeline or check read, or a report/review submission or verdict that only enters the operator queue changes nothing the operator has not agreed to."
 kinds = ["tool"]
 matches = [
     "query",
@@ -114,7 +114,6 @@ matches = [
     "submit_report",
     "report_status",
     "review_verdict",
-    "review_finding",
     "mr_status",
     "mr_discussions",
     "mr_for_branch",
@@ -147,15 +146,13 @@ matches = [
 [[rule]]
 id = "corpus-and-ledger"
 verdict = "allow"
-reason = "Recalling what is known, reading a document, a brief or the ledger, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
+reason = "Recalling what is known, reading a document or the ledger, retaining a fact, or recording and closing work changes nothing the operator has not agreed to."
 kinds = ["tool"]
 matches = [
     "recall",
     "retain",
     "doc_read",
     "doc_search",
-    "brief_read",
-    "criteria_read",
     "work_ready",
     "work_list",
     "work_show",
@@ -167,24 +164,12 @@ matches = [
 # `work_delete` change what the operator wrote down or agreed to, so each one
 # is put to the operator first.
 
-# A brief line is not a working note: `brief_note` is named nowhere here, so
-# every line a session would add to a brief is put to the operator first. The
-# node already refuses a session's decision and a session's uncited
-# observation; what is left is a claim about the customer, in the operator's
-# own record of what the work is for, and one look before it lands costs less
-# than finding it there later.
-#
-# `criteria_link` is a brief line too — an agent's proposal about what would
-# settle a criterion, written into the operator's own record of what the work is
-# for — so it is named nowhere here either, and is asked the same way. There is
-# no tool for judging a criterion at all: that one is not asked, it is absent.
-
 # Working notes are the agent's to keep current. A plan, a guide, a proposal or
 # a reference is not, and stays asked. A document's kind is its slug's prefix,
 # and which kinds are working notes is the node's `[[docs.kind]]` list
 # (`working_note = true`; by default note, repo, meeting and inbox), so the
 # allow is scoped by that rather than by a second list of slugs here. A reserved
-# kind (context, shown, brief, plan) is never a working note.
+# kind (shown, plan) is never a working note.
 [[rule]]
 id = "unattended-notes"
 verdict = "allow"

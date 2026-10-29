@@ -487,8 +487,6 @@ async fn the_api_files_a_document_under_a_kind_added_after_it_was_written() {
             "meeting",
             "inbox",
             "runbook",
-            "brief",
-            "context",
             "plan",
             "shown",
             "other",
@@ -506,7 +504,7 @@ async fn the_api_files_a_document_under_a_kind_added_after_it_was_written() {
         })
     );
     assert_eq!(kinds[5]["working_note"], true);
-    assert_eq!(kinds[12]["label"], "Shown work");
+    assert_eq!(kinds[10]["label"], "Shown work");
     assert!(
         kinds[9..].iter().all(|k| k["reserved"] == true),
         "{kinds:?}"

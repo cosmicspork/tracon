@@ -100,7 +100,7 @@ mod tests {
         let all = [
             operator::definitions(),
             approvals::definitions(),
-            review::definitions(true),
+            review::definitions(),
             egress::definitions(),
             setup::definitions(),
             github::definitions(),

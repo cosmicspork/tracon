@@ -74,8 +74,6 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (memory::RETAIN, "markdown", &["body"], &["kind"]),
     // Which memory is the call; the operator rewrites its body, not its target.
     (memory::AMEND, "markdown", &["body"], &["id"]),
-    (work::BRIEF_NOTE, "markdown", &["text"], &[]),
-    (work::CRITERIA_LINK, "markdown", &["value"], &["criterion"]),
     // Which item is the call; an edit to it would be a different call.
     (
         work::WORK_UPDATE,
@@ -165,7 +163,7 @@ fn registry() -> &'static HashMap<String, Value> {
             super::setup::definitions(),
             super::services::definitions_for(&[], ""),
             work::definitions(),
-            review::definitions(false),
+            review::definitions(),
         ]
         .into_iter()
         .flatten()
@@ -345,13 +343,7 @@ mod tests {
         ] {
             assert!(input_schema(tool).is_some(), "{tool}");
         }
-        for tool in [
-            "retain",
-            "brief_note",
-            "criteria_link",
-            "submit_report",
-            "query",
-        ] {
+        for tool in ["retain", "submit_report", "query"] {
             assert!(input_schema(tool).is_some(), "{tool}");
         }
         assert_eq!(presentation("issue_create").format, "jira_wiki");

@@ -3254,9 +3254,7 @@ models = [{ id = "gpt-6" }]
             "written out, the list replaces the default"
         );
         assert!(cfg.docs.kind[0].working_note);
-        for refused in [
-            "context", "shown", "brief", "plan", "other", "run-book", "Runbook", "",
-        ] {
+        for refused in ["shown", "plan", "other", "run-book", "Runbook", ""] {
             let text = format!("[[docs.kind]]\nprefix = {refused:?}\n");
             assert!(load(&text).is_err(), "{refused:?}");
         }

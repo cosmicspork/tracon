@@ -45,7 +45,7 @@ const SESSION_ONLY: &[&str] = &[
      bound to this session's project, so it survives the session.",
     "A session sees its own project unless it names another.",
     "In a review session it goes on the review you are reviewing, marked with that review's \
-     candidate, and is what review_finding cites as evidence.",
+     candidate.",
 ];
 
 /// `tool` as `audience` reads it.
@@ -113,7 +113,7 @@ mod tests {
         let mut all = Vec::new();
         all.extend(github::definitions());
         all.extend(gitlab::definitions());
-        all.extend(review::definitions(true));
+        all.extend(review::definitions());
         all.extend(memory::definitions());
         all.extend(docs::definitions(&crate::config::default_doc_kinds()));
         all.extend(operator::definitions());
@@ -169,7 +169,7 @@ mod tests {
             assert!(!said.contains("In a review session it goes"), "{said}");
             assert_eq!(tool["inputSchema"]["properties"]["worktree"], before);
         }
-        let mut submit = review::definitions(false)
+        let mut submit = review::definitions()
             .into_iter()
             .find(|t| t["name"] == review::SUBMIT)
             .unwrap();

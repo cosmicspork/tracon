@@ -225,6 +225,13 @@ const STEPS: &[&str] = &[
     ALTER TABLE memory ADD COLUMN supersedes TEXT;
     CREATE INDEX IF NOT EXISTS memory_supersedes ON memory(supersedes);
     "#,
+    // Step 9: the product brief is gone, and with it the link from step 5.
+    // Rows are read by column name (`TABLES`), so a peer that predates this
+    // still sends `brief_slug` and it is ignored, and a row from here leaves
+    // the field out, which a peer that has the column reads as no change.
+    r#"
+    ALTER TABLE work_item DROP COLUMN brief_slug;
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.

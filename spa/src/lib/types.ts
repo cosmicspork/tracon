@@ -622,25 +622,19 @@ export interface ReviewDetails {
   intent?: ReviewIntent | null
   /**
    * The node that owns a review mirrored here. Its worktree, candidate and
-   * checks stay there, so `stale`, `evidence` and `criteria` are empty and
+   * checks stay there, so `stale` and `evidence` are empty and
    * `intent` is null; a verdict is forwarded to it. Null for a local review.
    */
   remote_owner?: string | null
   /**
    * For a mirrored review, whether its owner's detail was read: `fetched`
-   * fills `stale`, `evidence`, `criteria` and `intent` from the owner;
+   * fills `stale`, `evidence` and `intent` from the owner;
    * `moved` and `unreachable` leave them empty, with the reason.
    */
   owner_detail?: OwnerDetail | null
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
-  /**
-   * The pinned item's acceptance criteria, read against this revision's own
-   * candidate. Null when the revision names no item, or the item has no brief.
-   * A verdict given from this screen binds to `revision`.
-   */
-  criteria: Criteria | null
   surrounding_code: ReviewContext[]
   evidence: CandidateEvidence | null
   legacy_check_events: CandidateCheckRun[]
@@ -974,282 +968,9 @@ export interface WorkItem {
   /** The lane of the harness outside the boundary that recorded the item, if one did. */
   discovered_by_lane?: string | null
   phase_plan_slug: string | null
-  /** The document holding this item's product brief, when it has one. */
-  brief_slug: string | null
   closed_by_session: string | null
   created_ms: number
   updated_ms: number
-}
-
-/** Who is behind a brief line. An unmarked line stays `unattributed`. */
-export type Provenance = 'observed' | 'inferred' | 'decided' | 'unattributed'
-
-export type BriefField =
-  | 'intended_user'
-  | 'problem'
-  | 'source_references'
-  | 'constraints'
-  | 'success_criteria'
-  | 'unresolved_questions'
-
-export type RefKind = 'doc' | 'session' | 'evidence' | 'work' | 'url' | 'file'
-
-/** What a line points at. `known` is absent where the node cannot tell. */
-export interface BriefRef {
-  kind: RefKind
-  value: string
-  label?: string
-  known?: boolean
-}
-
-export interface BriefEntry {
-  provenance: Provenance
-  text: string
-  refs: BriefRef[]
-  /** What this line says points at it, written under it in the document. */
-  links?: BriefLink[]
-}
-
-/** What a brief line says would settle it: a configured check. */
-export type LinkKind = 'check'
-
-/**
- * Link kinds an older brief may still hold. Nothing produces them; they are
- * read, shown as retired, and settle nothing.
- */
-export type RetiredLinkKind = 'scenario' | 'observation'
-
-export interface BriefLink {
-  provenance: Provenance
-  kind: LinkKind | RetiredLinkKind
-  value: string
-  refs: BriefRef[]
-}
-
-export interface BriefSection {
-  field: BriefField
-  heading: string
-  notes: string
-  entries: BriefEntry[]
-}
-
-/** A brief as the node reads it out of its document. */
-export interface Brief {
-  channel: string
-  slug: string
-  work_item_id?: string
-  hash: string
-  updated_ms: number
-  title: string
-  preamble: string
-  sections: BriefSection[]
-  extra: string
-  counts: { observed: number; inferred: number; decided: number; unattributed: number }
-  absent: { field: BriefField; heading: string; says: string }[]
-}
-
-/** One line, as the interface sends it. */
-export interface BriefEntryInput {
-  provenance?: Provenance
-  text: string
-  refs: { kind: RefKind; value: string }[]
-}
-
-/**
- * Whether the standard a criterion states is agreed, or is still somebody's
- * proposal. An agent may propose what good means; only the operator decides it.
- */
-export type Standard = 'agreed' | 'proposed' | 'unattributed'
-
-/**
- * How far the evidence for one candidate got. `checks_pass` is deliberately not
- * `judged_met`: passing the checks an agent proposed is not the customer
- * agreeing with the standard. Nor is `verified_unjudged`: a review session
- * running the candidate and finding it does what the criterion says.
- */
-export type Coverage =
-  | 'judged_met'
-  | 'judged_not_met'
-  | 'judged_unclear'
-  | 'contradicted_unjudged'
-  | 'failing'
-  | 'verified_unjudged'
-  | 'no_result_yet'
-  | 'checks_pass'
-  | 'awaits_judgement'
-  | 'only_proposed'
-  | 'nothing_points_at_it'
-
-export type Verdict = 'met' | 'not_met' | 'unclear'
-
-/** One thing a criterion points at, and what this node can say about it. */
-export interface CriterionLink {
-  index: number
-  provenance: Provenance
-  standard: Standard
-  kind: LinkKind | RetiredLinkKind
-  value: string
-  refs: BriefRef[]
-  /** For a check: `passed`, `failed`, `running`, `not_run`, `interrupted`, `cancelled`. */
-  outcome?: string
-  run_id?: string
-  /** Why this link contributes no result, said plainly. */
-  unresolved?: string
-}
-
-export interface CriterionJudgement {
-  id: string
-  verdict: Verdict
-  note?: string
-  candidate_id?: string
-  /** The criterion as it read when this verdict was given. */
-  criterion_text: string
-  judged_ms: number
-}
-
-/**
- * What a review session found when it exercised the candidate against one
- * criterion: its account, always `inferred`, resting on the work it showed.
- * Never a verdict on the criterion.
- */
-export interface CriterionFinding {
-  id: string
-  review_id: string
-  candidate_id: string
-  outcome: 'supported' | 'contradicted' | 'not_shown'
-  note: string
-  /** The shown-work ids it rests on. */
-  evidence: string[]
-  provenance: 'inferred'
-  session_id: string
-  model?: string
-  criterion_text: string
-  created_ms: number
-}
-
-export interface Criterion {
-  key: string
-  text: string
-  provenance: Provenance
-  standard: Standard
-  refs: BriefRef[]
-  links: CriterionLink[]
-  judgement?: CriterionJudgement
-  /** A verdict about another attempt, or about none. It does not settle this one. */
-  earlier_judgement?: CriterionJudgement
-  /** The standing review finding for this candidate, kept apart from the judgement. */
-  finding?: CriterionFinding
-  coverage: Coverage
-  duplicate?: boolean
-}
-
-/** An assumption the brief rests on: a line nobody observed and nobody decided. */
-export interface CriteriaAssumption {
-  field: BriefField
-  heading: string
-  text: string
-  provenance: Provenance
-}
-
-export interface CriteriaGaps {
-  uncovered: string[]
-  unjudged: string[]
-  assumptions: CriteriaAssumption[]
-  questions: string[]
-  orphaned_judgements: CriterionJudgement[]
-}
-
-/** The criteria of one item, read against one candidate. */
-export interface Criteria {
-  work_item_id: string
-  channel: string
-  brief_slug: string
-  hash: string
-  candidate?: { id: string; head_sha: string; captured_ms: number }
-  criteria: Criterion[]
-  /** What the section says when it states nothing, rather than an empty form. */
-  absent?: string
-  gaps: CriteriaGaps
-  summary: string
-}
-
-/** What a selected document is for; also the order a session reads them in. */
-export type ContextRole = 'brief' | 'research' | 'decisions' | 'constraints' | 'documents'
-
-/** Why a selected document did not reach an attempt whole. */
-export type ContextReason = 'absent' | 'archived' | 'html' | 'cap'
-
-export interface ContextPick {
-  role: ContextRole
-  slug: string
-  note: string
-}
-
-/** A selected document resolved against this node: would the next attempt get it? */
-export interface ContextResolved {
-  role: ContextRole
-  slug: string
-  title?: string
-  known: boolean
-  chars: number
-  reason?: ContextReason
-}
-
-/** The operator's selection for a work item, as the node reads its document. */
-export interface ContextSelection {
-  channel: string
-  slug: string
-  work_item_id: string
-  hash: string
-  updated_ms: number
-  title: string
-  preamble: string
-  picks: ContextPick[]
-  extra: string
-  resolved: ContextResolved[]
-}
-
-/** One selected document as one attempt received it. */
-export interface ContextReceived {
-  role: ContextRole
-  slug: string
-  note?: string
-  title?: string
-  hash?: string
-  chars: number
-  delivered_chars: number
-  delivery: 'full' | 'partial' | 'omitted'
-  reason?: ContextReason
-}
-
-export interface ContextChange {
-  kind: 'added' | 'removed' | 'moved' | 'edited' | 'delivery'
-  slug: string
-  role: ContextRole
-  says: string
-}
-
-/** What one attempt at the item received. Written at launch, never rewritten. */
-export interface ContextReceipt {
-  session_id: string
-  work_item_id: string
-  channel: string
-  revision: number
-  digest: string
-  selection_hash?: string
-  received: ContextReceived[]
-  previous_session?: string
-  previous_revision?: number
-  changes: ContextChange[]
-  created_ms: number
-}
-
-export interface WorkContext {
-  slug: string
-  selection: ContextSelection | null
-  /** Newest first. */
-  attempts: ContextReceipt[]
-  roles: ContextRole[]
 }
 
 export type Blocker = { kind: 'open'; id: string } | { kind: 'unknown'; id: string } | { kind: 'cycle' }
@@ -2278,7 +1999,6 @@ export interface Continuation {
   workspace: { id: string; branch: string; session_id: string } | null
   decisions: {
     plan: string | null
-    brief: string | null
     answered: { session_id: string; kind: 'permission' | 'question'; asked: string; answer: string; at_ms: number }[]
   }
   evidence: {

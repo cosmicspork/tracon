@@ -76,8 +76,6 @@ const html = (slug, title, o = {}) =>
 const personal = [
   doc('architecture-boundary', 'Boundary: gateway, egress and the session container', { updated_ms: -86400000 * 9 }),
   doc('architecture-mesh', 'Mesh: hub relay, sealed envelopes and HLC replication', { updated_ms: -86400000 * 21 }),
-  doc('brief-rate-limits', 'Brief: per-route rate limits for the orbit API', { updated_ms: -7200000 }),
-  doc('context-wi-2', 'Selected context for wi-2', { updated_ms: -5400000 }),
   doc('guide-release', 'Cutting a release with release-please', { pinned: true, updated_ms: -86400000 * 4 }),
   doc('guide-scratch-node', 'Running a scratch node beside the real one', { updated_ms: -86400000 * 2 }),
   doc('inbox-2026-10-07', 'Inbox 2026-10-07', { updated_ms: -900000 }),
@@ -357,20 +355,6 @@ const shownDoc = html('shown-0192f3a1-7c4e-7b9a-9d2e-5f8a1c3b6e04', 'shown-0192f
   ],
 })
 
-const contextDoc = doc('context-wi-2', 'Selected context for wi-2', {
-  updated_ms: -5400000,
-  body: `# Selected context for wi-2
-
-Every attempt at **wi-2 · per-route rate limits** starts with exactly this. Only the
-operator changes it; a session that tries gets \`context-wi-2 is a work item's
-selected context, which only the operator changes\`.
-
-- /docs/personal/brief-rate-limits
-- /docs/personal/architecture-boundary
-- memory \`m-01J9Z4\`: *the API gateway already counts requests per token; reuse it*
-`,
-})
-
 const html412 = (d) => ({
   status: 412,
   body: { error: { message: 'the document changed since it was read' }, hash: hex('theirs'), body: d },
@@ -489,7 +473,7 @@ export default [
     area,
     route: '/docs',
     title: 'Documents grouped by kind',
-    note: 'Groups in the node\'s order under its labels (Guide, Reference, … Inbox, then Brief, Context, Plan, Shown work, Other last); context-wi-2 under Context, scratch-ideas under Other. A Kind filter beside Channel; the header count matches the rows. Pinned doc carries no marker in the list.',
+    note: 'Groups in the node\'s order under its labels (Guide, Reference, … Inbox, then Plan, Shown work, Other last); scratch-ideas under Other. A Kind filter beside Channel; the header count matches the rows. Pinned doc carries no marker in the list.',
     api: { '/api/docs': populated },
   },
   {
@@ -510,7 +494,7 @@ export default [
     area,
     route: '/docs',
     title: 'A node configured with a runbook kind',
-    note: 'runbook-deploy and runbook-rotate-hub-cert under Runbook, after Inbox and before Brief, not under Other; Runbook in the Kind filter.',
+    note: 'runbook-deploy and runbook-rotate-hub-cert under Runbook, after Inbox and before Plan, not under Other; Runbook in the Kind filter.',
     api: {
       '/api/docs': listing({ personal: [...personal, ...runbooks] }, undefined, runbookKinds),
       '/api/docs/kinds': { kinds: runbookKinds },
@@ -640,7 +624,7 @@ export default [
     area,
     route: '/docs',
     title: 'New Markdown form with a slug typed',
-    note: 'The kinds hint is the node\'s writable list: guide, ref, architecture, proposal, repo, note, meeting, inbox, plan. It omits brief, context, shown and other.',
+    note: 'The kinds hint is the node\'s writable list: guide, ref, architecture, proposal, repo, note, meeting, inbox, plan. It omits shown and other.',
     api: { '/api/docs': populated },
     act: async (page) => {
       await page.getByRole('button', { name: 'New Markdown' }).click()
@@ -734,14 +718,6 @@ export default [
     title: 'Archived and pinned document',
     note: 'Header reads "· archived · pinned"; actions read Unpin and Unarchive.',
     api: { '/api/docs/personal/guide-release': { ...rich, archived: 1, pinned: 1 } },
-  },
-  {
-    id: 'docs-doc-context',
-    area,
-    route: '/docs/personal/context-wi-2',
-    title: 'A work item\'s selected context',
-    note: 'Operator-owned (sessions may not write it), but the page shows no hint of that and offers the usual Edit.',
-    api: { '/api/docs/personal/context-wi-2': contextDoc },
   },
   {
     id: 'docs-doc-action-failed',
@@ -975,7 +951,7 @@ export default [
       const d = page.locator('details.transfer')
       await d.getByPlaceholder('Immutable candidate ID').fill('cand-01J9ZA7Q4M2X-rate-limits')
       await d.locator('select').selectOption({ index: 1 })
-      await d.getByPlaceholder('guide-release, ref-api').fill('brief-rate-limits, architecture-boundary')
+      await d.getByPlaceholder('guide-release, ref-api').fill('plan-transfer-v2, architecture-boundary')
       await d.getByPlaceholder('What the next session should know').fill('Limits are wired for /v1/*; /admin/* still needs a bucket.')
       await d.evaluate((el) => el.scrollIntoView({ block: 'start' }))
     },

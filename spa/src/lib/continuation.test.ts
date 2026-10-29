@@ -61,7 +61,7 @@ const item = (over: Partial<Continuation> = {}): Continuation => ({
   blockers: [],
   next: { kind: 'done', text: '', session_id: null },
   workspace: { id: 'bbbbbbbb-2', branch: 'feat/rate-limits', session_id: 'bbbbbbbb-2' },
-  decisions: { plan: 'plan-wi-2', brief: null, answered: [] },
+  decisions: { plan: 'plan-wi-2', answered: [] },
   evidence: {
     reviews: [
       {
@@ -103,7 +103,7 @@ test('the links bar leaves out what the work does not have, and the task on its 
   const bare = item({
     attempts: [],
     workspace: null,
-    decisions: { plan: null, brief: null, answered: [] },
+    decisions: { plan: null, answered: [] },
     evidence: { reviews: [], shown: [] },
   })
   expect(read(workLinks(bare, { itemId: 'wi-2' }))).toEqual([])

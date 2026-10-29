@@ -13,7 +13,7 @@ const info = (kind: string, reserved = false): DocKindInfo => ({
 // As the node lists its defaults: configured, reserved, then other.
 const node = [
   ...['guide', 'ref', 'architecture', 'proposal', 'repo', 'note', 'meeting', 'inbox'].map((k) => info(k)),
-  ...['brief', 'context', 'plan', 'shown', 'other'].map((k) => info(k, true)),
+  ...['plan', 'shown', 'other'].map((k) => info(k, true)),
 ]
 
 const doc = (slug: string, kind: string, o: Partial<Document> = {}): Document => ({
@@ -35,9 +35,9 @@ const doc = (slug: string, kind: string, o: Partial<Document> = {}): Document =>
 
 const kinds = (docs: Document[], list = node) => groupDocs(docs, list).map(([kind, group]) => `${kind}:${group.length}`)
 
-test('a work item\'s selected context is listed under its own kind', () => {
-  const docs = [doc('guide-a', 'guide'), doc('context-0192f3a17c4e', 'context'), doc('plan-b', 'plan')]
-  expect(kinds(docs)).toEqual(['guide:1', 'context:1', 'plan:1'])
+test('shown work is listed under its own kind', () => {
+  const docs = [doc('guide-a', 'guide'), doc('shown-0192f3a17c4e', 'shown'), doc('plan-b', 'plan')]
+  expect(kinds(docs)).toEqual(['guide:1', 'plan:1', 'shown:1'])
 })
 
 test('a kind the interface does not name still gets a group, before other', () => {
@@ -47,14 +47,14 @@ test('a kind the interface does not name still gets a group, before other', () =
 
 test('every document is in exactly one group, archived ones last', () => {
   const docs = [
-    doc('context-a', 'context'),
-    doc('context-b', 'context', { archived: 1 }),
+    doc('plan-a', 'plan'),
+    doc('plan-b', 'plan', { archived: 1 }),
     doc('note-c', 'note'),
     doc('shown-d', 'shown'),
   ]
   const groups = groupDocs(docs, node)
   expect(groups.flatMap(([, list]) => list).length).toBe(docs.length)
-  expect(groups.map(([kind]) => kind)).toEqual(['note', 'context', 'shown', 'archived'])
+  expect(groups.map(([kind]) => kind)).toEqual(['note', 'plan', 'shown', 'archived'])
 })
 
 test('the groups follow the order the node lists its kinds in', () => {

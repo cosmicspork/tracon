@@ -204,13 +204,7 @@ impl Audience {
                     "{name} is not offered in {article} {} session",
                     phase.as_str()
                 );
-                if name == review::FINDING {
-                    format!(
-                        "{refusal}: only a review session records a finding; {} is how an \
-                         execute session says what would settle a criterion",
-                        work::CRITERIA_LINK
-                    )
-                } else if name == work::WORK_CLOSE {
+                if name == work::WORK_CLOSE {
                     format!(
                         "{refusal}: the operator closes the item a session holds, once its \
                          change is merged; until then it stays open for CI and review"
@@ -250,8 +244,6 @@ impl Tools {
         docs::DOC_READ,
         docs::DOC_SEARCH,
         docs::DOC_WRITE,
-        work::BRIEF_READ,
-        work::CRITERIA_READ,
         operator::ASK,
         operator::QUESTION_STATUS,
         operator::NOTIFY,
@@ -278,38 +270,27 @@ impl Tools {
     ];
 
     /// What an execute session is not offered: everything else is its to use.
-    /// A verdict and findings are a review session's account of someone
-    /// else's change, and closing the item is the operator's call: the item
-    /// stays open through CI and review until they close it.
-    pub const NOT_EXECUTE: &'static [&'static str] =
-        &[review::VERDICT, review::FINDING, work::WORK_CLOSE];
+    /// A verdict is a review session's account of someone else's change, and
+    /// closing the item is the operator's call: the item stays open through
+    /// CI and review until they close it.
+    pub const NOT_EXECUTE: &'static [&'static str] = &[review::VERDICT, work::WORK_CLOSE];
 
     /// The tools a review session gets: what it needs to read, what it needs
-    /// to exercise the candidate and show what it saw, its findings, and its
-    /// verdict. Nothing that publishes or reaches a forge.
+    /// to exercise the candidate and show what it saw, and its verdict.
+    /// Nothing that publishes or reaches a forge.
     pub const REVIEW_TOOLS: &'static [&'static str] = &[
         memory::RECALL,
         docs::DOC_READ,
         docs::DOC_SEARCH,
-        // What good was agreed to be, where the item said so. A reviewer
-        // asked to judge against criteria it cannot read is judging its own.
-        work::BRIEF_READ,
-        // And which of those criteria anything actually points at: a reviewer
-        // that cannot see an uncovered criterion cannot say it is uncovered.
-        work::CRITERIA_READ,
-        // What it thinks would settle a criterion, asked like any session's.
-        work::CRITERIA_LINK,
         // The item under review and its neighbours, read-only.
         work::WORK_LIST,
         work::WORK_SHOW,
-        // Running the candidate where no check settles a criterion: a
-        // browser beside the session, decided by the policy bundle by name,
-        // and what it saw shown to the operator, bound to the candidate.
+        // Running the candidate: a browser beside the session, decided by
+        // the policy bundle by name, and what it saw shown to the operator,
+        // bound to the candidate.
         services::START,
         services::STATUS,
         show::SHOW,
-        // Per criterion, what running it showed: never a verdict on one.
-        review::FINDING,
         review::VERDICT,
     ];
 
@@ -330,28 +311,17 @@ impl Tools {
                 operator::ASK,
             ],
             Phase::Execute => &[review::SUBMIT, review::STATUS, show::SHOW, operator::ASK],
-            Phase::Review => &[
-                review::VERDICT,
-                review::FINDING,
-                work::CRITERIA_READ,
-                show::SHOW,
-            ],
+            Phase::Review => &[review::VERDICT, show::SHOW],
         }
     }
 
-    /// What an external harness is not offered: a verdict and findings are
-    /// what a review session the node started gives on someone else's change,
-    /// and the brief and criteria tools read and write the item a session
-    /// holds, which an external harness never does. Nor does it run behind
-    /// the node's proxy, beside the node's services, or in a repository the
-    /// node can set up: those tools refuse it, so it is not shown them.
+    /// What an external harness is not offered: a verdict is what a review
+    /// session the node started gives on someone else's change. Nor does it
+    /// run behind the node's proxy, beside the node's services, or in a
+    /// repository the node can set up: those tools refuse it, so it is not
+    /// shown them.
     pub const NOT_EXTERNAL: &'static [&'static str] = &[
         review::VERDICT,
-        review::FINDING,
-        work::BRIEF_READ,
-        work::BRIEF_NOTE,
-        work::CRITERIA_READ,
-        work::CRITERIA_LINK,
         egress::REQUEST,
         services::START,
         services::STATUS,
@@ -403,8 +373,7 @@ impl Tools {
         // allowed, and publishing is what needs one. An agent that cannot
         // publish can still ask for review and be told why it stopped there.
         if self.session.get().is_some() {
-            let browser = self.cfg.service.iter().any(|s| s.name == services::BROWSER);
-            out.extend(review::definitions(browser));
+            out.extend(review::definitions());
             // Memory and documents need no credential either: the corpus is
             // the node's own, and reading it is what every session starts by
             // doing. This means every session gets an MCP server.
@@ -698,8 +667,7 @@ impl Tools {
             | review::STATUS
             | review::SUBMIT_REPORT
             | review::REPORT_STATUS
-            | review::VERDICT
-            | review::FINDING => {
+            | review::VERDICT => {
                 let access = self
                     .session
                     .get()
@@ -753,11 +721,7 @@ impl Tools {
             | work::WORK_LIST
             | work::WORK_SHOW
             | work::WORK_UPDATE
-            | work::WORK_DELETE
-            | work::BRIEF_READ
-            | work::BRIEF_NOTE
-            | work::CRITERIA_READ
-            | work::CRITERIA_LINK => {
+            | work::WORK_DELETE => {
                 let access = self
                     .session
                     .get()
@@ -2309,11 +2273,6 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
                 format!("{name} ({})", narrowed.join(", "))
             }
         }
-        work::BRIEF_NOTE => with(format!("{name} {}", id("field")), first_line("text")),
-        work::CRITERIA_LINK => with(
-            format!("{name} {} {}", id("criterion"), id("kind")),
-            first_line("value"),
-        ),
         review::SUBMIT_REPORT => with(name.to_string(), text("title")),
         jira::ISSUE_TRANSITION => {
             format!("{name} {}: transition {}", id("key"), id("transition_id"))

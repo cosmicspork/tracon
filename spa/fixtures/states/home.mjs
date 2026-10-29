@@ -1198,7 +1198,6 @@ export default [
             { key: 'checks', message: 'no required checks; add `checks` to its [[repo]] entry' },
             { key: 'credential', message: 'GitHub credential `gh`: not bound to channel personal on this node' },
           ],
-          [{ key: 'brief', message: 'no brief, so the review has no requirements to judge' }],
         ),
       }),
     }),

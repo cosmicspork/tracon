@@ -1758,6 +1758,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE review ADD COLUMN gone_confirmed_ms INTEGER;
     "#,
+    // 77: the product brief, its acceptance criteria and a work item's
+    // selected context are gone, and with them the operator's judgements on
+    // criteria (43), the receipts of what each attempt was given (42), and a
+    // reviewer's findings against criteria (67). None of them replicated.
+    r#"
+    DROP TABLE IF EXISTS criterion_judgement;
+    DROP TABLE IF EXISTS context_receipt;
+    DROP TABLE IF EXISTS review_finding;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

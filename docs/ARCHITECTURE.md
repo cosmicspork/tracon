@@ -1601,8 +1601,7 @@ an event, so the transcript shows what the agent was told.
 system orientation is generated from the node's own state: the node and harness,
 the item and phase, the tool names this channel serves, the enforced agreements.
 It is followed by sections that carry a heading saying they are not tracon's —
-*Operator notes*, the standing text on the channel's launch manifest; *Selected
-context*, the documents the operator chose for this work item; and *Pinned
+*Operator notes*, the standing text on the channel's launch manifest; and *Pinned
 documents*, the ones the operator pinned to every session on the channel. A
 session that cannot tell a system fact from a human's preference weighs neither
 correctly, so the boundary is stated rather than left to be inferred.
@@ -1610,8 +1609,8 @@ correctly, so the boundary is stated rather than left to be inferred.
 **Orientation also reserves its space for the work before the guides.** What the
 session is for and what bounds it — the node it runs on, the item and phase, the
 plan or the diff under review, the enforced agreements, the operator's directives,
-notes and launch customization, the item's selected context and the channel's
-pinned documents — is assembled first and is never dropped to make room for
+notes and launch customization, and the channel's pinned documents — is
+assembled first and is never dropped to make room for
 anything else. Other ready work is discretionary and gets what is left of the
 context cap, in ledger order.
 The cap used to be enforced by truncating
@@ -1667,8 +1666,8 @@ sessions that held it. A plain session's attempts are its lineage, meaning what 
 continued and what continued it, so it gets the same view without being made into
 an item. The view (`/api/work/{id}/continuation`, `/api/sessions/{id}/continuation`)
 gathers what the work was for (the item, or the first prompt), each attempt and how
-it ended, what the operator decided (answered permissions and questions, and the plan
-and brief), what is in the way, the workspace the latest attempt left, and the
+it ended, what the operator decided (answered permissions and questions, and the plan),
+what is in the way, the workspace the latest attempt left, and the
 reviews and shown work. It also gives the one next action. Every part of that is
 read from recorded state, and the next action follows fixed rules over those records,
 so it cannot claim more than they say. Once the work is published, the next action
@@ -1697,146 +1696,6 @@ harness's own compaction (`/compact` for Claude Code) on a live session between 
 or on one that ended by reopening it for that, and records `context_compacted` as
 automatic compaction does.
 
-### The product brief
-
-An item may point at one document that says what the work is for: intended user,
-problem, source references, constraints, success criteria, open questions. It is
-an extension of the item and the corpus, not a second store — the brief is a
-document of kind `brief`, the link is one nullable column on the item, and the
-evidence it rests on is referenced, never copied. An item without a brief is not
-an incomplete item; no phase asks for one.
-
-**Every line says who is behind it, and the node enforces the part an agent
-cannot be trusted to keep about itself.** A line is `observed` (the customer said
-or did this), `inferred` (someone reasoned to it), `decided` (the operator chose
-it), or, written by hand with no marker, `unattributed` — which stays
-unattributed rather than being promoted to one of the three. A session may not
-record a decision, because deciding is the operator's, and may not record an
-observation citing nothing, because an observation no one can check is an
-inference; a line a session does write carries a reference to that session, in
-the document. The shipped agreements name `brief_read` and do not name
-`brief_note`, so reading is free and every line an agent would add is asked.
-
-**Lines point at evidence rather than holding it.** A reference is
-`[doc:slug]`, `[session:id]`, `[evidence:id]`, `[work:id]`, `[url:…]` or
-`[file:path]`, and reading a brief resolves what this node can: a reference it
-has never seen is marked unknown, the way an unknown dependency is, instead of
-being rendered as a link that goes nowhere. A bracket in an unknown shape is
-prose, not a broken link.
-
-The document is the record. It is Markdown that round-trips: the structure is a
-reading of the file, not a schema the file depends on, so a brief can be written
-or edited by hand with no node running, and a section or a heading this node does
-not recognize is kept and written back rather than dropped for not fitting. A
-section with no lines says what it does not say — an empty success-criteria
-section reads as "no success criteria stated" — because a brief that has never
-heard from the customer should look like one rather than like a tidy form.
-
-### Criteria bound to what would settle them
-
-A success criterion is not a new record: it is a line in the brief's success
-criteria section, and what points at it is an indented line under it naming a
-`check`. The document stays the record, so links travel with the channel,
-round-trip, and are editable by hand. A check is the one link kind anything
-produces a result for; whatever a check cannot settle is the operator's
-judgement, recorded as a verdict rather than a link. The `scenario` and
-`observation` kinds an older brief may hold are retired: they are still read,
-so the file round-trips and they are not mistaken for criteria of their own,
-shown as retired, counted for nothing, and refused for anything new.
-
-**A criterion is named by its own text.** `sc-` and twelve hex characters of
-the SHA-256 hash of the line with only outer whitespace trimmed. Case,
-punctuation, comparison operators and internal whitespace are significant:
-changing the requirement requires a fresh judgement, never an inherited one.
-Reordering does not change identity. Earlier verdict rows are retained; on the
-same brief, a changed criterion leaves its prior verdict visible as orphaned.
-Switching briefs does not transfer a verdict even when the text matches.
-Identical lines remain separate display rows, both marked as duplicates; neither
-can be linked or judged until the brief distinguishes them.
-
-**An agent may propose what good means; the operator decides it.** A link
-carries the same provenance as every other brief line and is checked by the same
-rule, so a session's link is `inferred` and a `decided` one is refused. Coverage
-follows: a criterion whose only links are somebody's proposal reads as
-`only_proposed`, not as covered, however green that proposal would go. A `check`
-resolves only against the commands the operator configured — any other is
-recorded and reported as never running.
-
-**Passing one's own checks is not the customer agreeing.** A check result raises
-a criterion as far as `checks_pass`, shown as "checks pass · unjudged".
-The word *met* comes from append-only, node-local `criterion_judgement` rows
-written only by the operator; review sessions may read criteria, but no MCP tool
-settles one. An explicit candidate must belong to the item's channel and be
-associated by its owner session or a pinned review revision. When provided, a
-revision must pin that same item and candidate. An omitted or null candidate
-on a judgement write means no attempt, even if a new candidate was captured
-after the screen loaded; candidate-specific verdicts name the attempt the
-operator saw. Reads with no candidate still default to the newest attempt.
-An earlier verdict does not settle a later candidate. Index-based link removal
-requires the displayed brief hash: another editor's change refuses a stale
-index instead of deleting a different link.
-
-**A reviewer may exercise the candidate; it still does not judge.** A review
-session is offered `service_start` (the catalogue's browser, run unattended by
-the shipped policy), `show_work` and `review_finding` beside its verdict. What
-it shows goes on its own review, marked with the review's candidate rather than
-its checkout's commit. A finding is one append-only, node-local
-`review_finding` row per criterion and candidate — `supported`, `contradicted`
-or `not_shown`, a note, and the ids of work that session showed at that
-candidate — and is always `inferred`. It moves coverage only to
-`verified_unjudged` ("verified · unjudged"), unless an agreed check is failing,
-or to `contradicted_unjudged`; a person's verdict outranks both, `not_shown`
-moves nothing, and a finding about one candidate says nothing about the next.
-The verdict on the diff (`review_verdict`) stays separate. A reviewer's
-`criteria_link` is asked like any session's.
-
-Beside the criteria the view carries the gaps: what nothing points at, what
-nobody has judged, every inferred or unattributed line in the brief, the
-questions it still asks, and the orphaned verdicts — because a coverage view
-that lists only what is covered reads as though that were everything there is.
-
-### Selected context
-
-The brief says what the work is for; it is not everything an attempt should start
-from. The research behind it, the decisions already taken, the constraints the
-answer must keep and the documents that matter to this item and not to the whole
-channel are chosen by the operator, per item, and **follow every subsequent
-attempt** — plan, execute, review, and the revised attempt after a request for
-changes. Channel-wide pinned documents and memory recall are not a substitute:
-one is chosen for every session on the channel, the other for whatever the query
-happened to match.
-
-The selection is a document of kind `context`, `context-<item>`, beside the
-item's `brief-` and `plan-`: one line per document, `- [doc:slug] why it is
-here`, under a heading naming its role — Brief, Research, Decisions, Constraints
-or Documents. It travels with the channel and is readable and editable by hand
-with no node running; prose written into it that is not a selection line is
-kept. It is the operator's: `doc_write` refuses a `context-` slug outright,
-before the policy gate would put it to the operator as an ordinary edit, because
-a session choosing its own context is the substitution the selection exists to
-prevent. A session that thinks a document belongs asks.
-
-**What each attempt received is recorded, not inferred from the selection.** At
-launch the node resolves each selected document against what it holds and places
-it in the orientation in full, in role order, within an allowance of its own
-(48,000 characters) that nothing discretionary can spend. A document not on this
-node, archived, an HTML bundle, or past the allowance is not dropped silently: it
-is named in the orientation with the call that fetches it, and marked on the
-receipt. The receipt — one per session, never rewritten — records every selected
-document's role, slug, hash and delivery: whole, cut short, or left out and why.
-Its digest is over what was received, not who received it, and the item's
-context **revision** counts distinct digests, so two attempts that started from
-the same bytes share a revision and the first to start from something new mints
-the next. Each receipt also names what changed since the previous attempt at the
-item — a document added, removed, moved between roles, edited since, or
-delivered differently — and the orientation says so in one line ("Context
-revision 3 for this item. Since the previous attempt (revision 2): `ref-traces`
-edited since the previous attempt"). An item whose selection was removed after an
-attempt used it still gets a receipt, so the removal is visible rather than
-indistinguishable from never having had one. Receipts are node-local, like a
-launch manifest's revisions; the exact text an attempt was given is also on its
-orientation event.
-
 ## Sessions, phases, budgets
 
 Plan, execute, and review are **separate sessions the node spawns**, not phases
@@ -1853,12 +1712,10 @@ publishing ask different things of a repository, and `GET /api/readiness` (the l
 under the composer) says what each lacks before a session is spent finding out. An
 investigation needs a node that would start it and a forge repository to start it
 in (one not cloned yet is noted, "not cloned yet (will clone)", not held against
-it), and nothing else: no checks, no forge credential, no brief. Verifying adds required
+it), and nothing else: no checks, no forge credential. Verifying adds required
 checks and an image they can run in, since without them nothing the node runs can
 vouch for the result. Publishing adds an `origin` on a forge the node publishes to
-and that forge's credential bound to the channel; a work item with no brief is noted
-there, since its review will have no requirements to judge against, but not held
-against it. The answer only reads: it builds no image, calls no forge and starts no
+and that forge's credential bound to the channel. The answer only reads: it builds no image, calls no forge and starts no
 session.
 
 Budgets are denominated in tokens (dollars are derived where a provider binding
@@ -2012,7 +1869,7 @@ Every node serves the same embedded SPA; a client is a matter of shell.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
   and publishing need the owner's worktree and broker. A mirrored review's checks,
-  evidence, criteria, staleness and forge intent are read from the owner when it is
+  evidence, staleness and forge intent are read from the owner when it is
   opened, bounded like candidate evidence. The owner answers only for a review it holds,
   on a channel both nodes share. An owner that cannot be read, or that has moved on to
   a revision not yet mirrored, is said to be, rather than shown as an empty review.

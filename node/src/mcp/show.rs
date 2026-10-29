@@ -62,7 +62,7 @@ pub fn definitions() -> Vec<Value> {
                         `review_id` to attach it to one review only. A harness you run yourself \
                         must pass `review_id`, and paths are read from that review's worktree. \
                         In a review session it goes on the review you are reviewing, marked with \
-                        that review's candidate, and is what review_finding cites as evidence.",
+                        that review's candidate.",
         "inputSchema": {
             "type": "object",
             "properties": {

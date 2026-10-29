@@ -240,10 +240,6 @@ pub mod event_kind {
     pub const REVIEW_REJECTED: &str = "review_rejected";
     /// A review session gave its verdict on the review it was spawned for.
     pub const REVIEW_VERDICT: &str = "review_verdict";
-    /// A review session recorded what exercising the candidate showed of one
-    /// criterion (`review_id`, `criterion`, `criterion_text`, `outcome`,
-    /// `note`, `evidence`). Its account, never a verdict on the criterion.
-    pub const REVIEW_FINDING: &str = "review_finding";
     /// An operator persisted a review decision. Authority-driven transitions
     /// intentionally do not emit this human-intervention metric.
     pub const REVIEW_DECISION: &str = "review_decision";

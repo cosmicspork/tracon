@@ -3037,17 +3037,14 @@ async fn orientation_with(
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
 ) -> Orientation {
-    orientation_setup(tag, launch_with, pinned_docs, false, &[], Phase::Plan).await
+    orientation_setup(tag, launch_with, pinned_docs, &[], Phase::Plan).await
 }
 
-/// The whole setup, optionally with a context the operator selected for the
-/// item before its session starts: one research document this node holds and
-/// one constraint it does not. The session runs in `phase`.
+/// The whole setup. The session runs in `phase`.
 async fn orientation_setup(
     tag: &str,
     launch_with: Option<Arc<dyn HarnessAdapter>>,
     pinned_docs: usize,
-    with_context: bool,
     prepare: &[&str],
     phase: Phase,
 ) -> Orientation {
@@ -3168,50 +3165,6 @@ async fn orientation_setup(
         },
     )
     .unwrap();
-    if with_context {
-        let doc = |slug: &str, body: &str| {
-            tracon::mcp::docs::write_document(
-                &store,
-                &Bus::new(),
-                &tracon::config::default_doc_kinds(),
-                "n1",
-                "personal",
-                slug,
-                body,
-                None,
-                false,
-                None,
-                None,
-            )
-            .unwrap();
-        };
-        doc(
-            "ref-ledger-research",
-            "# Ledger research\n\nOperators read ready work first thing.",
-        );
-        tracon::corpus::context::write(
-            &store,
-            &Bus::new(),
-            "n1",
-            &item.id,
-            tracon::corpus::context::SelectionInput {
-                picks: vec![
-                    tracon::corpus::context::PickInput {
-                        role: "research".into(),
-                        slug: "ref-ledger-research".into(),
-                        note: "why ready work matters".into(),
-                    },
-                    tracon::corpus::context::PickInput {
-                        role: "constraints".into(),
-                        slug: "guide-elsewhere".into(),
-                        note: String::new(),
-                    },
-                ],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
     // An execute session carries out the item's plan, so there is one.
     if phase == Phase::Execute {
         let slug = tracon::corpus::work::plan_slug(&item.id);
@@ -3427,7 +3380,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
 async fn a_session_is_told_whether_its_workspace_was_prepared() {
     state::isolate();
     let Orientation { store, row, .. } =
-        orientation_setup("prepared", None, 0, false, &["make deps"], Phase::Plan).await;
+        orientation_setup("prepared", None, 0, &["make deps"], Phase::Plan).await;
     let mut events = Vec::new();
     for _ in 0..300 {
         events = store.events_after(&row.id, 0, 500).unwrap();
@@ -3633,67 +3586,6 @@ async fn pinned_documents_do_not_cost_a_session_its_task_or_its_directives() {
     tracon::session::materialize::remove(&row.id);
 }
 
-/// The documents the operator selected for the item reach the session in
-/// full, the one the node could not deliver is named, and what the session
-/// received is on record — as a receipt against the item, and on the
-/// orientation event the operator reads.
-#[tokio::test]
-async fn a_session_receives_its_items_selected_context_and_the_receipt_is_kept() {
-    state::isolate();
-    let Orientation {
-        store, item, row, ..
-    } = orientation_setup("context", None, 0, true, &[], Phase::Plan).await;
-
-    let mut found = None;
-    for _ in 0..300 {
-        if let Some(e) = store
-            .events_after(&row.id, 0, 500)
-            .unwrap()
-            .into_iter()
-            .find(|e| e.kind == "orientation")
-        {
-            found = Some(e);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let e = found.expect("no orientation event");
-    let text = e.payload["text"].as_str().unwrap();
-    assert!(text.contains("## Selected context"), "{text}");
-    assert!(text.contains("Context revision 1 for this item."), "{text}");
-    assert!(
-        text.contains("Operators read ready work first thing."),
-        "{text}"
-    );
-    assert!(text.contains("guide-elsewhere"), "{text}");
-    assert_eq!(e.payload["context"]["revision"], 1, "{}", e.payload);
-    assert_eq!(
-        e.payload["context"]["omitted"],
-        json!(["guide-elsewhere"]),
-        "{}",
-        e.payload
-    );
-
-    let receipt = store
-        .context_receipt_for(&row.id)
-        .unwrap()
-        .expect("a receipt for the session");
-    assert_eq!(receipt.work_item_id, item.id);
-    assert_eq!(receipt.received.len(), 2);
-    assert_eq!(
-        receipt.received[0].delivery,
-        tracon::corpus::context::Delivery::Full
-    );
-    assert_eq!(
-        receipt.received[1].reason,
-        Some(tracon::corpus::context::Reason::Absent)
-    );
-
-    tracon::session::materialize::remove(&row.id);
-}
-
-/// Writing the plan document is the phase's artifact: not asked for, recorded
-/// on the item, and the session ends with `phase_done`.
 #[tokio::test]
 async fn writing_the_plan_document_ends_the_plan_phase() {
     state::isolate();
@@ -3776,7 +3668,7 @@ impl Held {
     }
 
     async fn in_phase(tag: &str, phase: Phase) -> Self {
-        let o = orientation_setup(tag, None, 0, false, &[], phase).await;
+        let o = orientation_setup(tag, None, 0, &[], phase).await;
         o.manager.set_default_adapter(o.adapter.clone());
         // The kickoff turn has run and the session is idle, its own tool
         // token registered before the test's replaces it.
@@ -5217,7 +5109,7 @@ async fn the_node_wakes_an_exhausted_session_or_carries_it_on() {
         adapter,
         row,
         ..
-    } = orientation_setup("exhausted-wake", None, 0, false, &[], Phase::Plan).await;
+    } = orientation_setup("exhausted-wake", None, 0, &[], Phase::Plan).await;
     manager.set_default_adapter(adapter.clone());
     let wait = |id: String, want: &'static str| {
         let store = store.clone();
@@ -5379,7 +5271,7 @@ async fn raising_the_budget_lets_a_session_held_at_it_carry_on() {
         tools,
         row,
         ..
-    } = orientation_setup("budget-raise", None, 0, false, &[], Phase::Plan).await;
+    } = orientation_setup("budget-raise", None, 0, &[], Phase::Plan).await;
     let id = row.id.clone();
     let session = || store.get_session(&id).unwrap().unwrap();
     let settled = || async {
@@ -6354,7 +6246,7 @@ impl HarnessAdapter for Reopening {
 /// the operator's API.
 async fn reopening(tag: &str) -> (Orientation, Arc<Reopening>, axum::Router) {
     let adapter = Reopening::new();
-    let o = orientation_setup(tag, Some(adapter.clone()), 0, false, &[], Phase::Execute).await;
+    let o = orientation_setup(tag, Some(adapter.clone()), 0, &[], Phase::Execute).await;
     o.manager.set_adapter(adapter.clone());
     for _ in 0..1200 {
         let s = o.store.get_session(&o.row.id).unwrap().unwrap();
