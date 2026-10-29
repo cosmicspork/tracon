@@ -56,21 +56,10 @@ pub struct Reserved {
     pub description: &'static str,
 }
 
-/// The reserved kinds. A work item's selected context (`corpus::context`)
-/// and shown work (`show_work`) are refused to `doc_write`; a brief is what
-/// the work tools read an item's criteria from; `plan-<item>`, written in a
-/// plan session, is the plan artifact that ends the phase.
+/// The reserved kinds. Shown work (`show_work`) is refused to `doc_write`;
+/// `plan-<item>`, written in a plan session, is the plan artifact that ends
+/// the phase.
 pub const RESERVED: &[Reserved] = &[
-    Reserved {
-        kind: corpus::brief::KIND,
-        label: "Brief",
-        description: "a work item's brief: what it is for and how it is judged",
-    },
-    Reserved {
-        kind: corpus::context::KIND,
-        label: "Context",
-        description: "a work item's selected context, which only the operator changes",
-    },
     Reserved {
         kind: PLAN,
         label: "Plan",
@@ -189,22 +178,13 @@ pub fn title_of(kinds: &[DocKind], slug: &str, body: &str) -> String {
         })
 }
 
-/// A work item's selected context is the operator's choice of what every
-/// attempt at the item starts with (`corpus::context`). A session writing it
-/// would be choosing its own context — the substitution the selection exists
-/// to prevent — so `doc_write` refuses the slug outright, before the policy
+/// Shown work is reserved: only `show_work` writes it, bound to the commit it
+/// was shown at, and an edit or delete through the document tools would be an
+/// account nobody showed at any commit. Refused outright, before the policy
 /// gate would put it to the operator as an ordinary document edit.
-///
-/// Shown work is reserved too: only `show_work` writes it, bound to the
-/// commit it was shown at, and an edit through `doc_write` would be an account
-/// nobody showed at any commit.
-pub fn reserved_for_operator(args: &Value) -> Option<String> {
+pub fn reserved_refusal(args: &Value) -> Option<String> {
     let slug = args["slug"].as_str().unwrap_or("").trim();
     match reserved_kind_of(slug)? {
-        corpus::context::KIND => Some(format!(
-            "`{slug}` is a work item's selected context, which only the operator changes. \
-             Say which document belongs in it, and why, with `ask_operator`."
-        )),
         SHOWN => Some(format!(
             "`{slug}` is work shown to the operator, which only `show_work` writes. Show the \
              work again with `show_work`."
@@ -260,19 +240,6 @@ pub fn approval_title(summary: &str, document: Option<&DocumentRow>) -> String {
 /// The kind of the documents `show_work` stores its pages and files in.
 pub const SHOWN: &str = "shown";
 
-/// What `doc_delete` refuses outright: every slug `doc_write` refuses, and a
-/// brief, which the work tools own and an item's criteria are read from.
-fn reserved_from_delete(args: &Value) -> Option<String> {
-    let slug = args["slug"].as_str().unwrap_or("").trim();
-    if reserved_kind_of(slug) == Some(corpus::brief::KIND) {
-        return Some(format!(
-            "`{slug}` is a work item's brief, which the work tools keep. Say why it should go \
-             with `ask_operator`."
-        ));
-    }
-    reserved_for_operator(args)
-}
-
 /// Everything a document call can be refused for that its arguments alone
 /// decide: a reserved slug, a slug that is not one, a format that is not
 /// one, or an HTML body over the per-file limit. Checked before the call is
@@ -280,8 +247,7 @@ fn reserved_from_delete(args: &Value) -> Option<String> {
 /// and again when an allowed call runs, against the arguments as allowed.
 pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
     let reserved = match name {
-        DOC_WRITE => reserved_for_operator(args),
-        DOC_DELETE => reserved_from_delete(args),
+        DOC_WRITE | DOC_DELETE => reserved_refusal(args),
         _ => return None,
     };
     if reserved.is_some() {
@@ -296,11 +262,6 @@ pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
             Ok(format) => format,
             Err(error) => return Some(error.to_string()),
         };
-        if format == Format::Html && reserved_kind_of(slug) == Some(corpus::brief::KIND) {
-            return Some(format!(
-                "`{slug}` is a work item's brief, which the work tools read as Markdown only"
-            ));
-        }
         let body = args["body"].as_str().unwrap_or("");
         if format == Format::Html && body.len() > corpus::html::MAX_FILE_BYTES {
             return Some(
@@ -411,9 +372,8 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
         .into_iter()
         .filter_map(|k| k["kind"].as_str().map(str::to_string))
         .collect();
-    // What `doc_write` may write: every configured kind, and the plan. A
-    // brief is the work tools' to write, and context and shown work are
-    // refused (`reserved_for_operator`).
+    // What `doc_write` may write: every configured kind, and the plan. Shown
+    // work is refused (`reserved_refusal`).
     let writable: Vec<String> = kinds
         .iter()
         .map(|k| match k.description.is_empty() {
@@ -475,8 +435,7 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
             "name": DOC_DELETE,
             "description": "Delete a document on this channel, in either format; an HTML \
                 document's bundle goes with it. Pass if_hash (from doc_read) to refuse deleting \
-                an edit you have not seen. A work item's brief, its selected context and shown \
-                work are refused. The operator is always asked. An asked call returns \
+                an edit you have not seen. Shown work is refused. The operator is always asked. An asked call returns \
                 `awaiting_operator` with an `approval_id` at once, and approval_status reports \
                 the outcome.",
             "inputSchema": {
@@ -865,12 +824,7 @@ mod tests {
         assert_eq!(kind_of(&kinds, "runbook-deploy"), "runbook");
         assert_eq!(kind_of(&kinds, "meeting-weekly"), OTHER);
         // The reserved kinds hold whatever the list says.
-        for (slug, kind) in [
-            ("context-0192f3a17c4e", "context"),
-            ("shown-x", "shown"),
-            ("brief-x", "brief"),
-            ("plan-x", "plan"),
-        ] {
+        for (slug, kind) in [("shown-x", "shown"), ("plan-x", "plan")] {
             assert_eq!(kind_of(&[], slug), kind, "{slug}");
         }
         assert!(is_working_note(&kinds, "note-x"));
@@ -955,8 +909,6 @@ mod tests {
                 "meeting",
                 "inbox",
                 "runbook",
-                "brief",
-                "context",
                 "plan",
                 "shown",
                 "other",
@@ -980,10 +932,10 @@ mod tests {
         assert_eq!(list[4]["reserved"], false);
         // A configured kind with no label is called by its prefix.
         assert_eq!(list[8]["label"], "runbook");
-        assert_eq!(list[11]["label"], "Plan");
+        assert_eq!(list[9]["label"], "Plan");
+        assert_eq!(list[9]["reserved"], true);
+        assert_eq!(list[11]["label"], "Other");
         assert_eq!(list[11]["reserved"], true);
-        assert_eq!(list[13]["label"], "Other");
-        assert_eq!(list[13]["reserved"], true);
     }
 
     #[test]
@@ -1012,10 +964,7 @@ mod tests {
         assert!(write.contains("`plan`"), "{write}");
         assert!(!write.contains("`meeting`"), "{write}");
         // Refused to doc_write, so not offered by it.
-        assert!(
-            !write.contains("`context`") && !write.contains("`shown`"),
-            "{write}"
-        );
+        assert!(!write.contains("`shown`"), "{write}");
     }
 
     #[test]

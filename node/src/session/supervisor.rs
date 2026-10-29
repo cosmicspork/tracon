@@ -1415,7 +1415,7 @@ impl Supervisor {
         // The node's own MCP tools are gated where they run: the MCP server
         // decides each call against the same policy and queues what it must
         // ask (`mcp::Tools::call`). A harness asking first would put every
-        // read of the brief or the work item in front of the operator twice,
+        // read of a document or the work item in front of the operator twice,
         // and the plan document the phase exists to write behind a prompt the
         // server deliberately does not raise.
         if node_tool(&request.action) {
@@ -2570,7 +2570,7 @@ mod tests {
 
     #[test]
     fn only_the_node_s_own_tools_skip_the_harness_ask() {
-        assert!(node_tool("mcp__tracon__brief_read"));
+        assert!(node_tool("mcp__tracon__work_show"));
         assert!(node_tool("mcp__tracon__doc_write"));
         assert!(!node_tool("mcp__tracon__"));
         assert!(!node_tool("mcp__other__doc_write"));

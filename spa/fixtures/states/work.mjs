@@ -1,10 +1,9 @@
 // The work ledger (/work), one work item (/work/:id) with its links bar and
-// continuation, brief, criteria and context panels, and the composer a work item
-// sends a phase to (/?item=…&phase=…) with its readiness banner and preparation
-// preview.
+// continuation, and the composer a work item sends a phase to
+// (/?item=…&phase=…) with its readiness banner and preparation preview.
 //
 // Every item state overrides /api/work (the item page reads it for dependency
-// titles), /api/work/:id, and its continuation and context, so no state leans on the baseline's single item.
+// titles), /api/work/:id, and its continuation, so no state leans on the baseline's single item.
 
 import { readFileSync } from 'node:fs'
 
@@ -54,7 +53,6 @@ const item = (o) => ({
   discovered_by_session: null,
   discovered_by_lane: null,
   phase_plan_slug: null,
-  brief_slug: null,
   closed_by_session: null,
   created_ms: -2 * D,
   updated_ms: -H,
@@ -110,13 +108,11 @@ const continuation = (it, o) => ({
   blockers: [],
   next: { kind: 'start', text: 'Nothing has run yet: plan it.', session_id: null },
   workspace: null,
-  decisions: { plan: it.phase_plan_slug, brief: it.brief_slug, answered: [] },
+  decisions: { plan: it.phase_plan_slug, answered: [] },
   evidence: { reviews: [], shown: [] },
   actions: { continue_from: null, abandon: it.state === 'open' },
   ...o,
 })
-
-const noContext = { slug: '', selection: null, attempts: [], roles: ['brief', 'research', 'decisions', 'constraints', 'documents'] }
 
 // The node's order: open items by priority desc then age, closed by last update.
 const order = (items) => [
@@ -150,188 +146,12 @@ function itemApi(it, o = {}) {
       item: it,
       sessions: o.sessions ?? [],
       discovered: o.discovered ?? [],
-      brief: o.brief ?? null,
-      criteria: o.criteria ?? null,
     },
     [`${path}/continuation`]: o.continuation ?? (it === planned ? plannedContinuation : continuation(it)),
-    [`${path}/context`]: o.context ?? noContext,
     '/api/sessions': sessionsWithRun,
     ...(o.api ?? {}),
   }
 }
-
-// A brief with every kind of line, and a section left empty.
-const brief = (it, o = {}) => ({
-  channel: it.channel,
-  slug: `brief-${it.id.slice(0, 8)}`,
-  work_item_id: it.id,
-  hash: 'b4f1',
-  updated_ms: -5 * H,
-  title: `Brief: ${it.title}`,
-  preamble: 'Written after the gateway incident on the shared node; refine before the execute session.',
-  sections: [
-    {
-      field: 'intended_user',
-      heading: 'Intended user',
-      notes: '',
-      entries: [
-        { provenance: 'observed', text: 'An operator running two channels from one laptop, one of them for a client.', refs: [{ kind: 'doc', value: 'meeting-ops-sync', label: 'Ops sync, 3 Oct', known: true }] },
-      ],
-    },
-    {
-      field: 'problem',
-      heading: 'Problem',
-      notes: '',
-      entries: [
-        { provenance: 'observed', text: 'A burst of tool calls from one session starved the other channel for four minutes.', refs: [{ kind: 'doc', value: 'ref-burst-traces', label: 'Burst traces', known: true }, { kind: 'session', value: SID.exec1 }] },
-        { provenance: 'inferred', text: 'The gateway ceiling is daily, so nothing smooths a burst inside the day.', refs: [{ kind: 'file', value: 'node/src/gateway/ceiling.rs' }] },
-      ],
-    },
-    { field: 'source_references', heading: 'Source references', notes: '', entries: [{ provenance: 'unattributed', text: 'Token bucket notes from the earlier design.', refs: [{ kind: 'doc', value: 'note-token-bucket-old', known: false }] }] },
-    {
-      field: 'constraints',
-      heading: 'Constraints',
-      notes: '',
-      entries: [{ provenance: 'decided', text: 'No new table: the limiter keeps its state in memory and resets on restart.', refs: [] }],
-    },
-    {
-      field: 'success_criteria',
-      heading: 'Success criteria',
-      notes: '',
-      entries: [
-        { provenance: 'decided', text: 'A burst on one channel never delays another channel by more than a second.', refs: [] },
-        { provenance: 'inferred', text: 'The limit is configurable per channel in node.toml.', refs: [] },
-      ],
-    },
-  ],
-  extra: '',
-  counts: { observed: 2, inferred: 2, decided: 2, unattributed: 1 },
-  absent: [{ field: 'unresolved_questions', heading: 'Unresolved questions', says: 'no open questions recorded' }],
-  ...o,
-})
-
-const criterion = (o) => ({
-  key: 'c1',
-  text: 'A burst on one channel never delays another channel by more than a second.',
-  provenance: 'decided',
-  standard: 'agreed',
-  refs: [],
-  links: [],
-  coverage: 'nothing_points_at_it',
-  ...o,
-})
-
-const criteria = (it, o = {}) => ({
-  work_item_id: it.id,
-  channel: it.channel,
-  brief_slug: `brief-${it.id.slice(0, 8)}`,
-  hash: 'b4f1',
-  candidate: { id: 'cand-7e21', head_sha: 'e4b19c07a2d35f86e4b19c07a2d35f86e4b19c07', captured_ms: -50 * M },
-  criteria: [
-    criterion({
-      key: 'c1',
-      links: [{ index: 0, provenance: 'decided', standard: 'agreed', kind: 'check', value: 'cargo nextest run -p tracon-node gateway::limits', refs: [], outcome: 'passed', run_id: 'run-41' }],
-      coverage: 'checks_pass',
-    }),
-    criterion({
-      key: 'c2',
-      text: 'The limit is configurable per channel in node.toml.',
-      provenance: 'inferred',
-      standard: 'proposed',
-      links: [{ index: 0, provenance: 'inferred', standard: 'proposed', kind: 'check', value: 'cargo test config::channel_limits', refs: [], unresolved: 'not one of the checks the operator configured, so it never runs' }],
-      coverage: 'only_proposed',
-    }),
-    criterion({
-      key: 'c3',
-      text: 'Nothing new is written to disk by the limiter.',
-      links: [{ index: 0, provenance: 'decided', standard: 'agreed', kind: 'check', value: 'just test', refs: [], outcome: 'failed', run_id: 'run-42' }],
-      coverage: 'failing',
-    }),
-    criterion({
-      key: 'c4',
-      text: 'Operators can see why a call was delayed.',
-      links: [],
-      coverage: 'judged_met',
-      judgement: { id: 'j-1', verdict: 'met', note: 'the session log names the limiter and the wait', candidate_id: 'cand-7e21', criterion_text: 'Operators can see why a call was delayed.', judged_ms: -30 * M },
-    }),
-  ],
-  gaps: {
-    uncovered: ['c2'],
-    unjudged: ['c1', 'c2', 'c3'],
-    assumptions: [{ field: 'problem', heading: 'Problem', text: 'The gateway ceiling is daily, so nothing smooths a burst inside the day.', provenance: 'inferred' }],
-    questions: [],
-    orphaned_judgements: [],
-  },
-  summary: '4 criteria · 1 only the agent\'s proposal · 1 failing · 1 checks pass, unjudged · 1 judged met · 1 not an agreed standard · 1 assumption',
-  ...o,
-})
-
-const contextFull = (it) => ({
-  slug: `context-${it.id.slice(0, 8)}`,
-  roles: ['brief', 'research', 'decisions', 'constraints', 'documents'],
-  selection: {
-    channel: it.channel,
-    slug: `context-${it.id.slice(0, 8)}`,
-    work_item_id: it.id,
-    hash: 'c2',
-    updated_ms: -3 * H,
-    title: `Context: ${it.title}`,
-    preamble: '',
-    picks: [
-      { role: 'brief', slug: `brief-${it.id.slice(0, 8)}`, note: '' },
-      { role: 'research', slug: 'ref-burst-traces', note: "three bursts from last week's traces" },
-      { role: 'decisions', slug: 'note-token-bucket', note: '' },
-      { role: 'constraints', slug: 'guide-gateway-latency', note: 'p99 budget' },
-      { role: 'documents', slug: 'ref-gateway-dashboard', note: '' },
-    ],
-    extra: '',
-    resolved: [
-      { role: 'brief', slug: `brief-${it.id.slice(0, 8)}`, title: `Brief: ${it.title}`, known: true, chars: 2100 },
-      { role: 'research', slug: 'ref-burst-traces', title: 'Burst traces', known: true, chars: 4200 },
-      { role: 'decisions', slug: 'note-token-bucket', title: 'Token bucket, not leaky', known: true, chars: 1800 },
-      { role: 'constraints', slug: 'guide-gateway-latency', known: false, chars: 0, reason: 'absent' },
-      { role: 'documents', slug: 'ref-gateway-dashboard', title: 'Gateway dashboard', known: true, chars: 9000, reason: 'html' },
-    ],
-  },
-  attempts: [
-    {
-      session_id: SID.exec1,
-      work_item_id: it.id,
-      channel: it.channel,
-      revision: 2,
-      digest: 'd2',
-      selection_hash: 'c2',
-      received: [
-        { role: 'brief', slug: `brief-${it.id.slice(0, 8)}`, title: `Brief: ${it.title}`, hash: 'hb', chars: 2100, delivered_chars: 2100, delivery: 'full' },
-        { role: 'research', slug: 'ref-burst-traces', title: 'Burst traces', hash: 'h1b', chars: 42000, delivered_chars: 24000, delivery: 'partial', reason: 'cap' },
-        { role: 'decisions', slug: 'note-token-bucket', title: 'Token bucket, not leaky', hash: 'h2', chars: 1800, delivered_chars: 1800, delivery: 'full' },
-        { role: 'constraints', slug: 'guide-gateway-latency', chars: 0, delivered_chars: 0, delivery: 'omitted', reason: 'absent' },
-      ],
-      previous_session: SID.plan,
-      previous_revision: 1,
-      changes: [
-        { kind: 'edited', slug: 'ref-burst-traces', role: 'research', says: '`ref-burst-traces` edited since the previous attempt' },
-        { kind: 'added', slug: 'guide-gateway-latency', role: 'constraints', says: '`guide-gateway-latency` added as constraints' },
-        { kind: 'delivery', slug: 'ref-burst-traces', role: 'research', says: '`ref-burst-traces` was delivered in full, now cut short' },
-      ],
-      created_ms: -6 * H,
-    },
-    {
-      session_id: SID.plan,
-      work_item_id: it.id,
-      channel: it.channel,
-      revision: 1,
-      digest: 'd1',
-      selection_hash: 'c1',
-      received: [
-        { role: 'research', slug: 'ref-burst-traces', title: 'Burst traces', hash: 'h1a', chars: 3900, delivered_chars: 3900, delivery: 'full' },
-        { role: 'decisions', slug: 'note-token-bucket', title: 'Token bucket, not leaky', hash: 'h2', chars: 1800, delivered_chars: 1800, delivery: 'full' },
-      ],
-      changes: [],
-      created_ms: -26 * H,
-    },
-  ],
-})
 
 // The planned, worked-on item most panels are shown on.
 const planned = item({
@@ -340,7 +160,6 @@ const planned = item({
   body: 'The gateway refuses over-ceiling calls but nothing smooths bursts.\n\nAdd a token bucket per channel in front of the broker. Keep it in memory; no new table.',
   priority: 2,
   phase_plan_slug: 'plan-rate-limits',
-  brief_slug: `brief-${ID.limits.slice(0, 8)}`,
   created_ms: -2 * D,
 })
 const planSession = session({ id: SID.plan, phase: 'plan', end_reason: 'phase_done', tokens_used: 186_000, budget_tokens: 400_000, created_ms: -26 * H })
@@ -374,7 +193,7 @@ const prepClean = {
   ready: true,
 }
 const launchApi = (it, o = {}) => ({
-  [`/api/work/${it.id}`]: { item: it, sessions: [], discovered: [], brief: null, criteria: null },
+  [`/api/work/${it.id}`]: { item: it, sessions: [], discovered: [] },
   '/api/readiness': o.readiness ?? readinessAll,
   '/api/preparation': o.preparation ?? prepClean,
   ...(o.api ?? {}),
@@ -636,11 +455,11 @@ const states = [
     id: 'work-item-new',
     area: 'work',
     route: `/tasks/${ID.export}`,
-    title: 'New item: no plan, nothing run, no brief or context',
+    title: 'New item: no plan, nothing run',
     since: '#385',
-    note: 'continuation says plan it, and nothing else, since Execute is disabled with "needs a plan"; empty brief, criteria and context; discovered-from line',
+    note: 'continuation says plan it, and nothing else, since Execute is disabled with "needs a plan"; discovered-from line',
     api: itemApi(ledger.find((i) => i.id === ID.export), {
-      continuation: continuation(ledger.find((i) => i.id === ID.export), { decisions: { plan: null, brief: null, answered: [] } }),
+      continuation: continuation(ledger.find((i) => i.id === ID.export), { decisions: { plan: null, answered: [] } }),
     }),
   },
   {
@@ -678,7 +497,7 @@ const states = [
     note: 'standalone "Discovered by" row naming lane repo:planning; no "Discovered from" row; bound to project orbit like any worktree-bound item',
     api: (() => {
       const it = item({ id: ID.laned, title: 'Split the planning notes into one doc per milestone', discovered_by_lane: 'repo:planning', created_ms: -20 * M })
-      return itemApi(it, { continuation: continuation(it, { decisions: { plan: null, brief: null, answered: [] } }) })
+      return itemApi(it, { continuation: continuation(it, { decisions: { plan: null, answered: [] } }) })
     })(),
   },
   {
@@ -690,21 +509,18 @@ const states = [
     note: '"Discovered from" row links the parent and ends "· by lane repo:planning"; no session link, since no node session recorded it',
     api: (() => {
       const it = item({ id: ID.lanedChild, title: 'Link each milestone doc from the roadmap', discovered_from: ID.limits, discovered_by_lane: 'repo:planning', created_ms: -15 * M })
-      return itemApi(it, { continuation: continuation(it, { decisions: { plan: null, brief: null, answered: [] } }) })
+      return itemApi(it, { continuation: continuation(it, { decisions: { plan: null, answered: [] } }) })
     })(),
   },
   {
     id: 'work-item-planned',
     area: 'work',
     route: `/tasks/${ID.limits}`,
-    title: 'Planned item with brief, criteria and context',
+    title: 'Planned item',
     since: '#385',
-    note: 'continuation "The plan is written: execute it." — the node offers continue_from the plan session, so the primary button is Continue, which the node carries on as an execute session in the plan\'s workspace. Links bar: Plan doc and the plan session. Brief, criteria, context populated',
+    note: 'continuation "The plan is written: execute it." — the node offers continue_from the plan session, so the primary button is Continue, which the node carries on as an execute session in the plan\'s workspace. Links bar: Plan doc and the plan session',
     api: itemApi(planned, {
       sessions: [planSession],
-      brief: brief(planned),
-      criteria: criteria(planned),
-      context: contextFull(planned),
       continuation: continuation(planned, {
         attempts: [planAttempt],
         next: { kind: 'execute', text: 'The plan is written: execute it.', session_id: SID.plan },
@@ -751,7 +567,6 @@ const states = [
           workspace: { id: SID.run.slice(0, 12), branch: 'feat/retry-queue', session_id: SID.run },
           decisions: {
             plan: 'plan-retry-queue',
-            brief: null,
             answered: [
               { session_id: SID.run, kind: 'permission', asked: 'Bash: cargo nextest run -p tracon-node', answer: 'allow_always', at_ms: -30 * M },
               { session_id: SID.run, kind: 'question', asked: 'Should a push that fails while offline be retried after the device comes back, or dropped after an hour?', answer: 'retry with backoff, give up after 24h', at_ms: -12 * M },
@@ -812,9 +627,6 @@ const states = [
     note: 'Continue primary, Change approach secondary, Abandon; hovering the session in the links bar reads "node restarted"',
     api: itemApi(planned, {
       sessions: [planSession, session({ id: SID.exec1, phase: 'execute', model: 'opus', state: 'closed', end_reason: 'node_restart', tokens_used: 512_000, budget_tokens: 2_000_000, created_ms: -6 * H })],
-      brief: brief(planned),
-      criteria: criteria(planned),
-      context: contextFull(planned),
       continuation: continuation(planned, {
         attempts: [planAttempt, attempt({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'node_restart', tokens_used: 512_000, created_ms: -6 * H })],
         next: { kind: 'continue', text: `Session ${SID.exec1.slice(0, 8)} was cut off by a node restart; continue from its workspace.`, session_id: SID.exec1 },
@@ -836,9 +648,6 @@ const states = [
         session({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'node_restart', tokens_used: 512_000, budget_tokens: 2_000_000, created_ms: -6 * H }),
         session({ id: SID.exec2, phase: 'execute', model: 'opus', state: 'failed', end_reason: 'error', last_error: 'tests never passed', tokens_used: 1_204_000, budget_tokens: 2_000_000, continued_from: SID.exec1, created_ms: -3 * H }),
       ],
-      brief: brief(planned),
-      criteria: criteria(planned),
-      context: contextFull(planned),
       continuation: continuation(planned, {
         attempts: [
           planAttempt,
@@ -864,7 +673,7 @@ const states = [
     title: 'Change approach: direction typed',
     since: '#385',
     api: itemApi(planned, {
-      sessions: [planSession, session({ id: SID.exec2, phase: 'execute', model: 'opus', state: 'killed_budget', end_reason: 'budget', tokens_used: 2_000_000, budget_tokens: 2_000_000, created_ms: -3 * H })], brief: brief(planned), criteria: criteria(planned),
+      sessions: [planSession, session({ id: SID.exec2, phase: 'execute', model: 'opus', state: 'killed_budget', end_reason: 'budget', tokens_used: 2_000_000, budget_tokens: 2_000_000, created_ms: -3 * H })],
       continuation: continuation(planned, {
         attempts: [planAttempt, attempt({ id: SID.exec2, phase: 'execute', model: 'opus', state: 'killed_budget', end_reason: 'budget', tokens_used: 2_000_000, created_ms: -3 * H })],
         next: { kind: 'change_approach', text: `Session ${SID.exec2.slice(0, 8)} spent its budget. Continue with a different approach, or abandon it.`, session_id: SID.exec2 },
@@ -884,7 +693,7 @@ const states = [
     title: 'Abandon: the confirm step',
     since: '#385',
     api: itemApi(planned, {
-      sessions: [planSession, session({ id: SID.exec2, phase: 'execute', model: 'opus', end_reason: 'harness_exit', tokens_used: 88_000, budget_tokens: 2_000_000, created_ms: -3 * H })], brief: brief(planned), criteria: criteria(planned),
+      sessions: [planSession, session({ id: SID.exec2, phase: 'execute', model: 'opus', end_reason: 'harness_exit', tokens_used: 88_000, budget_tokens: 2_000_000, created_ms: -3 * H })],
       continuation: continuation(planned, {
         attempts: [planAttempt, attempt({ id: SID.exec2, phase: 'execute', model: 'opus', end_reason: 'harness_exit', tokens_used: 88_000, created_ms: -3 * H })],
         next: { kind: 'change_approach', text: `Session ${SID.exec2.slice(0, 8)} lost its harness. Continue with a different approach, or abandon it.`, session_id: SID.exec2 },
@@ -903,7 +712,7 @@ const states = [
     title: 'Continue refused by the node',
     since: '#385',
     api: itemApi(planned, {
-      sessions: [planSession, session({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'node_restart', tokens_used: 512_000, budget_tokens: 2_000_000, created_ms: -6 * H })], brief: brief(planned), criteria: criteria(planned),
+      sessions: [planSession, session({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'node_restart', tokens_used: 512_000, budget_tokens: 2_000_000, created_ms: -6 * H })],
       continuation: continuation(planned, {
         attempts: [planAttempt, attempt({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'node_restart', tokens_used: 512_000, created_ms: -6 * H })],
         next: { kind: 'continue', text: `Session ${SID.exec1.slice(0, 8)} was cut off by a node restart; continue from its workspace.`, session_id: SID.exec1 },
@@ -921,7 +730,7 @@ const states = [
     since: '#384',
     note: 'hovering the session in the links bar reads "provider exhausted"; next asks for a change of approach',
     api: itemApi(planned, {
-      sessions: [planSession, session({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'provider_exhausted', last_error: 'anthropic: weekly limit reached', tokens_used: 940_000, budget_tokens: 2_000_000, created_ms: -5 * H })], brief: brief(planned),
+      sessions: [planSession, session({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'provider_exhausted', last_error: 'anthropic: weekly limit reached', tokens_used: 940_000, budget_tokens: 2_000_000, created_ms: -5 * H })],
       continuation: continuation(planned, {
         attempts: [planAttempt, attempt({ id: SID.exec1, phase: 'execute', model: 'opus', end_reason: 'provider_exhausted', last_error: 'anthropic: weekly limit reached', tokens_used: 940_000, created_ms: -5 * H })],
         next: { kind: 'change_approach', text: `Session ${SID.exec1.slice(0, 8)} failed: anthropic: weekly limit reached. Continue with a different approach, or abandon it.`, session_id: SID.exec1 },
@@ -1037,7 +846,6 @@ const states = [
         deps,
         readiness: { state: 'blocked', by: deps.map((id) => ({ kind: 'open', id })) },
         phase_plan_slug: 'plan-rework-publication-path-from-the-credential-holding-node',
-        brief_slug: 'brief-rework-publication-path-from-the-credential-holding-node',
         discovered_from: ID.limits,
         discovered_by_session: SID.exec1,
       })
@@ -1064,201 +872,6 @@ const states = [
         }),
       })
     })(),
-  },
-
-  // ------------------------------------------------------------ the brief
-  {
-    id: 'work-item-brief-adding',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Brief: adding an observed line with a bad reference',
-    note: 'both validation notices: "Not a reference" and "An observation with nothing to point at"',
-    sizes: ['desktop'],
-    api: itemApi(planned, { sessions: [planSession], brief: brief(planned), criteria: criteria(planned) }),
-    act: async (page) => {
-      await page.getByRole('button', { name: 'Add a line' }).click()
-      await page.selectOption('select[aria-label="who is behind this line"]', 'observed')
-      await page.fill('.add input >> nth=0', 'Two operators asked for a per-channel limit in the ops sync.')
-      await page.fill('.add input >> nth=1', 'meeting-ops-sync note:missing')
-    },
-  },
-  {
-    id: 'work-item-brief-all-inferred',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Brief with nothing observed, most sections absent',
-    note: '"Nothing in this brief was observed" notice, absent sections, the extra Markdown block',
-    api: itemApi(planned, {
-      sessions: [planSession],
-      brief: brief(planned, {
-        preamble: '',
-        sections: [
-          { field: 'problem', heading: 'Problem', notes: 'Drafted by the plan session.', entries: [{ provenance: 'inferred', text: 'Bursts from one channel likely delay others.', refs: [] }] },
-          { field: 'success_criteria', heading: 'Success criteria', notes: '', entries: [{ provenance: 'unattributed', text: 'Bursts are smoothed.', refs: [] }] },
-        ],
-        extra: '## Scratch\n\n- look at the broker queue depth metric\n- ask whether the hub needs the same limiter',
-        counts: { observed: 0, inferred: 1, decided: 0, unattributed: 1 },
-        absent: [
-          { field: 'intended_user', heading: 'Intended user', says: 'no intended user named' },
-          { field: 'source_references', heading: 'Source references', says: 'nothing cited' },
-          { field: 'constraints', heading: 'Constraints', says: 'no constraints stated' },
-          { field: 'unresolved_questions', heading: 'Unresolved questions', says: 'no open questions recorded' },
-        ],
-      }),
-      criteria: criteria(planned, {
-        candidate: undefined,
-        criteria: [criterion({ key: 'c1', text: 'Bursts are smoothed.', provenance: 'unattributed', standard: 'unattributed' })],
-        gaps: { uncovered: ['c1'], unjudged: ['c1'], assumptions: [{ field: 'problem', heading: 'Problem', text: 'Bursts from one channel likely delay others.', provenance: 'inferred' }], questions: [], orphaned_judgements: [] },
-        summary: '1 criterion · 1 nothing points at it · 1 not an agreed standard · 1 assumption',
-      }),
-    }),
-  },
-  {
-    id: 'work-item-brief-unreadable',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Brief pointer this node cannot read',
-    api: itemApi(planned, { sessions: [planSession] }),
-  },
-
-  // --------------------------------------------------------- the criteria
-  {
-    id: 'work-item-criteria-retired',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Criteria: retired scenario/observation links, duplicate, earlier and orphaned verdicts',
-    since: '#398',
-    note: 'retired links say they settle nothing; duplicate disables its actions; open questions and reworded-verdict sections',
-    api: itemApi(planned, {
-      sessions: [planSession],
-      brief: brief(planned, {
-        sections: [
-          ...brief(planned).sections,
-          {
-            field: 'unresolved_questions',
-            heading: 'Unresolved questions',
-            notes: '',
-            entries: [
-              { provenance: 'unattributed', text: 'Does the hub need the same limiter, or only nodes?', refs: [] },
-              { provenance: 'unattributed', text: 'Is one second the right bound for a client channel?', refs: [] },
-            ],
-          },
-        ],
-        counts: { observed: 2, inferred: 2, decided: 2, unattributed: 3 },
-        absent: [],
-      }),
-      criteria: criteria(planned, {
-        criteria: [
-          criterion({
-            key: 'c1',
-            links: [
-              { index: 0, provenance: 'decided', standard: 'agreed', kind: 'scenario', value: 'burst-on-personal-while-work-runs', refs: [], unresolved: 'scenario links are retired and settle nothing; judge this criterion, or point a configured check at it' },
-              { index: 1, provenance: 'observed', standard: 'agreed', kind: 'observation', value: 'operator saw no stall during the 3 Oct incident replay', refs: [], unresolved: 'observation links are retired and settle nothing; judge this criterion, or point a configured check at it' },
-            ],
-            coverage: 'awaits_judgement',
-            earlier_judgement: { id: 'j-0', verdict: 'not_met', note: 'stalled 3s', candidate_id: 'cand-old', criterion_text: 'A burst on one channel never delays another channel by more than a second.', judged_ms: -D },
-          }),
-          criterion({ key: 'c2', text: 'The limit is configurable per channel in node.toml.', links: [{ index: 0, provenance: 'decided', standard: 'agreed', kind: 'check', value: 'just test', refs: [], outcome: 'running', run_id: 'run-43' }], coverage: 'no_result_yet', refs: [{ kind: 'doc', value: 'guide-node-toml', known: false }] }),
-          criterion({ key: 'c3', text: 'The limit is configurable per channel in node.toml.', coverage: 'nothing_points_at_it', duplicate: true }),
-          criterion({ key: 'c4', text: 'Operators can see why a call was delayed.', coverage: 'judged_unclear', judgement: { id: 'j-2', verdict: 'unclear', note: 'the log line exists but nobody reads the log', candidate_id: 'cand-7e21', criterion_text: 'Operators can see why a call was delayed.', judged_ms: -20 * M } }),
-          criterion({ key: 'c5', text: 'No call is dropped, only delayed.', coverage: 'judged_not_met', judgement: { id: 'j-3', verdict: 'not_met', candidate_id: 'cand-7e21', criterion_text: 'No call is dropped, only delayed.', judged_ms: -10 * M } }),
-        ],
-        gaps: {
-          uncovered: ['c3'],
-          unjudged: ['c1', 'c2', 'c3'],
-          assumptions: [],
-          questions: ['Does the hub need the same limiter, or only nodes?', 'Is one second the right bound for a client channel?'],
-          orphaned_judgements: [{ id: 'j-old', verdict: 'met', criterion_text: 'Bursts are smoothed.', judged_ms: -2 * D }],
-        },
-        summary: '5 criteria · 1 nothing points at it · 1 no result yet · 1 awaits a person · 1 judged not met · 1 judged unclear · 2 open questions · 1 verdict on a criterion that was reworded',
-      }),
-    }),
-  },
-  {
-    id: 'work-item-criteria-link-form',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Criteria: say what settles it (check only)',
-    since: '#398',
-    note: 'the link form no longer offers a kind picker: provenance select and a check command',
-    sizes: ['desktop'],
-    api: itemApi(planned, { sessions: [planSession], brief: brief(planned), criteria: criteria(planned) }),
-    act: async (page) => {
-      await page.getByRole('button', { name: 'Say what settles it' }).nth(1).click()
-      await page.fill('input[placeholder="the configured check command, exactly"]', 'cargo nextest run -p tracon-node config::')
-    },
-  },
-  {
-    id: 'work-item-criteria-judge-form',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Criteria: judging with nothing captured',
-    note: 'verdict form with the "about the criterion itself" notice',
-    sizes: ['desktop'],
-    api: itemApi(planned, {
-      sessions: [planSession],
-      brief: brief(planned),
-      // Nothing captured: no check has a result, and no verdict is bound to an attempt.
-      criteria: criteria(planned, {
-        candidate: undefined,
-        criteria: [
-          criterion({ key: 'c1', links: [{ index: 0, provenance: 'decided', standard: 'agreed', kind: 'check', value: 'cargo nextest run -p tracon-node gateway::limits', refs: [] }], coverage: 'no_result_yet' }),
-          criterion({ key: 'c2', text: 'The limit is configurable per channel in node.toml.', provenance: 'inferred', standard: 'proposed', coverage: 'nothing_points_at_it' }),
-        ],
-        gaps: { uncovered: ['c2'], unjudged: ['c1', 'c2'], assumptions: [], questions: [], orphaned_judgements: [] },
-        summary: '2 criteria · 1 nothing points at it · 1 no result yet · 1 not an agreed standard',
-      }),
-    }),
-    act: async (page) => {
-      await page.getByRole('button', { name: 'Judge it' }).first().click()
-      await page.selectOption('select[aria-label="your verdict"]', 'not_met')
-      await page.fill('input[placeholder="what you looked at, in one sentence"]', 'read the plan; it never mentions the hub')
-    },
-  },
-  {
-    id: 'work-item-criteria-none-stated',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Criteria: brief states none',
-    api: itemApi(planned, {
-      sessions: [planSession],
-      brief: brief(planned, { sections: brief(planned).sections.filter((s) => s.field !== 'success_criteria'), absent: [{ field: 'success_criteria', heading: 'Success criteria', says: 'no success criteria stated' }] }),
-      criteria: criteria(planned, { criteria: [], absent: 'no success criteria stated', gaps: { uncovered: [], unjudged: [], assumptions: [], questions: [], orphaned_judgements: [] }, summary: 'no success criteria stated' }),
-    }),
-  },
-
-  // ---------------------------------------------------------- the context
-  {
-    id: 'work-item-context-attempts-open',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Context: each attempt expanded',
-    note: 'changes and per-document delivery (full, cut short, left out)',
-    api: itemApi(planned, { sessions: [planSession], brief: brief(planned), criteria: criteria(planned), context: contextFull(planned) }),
-    act: openDetails('.context details'),
-  },
-  {
-    id: 'work-item-context-adding',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Context: adding a document',
-    sizes: ['desktop'],
-    api: itemApi(planned, { sessions: [planSession], brief: brief(planned), criteria: criteria(planned), context: contextFull(planned) }),
-    act: async (page) => {
-      await page.getByRole('button', { name: 'Add a document' }).click()
-      await page.fill('.context .add input >> nth=0', 'ref-gateway-incident-2026-10-03')
-      await page.fill('.context .add input >> nth=1', 'the incident this item came from')
-    },
-  },
-  {
-    id: 'work-item-context-empty-selection',
-    area: 'work',
-    route: `/tasks/${ID.limits}`,
-    title: 'Context: selection document with no picks',
-    api: itemApi(planned, {
-      sessions: [planSession], brief: brief(planned), criteria: criteria(planned),
-      context: { ...contextFull(planned), selection: { ...contextFull(planned).selection, picks: [], resolved: [] }, attempts: [] },
-    }),
   },
 
   // ------------------------------------------------- launching from an item
@@ -1347,7 +960,7 @@ const states = [
             { key: 'launch', message: 'this node is degraded: the gateway container is not running' },
             { key: 'remote', message: 'no `origin` remote' },
           ],
-          notes: [{ key: 'brief', message: 'no brief, so the review has no requirements to judge' }],
+          notes: [],
         },
       },
     }),

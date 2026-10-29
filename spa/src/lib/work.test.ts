@@ -22,7 +22,6 @@ const view = (o: Partial<WorkView>): WorkView => ({
   discovered_from: null,
   discovered_by_session: null,
   phase_plan_slug: null,
-  brief_slug: null,
   closed_by_session: null,
   created_ms: 0,
   updated_ms: 0,

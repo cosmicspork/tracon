@@ -81,7 +81,6 @@ pub struct Workspace {
 pub struct Decisions {
     /// The item's plan document, when one was written.
     pub plan: Option<String>,
-    pub brief: Option<String>,
     pub answered: Vec<Decided>,
 }
 
@@ -636,7 +635,6 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
         workspace,
         decisions: Decisions {
             plan: item.as_ref().and_then(|i| i.phase_plan_slug.clone()),
-            brief: item.as_ref().and_then(|i| i.brief_slug.clone()),
             answered: store.decisions_of_sessions(&ids)?,
         },
         evidence: Evidence { reviews, shown },

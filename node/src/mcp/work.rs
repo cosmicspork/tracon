@@ -5,19 +5,6 @@
 //! names. A session the node started never closes the item it holds: that
 //! is the operator's call, once its change has landed, so until then the
 //! item stays open for CI failures and review comments to come back to.
-//!
-//! `brief_read` and `brief_note` are the item's product brief, when it has
-//! one: who the work is for and what would make it good, as the operator
-//! recorded it. Reading is free; writing a line is asked, and the node holds
-//! a session to what a session can honestly claim — never a decision, and
-//! never an observation with nothing to point at.
-//!
-//! `criteria_read` and `criteria_link` are the same brief read as acceptance
-//! criteria: per criterion, what points at it and how far the evidence got.
-//! A session may say what it thinks would settle a criterion, and that is all
-//! it may say — there is deliberately no tool here for recording that a
-//! criterion was met. Passing one's own checks is not the customer agreeing
-//! with the standard, so the verdict is the operator's, over the interface.
 
 use serde_json::{json, Value};
 
@@ -34,10 +21,6 @@ pub const WORK_LIST: &str = "work_list";
 pub const WORK_SHOW: &str = "work_show";
 pub const WORK_UPDATE: &str = "work_update";
 pub const WORK_DELETE: &str = "work_delete";
-pub const BRIEF_READ: &str = "brief_read";
-pub const BRIEF_NOTE: &str = "brief_note";
-pub const CRITERIA_READ: &str = "criteria_read";
-pub const CRITERIA_LINK: &str = "criteria_link";
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -81,110 +64,6 @@ pub fn definitions() -> Vec<Value> {
                     },
                 },
                 "required": ["title"],
-            },
-        }),
-        json!({
-            "name": BRIEF_READ,
-            "description": "The product brief of the item this session holds, when it has one: intended \
-                            user, problem, source references, constraints, success criteria and open \
-                            questions. Every line says whether the customer was observed saying it, \
-                            someone inferred it, or the operator decided it, and what it points at. \
-                            An item without a brief is normal; the tool says so.",
-            "inputSchema": { "type": "object", "properties": {} },
-        }),
-        json!({
-            "name": BRIEF_NOTE,
-            "description": "Add a line to the brief of the item this session holds. Say which section, \
-                            and point at what the line rests on. You may record `inferred` (you reasoned \
-                            to it) or `observed` (the customer said or did it) — an observation must cite \
-                            a doc, url, evidence id or session. You may not record a decision: that is \
-                            the operator's. The line is written with a reference to this session.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "field": {
-                        "type": "string",
-                        "enum": ["intended_user", "problem", "source_references", "constraints", "success_criteria", "unresolved_questions"],
-                    },
-                    "provenance": { "type": "string", "enum": ["observed", "inferred"], "default": "inferred" },
-                    "text": { "type": "string" },
-                    "refs": {
-                        "type": "array",
-                        "description": "What the line rests on, as {kind, value} with kind one of doc, session, evidence, work, url, file.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "kind": { "type": "string", "enum": crate::corpus::brief::REF_KINDS },
-                                "value": { "type": "string" },
-                            },
-                            "required": ["kind", "value"],
-                        },
-                    },
-                },
-                "required": ["field", "text"],
-            },
-        }),
-        json!({
-            "name": CRITERIA_READ,
-            "description": "The acceptance criteria of the item this session holds, read as coverage: \
-                            per criterion, whether the standard is agreed or is still somebody's \
-                            proposal, what points at it (checks), what the \
-                            checks say about one candidate, and whether a person has judged it. It also \
-                            says what is uncovered, what nobody has judged, which lines are assumptions, \
-                            and which questions are still open. Checks passing is not the same as a \
-                            criterion being met: only the operator can say that.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "candidate": {
-                        "type": "string",
-                        "description": "The candidate to read the check results against. Without it the \
-                                        criteria and their links are still returned, with no results.",
-                    },
-                },
-            },
-        }),
-        json!({
-            "name": CRITERIA_LINK,
-            "description": "Say which check you think would settle one acceptance criterion: one of \
-                            the commands the operator configured (any other is recorded and reported as \
-                            never running). Anything a check cannot settle is the operator's judgement, \
-                            not a link. It is written under the criterion in the brief \
-                            as your proposal, which is all it can be: only the operator decides what good \
-                            means, and your proposal passing does not establish that the customer agreed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "criterion": {
-                        "type": "string",
-                        "description": "The criterion's key from criteria_read, or its text verbatim.",
-                    },
-                    "kind": { "type": "string", "enum": crate::corpus::brief::LINK_KINDS },
-                    "value": {
-                        "type": "string",
-                        "description": "The command.",
-                    },
-                    "provenance": {
-                        "type": "string",
-                        "enum": ["observed", "inferred"],
-                        "default": "inferred",
-                        "description": "`observed` only for something someone was seen to need, and it \
-                                        must cite where that was seen.",
-                    },
-                    "refs": {
-                        "type": "array",
-                        "description": "What this rests on, as {kind, value} with kind one of doc, session, evidence, work, url, file.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "kind": { "type": "string", "enum": crate::corpus::brief::REF_KINDS },
-                                "value": { "type": "string" },
-                            },
-                            "required": ["kind", "value"],
-                        },
-                    },
-                },
-                "required": ["criterion", "kind", "value"],
             },
         }),
         json!({
@@ -352,7 +231,6 @@ fn item_json(
         v["body"] = json!(item.body);
         v["discovered_from"] = json!(item.discovered_from);
         v["plan"] = json!(item.phase_plan_slug);
-        v["brief"] = json!(item.brief_slug);
         v["created_ms"] = json!(item.created_ms);
         v["updated_ms"] = json!(item.updated_ms);
     }
@@ -785,138 +663,6 @@ pub async fn call(
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "id": item.id, "deleted": true }))
         }
-        BRIEF_READ => {
-            let Some(id) = item_id else {
-                return Err("this session holds no work item, so it has no brief".into());
-            };
-            let view = corpus::brief::for_item(&access.store, &id).map_err(|e| e.to_string())?;
-            match view {
-                Some(view) => {
-                    let summary = corpus::brief::summary(&view);
-                    Ok(json!({ "brief": view, "summary": summary }))
-                }
-                None => Ok(json!({
-                    "brief": null,
-                    "summary": format!("{} has no brief; work from the item and the plan", &id[..12.min(id.len())]),
-                })),
-            }
-        }
-        BRIEF_NOTE => {
-            let (Some(session_id), Some(id)) = (ctx.session_id(), item_id) else {
-                return Err("this session holds no work item, so it has no brief".into());
-            };
-            let field = args["field"].as_str().unwrap_or("").trim().to_string();
-            let text = args["text"].as_str().unwrap_or("").trim().to_string();
-            if text.is_empty() {
-                return Err("brief_note needs the line's text".into());
-            }
-            let refs: Vec<corpus::brief::RefInput> =
-                serde_json::from_value(args.get("refs").cloned().unwrap_or_else(|| json!([])))
-                    .map_err(|e| format!("refs must be {{kind, value}} objects: {e}"))?;
-            let view = corpus::brief::append_for_item(
-                &access.store,
-                access.manager.bus(),
-                &ctx.node_id,
-                &id,
-                vec![corpus::brief::SectionInput {
-                    field,
-                    notes: None,
-                    replace: false,
-                    entries: Some(vec![corpus::brief::EntryInput {
-                        provenance: Some(session_provenance(args).to_string()),
-                        text,
-                        refs,
-                        links: vec![],
-                    }]),
-                }],
-                &corpus::brief::Author::Session(session_id.to_string()),
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(json!({ "slug": view.slug, "summary": corpus::brief::summary(&view) }))
-        }
-        CRITERIA_READ => {
-            let Some(id) = item_id else {
-                return Err("this session holds no work item, so it has no criteria".into());
-            };
-            let candidate = args["candidate"]
-                .as_str()
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .map(str::to_string);
-            // Without one named, the newest attempt at the item: that is what
-            // the session is looking at, and reading the criteria against no
-            // candidate at all would report every check as having no result.
-            let candidate = match candidate {
-                Some(id) => Some(id),
-                None => corpus::criteria::newest_candidate(&access.store, &id)
-                    .map_err(|e| e.to_string())?,
-            };
-            let view = corpus::criteria::for_item(&access.store, cfg, &id, candidate.as_deref())
-                .map_err(|e| match e {
-                    corpus::criteria::CriteriaError::MissingCandidate(_) => {
-                        "no candidate for this item".to_string()
-                    }
-                    other => other.to_string(),
-                })?;
-            match view {
-                Some(view) => {
-                    let summary = view.summary.clone();
-                    Ok(json!({ "criteria": view, "summary": summary }))
-                }
-                None => Ok(json!({
-                    "criteria": null,
-                    "summary": format!(
-                        "{} has no brief, so no criteria are stated; work from the item and the plan",
-                        &id[..12.min(id.len())],
-                    ),
-                })),
-            }
-        }
-        CRITERIA_LINK => {
-            let (Some(session_id), Some(id)) = (ctx.session_id(), item_id) else {
-                return Err("this session holds no work item, so it has no criteria".into());
-            };
-            let criterion = args["criterion"].as_str().unwrap_or("").trim();
-            if criterion.is_empty() {
-                return Err("criteria_link needs the criterion's key or its text".into());
-            }
-            let refs: Vec<corpus::brief::RefInput> =
-                serde_json::from_value(args.get("refs").cloned().unwrap_or_else(|| json!([])))
-                    .map_err(|e| format!("refs must be {{kind, value}} objects: {e}"))?;
-            corpus::criteria::add_link(
-                &access.store,
-                access.manager.bus(),
-                &ctx.node_id,
-                &id,
-                criterion,
-                corpus::brief::LinkInput {
-                    provenance: Some(session_provenance(args).to_string()),
-                    kind: args["kind"].as_str().unwrap_or("").to_string(),
-                    value: args["value"].as_str().unwrap_or("").to_string(),
-                    refs,
-                },
-                None,
-                &corpus::brief::Author::Session(session_id.to_string()),
-            )
-            .map_err(|e| e.to_string())?;
-            let candidate = corpus::criteria::newest_candidate(&access.store, &id)
-                .map_err(|e| e.to_string())?;
-            let view = corpus::criteria::for_item(&access.store, cfg, &id, candidate.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(json!({
-                "summary": view.as_ref().map(|v| v.summary.clone()),
-                "standing": format!(
-                    "your proposal, recorded as `{}`; the operator decides what good means",
-                    session_provenance(args)
-                ),
-            }))
-        }
         other => Err(format!("no work tool named {other}")),
     }
-}
-
-/// The schemas promise `inferred` when a session names no provenance; left to
-/// the store, an omitted value would be recorded as `unattributed` instead.
-fn session_provenance(args: &Value) -> &str {
-    args["provenance"].as_str().unwrap_or("inferred")
 }

@@ -259,7 +259,6 @@ function details(o = {}) {
     since_reviewed: null,
     stale: [],
     requirements: REQUIREMENTS,
-    criteria: null,
     surrounding_code: SURROUNDING,
     evidence: evidence(),
     legacy_check_events: [],
@@ -417,109 +416,6 @@ index 0000000..4be19c0
 +
 `
 
-// --- criteria ------------------------------------------------------------------
-
-const link = (index, value, outcome, o = {}) => ({ index, provenance: 'decided', standard: 'agreed', kind: 'check', value, refs: [], outcome, ...o })
-const CRITERIA = {
-  work_item_id: 'wi-2',
-  channel: 'personal',
-  brief_slug: 'brief-rate-limits',
-  hash: 'c0ffee12ab34',
-  candidate: { id: 'cand-7d3f9a1c', head_sha: HEAD, captured_ms: -1500000 },
-  criteria: [
-    {
-      key: 'c1',
-      text: 'A channel can burst to `per_minute` calls, and the next is refused.',
-      provenance: 'decided',
-      standard: 'agreed',
-      refs: [],
-      links: [link(0, 'cargo nextest run -E test(a_full_bucket)', 'passed')],
-      judgement: { id: 'j-1', verdict: 'met', note: 'read the test and drove 500 calls locally', candidate_id: 'cand-7d3f9a1c', criterion_text: 'A channel can burst to `per_minute` calls, and the next is refused.', judged_ms: -600000 },
-      coverage: 'judged_met',
-    },
-    {
-      key: 'c2',
-      text: 'A refused burst does not count against the daily ceiling.',
-      provenance: 'decided',
-      standard: 'agreed',
-      refs: [],
-      links: [link(0, 'cargo nextest run -E test(refused_burst_is_free)', 'passed')],
-      coverage: 'checks_pass',
-    },
-    {
-      key: 'c3',
-      text: 'An idle channel refills to capacity and no further.',
-      provenance: 'decided',
-      standard: 'agreed',
-      refs: [],
-      links: [link(0, 'cargo nextest run -E test(an_idle_bucket)', 'failed')],
-      earlier_judgement: { id: 'j-0', verdict: 'not_met', note: 'refill was unbounded', candidate_id: 'cand-c41e8b07', criterion_text: 'An idle channel refills to capacity and no further.', judged_ms: -86400000 },
-      coverage: 'failing',
-    },
-    {
-      key: 'c4',
-      text: 'The refusal tells the harness when to retry.',
-      provenance: 'inferred',
-      standard: 'proposed',
-      refs: [],
-      links: [link(0, 'cargo nextest run -E test(retry_after)', undefined, { provenance: 'inferred', standard: 'proposed', unresolved: 'only proposed by the agent; nobody agreed it' })],
-      coverage: 'only_proposed',
-    },
-    {
-      key: 'c5',
-      text: 'Operators can see a channel\'s current burst headroom.',
-      provenance: 'observed',
-      standard: 'agreed',
-      refs: [],
-      links: [],
-      finding: {
-        id: 'f-1',
-        review_id: ID,
-        candidate_id: 'cand-7d3f9a1c',
-        outcome: 'supported',
-        note: 'opened the channel page under load; headroom fell to 0 and refilled to 120',
-        evidence: ['sw-r'],
-        provenance: 'inferred',
-        session_id: 's-review',
-        model: 'claude-sonnet-4-5',
-        criterion_text: "Operators can see a channel's current burst headroom.",
-        created_ms: -900000,
-      },
-      coverage: 'verified_unjudged',
-    },
-    {
-      key: 'c6',
-      text: 'A refused call is answered with 429, not 500.',
-      provenance: 'observed',
-      standard: 'agreed',
-      refs: [],
-      links: [],
-      finding: {
-        id: 'f-2',
-        review_id: ID,
-        candidate_id: 'cand-7d3f9a1c',
-        outcome: 'contradicted',
-        note: 'drove the 121st call in the browser; the gateway answered 500 with a panic in the log',
-        evidence: ['sw-r2'],
-        provenance: 'inferred',
-        session_id: 's-review',
-        model: 'claude-sonnet-4-5',
-        criterion_text: 'A refused call is answered with 429, not 500.',
-        created_ms: -880000,
-      },
-      coverage: 'contradicted_unjudged',
-    },
-  ],
-  gaps: {
-    uncovered: ['c4', 'c5', 'c6'],
-    unjudged: ['c2', 'c3', 'c4', 'c5', 'c6'],
-    assumptions: [],
-    questions: ['Should a burst refusal be logged as a policy decision?'],
-    orphaned_judgements: [],
-  },
-  summary: '6 criteria · 1 only the agent\'s proposal · 1 contradicted by the reviewer, unjudged · 1 failing · 1 verified by the reviewer, unjudged · 1 checks pass, unjudged · 1 judged met',
-}
-
 // --- shown work ------------------------------------------------------------------
 
 const SHOWN = [
@@ -643,7 +539,6 @@ const reportDetail = (o = {}) => ({
   revision: null,
   stale: [],
   requirements: null,
-  criteria: null,
   surrounding_code: [],
   evidence: null,
   legacy_check_events: [],
@@ -1068,13 +963,12 @@ export default [
         authorship: null,
         since_reviewed: null,
         intent: { forge: {}, squash_onto: BASE_SHA, commits: COMMITS.slice(0, 2) },
-        criteria: { ...CRITERIA, channel: 'work' },
       }),
     ),
   }),
 
   state('mirrored-unreachable', 'Mirrored, owner unreachable', {
-    note: 'The red banner; evidence, intent and criteria absent.',
+    note: 'The red banner; evidence and intent absent.',
     since: '#392',
     detail: raw(
       details({
@@ -1394,8 +1288,8 @@ export default [
     },
   }),
 
-  state('criteria', 'Acceptance criteria on a GitLab merge request', {
-    note: 'Criteria in each coverage state with a judge form open, an open question; GitLab says "merge request"; failing check in the evidence.',
+  state('gitlab', 'A GitLab merge request with a failing check', {
+    note: 'GitLab says "merge request"; a failing and a reused check in the evidence; a current and a stale demonstration.',
     detail: raw(
       details({
         review: {
@@ -1404,7 +1298,6 @@ export default [
           target: target({ provider: 'gitlab', project: 'platform/orbit' }),
           checks_json: JSON.stringify([{ command: 'just check', ok: true, exit: 0, tail: 'ok', ms: 94000 }]),
         },
-        criteria: CRITERIA,
         evidence: evidence({
           checks: [
             run('just check', 'passed', 94),
@@ -1419,10 +1312,6 @@ export default [
         publication: { readiness: { ...READY, provider: 'gitlab', credential: 'GITLAB_TOKEN', project: 'platform/orbit', note: 'A GitLab token is bound to this channel. Whether it may push to platform/orbit is only known when GitLab answers.' }, latest: null },
       }),
     ),
-    act: async (page) => {
-      await page.getByRole('button', { name: 'Judge it', exact: true }).first().click()
-      await page.getByPlaceholder('what you looked at').fill('ran the idle test by hand')
-    },
   }),
 
   state('shown-work', 'What the agent showed of its work', {
@@ -1450,7 +1339,6 @@ export default [
       revision: null,
       stale: [],
       requirements: null,
-      criteria: null,
       surrounding_code: [],
       evidence: null,
       legacy_check_events: [],

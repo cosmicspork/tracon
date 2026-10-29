@@ -66,17 +66,6 @@ import type {
   TransferImport,
   TransferInboxItem,
   TransferStage,
-  Brief,
-  BriefEntryInput,
-  BriefField,
-  Criteria,
-  CriterionJudgement,
-  LinkKind,
-  Provenance,
-  RefKind,
-  Verdict,
-  ContextRole,
-  WorkContext,
   WorkItem,
   WorkView,
   Project,
@@ -935,65 +924,7 @@ export const api = {
       item: WorkView | null
       sessions: Session[]
       discovered: { id: string; title: string; state: string }[]
-      brief: Brief | null
-      criteria: Criteria | null
     }>('GET', `/api/work/${id}`),
-  /** The item's product brief. `brief` is null when it has none, which is not an error. */
-  workBrief: (id: string) =>
-    call<{ brief: Brief | null; linked_slug: string | null; summary?: string }>('GET', `/api/work/${id}/brief`),
-  /**
-   * Start a brief, add lines to it, or replace its Markdown. `if_hash` is the
-   * hash last read: an edit against a brief that moved is refused, not merged.
-   */
-  putBrief: (
-    id: string,
-    input: {
-      title?: string
-      preamble?: string
-      sections?: { field: BriefField; notes?: string; entries?: BriefEntryInput[] }[]
-      markdown?: string
-      if_hash?: string
-    },
-  ) => call<{ brief: Brief; summary: string }>('PUT', `/api/work/${id}/brief`, input),
-  /**
-   * The item's acceptance criteria, read against one candidate — the newest by
-   * default. Each says whether its standard is agreed or only proposed, what
-   * points at it, what the checks said, and whether a person has judged it.
-   */
-  workCriteria: (id: string, candidate?: string) => {
-    const q = candidate ? `?${new URLSearchParams({ candidate })}` : ''
-    return call<{ criteria: Criteria | null }>('GET', `/api/work/${id}/criteria${q}`)
-  },
-  /**
-   * Say what would settle a criterion. The operator writes here, so this link
-   * may be `decided`; a session's is only ever a proposal.
-   */
-  addCriterionLink: (
-    id: string,
-    key: string,
-    input: { kind: LinkKind; value: string; provenance?: Provenance; refs?: { kind: RefKind; value: string }[]; if_hash?: string },
-  ) => call<{ criteria: Criteria | null }>('POST', `/api/work/${id}/criteria/${key}/links`, input),
-  /** Take back one of a criterion's links from the brief version displayed. */
-  removeCriterionLink: (id: string, key: string, index: number, ifHash: string) =>
-    call<{ criteria: Criteria | null }>('DELETE', `/api/work/${id}/criteria/${key}/links/${index}?${new URLSearchParams({ if_hash: ifHash })}`),
-  /**
-   * Say whether a criterion was met. There is no session route to this: an
-   * agent passing its own checks does not establish that the customer agreed.
-   */
-  judgeCriterion: (
-    id: string,
-    input: { criterion: string; verdict: Verdict; note?: string; candidate_id: string | null; revision_id?: string },
-  ) => call<{ judgement: CriterionJudgement; criteria: Criteria | null }>('POST', `/api/work/${id}/criteria/judgements`, input),
-  /** What the operator selected for the item, and what each attempt received. */
-  workContext: (id: string) => call<WorkContext>('GET', `/api/work/${id}/context`),
-  /**
-   * Replace the item's selection. Applies to the next attempt; a running
-   * session keeps what it started with. `if_hash` is the hash last read.
-   */
-  putContext: (id: string, input: { picks: { role: ContextRole; slug: string; note?: string }[]; if_hash?: string }) =>
-    call<WorkContext>('PUT', `/api/work/${id}/context`, input),
-  /** Unlink the brief from the item. The document stays. */
-  unlinkBrief: (id: string) => call<{ ok: boolean; slug: string; document_kept: boolean }>('DELETE', `/api/work/${id}/brief`),
   addWork: (w: { channel: string; title: string; body?: string; deps?: string[]; priority?: number; project_id?: string; discovered_from?: string }) =>
     call<WorkItem>('POST', '/api/work', w),
   /** Only the fields given change; `project_id: null` takes the item out of its project. */

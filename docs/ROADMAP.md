@@ -13,16 +13,16 @@
 - Keep the core accountable and personal workflows adaptable. Customizations reuse
   isolation, scoped authority, manifests and evidence; installing code grants no permission.
 - The operator's scarce work is understanding the problem and judging the result; tracon's
-  job is to take the implementation mechanics off their plate reliably. Product briefs,
-  criteria and follow-through stay optional extensions of ordinary work, never process.
+  job is to take the implementation mechanics off their plate reliably. Follow-through
+  stays an optional extension of ordinary work, never process.
 
 **Reprioritised 2026-09-29.** The 2026-09-15 turn towards product engineering added a
 layer of evaluation machinery before tracon had run a real session, and the first real
 runs (2026-09-20, 2026-09-28) found the everyday path broken underneath it. The plan
 now is ordered by what it takes to start a session, build something and ship it from
 one node, every day. The product-engineering work that shipped (the brief, selected
-context, criteria bound to checks) stays and stays optional; the rest waits until its
-absence is felt in real work.
+context, criteria bound to checks) went unused and was removed on 2026-10-28; the rest
+waits until its absence is felt in real work.
 
 ### The supported configuration
 
@@ -182,22 +182,19 @@ wait until **Now** and **Next** have made a day's work unremarkable.
       account of finished work.
 - [ ] Separate authorization to publish, technical verification and human acceptance of the
       outcome. Support optional published/awaiting-evaluation work rather than closing it
-      merely because a PR opened. Bind acceptance to the evaluated candidate and criteria;
-      a new candidate must not inherit an old verdict. Plain coding tasks may still end at
-      publication when that is the operator's chosen endpoint. Criterion judgements are
-      already bound to their candidate, and #514 adds the reviewer's per-criterion findings;
-      what is left is not closing the item on publication (`authority.rs` closes it today)
-      and accepting the item as a whole.
+      merely because a PR opened. Bind acceptance to the evaluated candidate; a new candidate
+      must not inherit an old verdict. Plain coding tasks may still end at publication when
+      that is the operator's chosen endpoint. What is left is not closing the item on
+      publication (`authority.rs` closes it today) and accepting the item as a whole.
 - [ ] Individually addressable review feedback: general and file comments and line/range
       threads bound to revision, path and side, returned through the agent review contract
       and kept across resubmission. Addressed, unresolved and outdated are distinct; a moved
-      anchor must not silently attach to unrelated code. Anchoring to criteria and
-      screenshots, and browser traces beside screenshots, moved to #514. Today the contract
-      returns one note and an optional edited patch.
-- [ ] Exit proof: one independent operator's complete loop on a real project — capture a
-      user's problem and source, agree on good, delegate with selected context, capture a
-      candidate, judge it from the diff and the shown work, record the result, inspect a
-      revision and explicitly accept. Show that a candidate whose shown work fails the
+      anchor must not silently attach to unrelated code. Anchoring to screenshots, and
+      browser traces beside screenshots, moved to #514. Today the contract returns one
+      note and an optional edited patch.
+- [ ] Exit proof: one independent operator's complete loop on a real project — delegate
+      the work, capture a candidate, judge it from the diff and the shown work, record the
+      result, inspect a revision and explicitly accept. Show that a candidate whose shown work fails the
       user task stays unaccepted with an obvious continuation path. Fixtures are not
       substitutes.
 
@@ -243,7 +240,7 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 - [ ] Publish a versioned data contract: the signed candidate JSON, offline package reader
       and document export extended into a round-trip export readable without tracon —
       sessions, events, work items, decisions, drafts, documents, memories, workspace
-      state, evidence, provenance, briefs and criteria, with identifiers, encodings and
+      state, evidence and provenance, with identifiers, encodings and
       omission rules defined. Export omits credentials and private keys and warns that
       transcripts can still carry sensitive information; neither import nor signature
       verification grants authority. Import is proven on a fresh node and by reading with

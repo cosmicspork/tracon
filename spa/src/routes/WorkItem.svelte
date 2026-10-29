@@ -1,8 +1,5 @@
 <script lang="ts">
-  import BriefPanel from '../components/BriefPanel.svelte'
-  import ContextPanel from '../components/ContextPanel.svelte'
   import ContinuationPanel from '../components/ContinuationPanel.svelte'
-  import CriteriaPanel from '../components/CriteriaPanel.svelte'
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
@@ -12,7 +9,7 @@
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import { surface } from '../lib/surface.svelte'
-  import type { Brief, Criteria, Project, WorkView } from '../lib/types'
+  import type { Project, WorkView } from '../lib/types'
   import {
     pickableProjects,
     priorityLabel,
@@ -26,8 +23,6 @@
   let { id }: { id: string } = $props()
 
   let item = $state<WorkView | null>(null)
-  let brief = $state<Brief | null>(null)
-  let criteria = $state<Criteria | null>(null)
   let discovered = $state<{ id: string; title: string; state: string }[]>([])
   let titles = $state<Map<string, string>>(new Map())
   // Each listed dependency says itself why it still blocks; only a cycle,
@@ -55,8 +50,6 @@
       const d = await api.workItem(id)
       failed = false
       item = d.item
-      brief = d.brief
-      criteria = d.criteria
       discovered = d.discovered
       if (d.item) {
         const [all, known] = await Promise.all([
@@ -179,10 +172,6 @@
     <dd class="m">
       {#if item.phase_plan_slug}<a href="/docs/{item.channel}/{item.phase_plan_slug}">{item.phase_plan_slug}</a>{:else}none yet · a plan session writes it{/if}
     </dd>
-    <dt>Brief</dt>
-    <dd class="m">
-      {#if item.brief_slug}<a href="/docs/{item.channel}/{item.brief_slug}">{item.brief_slug}</a>{:else}none · optional{/if}
-    </dd>
     <dt>Waits on</dt>
     <dd class="m">
       {#if item.deps.length === 0}nothing{:else}
@@ -242,10 +231,6 @@
   {:else if item.body.trim()}
     <div class="body md">{@html renderMessage(item.body)}</div>
   {/if}
-
-  <BriefPanel {item} {brief} onchange={load} />
-  <CriteriaPanel {item} {criteria} onchange={load} />
-  <ContextPanel {item} />
 
   {#if discovered.length}
     <div class="h5">Discovered from this task <b>{discovered.length}</b></div>

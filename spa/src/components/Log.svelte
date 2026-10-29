@@ -11,7 +11,6 @@
     sessionImage,
     missingContext,
     missingLine,
-    orientationContext,
     orientationLine,
     queuedDeliveries,
     queuedStatus,
@@ -294,8 +293,6 @@
         <div class="mark">work closed{e.payload.summary ? ` · ${e.payload.summary}` : ''}</div>
       {:else if e.kind === 'review_verdict'}
         <div class="mark ok">verdict · {e.payload.verdict} · {e.payload.summary}</div>
-      {:else if e.kind === 'review_finding'}
-        <div class="mark" class:crit={e.payload.outcome === 'contradicted'}>finding · {String(e.payload.outcome ?? '').replace('_', ' ')} · {e.payload.criterion_text} · {e.payload.note} · inferred</div>
       {:else if e.kind === 'provider_error'}
         {#if typeof e.payload.frame === 'string' && e.payload.frame}
           <!-- A retry that named no cause keeps what the harness sent. -->
@@ -318,19 +315,9 @@
         <div class="mark wait">{usageUnmeteredLine(e.payload)}</div>
       {:else if e.kind === 'orientation'}
         {@const missing = missingContext(e.payload)}
-        {@const context = orientationContext(e.payload)}
         <details class="fold">
           <summary class:wait={missing.length > 0}>{orientationLine(e.payload)}</summary>
           <div>
-            {#if context && context.changes.length > 0}
-              <!-- What this attempt was given that the previous one was not,
-                   or the other way round. -->
-              <ul class="missing">
-                {#each context.changes as c, i (i)}
-                  <li>context: {c.says}</li>
-                {/each}
-              </ul>
-            {/if}
             {#if missing.length > 0}
               <!-- Named, not flagged: the operator can see whether the guide
                    the session needed was one of the ones it did not get. -->

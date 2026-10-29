@@ -105,9 +105,10 @@ delete. Version 2 added these three kinds. The replicated tables are `document`,
 `memory`, `promotion`, and (sync schema step 2, no contract change) `work_item`, whose
 id is `hex(sha256("tracon/work-item" ‖ 0x1f ‖ channel ‖ 0x1f ‖ project ‖ 0x1f ‖ site ‖
 0x1f ‖ created_ms ‖ 0x1f ‖ title))` — pinned in `sync/src/work.rs`. Sync schema step 5
-adds the nullable `brief_slug` to that row, additively and with no contract change: a
-peer that predates it leaves the field out, and an omitted field keeps whatever the
-receiving replica holds rather than clearing the link.
+added a nullable `brief_slug` to that row and step 9 dropped it, both with no contract
+change: a peer leaves out a field it does not have, an omitted field keeps whatever the
+receiving replica holds rather than clearing it, and a field the receiver has no column
+for is ignored.
 Commands are discriminated on `op`: `create`, `prompt`, `answer`, `kill`, `verdict`,
 and (version 3) `provider_connect`, `provider_code`, `provider_disconnect` — a peer's
 providers driven from another node's interface, executed by the owner exactly as a

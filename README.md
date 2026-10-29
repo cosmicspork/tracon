@@ -308,31 +308,6 @@ those `x-codex-*` headers per call beside the call's token count; it does not po
 the provider and enforces nothing from them. The ChatGPT workspace admin console
 remains the authoritative credit ledger.
 
-**A work item may carry a brief, and most never will.** It is one document —
-`brief-<item>` on the Documents screen, linked from the item — saying who the work
-is for, what their problem is, what was read to reach that belief, what bounds the
-answer, what would make it good, and what is still open. Every line is marked
-`observed` (the customer said or did this), `inferred` (someone reasoned to it) or
-`decided` (you chose it), and points at what it rests on: a document, a session, a
-piece of evidence, another item, a URL. The node resolves those and says which ones
-it has never seen rather than showing a link that goes nowhere. A session reads the
-brief with `brief_read`; a line it wants to add goes through `brief_note`, which
-comes to you for approval, and which refuses outright to record a decision in your
-name or an observation with nothing to point at. Nothing requires a brief: an item
-without one is worked from its description and its plan, exactly as before.
-
-**You choose what every attempt at an item starts with.** The item's Context
-panel selects documents for it by role — the brief, research, decisions,
-constraints, anything else relevant — into one document, `context-<item>`, that
-you can also edit by hand. Each later session on the item gets those documents in
-full in its orientation, under their own heading; a session cannot change the
-selection, only ask you to. The node records what each attempt actually received
-— every document at its exact revision, whole, cut short or left out and why —
-numbers the distinct contexts as revisions, and says what changed since the
-previous attempt, both to you on the item and to the session in its orientation.
-A document the next attempt will not get, because this node does not hold it or
-it has been archived, is flagged before the attempt starts.
-
 The model picker uses the selected runner's connected, channel-bound providers.
 A sign-in starts out serving the node's default channel (or every channel the node
 belongs to when it has none); choose others before connecting, or use **edit
@@ -415,7 +390,7 @@ work is one action; a plain session waits for the prompt you give it.
 
 It has two parts, and the split is the point. The **system orientation** is
 tracon's own account of the installation. It opens with the work: the item and its
-phase, what the phase must produce, the brief it points at, and the plan. Then the
+phase, what the phase must produce, and the plan. Then the
 environment: the node and its harness, the worktree and repository, the network the
 session may reach and how its dependencies were prepared. Then how to work with the
 node: the tools this channel actually serves, grouped by purpose (a harness that
@@ -433,8 +408,7 @@ replaces it — or over the API with `PUT /api/manifest/text` (`kind =
 "instruction"`). They reach every session launched on that channel from the next
 launch onward; a running session keeps the manifest revision it staged.
 
-Documents you select for a work item follow as **Selected context**, and documents
-you pin to a channel as **Pinned documents**, in full. Your directives, and confident
+Documents you pin to a channel follow as **Pinned documents**, in full. Your directives, and confident
 facts about the session's own project, are under **Known**; a fact retained for the
 whole channel is left to `recall`. The other ready work on the project is
 discretionary: it is included only as far as the session's context budget allows.
@@ -767,7 +741,7 @@ that a peer has none.
 
 A review can also get a second opinion from a **review session**: a fresh session
 that never saw the implementation. It starts from the submitted change with none of
-the implementing session's conversation, reads the item's brief and criteria and the
+the implementing session's conversation, reads the item and the
 diff, and judges the one against the other. Beside the diff it is given what the node
 holds about the candidate: the required checks run on it, with the end of their
 output, the work shown at that commit, and what earlier reviewers of the same review
@@ -822,9 +796,9 @@ receives it like any other, marked as from the AI review.
 A review session never decides. It ends by giving one `review_verdict`, approve or
 request changes with a summary and findings, and what it rests on (`ran_checks`,
 `cited_evidence` or `diff_only`), which is shown on the review card;
-only your decision publishes or sends the work back. Its tools are read-only:
-`recall`, `doc_read`, `doc_search`, `brief_read`, `criteria_read`, and
-`review_verdict`.
+only your decision publishes or sends the work back. Its tools read and run, never
+publish: `recall`, `doc_read`, `doc_search`, `work_list`, `work_show`,
+`service_start`, `service_status`, `show_work`, and `review_verdict`.
 
 ### Asking, pinging, and complaining
 
@@ -1433,8 +1407,8 @@ already there, with no step to reclassify them: a removed kind's documents show 
 `other`, and the export leaves their files alone, as it does any file without a
 kind's prefix. The reverse holds too: adding a kind puts the `<prefix>-*.md` files
 already in the export directory under the export's management, so a file there that
-is not a document is deleted at the next export. Four kinds are the node's own and cannot be configured: `context` (a
-work item's selected context), `shown` (what `show_work` wrote), `brief` and `plan`.
+is not a document is deleted at the next export. Two kinds are the node's own and cannot be configured: `shown` (what
+`show_work` wrote) and `plan`.
 An entry that names one of them, `other`, or a prefix already listed, is refused.
 `doc_write` and `doc_search` offer agents the list as it is, and the Documents screen
 groups and filters by it (`GET /api/docs/kinds`).
@@ -1448,7 +1422,7 @@ through the same writer, path checks and limits as an import and served only
 from the preview origin; replacing a multi-file bundle drops its other files,
 and the approval's title says how many. Markdown over an HTML document retires
 its bundle. `doc_delete` removes a document of either format with its bundle,
-is always asked, and refuses a brief, a selected context, and shown work. Both
+is always asked, and refuses shown work. Both
 take `if_hash` from `doc_read`, across a change of format, and a reserved slug,
 an unknown format, or an HTML body over the per-file limit is refused before
 the call is held.
@@ -1504,10 +1478,9 @@ asked and need a narrow authority grant. It also refuses an edit
 to the harness's settings (`.claude/settings…`), which would configure the harness of
 whoever checks the branch out, and an edit tool's write into Git's internals
 (`.git/`). It runs the brokered reads unattended — queries, lookups, searches,
-pipeline and check status, job logs, documents, memory, the ledger, an item's brief —
+pipeline and check status, job logs, documents, memory, the ledger —
 and asks before every brokered write that others see: a comment, an edited or new
-ticket, a pipeline run, a document other than working notes, a line added to a brief,
-a rewritten or deleted work item.
+ticket, a pipeline run, a document other than working notes, a rewritten or deleted work item.
 A tool whose kind the node does not know is asked. The narrative a call carries (a
 review's or report's title and body, a review's forge description and comment, a ticket's summary and description, a comment,
 a reply, a document's body) is text, not an action, so it is left out of deny

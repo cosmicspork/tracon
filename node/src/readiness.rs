@@ -2,7 +2,7 @@
 //!
 //! Three paths ask for different things. An investigation needs a place to run
 //! and a model: it reads, reproduces and reports, and asking it for a forge
-//! credential or a product brief would refuse work that never touches either.
+//! credential would refuse work that never touches one.
 //! Verification adds what the node needs to vouch for a result: required
 //! checks, and an image those checks can be pinned to. Publication adds what
 //! the forge needs: a remote the node can name, a credential this channel
@@ -76,9 +76,6 @@ pub struct Facts {
     /// Why the forge's CLI (`publish.gh` or `publish.glab`) could not be run;
     /// `None` when it can, or when there is no forge to ask about.
     pub cli_refused: Option<String>,
-    /// Whether the work item the session would serve has a brief. `None` for
-    /// a session with no item.
-    pub item_has_brief: Option<bool>,
 }
 
 /// The forge a remote is on, by its host.
@@ -179,20 +176,12 @@ pub fn assess(channel: &str, repo: &str, facts: &Facts) -> Readiness {
             }
         }
     }
-    let mut publish_notes = Vec::new();
-    if facts.item_has_brief == Some(false) {
-        publish_notes.push(gap(
-            "brief",
-            "no brief, so the review has no requirements to judge",
-        ));
-    }
-
     Readiness {
         channel: channel.to_string(),
         repo: repo.to_string(),
         investigate: path(INVESTIGATE, launch, launch_notes),
         verify: path(VERIFY, verifying, verify_notes),
-        publish: path(PUBLISH, publishing, publish_notes),
+        publish: path(PUBLISH, publishing, Vec::new()),
     }
 }
 
@@ -270,13 +259,6 @@ pub async fn readiness(
             .err()
             .map(|refusal| refusal.to_string())
     });
-    let item_has_brief = work_item.map(|id| {
-        store
-            .work_get(id)
-            .ok()
-            .flatten()
-            .is_some_and(|item| item.brief_slug.is_some())
-    });
 
     assess(
         channel,
@@ -291,7 +273,6 @@ pub async fn readiness(
             remote,
             credential_refused,
             cli_refused,
-            item_has_brief,
         },
     )
 }
@@ -314,7 +295,6 @@ mod tests {
             remote: Some("github.com/o/r".into()),
             credential_refused: None,
             cli_refused: None,
-            item_has_brief: Some(true),
         }
     }
 
@@ -330,19 +310,17 @@ mod tests {
     }
 
     #[test]
-    fn an_investigation_needs_no_checks_forge_or_brief() {
+    fn an_investigation_needs_no_checks_or_forge() {
         let facts = Facts {
             checks: Vec::new(),
             remote: None,
             credential_refused: Some("credential gh is not bound to channel personal".into()),
-            item_has_brief: Some(false),
             ..ready()
         };
         let r = assess("personal", "/r", &facts);
         assert!(r.investigate.ready, "{:?}", r.investigate);
         assert_eq!(keys(&r.verify), vec!["checks"]);
         assert_eq!(keys(&r.publish), vec!["checks", "remote"]);
-        assert_eq!(r.publish.notes[0].key, "brief");
     }
 
     #[test]

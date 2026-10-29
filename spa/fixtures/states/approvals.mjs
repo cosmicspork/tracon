@@ -800,7 +800,7 @@ function promotionStates() {
       kind: 'episode',
       scope: 'session',
       scope_ref: '0199f0b2-4d6e-7a8c-9e0f-1a2b3c4d5e6f',
-      body: 'Rebased feat/rate-limits onto main after #398 retired the scenario links; two criterion tests had to be rewritten.',
+      body: 'Rebased feat/rate-limits onto main after #398 changed the limiter; two of its tests had to be rewritten.',
       confidence: 0.55,
       source_session: '0199f0b2-4d6e-7a8c-9e0f-1a2b3c4d5e6f',
       source_node: NODE,

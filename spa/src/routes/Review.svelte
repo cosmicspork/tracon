@@ -21,7 +21,6 @@
     reviewChecks,
     reviewVerdict,
     type CandidateEvidence,
-    type Criteria,
     type OwnerDetail,
     type PinnedRequirements,
     type Review,
@@ -34,7 +33,6 @@
     type ReviewRevisionRef,
     type SinceReviewed,
     type ShownWork as ShownWorkItem,
-    type Verdict,
     type AiFinding,
     type ReviewerView,
   } from '../lib/types'
@@ -58,7 +56,6 @@
     unavailable,
   } from '../lib/verdicts'
   import { openAiRequest, sentReason, withFinding } from '../lib/reviewerChanges'
-  import { COVERAGE, FINDING, VERDICTS, attention, linkSays, whatIsLeft } from '../lib/criteria'
   import { failuresOf, outcomeLabel, runDuration, runTone, runsSummary } from '../lib/checkRuns'
 
   let { id }: { id: string } = $props()
@@ -82,13 +79,6 @@
   /** What became of the latest revision's reviewer, as the node last said. */
   let reviewerView = $state<ReviewerView | null>(null)
   let requirements = $state<PinnedRequirements | null>(null)
-  /** The pinned item's criteria against this revision's candidate, if any. */
-  let criteria = $state<Criteria | null>(null)
-  /** The criterion whose verdict is being given, by key. */
-  let judging = $state<string | null>(null)
-  let criterionVerdict = $state<Verdict>('met')
-  let criterionNote = $state('')
-  let criteriaError = $state<string | null>(null)
   /** What changed since your last verdict, and which diff is showing. */
   let sinceReviewed = $state<SinceReviewed | null>(null)
   let diffView = $state<'since' | 'full'>('full')
@@ -191,7 +181,6 @@
         reviewerStarting = d.review_session_starting ?? false
         reviewerView = d.reviewer ?? null
         requirements = d.requirements
-        criteria = d.criteria
         sinceReviewed = d.since_reviewed ?? null
         // A resubmission opens on what answered your feedback; the full diff
         // is one tap away.
@@ -592,38 +581,6 @@
       ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }
 
-  /** The title of shown work on this review, for a finding that cites it. */
-  function shownTitle(id: string): string | null {
-    return shownWork.find((w) => w.id === id)?.title ?? null
-  }
-
-  /**
-   * Record a verdict on one criterion, bound to the revision on the screen.
-   * This is the only thing that can say a criterion was met: the checks
-   * passing says the checks passed, and nothing more.
-   */
-  async function judgeCriterion(key: string) {
-    if (!criteria) return
-    busy = true
-    criteriaError = null
-    try {
-      const res = await api.judgeCriterion(criteria.work_item_id, {
-        criterion: key,
-        verdict: criterionVerdict,
-        note: criterionNote.trim() || undefined,
-        candidate_id: criteria.candidate?.id ?? null,
-        revision_id: revision?.id,
-      })
-      criteria = res.criteria
-      criterionNote = ''
-      judging = null
-    } catch (e) {
-      criteriaError = e instanceof Error ? e.message : String(e)
-    } finally {
-      busy = false
-    }
-  }
-
   async function decide(verdict: 'approve' | 'reject' | 'revise') {
     if (!review || publishing) return
     busy = true
@@ -1001,86 +958,6 @@
           <small>Linked context documents.</small>
         </div>
       {/if}
-    </section>
-  {/if}
-
-  {#if criteria}
-    <section class="criteria-block">
-      <div class="h4">
-        Acceptance criteria
-        <b>{criteria.summary}</b>
-      </div>
-      {#if criteria.criteria.length === 0}
-        <p class="missing">{criteria.absent ?? 'the brief states no success criteria'}</p>
-      {:else}
-        <p class="left">
-          {whatIsLeft(criteria)} 
-        </p>
-        <ul>
-          {#each criteria.criteria as c, i (i)}
-            <li class={attention(c.coverage)}>
-              <div class="line">
-                <span class="chip {attention(c.coverage)}" title={COVERAGE[c.coverage].title}>{COVERAGE[c.coverage].label}</span>
-                <span>{c.text}</span>
-              </div>
-              {#if c.duplicate}
-                <small class="missing">
-                  Duplicate criterion; <a href="/docs/{criteria.channel}/{criteria.brief_slug}">edit the brief to distinguish these lines.</a>
-                </small>
-              {/if}
-              {#each c.links as l (l.index)}
-                <small><code>{l.value}</code> · {linkSays(l)}</small>
-              {/each}
-              {#if c.links.length === 0}
-                <small>Nothing points at this one, so nothing on this screen speaks to it.</small>
-              {/if}
-              {#if c.finding}
-                <small class="finding" class:contra={c.finding.outcome === 'contradicted'}>
-                  review finding · {FINDING[c.finding.outcome]}{c.finding.note ? ` · ${c.finding.note}` : ''}
-                  {#each c.finding.evidence as ev, n (ev)}
-                    {' · '}<a href="#shown-{ev}">{shownTitle(ev) ?? `evidence ${n + 1}`}</a>
-                  {/each}
-                  · reviewer's view
-                </small>
-              {/if}
-              {#if c.judgement}
-                <small class="judged">
-                  you judged it {c.judgement.verdict.replace('_', ' ')}{c.judgement.note ? ` · ${c.judgement.note}` : ''}
-                </small>
-              {:else if c.earlier_judgement}
-                <small class="earlier">
-                  judged {c.earlier_judgement.verdict.replace('_', ' ')}
-                  {c.earlier_judgement.candidate_id ? 'on another attempt' : 'on no named attempt'}
-                </small>
-              {/if}
-              {#if c.duplicate}
-                <button class="lnk" disabled>Judge it</button>
-              {:else if remoteOwner}
-                <small>Judge it on {nodeLabel(store.nodes, remoteOwner)}, which holds this attempt.</small>
-              {:else if judging === c.key}
-                <div class="judge">
-                  <select bind:value={criterionVerdict} aria-label="your verdict">
-                    {#each VERDICTS as v (v)}<option value={v}>{v.replace('_', ' ')}</option>{/each}
-                  </select>
-                  <input placeholder="what you looked at" bind:value={criterionNote} />
-                  <button class="btn p" onclick={() => judgeCriterion(c.key)} disabled={busy}>Record it</button>
-                  <button class="lnk" onclick={() => (judging = null)} disabled={busy}>Cancel</button>
-                </div>
-              {:else}
-                <button class="lnk" onclick={() => (judging = c.key)} disabled={busy}>
-                  {c.judgement ? 'Judge it again' : 'Judge it'}
-                </button>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-        {#if criteria.gaps.questions.length}
-          <p class="missing">
-            Still open: {criteria.gaps.questions.join(' · ')}
-          </p>
-        {/if}
-      {/if}
-      {#if criteriaError}<div class="banner crit">refused <b>· {criteriaError}</b></div>{/if}
     </section>
   {/if}
 
@@ -1748,110 +1625,6 @@
   .checks .chip.bad {
     background: var(--wash-crit);
     color: var(--crit);
-  }
-  .criteria-block {
-    display: flex;
-    flex-direction: column;
-    gap: 9px;
-  }
-  .criteria-block .left {
-    margin: 0;
-    color: var(--ink2);
-    font-size: 13px;
-  }
-  .criteria-block ul {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    display: grid;
-    gap: 7px;
-  }
-  .criteria-block li {
-    background: var(--s1);
-    border-radius: 4px;
-    border-left: 2px solid var(--dim);
-    padding: 8px 11px;
-    display: grid;
-    gap: 4px;
-    font-size: 13.5px;
-    line-height: 1.45;
-  }
-  .criteria-block li.gap {
-    border-left-color: var(--wait);
-  }
-  .criteria-block li.fail {
-    border-left-color: var(--crit);
-  }
-  .criteria-block li.settled {
-    border-left-color: var(--ok);
-  }
-  .criteria-block .line {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .criteria-block small {
-    color: var(--dim);
-    font: 11.5px var(--mono);
-  }
-  .criteria-block small.judged {
-    color: var(--ok);
-  }
-  .criteria-block small.finding {
-    color: var(--ink2);
-  }
-  .criteria-block small.finding.contra {
-    color: var(--crit);
-  }
-  .criteria-block small.earlier {
-    color: var(--wait);
-  }
-  .criteria-block code {
-    font: 11.5px var(--mono);
-    color: var(--ink2);
-  }
-  .criteria-block .judge {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
-  }
-  .criteria-block input,
-  .criteria-block select {
-    background: var(--s2);
-    border: 0;
-    border-radius: 4px;
-    color: var(--ink);
-    padding: 6px 9px;
-    font: 12.5px var(--sans);
-  }
-  .criteria-block input {
-    flex: 1;
-    min-width: 140px;
-  }
-  .criteria-block button {
-    justify-self: start;
-  }
-  .chip.gap,
-  .chip.wait {
-    background: var(--wash-wait);
-    color: var(--wait);
-  }
-  .chip.gap::before,
-  .chip.wait::before {
-    background: var(--wait);
-  }
-  .chip.fail {
-    background: var(--wash-crit);
-    color: var(--crit);
-  }
-  .chip.fail::before {
-    background: var(--crit);
-  }
-  .chip.settled {
-    background: var(--wash-ok);
-    color: var(--ok);
   }
   .prov {
     display: grid;

@@ -424,9 +424,8 @@ fn kickoff(
             Some(format!(
                 "Review the change under review `{review}`. The requirements and the diff are \
                  in your orientation. Your workspace holds the candidate's files, without its \
-                 Git history, and `{diff}` holds the whole diff. Where a criterion needs the \
-                 change run, show what you saw with `show_work` and record a `review_finding` \
-                 for it. Give your verdict with `review_verdict`.",
+                 Git history, and `{diff}` holds the whole diff. Where the change needs running, \
+                 show what you saw with `show_work`. Give your verdict with `review_verdict`.",
                 diff = crate::mcp::review::REVIEW_DIFF,
             ))
         }
@@ -2821,7 +2820,7 @@ impl Manager {
         // constraints, the channel's policy and what is known, and then
         // whatever conventions fit under the cap. Recorded as an event so the
         // transcript shows what the agent was told — and what it was not.
-        let ((orientation, missing), context) = {
+        let (orientation, missing) = {
             let session_row = self.store.get_session(id)?;
             let project = session_row
                 .as_ref()
@@ -2884,17 +2883,8 @@ impl Manager {
                 .iter()
                 .map(|service| service.name.clone())
                 .collect();
-            // What the operator selected for this item, delivered and
-            // recorded before the orientation is assembled, so the receipt
-            // says exactly what the text below carries. A receipt that
-            // cannot be recorded fails the launch: an attempt whose context
-            // is not on record is the thing this exists to prevent.
-            let context = match item.as_ref() {
-                Some(item) => crate::corpus::context::prepare(&self.store, id, item)?,
-                None => None,
-            };
             let policy = self.policy.read();
-            let assembled = crate::corpus::orientation::assemble(
+            crate::corpus::orientation::assemble(
                 &self.store,
                 &policy,
                 &crate::corpus::orientation::Facts {
@@ -2923,7 +2913,6 @@ impl Manager {
                             checks_configured: !environment.checks.is_empty(),
                         }),
                     manifest: &manifest,
-                    context: context.as_ref().map(|(d, r)| (d, r)),
                     egress: egress
                         .as_ref()
                         .map(|_| environment.session_egress.as_slice()),
@@ -2931,8 +2920,7 @@ impl Manager {
                     prepared: prepared.as_ref(),
                     stale_base: stale.as_deref(),
                 },
-            );
-            (assembled, context.map(|(_, receipt)| receipt))
+            )
         };
         self.record(NewEvent {
             session_id: id.to_string(),
@@ -2947,16 +2935,6 @@ impl Manager {
                 "trimmed": !missing.is_empty(),
                 "missing": missing,
                 "chars": orientation.len(),
-                // Which revision of the item's selected context this attempt
-                // received, and what differs from the previous attempt; the
-                // whole receipt is on the item's context record.
-                "context": context.as_ref().map(|r| json!({
-                    "revision": r.revision,
-                    "digest": r.digest,
-                    "previous_revision": r.previous_revision,
-                    "changes": r.changes,
-                    "omitted": r.omissions().map(|o| &o.slug).collect::<Vec<_>>(),
-                })),
             }),
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
@@ -4743,7 +4721,6 @@ mod tests {
             discovered_by_session: None,
             discovered_by_lane: None,
             phase_plan_slug: plan.map(str::to_string),
-            brief_slug: None,
             closed_by_session: None,
             created_ms: 0,
             updated_ms: 0,

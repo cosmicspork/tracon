@@ -488,10 +488,10 @@ pub enum Command {
     EvidenceCandidates {
         query: Value,
     },
-    /// A mirrored review's detail — its checks, evidence, criteria and
-    /// staleness — read from the node that holds it. The request names the
-    /// owner and the review's channel, so the receiver refuses a third-node
-    /// relay or a lookup across channels; an older peer rejects it.
+    /// A mirrored review's detail — its checks, evidence and staleness —
+    /// read from the node that holds it. The request names the owner and the
+    /// review's channel, so the receiver refuses a third-node relay or a
+    /// lookup across channels; an older peer rejects it.
     ReviewDetail {
         request: Value,
     },

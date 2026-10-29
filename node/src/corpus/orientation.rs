@@ -7,27 +7,23 @@
 //! account of the installation: the node, the session's work and phase, the
 //! tool names, what the node enforces. It is followed by sections that are
 //! not tracon's — "Operator notes", the standing text the operator set for
-//! this channel; "Selected context", the documents the operator chose for
-//! this work item (`corpus::context`); and "Pinned documents", the documents
-//! the operator has chosen to have every session start with, in full. A
-//! session that cannot tell one from the other cannot weigh either: it reads
-//! a human's preference as a property of the system, or a system fact as
+//! this channel; and "Pinned documents", the documents the operator has
+//! chosen to have every session start with, in full. A session that cannot
+//! tell one from the other cannot weigh either: it reads a human's preference as a property of the system, or a system fact as
 //! advice it may trade away. So each of those carries a heading and a
 //! sentence saying where it came from, and nothing personal is ever compiled
 //! into this file.
 //!
 //! **What the cap may take.** *Reserved* is what this session is for and what
-//! bounds it: the node, the work item and its phase, the brief it points at,
-//! the plan or the diff under review, the agreements, the operator's
-//! directives, notes, customization, the documents selected for the item,
-//! and any document the operator has pinned to the channel. It is assembled
-//! first and is never dropped to make room for anything below it — a pinned
-//! document goes in whole or not at all, never truncated; the operator's own
-//! curation is the limit, not a byte cap. The selected documents have an
-//! allowance of their own, applied when they are delivered, so one oversized
-//! research dump cannot become the session. *Discretionary* is everything
-//! else the node offers because it might help: the other ready work on the
-//! project, in ledger order, with whatever the reserved tier left of the cap.
+//! bounds it: the node, the work item and its phase, the plan or the diff
+//! under review, the agreements, the operator's directives, notes,
+//! customization, and any document the operator has pinned to the channel.
+//! It is assembled first and is never dropped to make room for anything below
+//! it — a pinned document goes in whole or not at all, never truncated; the
+//! operator's own curation is the limit, not a byte cap. *Discretionary* is
+//! everything else the node offers because it might help: the other ready
+//! work on the project, in ledger order, with whatever the reserved tier left
+//! of the cap.
 //!
 //! The cap exists because oversized context degrades the session it was meant
 //! to help. It used to be enforced by truncating the assembled text, which cut
@@ -107,13 +103,6 @@ pub struct Facts<'a> {
     /// standing text goes, and instruction content grants no permission on
     /// either path.
     pub manifest: &'a crate::manifest::LaunchManifest,
-    /// The documents the operator selected for this item, as this launch
-    /// delivered them, and the receipt recorded for it. `None` when the item
-    /// has no selection and never had one.
-    pub context: Option<(
-        &'a crate::corpus::context::Delivered,
-        &'a crate::corpus::context::Receipt,
-    )>,
     /// What this session's repository opens to it, as the operator wrote it
     /// (`crates`, `npm`, a host name); empty when it opens nothing. `None`
     /// for a session whose egress is not its own grant, where the node has
@@ -219,22 +208,21 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
     let mut out = String::new();
     out.push_str(
         "# Orientation\n\nAssembled by the tracon node for this session; nothing here is in \
-         the repository. Sections headed \"Operator notes\", \"Selected context\" or \
-         \"Pinned documents\" are the operator, and documents they chose, speaking: take \
+         the repository. Sections headed \"Operator notes\" or \"Pinned documents\" \
+         are the operator, and documents they chose, speaking: take \
          them as a human's instructions. Everything else is tracon's own account of the \
          system: take it as fact.\n\n",
     );
     // What the session is for, first; then where it is and how the node
     // answers it, both short; then the review's evidence and diff, which can
     // be long; then what the operator has said.
-    push_work(&mut out, store, facts, &mut missing);
+    push_work(&mut out, facts, &mut missing);
     push_node(&mut out, facts);
     push_working_with(&mut out, policy, facts);
     push_review(&mut out, store, facts, &mut missing);
     push_known(&mut out, store, facts, &mut missing);
     push_customization(&mut out, facts, &mut missing);
     push_operator_notes(&mut out, facts, &mut missing);
-    push_selected_context(&mut out, facts, &mut missing);
     push_pinned_documents(&mut out, store, facts);
 
     // Discretionary. Whatever the reserved tier — including every pinned
@@ -336,13 +324,7 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
     &[
         (
             "Review",
-            &[
-                review::SUBMIT,
-                review::STATUS,
-                show::SHOW,
-                review::VERDICT,
-                review::FINDING,
-            ],
+            &[review::SUBMIT, review::STATUS, show::SHOW, review::VERDICT],
         ),
         (
             "Work ledger",
@@ -354,10 +336,6 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
                 work::WORK_UPDATE,
                 work::WORK_CLOSE,
                 work::WORK_DELETE,
-                work::BRIEF_READ,
-                work::BRIEF_NOTE,
-                work::CRITERIA_READ,
-                work::CRITERIA_LINK,
             ],
         ),
         (
@@ -529,7 +507,7 @@ fn push_repository(out: &mut String, facts: &Facts) {
 }
 
 /// The item, its phase, what the phase must produce, and the plan.
-fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<Missing>) {
+fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
     let Some(item) = facts.item else { return };
     out.push_str(&format!(
         "## Work\n\n**{}** (`{}…`, phase: {})\n\n",
@@ -548,27 +526,6 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
             missing,
         );
         out.push_str("\n\n");
-    }
-    if let Some(slug) = &item.brief_slug {
-        // A pointer, not the brief: what the work is for is worth 25 tokens
-        // of the reserved space, and the brief itself is a call away.
-        out.push_str(&format!(
-            "This item has a product brief (`{slug}`): who the work is for, what would make it \
-             good, and what is still open. `brief_read` returns it, with every line marked \
-             observed, inferred or decided."
-        ));
-        // A session not offered `brief_note` is not told how to add a line:
-        // it would spend a turn on a call that is refused.
-        if offered(facts, crate::mcp::work::BRIEF_NOTE) {
-            out.push_str(
-                " `brief_note` adds a line to it — `observed` must cite what the customer said \
-                 or did, `inferred` is your own reasoning, and a decision is the operator's and \
-                 is refused. Every line you add goes to the operator for approval before it \
-                 lands.",
-            );
-        }
-        out.push_str("\n\n");
-        push_criteria(out, store, facts, item);
     }
     if let Some(from) = &item.discovered_from {
         out.push_str(&format!(
@@ -626,48 +583,6 @@ fn push_work(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec<M
     }
 }
 
-/// One sentence on what the item's success criteria are bound to, when the
-/// brief states any. Said here because a session that never learns a criterion
-/// has nothing pointing at it will not go looking: the gap is what is worth the
-/// reserved space, not the coverage.
-fn push_criteria(out: &mut String, store: &Store, facts: &Facts, item: &WorkItem) {
-    let Some(slug) = item.brief_slug.as_deref() else {
-        return;
-    };
-    let Ok(Some(doc)) = store.doc_get(&item.channel, slug) else {
-        return;
-    };
-    let standing =
-        crate::corpus::criteria::standing(&crate::corpus::brief::Brief::parse(&doc.body));
-    if standing.total == 0 {
-        return;
-    }
-    let loose = standing.unlinked + standing.only_proposed;
-    let gap = if loose == 0 {
-        "every one of them says what would settle it".to_string()
-    } else {
-        format!(
-            "{loose} of them have nothing agreed pointing at them ({} with nothing at all, \
-             {} with only somebody's proposal)",
-            standing.unlinked, standing.only_proposed
-        )
-    };
-    out.push_str(&format!(
-        "It states {} success criteri{}, and {gap}. `criteria_read` says which, and what the \
-         checks say about the current candidate",
-        standing.total,
-        if standing.total == 1 { "on" } else { "a" },
-    ));
-    if offered(facts, crate::mcp::work::CRITERIA_LINK) {
-        out.push_str(
-            "; `criteria_link` records what you think would settle one. Your link is a \
-             proposal: only the operator decides what good means, and your own checks passing \
-             is not the customer agreeing with the standard",
-        );
-    }
-    out.push_str(".\n\n");
-}
-
 /// Whether this session is offered `name`, so the orientation names only
 /// the tools it can call.
 fn offered(facts: &Facts, name: &str) -> bool {
@@ -675,11 +590,11 @@ fn offered(facts: &Facts, name: &str) -> bool {
 }
 
 /// What a reviewer can do besides reading the diff: run the change, where the
-/// node offers a browser, and say per criterion what that showed. Said only of
-/// the tools this session actually has and the services its catalogue holds.
+/// node offers a browser, and show what that showed. Said only of the tools
+/// this session actually has and the services its catalogue holds.
 fn exercising(tools: &[String], services: &[String]) -> String {
     let has = |name: &str| tools.iter().any(|t| t == name);
-    if !has(crate::mcp::review::FINDING) {
+    if !has(crate::mcp::show::SHOW) {
         return String::new();
     }
     let browser = services.iter().any(|s| s == crate::mcp::services::BROWSER);
@@ -689,12 +604,8 @@ fn exercising(tools: &[String], services: &[String]) -> String {
         "run it in your worktree, "
     };
     format!(
-        "Where a criterion is one no check settles, or the operator asks, exercise the change: \
-         {run}show what you saw with `show_work`, and record per criterion with \
-         `review_finding` whether it supported the criterion, contradicted it, or could not be \
-         shown, citing that shown work. A finding is your account, kept apart from the verdict \
-         on the diff; it never marks a criterion met. `criteria_link` proposes a check, and is \
-         asked like any session's.\n\n"
+        "Where no check settles what the change does, or the operator asks, exercise it: \
+         {run}and show what you saw with `show_work`.\n\n"
     )
 }
 
@@ -1293,36 +1204,6 @@ fn push_operator_notes(out: &mut String, facts: &Facts, missing: &mut Vec<Missin
     out.push_str("\n\n");
 }
 
-/// The documents the operator selected for this work item, as this launch
-/// delivered them (`corpus::context`). Reserved: this is what the item is
-/// for, chosen for it rather than for the channel, so it comes before the
-/// channel's pinned documents and is never spent to make room for anything
-/// discretionary. It has an allowance of its own, applied when it was
-/// delivered; what did not fit is already named in the delivery, and joins
-/// the rest of what this orientation does not carry.
-///
-/// An item whose selection was removed after an earlier attempt used it
-/// still gets the heading and the revision line: the session is owed "your
-/// context was taken away", not silence.
-fn push_selected_context(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
-    let Some((delivered, receipt)) = facts.context else {
-        return;
-    };
-    out.push_str(
-        "## Selected context\n\nDocuments the operator selected for this work item. They are \
-         not tracon's, and they were chosen for this item rather than for the channel; every \
-         attempt at the item starts with them. Where one contradicts the work item, the plan \
-         or the operator's notes, ask the operator rather than choosing.\n\n",
-    );
-    out.push_str(&crate::corpus::context::revision_line(receipt));
-    out.push_str("\n\n");
-    if delivered.received.is_empty() {
-        out.push_str("Nothing is selected for this attempt.\n\n");
-    }
-    out.push_str(&delivered.text);
-    missing.extend(delivered.missing.iter().cloned());
-}
-
 /// The heading the channel's pinned documents open under, and the sentence
 /// saying whose they are. Not "Conventions": a pinned document is one the
 /// operator chose, not one tracon selected, and calling it a convention
@@ -1550,7 +1431,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -1630,7 +1510,6 @@ mod tests {
                 ready: &[],
                 review: None,
                 manifest: &crate::manifest::LaunchManifest::default(),
-                context: None,
                 egress: None,
                 forge_repo: None,
                 prepared: None,
@@ -1704,7 +1583,6 @@ mod tests {
                 ready: &[],
                 review: None,
                 manifest: &manifest,
-                context: None,
                 egress: None,
                 forge_repo: repo,
                 prepared: None,
@@ -1785,7 +1663,6 @@ mod tests {
             discovered_by_session: None,
             discovered_by_lane: None,
             phase_plan_slug: None,
-            brief_slug: None,
             closed_by_session: None,
             created_ms: 1,
             updated_ms: 1,
@@ -1849,7 +1726,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &manifest,
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -1890,7 +1766,7 @@ mod tests {
         all.extend(github::definitions());
         all.extend(gitlab::definitions());
         all.extend(jira::definitions());
-        all.extend(review::definitions(true));
+        all.extend(review::definitions());
         all.extend(memory::definitions());
         all.extend(docs::definitions(&crate::config::default_doc_kinds()));
         all.extend(operator::definitions());
@@ -1944,7 +1820,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -1989,7 +1864,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2035,7 +1909,6 @@ mod tests {
             ready: &ready,
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2087,7 +1960,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2137,7 +2009,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2192,7 +2063,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2239,7 +2109,6 @@ mod tests {
             ready: &ready,
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2265,210 +2134,6 @@ mod tests {
             missing.iter().any(|m| m.what.contains("ready work")),
             "{missing:?}"
         );
-    }
-
-    /// An item's brief is named in the reserved tier, and only when there is
-    /// one: a session whose item has no brief is told nothing about briefs.
-    #[test]
-    fn a_brief_is_pointed_at_from_the_task_and_is_silent_when_there_is_none() {
-        let store = Store::open_in_memory().unwrap();
-        let mut item = item("Overnight alert triage", "");
-        let manifest = crate::manifest::LaunchManifest::default();
-        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let plan = names(crate::mcp::Tools::PLAN_TOOLS);
-        let execute = names(&["brief_read", "brief_note"]);
-        fn facts<'a>(
-            item: &'a WorkItem,
-            manifest: &'a crate::manifest::LaunchManifest,
-            tools: &'a [String],
-            phase: &'a str,
-        ) -> Facts<'a> {
-            Facts {
-                node_name: "n",
-                node_id: "id",
-                backend: "local",
-                harness: "fake",
-                harness_version: "1",
-                channel: "personal",
-                project_id: None,
-                project_name: None,
-                tools,
-                services: &[],
-                worktree: "/work",
-                phase,
-                item: Some(item),
-                plan_body: None,
-                ready: &[],
-                review: None,
-                manifest,
-                context: None,
-                egress: None,
-                forge_repo: None,
-                prepared: None,
-                stale_base: None,
-            }
-        }
-        let (bare, _) = assemble(
-            &store,
-            &Policy::default(),
-            &facts(&item, &manifest, &execute, "execute"),
-        );
-        assert!(
-            !bare.contains("product brief"),
-            "no brief, nothing said: {bare}"
-        );
-
-        item.brief_slug = Some("brief-item0001dead".into());
-        let (text, missing) = assemble(
-            &store,
-            &Policy::default(),
-            &facts(&item, &manifest, &execute, "execute"),
-        );
-        assert!(text.contains("`brief-item0001dead`"), "{text}");
-        assert!(text.contains("`brief_read`"), "and how to read it: {text}");
-        // Reading a brief is only half of it: a session that learns something
-        // about the customer can put it back, and the node holds it to what it
-        // can honestly claim.
-        assert!(
-            text.contains("`brief_note`"),
-            "and how to add to it: {text}"
-        );
-        assert!(
-            text.contains("approval"),
-            "and that a line is asked: {text}"
-        );
-        assert!(
-            text.find("Overnight alert triage") < text.find("brief-item0001dead"),
-            "the pointer sits with the task"
-        );
-        assert!(missing.is_empty(), "a pointer costs nothing: {missing:?}");
-
-        // A plan session is not offered `brief_note`, so it is not told of it.
-        let (planned, _) = assemble(
-            &store,
-            &Policy::default(),
-            &facts(&item, &manifest, &plan, "plan"),
-        );
-        assert!(planned.contains("`brief_read`"), "{planned}");
-        assert!(!planned.contains("brief_note"), "{planned}");
-    }
-
-    /// A criterion nothing points at is the thing a session will not go
-    /// looking for unless it is told. The pointer says how many, and how many
-    /// are loose — and says nothing at all when the brief states no criteria.
-    #[test]
-    fn the_criteria_gap_is_named_only_when_the_brief_states_criteria() {
-        let store = Store::open_in_memory().unwrap();
-        let mut item = item("Overnight alert triage", "");
-        let manifest = crate::manifest::LaunchManifest::default();
-        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let plan = names(crate::mcp::Tools::PLAN_TOOLS);
-        let execute = names(&["criteria_read", "criteria_link"]);
-        let write = |slug: &str, body: &str| {
-            store
-                .write_change(
-                    "n",
-                    "personal",
-                    "document",
-                    ChangeOp::Upsert,
-                    slug,
-                    json!({
-                        "channel": "personal", "slug": slug,
-                        "kind": "brief", "title": "Brief: Overnight alert triage",
-                        "body": body, "hash": slug, "format": "markdown",
-                        "entry_path": null, "source_name": null, "pinned": false,
-                        "created_ms": 1, "updated_ms": 1}),
-                )
-                .unwrap();
-        };
-        fn facts<'a>(
-            item: &'a WorkItem,
-            manifest: &'a crate::manifest::LaunchManifest,
-            tools: &'a [String],
-            phase: &'a str,
-        ) -> Facts<'a> {
-            Facts {
-                node_name: "n",
-                node_id: "id",
-                backend: "local",
-                harness: "fake",
-                harness_version: "1",
-                channel: "personal",
-                project_id: None,
-                project_name: None,
-                tools,
-                services: &[],
-                worktree: "/work",
-                phase,
-                item: Some(item),
-                plan_body: None,
-                ready: &[],
-                review: None,
-                manifest,
-                context: None,
-                egress: None,
-                forge_repo: None,
-                prepared: None,
-                stale_base: None,
-            }
-        }
-
-        write(
-            "brief-quiet",
-            "# Brief: Overnight alert triage\n\n## Problem\n\n- decided: it is slow\n",
-        );
-        item.brief_slug = Some("brief-quiet".into());
-        let (quiet, _) = assemble(
-            &store,
-            &Policy::default(),
-            &facts(&item, &manifest, &execute, "execute"),
-        );
-        assert!(
-            !quiet.contains("It states") && !quiet.contains("`criteria_read` says which"),
-            "a brief that states none is not told it has an uncovered one: {quiet}"
-        );
-
-        write(
-            "brief-stated",
-            "# Brief: Overnight alert triage\n\n## Success criteria\n\n\
-             - decided: triage finishes in under two minutes\n  - decided check: just check\n\
-             - decided: the count is never stale\n  - inferred check: just test\n\
-             - inferred: nobody scrolls to find the urgent one\n",
-        );
-        item.brief_slug = Some("brief-stated".into());
-        let (text, missing) = assemble(
-            &store,
-            &Policy::default(),
-            &facts(&item, &manifest, &execute, "execute"),
-        );
-        assert!(text.contains("It states 3 success criteria"), "{text}");
-        assert!(
-            text.contains("2 of them have nothing agreed pointing at them"),
-            "the gap, not the coverage: {text}"
-        );
-        assert!(
-            text.contains("`criteria_read`") && text.contains("`criteria_link`"),
-            "{text}"
-        );
-        assert!(
-            text.contains("only the operator decides what good means"),
-            "and that a proposal is not agreement: {text}"
-        );
-        assert!(missing.is_empty(), "a sentence costs nothing: {missing:?}");
-
-        // A plan session is not offered `criteria_link`, so it is not told of
-        // it, but still learns of the gap and how to read it.
-        let (planned, _) = assemble(
-            &store,
-            &Policy::default(),
-            &facts(&item, &manifest, &plan, "plan"),
-        );
-        assert!(
-            planned.contains("2 of them have nothing agreed pointing at them")
-                && planned.contains("`criteria_read`"),
-            "{planned}"
-        );
-        assert!(!planned.contains("criteria_link"), "{planned}");
     }
 
     /// An orientation that names a tool the node does not serve is worse than
@@ -2498,7 +2163,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &manifest,
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2576,7 +2240,6 @@ mod tests {
                 ready: &[],
                 review: None,
                 manifest: &manifest,
-                context: None,
                 egress: None,
                 forge_repo: None,
                 prepared: None,
@@ -2597,105 +2260,6 @@ mod tests {
         let cut = missing.iter().find(|m| m.what == "the plan").unwrap();
         assert_eq!(cut.chars, 10);
         assert!(cut.fetch.as_deref().unwrap().contains("doc_read"));
-    }
-
-    /// The documents the operator selected for the item are reserved, the
-    /// operator's rather than tracon's, specific to the item so they come
-    /// before the channel's pinned documents, and say which revision they
-    /// are. One the node could not deliver is named, not silently missing.
-    #[test]
-    fn selected_context_is_reserved_and_names_what_it_could_not_carry() {
-        let store = Store::open_in_memory().unwrap();
-        let doc = |id: &str, slug: &str, title: &str, body: &str, pinned: bool| {
-            store
-                .write_change(
-                    "n",
-                    "personal",
-                    "document",
-                    ChangeOp::Upsert,
-                    id,
-                    json!({
-                    "channel": "personal", "slug": slug, "kind": "ref", "title": title,
-                    "body": body, "pinned": pinned, "hash": format!("h-{id}"),
-                    "created_ms": 1, "updated_ms": 1}),
-                )
-                .unwrap();
-        };
-        let it = item("Triage alerts", "");
-        doc(
-            "d1",
-            "ref-interviews",
-            "Interviews",
-            "Admins sort by severity.",
-            false,
-        );
-        doc(
-            "d2",
-            "guide-house",
-            "House style",
-            "Pinned for everyone.",
-            true,
-        );
-        doc(
-            "d3",
-            &crate::corpus::context::slug_for(&it.id),
-            "Context",
-            "# Context\n\n## Research\n\n- [doc:ref-interviews] what admins said\n\n\
-             ## Constraints\n\n- [doc:ref-never-synced]\n",
-            false,
-        );
-        let (delivered, receipt) = crate::corpus::context::prepare(&store, "s1", &it)
-            .unwrap()
-            .unwrap();
-        let manifest = crate::manifest::LaunchManifest::default();
-        let facts = Facts {
-            node_name: "n",
-            node_id: "id",
-            backend: "local",
-            harness: "fake",
-            harness_version: "1",
-            channel: "personal",
-            project_id: None,
-            project_name: None,
-            tools: &[],
-            services: &[],
-            worktree: "/work",
-            phase: "execute",
-            item: Some(&it),
-            plan_body: None,
-            ready: &[],
-            review: None,
-            manifest: &manifest,
-            context: Some((&delivered, &receipt)),
-            egress: None,
-            forge_repo: None,
-            prepared: None,
-            stale_base: None,
-        };
-        let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
-        let i = |s: &str| {
-            text.find(s)
-                .unwrap_or_else(|| panic!("missing {s:?} in:\n{text}"))
-        };
-        // The task first, then where the session is.
-        assert!(i("## Work\n") < i("## Environment"));
-        assert!(i("## Work\n") < i("## Selected context"));
-        assert!(i("Refused outright") < i("## Selected context"));
-        assert!(i("## Selected context") < i("## Pinned documents"));
-        // Said whose they are, in the section itself.
-        assert!(text[i("## Selected context")..i("## Pinned documents")]
-            .contains("They are not tracon's"));
-        assert!(text.contains("Context revision 1 for this item."), "{text}");
-        assert!(text.contains("Admins sort by severity."), "{text}");
-        assert!(
-            text.contains("_Selected because: what admins said_"),
-            "{text}"
-        );
-        // The one that could not be delivered is named with a way to get it.
-        assert_eq!(missing.len(), 1, "{missing:?}");
-        assert!(missing[0].what.contains("ref-never-synced"), "{missing:?}");
-        assert!(i("## Not in this orientation") > i("## Pinned documents"));
-        assert!(text.contains("could not deliver"), "{text}");
     }
 
     /// A denial is answered in the task's own terms by `mcp::refusal`; the
@@ -2722,7 +2286,6 @@ mod tests {
             ready: &[],
             review: None,
             manifest: &crate::manifest::LaunchManifest::default(),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,
@@ -2801,22 +2364,21 @@ mod tests {
     #[test]
     fn a_reviewer_is_told_how_to_exercise_the_change_only_with_the_tools_it_has() {
         let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        let offered = names(&["review_verdict", "review_finding", "service_start"]);
+        let offered = names(&["review_verdict", "show_work", "service_start"]);
         let browser = exercising(&offered, &names(&["browser"]));
         assert!(
             browser.contains("`service_start` with `browser`"),
             "{browser}"
         );
         assert!(browser.contains("`show_work`"), "{browser}");
-        assert!(browser.contains("never marks a criterion met"), "{browser}");
         // A catalogue that holds services, none of them a browser, offers
         // `service_start` but no browser to promise.
         let no_browser = exercising(&offered, &names(&["postgres"]));
         assert!(!no_browser.contains("browser"), "{no_browser}");
-        assert!(no_browser.contains("`review_finding`"), "{no_browser}");
-        let no_catalogue = exercising(&names(&["review_verdict", "review_finding"]), &[]);
+        assert!(no_browser.contains("`show_work`"), "{no_browser}");
+        let no_catalogue = exercising(&names(&["review_verdict", "show_work"]), &[]);
         assert!(!no_catalogue.contains("service_start"), "{no_catalogue}");
-        assert!(no_catalogue.contains("`review_finding`"), "{no_catalogue}");
+        assert!(no_catalogue.contains("`show_work`"), "{no_catalogue}");
         assert_eq!(exercising(&names(&["review_verdict"]), &[]), "");
     }
 
@@ -2948,7 +2510,6 @@ mod tests {
             ready: &[],
             review: Some(review),
             manifest: Box::leak(Box::default()),
-            context: None,
             egress: None,
             forge_repo: None,
             prepared: None,

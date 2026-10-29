@@ -13,7 +13,7 @@ const readiness: RepoReadiness = {
     purpose: 'publish',
     ready: false,
     missing: [gap('checks'), gap('credential')],
-    notes: [gap('brief')],
+    notes: [gap('image')],
   },
 }
 

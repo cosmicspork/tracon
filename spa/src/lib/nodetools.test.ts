@@ -23,9 +23,6 @@ test('review and report calls name what they wait on', () => {
   expect(nodeCallText('submit_review', { title: 'fix: x', review_id: '01a128ee-0940' })).toBe('Resubmit for review · fix: x')
   expect(nodeCallText('review_status', { review_id: '01a128ee-0940-7cf0-85e7-a5f3aa718404' })).toBe('Wait for review 01a128ee')
   expect(nodeCallText('review_verdict', { verdict: 'approve', summary: 'ok' })).toBe('Give a verdict · approve')
-  expect(nodeCallText('review_finding', { criterion: 'sc-0123', outcome: 'not_shown', note: 'n' })).toBe(
-    'Record a finding · not shown · sc-0123',
-  )
   expect(nodeCallText('submit_report', { title: 'Why exports double' })).toBe('Submit a report · Why exports double')
   expect(nodeCallText('report_status', { report_id: 'r-1' })).toBe('Wait for the report r-1')
 })
@@ -79,8 +76,6 @@ test('documents, memory, services, setup and the work item read as actions', () 
   expect(nodeCallText('query', { sql: 'SELECT 1' })).toBe('Query · SELECT 1')
   expect(nodeCallText('service_start', { name: 'browser' })).toBe('Start service browser')
   expect(nodeCallText('repo_setup_draft', {})).toBe("Draft the repository's setup")
-  expect(nodeCallText('brief_read', {})).toBe('Read the brief')
-  expect(nodeCallText('criteria_link', { criterion: 'c1', kind: 'test', value: 'v' })).toBe('Link evidence to c1')
   expect(nodeCallText('work_close', { summary: 'done' })).toBe('Close the task · done')
   expect(nodeCallText('work_list', { project: 'tracon', state: 'all' })).toBe('Tasks · tracon · all')
   expect(nodeCallText('work_show', { id: '0b0e29c44da42ee5' })).toBe('Task 0b0e29c4')

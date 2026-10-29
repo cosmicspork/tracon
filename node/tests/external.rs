@@ -2748,18 +2748,7 @@ async fn a_document_call_that_cannot_run_is_refused_before_it_is_held() {
         ),
         ("doc_write", json!({ "slug": "Ref X", "body": "x" }), "slug"),
         ("doc_delete", json!({ "slug": "../x" }), "slug"),
-        (
-            "doc_delete",
-            json!({ "slug": "context-0192f3a17c4e" }),
-            "selected context",
-        ),
         ("doc_delete", json!({ "slug": "shown-abc" }), "show_work"),
-        ("doc_delete", json!({ "slug": "brief-abc" }), "brief"),
-        (
-            "doc_write",
-            json!({ "slug": "brief-abc", "body": "<p>x</p>", "format": "html" }),
-            "Markdown only",
-        ),
     ] {
         let (_, v) = mcp(&h.operator, "work", tool_call(name, args)).await;
         let (err, out) = outcome(&v);
