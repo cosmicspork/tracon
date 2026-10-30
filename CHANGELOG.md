@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.44.0](https://github.com/cosmicspork/tracon/compare/v0.43.0...v0.44.0) (2026-10-30)
+
+
+### Features
+
+* **jira:** return labels, parent, issue links and subtasks from issue ([#744](https://github.com/cosmicspork/tracon/issues/744)) ([bfbf0b2](https://github.com/cosmicspork/tracon/commit/bfbf0b2633de2b359b49fb2d5b6c8c692951931a))
+
+
+### Bug Fixes
+
+* **jira:** say the Jira writes are asked, and that issue_create's key comes later ([#741](https://github.com/cosmicspork/tracon/issues/741)) ([c0fcd91](https://github.com/cosmicspork/tracon/commit/c0fcd916b81e676336f0245232ed28117567c932))
+* **spa:** mobile fixes for errors, the composer, tasks, and reconnects ([#730](https://github.com/cosmicspork/tracon/issues/730)) ([5448932](https://github.com/cosmicspork/tracon/commit/544893232e6faff12b48836e0fdc858cc24f779a))
+
 ## [0.43.0](https://github.com/cosmicspork/tracon/compare/v0.42.0...v0.43.0) (2026-10-29)
 
 
