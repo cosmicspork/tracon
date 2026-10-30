@@ -8,7 +8,6 @@
   import { renderMessage } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
-  import { surface } from '../lib/surface.svelte'
   import type { Project, WorkView } from '../lib/types'
   import {
     pickableProjects,
@@ -176,7 +175,7 @@
     <dd class="m">
       {#if item.deps.length === 0}nothing{:else}
         {#each item.deps as d (d)}
-          <span class="dep"><a href="/tasks/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if blocking.has(d)}<span class="why">{` · ${blocking.get(d)}`}</span>{/if}{#if !surface.phone && item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
+          <span class="dep"><a href="/tasks/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if blocking.has(d)}<span class="why">{` · ${blocking.get(d)}`}</span>{/if}{#if item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
         {/each}
       {/if}
       {#if cycle}<span class="why">{' · part of a dependency cycle'}</span>{/if}
@@ -245,39 +244,37 @@
     <div class="banner crit">refused <b>· {error}</b></div>
   {/if}
 
-  {#if !surface.phone}
-    {#if item.state === 'open'}
-      <div class="deps">
-        <input placeholder="add a dependency by id prefix" bind:value={depInput} onkeydown={(e) => e.key === 'Enter' && addDep()} />
-        <button class="btn" onclick={addDep} disabled={busy || !depInput.trim()}>Waits on</button>
-      </div>
-      <div class="actions">
-        {#if ws === 'ready'}
-          <a class="btn" class:p={!item.phase_plan_slug} href="/?item={item.id}&phase=plan">{item.phase_plan_slug ? 'Plan again' : 'Plan'}</a>
-          {#if item.phase_plan_slug}
-            <a class="btn p" href="/?item={item.id}&phase=execute">Execute</a>
-          {:else}
-            <span class="btn" aria-disabled="true" title="needs a plan">Execute · needs a plan</span>
-          {/if}
-        {:else if ws === 'insession' && item.session_id}
-          <a class="btn p" href="/sessions/{item.session_id}">Open session</a>
-        {/if}
-        {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
-        <button class="lnk d" onclick={close} disabled={busy}>Close task</button>
-        {#if confirmingDelete}
-          <span class="confirm">Delete this task for good? <button class="btn d" onclick={remove} disabled={busy}>Delete</button>
-            <button class="lnk" onclick={() => (confirmingDelete = false)} disabled={busy}>Keep it</button></span
-          >
+  {#if item.state === 'open'}
+    <div class="deps">
+      <input placeholder="add a dependency by id prefix" bind:value={depInput} onkeydown={(e) => e.key === 'Enter' && addDep()} />
+      <button class="btn" onclick={addDep} disabled={busy || !depInput.trim()}>Waits on</button>
+    </div>
+    <div class="actions">
+      {#if ws === 'ready'}
+        <a class="btn" class:p={!item.phase_plan_slug} href="/?item={item.id}&phase=plan">{item.phase_plan_slug ? 'Plan again' : 'Plan'}</a>
+        {#if item.phase_plan_slug}
+          <a class="btn p" href="/?item={item.id}&phase=execute">Execute</a>
         {:else}
-          <button class="lnk d" onclick={() => (confirmingDelete = true)} disabled={busy}>Delete</button>
+          <span class="btn" aria-disabled="true" title="needs a plan">Execute · needs a plan</span>
         {/if}
-      </div>
-    {:else}
-      <div class="actions">
-        <button class="lnk" onclick={reopen} disabled={busy}>Reopen</button>
-        {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
-      </div>
-    {/if}
+      {:else if ws === 'insession' && item.session_id}
+        <a class="btn p" href="/sessions/{item.session_id}">Open session</a>
+      {/if}
+      {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
+      <button class="lnk d" onclick={close} disabled={busy}>Close task</button>
+      {#if confirmingDelete}
+        <span class="confirm">Delete this task for good? <button class="btn d" onclick={remove} disabled={busy}>Delete</button>
+          <button class="lnk" onclick={() => (confirmingDelete = false)} disabled={busy}>Keep it</button></span
+        >
+      {:else}
+        <button class="lnk d" onclick={() => (confirmingDelete = true)} disabled={busy}>Delete</button>
+      {/if}
+    </div>
+  {:else}
+    <div class="actions">
+      <button class="lnk" onclick={reopen} disabled={busy}>Reopen</button>
+      {#if !editing}<button class="lnk" onclick={edit} disabled={busy}>Edit</button>{/if}
+    </div>
   {/if}
 {/if}
 
@@ -536,5 +533,11 @@
   .actions span.btn {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+  @media (max-width: 700px) {
+    .deps input {
+      min-width: 0;
+      font-size: 16px;
+    }
   }
 </style>

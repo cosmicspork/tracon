@@ -136,7 +136,7 @@
   )
   const nodeStatus = $derived(
     nodeLight({
-      connected: store.connected,
+      connected: !store.connectionLost,
       node: store.node,
       cannotRun: cannotRun !== null,
       waiting,
@@ -218,7 +218,7 @@
   </nav>
 
   <main>
-    {#if !store.connected}
+    {#if store.connectionLost}
       <div class="banner crit">Connection lost <b>· reconnecting. Saved work remains on the node; keep this page open to preserve unsent text.</b></div>
     {/if}
     {#if store.node?.state === 'refused'}

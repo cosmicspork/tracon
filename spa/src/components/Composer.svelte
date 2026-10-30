@@ -531,6 +531,9 @@
     border-radius: 6px;
     padding: 12px 14px;
     display: grid;
+    /* One column that never grows past the form: a long repository name in
+       the picker would otherwise widen it, and the page with it, on a phone. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
   }
   textarea {
@@ -605,11 +608,13 @@
     border-radius: 5px;
     padding: 13px 14px;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 13px;
   }
   label,
   .field {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 5px;
     min-width: 0;
   }
