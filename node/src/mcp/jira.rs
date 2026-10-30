@@ -52,10 +52,12 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": ISSUE_COMMENT,
-            "description": "Post one comment on a Jira issue. The body is Jira wiki markup \
-                            (*bold*, {{code}}, * bullets), not Markdown. Status changes are \
-                            issue_transition, not a comment. Not for GitHub issues: that is \
-                            github_issue_comment.",
+            "description": format!(
+                "Post one comment on a Jira issue. The body is Jira wiki markup (*bold*, \
+                 {{{{code}}}}, * bullets), not Markdown. Status changes are issue_transition, not \
+                 a comment. Not for GitHub issues: that is github_issue_comment. {}",
+                super::aside::ASKED
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -67,9 +69,11 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": ISSUE_UPDATE,
-            "description": "Edit an issue's fields: summary, description, priority, labels, and \
-                            parent. Status is not a field here; it changes only through \
-                            issue_transition.",
+            "description": format!(
+                "Edit an issue's fields: summary, description, priority, labels, and parent. \
+                 Status is not a field here; it changes only through issue_transition. {}",
+                super::aside::ASKED
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -86,7 +90,11 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": ISSUE_CREATE,
-            "description": "Create an issue in a project. Returns its key and a link to it.",
+            "description": format!(
+                "Create an issue in a project. Once it is allowed and has run, approval_status's \
+                 result carries its key and a link to it. {}",
+                super::aside::ASKED
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
