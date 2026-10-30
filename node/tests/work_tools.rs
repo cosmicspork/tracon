@@ -84,7 +84,8 @@ async fn stub(
             Json(json!({ "issues": [{ "key": "WRK-1", "fields": {
                 "summary": "Do the thing", "status": { "name": "In Progress" },
                 "priority": { "name": "Medium" }, "issuetype": { "name": "Task" },
-                "assignee": { "displayName": "J" }, "parent": { "key": "WRK-100" } } }] })),
+                "assignee": { "displayName": "J" }, "parent": { "key": "WRK-100" },
+                "labels": ["etl"] } }] })),
         );
     }
     // A draft by its title, as GitLab reads one: the last title written wins.
@@ -701,7 +702,7 @@ async fn a_search_returns_one_compact_row_per_issue() {
         v["issues"][0],
         json!({ "key": "WRK-1", "type": "Task", "summary": "Do the thing",
                 "status": "In Progress", "priority": "Medium", "assignee": "J",
-                "parent": "WRK-100" })
+                "parent": "WRK-100", "labels": ["etl"] })
     );
     assert_eq!(paths(&seen), vec!["GET /rest/api/3/search/jql"]);
 
