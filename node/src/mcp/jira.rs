@@ -18,7 +18,12 @@ pub const ISSUE_TRANSITION: &str = "issue_transition";
 pub const ISSUE_TRANSITIONS: &str = "issue_transitions";
 
 /// What a search row carries: enough to pick an issue, not to read it.
-const SEARCH_FIELDS: &str = "summary,status,assignee,priority,issuetype,parent";
+const SEARCH_FIELDS: &str = "summary,status,assignee,priority,issuetype,parent,labels";
+
+/// What `issue` reads: enough to write to the issue safely, since a label
+/// list, a parent or a link is what a write would otherwise have to guess.
+const ISSUE_FIELDS: &str = "summary,status,assignee,description,comment,issuetype,priority,\
+                            labels,parent,issuelinks,subtasks,created,updated";
 
 /// The fields either write may set. Status is deliberately absent; so is
 /// everything else Jira would accept, because a field this list does not name
@@ -30,7 +35,7 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": ISSUE_SEARCH,
             "description": "Search issues with JQL. One row per issue: key, type, summary, status, \
-                            priority, assignee, parent. Read one in full with issue.",
+                            priority, assignee, parent, labels. Read one in full with issue.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -42,8 +47,10 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": ISSUE,
-            "description": "A Jira issue: summary, status, assignee, description, and its most \
-                            recent comments.",
+            "description": "A Jira issue: summary, status, assignee, description, labels, \
+                            parent, links to other issues (each with its direction and wording, \
+                            e.g. \"is blocked by\"), subtasks, when it was created and updated, \
+                            and its most recent comments.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "key": { "type": "string", "description": "Issue key, e.g. WRK-123." } },
@@ -184,32 +191,15 @@ pub async fn call(
             }
             let issues: Vec<Value> = v["issues"]
                 .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|i| {
-                            let f = &i["fields"];
-                            json!({
-                                "key": i["key"],
-                                "type": f["issuetype"]["name"],
-                                "summary": f["summary"],
-                                "status": f["status"]["name"],
-                                "priority": f["priority"]["name"],
-                                "assignee": f["assignee"]["displayName"],
-                                "parent": f["parent"]["key"],
-                            })
-                        })
-                        .collect()
-                })
+                .map(|a| a.iter().map(search_row).collect())
                 .unwrap_or_default();
             Ok(json!({ "issues": issues }))
         }
         ISSUE => {
             let key = issue_key(args.get("key"), "key")?;
             let res = http
-                .get(format!(
-                    "{url}/rest/api/2/issue/{key}\
-                     ?fields=summary,status,assignee,description,comment,issuetype,priority"
-                ))
+                .get(format!("{url}/rest/api/2/issue/{key}"))
+                .query(&[("fields", ISSUE_FIELDS)])
                 .basic_auth(email, Some(token))
                 .send()
                 .await
@@ -219,33 +209,7 @@ pub async fn call(
             if !status.is_success() {
                 return Err(refusal("jira answered", status, &v));
             }
-            let f = &v["fields"];
-            let comments: Vec<Value> = f["comment"]["comments"]
-                .as_array()
-                .map(|c| {
-                    c.iter()
-                        .rev()
-                        .take(10)
-                        .map(|c| {
-                            json!({
-                                "author": c["author"]["displayName"],
-                                "created": c["created"],
-                                "body": c["body"],
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(json!({
-                "key": v["key"],
-                "type": f["issuetype"]["name"],
-                "summary": f["summary"],
-                "status": f["status"]["name"],
-                "priority": f["priority"]["name"],
-                "assignee": f["assignee"]["displayName"],
-                "description": f["description"],
-                "comments": comments,
-            }))
+            Ok(issue_view(&v))
         }
         ISSUE_COMMENT => {
             let key = issue_key(args.get("key"), "key")?;
@@ -427,6 +391,109 @@ fn target_of(listed: &Value, id: &str) -> Option<String> {
         .map(str::trim)
         .find(|name| !name.is_empty())
         .map(str::to_string)
+}
+
+/// One `issue_search` row.
+fn search_row(i: &Value) -> Value {
+    let f = &i["fields"];
+    json!({
+        "key": i["key"],
+        "type": f["issuetype"]["name"],
+        "summary": f["summary"],
+        "status": f["status"]["name"],
+        "priority": f["priority"]["name"],
+        "assignee": f["assignee"]["displayName"],
+        "parent": f["parent"]["key"],
+        "labels": labels(f),
+    })
+}
+
+/// What `issue` answers, from Jira's issue as it came back.
+fn issue_view(v: &Value) -> Value {
+    let f = &v["fields"];
+    let comments: Vec<Value> = f["comment"]["comments"]
+        .as_array()
+        .map(|c| {
+            c.iter()
+                .rev()
+                .take(10)
+                .map(|c| {
+                    json!({
+                        "author": c["author"]["displayName"],
+                        "created": c["created"],
+                        "body": c["body"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Jira lists a link on each of its two issues, naming the other one as
+    // the side it is on: `outwardIssue` X on this issue reads "this blocks X",
+    // `inwardIssue` X reads "this is blocked by X".
+    let links: Vec<Value> = f["issuelinks"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| {
+                    let (direction, other) = if l["outwardIssue"].is_object() {
+                        ("outward", &l["outwardIssue"])
+                    } else if l["inwardIssue"].is_object() {
+                        ("inward", &l["inwardIssue"])
+                    } else {
+                        return None;
+                    };
+                    Some(json!({
+                        "type": l["type"]["name"],
+                        "direction": direction,
+                        "label": l["type"][direction],
+                        "key": other["key"],
+                        "summary": other["fields"]["summary"],
+                        "status": other["fields"]["status"]["name"],
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let subtasks: Vec<Value> = f["subtasks"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|t| {
+                    json!({
+                        "key": t["key"],
+                        "summary": t["fields"]["summary"],
+                        "status": t["fields"]["status"]["name"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let p = &f["parent"];
+    json!({
+        "key": v["key"],
+        "type": f["issuetype"]["name"],
+        "summary": f["summary"],
+        "status": f["status"]["name"],
+        "priority": f["priority"]["name"],
+        "assignee": f["assignee"]["displayName"],
+        "labels": labels(f),
+        "parent": if p.is_object() {
+            json!({ "key": p["key"], "summary": p["fields"]["summary"] })
+        } else {
+            Value::Null
+        },
+        "links": links,
+        "subtasks": subtasks,
+        "created": f["created"],
+        "updated": f["updated"],
+        "description": f["description"],
+        "comments": comments,
+    })
+}
+
+/// An issue's labels, or none when Jira leaves the field out.
+fn labels(fields: &Value) -> Value {
+    json!(fields["labels"].as_array().cloned().unwrap_or_default())
 }
 
 /// An issue key, validated before it reaches a URL or a field.
@@ -669,6 +736,87 @@ mod tests {
         assert_eq!(target_of(&listed, "41"), None);
         assert_eq!(target_of(&listed, "99"), None);
         assert_eq!(target_of(&json!({}), "21"), None);
+    }
+
+    /// Trimmed from a real v2 issue: one link each way, a parent, labels and
+    /// a subtask, with the fields Jira sends that `issue` does not keep.
+    fn linked_issue() -> Value {
+        let status = |name: &str| json!({ "name": name, "statusCategory": { "key": "new" } });
+        json!({
+            "key": "WRK-16",
+            "fields": {
+                "summary": "Replace the scripts",
+                "status": status("In Progress"),
+                "issuetype": { "name": "Task" },
+                "priority": { "name": "Minor" },
+                "assignee": null,
+                "description": "h2. Goal",
+                "labels": ["etl", "fusion"],
+                "parent": { "id": "1", "key": "WRK-10", "fields": {
+                    "summary": "The epic", "status": status("Open"),
+                    "issuetype": { "name": "Epic" } } },
+                "issuelinks": [
+                    { "id": "1", "type": { "id": "10000", "name": "Blocks",
+                        "inward": "is blocked by", "outward": "blocks" },
+                      "outwardIssue": { "key": "WRK-20", "fields": {
+                        "summary": "Clean up", "status": status("Open") } } },
+                    { "id": "2", "type": { "id": "10000", "name": "Blocks",
+                        "inward": "is blocked by", "outward": "blocks" },
+                      "inwardIssue": { "key": "WRK-15", "fields": {
+                        "summary": "Add a flavor", "status": status("To Do") } } },
+                ],
+                "subtasks": [ { "id": "3", "key": "WRK-17", "fields": {
+                    "summary": "Port one", "status": status("Done"),
+                    "issuetype": { "name": "Subtask" } } } ],
+                "created": "2025-10-21T13:13:10.850-0500",
+                "updated": "2026-08-13T15:51:11.203-0500",
+                "comment": { "comments": [] },
+            },
+        })
+    }
+
+    #[test]
+    fn an_issue_carries_what_a_write_to_it_needs() {
+        let view = issue_view(&linked_issue());
+        assert_eq!(view["labels"], json!(["etl", "fusion"]));
+        assert_eq!(
+            view["parent"],
+            json!({ "key": "WRK-10", "summary": "The epic" })
+        );
+        assert_eq!(
+            view["links"],
+            json!([
+                { "type": "Blocks", "direction": "outward", "label": "blocks",
+                  "key": "WRK-20", "summary": "Clean up", "status": "Open" },
+                { "type": "Blocks", "direction": "inward", "label": "is blocked by",
+                  "key": "WRK-15", "summary": "Add a flavor", "status": "To Do" },
+            ])
+        );
+        assert_eq!(
+            view["subtasks"],
+            json!([{ "key": "WRK-17", "summary": "Port one", "status": "Done" }])
+        );
+        assert_eq!(view["created"], json!("2025-10-21T13:13:10.850-0500"));
+        assert_eq!(view["updated"], json!("2026-08-13T15:51:11.203-0500"));
+        assert_eq!(view["status"], json!("In Progress"));
+        assert_eq!(view["comments"], json!([]));
+    }
+
+    #[test]
+    fn an_issue_with_none_of_them_says_so_rather_than_leaving_them_out() {
+        let view = issue_view(&json!({ "key": "WRK-1", "fields": { "summary": "Bare" } }));
+        assert_eq!(view["labels"], json!([]));
+        assert_eq!(view["parent"], Value::Null);
+        assert_eq!(view["links"], json!([]));
+        assert_eq!(view["subtasks"], json!([]));
+    }
+
+    #[test]
+    fn a_search_row_carries_labels_and_the_parent_key() {
+        let row = search_row(&linked_issue());
+        assert_eq!(row["labels"], json!(["etl", "fusion"]));
+        assert_eq!(row["parent"], json!("WRK-10"));
+        assert_eq!(search_row(&json!({ "fields": {} }))["labels"], json!([]));
     }
 
     #[test]
