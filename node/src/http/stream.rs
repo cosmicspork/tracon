@@ -1,11 +1,12 @@
-//! `GET /api/stream`. Replays persisted events after `Last-Event-ID`, then
-//! follows live. A client crash is a reconnect, never lost work: session state
+//! `GET /api/stream`. Replays persisted events after `Last-Event-ID` (or
+//! `?after=`, for a client that opened a fresh stream and so cannot set the
+//! header), then follows live. A client crash is a reconnect, never lost work: session state
 //! lives in the node, and the client resumes from the last id it saw.
 
 use std::convert::Infallible;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
 };
@@ -40,14 +41,23 @@ fn row_to_frame(r: crate::store::EventRow) -> Frame {
     }
 }
 
+#[derive(serde::Deserialize)]
+pub struct StreamQuery {
+    after: Option<i64>,
+}
+
 pub async fn stream(
     State(s): State<AppState>,
+    Query(q): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // The header wins: the browser's own reconnect of a stream opened with
+    // `?after=` keeps that query but sends a newer id in the header.
     let after = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok())
+        .or(q.after)
         .unwrap_or(-1);
 
     // Subscribe before replaying, so an event landing mid-replay is buffered on

@@ -183,6 +183,20 @@ export interface PasskeyList {
   enrollment: { open: boolean; closes_ms: number | null }
 }
 
+/** What to say about a failed response that carried no JSON error. A proxy
+    in front of the node (a Cloudflare 504, say) answers with a whole HTML
+    page, which is no message: name the status and the page's title instead. */
+export function failureText(status: number, statusText: string, text: string): string {
+  const body = text.trim()
+  if (!body) return `${status} ${statusText}`.trim()
+  if (/^<(!doctype|html|head|body)\b/i.test(body) || /<\/html>\s*$/i.test(body)) {
+    const title = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim()
+    const what = title || `${status} ${statusText}`.trim()
+    return `the node did not answer (${what}); try again in a moment`
+  }
+  return body.length > 300 ? `${body.slice(0, 300)}…` : body
+}
+
 export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   // Serialized once: a retry after a passkey confirmation must send the very
   // bytes the confirmation was bound to.
@@ -207,7 +221,7 @@ export async function call<T>(method: string, path: string, body?: unknown): Pro
       json = null
     }
     if (res.ok) return json as T
-    const message = json?.error?.message ?? (text || `${res.status} ${res.statusText}`)
+    const message = json?.error?.message ?? failureText(res.status, res.statusText, text)
     // An admin action off the node's machine: confirm it, then send the same
     // request once more. A refusal of a confirmed request is reported, not
     // prompted again; only a request re-sent for a fresh challenge is.
@@ -242,7 +256,7 @@ async function upload<T>(path: string, body: FormData): Promise<T> {
   } catch {
     json = null
   }
-  if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? (text || `${res.status} ${res.statusText}`))
+  if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? failureText(res.status, res.statusText, text))
   return json as T
 }
 
@@ -481,7 +495,7 @@ export const api = {
       json = null
     }
     if (res.status === 409) throw new ReviewDraftConflict(json?.draft ?? null)
-    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? (text || `${res.status} ${res.statusText}`))
+    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? failureText(res.status, res.statusText, text))
     return { version: json?.version ?? 0, updated_ms: json?.updated_ms ?? 0 }
   },
   saveDraft: (id: string, text: string) => call<void>('PUT', `/api/sessions/${id}/draft`, { text }),
@@ -604,7 +618,7 @@ export const api = {
       json = null
     }
     if (res.status === 412) throw new DocConflict(json?.hash ?? '', json?.body ?? '')
-    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? text)
+    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? failureText(res.status, res.statusText, text))
     return json as unknown as Document
   },
   importHtml: async (
@@ -630,7 +644,7 @@ export const api = {
       json = null
     }
     if (res.status === 412) throw new DocConflict(json?.hash ?? '', json?.body ?? '')
-    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? text)
+    if (!res.ok) throw new ApiError(res.status, json?.error?.message ?? failureText(res.status, res.statusText, text))
     return json as unknown as Document
   },
   previewDoc: (channel: string, slug: string) =>
@@ -639,9 +653,9 @@ export const api = {
     const res = await fetch(`/api/docs/${channel}/${slug}/download`)
     if (!res.ok) {
       const text = await res.text()
-      let message = text
+      let message = failureText(res.status, res.statusText, text)
       try {
-        message = JSON.parse(text)?.error?.message ?? text
+        message = JSON.parse(text)?.error?.message ?? message
       } catch {
         // Keep the non-JSON response.
       }

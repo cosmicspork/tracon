@@ -34,6 +34,10 @@ const RECONNECTED_BANNER_MS = 8000
 // without them. Polled here rather than on the home screen, so the badge and
 // the list it links to are never counting different things.
 const INTERVENTION_POLL_MS = 5000
+// How long the stream may be down before the interface says so. Opening the
+// app, or bringing it back from the background on a phone, always starts with
+// the stream down for a moment; that is not a lost connection.
+const STREAM_LOST_GRACE_MS = 5000
 
 type Snapshot = 'nodes' | 'mesh' | 'channels' | 'queue' | 'sessions' | 'providers'
 
@@ -89,6 +93,8 @@ class Store {
   /** A refetch is in flight; a retry button waits on it. */
   refetching = $state(false)
   connected = $state(false)
+  /** The stream has been down for longer than a reconnect takes: say so. */
+  connectionLost = $state(false)
   /** The node wants a login: show the gate rather than an empty interface. */
   authRequired = $state(false)
   /** This browser just spent the operator token: offer it a passkey while
@@ -99,6 +105,8 @@ class Store {
   private source: EventSource | null = null
   private wasConnected = false
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private lostTimer: ReturnType<typeof setTimeout> | undefined
+  private resumeWatched = false
   private interventionTimer: ReturnType<typeof setInterval> | undefined
 
   /** The node that served this interface. */
@@ -118,10 +126,49 @@ class Store {
         if (d && d.type === 'navigate' && typeof d.path === 'string') router.go(d.path)
       })
     }
+    this.watchResume()
+    this.openStream()
+  }
+
+  /** Counts down to saying the connection is lost, unless the stream opens first. */
+  private armLost() {
+    if (this.lostTimer !== undefined) return
+    this.lostTimer = setTimeout(() => {
+      this.lostTimer = undefined
+      if (!this.connected) this.connectionLost = true
+    }, STREAM_LOST_GRACE_MS)
+  }
+
+  /** A phone suspends a backgrounded app and its stream with it; the browser's
+      own retry then waits out a backoff. Coming back to the app, or back
+      online, reconnects at once instead. */
+  private watchResume() {
+    if (this.resumeWatched || typeof document === 'undefined') return
+    this.resumeWatched = true
+    const resume = () => {
+      if (document.visibilityState !== 'visible' || this.authRequired || !this.source) return
+      if (this.source.readyState === EventSource.OPEN) return
+      this.source.close()
+      this.source = null
+      this.openStream()
+    }
+    document.addEventListener('visibilitychange', resume)
+    window.addEventListener('pageshow', resume)
+    window.addEventListener('online', resume)
+  }
+
+  private openStream() {
+    this.armLost()
     // EventSource resends Last-Event-ID on its own reconnects; the node replays
-    // persisted events after it.
-    this.source = new EventSource('/api/stream')
-    this.source.onopen = () => {
+    // persisted events after it. A stream reopened on resume starts without
+    // one, so it names the last event it saw in the query instead.
+    const source = new EventSource(this.lastSeq > 0 ? `/api/stream?after=${this.lastSeq}` : '/api/stream')
+    this.source = source
+    source.onopen = () => {
+      if (this.source !== source) return
+      clearTimeout(this.lostTimer)
+      this.lostTimer = undefined
+      this.connectionLost = false
       this.connected = true
       if (this.wasConnected) {
         // Frames may have been missed while down: refetch snapshots and drop
@@ -133,8 +180,10 @@ class Store {
       }
       this.wasConnected = true
     }
-    this.source.onerror = () => {
+    source.onerror = () => {
+      if (this.source !== source) return
       this.connected = false
+      this.armLost()
       // EventSource reports no status, so a node that wants a login looks
       // exactly like a node that is down. Ask a request that can answer.
       void this.probeAuth()
@@ -154,7 +203,7 @@ class Store {
       'awake',
       'restart',
     ] as const) {
-      this.source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
+      source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
   }
 

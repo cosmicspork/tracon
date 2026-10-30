@@ -657,6 +657,30 @@
     ],
     "none": { "open": 0, "total": 0 }
   },
+  "/api/work/wi-3": {
+    "item": {
+      "id": "wi-3",
+      "channel": "personal",
+      "project_id": "orbit",
+      "title": "Retry queue for failed pushes",
+      "body": "A push that fails while the phone is offline should retry with backoff.",
+      "state": "open",
+      "priority": 1,
+      "deps": [],
+      "discovered_from": null,
+      "discovered_by_session": null,
+      "phase_plan_slug": "plan-retry-queue",
+      "closed_by_session": null,
+      "created_ms": -260000000,
+      "updated_ms": -86400000,
+      "readiness": {
+        "state": "ready"
+      },
+      "session_id": null
+    },
+    "sessions": [],
+    "discovered": []
+  },
   "/api/work": {
     "items": [
       {
