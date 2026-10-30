@@ -104,8 +104,8 @@ fn tidy(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::mcp::{
-        approvals, docs, egress, github, gitlab, memory, operator, review, services, setup, show,
-        work,
+        approvals, consulta, docs, egress, github, gitlab, jira, memory, operator, review,
+        services, setup, show, work,
     };
     use crate::session::Phase;
 
@@ -113,6 +113,8 @@ mod tests {
         let mut all = Vec::new();
         all.extend(github::definitions());
         all.extend(gitlab::definitions());
+        all.extend(jira::definitions());
+        all.extend(consulta::definitions(&["qa".to_string()]));
         all.extend(review::definitions());
         all.extend(memory::definitions());
         all.extend(docs::definitions(&crate::config::default_doc_kinds()));
@@ -141,6 +143,52 @@ mod tests {
                 "no definition says {sentence:?}"
             );
         }
+    }
+
+    /// A tool the shipped bundle leaves to the operator says so, or a harness
+    /// plans around a result it will not get at once (#740). A session is told
+    /// once in its orientation instead; the tools the dispatcher answers before
+    /// the policy gate, and those that run on scoped authority, are not asked
+    /// this way.
+    #[test]
+    fn every_tool_the_shipped_bundle_asks_says_so() {
+        use crate::policy::{Policy, Request, Verdict};
+        let policy = Policy::shipped();
+        let kinds = crate::config::default_doc_kinds();
+        let none = serde_json::json!({});
+        let before_the_gate = [
+            operator::ASK,
+            operator::NOTIFY,
+            operator::REPORT,
+            operator::REPORT_STATUS,
+            operator::QUESTION_STATUS,
+            show::SHOW,
+            approvals::STATUS,
+        ];
+        let mut silent = Vec::new();
+        for tool in every_definition() {
+            let name = tool["name"].as_str().unwrap();
+            if !Audience::External.offers(name)
+                || before_the_gate.contains(&name)
+                || crate::mcp::consequential_name(name)
+            {
+                continue;
+            }
+            let decision = policy.decide(&Request {
+                channel: "work",
+                action: name,
+                kind: Some(crate::mcp::TOOL_KIND),
+                resource: None,
+                command: None,
+                arguments: Some(&none),
+                doc_kinds: Some(&kinds),
+            });
+            let said = tool["description"].as_str().unwrap();
+            if decision.verdict == Verdict::Ask && !said.contains(ASKED) {
+                silent.push(name.to_string());
+            }
+        }
+        assert!(silent.is_empty(), "asked without saying so: {silent:?}");
     }
 
     #[test]
