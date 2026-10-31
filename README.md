@@ -462,7 +462,10 @@ container. A draft that names a Dockerfile is tried in the image built from it, 
 harness image instead. An image this node already built from the same Dockerfile and context
 is reused; building a new one is yours to allow on a card, because the build runs with the
 network outside the boundary, and the entry you later allow uses that image rather than
-building it again. `repo_setup_propose` puts it to you on a card, which you may edit. The node
+building it again. A trial prepares under an egress grant of its own, so a host its
+preparation is refused is listed in the trial's `refused` while it runs, and named in its
+failure even when it ran out of time. A trial being refused will not recover, and the
+session can cancel it rather than wait it out. `repo_setup_propose` puts it to you on a card, which you may edit. The node
 writes the entry only when you allow it, and a proposal never opens the repository's
 egress to its sessions. Hosts you opened to the session while it tried are suggested in
 `egress`.

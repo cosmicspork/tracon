@@ -26,7 +26,7 @@ use crate::{
     config::{Config, RuntimeKind},
     environment::{
         cache_env, check_env, environment_for, origin_repo, scoped_egress, PrepareSecrets,
-        RepoEnvironment,
+        Refusals, RepoEnvironment,
     },
     runner::{Mount, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
@@ -914,6 +914,7 @@ pub(crate) async fn run_preparation_with(
         unprepared,
         secrets,
         warming,
+        None,
     )
     .await;
     match prepared {
@@ -932,6 +933,37 @@ pub(crate) async fn run_preparation_with(
     }
 }
 
+/// `run_preparation` for a repository setup trial, with what its grant
+/// refuses readable from `watch` while it runs: a trial being refused will
+/// not recover, and whoever started it can stop it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_preparation_watched(
+    backend: &dyn Backend,
+    runner: &dyn Runner,
+    environment: &RepoEnvironment,
+    volumes: (&str, &str),
+    runner_name: &str,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+    unprepared: &str,
+    watch: &std::sync::OnceLock<Refusals>,
+) -> Result<(), Stopped> {
+    prepare_steps(
+        backend,
+        runner,
+        environment,
+        volumes,
+        runner_name,
+        deadline,
+        cancel,
+        unprepared,
+        &PrepareSecrets::default(),
+        None,
+        Some(watch),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prepare_steps(
     backend: &dyn Backend,
@@ -944,18 +976,39 @@ async fn prepare_steps(
     unprepared: &str,
     secrets: &PrepareSecrets,
     warming: Option<&std::path::Path>,
+    watch: Option<&std::sync::OnceLock<Refusals>>,
 ) -> Result<(), Stopped> {
-    let stopped = |stop: Option<String>, killed: &str| match stop {
-        Some(reason) => Stopped::Cancelled {
-            reason,
-            killed: killed.to_string(),
-        },
-        None => Stopped::TimedOut,
-    };
     // This preparation's own grant: nothing to wait for, and nothing another
     // run's hosts can widen.
     let egress = scoped_egress(backend, &environment.egress, warming)
         .map_err(|error| Stopped::Unprepared(PrepareFailure::said(error)))?;
+    let refusals = egress.refusals();
+    if let Some(watch) = watch {
+        let _ = watch.set(refusals.clone());
+    }
+    let stopped = |stop: Option<String>, killed: &str, command: &str| match stop {
+        Some(reason) => Stopped::Cancelled {
+            reason,
+            killed: killed.to_string(),
+        },
+        // A package manager refused a host retries it until the time runs
+        // out, printing nothing to say why: the refusal is the reason.
+        None => match refusals.hosts() {
+            refused if refused.is_empty() => Stopped::TimedOut,
+            refused => Stopped::Unprepared(PrepareFailure {
+                command: Some(command.to_string()),
+                exit: None,
+                message: format!(
+                    "preparation `{command}` timed out after {}s; egress refused {}, which the \
+                     repository's egress does not name; {unprepared}.",
+                    environment.timeout_secs,
+                    refused.join(", ")
+                ),
+                output: String::new(),
+                refused,
+            }),
+        },
+    };
     for (step, command) in environment.prepare.iter().enumerate() {
         let name = format!("{runner_name}-p{step}");
         let running = runner.capture_name(&name);
@@ -983,7 +1036,7 @@ async fn prepare_steps(
             Some((runner, &running)),
         )
         .await
-        .map_err(|stop| stopped(stop, &running))?;
+        .map_err(|stop| stopped(stop, &running, command))?;
         let output = finished.map_err(|error| {
             Stopped::Unprepared(PrepareFailure {
                 command: Some(command.clone()),

@@ -365,7 +365,7 @@ impl Grants {
         *self.on_refusal.write() = Some(observer);
     }
 
-    fn holder(&self, token: &str) -> Option<Arc<Grant>> {
+    pub(crate) fn holder(&self, token: &str) -> Option<Arc<Grant>> {
         self.live.read().get(token).cloned()
     }
 
