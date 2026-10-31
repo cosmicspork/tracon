@@ -2222,8 +2222,27 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
                 .into_iter()
                 .filter(|f| args.get(*f).is_some())
                 .collect();
-            let head = format!("{name} {} ({})", id("key"), fields.join(", "));
-            with(head, text("summary"))
+            // A relative label edit is short enough to read in full, and
+            // which labels it adds and removes is the whole of it.
+            let labels = |key: &str, sign: char| -> Vec<String> {
+                args.get(key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|l| format!("{sign}{l}"))
+                    .collect()
+            };
+            let relative = [labels("add_labels", '+'), labels("remove_labels", '-')].concat();
+            let mut head = format!("{name} {}", id("key"));
+            if !fields.is_empty() || relative.is_empty() {
+                head = format!("{head} ({})", fields.join(", "));
+            }
+            match (relative.is_empty(), text("summary")) {
+                (true, summary) => with(head, summary),
+                (false, None) => format!("{head}: {}", relative.join(" ")),
+                (false, Some(summary)) => format!("{head}: {}; {summary}", relative.join(" ")),
+            }
         }
         jira::ISSUE_COMMENT => with(format!("{name} {}", id("key")), first_line("body")),
         github::PR_COMMENT | github::ISSUE_COMMENT | github::PR_REPLY => with(
@@ -2384,6 +2403,17 @@ mod tests {
         assert_eq!(
             summarize(jira::ISSUE_UPDATE, &update),
             "issue_update WRK-2 (description, labels)"
+        );
+        let relative =
+            json!({ "key": "NUDEV-140", "add_labels": ["nead"], "remove_labels": ["stale"] });
+        assert_eq!(
+            summarize(jira::ISSUE_UPDATE, &relative),
+            "issue_update NUDEV-140: +nead -stale"
+        );
+        let mixed = json!({ "key": "WRK-2", "summary": "Rename", "add_labels": ["nead"] });
+        assert_eq!(
+            summarize(jira::ISSUE_UPDATE, &mixed),
+            "issue_update WRK-2 (summary): +nead; Rename"
         );
         let comment = json!({ "repo": "o/n", "number": 4, "body": "\n  Looks good.\nMore." });
         assert_eq!(

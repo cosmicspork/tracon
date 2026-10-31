@@ -616,6 +616,31 @@ async fn an_edit_sends_only_the_fields_it_names_and_never_a_transition() {
 }
 
 #[tokio::test]
+async fn a_relative_label_edit_is_sent_as_jiras_update_verbs_not_a_replacement() {
+    state::isolate();
+    let (mut t, _, bodies, _) = rig_with_bodies().await;
+    t.policy = allowing(r#""issue_update""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "issue_update",
+        json!({ "key": "WRK-1", "add_labels": ["nead"], "remove_labels": ["stale"] }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["updated"], json!(["labels"]));
+
+    let bodies = bodies.0.lock().unwrap().clone();
+    let (method, _, body) = bodies.last().unwrap();
+    assert_eq!(method, "PUT");
+    assert_eq!(
+        body["update"]["labels"],
+        json!([{ "add": "nead" }, { "remove": "stale" }])
+    );
+    assert!(body["fields"].get("labels").is_none(), "{body}");
+}
+
+#[tokio::test]
 async fn an_edit_refuses_a_field_it_does_not_write_before_anything_is_sent() {
     state::isolate();
     let (mut t, seen, _) = rig().await;

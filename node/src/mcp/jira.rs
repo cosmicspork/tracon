@@ -30,6 +30,11 @@ const ISSUE_FIELDS: &str = "summary,status,assignee,description,comment,issuetyp
 /// is one nobody decided an agent should write.
 const EDITABLE: &[&str] = &["summary", "description", "priority", "labels", "parent"];
 
+/// Label edits relative to whatever the issue has when the call runs, which
+/// only `issue_update` takes: a held replacement would drop a label someone
+/// added while it waited on the operator.
+const RELATIVE: &[&str] = &["add_labels", "remove_labels"];
+
 pub fn definitions() -> Vec<Value> {
     vec![
         json!({
@@ -78,6 +83,8 @@ pub fn definitions() -> Vec<Value> {
             "name": ISSUE_UPDATE,
             "description": format!(
                 "Edit an issue's fields: summary, description, priority, labels, and parent. \
+                 add_labels and remove_labels change labels relative to what the issue has \
+                 when the edit runs; labels replaces them all, and is not taken with either. \
                  Status is not a field here; it changes only through issue_transition. {}",
                 super::aside::ASKED
             ),
@@ -90,6 +97,10 @@ pub fn definitions() -> Vec<Value> {
                     "priority": { "type": "string", "description": "Priority name, e.g. High." },
                     "labels": { "type": "array", "items": { "type": "string" },
                                 "description": "Replaces the issue's labels. Single tokens, no spaces." },
+                    "add_labels": { "type": "array", "items": { "type": "string" },
+                                    "description": "Labels to add, keeping the rest." },
+                    "remove_labels": { "type": "array", "items": { "type": "string" },
+                                       "description": "Labels to remove, keeping the rest." },
                     "parent": { "type": "string", "description": "Parent issue key." },
                 },
                 "required": ["key"],
@@ -235,17 +246,24 @@ pub async fn call(
         ISSUE_UPDATE => {
             let key = issue_key(args.get("key"), "key")?;
             let fields = fields_from(args, ISSUE_UPDATE, &[])?;
-            if fields.is_empty() {
+            let edits = label_edits(args)?;
+            if fields.is_empty() && edits.is_empty() {
                 return Err(format!(
-                    "nothing to update: name at least one of {}",
-                    EDITABLE.join(", ")
+                    "nothing to update: name at least one of {}, {}",
+                    EDITABLE.join(", "),
+                    RELATIVE.join(", ")
                 ));
             }
-            let named: Vec<String> = fields.keys().cloned().collect();
+            let mut named: Vec<String> = fields.keys().cloned().collect();
+            let mut body = json!({ "fields": fields });
+            if !edits.is_empty() {
+                named.push("labels".into());
+                body["update"] = json!({ "labels": edits });
+            }
             let res = http
                 .put(format!("{url}/rest/api/2/issue/{key}"))
                 .basic_auth(email, Some(token))
-                .json(&json!({ "fields": fields }))
+                .json(&body)
                 .send()
                 .await
                 .map_err(|e| format!("jira: {e}"))?;
@@ -519,11 +537,19 @@ fn fields_from(
         if k == "key" || structural.contains(&k.as_str()) {
             continue;
         }
+        // Read by `label_edits`, into the request's `update` rather than here.
+        if verb == ISSUE_UPDATE && RELATIVE.contains(&k.as_str()) {
+            continue;
+        }
         if !EDITABLE.contains(&k.as_str()) {
+            let mut writes = EDITABLE.to_vec();
+            if verb == ISSUE_UPDATE {
+                writes.extend(RELATIVE);
+            }
             return Err(format!(
                 "{verb} does not set {k}; it writes only {}. A status change is the operator's — \
                  say what you would transition and why with {ISSUE_COMMENT}.",
-                EDITABLE.join(", ")
+                writes.join(", ")
             ));
         }
         match k.as_str() {
@@ -543,24 +569,7 @@ fn fields_from(
                 fields.insert(k.clone(), json!({ "name": p }));
             }
             "labels" => {
-                let items = v
-                    .as_array()
-                    .ok_or("labels expects a list of strings")?
-                    .iter()
-                    .map(|l| {
-                        let l = l.as_str().ok_or("labels expects a list of strings")?;
-                        if l.trim().is_empty() {
-                            return Err("a label cannot be empty".to_string());
-                        }
-                        if l.chars().any(char::is_whitespace) {
-                            return Err(format!(
-                                "label {l:?} has whitespace; a Jira label is a single token"
-                            ));
-                        }
-                        Ok(json!(l))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                fields.insert(k.clone(), json!(items));
+                fields.insert(k.clone(), json!(label_list(v, k)?));
             }
             "parent" => {
                 let p = issue_key(Some(v), "parent")?;
@@ -570,6 +579,56 @@ fn fields_from(
         }
     }
     Ok(fields)
+}
+
+/// Jira's `update` verbs for `add_labels` and `remove_labels`, in that order:
+/// edits applied to the labels the issue has when the call runs. Naming
+/// either with `labels`, or one label both ways, is refused rather than
+/// guessed at.
+fn label_edits(args: &Value) -> Result<Vec<Value>, String> {
+    let list = |field: &str| match args.get(field) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(v) => label_list(v, field),
+    };
+    let (add, remove) = (list("add_labels")?, list("remove_labels")?);
+    if add.is_empty() && remove.is_empty() {
+        return Ok(Vec::new());
+    }
+    if args.get("labels").is_some_and(|l| !l.is_null()) {
+        return Err(
+            "labels replaces every label, so it is not taken with add_labels or \
+                    remove_labels; name one or the other"
+                .into(),
+        );
+    }
+    if let Some(both) = add.iter().find(|l| remove.contains(l)) {
+        return Err(format!("label {both} is both added and removed"));
+    }
+    let add = add.into_iter().map(|l| json!({ "add": l }));
+    let remove = remove.into_iter().map(|l| json!({ "remove": l }));
+    Ok(add.chain(remove).collect())
+}
+
+/// A list of Jira labels, each a single token, as `field` gave them.
+fn label_list(v: &Value, field: &str) -> Result<Vec<String>, String> {
+    v.as_array()
+        .ok_or_else(|| format!("{field} expects a list of strings"))?
+        .iter()
+        .map(|l| {
+            let l = l
+                .as_str()
+                .ok_or_else(|| format!("{field} expects a list of strings"))?;
+            if l.trim().is_empty() {
+                return Err("a label cannot be empty".to_string());
+            }
+            if l.chars().any(char::is_whitespace) {
+                return Err(format!(
+                    "label {l:?} has whitespace; a Jira label is a single token"
+                ));
+            }
+            Ok(l.to_string())
+        })
+        .collect()
 }
 
 /// JIRA_URL without a trailing slash, JIRA_EMAIL, JIRA_TOKEN.
@@ -870,5 +929,49 @@ mod tests {
         // A padded label is refused, not trimmed into a different one.
         let e = fields_from(&json!({ "labels": [" a"] }), ISSUE_UPDATE, &[]).unwrap_err();
         assert!(e.contains("whitespace"), "{e}");
+    }
+
+    #[test]
+    fn labels_can_be_added_and_removed_relative_to_what_the_issue_has() {
+        let args =
+            json!({ "key": "WRK-1", "add_labels": ["nead", "etl"], "remove_labels": ["stale"] });
+        assert_eq!(
+            label_edits(&args).unwrap(),
+            vec![
+                json!({ "add": "nead" }),
+                json!({ "add": "etl" }),
+                json!({ "remove": "stale" })
+            ]
+        );
+        // They are an `update`, not a field: the replacement list is not sent.
+        assert!(fields_from(&args, ISSUE_UPDATE, &[]).unwrap().is_empty());
+        assert_eq!(
+            label_edits(&json!({ "remove_labels": ["stale"] })).unwrap(),
+            vec![json!({ "remove": "stale" })]
+        );
+        assert!(label_edits(&json!({ "summary": "x" })).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_relative_label_edit_is_refused_alongside_a_replacement_or_against_itself() {
+        let e = label_edits(&json!({ "labels": ["a"], "add_labels": ["b"] })).unwrap_err();
+        assert!(e.contains("not taken with"), "{e}");
+        let e = label_edits(&json!({ "add_labels": ["a"], "remove_labels": ["a"] })).unwrap_err();
+        assert!(e.contains("both added and removed"), "{e}");
+        let e = label_edits(&json!({ "add_labels": ["needs review"] })).unwrap_err();
+        assert!(e.contains("whitespace"), "{e}");
+        let e = label_edits(&json!({ "remove_labels": "stale" })).unwrap_err();
+        assert!(e.contains("remove_labels expects a list"), "{e}");
+    }
+
+    #[test]
+    fn a_new_issue_takes_no_relative_label_edit() {
+        let e = fields_from(
+            &json!({ "summary": "x", "add_labels": ["a"] }),
+            ISSUE_CREATE,
+            &[],
+        )
+        .unwrap_err();
+        assert!(e.contains("does not set add_labels"), "{e}");
     }
 }
