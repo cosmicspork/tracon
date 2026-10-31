@@ -147,8 +147,10 @@ fn newly_lent<'a>(
 fn warm_newly_lent(s: &AppState, before: &[Repo], after: &[Repo]) {
     for entry in newly_lent(s.store(), before, after) {
         let Ok(repo) = repo_root(&entry.path.to_string_lossy()) else {
+            tracing::debug!(path = %entry.path.display(), "newly lent entry names no one repository; not warmed");
             continue;
         };
+        repo_image::forget_warmed(&repo);
         let (backend, cfg, store) = (
             s.manager.backend().clone(),
             s.cfg.clone(),
