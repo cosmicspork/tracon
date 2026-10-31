@@ -1080,6 +1080,7 @@ mod tests {
             "issue_comment",
             "issue_update",
             "issue_create",
+            "issue_link",
             "pr_ready",
             "mr_ready",
             "pr_merge",

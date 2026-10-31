@@ -1,5 +1,5 @@
 //! Jira, as narrow tools: search, read an issue, comment on it, edit its
-//! fields, create one, and transition one. A transition moves what the
+//! fields, create one, link two, and transition one. A transition moves what the
 //! operator is actually working on, so it runs only with current scoped
 //! authority for that issue; the fields the other writes touch are named
 //! rather than passed through. The API token never leaves the node.
@@ -13,6 +13,7 @@ pub const ISSUE: &str = "issue";
 pub const ISSUE_COMMENT: &str = "issue_comment";
 pub const ISSUE_UPDATE: &str = "issue_update";
 pub const ISSUE_CREATE: &str = "issue_create";
+pub const ISSUE_LINK: &str = "issue_link";
 pub const ISSUE_SEARCH: &str = "issue_search";
 pub const ISSUE_TRANSITION: &str = "issue_transition";
 pub const ISSUE_TRANSITIONS: &str = "issue_transitions";
@@ -114,6 +115,24 @@ pub fn definitions() -> Vec<Value> {
                     "parent": { "type": "string", "description": "Parent issue key." },
                 },
                 "required": ["project", "type", "summary"],
+            },
+        }),
+        json!({
+            "name": ISSUE_LINK,
+            "description": format!(
+                "Link two Jira issues, read in the type's outward wording: from blocks to, for \
+                 type Blocks. type is the link type's name as Jira lists it (Blocks, Relates, \
+                 ...); one this Jira does not have is refused with the names it does. {}",
+                super::aside::ASKED
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "Issue key, e.g. WRK-123." },
+                    "to": { "type": "string", "description": "Issue key, e.g. WRK-124." },
+                    "type": { "type": "string", "description": "Link type name, e.g. Blocks." },
+                },
+                "required": ["from", "to", "type"],
             },
         }),
         json!({
@@ -294,6 +313,53 @@ pub async fn call(
             let key = v["key"].as_str().unwrap_or_default().to_string();
             Ok(json!({ "key": key, "id": v["id"], "url": format!("{url}/browse/{key}") }))
         }
+        ISSUE_LINK => {
+            let (from, to, asked) = link_args(args)?;
+            let types = link_types(http, &ctx.channel, &url, email, token).await?;
+            let kind = link_type(&types, asked)?;
+            // Jira's create names the sides the opposite way to how an issue
+            // reads its own links: `from` shows the link as an `outwardIssue`
+            // `to` ("from blocks to"), which makes `to` the link's outward
+            // side. Not verified against a live Jira; the read-back below is
+            // what holds the call to the wording it was asked for.
+            let res = http
+                .post(format!("{url}/rest/api/2/issueLink"))
+                .basic_auth(email, Some(token))
+                .json(&json!({
+                    "type": { "name": kind.name },
+                    "inwardIssue": { "key": from },
+                    "outwardIssue": { "key": to },
+                }))
+                .send()
+                .await
+                .map_err(|e| format!("jira: {e}"))?;
+            let status = res.status();
+            if !status.is_success() {
+                let v: Value = res.json().await.unwrap_or(Value::Null);
+                return Err(refusal("jira refused the link", status, &v));
+            }
+            // A link is created with 201 and no body, so whether it reads
+            // the way it was asked is read from `from` itself.
+            let res = http
+                .get(format!("{url}/rest/api/2/issue/{from}"))
+                .query(&[("fields", "issuelinks")])
+                .basic_auth(email, Some(token))
+                .send()
+                .await
+                .map_err(|e| {
+                    format!("jira linked {from} and {to} but did not answer the read-back: {e}")
+                })?;
+            let status = res.status();
+            let v: Value = res.json().await.unwrap_or(Value::Null);
+            if !status.is_success() {
+                return Err(refusal(
+                    &format!("jira linked {from} and {to} but refused the read-back"),
+                    status,
+                    &v,
+                ));
+            }
+            linked(&links(&v["fields"]), from, to, &kind)
+        }
         ISSUE_TRANSITIONS => {
             let key = issue_key(args.get("key"), "key")?;
             let res = http
@@ -427,33 +493,6 @@ fn issue_view(v: &Value) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    // Jira lists a link on each of its two issues, naming the other one as
-    // the side it is on: `outwardIssue` X on this issue reads "this blocks X",
-    // `inwardIssue` X reads "this is blocked by X".
-    let links: Vec<Value> = f["issuelinks"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|l| {
-                    let (direction, other) = if l["outwardIssue"].is_object() {
-                        ("outward", &l["outwardIssue"])
-                    } else if l["inwardIssue"].is_object() {
-                        ("inward", &l["inwardIssue"])
-                    } else {
-                        return None;
-                    };
-                    Some(json!({
-                        "type": l["type"]["name"],
-                        "direction": direction,
-                        "label": l["type"][direction],
-                        "key": other["key"],
-                        "summary": other["fields"]["summary"],
-                        "status": other["fields"]["status"]["name"],
-                    }))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let subtasks: Vec<Value> = f["subtasks"]
         .as_array()
         .map(|a| {
@@ -482,13 +521,194 @@ fn issue_view(v: &Value) -> Value {
         } else {
             Value::Null
         },
-        "links": links,
+        "links": links(f),
         "subtasks": subtasks,
         "created": f["created"],
         "updated": f["updated"],
         "description": f["description"],
         "comments": comments,
     })
+}
+
+/// An issue's links to other issues, each read from this issue's side.
+///
+/// Jira lists a link on each of its two issues, naming the other one as the
+/// side it is on: `outwardIssue` X on this issue reads "this blocks X",
+/// `inwardIssue` X reads "this is blocked by X".
+fn links(fields: &Value) -> Vec<Value> {
+    fields["issuelinks"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| {
+                    let (direction, other) = if l["outwardIssue"].is_object() {
+                        ("outward", &l["outwardIssue"])
+                    } else if l["inwardIssue"].is_object() {
+                        ("inward", &l["inwardIssue"])
+                    } else {
+                        return None;
+                    };
+                    Some(json!({
+                        "type": l["type"]["name"],
+                        "direction": direction,
+                        "label": l["type"][direction],
+                        "key": other["key"],
+                        "summary": other["fields"]["summary"],
+                        "status": other["fields"]["status"]["name"],
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One of the instance's issue link types: its name, and how each side
+/// reads it ("blocks", "is blocked by").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkType {
+    pub name: String,
+    pub outward: String,
+    pub inward: String,
+}
+
+/// `from`, `to` and `type` of an `issue_link`, checked before anything is
+/// asked or sent.
+fn link_args(args: &Value) -> Result<(&str, &str, &str), String> {
+    let from = issue_key(args.get("from"), "from")?;
+    let to = issue_key(args.get("to"), "to")?;
+    if from.eq_ignore_ascii_case(to) {
+        return Err(format!("{from} cannot be linked to itself"));
+    }
+    let kind = args
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or("type is required (a link type name, e.g. Blocks)")?;
+    Ok((from, to, kind))
+}
+
+/// The link type named `asked`, ignoring case, or a refusal listing the
+/// names this Jira has, so the agent can choose without another tool.
+fn link_type(types: &[LinkType], asked: &str) -> Result<LinkType, String> {
+    types
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(asked))
+        .cloned()
+        .ok_or_else(|| {
+            let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+            if names.is_empty() {
+                return format!("this Jira has no link type {asked:?}; it lists none");
+            }
+            format!(
+                "this Jira has no link type {asked:?}; it has {}",
+                names.join(", ")
+            )
+        })
+}
+
+/// The instance's link types, read once per channel and Jira for the
+/// node's lifetime: they change about as often as the workflow does.
+async fn link_types(
+    http: &reqwest::Client,
+    channel: &str,
+    url: &str,
+    email: &str,
+    token: &str,
+) -> Result<Vec<LinkType>, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    /// Keyed by channel and Jira URL.
+    type Read = HashMap<(String, String), Vec<LinkType>>;
+    static READ: OnceLock<Mutex<Read>> = OnceLock::new();
+    let cache = READ.get_or_init(Default::default);
+    let at = (channel.to_string(), url.to_string());
+    if let Some(types) = cache.lock().unwrap().get(&at) {
+        return Ok(types.clone());
+    }
+    let res = http
+        .get(format!("{url}/rest/api/2/issueLinkType"))
+        .basic_auth(email, Some(token))
+        .send()
+        .await
+        .map_err(|e| format!("jira: {e}"))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(refusal("jira did not list its link types", status, &v));
+    }
+    let types: Vec<LinkType> = v["issueLinkTypes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| {
+            Some(LinkType {
+                name: t["name"].as_str()?.to_string(),
+                outward: t["outward"].as_str().unwrap_or_default().to_string(),
+                inward: t["inward"].as_str().unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    if !types.is_empty() {
+        cache.lock().unwrap().insert(at, types.clone());
+    }
+    Ok(types)
+}
+
+/// The link type a held `issue_link` names, read from Jira at ask time:
+/// `Err` with the refusal when Jira has no such type or the keys are not
+/// keys, `Ok(None)` when Jira cannot say, which leaves the call to be asked
+/// and refused when it runs.
+pub async fn link_target(
+    broker: &SharedBroker,
+    http: &reqwest::Client,
+    ctx: &CallContext,
+    args: &Value,
+) -> Result<Option<LinkType>, String> {
+    let (_, _, asked) = link_args(args)?;
+    let Ok((url, email, token)) = credential(broker, &ctx.channel, &ctx.node_id) else {
+        return Ok(None);
+    };
+    match link_types(http, &ctx.channel, &url, &email, &token).await {
+        Ok(types) if !types.is_empty() => link_type(&types, asked).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// What `issue_link` answers, from `from`'s links as Jira reads them after
+/// the create: the link toward `to` in the type's outward wording, or an
+/// error when it reads the other way. A reversed link is left for the
+/// operator to remove; deleting it here would be a second write nobody asked
+/// for.
+fn linked(links: &[Value], from: &str, to: &str, kind: &LinkType) -> Result<Value, String> {
+    let toward: Vec<&Value> = links
+        .iter()
+        .filter(|l| {
+            l["type"].as_str() == Some(kind.name.as_str())
+                && l["key"]
+                    .as_str()
+                    .is_some_and(|k| k.eq_ignore_ascii_case(to))
+        })
+        .collect();
+    // A type that reads the same both ways ("relates to") has no wrong way.
+    let symmetric = kind.inward == kind.outward;
+    if let Some(l) = toward
+        .iter()
+        .find(|l| symmetric || l["direction"] == "outward")
+    {
+        return Ok(json!({ "from": from, "to": to, "type": kind.name, "label": l["label"] }));
+    }
+    if !toward.is_empty() {
+        return Err(format!(
+            "jira created the {} link reversed: {from} {} {to}, not {from} {} {to}. Nothing \
+             was removed; the operator can delete it from either issue.",
+            kind.name, kind.inward, kind.outward
+        ));
+    }
+    Err(format!(
+        "jira accepted the {} link but {from} does not show it toward {to}",
+        kind.name
+    ))
 }
 
 /// An issue's labels, or none when Jira leaves the field out.
@@ -817,6 +1037,71 @@ mod tests {
         assert_eq!(row["labels"], json!(["etl", "fusion"]));
         assert_eq!(row["parent"], json!("WRK-10"));
         assert_eq!(search_row(&json!({ "fields": {} }))["labels"], json!([]));
+    }
+
+    fn blocks() -> LinkType {
+        LinkType {
+            name: "Blocks".into(),
+            outward: "blocks".into(),
+            inward: "is blocked by".into(),
+        }
+    }
+
+    #[test]
+    fn a_link_type_is_found_by_name_or_refused_with_the_names_there_are() {
+        let relates = LinkType {
+            name: "Relates".into(),
+            outward: "relates to".into(),
+            inward: "relates to".into(),
+        };
+        let types = [blocks(), relates];
+        assert_eq!(link_type(&types, "blocks").unwrap(), blocks());
+        let e = link_type(&types, "Precedes").unwrap_err();
+        assert!(e.contains("Blocks, Relates"), "{e}");
+    }
+
+    #[test]
+    fn a_link_names_two_different_issues_and_a_type() {
+        let e =
+            link_args(&json!({ "from": "WRK-1", "to": "wrk-1", "type": "Blocks" })).unwrap_err();
+        assert!(e.contains("itself"), "{e}");
+        let e = link_args(&json!({ "from": "WRK-1", "to": "not a key", "type": "Blocks" }))
+            .unwrap_err();
+        assert!(e.starts_with("to"), "{e}");
+        let e = link_args(&json!({ "from": "WRK-1", "to": "WRK-2" })).unwrap_err();
+        assert!(e.contains("type"), "{e}");
+    }
+
+    #[test]
+    fn a_link_read_back_the_way_it_was_asked_is_returned_in_its_wording() {
+        let mut issue = linked_issue();
+        let read = links(&issue["fields"]);
+        assert_eq!(
+            linked(&read, "WRK-16", "WRK-20", &blocks()).unwrap(),
+            json!({ "from": "WRK-16", "to": "WRK-20", "type": "Blocks", "label": "blocks" })
+        );
+        // WRK-15 shows on WRK-16 as blocking it: asked the other way round.
+        let e = linked(&read, "WRK-16", "WRK-15", &blocks()).unwrap_err();
+        assert!(e.contains("reversed"), "{e}");
+        assert!(e.contains("WRK-16 is blocked by WRK-15"), "{e}");
+        issue["fields"]["issuelinks"] = json!([]);
+        let e = linked(&links(&issue["fields"]), "WRK-16", "WRK-20", &blocks()).unwrap_err();
+        assert!(e.contains("does not show it"), "{e}");
+    }
+
+    #[test]
+    fn a_link_type_that_reads_the_same_both_ways_cannot_be_reversed() {
+        let relates = LinkType {
+            name: "Relates".into(),
+            outward: "relates to".into(),
+            inward: "relates to".into(),
+        };
+        let read = vec![json!({ "type": "Relates", "direction": "inward",
+                                "label": "relates to", "key": "WRK-2" })];
+        assert_eq!(
+            linked(&read, "WRK-1", "WRK-2", &relates).unwrap()["label"],
+            "relates to"
+        );
     }
 
     #[test]

@@ -106,6 +106,8 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     ),
     // The title names the status this id leads to, read when it was asked.
     (jira::ISSUE_TRANSITION, "markdown", &[], &["transition_id"]),
+    // So does a link, in its type's wording between these two issues.
+    (jira::ISSUE_LINK, "markdown", &[], &["from", "to", "type"]),
     // The title says which way the call turns it, ready or back to draft.
     (github::PR_READY, "markdown", &[], &["ready"]),
     (gitlab::MR_READY, "markdown", &[], &["ready"]),
