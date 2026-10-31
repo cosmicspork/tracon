@@ -17,3 +17,17 @@ test('shown work, the submitter note among it, comes before the evidence grid an
   expect(shown).toBeLessThan(evidence)
   expect(shown).toBeLessThan(files)
 })
+
+test("the reviewer's verdict and its controls come before shown work, so a phone reaches it first", () => {
+  const verdict = markup.indexOf('<div class="verdict"')
+  const control = markup.indexOf("{#if control?.kind === 'running'}")
+  const shown = markup.indexOf('<ShownWork ')
+  expect(verdict).toBeGreaterThan(-1)
+  expect(control).toBeGreaterThan(-1)
+  expect(verdict).toBeLessThan(shown)
+  expect(control).toBeLessThan(shown)
+  // It follows the header's publish line, which says what is being decided.
+  expect(markup.indexOf('<dl class="kv">')).toBeLessThan(verdict)
+  // The provenance line keeps who reviewed it.
+  expect(markup.indexOf('<dl class="prov">')).toBeGreaterThan(shown)
+})
