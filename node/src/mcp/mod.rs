@@ -244,6 +244,7 @@ impl Tools {
         docs::DOC_READ,
         docs::DOC_SEARCH,
         docs::DOC_WRITE,
+        docs::DOC_EDIT,
         operator::ASK,
         operator::QUESTION_STATUS,
         operator::NOTIFY,
@@ -306,6 +307,7 @@ impl Tools {
         match phase {
             Phase::Plan => &[
                 docs::DOC_WRITE,
+                docs::DOC_EDIT,
                 docs::DOC_READ,
                 memory::RECALL,
                 operator::ASK,
@@ -406,7 +408,8 @@ impl Tools {
         let defaulted = self.with_defaults(ctx, name, args)?;
         let args = defaulted.as_ref().unwrap_or(args);
         // A plan session's own plan document is the phase's artifact: writing
-        // that one slug is what the session exists to do, so it is not asked.
+        // or editing that one slug is what the session exists to do, so it is
+        // not asked.
         // A delete, and a write that converts a document or drops files of
         // its bundle, are always the operator's, whatever the policy says;
         // so is an amendment, which rewrites a memory in place with no
@@ -419,8 +422,9 @@ impl Tools {
                     .get()
                     .and_then(|access| docs::write_consequence(&access.store, &ctx.channel, args))
                     .is_some();
-        let plan_write =
-            name == docs::DOC_WRITE && !always_asked && self.is_plan_artifact(ctx, args);
+        let plan_write = matches!(name, docs::DOC_WRITE | docs::DOC_EDIT)
+            && !always_asked
+            && self.is_plan_artifact(ctx, args);
         let audience = self.audience(ctx);
         if !audience.offers(name) {
             return Err(audience.refusal(name));
@@ -728,7 +732,11 @@ impl Tools {
                     .ok_or_else(|| "node not ready".to_string())?;
                 work::call(&self.cfg, access, ctx, name, args).await
             }
-            docs::DOC_READ | docs::DOC_SEARCH | docs::DOC_WRITE | docs::DOC_DELETE => {
+            docs::DOC_READ
+            | docs::DOC_SEARCH
+            | docs::DOC_WRITE
+            | docs::DOC_EDIT
+            | docs::DOC_DELETE => {
                 let access = self
                     .session
                     .get()
@@ -1162,6 +1170,8 @@ impl Tools {
         match name {
             work::WORK_UPDATE => work::refusal_before_asking(self.session.get()?, ctx, args),
             docs::DOC_WRITE | docs::DOC_DELETE => docs::refusal_before_asking(name, args),
+            docs::DOC_EDIT => docs::refusal_before_asking(name, args)
+                .or_else(|| docs::edit_refusal(&self.session.get()?.store, &ctx.channel, args)),
             github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.live().github, args),
             // The card names the direction, so a `ready` it cannot read is
             // refused before it is shown.
@@ -1286,6 +1296,15 @@ impl Tools {
             let lookup = jira::transition_target(&self.broker, &self.http, ctx, args);
             if let Ok(Some(to)) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
                 return transition_title(args, &to);
+            }
+        }
+        if name == docs::DOC_EDIT {
+            if let Some(access) = self.session.get() {
+                if let Ok(current) = docs::replaced(&access.store, &ctx.channel, args) {
+                    let mut title = docs::approval_title(&summarize(name, args), current.as_ref());
+                    bound(&mut title);
+                    return title;
+                }
             }
         }
         if name == docs::DOC_WRITE {
@@ -2146,6 +2165,10 @@ pub fn approval_context(
             let current = docs::replaced(store, channel, args)?;
             Ok(Some(docs::approval_context(current.as_ref(), args)))
         }
+        docs::DOC_EDIT => {
+            let current = docs::replaced(store, channel, args)?;
+            Ok(Some(docs::edit_approval_context(current.as_ref(), args)))
+        }
         memory::AMEND => Ok(Some(memory::approval_context(store, channel, args)?)),
         _ => Ok(None),
     }
@@ -2234,7 +2257,7 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             format!("{name} {}!{}", id("project"), id("iid")),
             first_line("body"),
         ),
-        docs::DOC_WRITE | docs::DOC_DELETE => format!("{name} {}", id("slug")),
+        docs::DOC_WRITE | docs::DOC_EDIT | docs::DOC_DELETE => format!("{name} {}", id("slug")),
         memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
         memory::AMEND => with(
             format!("{name} {}", id("id").chars().take(8).collect::<String>()),

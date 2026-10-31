@@ -277,7 +277,13 @@
   {/if}
 
   {#if replacing}
-    {#if details.stale}
+    {#if details.stale && details.proposed_body === null}
+      <div class="banner crit" role="alert">
+        the edits no longer apply to the document as it is now <b
+          >· Allow will fail, so ask for changes or reject</b
+        >
+      </div>
+    {:else if details.stale}
       <div class="banner crit" role="alert">
         the document changed since the agent read it <b
           >· this diff is against the document as it is now; Allow will fail as a conflict, so ask for changes

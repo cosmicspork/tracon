@@ -315,6 +315,87 @@ async fn documents_are_written_by_the_operator_read_by_the_agent_and_edits_confl
 }
 
 #[tokio::test]
+async fn a_working_note_is_edited_in_place_by_exact_replacements_and_a_miss_writes_nothing() {
+    state::isolate();
+    let h = harness().await;
+    let token = h
+        .manager
+        .register_tool_token_for_test("s1", "personal")
+        .await;
+    let body = "# Status\n\nbuild: red\ndeploy: held\n";
+    let (st, v) = call_with(
+        &h.operator,
+        "PUT",
+        "/api/docs/personal/note-status",
+        Some(json!({ "body": body })),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let hash = v["hash"].as_str().unwrap().to_string();
+    let stored = |slug: &str| h.store.doc_get("personal", slug).unwrap().unwrap();
+
+    // One edit misses: nothing is written, and the miss is named.
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(
+            1,
+            "doc_edit",
+            json!({ "slug": "note-status", "if_hash": hash, "edits": [
+                { "old_str": "build: red", "new_str": "build: green" },
+                { "old_str": "deploy: done", "new_str": "deploy: live" },
+            ] }),
+        ),
+    )
+    .await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    assert!(text(&v).contains("edits[1]"), "{v}");
+    assert_eq!(stored("note-status").body, body);
+
+    // A working note is written unattended, as doc_write would be.
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(
+            2,
+            "doc_edit",
+            json!({ "slug": "note-status", "if_hash": hash, "edits": [
+                { "old_str": "build: red", "new_str": "build: green" },
+                { "old_str": "deploy: held", "new_str": "deploy: live" },
+            ] }),
+        ),
+    )
+    .await;
+    assert_ne!(v["result"]["isError"], true, "{v}");
+    let done = serde_json::from_str::<Value>(&text(&v)).unwrap();
+    assert_eq!(done["applied"], 2);
+    assert_eq!(done["format"], "markdown");
+    let now = stored("note-status");
+    assert_eq!(now.body, "# Status\n\nbuild: green\ndeploy: live\n");
+    assert_eq!(done["hash"], now.hash);
+
+    // The hash it was edited from is stale now: the same edit conflicts.
+    let v = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        tool_call(
+            3,
+            "doc_edit",
+            json!({ "slug": "note-status", "if_hash": hash, "edits": [
+                { "old_str": "green", "new_str": "amber" },
+            ] }),
+        ),
+    )
+    .await;
+    assert_eq!(v["result"]["isError"], true, "{v}");
+    assert!(text(&v).contains(&now.hash), "{v}");
+}
+
+#[tokio::test]
 async fn an_archived_document_is_kept_but_out_of_the_list_and_search_until_asked_for() {
     state::isolate();
     let h = harness().await;
