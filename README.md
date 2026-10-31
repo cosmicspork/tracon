@@ -1425,11 +1425,15 @@ with `"format": "html"`, or `tracon doc put --format html` is one page, stored
 through the same writer, path checks and limits as an import and served only
 from the preview origin; replacing a multi-file bundle drops its other files,
 and the approval's title says how many. Markdown over an HTML document retires
-its bundle. `doc_delete` removes a document of either format with its bundle,
-is always asked, and refuses shown work. Both
-take `if_hash` from `doc_read`, across a change of format, and a reserved slug,
-an unknown format, or an HTML body over the per-file limit is refused before
-the call is held.
+its bundle. `doc_edit` changes a Markdown document by exact-match replacements
+(`edits`, 1 to 64 `{old_str, new_str}`, applied in order, all or none, each
+`old_str` matching exactly once), so a one-line change does not resend the whole
+body; it requires `if_hash`, refuses HTML (use `doc_write`), is approved as
+`doc_write` is, and its approval shows the diff the edits make. `doc_delete` removes
+a document of either format with its bundle, is always asked, and refuses shown
+work. All three take `if_hash` from `doc_read`, across a change of format, and a
+reserved slug, an unknown format, an HTML body over the per-file limit, or a
+`doc_edit` that does not apply is refused before the call is held.
 
 ### Policy
 
@@ -1463,7 +1467,7 @@ args = { slug = ["note-*", "repo-*", "meeting-*", "inbox-*"] }
 ```
 
 The shipped bundle's `unattended-notes` rule names no slugs. It says
-`args = { slug_working_note = true }` instead, which matches a `doc_write` whose slug
+`args = { slug_working_note = true }` instead, which matches a `doc_write` or `doc_edit` whose slug
 is of a kind `[[docs.kind]]` marks `working_note = true`, so which documents are
 working notes is said once, beside the kinds. The trade-off is deliberate: part of
 what runs unattended is now decided by `node.toml`, which is not signed. An edit of

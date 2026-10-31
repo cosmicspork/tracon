@@ -70,6 +70,9 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
         &["body"],
         &["slug", "if_hash", "format"],
     ),
+    // The page shows the diff the edits make; which document, and which
+    // version of it they apply to, is the call.
+    (docs::DOC_EDIT, "markdown", &[], &["slug", "if_hash"]),
     (docs::DOC_DELETE, "markdown", &[], &["slug", "if_hash"]),
     (memory::RETAIN, "markdown", &["body"], &["kind"]),
     // Which memory is the call; the operator rewrites its body, not its target.

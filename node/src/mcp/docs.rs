@@ -15,6 +15,7 @@ use crate::{
 pub const DOC_READ: &str = "doc_read";
 pub const DOC_SEARCH: &str = "doc_search";
 pub const DOC_WRITE: &str = "doc_write";
+pub const DOC_EDIT: &str = "doc_edit";
 pub const DOC_DELETE: &str = "doc_delete";
 
 /// What a document is written as. HTML from `doc_write` is a single-file
@@ -217,15 +218,39 @@ pub fn approval_context(document: Option<&DocumentRow>, args: &Value) -> Value {
         .as_str()
         .is_some_and(|want| document.map(|d| d.hash.as_str()) != Some(want));
     json!({
-        "document": document.map(|d| json!({
-            "body": d.body,
-            "hash": d.hash,
-            "format": d.format,
-            "title": d.title,
-            "updated_ms": d.updated_ms,
-        })),
+        "document": document_context(document),
         "stale": stale,
     })
+}
+
+/// [`approval_context`] for a held `doc_edit`: the document as it stands and
+/// the body the edits make of it, which the page diffs in place of a
+/// `doc_write`'s `body`. Edits that no longer apply to the document as it
+/// stands (or a stale `if_hash`) are `stale`, with no body: Allow would fail.
+pub fn edit_approval_context(document: Option<&DocumentRow>, args: &Value) -> Value {
+    let proposed = document.and_then(|d| {
+        let edits = edits_of(args).ok()?;
+        apply_edits(&d.body, &edits).ok()
+    });
+    let stale = proposed.is_none()
+        || args["if_hash"]
+            .as_str()
+            .is_some_and(|want| document.map(|d| d.hash.as_str()) != Some(want));
+    json!({
+        "document": document_context(document),
+        "proposed_body": proposed,
+        "stale": stale,
+    })
+}
+
+fn document_context(document: Option<&DocumentRow>) -> Value {
+    json!(document.map(|d| json!({
+        "body": d.body,
+        "hash": d.hash,
+        "format": d.format,
+        "title": d.title,
+        "updated_ms": d.updated_ms,
+    })))
 }
 
 /// The approval title's tail: whether the write creates the document or
@@ -247,7 +272,7 @@ pub const SHOWN: &str = "shown";
 /// and again when an allowed call runs, against the arguments as allowed.
 pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
     let reserved = match name {
-        DOC_WRITE | DOC_DELETE => reserved_refusal(args),
+        DOC_WRITE | DOC_EDIT | DOC_DELETE => reserved_refusal(args),
         _ => return None,
     };
     if reserved.is_some() {
@@ -272,7 +297,118 @@ pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
             );
         }
     }
+    if name == DOC_EDIT {
+        if let Err(error) = edits_of(args) {
+            return Some(error.to_string());
+        }
+        if !args["if_hash"].as_str().is_some_and(|h| !h.is_empty()) {
+            return Some("if_hash is required: pass the hash doc_read returned".into());
+        }
+    }
     None
+}
+
+/// Everything a `doc_edit` can be refused for against the document as it
+/// stands: none at the slug, an HTML one, an `if_hash` it no longer has, or
+/// an edit that does not match exactly once. Checked before the call is
+/// held, so the agent hears at once that its edit misses rather than after
+/// the operator allows it, and again when an allowed call runs.
+pub fn edit_refusal(store: &crate::store::Store, channel: &str, args: &Value) -> Option<String> {
+    let slug = args["slug"].as_str().unwrap_or("").trim();
+    let doc = match store.doc_get(channel, slug) {
+        Ok(Some(doc)) => doc,
+        Ok(None) => return Some(format!("no document {slug} on channel {channel}")),
+        Err(error) => return Some(error.to_string()),
+    };
+    edit_document(&doc, args).err()
+}
+
+/// The body a `doc_edit` makes of `doc`, or why it cannot: an HTML document,
+/// a stale `if_hash`, or an edit that does not match exactly once.
+fn edit_document(doc: &DocumentRow, args: &Value) -> Result<(String, usize), String> {
+    if doc.format == "html" {
+        return Err(format!(
+            "`{}` is an HTML document, which doc_edit does not change; use doc_write",
+            doc.slug
+        ));
+    }
+    if args["if_hash"].as_str() != Some(doc.hash.as_str()) {
+        return Err(WriteError::Conflict {
+            hash: doc.hash.clone(),
+            body: String::new(),
+        }
+        .to_string());
+    }
+    let edits = edits_of(args).map_err(|e| e.to_string())?;
+    let body = apply_edits(&doc.body, &edits).map_err(|e| e.to_string())?;
+    Ok((body, edits.len()))
+}
+
+/// The most edits one `doc_edit` takes.
+pub const MAX_EDITS: usize = 64;
+
+/// One exact-match replacement of a `doc_edit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub old_str: String,
+    pub new_str: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EditError {
+    #[error("edits must be 1 to {MAX_EDITS} items of {{old_str, new_str}}")]
+    Shape,
+    #[error("edits[{0}] needs a non-empty old_str and a new_str, both strings")]
+    Item(usize),
+    #[error(
+        "edits[{index}].old_str matches {matches} times in the document as edited so far; \
+         it must match exactly once, so nothing was written"
+    )]
+    Matches { index: usize, matches: usize },
+}
+
+/// A `doc_edit`'s `edits`, as the arguments carry them.
+pub fn edits_of(args: &Value) -> Result<Vec<Edit>, EditError> {
+    let items = args["edits"]
+        .as_array()
+        .filter(|a| (1..=MAX_EDITS).contains(&a.len()))
+        .ok_or(EditError::Shape)?;
+    items
+        .iter()
+        .enumerate()
+        .map(
+            |(i, item)| match (item["old_str"].as_str(), item["new_str"].as_str()) {
+                (Some(old), Some(new)) if !old.is_empty() => Ok(Edit {
+                    old_str: old.to_string(),
+                    new_str: new.to_string(),
+                }),
+                _ => Err(EditError::Item(i)),
+            },
+        )
+        .collect()
+}
+
+/// `edits` applied in order, each to the result of the one before: all of
+/// them or, when any `old_str` does not occur exactly once at its turn, none.
+/// Occurrences are counted overlapping, so `aa` in `aaa` is two, not one.
+pub fn apply_edits(body: &str, edits: &[Edit]) -> Result<String, EditError> {
+    let mut out = body.to_string();
+    for (index, edit) in edits.iter().enumerate() {
+        let mut at = None;
+        let mut matches = 0;
+        let mut from = 0;
+        while let Some(i) = out[from..].find(&edit.old_str) {
+            at.get_or_insert(from + i);
+            matches += 1;
+            // Step one character on, so an overlapping match is counted.
+            from += i + out[from + i..].chars().next().map_or(1, char::len_utf8);
+        }
+        match (at, matches) {
+            (Some(i), 1) => out.replace_range(i..i + edit.old_str.len(), &edit.new_str),
+            _ => return Err(EditError::Matches { index, matches }),
+        }
+    }
+    Ok(out)
 }
 
 /// The path of the single file an HTML `doc_write` stores: the existing
@@ -388,7 +524,8 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
          `html`; writing the other format converts the document in place, keeping its archived \
          and pinned state. An HTML body is one self-contained page, stored as a single-file \
          bundle and shown only in the sandboxed preview; replacing a multi-file bundle drops \
-         its other files. Pass if_hash (from doc_read) to refuse overwriting an edit you have \
+         its other files. For a small change to a Markdown document, doc_edit sends only the \
+         changed text. Pass if_hash (from doc_read) to refuse overwriting an edit you have \
          not seen. The operator is asked before this runs, unless the policy writes it \
          unattended (working notes). An asked call returns `awaiting_operator` with an \
          `approval_id` at once, and approval_status reports the outcome.",
@@ -429,6 +566,39 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
                     "if_hash": { "type": "string" },
                 },
                 "required": ["slug", "body"],
+            },
+        }),
+        json!({
+            "name": DOC_EDIT,
+            "description": format!(
+                "Change a Markdown document on this channel by exact-match replacements, \
+                 without resending its body. Each edit's old_str must occur exactly once in \
+                 the document as the edits before it left it; the edits apply in order, all \
+                 or none, and a miss names the edit and how many times it matched. Pass the \
+                 if_hash doc_read returned. An HTML document is refused: use doc_write. \
+                 Approval is as for doc_write, and the operator sees the resulting diff. {}",
+                super::aside::ASKED
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "if_hash": { "type": "string" },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_EDITS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_str": { "type": "string" },
+                                "new_str": { "type": "string" },
+                            },
+                            "required": ["old_str", "new_str"],
+                        },
+                    },
+                },
+                "required": ["slug", "if_hash", "edits"],
             },
         }),
         json!({
@@ -517,26 +687,40 @@ pub async fn call(
                 None,
             )
             .map_err(|e| e.to_string())?;
-            // The plan artifact: record it on the item and end the plan
-            // session once this turn is over.
-            let session = ctx
-                .session_id()
-                .and_then(|id| access.store.get_session(id).ok().flatten());
-            if let Some((session_id, item)) = session
-                .filter(|s| s.phase == "plan")
-                .and_then(|s| s.work_item_id.clone().map(|item| (s.id, item)))
-                .filter(|(_, item)| corpus::work::plan_slug(item) == slug)
-            {
-                corpus::work::set_plan(&access.store, access.manager.bus(), &node_id, &item, slug)
-                    .map_err(|e| e.to_string())?;
-                access.manager.record_event(
-                    &session_id,
-                    crate::session::state::event_kind::PLAN_ARTIFACT,
-                    json!({ "slug": slug, "hash": doc.hash, "work_item_id": item }),
-                );
-                access.manager.phase_done(&session_id).await;
-            }
+            plan_artifact(access, ctx, &node_id, slug, &doc).await?;
             Ok(json!({ "slug": doc.slug, "hash": doc.hash, "format": doc.format }))
+        }
+        DOC_EDIT => {
+            let slug = args["slug"].as_str().unwrap_or("").trim();
+            let node_id = access.manager.node_id().to_string();
+            let kinds = tools.cfg.live().docs.kind.clone();
+            let current = access
+                .store
+                .doc_get(&ctx.channel, slug)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no document {slug} on channel {}", ctx.channel))?;
+            let (body, applied) = edit_document(&current, args)?;
+            // Written against the hash it was edited from, so a write that
+            // lands in between conflicts exactly as it would for doc_write.
+            let doc = write_document_as(
+                &access.store,
+                access.manager.bus(),
+                &kinds,
+                &node_id,
+                &ctx.channel,
+                slug,
+                Format::Markdown,
+                &body,
+                Some(&current.hash),
+                false,
+                None,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            plan_artifact(access, ctx, &node_id, slug, &doc).await?;
+            Ok(json!({
+                "slug": doc.slug, "hash": doc.hash, "format": doc.format, "applied": applied,
+            }))
         }
         DOC_DELETE => {
             let slug = args["slug"].as_str().unwrap_or("").trim();
@@ -556,6 +740,35 @@ pub async fn call(
         }
         other => Err(format!("no tool named {other}")),
     }
+}
+
+/// A plan session's write of its own plan document is the phase's artifact:
+/// record it on the item and end the plan session once this turn is over.
+async fn plan_artifact(
+    access: &SessionAccess,
+    ctx: &CallContext,
+    node_id: &str,
+    slug: &str,
+    doc: &DocumentRow,
+) -> Result<(), String> {
+    let session = ctx
+        .session_id()
+        .and_then(|id| access.store.get_session(id).ok().flatten());
+    if let Some((session_id, item)) = session
+        .filter(|s| s.phase == "plan")
+        .and_then(|s| s.work_item_id.clone().map(|item| (s.id, item)))
+        .filter(|(_, item)| corpus::work::plan_slug(item) == slug)
+    {
+        corpus::work::set_plan(&access.store, access.manager.bus(), node_id, &item, slug)
+            .map_err(|e| e.to_string())?;
+        access.manager.record_event(
+            &session_id,
+            crate::session::state::event_kind::PLAN_ARTIFACT,
+            json!({ "slug": slug, "hash": doc.hash, "work_item_id": item }),
+        );
+        access.manager.phase_done(&session_id).await;
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -738,6 +951,178 @@ mod tests {
         assert_eq!(ctx, json!({ "document": null, "stale": true }));
         let ctx = approval_context(None, &json!({ "slug": "plan-foo" }));
         assert_eq!(ctx, json!({ "document": null, "stale": false }));
+    }
+
+    fn edits(pairs: &[(&str, &str)]) -> Vec<Edit> {
+        pairs
+            .iter()
+            .map(|(old, new)| Edit {
+                old_str: old.to_string(),
+                new_str: new.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_edit_replaces_the_one_place_its_old_str_occurs() {
+        let body = "# Plan\n\nstatus: draft\n";
+        assert_eq!(
+            apply_edits(body, &edits(&[("draft", "ready")])),
+            Ok("# Plan\n\nstatus: ready\n".to_string())
+        );
+    }
+
+    #[test]
+    fn an_edit_that_misses_or_matches_twice_names_its_index_and_count() {
+        let body = "one two two";
+        assert_eq!(
+            apply_edits(body, &edits(&[("one", "1"), ("three", "3")])),
+            Err(EditError::Matches {
+                index: 1,
+                matches: 0
+            })
+        );
+        assert_eq!(
+            apply_edits(body, &edits(&[("two", "2")])),
+            Err(EditError::Matches {
+                index: 0,
+                matches: 2
+            })
+        );
+        // Overlapping occurrences count: `aa` is twice in `aaa`.
+        assert_eq!(
+            apply_edits("aaa", &edits(&[("aa", "b")])),
+            Err(EditError::Matches {
+                index: 0,
+                matches: 2
+            })
+        );
+        let said = EditError::Matches {
+            index: 1,
+            matches: 0,
+        }
+        .to_string();
+        assert!(
+            said.contains("edits[1]") && said.contains("0 times"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn edits_apply_in_order_to_the_running_result() {
+        // The second old_str exists only once the first edit has run.
+        assert_eq!(
+            apply_edits(
+                "alpha",
+                &edits(&[("alpha", "beta gamma"), ("gamma", "delta")])
+            ),
+            Ok("beta delta".to_string())
+        );
+        // And the first edit's text no longer matches for a later one.
+        assert_eq!(
+            apply_edits("alpha", &edits(&[("alpha", "beta"), ("alpha", "x")])),
+            Err(EditError::Matches {
+                index: 1,
+                matches: 0
+            })
+        );
+    }
+
+    #[test]
+    fn edits_are_parsed_from_one_to_the_limit_with_a_non_empty_old_str() {
+        let one = json!({ "edits": [{ "old_str": "a", "new_str": "" }] });
+        assert_eq!(edits_of(&one).unwrap(), edits(&[("a", "")]));
+        assert_eq!(edits_of(&json!({ "edits": [] })), Err(EditError::Shape));
+        assert_eq!(edits_of(&json!({})), Err(EditError::Shape));
+        let many: Vec<Value> = (0..=MAX_EDITS)
+            .map(|i| json!({ "old_str": i.to_string(), "new_str": "x" }))
+            .collect();
+        assert_eq!(edits_of(&json!({ "edits": many })), Err(EditError::Shape));
+        let empty = json!({ "edits": [{ "old_str": "a", "new_str": "b" }, { "old_str": "", "new_str": "b" }] });
+        assert_eq!(edits_of(&empty), Err(EditError::Item(1)));
+        let no_new = json!({ "edits": [{ "old_str": "a" }] });
+        assert_eq!(edits_of(&no_new), Err(EditError::Item(0)));
+    }
+
+    #[test]
+    fn a_doc_edit_is_refused_before_asking_without_edits_or_an_if_hash() {
+        let refused = |args: Value| refusal_before_asking(DOC_EDIT, &args);
+        assert!(refused(json!({ "slug": "note-x", "if_hash": "h" })).is_some());
+        let edit = json!([{ "old_str": "a", "new_str": "b" }]);
+        let missing = refused(json!({ "slug": "note-x", "edits": edit }));
+        assert!(
+            missing.as_deref().is_some_and(|r| r.contains("if_hash")),
+            "{missing:?}"
+        );
+        assert!(refused(json!({ "slug": "Bad", "if_hash": "h", "edits": edit })).is_some());
+        assert!(refused(json!({ "slug": "shown-x", "if_hash": "h", "edits": edit })).is_some());
+        assert_eq!(
+            refused(json!({ "slug": "note-x", "if_hash": "h", "edits": edit })),
+            None
+        );
+    }
+
+    fn put(store: &crate::store::Store, slug: &str, format: Format, body: &str) -> DocumentRow {
+        let bus = crate::stream::Bus::new();
+        write_document_as(
+            store,
+            &bus,
+            &[],
+            "A",
+            "personal",
+            slug,
+            format,
+            body,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_doc_edit_of_an_html_document_is_refused_with_doc_write_named() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let doc = put(&store, "ref-page", Format::Html, "<p>one</p>");
+        let args = json!({ "slug": "ref-page", "if_hash": doc.hash,
+                           "edits": [{ "old_str": "one", "new_str": "two" }] });
+        let refused = edit_refusal(&store, "personal", &args).unwrap();
+        assert!(refused.contains("use doc_write"), "{refused}");
+    }
+
+    #[test]
+    fn a_doc_edit_against_a_stale_hash_conflicts_as_a_doc_write_would() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let doc = put(&store, "note-x", Format::Markdown, "status: draft");
+        let edit = json!([{ "old_str": "draft", "new_str": "ready" }]);
+        let args = json!({ "slug": "note-x", "if_hash": "old", "edits": edit });
+        let refused = edit_refusal(&store, "personal", &args).unwrap();
+        assert!(refused.contains(&doc.hash), "{refused}");
+        let args = json!({ "slug": "note-x", "if_hash": doc.hash, "edits": edit });
+        assert_eq!(edit_refusal(&store, "personal", &args), None);
+        let missing = json!({ "slug": "note-y", "if_hash": doc.hash, "edits": edit });
+        assert!(edit_refusal(&store, "personal", &missing).is_some());
+    }
+
+    /// The approval page diffs the body the edits make against the document
+    /// as it stands, exactly as it does a `doc_write`'s body; edits that no
+    /// longer apply make no body and say Allow will fail.
+    #[test]
+    fn a_held_doc_edit_shows_the_body_its_edits_make() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let doc = put(&store, "plan-foo", Format::Markdown, "# Plan\n\nOne.\nTwo.");
+        let args = json!({ "slug": "plan-foo", "if_hash": doc.hash,
+                           "edits": [{ "old_str": "Two.", "new_str": "Three." }] });
+        let ctx = edit_approval_context(Some(&doc), &args);
+        assert_eq!(ctx["proposed_body"], "# Plan\n\nOne.\nThree.");
+        assert_eq!(ctx["document"]["body"], doc.body);
+        assert_eq!(ctx["stale"], false);
+        let missing = json!({ "slug": "plan-foo", "if_hash": doc.hash,
+                              "edits": [{ "old_str": "Four.", "new_str": "Five." }] });
+        let ctx = edit_approval_context(Some(&doc), &missing);
+        assert_eq!(ctx["proposed_body"], Value::Null);
+        assert_eq!(ctx["stale"], true);
     }
 
     /// `pinned`, like `archived`, `kind`, and `title`, is operator-only: an

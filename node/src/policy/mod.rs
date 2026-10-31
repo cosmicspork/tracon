@@ -436,6 +436,7 @@ fn prose_fields(action: &str) -> &'static [&'static str] {
         | gitlab::MR_COMMENT
         | gitlab::MR_REPLY
         | docs::DOC_WRITE => &["body"],
+        docs::DOC_EDIT => &["edits"],
         _ => &[],
     }
 }
@@ -827,6 +828,14 @@ mod tests {
             let d = p.decide(&tool("doc_write", &args, "doc_write"));
             assert_eq!(d.verdict, Verdict::Ask, "{args}");
         }
+        // An edit is held to the same rule as a write.
+        let edit = serde_json::json!([{ "old_str": "a", "new_str": "b" }]);
+        let args = serde_json::json!({ "slug": "note-personal", "if_hash": "h", "edits": edit });
+        let d = p.decide(&tool("doc_edit", &args, "doc_edit"));
+        assert_eq!(d.verdict, Verdict::Allow);
+        let args = serde_json::json!({ "slug": "plan-migration", "if_hash": "h", "edits": edit });
+        let d = p.decide(&tool("doc_edit", &args, "doc_edit"));
+        assert_eq!(d.verdict, Verdict::Ask);
         // Deleting is never a working note's upkeep: even a note is asked.
         let args = serde_json::json!({ "slug": "note-personal" });
         let d = p.decide(&tool("doc_delete", &args, "doc_delete note-personal"));
