@@ -3028,8 +3028,10 @@ async fn a_reviewer_is_not_started_by_hand_while_another_start_is_pending() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// A review another node owns is started there, over the mesh; a node on
+/// no mesh starts nothing, and says why.
 #[tokio::test]
-async fn a_reviewer_is_not_started_by_hand_on_a_review_another_node_owns() {
+async fn a_reviewer_is_not_started_on_a_review_another_node_owns_off_the_mesh() {
     state::isolate();
     let f = fixture(test_name!(), WITH_GH).await;
     bind_review_model(&f);
@@ -3047,10 +3049,7 @@ async fn a_reviewer_is_not_started_by_hand_on_a_review_another_node_owns() {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert!(
-        body.to_string().contains("start a reviewer there"),
-        "{body}"
-    );
+    assert!(body.to_string().contains("not on a mesh"), "{body}");
     let mirrored = f.store.get_review(&mirrored.id).unwrap().unwrap();
     assert_eq!(mirrored.review_session_id, None);
 }
