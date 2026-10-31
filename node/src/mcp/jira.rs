@@ -378,6 +378,50 @@ pub async fn transition_target(
     target_of(&listed, id)
 }
 
+/// The fields `issue_update` writes, as the issue has them now, and when it
+/// last changed: what a held edit is shown against. `None` when Jira cannot
+/// say.
+pub async fn current_fields(
+    broker: &SharedBroker,
+    http: &reqwest::Client,
+    channel: &str,
+    node_id: &str,
+    key: &str,
+) -> Option<Value> {
+    let (url, email, token) = credential(broker, channel, node_id).ok()?;
+    let key = issue_key(Some(&json!(key)), "key").ok()?.to_string();
+    let res = http
+        .get(format!("{url}/rest/api/2/issue/{key}"))
+        .query(&[(
+            "fields",
+            "summary,description,priority,labels,parent,updated",
+        )])
+        .basic_auth(&email, Some(&token))
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let v: Value = res.json().await.ok()?;
+    Some(current_view(&v))
+}
+
+/// [`current_fields`] from Jira's issue as it came back: each field in the
+/// shape `issue_update` takes it, so the page compares like with like.
+fn current_view(v: &Value) -> Value {
+    let f = &v["fields"];
+    json!({
+        "key": v["key"],
+        "summary": f["summary"],
+        "description": f["description"],
+        "priority": f["priority"]["name"],
+        "labels": labels(f),
+        "parent": f["parent"]["key"],
+        "updated": f["updated"],
+    })
+}
+
 /// Where the transition `id` in an `issue_transitions` listing leads: the
 /// status, or the transition's own name when the status is not given.
 fn target_of(listed: &Value, id: &str) -> Option<String> {

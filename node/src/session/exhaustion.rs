@@ -159,7 +159,7 @@ pub fn reset_ms(headers: &HeaderMap, now_ms: i64) -> Option<i64> {
 }
 
 /// `2026-10-07T12:00:00Z`, with optional fractional seconds and a `Z` or a
-/// `±HH:MM` offset.
+/// `±HH:MM` offset, or Jira's `±HHMM`.
 pub(crate) fn rfc3339_ms(text: &str) -> Option<i64> {
     let text = text.trim();
     let (date, time) = text.split_once(['T', 't', ' '])?;
@@ -171,7 +171,10 @@ pub(crate) fn rfc3339_ms(text: &str) -> Option<i64> {
         let at = time.rfind(['+', '-'])?;
         let (clock, off) = time.split_at(at);
         let sign = if off.starts_with('-') { -1 } else { 1 };
-        let (h, mi) = off[1..].split_once(':')?;
+        let digits = &off[1..];
+        let (h, mi) = digits
+            .split_once(':')
+            .or_else(|| (digits.len() == 4).then(|| digits.split_at(2)))?;
         (
             clock,
             sign * (h.parse::<i64>().ok()? * 60 + mi.parse::<i64>().ok()?),
@@ -492,6 +495,19 @@ mod tests {
             reset_ms(&headers(&[("x-ratelimit-reset-tokens", "soon")]), now),
             None
         );
+    }
+
+    #[test]
+    fn a_jira_timestamp_reads_with_its_offset_without_a_colon() {
+        assert_eq!(
+            rfc3339_ms("2026-10-07T07:00:00.250-0500"),
+            Some(1_791_374_400_250)
+        );
+        assert_eq!(
+            rfc3339_ms("2026-10-07T07:00:00.250-05:00"),
+            rfc3339_ms("2026-10-07T07:00:00.250-0500")
+        );
+        assert_eq!(rfc3339_ms("2026-10-07T07:00:00-050"), None);
     }
 
     #[test]
