@@ -919,4 +919,59 @@ mod tests {
         );
         assert!(peer.open_reviews().unwrap().is_empty());
     }
+
+    #[test]
+    fn review_frame_mirrors_the_owners_reviewer_and_its_verdict() {
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus: Bus::new(),
+            self_id: "peer".into(),
+        };
+        let listed = |reviewer: Option<&str>, verdict: Option<&str>| {
+            let review = ReviewRow {
+                id: "code".into(),
+                session_id: None,
+                kind: "pr".into(),
+                state: "new".into(),
+                verdict_reason: None,
+                resolved_mono_ms: None,
+                review_session_id: reviewer.map(Into::into),
+                ai_verdict_json: verdict.map(Into::into),
+                ..acknowledged_report()
+            };
+            Payload::Reviews {
+                waiting: vec![serde_json::to_value(review).unwrap()],
+                decided: Vec::new(),
+            }
+        };
+        let held = || peer.get_review("code").unwrap().unwrap();
+
+        let approved = r#"{"verdict":"approve","summary":"fine","findings":[]}"#;
+        assert_eq!(
+            mirror.apply(
+                "owner",
+                "personal",
+                listed(Some("reviewer-1"), Some(approved))
+            ),
+            Applied::Stored
+        );
+        assert_eq!(held().review_session_id.as_deref(), Some("reviewer-1"));
+        assert_eq!(held().ai_verdict_json.as_deref(), Some(approved));
+
+        // A newer reviewer's verdict replaces the first.
+        let changes = r#"{"verdict":"request_changes","summary":"no","findings":[]}"#;
+        mirror.apply(
+            "owner",
+            "personal",
+            listed(Some("reviewer-2"), Some(changes)),
+        );
+        assert_eq!(held().review_session_id.as_deref(), Some("reviewer-2"));
+        assert_eq!(held().ai_verdict_json.as_deref(), Some(changes));
+
+        // A resubmission clears both on the owner, and so here.
+        mirror.apply("owner", "personal", listed(None, None));
+        assert_eq!(held().review_session_id, None);
+        assert_eq!(held().ai_verdict_json, None);
+    }
 }
