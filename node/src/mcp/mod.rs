@@ -511,6 +511,14 @@ impl Tools {
         if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
             return Err(refusal);
         }
+        // So is a link type Jira does not have, with the ones it does; a
+        // Jira that cannot say in time leaves the call to be asked.
+        if name == jira::ISSUE_LINK {
+            let lookup = jira::link_target(&self.broker, &self.http, ctx, args);
+            if let Ok(Err(refusal)) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
+                return Err(refusal);
+            }
+        }
         if !plan_write {
             let decision = self.decide(ctx, name, args);
             match decision.verdict {
@@ -652,6 +660,7 @@ impl Tools {
             | jira::ISSUE_COMMENT
             | jira::ISSUE_UPDATE
             | jira::ISSUE_CREATE
+            | jira::ISSUE_LINK
             | jira::ISSUE_TRANSITION => {
                 jira::call(
                     &self.broker,
@@ -1286,6 +1295,12 @@ impl Tools {
             let lookup = jira::transition_target(&self.broker, &self.http, ctx, args);
             if let Ok(Some(to)) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
                 return transition_title(args, &to);
+            }
+        }
+        if name == jira::ISSUE_LINK {
+            let lookup = jira::link_target(&self.broker, &self.http, ctx, args);
+            if let Ok(Ok(Some(kind))) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
+                return link_title(args, &kind.outward);
             }
         }
         if name == docs::DOC_WRITE {
@@ -2177,6 +2192,20 @@ fn transition_title(args: &Value, to: &str) -> String {
     s
 }
 
+/// A Jira link titled the way it will read on `from`, in the type's outward
+/// wording ("blocks"), which Jira is asked for at request time.
+fn link_title(args: &Value, outward: &str) -> String {
+    let key = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("?").trim();
+    let mut s = format!(
+        "{} {} {outward} {}",
+        jira::ISSUE_LINK,
+        key("from"),
+        key("to")
+    );
+    bound(&mut s);
+    s
+}
+
 /// A title a person reads for a call that carries prose: what it acts on and
 /// the first line of what it says, rather than its arguments as JSON.
 fn prose_title(name: &str, args: &Value) -> Option<String> {
@@ -2277,6 +2306,7 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         jira::ISSUE_TRANSITION => {
             format!("{name} {}: transition {}", id("key"), id("transition_id"))
         }
+        jira::ISSUE_LINK => format!("{name} {} {} {}", id("from"), id("type"), id("to")),
         github::PR_MERGE => format!(
             "{name} {}#{}: {} at {}",
             id("repo"),
@@ -2504,6 +2534,15 @@ mod tests {
         assert_eq!(
             transition_title(&transition, "In Review"),
             "issue_transition WRK-1: move to In Review"
+        );
+        let link = json!({ "from": "NUDEV-140", "to": "NUDEV-141", "type": "Blocks" });
+        assert_eq!(
+            summarize(jira::ISSUE_LINK, &link),
+            "issue_link NUDEV-140 Blocks NUDEV-141"
+        );
+        assert_eq!(
+            link_title(&link, "blocks"),
+            "issue_link NUDEV-140 blocks NUDEV-141"
         );
     }
 

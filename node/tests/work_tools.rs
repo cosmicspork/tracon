@@ -58,6 +58,44 @@ async fn stub(
             Json(json!({ "id": "1042", "key": "WRK-9" })),
         );
     }
+    if path == "/rest/api/2/issueLinkType" {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({ "issueLinkTypes": [
+                { "id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
+                { "id": "10003", "name": "Relates", "inward": "relates to", "outward": "relates to" },
+            ] })),
+        );
+    }
+    if path == "/rest/api/2/issueLink" && method == "POST" {
+        return (axum::http::StatusCode::CREATED, Json(Value::Null));
+    }
+    // The read-back after a link: WRK-2 shows the last link the way the tool
+    // expects Jira to; WRK-3 plays a Jira that names the sides the other way.
+    if (path == "/rest/api/2/issue/WRK-2" || path == "/rest/api/2/issue/WRK-3") && method == "GET" {
+        let link = bodies
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(m, p, _)| m == "POST" && p == "/rest/api/2/issueLink")
+            .map(|(_, _, b)| b.clone())
+            .unwrap_or(Value::Null);
+        let (side, other) = if path.ends_with("WRK-2") {
+            ("outwardIssue", &link["outwardIssue"])
+        } else {
+            ("inwardIssue", &link["outwardIssue"])
+        };
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({ "key": "WRK-2", "fields": { "issuelinks": [{
+                "id": "1",
+                "type": { "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
+                side: { "key": other["key"], "fields": { "summary": "Next" } },
+            }] } })),
+        );
+    }
     if path == "/rest/api/2/issue/WRK-1/transitions" && method == "GET" {
         return (
             axum::http::StatusCode::OK,
@@ -673,6 +711,96 @@ async fn a_new_issue_carries_its_project_and_type_and_comes_back_with_a_link() {
     assert_eq!(path, "/rest/api/2/issue");
     assert_eq!(body["fields"]["project"], json!({ "key": "WRK" }));
     assert_eq!(body["fields"]["issuetype"], json!({ "name": "Task" }));
+}
+
+#[tokio::test]
+async fn a_link_is_created_from_the_blocking_side_and_read_back_from_it() {
+    state::isolate();
+    let (mut t, seen, bodies, _) = rig_with_bodies().await;
+    t.policy = allowing(r#""issue_link""#);
+    let c = ctx("work", "n1");
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_link",
+        json!({ "from": "WRK-2", "to": "WRK-5", "type": "blocks" }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(
+        v,
+        json!({ "from": "WRK-2", "to": "WRK-5", "type": "Blocks", "label": "blocks" })
+    );
+
+    // The sides are an unverified reading of Jira's create; the read-back
+    // above is what holds it to "WRK-2 blocks WRK-5" on a real instance.
+    let sent = bodies.0.lock().unwrap().clone();
+    let (_, _, body) = sent
+        .iter()
+        .find(|(m, p, _)| m == "POST" && p == "/rest/api/2/issueLink")
+        .unwrap();
+    assert_eq!(
+        *body,
+        json!({ "type": { "name": "Blocks" },
+                "inwardIssue": { "key": "WRK-2" }, "outwardIssue": { "key": "WRK-5" } })
+    );
+    assert_eq!(
+        paths(&seen),
+        vec![
+            "GET /rest/api/2/issueLinkType",
+            "POST /rest/api/2/issueLink",
+            "GET /rest/api/2/issue/WRK-2",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_link_that_reads_back_reversed_is_an_error_not_a_success() {
+    state::isolate();
+    let (mut t, _, _) = rig().await;
+    t.policy = allowing(r#""issue_link""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "issue_link",
+        json!({ "from": "WRK-3", "to": "WRK-5", "type": "Blocks" }),
+    )
+    .await;
+    assert!(err, "{v}");
+    let text = v.as_str().unwrap();
+    assert!(text.contains("reversed"), "{text}");
+    assert!(text.contains("WRK-3 is blocked by WRK-5"), "{text}");
+}
+
+#[tokio::test]
+async fn an_unknown_link_type_is_refused_with_the_known_ones_before_asking() {
+    state::isolate();
+    // The shipped bundle asks for a link; this rig has no session to ask on.
+    let (t, seen, _) = rig().await;
+    let c = ctx("work", "n1");
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_link",
+        json!({ "from": "WRK-2", "to": "WRK-5", "type": "Precedes" }),
+    )
+    .await;
+    assert!(err);
+    let text = v.as_str().unwrap();
+    assert!(text.contains("Blocks, Relates"), "{text}");
+    assert!(!text.contains("approval"), "{text}");
+
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_link",
+        json!({ "from": "WRK-2", "to": "WRK-5", "type": "Blocks" }),
+    )
+    .await;
+    assert!(err);
+    assert!(v.as_str().unwrap().contains("approval"), "{v}");
+    // Only the link types were read, once, and nothing was linked.
+    assert_eq!(paths(&seen), vec!["GET /rest/api/2/issueLinkType"]);
 }
 
 fn paths(seen: &Seen) -> Vec<String> {
