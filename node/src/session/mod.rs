@@ -1314,7 +1314,8 @@ impl Manager {
             }
             // The handoff points it at the AI reviewer's verdict on a review
             // still waiting (`carried_note`), so that verdict is not brought
-            // back as a prompt as well; one given after this still is.
+            // back as a prompt as well; one given after this still is. Its
+            // findings are left unsent, so that review_status carries them.
             if let Some(verdict) = crate::mcp::review::current_verdict(&self.store, review) {
                 self.waits()
                     .tell(to, &waits::reviewer_key(&review.id, &verdict));

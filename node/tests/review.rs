@@ -3318,6 +3318,95 @@ async fn the_submitter_hears_its_reviewer_and_the_verdict_while_it_waits() {
     assert_eq!(detail["reviewer"]["revision"], 1, "{detail}");
 }
 
+/// A continuation that takes over a review the reviewer has already given
+/// its verdict on is not brought that verdict as a prompt; the handoff sends
+/// it to review_status instead, so the first call there carries the findings.
+#[tokio::test]
+async fn a_continuation_hears_the_findings_of_a_verdict_given_before_it_took_over() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review_model(&f);
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let reviewer = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    running_reviewer(&f, &reviewer).await;
+    let v = f
+        .tool(
+            &reviewer,
+            "review_verdict",
+            json!({"verdict": "request_changes", "summary": "a.txt grew without a test",
+            "findings": [{"path": "a.txt", "line": 2, "severity": "should", "note": "cover it"}]}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+
+    // The submitter ends before it hears the verdict, and is carried on.
+    f.store
+        .conn()
+        .execute(
+            "UPDATE session SET state='closed', end_reason='killed_user' WHERE id='s1'",
+            [],
+        )
+        .unwrap();
+    let (st, row) = f
+        .call(
+            "POST",
+            "/api/continuation/continue",
+            Some(json!({ "session_id": "s1" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::CREATED, "{row}");
+    let next = row["id"].as_str().unwrap_or_else(|| panic!("{row}"));
+    assert_eq!(
+        f.store
+            .get_review(&id)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some(next)
+    );
+    let waits = f.manager.waits().of(next);
+    let verdict = waits
+        .iter()
+        .find(|w| w.key.starts_with("reviewer:"))
+        .unwrap_or_else(|| panic!("{waits:?}"));
+    assert!(f.manager.waits().was_told(next, &verdict.key), "{waits:?}");
+
+    let status = || async {
+        tracon::mcp::review::call(
+            &f.store,
+            &f.manager,
+            &tracon::mcp::CallContext::session(next, "work", "n1"),
+            "review_status",
+            &json!({ "review_id": id, "wait_secs": 0 }),
+        )
+        .await
+        .unwrap()
+    };
+    let s = status().await;
+    assert_eq!(s["still_waiting"], true, "{s}");
+    assert_eq!(s["reviewer"]["findings"][0]["note"], "cover it", "{s}");
+    assert_eq!(s["reviewer"]["summary"], "a.txt grew without a test", "{s}");
+    assert!(
+        s["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("has given its verdict"),
+        "{s}"
+    );
+    // Sent once, to the continuation as to any submitter.
+    let s = status().await;
+    assert_eq!(s["reviewer"]["findings_count"], 1, "{s}");
+    assert_eq!(s["reviewer"]["findings"], Value::Null, "{s}");
+}
+
 #[tokio::test]
 async fn a_verdict_on_an_earlier_revision_never_replaces_one_on_a_later_revision() {
     state::isolate();

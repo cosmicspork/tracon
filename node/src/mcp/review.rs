@@ -4048,12 +4048,22 @@ async fn status(
         if untold || untold_failure || now >= deadline {
             // A verdict already sent comes back compact on later polls, so
             // its findings are not repeated into the caller's context each time.
-            let full = untold || args["include_findings"].as_bool() == Some(true);
+            let full = args["include_findings"].as_bool() == Some(true)
+                || verdict.as_ref().is_some_and(|verdict| {
+                    !manager.waits().was_told(
+                        &caller,
+                        &crate::session::waits::findings_key(&r.id, verdict),
+                    )
+                });
             let says = match &verdict {
                 Some(verdict) => {
                     manager.waits().tell(
                         &caller,
                         &crate::session::waits::reviewer_key(&r.id, verdict),
+                    );
+                    manager.waits().tell(
+                        &caller,
+                        &crate::session::waits::findings_key(&r.id, verdict),
                     );
                     if full {
                         format!("{} ", reviewer_verdict_says(verdict))
