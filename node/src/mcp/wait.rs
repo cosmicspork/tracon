@@ -30,6 +30,73 @@ pub fn wait_secs(args: &Value) -> u64 {
         .min(MAX_WAIT_SECS)
 }
 
+/// What ends a `pipeline_wait` or `run_wait` call before its time is up, as
+/// its `until` argument names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Until {
+    /// The pipeline or any of its jobs changing state.
+    Change,
+    /// Only the pipeline finishing.
+    Finished,
+    /// A job failing, or the pipeline finishing.
+    Failure,
+}
+
+/// The `until` a CI wait was asked for, `change` when absent. Both forges
+/// parse it here so an unknown value is refused the same way on either.
+pub fn until(args: &Value) -> Result<Until, String> {
+    match args.get("until") {
+        None | Some(Value::Null) => Ok(Until::Change),
+        Some(v) => match v.as_str() {
+            Some("change") => Ok(Until::Change),
+            Some("finished") => Ok(Until::Finished),
+            Some("failure") => Ok(Until::Failure),
+            _ => Err(format!(
+                "until must be \"change\", \"finished\" or \"failure\", not {v}"
+            )),
+        },
+    }
+}
+
+/// The schema of a CI wait's `until` argument.
+pub fn until_schema() -> Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": ["change", "finished", "failure"],
+        "description": "What ends the wait early: `change` (the default) any move, \
+            `finished` only finishing, `failure` a job failing or finishing.",
+    })
+}
+
+/// Whether a CI wait returns on this read rather than holding on; running
+/// out of time is the caller's to add.
+///
+/// `changed` is whether the state moved from the one the caller last saw,
+/// and `first` whether it passed no `since` and this is its first look. A
+/// failed job ends a `failure` wait only when that is news (`changed` or
+/// `first`), so a caller already told of one is not answered again at once
+/// on every call while later stages run.
+pub fn returns(until: Until, changed: bool, first: bool, done: bool, failed: bool) -> bool {
+    done || match until {
+        Until::Change => changed,
+        Until::Finished => false,
+        Until::Failure => failed && (changed || first),
+    }
+}
+
+/// What one read of a pipeline or run means to a CI wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Read {
+    /// The token to compare the next read with and to hand back as `state`.
+    pub state: String,
+    /// Whether the state moved from the one the caller last saw.
+    pub changed: bool,
+    /// Whether the pipeline or run has finished.
+    pub done: bool,
+    /// Whether the wait returns on this read, time left aside.
+    pub returns: bool,
+}
+
 /// The tools that wait: each blocks inside one call for at most
 /// [`MAX_WAIT_SECS`]. How to keep waiting on one is said once, in the
 /// orientation, and each description carries only [`pointer`].
@@ -166,6 +233,17 @@ mod tests {
             "doc_read",
         ] {
             assert!(!is_poll(tool, None), "{tool}");
+        }
+    }
+
+    #[test]
+    fn until_defaults_to_change_and_refuses_an_unknown_value() {
+        assert_eq!(until(&json!({})), Ok(Until::Change));
+        assert_eq!(until(&json!({ "until": "finished" })), Ok(Until::Finished));
+        assert_eq!(until(&json!({ "until": "failure" })), Ok(Until::Failure));
+        for bad in [json!("done"), json!(true), json!(1)] {
+            let e = until(&json!({ "until": bad })).unwrap_err();
+            assert!(e.contains("until must be"), "{e}");
         }
     }
 }
