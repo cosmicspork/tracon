@@ -987,8 +987,8 @@ fn wait_read(
     let state = run_state_token(run);
     let changed = started && baseline.is_some_and(|b| b != state);
     let done = started && run["run"]["status"] == "completed";
-    let failed = started && job_failed(run);
-    let returns = super::wait::returns(until, changed, baseline.is_none(), done, failed);
+    let failed = started && super::wait::new_failure(&state, baseline);
+    let returns = super::wait::returns(until, changed, done, failed);
     super::wait::Read {
         state,
         changed,
@@ -997,19 +997,26 @@ fn wait_read(
     }
 }
 
-/// Whether a job in the run has failed.
-fn job_failed(run: &Value) -> bool {
+/// The run's jobs that have failed. A job that timed out or never started
+/// failed too; one cancelled was stopped rather than failing.
+fn failed_jobs(run: &Value) -> Vec<i64> {
     run["jobs"]
         .as_array()
         .into_iter()
         .flatten()
-        .any(|j| j["conclusion"] == "failure")
+        .filter(|j| {
+            matches!(
+                j["conclusion"].as_str(),
+                Some("failure" | "timed_out" | "startup_failure")
+            )
+        })
+        .map(|j| j["id"].as_i64().unwrap_or(0))
+        .collect()
 }
 
 /// What `run_wait` compares: the run's attempt, status and conclusion, and
 /// each job's.
 fn run_state_token(run: &Value) -> String {
-    use sha2::{Digest, Sha256};
     let r = &run["run"];
     let mut seen = format!("{};{};{}", r["attempt"], r["status"], r["conclusion"]);
     let mut jobs: Vec<(i64, String)> = run["jobs"]
@@ -1027,7 +1034,7 @@ fn run_state_token(run: &Value) -> String {
     for (id, status) in jobs {
         seen.push_str(&format!(";{id}={status}"));
     }
-    hex::encode(&Sha256::digest(seen.as_bytes())[..8])
+    super::wait::state_token(&seen, failed_jobs(run))
 }
 
 /// `owner/name`, validated before it reaches a URL.
@@ -1549,9 +1556,10 @@ mod tests {
     fn returns_at(
         reads: &[Value],
         attempt: i64,
+        since: Option<&str>,
         until: super::super::wait::Until,
     ) -> Option<usize> {
-        let mut baseline: Option<String> = None;
+        let mut baseline = since.map(str::to_string);
         for (i, now) in reads.iter().enumerate() {
             let read = wait_read(now, attempt, baseline.as_deref(), until);
             if read.returns {
@@ -1590,9 +1598,9 @@ mod tests {
                 ],
             ),
         ];
-        assert_eq!(returns_at(&reads, 0, Until::Change), Some(1));
-        assert_eq!(returns_at(&reads, 0, Until::Finished), Some(3));
-        assert_eq!(returns_at(&reads, 0, Until::Failure), Some(2));
+        assert_eq!(returns_at(&reads, 0, None, Until::Change), Some(1));
+        assert_eq!(returns_at(&reads, 0, None, Until::Finished), Some(3));
+        assert_eq!(returns_at(&reads, 0, None, Until::Failure), Some(2));
     }
 
     #[test]
@@ -1605,7 +1613,70 @@ mod tests {
             run_read(2, "in_progress", &[(3, "in_progress", None)]),
             run_read(2, "completed", &[(3, "completed", Some("success"))]),
         ];
-        assert_eq!(returns_at(&reads, 2, Until::Failure), Some(3));
-        assert_eq!(returns_at(&reads, 2, Until::Finished), Some(3));
+        assert_eq!(returns_at(&reads, 2, None, Until::Failure), Some(3));
+        assert_eq!(returns_at(&reads, 2, None, Until::Finished), Some(3));
+    }
+
+    #[test]
+    fn a_run_wait_until_failure_holds_through_later_moves_once_told_and_returns_on_another_failure()
+    {
+        use super::super::wait::Until;
+        let told = run_read(
+            1,
+            "in_progress",
+            &[
+                (1, "completed", Some("failure")),
+                (2, "in_progress", None),
+                (3, "in_progress", None),
+            ],
+        );
+        let seen = run_state_token(&told);
+        let moved = run_read(
+            1,
+            "in_progress",
+            &[
+                (1, "completed", Some("failure")),
+                (2, "completed", Some("success")),
+                (3, "in_progress", None),
+            ],
+        );
+        let one = std::slice::from_ref(&moved);
+        assert_eq!(returns_at(one, 0, Some(&seen), Until::Change), Some(0));
+        assert_eq!(returns_at(one, 0, Some(&seen), Until::Failure), None);
+        let again = run_read(
+            1,
+            "in_progress",
+            &[
+                (1, "completed", Some("failure")),
+                (2, "completed", Some("success")),
+                (3, "completed", Some("timed_out")),
+            ],
+        );
+        assert_eq!(
+            returns_at(&[moved, again], 0, Some(&seen), Until::Failure),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_job_that_timed_out_or_never_started_has_failed_and_a_cancelled_one_has_not() {
+        let jobs = [
+            (1, "completed", Some("failure")),
+            (2, "completed", Some("timed_out")),
+            (3, "completed", Some("startup_failure")),
+            (4, "completed", Some("cancelled")),
+            (5, "completed", Some("success")),
+            (6, "completed", Some("skipped")),
+            (7, "in_progress", None),
+        ];
+        assert_eq!(
+            failed_jobs(&run_read(1, "in_progress", &jobs)),
+            vec![1, 2, 3]
+        );
+        let cancelled = run_read(1, "in_progress", &[(4, "completed", Some("cancelled"))]);
+        assert_eq!(
+            returns_at(&[cancelled], 0, None, super::super::wait::Until::Failure),
+            None
+        );
     }
 }

@@ -903,13 +903,8 @@ fn wait_read(
     let state = state_token(pipeline);
     let changed = baseline.is_some_and(|b| b != state);
     let done = pipeline["status"].as_str().is_some_and(finished);
-    let returns = super::wait::returns(
-        until,
-        changed,
-        baseline.is_none(),
-        done,
-        job_failed(pipeline),
-    );
+    let failed = super::wait::new_failure(&state, baseline);
+    let returns = super::wait::returns(until, changed, done, failed);
     super::wait::Read {
         state,
         changed,
@@ -918,19 +913,20 @@ fn wait_read(
     }
 }
 
-/// Whether a job in the pipeline has failed in a way that fails it: one
-/// allowed to fail does not count.
-fn job_failed(pipeline: &Value) -> bool {
+/// The pipeline's jobs that have failed in a way that fails it: one allowed
+/// to fail does not count.
+fn failed_jobs(pipeline: &Value) -> Vec<i64> {
     pipeline["jobs"]
         .as_array()
         .into_iter()
         .flatten()
-        .any(|j| j["status"] == "failed" && j["allow_failure"] != true)
+        .filter(|j| j["status"] == "failed" && j["allow_failure"] != true)
+        .map(|j| j["id"].as_i64().unwrap_or(0))
+        .collect()
 }
 
 /// What `pipeline_wait` compares: the pipeline's status and each job's.
 fn state_token(pipeline: &Value) -> String {
-    use sha2::{Digest, Sha256};
     let mut seen = format!("{}", pipeline["status"]);
     let mut jobs: Vec<(i64, String)> = pipeline["jobs"]
         .as_array()
@@ -942,7 +938,7 @@ fn state_token(pipeline: &Value) -> String {
     for (id, status) in jobs {
         seen.push_str(&format!(";{id}={status}"));
     }
-    hex::encode(&Sha256::digest(seen.as_bytes())[..8])
+    super::wait::state_token(&seen, failed_jobs(pipeline))
 }
 
 async fn merge_request(
@@ -1392,6 +1388,48 @@ mod tests {
         assert_eq!(
             returns_at(&[failed], Some(&state_token(&before)), Until::Failure),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn a_wait_until_failure_holds_through_later_moves_once_told_and_returns_on_another_failure() {
+        use super::super::wait::Until;
+        let told = pipeline_read(
+            "running",
+            &[
+                (1, "failed", false),
+                (2, "running", false),
+                (3, "running", false),
+            ],
+        );
+        let seen = state_token(&told);
+        let moved = pipeline_read(
+            "running",
+            &[
+                (1, "failed", false),
+                (2, "success", false),
+                (3, "running", false),
+            ],
+        );
+        assert_eq!(
+            returns_at(std::slice::from_ref(&moved), Some(&seen), Until::Change),
+            Some(0)
+        );
+        assert_eq!(
+            returns_at(std::slice::from_ref(&moved), Some(&seen), Until::Failure),
+            None
+        );
+        let again = pipeline_read(
+            "running",
+            &[
+                (1, "failed", false),
+                (2, "success", false),
+                (3, "failed", false),
+            ],
+        );
+        assert_eq!(
+            returns_at(&[moved, again], Some(&seen), Until::Failure),
+            Some(1)
         );
     }
 

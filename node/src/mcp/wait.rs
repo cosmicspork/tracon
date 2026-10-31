@@ -72,15 +72,50 @@ pub fn until_schema() -> Value {
 /// out of time is the caller's to add.
 ///
 /// `changed` is whether the state moved from the one the caller last saw,
-/// and `first` whether it passed no `since` and this is its first look. A
-/// failed job ends a `failure` wait only when that is news (`changed` or
-/// `first`), so a caller already told of one is not answered again at once
-/// on every call while later stages run.
-pub fn returns(until: Until, changed: bool, first: bool, done: bool, failed: bool) -> bool {
+/// and `failed` whether a job has failed that the caller was not told of
+/// ([`new_failure`]).
+pub fn returns(until: Until, changed: bool, done: bool, failed: bool) -> bool {
     done || match until {
         Until::Change => changed,
         Until::Finished => false,
-        Until::Failure => failed && (changed || first),
+        Until::Failure => failed,
+    }
+}
+
+/// A CI wait's `state` token: a hash of everything the wait compares and,
+/// once a job has failed, a hash of which ones after a dot.
+///
+/// The failed jobs ride in the token so a `failure` wait can tell a job
+/// failing from other jobs moving after one has: once a stage fails, every
+/// later move would otherwise be read as the failure again. A run with no
+/// failed job keeps a bare hash, the shape tokens had before.
+pub fn state_token(seen: &str, mut failed: Vec<i64>) -> String {
+    let hash = |s: &str| {
+        use sha2::{Digest, Sha256};
+        hex::encode(&Sha256::digest(s.as_bytes())[..8])
+    };
+    let state = hash(seen);
+    if failed.is_empty() {
+        return state;
+    }
+    failed.sort_unstable();
+    failed.dedup();
+    let ids: Vec<String> = failed.iter().map(i64::to_string).collect();
+    format!("{state}.{}", hash(&ids.join(",")))
+}
+
+/// Whether `state` shows failed jobs other than those in `since`, the
+/// token the caller last saw. With no `since`, this is the caller's first
+/// look and any failed job is news. A token from before failed jobs were
+/// carried reads as having none, so its failure is told once more.
+pub fn new_failure(state: &str, since: Option<&str>) -> bool {
+    fn failed(token: &str) -> Option<&str> {
+        token.split_once('.').map(|(_, f)| f)
+    }
+    match (failed(state), since) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (now, Some(since)) => now != failed(since),
     }
 }
 
@@ -245,5 +280,33 @@ mod tests {
             let e = until(&json!({ "until": bad })).unwrap_err();
             assert!(e.contains("until must be"), "{e}");
         }
+    }
+
+    #[test]
+    fn a_failure_is_news_only_when_the_failed_jobs_are_new_to_the_caller() {
+        let clean = state_token("running;1=running;2=running", vec![]);
+        let one = state_token("running;1=failed;2=running", vec![1]);
+        let one_later = state_token("running;1=failed;2=success", vec![1]);
+        let two = state_token("running;1=failed;2=failed", vec![2, 1]);
+        // No failed job keeps the bare hash a token always had.
+        assert!(!clean.contains('.'), "{clean}");
+        assert!(!new_failure(&clean, None));
+        // A first look, or a caller who last saw none, is told.
+        assert!(new_failure(&one, None));
+        assert!(new_failure(&one, Some(&clean)));
+        // Another job moving after the caller was told is not a failure.
+        assert!(!new_failure(&one_later, Some(&one)));
+        assert!(returns(Until::Change, true, false, false));
+        assert!(!returns(
+            Until::Failure,
+            true,
+            false,
+            new_failure(&one_later, Some(&one))
+        ));
+        // A second job failing is.
+        assert!(new_failure(&two, Some(&one_later)));
+        assert_eq!(two, state_token("running;1=failed;2=failed", vec![1, 2]));
+        // An older token without the failed part reads as having seen none.
+        assert!(new_failure(&one, Some(one.split_once('.').unwrap().0)));
     }
 }
