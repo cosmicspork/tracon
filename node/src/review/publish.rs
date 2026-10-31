@@ -90,6 +90,11 @@ pub struct Target {
     /// immutable candidate into a distinct publisher repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// External only: the repository that worktree belongs to and the
+    /// branch it had checked out, what a resubmission from another worktree
+    /// is held to once the harness has removed this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<Checkout>,
     /// For a worktree a harness the operator runs submitted: the repository
     /// whose `[[repo]]` entry its review answers to, so its reviewer and the
     /// checks run on its candidate get that repository's image. Chosen once,
@@ -108,6 +113,13 @@ pub struct Target {
     /// change. Settled again by every submit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub initial: bool,
+}
+
+/// Where an external review's worktree was: its repository and branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkout {
+    pub repo: String,
+    pub branch: String,
 }
 
 impl Target {
@@ -2086,6 +2098,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            checkout: None,
             repo: None,
             change: None,
             initial: false,
@@ -2197,6 +2210,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "master".into(),
             branch: "fix/x".into(),
             worktree: None,
+            checkout: None,
             repo: None,
             change: None,
             initial: false,
@@ -2243,6 +2257,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            checkout: None,
             repo: None,
             change: None,
             initial: false,
@@ -2265,6 +2280,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            checkout: None,
             repo: None,
             change: None,
             initial: false,
@@ -2295,6 +2311,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            checkout: None,
             repo: None,
             change: None,
             initial: false,
@@ -2351,6 +2368,7 @@ encoding ISO-8859-1\n\nsubject\n";
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            checkout: None,
             repo: None,
             change: None,
             initial: false,

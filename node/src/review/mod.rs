@@ -1372,6 +1372,7 @@ mod tests {
             base: "main".into(),
             branch: "feat/x".into(),
             worktree: None,
+            checkout: None,
             repo: None,
             change: Some(publish::ChangeRef {
                 number: 63,
