@@ -2293,7 +2293,10 @@ pub async fn get_approval(
     // What the call would change, read now: only while it is still undecided.
     let context = match &arguments {
         Some(args) if a.state == crate::store::approvals::PENDING => {
-            crate::mcp::approval_context(s.store(), &a.channel, &a.tool, args)?
+            match crate::mcp::approval_context(s.store(), &a.channel, &a.tool, args)? {
+                Some(context) => Some(context),
+                None => s.tools.remote_approval_context(&a, args).await,
+            }
         }
         _ => None,
     };

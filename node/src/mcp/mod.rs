@@ -1305,6 +1305,35 @@ impl Tools {
         summarize(name, args)
     }
 
+    /// What a held call would change that only a remote service can say, read
+    /// when the page opens, for [`approval_context`]'s fields: a Jira edit is
+    /// shown against the issue as it is now, and marked `stale` when the
+    /// issue changed after the call was asked. A slow or failed read leaves
+    /// the page without it rather than holding the page.
+    pub async fn remote_approval_context(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        args: &Value,
+    ) -> Option<Value> {
+        if approval.tool != jira::ISSUE_UPDATE {
+            return None;
+        }
+        let key = args.get("key")?.as_str()?;
+        let read = jira::current_fields(
+            &self.broker,
+            &self.http,
+            &approval.channel,
+            &approval.node_id,
+            key,
+        );
+        let mut issue = tokio::time::timeout(TRANSITION_LOOKUP, read).await.ok()??;
+        let changed = issue["updated"]
+            .as_str()
+            .and_then(crate::session::exhaustion::rfc3339_ms);
+        issue["stale"] = json!(changed.is_some_and(|ms| ms > approval.created_ms));
+        Some(json!({ "issue": issue }))
+    }
+
     /// The operator's answer to an approval. Allowing it runs the call, with
     /// their edit when they made one, held to every refusal the call itself
     /// would meet. Refusing it, or asking for changes, settles it with what

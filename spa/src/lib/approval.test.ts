@@ -9,6 +9,7 @@ import {
   outcome,
   problemsByField,
   amendsNothing,
+  issueChanges,
   replacement,
   resultRows,
   schemaFor,
@@ -194,4 +195,34 @@ test('a memory amendment diffs the draft against the memory as it stands, and sa
   expect(replacement({ document }, { body: 'b' })).toMatchObject({ subject: 'document', label: 'edit · “Plan”' })
   expect(replacement({ document: null }, { body: 'b' })).toMatchObject({ label: 'new document' })
   expect(amendsNothing({})).toBe(false)
+})
+
+test('a Jira edit diffs the description and the fields it sets against the issue as it stands', () => {
+  const issue = {
+    key: 'WRK-1',
+    summary: 'Port the feed',
+    description: 'h2. Goal\n* one\n* two',
+    priority: 'High',
+    labels: ['etl'],
+    parent: 'WRK-10',
+    updated: '2026-10-07T07:00:00.000-0500',
+    stale: false,
+  }
+  const edit = replacement({ issue }, { key: 'WRK-1', description: 'h2. Goal\n* one\n* three' })!
+  expect(edit).toMatchObject({
+    key: 'description',
+    subject: 'issue',
+    label: 'edit · WRK-1 “Port the feed”',
+    added: 1,
+    removed: 1,
+  })
+  // An edit that leaves the description alone has nothing to diff.
+  expect(replacement({ issue }, { key: 'WRK-1', summary: 'x' })).toBeNull()
+  expect(
+    issueChanges({ issue }, { key: 'WRK-1', summary: 'Port the feeds', priority: 'High', labels: ['etl', 'nead'] }),
+  ).toEqual([
+    { key: 'summary', before: 'Port the feed', after: 'Port the feeds' },
+    { key: 'labels', before: 'etl', after: 'etl, nead' },
+  ])
+  expect(issueChanges({}, { summary: 'x' })).toEqual([])
 })
