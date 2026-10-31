@@ -30,6 +30,108 @@ pub fn wait_secs(args: &Value) -> u64 {
         .min(MAX_WAIT_SECS)
 }
 
+/// What ends a `pipeline_wait` or `run_wait` call before its time is up, as
+/// its `until` argument names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Until {
+    /// The pipeline or any of its jobs changing state.
+    Change,
+    /// Only the pipeline finishing.
+    Finished,
+    /// A job failing, or the pipeline finishing.
+    Failure,
+}
+
+/// The `until` a CI wait was asked for, `change` when absent. Both forges
+/// parse it here so an unknown value is refused the same way on either.
+pub fn until(args: &Value) -> Result<Until, String> {
+    match args.get("until") {
+        None | Some(Value::Null) => Ok(Until::Change),
+        Some(v) => match v.as_str() {
+            Some("change") => Ok(Until::Change),
+            Some("finished") => Ok(Until::Finished),
+            Some("failure") => Ok(Until::Failure),
+            _ => Err(format!(
+                "until must be \"change\", \"finished\" or \"failure\", not {v}"
+            )),
+        },
+    }
+}
+
+/// The schema of a CI wait's `until` argument.
+pub fn until_schema() -> Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": ["change", "finished", "failure"],
+        "description": "What ends the wait early: `change` (the default) any move, \
+            `finished` only finishing, `failure` a job failing or finishing.",
+    })
+}
+
+/// Whether a CI wait returns on this read rather than holding on; running
+/// out of time is the caller's to add.
+///
+/// `changed` is whether the state moved from the one the caller last saw,
+/// and `failed` whether a job has failed that the caller was not told of
+/// ([`new_failure`]).
+pub fn returns(until: Until, changed: bool, done: bool, failed: bool) -> bool {
+    done || match until {
+        Until::Change => changed,
+        Until::Finished => false,
+        Until::Failure => failed,
+    }
+}
+
+/// A CI wait's `state` token: a hash of everything the wait compares and,
+/// once a job has failed, a hash of which ones after a dot.
+///
+/// The failed jobs ride in the token so a `failure` wait can tell a job
+/// failing from other jobs moving after one has: once a stage fails, every
+/// later move would otherwise be read as the failure again. A run with no
+/// failed job keeps a bare hash, the shape tokens had before.
+pub fn state_token(seen: &str, mut failed: Vec<i64>) -> String {
+    let hash = |s: &str| {
+        use sha2::{Digest, Sha256};
+        hex::encode(&Sha256::digest(s.as_bytes())[..8])
+    };
+    let state = hash(seen);
+    if failed.is_empty() {
+        return state;
+    }
+    failed.sort_unstable();
+    failed.dedup();
+    let ids: Vec<String> = failed.iter().map(i64::to_string).collect();
+    format!("{state}.{}", hash(&ids.join(",")))
+}
+
+/// Whether `state` shows failed jobs other than those in `since`, the
+/// token the caller last saw. With no `since`, this is the caller's first
+/// look and any failed job is news. A token from before failed jobs were
+/// carried reads as having none, so its failure is told once more.
+pub fn new_failure(state: &str, since: Option<&str>) -> bool {
+    fn failed(token: &str) -> Option<&str> {
+        token.split_once('.').map(|(_, f)| f)
+    }
+    match (failed(state), since) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (now, Some(since)) => now != failed(since),
+    }
+}
+
+/// What one read of a pipeline or run means to a CI wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Read {
+    /// The token to compare the next read with and to hand back as `state`.
+    pub state: String,
+    /// Whether the state moved from the one the caller last saw.
+    pub changed: bool,
+    /// Whether the pipeline or run has finished.
+    pub done: bool,
+    /// Whether the wait returns on this read, time left aside.
+    pub returns: bool,
+}
+
 /// The tools that wait: each blocks inside one call for at most
 /// [`MAX_WAIT_SECS`]. How to keep waiting on one is said once, in the
 /// orientation, and each description carries only [`pointer`].
@@ -168,5 +270,44 @@ mod tests {
         ] {
             assert!(!is_poll(tool, None), "{tool}");
         }
+    }
+
+    #[test]
+    fn until_defaults_to_change_and_refuses_an_unknown_value() {
+        assert_eq!(until(&json!({})), Ok(Until::Change));
+        assert_eq!(until(&json!({ "until": "finished" })), Ok(Until::Finished));
+        assert_eq!(until(&json!({ "until": "failure" })), Ok(Until::Failure));
+        for bad in [json!("done"), json!(true), json!(1)] {
+            let e = until(&json!({ "until": bad })).unwrap_err();
+            assert!(e.contains("until must be"), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_failure_is_news_only_when_the_failed_jobs_are_new_to_the_caller() {
+        let clean = state_token("running;1=running;2=running", vec![]);
+        let one = state_token("running;1=failed;2=running", vec![1]);
+        let one_later = state_token("running;1=failed;2=success", vec![1]);
+        let two = state_token("running;1=failed;2=failed", vec![2, 1]);
+        // No failed job keeps the bare hash a token always had.
+        assert!(!clean.contains('.'), "{clean}");
+        assert!(!new_failure(&clean, None));
+        // A first look, or a caller who last saw none, is told.
+        assert!(new_failure(&one, None));
+        assert!(new_failure(&one, Some(&clean)));
+        // Another job moving after the caller was told is not a failure.
+        assert!(!new_failure(&one_later, Some(&one)));
+        assert!(returns(Until::Change, true, false, false));
+        assert!(!returns(
+            Until::Failure,
+            true,
+            false,
+            new_failure(&one_later, Some(&one))
+        ));
+        // A second job failing is.
+        assert!(new_failure(&two, Some(&one_later)));
+        assert_eq!(two, state_token("running;1=failed;2=failed", vec![1, 2]));
+        // An older token without the failed part reads as having seen none.
+        assert!(new_failure(&one, Some(one.split_once('.').unwrap().0)));
     }
 }
