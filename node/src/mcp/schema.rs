@@ -71,8 +71,15 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
         &["slug", "if_hash", "format"],
     ),
     // The page shows the diff the edits make; which document, and which
-    // version of it they apply to, is the call.
-    (docs::DOC_EDIT, "markdown", &[], &["slug", "if_hash"]),
+    // version of it they apply to, is the call. The diff is the node's, made
+    // from the edits as asked, so the edits are locked too: an operator's
+    // change to them would run edits the page never showed.
+    (
+        docs::DOC_EDIT,
+        "markdown",
+        &[],
+        &["slug", "if_hash", "edits"],
+    ),
     (docs::DOC_DELETE, "markdown", &[], &["slug", "if_hash"]),
     (memory::RETAIN, "markdown", &["body"], &["kind"]),
     // Which memory is the call; the operator rewrites its body, not its target.
@@ -356,6 +363,7 @@ mod tests {
         assert!(doc.locked_fields.contains(&"slug") && doc.locked_fields.contains(&"key"));
         assert!(doc.locked_fields.contains(&"format"));
         assert!(presentation("doc_delete").locked_fields.contains(&"slug"));
+        assert!(presentation("doc_edit").locked_fields.contains(&"edits"));
         // A held service start has its schema with no catalogue to hand,
         // and the service it starts is what the call acts on.
         let service = input_schema("service_start").unwrap();

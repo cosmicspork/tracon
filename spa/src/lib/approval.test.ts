@@ -158,6 +158,10 @@ test('a document edit diffs the body its edits make, sent by the node, against t
     added: 0,
     removed: 0,
   })
+  // A stray `body` argument can't stand in for the edits' body on the card.
+  expect(
+    replacement({ document, proposed_body: '# Plan\n\nOne.\nThree.' }, { slug: 'plan-foo', edits, body: document.body }),
+  ).toMatchObject({ added: 1, removed: 1 })
 })
 
 test('the diff names a change of format, from the document to what the call writes', () => {

@@ -132,8 +132,10 @@ export function replacement(
   const body = args[REPLACING_FIELD]
   // A `doc_edit` carries edits, not a body: the node sends the body they
   // make, or null when they no longer apply, which changes nothing here.
+  // That body wins over any `body` argument, which a doc_edit never uses and
+  // would otherwise let the caller pick the diff the operator sees.
   const proposed = (before: string) =>
-    typeof body === 'string' ? body : details.proposed_body !== undefined ? (details.proposed_body ?? before) : ''
+    details.proposed_body !== undefined ? (details.proposed_body ?? before) : typeof body === 'string' ? body : ''
   const diff = (before: string) => {
     const lines = diffLines(before, proposed(before))
     return {
