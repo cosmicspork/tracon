@@ -66,6 +66,23 @@ export interface ApprovalDetails {
    * is no longer one the call could amend. Absent for any other tool.
    */
   memory?: ReplacedMemory | null
+  /**
+   * The Jira issue an `issue_update` edits, as Jira had it when the page
+   * opened. Absent for any other tool, or when Jira could not say in time.
+   */
+  issue?: CurrentIssue
+}
+
+export interface CurrentIssue {
+  key: string
+  summary: string | null
+  description: string | null
+  priority: string | null
+  labels: string[]
+  parent: string | null
+  updated: string | null
+  /** The issue changed in Jira after the call was asked. */
+  stale: boolean
 }
 
 export interface ReplacedMemory {
@@ -93,7 +110,7 @@ export const REPLACING_FIELD = 'body'
 export interface Replacement {
   key: string
   /** What the call replaces the text of, for the heading. */
-  subject: 'document' | 'memory'
+  subject: 'document' | 'memory' | 'issue'
   /** How the heading names the change: new, or an edit of what. */
   label: string
   /** Nothing stands there yet, so the proposal is all added. */
@@ -121,17 +138,30 @@ function formatLabel(current: string | null, requested: unknown): string | null 
  * the diff follows their edit.
  */
 export function replacement(
-  details: Pick<ApprovalDetails, 'document' | 'memory'>,
+  details: Pick<ApprovalDetails, 'document' | 'memory' | 'issue'>,
   args: Record<string, unknown>,
 ): Replacement | null {
-  const proposed = args[REPLACING_FIELD]
-  const diff = (before: string) => {
+  const diff = (before: string, key = REPLACING_FIELD) => {
+    const proposed = args[key]
     const lines = diffLines(before, typeof proposed === 'string' ? proposed : '')
     return {
-      key: REPLACING_FIELD,
+      key,
       hunks: hunks(lines),
       added: lines.filter((l) => l.kind === 'add').length,
       removed: lines.filter((l) => l.kind === 'del').length,
+    }
+  }
+  // A Jira description is only ever replaced whole: the diff is the review.
+  if (details.issue) {
+    if (typeof args.description !== 'string') return null
+    const i = details.issue
+    return {
+      ...diff(i.description ?? '', 'description'),
+      subject: 'issue',
+      label: `edit · ${i.key}${i.summary ? ` “${i.summary}”` : ''}`,
+      created: false,
+      title: i.summary,
+      format: null,
     }
   }
   // A memory no longer there has nothing to diff against: the page says so.
@@ -150,6 +180,30 @@ export function replacement(
     title: current?.title ?? null,
     format: formatLabel(current?.format ?? null, args.format),
   }
+}
+
+/** One field a held `issue_update` sets, as the issue has it and as the call would leave it. */
+export interface FieldChange {
+  key: string
+  before: string
+  after: string
+}
+
+/**
+ * The short fields a held `issue_update` sets, against the issue as it
+ * stands, for the ones the call changes. The description is the diff.
+ */
+export function issueChanges(
+  details: Pick<ApprovalDetails, 'issue'>,
+  args: Record<string, unknown>,
+): FieldChange[] {
+  const issue = details.issue
+  if (!issue) return []
+  const shown = (v: unknown) => (Array.isArray(v) ? v.join(', ') : v === null || v === undefined ? '' : String(v))
+  return (['summary', 'priority', 'parent', 'labels'] as const)
+    .filter((key) => key in args && args[key] !== null)
+    .map((key) => ({ key, before: shown(issue[key]), after: shown(args[key]) }))
+    .filter((c) => c.before !== c.after)
 }
 
 /** A held `memory_amend` whose memory is gone or no longer live: Allow would fail. */

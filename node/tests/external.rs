@@ -2246,6 +2246,68 @@ async fn a_held_transition_is_titled_by_the_status_it_leads_to() {
     assert_eq!(*seen.lock().unwrap(), ["GET", "GET"]);
 }
 
+/// A held Jira edit is shown against the issue as Jira has it when the page
+/// opens, and marked stale when the issue changed after it was asked.
+#[tokio::test]
+async fn a_held_issue_edit_is_shown_against_the_issue_as_it_is_now() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let issue = |key: &str, updated: &str| {
+        json!({ "key": key, "fields": {
+            "summary": "Port the feed", "description": "h2. Goal\n* one\n* two",
+            "priority": { "name": "High" }, "labels": ["etl"],
+            "parent": { "key": "WRK-10", "fields": { "summary": "Epic" } },
+            "updated": updated,
+        } })
+    };
+    let (old, new) = (
+        issue("WRK-1", "2020-01-02T03:04:05.000-0500"),
+        issue("WRK-2", "2099-01-02T03:04:05.000-0500"),
+    );
+    let app = axum::Router::new()
+        .route(
+            "/rest/api/2/issue/WRK-1",
+            axum::routing::get(move || async move { axum::Json(old) }),
+        )
+        .route(
+            "/rest/api/2/issue/WRK-2",
+            axum::routing::get(move || async move { axum::Json(new) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    h.tools.broker.write().unwrap().put(
+        "jira",
+        tracon::broker::Credential {
+            env: [
+                ("JIRA_URL".to_string(), format!("http://{addr}")),
+                ("JIRA_EMAIL".to_string(), "me@example.com".to_string()),
+                ("JIRA_TOKEN".to_string(), "t".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            channels: vec!["work".into()],
+            ..Default::default()
+        },
+    );
+
+    let edit = |key: &str| json!({ "key": key, "description": "h2. Goal\n* one\n* three" });
+    let id = ask(&h, "issue_update", edit("WRK-1")).await;
+    let (status, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["issue"],
+        json!({ "key": "WRK-1", "summary": "Port the feed",
+                "description": "h2. Goal\n* one\n* two", "priority": "High",
+                "labels": ["etl"], "parent": "WRK-10",
+                "updated": "2020-01-02T03:04:05.000-0500", "stale": false })
+    );
+
+    let id = ask(&h, "issue_update", edit("WRK-2")).await;
+    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    assert_eq!(v["issue"]["stale"], true, "{v}");
+}
+
 /// Seed an item on `channel` through the operator's API and return its id.
 async fn seed(h: &Harness, channel: &str, body: Value) -> String {
     let mut body = body;
