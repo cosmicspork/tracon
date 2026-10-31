@@ -245,7 +245,8 @@ async fn submit(
     // How long this call waits on its checks before handing the wait to
     // `review_status`, counted from the start so capture and the forge's
     // answers come out of the same budget.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs(args));
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs(ctx, args));
     let session = match ctx.session_id() {
         Some(id) => Some(
             store
@@ -3960,7 +3961,7 @@ async fn report_status(
     args: &Value,
 ) -> Result<Value, String> {
     let id = str_arg(args, "report_id")?;
-    let wait = wait_secs(args);
+    let wait = wait_secs(ctx, args);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
 
     loop {
@@ -3986,8 +3987,8 @@ async fn report_status(
                 "waited_secs": wait,
                 "message": format!(
                     "Still waiting on an operator acknowledgement. The wait is capped at \
-                     {MAX_WAIT_SECS} seconds; call report_status again with the same \
-                     report_id.{}",
+                     {} seconds; call report_status again with the same report_id.{}",
+                    super::wait::cap(ctx),
                     crate::session::waits::brought_back(ctx.session_id().is_some())
                 ),
             }));
@@ -4003,7 +4004,7 @@ async fn status(
     args: &Value,
 ) -> Result<Value, String> {
     let id = str_arg(args, "review_id")?;
-    let wait = wait_secs(args);
+    let wait = wait_secs(ctx, args);
     // tokio's clock, not std's, so the wait is the same thing a test can drive.
     let began = tokio::time::Instant::now();
     let deadline = began + std::time::Duration::from_secs(wait);
@@ -4022,9 +4023,10 @@ async fn status(
             response["waited_secs"] = json!(wait);
             response["message"] = json!(format!(
                 "Still running the required checks ({}s so far); nothing reaches the \
-                 operator until they pass. The wait is capped at {MAX_WAIT_SECS} seconds; \
-                 call review_status again with the same review_id.{}",
+                 operator until they pass. The wait is capped at {} seconds; call \
+                 review_status again with the same review_id.{}",
                 entry.running_secs(),
+                super::wait::cap(ctx),
                 crate::session::waits::brought_back(true)
             ));
             return Ok(response);
@@ -4159,11 +4161,10 @@ async fn status(
                 "waited_secs": waited,
                 "reviewer": reviewer(),
                 "message": format!(
-                    "{says}Still waiting on a human; the review is {}. The wait is capped at \
-                     {MAX_WAIT_SECS} seconds so this call returns before your MCP client \
-                     times out — asking for longer will not help. Call review_status again \
-                     with the same review_id to keep waiting.{}",
+                    "{says}Still waiting on a human; the review is {}. {} Call review_status \
+                     again with the same review_id to keep waiting.{}",
                     r.state,
+                    super::wait::capped(ctx),
                     crate::session::waits::brought_back(ctx.session_id().is_some())
                 ),
             }));

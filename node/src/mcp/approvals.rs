@@ -53,7 +53,7 @@ pub async fn status(
 ) -> Result<Value, String> {
     let store = &access.store;
     let ids = ids(args)?;
-    let wait = wait_secs(args);
+    let wait = wait_secs(ctx, args);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
         // Expiry is applied here too, not only on the sweeper's tick, so a

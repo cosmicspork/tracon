@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use super::CallContext;
+
 /// The longest a status tool will block inside a single call.
 ///
 /// A harness's MCP client gives up on a tool call long before a human gets to
@@ -19,15 +21,54 @@ use serde_json::Value;
 /// doubles how much of a human's attention one call can cover.
 pub const MAX_WAIT_SECS: u64 = 45;
 
-/// How long a status call should block, clamped to [`MAX_WAIT_SECS`].
+/// The longest a status tool blocks for an external harness that declared
+/// a longer client timeout. Ten minutes covers most of a person's attention
+/// in one call while still bounding what a dropped connection holds.
+pub const MAX_EXTERNAL_WAIT_SECS: u64 = 600;
+
+/// What is kept in hand of a declared budget, for the same slow store read
+/// [`MAX_WAIT_SECS`] leaves room for, and the round trip.
+const BUDGET_HEADROOM_SECS: u64 = 60;
+
+/// The most this call may block: [`MAX_WAIT_SECS`], or for an external
+/// harness that declared its client's timeout (`X-Tracon-Wait-Budget`), that
+/// budget less a minute, up to [`MAX_EXTERNAL_WAIT_SECS`]. A budget that
+/// leaves less than the default keeps the default, which every client allows.
+pub fn cap(ctx: &CallContext) -> u64 {
+    ctx.wait_budget()
+        .map(|budget| {
+            budget
+                .saturating_sub(BUDGET_HEADROOM_SECS)
+                .clamp(MAX_WAIT_SECS, MAX_EXTERNAL_WAIT_SECS)
+        })
+        .unwrap_or(MAX_WAIT_SECS)
+}
+
+/// How long a status call should block, clamped to the call's [`cap`].
 ///
 /// An oversized request is honoured up to the cap rather than rejected: the
 /// caller wants to wait, and polling is the only thing that actually works.
-pub fn wait_secs(args: &Value) -> u64 {
+pub fn wait_secs(ctx: &CallContext, args: &Value) -> u64 {
+    let cap = cap(ctx);
     args.get("wait_secs")
         .and_then(Value::as_u64)
-        .unwrap_or(MAX_WAIT_SECS)
-        .min(MAX_WAIT_SECS)
+        .unwrap_or(cap)
+        .min(cap)
+}
+
+/// What a `still_waiting` message says of the cap: that asking for longer
+/// will not help, unless the caller declared a budget that already sets it.
+pub fn capped(ctx: &CallContext) -> String {
+    let cap = cap(ctx);
+    match ctx.wait_budget() {
+        Some(_) => {
+            format!("The wait is capped at {cap} seconds, inside what your client declared.")
+        }
+        None => format!(
+            "The wait is capped at {cap} seconds so this call returns before your MCP client \
+             times out; asking for longer will not help."
+        ),
+    }
 }
 
 /// What ends a `pipeline_wait` or `run_wait` call before its time is up, as
@@ -163,8 +204,9 @@ pub const HELD: &[&str] = &[
 /// operator runs, which has no orientation.
 pub fn pointer() -> String {
     format!(
-        "Blocks at most {MAX_WAIT_SECS} seconds a call; call again to keep waiting (your \
-         orientation says when ending your turn waits instead)."
+        "Blocks at most {MAX_WAIT_SECS} seconds a call, or longer when your client says it \
+         allows more; call again to keep waiting (your orientation says when ending your turn \
+         waits instead)."
     )
 }
 
@@ -231,14 +273,44 @@ mod tests {
         // timeout a harness gives a tool call: 60 s, the MCP TS SDK default.
         // A quarter of that stays in hand.
         const { assert!(MAX_WAIT_SECS <= 45) };
-        assert_eq!(wait_secs(&json!({})), MAX_WAIT_SECS);
-        assert_eq!(wait_secs(&json!({ "wait_secs": 600 })), MAX_WAIT_SECS);
-        assert_eq!(wait_secs(&json!({ "wait_secs": 300 })), MAX_WAIT_SECS);
-        assert_eq!(wait_secs(&json!({ "wait_secs": 5 })), 5);
-        assert_eq!(wait_secs(&json!({ "wait_secs": 0 })), 0);
+        let ctx = CallContext::session("s1", "work", "n1");
+        let wait_secs = |args: Value| wait_secs(&ctx, &args);
+        assert_eq!(wait_secs(json!({})), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(json!({ "wait_secs": 600 })), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(json!({ "wait_secs": 300 })), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(json!({ "wait_secs": 5 })), 5);
+        assert_eq!(wait_secs(json!({ "wait_secs": 0 })), 0);
         // Nonsense falls back to the default rather than blocking forever.
-        assert_eq!(wait_secs(&json!({ "wait_secs": -1 })), MAX_WAIT_SECS);
-        assert_eq!(wait_secs(&json!({ "wait_secs": "600" })), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(json!({ "wait_secs": -1 })), MAX_WAIT_SECS);
+        assert_eq!(wait_secs(json!({ "wait_secs": "600" })), MAX_WAIT_SECS);
+    }
+
+    #[test]
+    fn an_external_harness_that_declares_a_longer_client_timeout_waits_longer() {
+        let external = |budget| CallContext::external(None, "work", "n1").with_wait_budget(budget);
+        assert_eq!(cap(&external(None)), MAX_WAIT_SECS);
+        // A minute of the budget is kept in hand.
+        assert_eq!(cap(&external(Some(1140))), MAX_EXTERNAL_WAIT_SECS);
+        assert_eq!(cap(&external(Some(300))), 240);
+        assert_eq!(wait_secs(&external(Some(300)), &json!({})), 240);
+        assert_eq!(
+            wait_secs(&external(Some(300)), &json!({ "wait_secs": 600 })),
+            240
+        );
+        assert_eq!(
+            wait_secs(&external(Some(300)), &json!({ "wait_secs": 5 })),
+            5
+        );
+        // Too short a budget keeps the default; a huge one is held to the
+        // external cap.
+        assert_eq!(cap(&external(Some(30))), MAX_WAIT_SECS);
+        assert_eq!(cap(&external(Some(90))), MAX_WAIT_SECS);
+        assert_eq!(cap(&external(Some(u64::MAX))), MAX_EXTERNAL_WAIT_SECS);
+        // A session's calls never carry one.
+        let session = CallContext::session("s1", "work", "n1").with_wait_budget(Some(1140));
+        assert_eq!(cap(&session), MAX_WAIT_SECS);
+        assert!(capped(&external(None)).contains("will not help"));
+        assert!(!capped(&external(Some(1140))).contains("will not help"));
     }
 
     #[test]

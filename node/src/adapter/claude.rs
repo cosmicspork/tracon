@@ -276,7 +276,7 @@ fn claude_model(model: &str) -> Result<&str, AdapterError> {
 /// `mcp::wait::MAX_WAIT_SECS` with a handle its status tool waits on, since
 /// twenty minutes is no bound on a person either. This value is headroom for
 /// slow tools that are not waiting on anyone, not permission to block.
-const MCP_CALL_TIMEOUT_MS: u64 = 20 * 60 * 1000;
+pub const MCP_CALL_TIMEOUT_MS: u64 = 20 * 60 * 1000;
 
 /// The node builds one neutral MCP descriptor; Claude Code wants a map keyed
 /// by server name, with headers as an object rather than a list.

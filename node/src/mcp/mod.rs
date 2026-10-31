@@ -105,6 +105,10 @@ pub enum Caller {
     External {
         /// What the harness labels itself, for display. Never authority.
         lane: Option<String>,
+        /// How many seconds the harness says its client gives one call, so
+        /// a status tool may hold longer than the default (`wait::cap`). A
+        /// hint, like the lane.
+        wait_budget: Option<u64>,
     },
 }
 
@@ -146,9 +150,29 @@ impl CallContext {
         node_id: impl Into<String>,
     ) -> Self {
         Self {
-            caller: Caller::External { lane },
+            caller: Caller::External {
+                lane,
+                wait_budget: None,
+            },
             channel: channel.into(),
             node_id: node_id.into(),
+        }
+    }
+
+    /// The same external caller, with the per-call budget its harness
+    /// declared. A session's calls keep the default cap.
+    pub fn with_wait_budget(mut self, budget: Option<u64>) -> Self {
+        if let Caller::External { wait_budget, .. } = &mut self.caller {
+            *wait_budget = budget;
+        }
+        self
+    }
+
+    /// The per-call budget an external harness declared, if any.
+    pub fn wait_budget(&self) -> Option<u64> {
+        match &self.caller {
+            Caller::External { wait_budget, .. } => *wait_budget,
+            Caller::Session(_) => None,
         }
     }
 }
@@ -1439,6 +1463,7 @@ impl Tools {
             Some(session_id) => Caller::Session(session_id),
             None => Caller::External {
                 lane: approval.lane.clone(),
+                wait_budget: None,
             },
         };
         let ctx = CallContext {

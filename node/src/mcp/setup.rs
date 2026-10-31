@@ -265,8 +265,8 @@ pub async fn call(
                     start_trial(access, &session_id, repo, entry, None)?.id
                 }
             };
-            let deadline =
-                tokio::time::Instant::now() + Duration::from_secs(super::wait::wait_secs(args));
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_secs(super::wait::wait_secs(ctx, args));
             loop {
                 let trial = repo_setup::trial(&id).ok_or("the trial is gone")?;
                 if trial.state != "running" || tokio::time::Instant::now() >= deadline {
