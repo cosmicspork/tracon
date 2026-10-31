@@ -618,6 +618,14 @@ pub struct Trial {
     /// before its time runs out.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<String>,
+    /// The credentials the operator's entry lends its default branch's
+    /// preparation, by name: a trial runs code an agent chose, so it is lent
+    /// none of them, and a package needing one fails here and nowhere else.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub credentials_not_lent: Vec<String>,
+    /// What that means for the trial, said when any were not lent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credentials_note: Option<&'static str>,
     /// Why the trial stopped before its steps, if it did.
     pub error: Option<String>,
     pub started_ms: i64,
@@ -653,6 +661,23 @@ impl crate::review::checks::Cancel for Cancelling<'_> {
 
 /// What a cancelled trial says it stopped for.
 pub const CANCELLED: &str = "cancelled";
+
+/// What a trial that was not lent the entry's credentials is told.
+pub const CREDENTIALS_NOTE: &str = "this trial ran without the credentials in \
+    `credentials_not_lent`, as every trial does, so a package that needs one fails here; \
+    required checks install from the base cache, which the default branch's preparation warms \
+    with them";
+
+/// The names of the credentials the operator's entry for `repo` lends its
+/// default branch's preparation, which no trial is lent. Names only: a value
+/// never reaches a trial, nor its report.
+fn credentials_not_lent(cfg: &Config, repo: &Path) -> Vec<String> {
+    cfg.repos()
+        .iter()
+        .find(|entry| entry.matches(repo))
+        .map(|entry| entry.prepare_credentials.clone())
+        .unwrap_or_default()
+}
 
 /// Trials, newest last per session. Held in memory: a trial is advice for
 /// the session that asked, and a restart that drops one loses a report, not
@@ -759,6 +784,7 @@ pub fn start(
     let (egress_tried, egress_not_tried): (Vec<String>, Vec<String>) =
         hosts.into_iter().partition(|host| reachable(host));
     let id = uuid::Uuid::now_v7().simple().to_string();
+    let credentials_not_lent = credentials_not_lent(&cfg, &repo);
     let trial = Trial {
         id: id.clone(),
         session_id: session_id.to_string(),
@@ -772,6 +798,8 @@ pub fn start(
         egress_not_tried,
         steps: Vec::new(),
         refused: Vec::new(),
+        credentials_note: (!credentials_not_lent.is_empty()).then_some(CREDENTIALS_NOTE),
+        credentials_not_lent,
         error: None,
         started_ms: crate::store::now_ms(),
         finished_ms: None,
@@ -1237,6 +1265,24 @@ mod tests {
         assert!(entry.image.is_none());
         assert!(notes.iter().any(|n| n.contains("by tag")), "{notes:?}");
         assert!(notes.iter().any(|n| n.contains("compose")), "{notes:?}");
+    }
+
+    /// A trial names the credentials it was not lent, never their values,
+    /// and says nothing of credentials where the entry lends none.
+    #[test]
+    fn a_trial_names_the_credentials_it_was_not_lent() {
+        let lends = |credentials: &[&str]| Config {
+            repo: vec![Repo {
+                path: "/src/app".into(),
+                prepare_credentials: credentials.iter().map(|name| name.to_string()).collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let app = Path::new("/src/app");
+        assert_eq!(credentials_not_lent(&lends(&["nova"]), app), ["nova"]);
+        assert!(credentials_not_lent(&lends(&[]), app).is_empty());
+        assert!(credentials_not_lent(&lends(&["nova"]), Path::new("/src/other")).is_empty());
     }
 
     #[test]
