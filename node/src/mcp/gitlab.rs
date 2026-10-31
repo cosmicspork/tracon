@@ -174,7 +174,7 @@ pub fn definitions() -> Vec<Value> {
                     "pipeline_id": { "type": "integer" },
                     "since": { "type": "string", "description": "The `state` an earlier call returned." },
                     "until": super::wait::until_schema(),
-                    "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
+                    "wait_secs": { "type": "integer", "description": super::wait::wait_secs_description() },
                 },
                 "required": ["project", "pipeline_id"],
             },
@@ -518,7 +518,7 @@ pub async fn call(
             let since = args.get("since").and_then(Value::as_str);
             let wait_until = super::wait::until(args)?;
             let until = tokio::time::Instant::now()
-                + std::time::Duration::from_secs(super::wait::wait_secs(args));
+                + std::time::Duration::from_secs(super::wait::wait_secs(ctx, args));
             let mut baseline: Option<String> = since.map(str::to_string);
             loop {
                 let mut now = pipeline(http, token, &project_url, id).await?;

@@ -103,10 +103,7 @@ pub fn definitions() -> Vec<Value> {
 fn wait_secs_schema() -> Value {
     json!({
         "type": "integer",
-        "description": format!(
-            "How long to block, up to {MAX_WAIT_SECS}; larger values are capped. \
-             Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
-        ),
+        "description": super::wait::wait_secs_description(),
     })
 }
 
@@ -224,7 +221,7 @@ async fn question_status(
     ids: &[String],
     args: &Value,
 ) -> Result<Value, String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs(args));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs(ctx, args));
     loop {
         let mut rows = Vec::with_capacity(ids.len());
         for id in ids {
@@ -566,7 +563,7 @@ async fn report_status(
     args: &Value,
 ) -> Result<Value, String> {
     let ids = ids(args, "issue_id", "issue_ids")?;
-    let wait = wait_secs(args);
+    let wait = wait_secs(ctx, args);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
         let mut rows = Vec::with_capacity(ids.len());

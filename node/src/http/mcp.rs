@@ -123,7 +123,8 @@ pub async fn handle_external(
             .into_response();
     }
     let (lane, pid) = caller_labels(&headers);
-    let ctx = CallContext::external(lane, channel, s.node_id.clone());
+    let ctx = CallContext::external(lane, channel, s.node_id.clone())
+        .with_wait_budget(wait_budget(&headers));
     if let Some(pid) = pid {
         s.manager
             .liveness()
@@ -139,6 +140,23 @@ const LANE_HEADER: &str = "x-tracon-agent";
 
 /// The harness process behind the call, for saying whether a lane runs.
 const PID_HEADER: &str = "x-tracon-agent-pid";
+
+/// The seconds a harness says its MCP client gives one call, so a status
+/// tool may hold longer (`mcp::wait::cap`). A hint, never authority.
+const WAIT_BUDGET_HEADER: &str = "x-tracon-wait-budget";
+
+/// The budget a harness declared: a whole number of seconds, at most a day.
+/// Anything else is no budget, and the default cap holds.
+fn wait_budget(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(WAIT_BUDGET_HEADER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|secs| *secs <= 24 * 60 * 60)
+}
 
 /// The label a harness sent, trimmed and bounded so a stored column is not
 /// whatever a caller sends, and its process. Absent, empty or not text is no
