@@ -517,18 +517,36 @@ impl PrepareSecrets {
 /// environment.
 pub struct ScopedEgress {
     _grant: Option<crate::boundary::EgressGrant>,
-    /// Where the grant is held, to read back what it refused.
-    held: Option<(crate::gateway::proxy::Grants, String)>,
+    refusals: Refusals,
     pub secret_env: crate::runner::SecretEnv,
 }
 
 impl ScopedEgress {
     /// The hosts this preparation was refused so far, first refused first.
     pub fn refused(&self) -> Vec<String> {
-        match &self.held {
-            Some((grants, token)) => grants.refused_by(token),
-            None => Vec::new(),
-        }
+        self.refusals.hosts()
+    }
+
+    /// Where to read what this preparation is refused, from outside the run
+    /// and after it.
+    pub fn refusals(&self) -> Refusals {
+        self.refusals.clone()
+    }
+}
+
+/// What one preparation's grant refused, readable while it runs and once it
+/// is over. Empty where nothing was granted, as on a backend with no
+/// per-client egress.
+#[derive(Debug, Clone, Default)]
+pub struct Refusals(Option<std::sync::Arc<crate::gateway::proxy::Grant>>);
+
+impl Refusals {
+    /// The hosts refused so far, first refused first.
+    pub fn hosts(&self) -> Vec<String> {
+        self.0
+            .as_ref()
+            .map(|grant| grant.refused())
+            .unwrap_or_default()
     }
 }
 
@@ -659,9 +677,13 @@ pub const PREPARATION_REFUSAL: &str =
 
 /// Open the backend's egress to exactly `hosts` for one preparation. The
 /// grant is this preparation's own: its credentials reach these hosts and
-/// nobody else's do, so it neither waits for another run nor widens one. No
-/// hosts means nothing is opened and the container keeps the harness proxy,
-/// which serves it nothing.
+/// nobody else's do, so it neither waits for another run nor widens one.
+///
+/// No hosts still opens a grant, to nothing, where the backend issues them:
+/// what the preparation asks for is then refused under its own grant, so its
+/// failure (and a trial while it runs) can name the hosts. A backend that
+/// cannot issue one leaves the container on the harness proxy, which serves
+/// it nothing and says nothing about which run asked.
 ///
 /// The grant filters by host, not by method: a host named here that accepts
 /// uploads accepts them from this preparation. That is the cost of naming it.
@@ -673,28 +695,37 @@ pub fn scoped_egress(
     hosts: &[String],
     warming: Option<&Path>,
 ) -> Result<ScopedEgress, String> {
-    if hosts.is_empty() {
-        return Ok(ScopedEgress {
-            _grant: None,
-            held: None,
-            secret_env: Default::default(),
-        });
+    let unscoped = || ScopedEgress {
+        _grant: None,
+        refusals: Refusals::default(),
+        secret_env: Default::default(),
+    };
+    if hosts.is_empty() && backend.egress_grants().is_none() {
+        return Ok(unscoped());
     }
-    let grant = backend
-        .egress_grant(crate::gateway::proxy::GrantSpec {
-            client: "prepare".into(),
-            warming: warming.map(Path::to_path_buf),
-            hosts: hosts.to_vec(),
-            refusal: PREPARATION_REFUSAL.into(),
-            ..Default::default()
-        })
-        .map_err(|error| format!("could not open preparation egress: {error}"))?;
-    let held = backend
+    let grant = backend.egress_grant(crate::gateway::proxy::GrantSpec {
+        client: "prepare".into(),
+        warming: warming.map(Path::to_path_buf),
+        hosts: hosts.to_vec(),
+        refusal: PREPARATION_REFUSAL.into(),
+        ..Default::default()
+    });
+    let grant = match grant {
+        Ok(grant) => grant,
+        // Nothing was asked for, so nothing is lost without the grant but
+        // the names of what it would have refused.
+        Err(error) if hosts.is_empty() => {
+            tracing::debug!(%error, "preparation runs on the harness proxy");
+            return Ok(unscoped());
+        }
+        Err(error) => return Err(format!("could not open preparation egress: {error}")),
+    };
+    let refusals = backend
         .egress_grants()
-        .map(|grants| (grants.clone(), grant.password.clone()));
+        .and_then(|grants| grants.holder(&grant.password));
     Ok(ScopedEgress {
         secret_env: grant.env(),
-        held,
+        refusals: Refusals(refusals),
         _grant: Some(grant),
     })
 }

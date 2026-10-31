@@ -80,6 +80,10 @@ pub fn definitions() -> Vec<Value> {
         "type": "string",
         "description": "Read a trial already started, waiting for it if it is still running.",
     });
+    try_properties["cancel"] = json!({
+        "type": "boolean",
+        "description": "With `trial_id`: stop that trial, so this session can start another.",
+    });
     try_properties["wait_secs"] = json!({
         "type": "integer",
         "description": format!("How long to block, up to {}. 0 returns at once.", super::wait::MAX_WAIT_SECS),
@@ -128,7 +132,11 @@ pub fn definitions() -> Vec<Value> {
                  `dockerfile` this node has not built before is the operator's to allow, and \
                  approval_status then gives the started trial. {} Returns `running` (call again \
                  with its `trial_id`), `passed`, or `failed` with each step's exit and the end of \
-                 its output. One trial runs per session at a time. {}",
+                 its output. One trial runs per session at a time. While it runs, `refused` lists \
+                 hosts preparation asked for and was refused: it will not reach them however \
+                 long it runs, and an answer to request_egress does not reach a running trial, \
+                 so cancel it (`cancel` with its `trial_id`) and try again once they are \
+                 reachable. {}",
                 super::aside::ASKED,
                 super::wait::pointer()
             ),
@@ -222,6 +230,17 @@ pub async fn call(
             Ok(out)
         }
         TRY => {
+            if args.get("cancel").and_then(Value::as_bool) == Some(true) {
+                let id = args
+                    .get("trial_id")
+                    .and_then(Value::as_str)
+                    .ok_or("name the trial to cancel with `trial_id`")?;
+                repo_setup::trial(id)
+                    .filter(|trial| trial.session_id == session_id)
+                    .ok_or("no such trial for this session; a node restart drops trials")?;
+                let trial = repo_setup::cancel(id).ok_or("the trial is gone")?;
+                return serde_json::to_value(&trial).map_err(|e| e.to_string());
+            }
             let id = match args.get("trial_id").and_then(Value::as_str) {
                 Some(id) => {
                     let trial = repo_setup::trial(id)
@@ -233,7 +252,8 @@ pub async fn call(
                     if let Some(running) = repo_setup::running_for(&session_id) {
                         let mut out = serde_json::to_value(&running).map_err(|e| e.to_string())?;
                         out["note"] = json!(
-                            "a trial is already running for this session; this is that trial"
+                            "a trial is already running for this session; this is that trial. Cancel it \
+                             (`cancel` with its `trial_id`) to start another."
                         );
                         return Ok(out);
                     }
@@ -310,7 +330,9 @@ pub async fn build_to_ask(
     ctx: &CallContext,
     args: &Value,
 ) -> Result<Option<Value>, String> {
-    if args.get("trial_id").and_then(Value::as_str).is_some() {
+    if args.get("trial_id").and_then(Value::as_str).is_some()
+        || args.get("cancel").and_then(Value::as_bool) == Some(true)
+    {
         return Ok(None);
     }
     let (session_id, repo) = session_repo(access, ctx)?;

@@ -28,6 +28,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -612,11 +613,46 @@ pub struct Trial {
     /// prepared without them.
     pub egress_not_tried: Vec<String>,
     pub steps: Vec<Step>,
+    /// Hosts preparation asked for and was refused, first refused first:
+    /// filled in while it runs, so a trial that will not recover says so
+    /// before its time runs out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<String>,
     /// Why the trial stopped before its steps, if it did.
     pub error: Option<String>,
     pub started_ms: i64,
     pub finished_ms: Option<i64>,
+    /// What preparation's grant refused, read whenever the trial is.
+    #[serde(skip)]
+    refusals: Arc<std::sync::OnceLock<crate::environment::Refusals>>,
+    /// Set when the session cancels the trial; its run stops at the next poll.
+    #[serde(skip)]
+    cancelled: Arc<AtomicBool>,
 }
+
+impl Trial {
+    /// The trial with what its preparation was refused so far.
+    fn read(mut self) -> Self {
+        if let Some(refusals) = self.refusals.get() {
+            self.refused = refusals.hosts();
+        }
+        self
+    }
+}
+
+/// A trial's run is no longer wanted once its session cancelled it.
+struct Cancelling<'a>(&'a AtomicBool);
+
+impl crate::review::checks::Cancel for Cancelling<'_> {
+    fn cancelled(&self) -> Option<String> {
+        self.0
+            .load(Ordering::Relaxed)
+            .then(|| "the session cancelled the trial".to_string())
+    }
+}
+
+/// What a cancelled trial says it stopped for.
+pub const CANCELLED: &str = "cancelled";
 
 /// Trials, newest last per session. Held in memory: a trial is advice for
 /// the session that asked, and a restart that drops one loses a report, not
@@ -627,7 +663,7 @@ fn trials() -> &'static Mutex<HashMap<String, Trial>> {
 }
 
 pub fn trial(id: &str) -> Option<Trial> {
-    trials().lock().unwrap().get(id).cloned()
+    trials().lock().unwrap().get(id).cloned().map(Trial::read)
 }
 
 /// The trial a session has running, if any: one at a time.
@@ -638,6 +674,23 @@ pub fn running_for(session_id: &str) -> Option<Trial> {
         .values()
         .find(|trial| trial.session_id == session_id && trial.state == "running")
         .cloned()
+        .map(Trial::read)
+}
+
+/// Stop a running trial: it ends now, as `failed` with the error
+/// [`CANCELLED`], so its session may start another at once, while its run
+/// kills what it started and removes its volumes behind it. A trial already
+/// over is returned as it ended.
+pub fn cancel(id: &str) -> Option<Trial> {
+    let mut all = trials().lock().unwrap();
+    let trial = all.get_mut(id)?;
+    if trial.state == "running" {
+        trial.cancelled.store(true, Ordering::Relaxed);
+        trial.state = "failed";
+        trial.error = Some(CANCELLED.into());
+        trial.finished_ms = Some(crate::store::now_ms());
+    }
+    Some(trial.clone().read())
 }
 
 fn update(id: &str, change: impl FnOnce(&mut Trial)) {
@@ -718,10 +771,14 @@ pub fn start(
         egress_tried: egress_tried.clone(),
         egress_not_tried,
         steps: Vec::new(),
+        refused: Vec::new(),
         error: None,
         started_ms: crate::store::now_ms(),
         finished_ms: None,
+        refusals: Default::default(),
+        cancelled: Default::default(),
     };
+    let (refusals, cancelled) = (trial.refusals.clone(), trial.cancelled.clone());
     {
         let mut all = trials().lock().unwrap();
         // Keep the newest few per session.
@@ -747,9 +804,14 @@ pub fn start(
             &entry,
             egress_tried,
             build.as_deref(),
+            (&refusals, &cancelled),
         )
         .await;
         update(&id, |trial| {
+            // A cancelled trial already ended as it was cancelled.
+            if trial.state != "running" {
+                return;
+            }
             if let Err(error) = outcome {
                 trial.error = Some(error);
             }
@@ -764,7 +826,7 @@ pub fn start(
 /// Prepare the default branch the way the entry says, in a volume and a
 /// cache of the trial's own, then run each check on a copy of the result
 /// with the cache read-only and no egress — the shape a required check
-/// runs in. Every volume is removed when it ends.
+/// runs in. Every volume is removed when it ends, cancelled or not.
 #[allow(clippy::too_many_arguments)]
 async fn run(
     backend: &dyn Backend,
@@ -775,7 +837,12 @@ async fn run(
     entry: &Repo,
     egress: Vec<String>,
     build: Option<&str>,
+    (refusals, cancelled): (
+        &std::sync::OnceLock<crate::environment::Refusals>,
+        &AtomicBool,
+    ),
 ) -> Result<(), String> {
+    let stop = Cancelling(cancelled);
     let (_, commit) = crate::repo_image::default_commit(repo).await?;
     let mut environment = crate::environment::environment_with(cfg, store, Some(repo), Some(entry));
     environment.egress = egress;
@@ -787,6 +854,9 @@ async fn run(
         else {
             return Ok(());
         };
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         environment.cache_volume = crate::environment::base_cache_volume(Some(repo), &image);
         environment.image = image;
         environment.image_source = crate::environment::REPOSITORY_DOCKERFILE;
@@ -817,15 +887,16 @@ async fn run(
             .await;
         if !environment.prepare.is_empty() {
             let started = std::time::Instant::now();
-            let prepared = crate::review::checks::run_preparation(
+            let prepared = crate::review::checks::run_preparation_watched(
                 backend,
                 runner.as_ref(),
                 &environment,
                 (&work, &cache),
                 &format!("tracon-t-{}", &id[..12]),
                 tokio::time::Instant::now() + timeout,
-                &crate::review::checks::RunToCompletion,
+                &stop,
                 "the checks were not run",
+                refusals,
             )
             .await;
             let step = Step {
@@ -847,6 +918,9 @@ async fn run(
             }
         }
         for (index, command) in environment.checks.iter().enumerate() {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
             let copy = format!("tracon-try-{id}-c{index}");
             let started = std::time::Instant::now();
             let step = match backend.clone_volume(&work, &copy).await {
@@ -874,7 +948,14 @@ async fn run(
                         name,
                         image: Some(environment.image.clone()),
                     };
-                    let finished = tokio::time::timeout(timeout, runner.run_capture(cmd)).await;
+                    let finished = tokio::select! {
+                        finished = tokio::time::timeout(timeout, runner.run_capture(cmd)) => finished,
+                        () = until_cancelled(cancelled) => {
+                            let _ = runner.kill(&running).await;
+                            let _ = backend.remove_volume(&copy).await;
+                            break;
+                        }
+                    };
                     let step = match finished {
                         Err(_) => {
                             let _ = runner.kill(&running).await;
@@ -1030,6 +1111,13 @@ async fn dockerfile_image(
         trial.steps.push(step)
     });
     Ok(built.ok())
+}
+
+/// Returns once `cancelled` is set.
+async fn until_cancelled(cancelled: &AtomicBool) {
+    while !cancelled.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// The last lines of what a step printed: enough to see why it failed.
