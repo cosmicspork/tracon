@@ -8,10 +8,12 @@ import {
   requestName,
   publishedLabel,
   rereadDelay,
+  ownersReviewer,
   rereadReviewer,
   reviewerControl,
   startedHow,
   unavailable,
+  unreachableReviewer,
 } from './verdicts'
 
 const ready = { busy: false, publishing: false, stale: [] as string[], reason: '' }
@@ -124,6 +126,25 @@ describe('the reviewer control', () => {
     expect(reviewerControl('approved', view())).toEqual({ kind: 'hidden' })
     expect(reviewerControl('publishing', view())).toEqual({ kind: 'hidden' })
     expect(reviewerControl('new', null)).toEqual({ kind: 'hidden' })
+  })
+
+  test('a review read from the peer that owns it offers what the owner holds', () => {
+    const owners = view({ state: 'failed', reason: 'out of budget' })
+    const reviewer = ownersReviewer('peer', { state: 'fetched' }, owners)
+    expect(reviewerControl('new', reviewer)).toEqual({ kind: 'retry', reason: 'out of budget' })
+    expect(ownersReviewer(null, null, owners)).toBe(owners)
+  })
+
+  test('a peer review not read from its owner offers nothing, and says why', () => {
+    for (const detail of [{ state: 'unreachable' as const, reason: 'gone' }, { state: 'moved' as const }, null]) {
+      expect(reviewerControl('new', ownersReviewer('peer', detail, view()))).toEqual({ kind: 'hidden' })
+      expect(unreachableReviewer('new', 'peer', detail, 'homelab')).toBe(
+        "Reviewer runs on homelab; it can't be reached from here right now",
+      )
+    }
+    expect(unreachableReviewer('new', 'peer', { state: 'fetched' }, 'homelab')).toBeNull()
+    expect(unreachableReviewer('approved', 'peer', null, 'homelab')).toBeNull()
+    expect(unreachableReviewer('new', null, null, 'here')).toBeNull()
   })
 
   test('the reviewed-by line says how the reviewer started', () => {

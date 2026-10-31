@@ -544,9 +544,15 @@ export const api = {
       change,
     }),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
-  /** Start a fresh review session on a review: an admin action. */
-  startReviewer: (id: string) =>
-    call<{ state: string; session_id: string }>('POST', `/api/reviews/${id}/review-session`),
+  /** Start a fresh review session on a review: an admin action. On a peer's
+   * review, the node that owns it starts one, refused once it holds a newer
+   * revision than `revisionId`, the one the operator was reading. */
+  startReviewer: (id: string, revisionId?: string) =>
+    call<{ state: string; session_id: string }>(
+      'POST',
+      `/api/reviews/${id}/review-session`,
+      revisionId ? { revision_id: revisionId } : undefined,
+    ),
   /** What became of a review's reviewer, without the rest of the review: what the page polls while one runs. */
   reviewSession: (id: string) =>
     call<{
