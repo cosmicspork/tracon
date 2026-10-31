@@ -7,6 +7,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { renderWithoutFetching } from '../lib/markdown'
+  import { router } from '../lib/router.svelte'
   import type { ShownWork } from '../lib/types'
 
   let {
@@ -41,10 +42,74 @@
     return `${bytes} B`
   }
 
+  /**
+   * A stale item on a review is folded to its header, so what applies to the
+   * candidate is read first. A link to the item itself still lands open.
+   */
+  function folded(item: ShownWork): boolean {
+    return onReview && item.stale
+  }
+
   function passed(check: ShownWork['checks'][number]): boolean {
     return check.outcome === 'passed' || (check.outcome === 'reused' && check.source_outcome === 'passed')
   }
 </script>
+
+{#snippet head(item: ShownWork)}
+  <header>
+    <b>{item.title}</b>
+    {#if reviewer && item.session_id === reviewer}
+      <span class="tag" title="shown by the review session, at the candidate it exercised">reviewer</span>
+    {/if}
+    <span class="tag">{item.format === 'markdown' ? 'account' : item.format === 'html' ? 'page' : 'files'}</span>
+    <span class="mono" title={item.head_sha}>at {item.head_sha.slice(0, 12)}</span>
+    {#if onReview && item.stale}
+      <span class="chip warn" title={item.stale_reason ?? ''}>stale</span>
+    {/if}
+    <span class="mono dim">{formatAge(item.created_ms, clock.now)}</span>
+  </header>
+  {#if onReview && item.stale && item.stale_reason}
+    <p class="dim">{item.stale_reason} · ask for it to be shown again if it matters</p>
+  {/if}
+{/snippet}
+
+{#snippet body(item: ShownWork)}
+  {#if item.markdown.trim()}
+    <div class="md">{@html renderWithoutFetching(item.markdown)}</div>
+  {/if}
+  {#if item.document_slug}
+    <div class="actions">
+      {#if item.format === 'html' && !opened[item.id]}
+        <button class="lnk" onclick={() => open(item)}>Open here</button>
+      {/if}
+      <a href="/docs/{item.channel}/{item.document_slug}/preview">{item.format === 'html' ? 'Open full size' : 'Open the files'}</a>
+    </div>
+    {#if failed[item.id]}
+      <p class="crit">Could not load the isolated preview: {failed[item.id]}</p>
+    {/if}
+    {#if opened[item.id]}
+      <iframe title={item.title} src={opened[item.id]} sandbox="allow-scripts"></iframe>
+    {/if}
+    <details class="files">
+      <summary>{item.files.length} {item.files.length === 1 ? 'file' : 'files'}</summary>
+      <ul>
+        {#each item.files as file (file.path)}
+          <li><code>{file.path}</code> <small>{size(file.size_bytes)}</small></li>
+        {/each}
+      </ul>
+    </details>
+  {/if}
+  <p class="checks">
+    {#if item.checks.length}
+      checks the node ran at this commit:
+      {#each item.checks as check, i (i)}
+        <span class:ok={passed(check)} class:bad={!passed(check) && check.outcome !== 'running'}>{passed(check) ? '✓' : check.outcome === 'running' ? '…' : '✗'} {check.command ?? 'command not recorded'}</span>
+      {/each}
+    {:else}
+      no required checks ran at this commit
+    {/if}
+  </p>
+{/snippet}
 
 {#if items.length}
   <section class="shown">
@@ -53,58 +118,19 @@
       <b>· the agent's account, to help you decide · not verification · it does not go to the forge</b>
     </div>
     {#each items as item (item.id)}
-      <article id="shown-{item.id}" class:stale={onReview && item.stale}>
-        <header>
-          <b>{item.title}</b>
-          {#if reviewer && item.session_id === reviewer}
-            <span class="tag" title="shown by the review session, at the candidate it exercised">reviewer</span>
-          {/if}
-          <span class="tag">{item.format === 'markdown' ? 'account' : item.format === 'html' ? 'page' : 'files'}</span>
-          <span class="mono" title={item.head_sha}>at {item.head_sha.slice(0, 12)}</span>
-          {#if onReview && item.stale}
-            <span class="chip warn" title={item.stale_reason ?? ''}>stale</span>
-          {/if}
-          <span class="mono dim">{formatAge(item.created_ms, clock.now)}</span>
-        </header>
-        {#if onReview && item.stale && item.stale_reason}
-          <p class="dim">{item.stale_reason} · ask for it to be shown again if it matters</p>
-        {/if}
-        {#if item.markdown.trim()}
-          <div class="md">{@html renderWithoutFetching(item.markdown)}</div>
-        {/if}
-        {#if item.document_slug}
-          <div class="actions">
-            {#if item.format === 'html' && !opened[item.id]}
-              <button class="lnk" onclick={() => open(item)}>Open here</button>
-            {/if}
-            <a href="/docs/{item.channel}/{item.document_slug}/preview">{item.format === 'html' ? 'Open full size' : 'Open the files'}</a>
-          </div>
-          {#if failed[item.id]}
-            <p class="crit">Could not load the isolated preview: {failed[item.id]}</p>
-          {/if}
-          {#if opened[item.id]}
-            <iframe title={item.title} src={opened[item.id]} sandbox="allow-scripts"></iframe>
-          {/if}
-          <details>
-            <summary>{item.files.length} {item.files.length === 1 ? 'file' : 'files'}</summary>
-            <ul>
-              {#each item.files as file (file.path)}
-                <li><code>{file.path}</code> <small>{size(file.size_bytes)}</small></li>
-              {/each}
-            </ul>
+      {#if folded(item)}
+        <article id="shown-{item.id}" class="stale">
+          <details class="fold" open={router.hash === `#shown-${item.id}`}>
+            <summary>{@render head(item)}</summary>
+            <div class="body">{@render body(item)}</div>
           </details>
-        {/if}
-        <p class="checks">
-          {#if item.checks.length}
-            checks the node ran at this commit:
-            {#each item.checks as check, i (i)}
-              <span class:ok={passed(check)} class:bad={!passed(check) && check.outcome !== 'running'}>{passed(check) ? '✓' : check.outcome === 'running' ? '…' : '✗'} {check.command ?? 'command not recorded'}</span>
-            {/each}
-          {:else}
-            no required checks ran at this commit
-          {/if}
-        </p>
-      </article>
+        </article>
+      {:else}
+        <article id="shown-{item.id}">
+          {@render head(item)}
+          {@render body(item)}
+        </article>
+      {/if}
     {/each}
   </section>
 {/if}
@@ -176,7 +202,30 @@
     border-radius: 4px;
     background: white;
   }
-  details summary {
+  .fold > summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .fold > summary::-webkit-details-marker {
+    display: none;
+  }
+  .fold > summary header::before {
+    content: '▸';
+    color: var(--dim);
+  }
+  .fold[open] > summary header::before {
+    content: '▾';
+  }
+  .fold > .body {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .files summary {
     cursor: pointer;
     color: var(--ink2);
     font: 11.5px var(--mono);
