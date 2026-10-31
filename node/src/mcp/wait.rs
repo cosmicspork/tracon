@@ -53,6 +53,7 @@ pub const HELD: &[&str] = &[
     super::approvals::STATUS,
     super::review::STATUS,
     super::review::REPORT_STATUS,
+    super::egress::REQUEST,
 ];
 
 /// The line a waiting tool's description ends with in place of the shared

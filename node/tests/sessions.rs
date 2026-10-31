@@ -3902,6 +3902,64 @@ async fn an_answer_the_agent_already_read_is_not_brought_back() {
     tracon::session::materialize::remove(&h.o.row.id);
 }
 
+/// The live case on 0.43.0: an executing session asks for a host with
+/// `request_egress` and `wait_secs: 0`, and ends its turn. Nothing held it,
+/// and the operator's "Allow once" never reached it. Now it is held on the
+/// ask, and the answer comes back as its next prompt.
+#[tokio::test]
+async fn a_session_that_ends_its_turn_on_request_egress_is_given_the_answer() {
+    use tracon::gateway::proxy::{GrantSpec, Grants};
+    state::isolate();
+    // `request_egress` is offered to a session executing its plan.
+    let h = Held::in_phase("held-egress", Phase::Execute).await;
+    let grants = Grants::default();
+    h.o.manager.watch_egress(&grants);
+    grants
+        .issue(GrantSpec {
+            client: "session".into(),
+            session_id: Some(h.o.row.id.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+    let asked = h
+        .tool(
+            "request_egress",
+            json!({ "host": "registry.example.test", "why": "npm install", "wait_secs": 0 }),
+        )
+        .await;
+    assert_eq!(asked["state"], "still_waiting", "{asked}");
+    let approval = asked["approval_id"].as_str().unwrap().to_string();
+
+    h.until(|s| s.state == "waiting_on_you", "held on its egress ask")
+        .await;
+    let held =
+        h.o.store
+            .last_event_payload(&h.o.row.id, "state")
+            .unwrap()
+            .unwrap();
+    assert_eq!(held["waiting_on"][0]["id"], approval.as_str(), "{held}");
+
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/permissions/{approval}/answer"),
+        Some(json!({ "option_id": "allow_once" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.delivered(&approval).await;
+    assert!(prompt.contains("registry.example.test"), "{prompt}");
+    assert!(prompt.contains("\"state\": \"succeeded\""), "{prompt}");
+    assert!(prompt.contains("Nothing else is waiting"), "{prompt}");
+    assert!(grants.session_allows(&h.o.row.id, "registry.example.test"));
+    h.until(
+        |s| s.state == "running" && s.turn_active == 0,
+        "carried on from the answer",
+    )
+    .await;
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
 /// A review the session submitted holds it the same way, and the verdict —
 /// here a rejection with its reason — is what comes back.
 #[tokio::test]

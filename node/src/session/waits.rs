@@ -13,12 +13,14 @@
 //! - an `ask_operator` question (`question_status`);
 //! - a review it submitted, its required checks included (`review_status`),
 //!   and a narrative report (`report_status`);
-//! - a gated call it asked the operator to allow (`approval_status`).
+//! - a gated call it asked the operator to allow (`approval_status`);
+//! - a host it asked the operator to open with `request_egress`.
 //!
-//! Not an egress ask: a refused connection raises one whether or not the
-//! agent wants the host, and answering one changes nothing the agent has to
-//! hear about. Not an issue draft either: drafting one says outright that it
-//! does not pause the work.
+//! Not an egress ask the agent never made: a refused connection raises one
+//! whether or not the agent wants the host, and answering it changes nothing
+//! the agent has to hear about unless it said so by calling `request_egress`.
+//! Not an issue draft either: drafting one says outright that it does not
+//! pause the work.
 //!
 //! What has been told is kept in memory, per session: what a status call
 //! returned decided, and what the node delivered. A session does not outlive
@@ -59,9 +61,11 @@ impl Wait {
     }
 
     /// Whether it is still there once the node restarts. Checks run in the
-    /// node's process and a restart interrupts them; the rest is in the store.
+    /// node's process and a restart interrupts them, and which egress asks a
+    /// session made itself is kept only in that process (as its grant is);
+    /// the rest is in the store.
     pub fn survives_restart(&self) -> bool {
-        !self.key.starts_with("checks:")
+        !self.key.starts_with("checks:") && !self.key.starts_with("egress:")
     }
 
     /// The handle a held session's log names it by.
@@ -129,8 +133,21 @@ pub fn publication_key(row: &crate::store::PublicationRow) -> String {
     format!("publication:{}:{}:{}", row.review_id, row.id, row.attempts)
 }
 
+/// An egress ask is told as one, so whether it outlives a restart can be
+/// read from its key.
 pub fn approval_key(row: &ApprovalRow) -> String {
-    format!("approval:{}:{}", row.id, row.state)
+    let kind = if row.tool == crate::store::approvals::EGRESS_TOOL {
+        "egress"
+    } else {
+        "approval"
+    };
+    format!("{kind}:{}:{}", row.id, row.state)
+}
+
+/// An egress ask the session made itself with `request_egress`, and so
+/// waits on; an ask only a refused connection raised is not one.
+pub fn asked_key(approval_id: &str) -> String {
+    format!("asked:{approval_id}")
 }
 
 pub fn checks_key(entry: &Entry) -> String {
@@ -159,14 +176,34 @@ impl Waits {
 
     /// Everything `session_id` waits on or has waited on, open or decided.
     pub fn of(&self, session_id: &str) -> Vec<Wait> {
-        collect(&self.store, &self.checking, session_id, |row| {
-            self.told.1.of(&self.store, row)
-        })
+        collect(
+            &self.store,
+            &self.checking,
+            session_id,
+            |row| self.told.1.of(&self.store, row),
+            |id| self.was_told(session_id, &asked_key(id)),
+        )
     }
 
     /// What `session_id` still waits on the operator for.
     pub fn open(&self, session_id: &str) -> Vec<Wait> {
-        open(&self.store, &self.checking, session_id)
+        // A reviewer's verdict is never an open wait, so it is not read here.
+        collect(
+            &self.store,
+            &self.checking,
+            session_id,
+            |_| None,
+            |id| self.was_told(session_id, &asked_key(id)),
+        )
+        .into_iter()
+        .filter(Wait::is_open)
+        .collect()
+    }
+
+    /// Record that `session_id` asked for egress approval `approval_id`
+    /// itself, so it waits on the answer.
+    pub fn asked(&self, session_id: &str, approval_id: &str) {
+        self.tell(session_id, &asked_key(approval_id));
     }
 
     /// Record that `session_id` has been told what `key` came to.
@@ -237,19 +274,26 @@ impl Waits {
 }
 
 /// Everything `session_id` waits on or has waited on, open or decided, as
-/// the store and the node's running checks say.
+/// the store and the node's running checks say. Without what the node has
+/// told the session, no egress ask is among them.
 pub fn of(store: &Store, checking: &Checking, session_id: &str) -> Vec<Wait> {
-    collect(store, checking, session_id, |row| {
-        crate::mcp::review::current_verdict(store, row)
-    })
+    collect(
+        store,
+        checking,
+        session_id,
+        |row| crate::mcp::review::current_verdict(store, row),
+        |_| false,
+    )
 }
 
-/// [`of`], reading a review's AI verdict with `verdict`.
+/// [`of`], reading a review's AI verdict with `verdict`, and counting the
+/// egress asks for which `asked` holds.
 fn collect(
     store: &Store,
     checking: &Checking,
     session_id: &str,
     verdict: impl Fn(&ReviewRow) -> Option<Value>,
+    asked: impl Fn(&str) -> bool,
 ) -> Vec<Wait> {
     use crate::mcp::{approvals, operator, review};
     let mut waits = Vec::new();
@@ -351,7 +395,7 @@ fn collect(
         });
     }
     for row in store.approvals_of_session(session_id).unwrap_or_default() {
-        if row.tool == crate::store::approvals::EGRESS_TOOL {
+        if row.tool == crate::store::approvals::EGRESS_TOOL && !asked(&row.id) {
             continue;
         }
         waits.push(Wait {
@@ -365,10 +409,11 @@ fn collect(
     waits
 }
 
-/// What `session_id` still waits on the operator for.
+/// What `session_id` still waits on the operator for, as the store and the
+/// node's running checks say: no egress ask, as for [`of`].
 pub fn open(store: &Store, checking: &Checking, session_id: &str) -> Vec<Wait> {
     // A reviewer's verdict is never an open wait, so it is not read here.
-    collect(store, checking, session_id, |_| None)
+    collect(store, checking, session_id, |_| None, |_| false)
         .into_iter()
         .filter(Wait::is_open)
         .collect()
