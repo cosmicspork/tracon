@@ -141,7 +141,9 @@ pub fn definitions() -> Vec<Value> {
                  submitted. While it waits, `reviewer` says what an AI reviewer of the \
                  latest revision is doing (`state`: starting, running, done, failed or none) \
                  and, once it has given one, its `verdict`, `summary` and `findings`; a \
-                 verdict arriving ends the wait early. That verdict is advisory: only the \
+                 verdict arriving ends the wait early. Its summary and findings are sent \
+                 once: later calls carry only `findings_count`, unless you pass \
+                 `include_findings: true` to have them again. That verdict is advisory: only the \
                  operator's decision publishes. On approval the node publishes the approved \
                  text itself and returns where it landed; if that fails, it reads \
                  `state: \"publish_failed\"` with the error under `publication`, back with \
@@ -153,6 +155,10 @@ pub fn definitions() -> Vec<Value> {
                 "properties": {
                     "review_id": { "type": "string" },
                     "wait_secs": wait_secs_arg.clone(),
+                    "include_findings": {
+                        "type": "boolean",
+                        "description": "Return the AI reviewer's summary and findings even when this caller has already been sent them.",
+                    },
                 },
                 "required": ["review_id"],
             },
@@ -3183,6 +3189,19 @@ pub(crate) fn reviewer_view(store: &Store, manager: &Manager, r: &ReviewRow) -> 
     view
 }
 
+/// A reviewer view without the verdict's `summary` and `findings`, which
+/// the caller has already been sent: how many findings there were instead.
+fn compact_reviewer(mut view: Value) -> Value {
+    if let Some(view) = view.as_object_mut() {
+        if let Some(findings) = view.remove("findings") {
+            view.remove("summary");
+            let count = findings.as_array().map_or(0, Vec::len);
+            view.insert("findings_count".into(), json!(count));
+        }
+    }
+    view
+}
+
 /// The revision a reviewer's verdict is about: recorded with it, or, for
 /// one recorded before that was, the revision its session started from.
 fn verdict_revision(store: &Store, verdict: &Value) -> Option<String> {
@@ -4027,15 +4046,30 @@ async fn status(
         });
         let now = tokio::time::Instant::now();
         if untold || untold_failure || now >= deadline {
+            // A verdict already sent comes back compact on later polls, so
+            // its findings are not repeated into the caller's context each time.
+            let full = untold || args["include_findings"].as_bool() == Some(true);
             let says = match &verdict {
                 Some(verdict) => {
                     manager.waits().tell(
                         &caller,
                         &crate::session::waits::reviewer_key(&r.id, verdict),
                     );
-                    format!("{} ", reviewer_verdict_says(verdict))
+                    if full {
+                        format!("{} ", reviewer_verdict_says(verdict))
+                    } else {
+                        String::new()
+                    }
                 }
                 None => String::new(),
+            };
+            let reviewer = || {
+                let view = reviewer_view(store, manager, &r);
+                if full {
+                    view
+                } else {
+                    compact_reviewer(view)
+                }
             };
             let waited = if now >= deadline {
                 wait
@@ -4053,7 +4087,7 @@ async fn status(
                     crate::session::waits::brought_back(ctx.session_id().is_some()),
                 );
                 view["waited_secs"] = json!(waited);
-                view["reviewer"] = reviewer_view(store, manager, &r);
+                view["reviewer"] = reviewer();
                 return Ok(view);
             }
             return Ok(json!({
@@ -4062,7 +4096,7 @@ async fn status(
                 "still_waiting": true,
                 // What it waited, which a verdict can cut short of the wait asked.
                 "waited_secs": waited,
-                "reviewer": reviewer_view(store, manager, &r),
+                "reviewer": reviewer(),
                 "message": format!(
                     "{says}Still waiting on a human; the review is {}. The wait is capped at \
                      {MAX_WAIT_SECS} seconds so this call returns before your MCP client \
