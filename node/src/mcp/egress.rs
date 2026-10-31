@@ -55,7 +55,7 @@ pub fn definitions() -> Vec<Value> {
              connection already asks the operator: its reason says so. Call this when you \
              know a host you need before you try it, or to wait for the answer to such a \
              refusal. Returns `reachable` once the host is open, `still_waiting` while the \
-             operator has not answered (call again with the same host), or `rejected` with \
+             operator has not answered (to wait again, give the same host), or `rejected` with \
              their reason — then do without it, and do not look for another way to fetch \
              it. Only HTTPS on port 443 is ever proxied. {}",
             super::wait::pointer()
@@ -359,6 +359,9 @@ pub async fn call(
         }
         Asked::Declined(row) => row,
     };
+    // Asked for by the agent, unlike an ask a refusal raised on its own: the
+    // answer comes back to it if it ends its turn waiting.
+    manager.waits().asked(session_id, &approval.id);
     let mut status = approvals::status(
         access,
         ctx,
