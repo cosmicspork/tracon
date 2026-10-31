@@ -979,7 +979,7 @@ impl Supervisor {
                 Ok(()) => {
                     self.delivery_error = None;
                     for wait in &untold {
-                        self.waits.tell(&self.session_id, &wait.key);
+                        self.waits.delivered(&self.session_id, wait);
                     }
                 }
                 Err(error) => {

@@ -128,6 +128,14 @@ pub fn reviewer_key(review_id: &str, verdict: &Value) -> String {
     format!("reviewer:{review_id}:{}", verdict["at_ms"])
 }
 
+/// That verdict's summary and findings have been sent, once in full. Kept
+/// apart from [`reviewer_key`] because a continuation taking the review over
+/// is told of the verdict (so it is not brought back as a prompt) without
+/// having seen its findings, which its first review_status must still carry.
+pub fn findings_key(review_id: &str, verdict: &Value) -> String {
+    format!("findings:{review_id}:{}", verdict["at_ms"])
+}
+
 /// An approval of a review that failed to publish: told once per attempt.
 pub fn publication_key(row: &crate::store::PublicationRow) -> String {
     format!("publication:{}:{}:{}", row.review_id, row.id, row.attempts)
@@ -215,6 +223,15 @@ impl Waits {
             .insert((session_id.to_string(), key.to_string()));
     }
 
+    /// Record that `wait` was brought back to `session_id` as a prompt. A
+    /// reviewer's verdict comes with its findings, so those are sent too.
+    pub fn delivered(&self, session_id: &str, wait: &Wait) {
+        self.tell(session_id, &wait.key);
+        if let Some(verdict) = wait.key.strip_prefix("reviewer:") {
+            self.tell(session_id, &format!("findings:{verdict}"));
+        }
+    }
+
     pub fn was_told(&self, session_id: &str, key: &str) -> bool {
         self.told
             .0
@@ -231,7 +248,10 @@ impl Waits {
             if let Some(review) = session.strip_prefix("external:") {
                 return open.contains(review);
             }
-            if let Some(rest) = key.strip_prefix("reviewer:") {
+            if let Some(rest) = key
+                .strip_prefix("reviewer:")
+                .or_else(|| key.strip_prefix("findings:"))
+            {
                 return open.contains(rest.rsplit_once(':').map_or(rest, |(id, _)| id));
             }
             match key.strip_prefix("publication:") {
