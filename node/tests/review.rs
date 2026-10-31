@@ -3283,9 +3283,34 @@ async fn the_submitter_hears_its_reviewer_and_the_verdict_while_it_waits() {
         "request_changes"
     );
     assert!(waits.iter().any(|w| w.id == id && w.is_open()), "{waits:?}");
-    // Told once: the next call waits for the operator again.
+    // Told once: the next call waits for the operator again, and carries
+    // the verdict without repeating its findings.
     let s = f.status_tool_waiting(&id, 1).await;
     assert_eq!(s["waited_secs"], 1, "{s}");
+    assert_eq!(s["reviewer"]["verdict"], "request_changes", "{s}");
+    assert_eq!(s["reviewer"]["findings_count"], 2, "{s}");
+    assert_eq!(s["reviewer"]["findings"], Value::Null, "{s}");
+    assert_eq!(s["reviewer"]["summary"], Value::Null, "{s}");
+    assert!(
+        !s["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("has given its verdict"),
+        "{s}"
+    );
+    // Asked for, they come back.
+    let ctx = tracon::mcp::CallContext::session("s1", "work", "n1");
+    let s = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &ctx,
+        "review_status",
+        &json!({ "review_id": id, "wait_secs": 0, "include_findings": true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(s["reviewer"]["findings"][1]["note"], "cover it", "{s}");
+    assert_eq!(s["reviewer"]["summary"], "a.txt grew without a test", "{s}");
     // The page sees the verdict as this revision's.
     let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
     assert_eq!(detail["reviewer"]["started_by"], "submission", "{detail}");
