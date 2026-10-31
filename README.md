@@ -569,7 +569,9 @@ prepare_credentials = ["nova"]
 ```
 
 `tracon repo set github.com/acme/shop --prepare-credential nova` sets the same list
-(repeat the flag for several; `--prepare-credential ""` clears it). Both sides must agree: an entry naming a credential that does not name the repository
+(repeat the flag for several; `--prepare-credential ""` clears it). Lending a credential
+this way or in Settings, or lending a different set, warms the base cache again with it straight away,
+without a rebuild; clearing the list warms nothing. Both sides must agree: an entry naming a credential that does not name the repository
 is refused at the warm-up, and the warm-up does not run. A credential's `repos` can name a
 forge group instead of each repository: `repos = ["gitlab.com/acme/**"]` names every
 repository under `gitlab.com/acme`, by whole segment (`gitlab.com/acme2/x` is not one), and

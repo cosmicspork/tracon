@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::api::{ApiError, ApiResult, AppState};
 use super::passkey::AdminRequest;
-use crate::config::Config;
+use crate::config::{Config, Repo};
 use crate::repo_image;
 
 /// Every entry, with the newest build of each repository it answers for. A
@@ -99,6 +99,9 @@ pub async fn save(
         "Settings (repositories)",
     )
     .map_err(super::config_api::edit_refusal)?;
+    if outcome.wrote() {
+        warm_newly_lent(&s, &now.repo, &body.entries);
+    }
     let (restart_required, pending) = super::config_api::restart_owed(&s, &outcome).await;
     Ok(Json(json!({
         "changed": outcome.wrote(),
@@ -106,6 +109,57 @@ pub async fn save(
         "pending_restart": pending,
         "hash": outcome.new_hash,
     })))
+}
+
+/// The entries of `after` that lend their preparation credentials `before`
+/// did not lend them: newly lent, or lent a different set. An entry that
+/// lends none, or the same ones in another order, is not among them, nor is
+/// one held for a peer's recipe, which lends nothing until its build is
+/// started.
+fn newly_lent<'a>(
+    store: &crate::store::Store,
+    before: &[Repo],
+    after: &'a [Repo],
+) -> Vec<&'a Repo> {
+    let lent = |entry: &Repo| {
+        let mut names = entry.prepare_credentials.clone();
+        names.sort();
+        names.dedup();
+        names
+    };
+    after
+        .iter()
+        .filter(|entry| !entry.prepare_credentials.is_empty())
+        .filter(|entry| {
+            before
+                .iter()
+                .find(|was| was.path == entry.path)
+                .is_none_or(|was| lent(was) != lent(entry))
+        })
+        .filter(|entry| crate::mesh::recipe::held(store, entry).is_none())
+        .collect()
+}
+
+/// Warm the base cache of each repository whose entry now lends its
+/// preparation a credential it did not, without a rebuild: lending one
+/// changes no recipe, so nothing else would warm with it, and the next
+/// check would install from a cache filled without it.
+fn warm_newly_lent(s: &AppState, before: &[Repo], after: &[Repo]) {
+    for entry in newly_lent(s.store(), before, after) {
+        let Ok(repo) = repo_root(&entry.path.to_string_lossy()) else {
+            tracing::debug!(path = %entry.path.display(), "newly lent entry names no one repository; not warmed");
+            continue;
+        };
+        repo_image::forget_warmed(&repo);
+        let (backend, cfg, store) = (
+            s.manager.backend().clone(),
+            s.cfg.clone(),
+            s.store().clone(),
+        );
+        tokio::spawn(async move {
+            repo_image::warm_base_cache(backend.as_ref(), &cfg, &store, &repo).await;
+        });
+    }
 }
 
 #[derive(Deserialize)]
@@ -278,6 +332,53 @@ fn uncloned(root: &Path, given: &str) -> Option<(String, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lending(path: &str, credentials: &[&str]) -> Repo {
+        Repo {
+            path: path.into(),
+            prepare_credentials: credentials.iter().map(|name| name.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Only lending a credential anew warms: adding one, or changing which,
+    /// to an entry old or new. Saving the same ones, in any order, taking
+    /// them all away, or lending them to a held entry does not.
+    #[test]
+    fn only_an_entry_newly_lent_a_credential_is_warmed_again() {
+        let before = [
+            lending("/src/same", &["nova", "npm"]),
+            lending("/src/added", &[]),
+            lending("/src/changed", &["nova"]),
+            lending("/src/removed", &["nova"]),
+        ];
+        let after = [
+            lending("/src/same", &["npm", "nova"]),
+            lending("/src/added", &["nova"]),
+            lending("/src/changed", &["npm"]),
+            lending("/src/removed", &[]),
+            lending("/src/new", &["nova"]),
+            lending("/src/new-bare", &[]),
+            lending("/src/held", &["nova"]),
+        ];
+        let store = crate::store::Store::open_in_memory().unwrap();
+        store
+            .credential_hold_put(&crate::store::recipe_offers::CredentialHoldRow {
+                path: "/src/held".into(),
+                offer_id: "o1".into(),
+                sender_node: "peer".into(),
+                repo: "github.com/o/r".into(),
+                credentials: vec!["nova".into()],
+                lending_hash: crate::mesh::recipe::lending_hash(&after[6]),
+                created_ms: 0,
+            })
+            .unwrap();
+        let warmed: Vec<_> = newly_lent(&store, &before, &after)
+            .into_iter()
+            .map(|entry| entry.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(warmed, ["/src/added", "/src/changed", "/src/new"]);
+    }
 
     #[test]
     fn only_a_forge_identity_without_a_clone_is_cloned_for_a_build() {

@@ -169,6 +169,13 @@ fn warmed_in(repo: &Path) -> Option<(String, String)> {
     warmed_images().lock().unwrap().get(repo).cloned()
 }
 
+/// Forget that `repo`'s base cache was warmed, so the next warm-up runs even
+/// in the same image from the same commit: what it is lent changed, and the
+/// cache filled without that may be missing what needs it.
+pub(crate) fn forget_warmed(repo: &Path) {
+    warmed_images().lock().unwrap().remove(repo);
+}
+
 /// When the build of `recipe_hash` now running for `repo` started, if one
 /// is: a forced build asked for meanwhile joins it rather than starting
 /// another, and whoever asked follows that one.
