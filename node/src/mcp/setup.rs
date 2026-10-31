@@ -126,7 +126,11 @@ pub fn definitions() -> Vec<Value> {
             "description": format!(
                 "Try an entry the way required checks run: the default branch in a fresh \
                  container, prepared as `prepare` says, then each check on a copy with no network \
-                 and the cache read-only. Give the fields to try, or none to try the draft. \
+                 and the cache read-only. Give the fields to try, or none to try the draft; \
+                 given fields replace the draft entirely, so name every field the trial needs. \
+                 Preparation is never lent the entry's `prepare_credentials` (named in \
+                 `credentials_not_lent`): a package that needs one fails in a trial, and required \
+                 checks install it from the base cache, which is warmed with them. \
                  Preparation reaches only hosts this session can already reach; the rest are \
                  listed in `egress_not_tried`, and request_egress asks for one. Building a \
                  `dockerfile` this node has not built before is the operator's to allow, and \

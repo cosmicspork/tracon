@@ -26,8 +26,9 @@ already says must pass before a change is reviewed; leaving one out is not a fix
    lockfiles, a `just check` recipe, `package.json` scripts, Cargo) and returns a draft,
    where each field came from, notes on what it could not settle, and the entry the node
    holds now. Read the notes: they are what you have to settle.
-2. **Try.** Call `repo_setup_try` with no arguments to try the draft, or with the fields
-   you changed. It prepares the default branch in a fresh container and runs each check
+2. **Try.** Call `repo_setup_try` with no arguments to try the draft, or with every field
+   of the entry you want tried: fields you give replace the draft entirely, and one you
+   leave out is not taken from it. It prepares the default branch in a fresh container and runs each check
    the way required checks run, with no network. If it returns `running`, call it again
    with the `trial_id`.
 3. **Fix what fails.** Read each failed step's exit and the end of its output.
@@ -36,6 +37,10 @@ already says must pass before a change is reviewed; leaving one out is not a fix
      network is open.
    - A host preparation cannot reach: it is listed in `egress_not_tried`. Ask for it with
      `request_egress`; once the operator allows it, the next draft and trial include it.
+   - A package that needs a credential fails in every trial: trials are never lent the
+     entry's `prepare_credentials` (the trial names them in `credentials_not_lent`).
+     Required checks install it from the base cache, which is warmed with them, so say
+     so in `why` rather than asking the operator to fix the credential.
    - A check that is slow: raise `timeout_secs` rather than dropping the check.
    Try again after each change. Stop when the trial passes, or when what is left is
    something only the operator can decide.
