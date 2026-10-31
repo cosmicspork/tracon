@@ -1990,20 +1990,24 @@ impl Store {
     /// Upsert a review an owner mirrored to us. An ID collision from a
     /// different owner/channel never rewrites the existing row.
     ///
-    /// Returns `false` only for that rejected collision.
+    /// Returns `false` only for that rejected collision. The owner's
+    /// reviewer and its verdict come with the row, so the review page here
+    /// shows what the owner's reviewer found.
     pub fn upsert_review_mirror(&self, r: &ReviewRow) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
             "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, edited_title,
                 edited_body, provider, target, diff, files, head_sha, base_ref, added, removed, state,
                 verdict_reason, publish_result, claimed_ms, created_ms, created_mono_ms,
-                resolved_mono_ms, updated_ms, lane, checks_json, publication_failed)
+                resolved_mono_ms, updated_ms, lane, checks_json, publication_failed,
+                review_session_id, ai_verdict_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27,?28)
+                ?23,?24,?25,?26,?27,?28,?29,?30)
              ON CONFLICT(id) DO UPDATE SET title=?6, body=?7, edited_title=?8, edited_body=?9,
                 diff=?12, files=?13, head_sha=?14, added=?16, removed=?17, state=?18,
                 verdict_reason=?19, publish_result=?20, claimed_ms=?21, resolved_mono_ms=?24,
-                updated_ms=?25, checks_json=?27, publication_failed=?28
+                updated_ms=?25, checks_json=?27, publication_failed=?28,
+                review_session_id=?29, ai_verdict_json=?30
              WHERE node_id=excluded.node_id AND channel=excluded.channel
                 AND session_id IS excluded.session_id AND kind=excluded.kind",
             rusqlite::params![
@@ -2034,7 +2038,9 @@ impl Store {
                 r.updated_ms,
                 r.lane,
                 r.checks_json,
-                r.publication_failed
+                r.publication_failed,
+                r.review_session_id,
+                r.ai_verdict_json
             ],
         )?;
         Ok(changed == 1)
