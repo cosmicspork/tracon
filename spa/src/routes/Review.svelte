@@ -847,6 +847,64 @@
       <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
     </div>
   {/if}
+  <!-- The reviewer's verdict first: it is what the decision is made on, and on a
+       phone the shown work and evidence below it run to several screens. -->
+  {#if verdict}
+    <div class="verdict" class:rc={verdict.verdict === 'request_changes'}>
+      <span class="vbar"></span>
+      <div class="in">
+        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b>{verdictRevision !== null ? ` · for revision ${verdictRevision}` : ''} · {verdict.model}{basisLabel(verdict.basis) ? ` · ${basisLabel(verdict.basis)}` : ''}{reviewer && verdictRevision === null ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
+        <div class="sum">{verdict.summary}</div>
+        {#if verdict.findings?.length}
+          <ul class="findings">
+            {#each verdict.findings as f, i (i)}
+              <li><span class="sev {f.severity ?? 'should'}">{f.severity ?? 'should'}</span><span class="path">{f.path ?? ''}{f.line ? `:${f.line}` : ''}</span><span class="fnote">{f.note}</span></li>
+            {/each}
+          </ul>
+        {/if}
+        {#if verdict.verdict === 'request_changes' && control?.kind === 'again' && !composing && !publishing}
+          <div class="row"><button class="btn" disabled={busy} onclick={requestTheseChanges}>Request these changes…</button></div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  {#if control?.kind === 'running'}
+    <div class="banner dim">
+      a fresh session is reading this review{control.since ? ` · ${formatAge(control.since, clock.now)}` : ''} <b>· its verdict lands here; yours decides</b>
+    </div>
+  {:else if remoteOwner && review.review_session_id && !verdict}
+    <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
+  {:else if control?.kind === 'no_model'}
+    <div class="recover">
+      <span class="note">No review model on {review.channel} · <a class="lnk" href="/settings#channels">Settings → Channels</a></span>
+    </div>
+  {:else if control?.kind === 'start'}
+    <div class="recover">
+      {#if control.note}<span class="note">{control.note}</span>{/if}
+      <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>
+    </div>
+  {:else if control?.kind === 'retry'}
+    <div class="recover">
+      <span class="note">{control.reason}</span>
+      <button class="btn" disabled={busy} onclick={startReviewer}>Retry reviewer</button>
+    </div>
+  {:else if control?.kind === 'stale'}
+    <div class="recover">
+      <span class="note">the reviewer's verdict is on revision {control.revision ?? 'an earlier one'}; this is revision {reviewerView?.revision ?? 'a later one'}</span>
+      <button class="btn" disabled={busy} onclick={startReviewer}>Review this revision</button>
+    </div>
+  {:else if control?.kind === 'again'}
+    <div class="recover">
+      {#if confirmingAgain}
+        <span class="note">A new reviewer replaces the verdict shown.</span>
+        <button class="btn" disabled={busy} onclick={() => { confirmingAgain = false; void startReviewer() }}>Review again</button>
+        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = false)}>Keep this verdict</button>
+      {:else}
+        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = true)}>Review again…</button>
+      {/if}
+    </div>
+  {/if}
   <!-- Before the evidence, prose and files: it is what saves reading them again. -->
   {#if sinceReviewed}
     <section class="since">
@@ -973,63 +1031,6 @@
     <div><dt>Task</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
     <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}{reviewer && startedHow(reviewerView?.started_by) ? ` · ${startedHow(reviewerView?.started_by)}` : ''}</dd></div>
   </dl>
-
-  {#if verdict}
-    <div class="verdict" class:rc={verdict.verdict === 'request_changes'}>
-      <span class="vbar"></span>
-      <div class="in">
-        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b>{verdictRevision !== null ? ` · for revision ${verdictRevision}` : ''} · {verdict.model}{basisLabel(verdict.basis) ? ` · ${basisLabel(verdict.basis)}` : ''}{reviewer && verdictRevision === null ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
-        <div class="sum">{verdict.summary}</div>
-        {#if verdict.findings?.length}
-          <ul class="findings">
-            {#each verdict.findings as f, i (i)}
-              <li><span class="sev {f.severity ?? 'should'}">{f.severity ?? 'should'}</span><span class="path">{f.path ?? ''}{f.line ? `:${f.line}` : ''}</span><span class="fnote">{f.note}</span></li>
-            {/each}
-          </ul>
-        {/if}
-        {#if verdict.verdict === 'request_changes' && control?.kind === 'again' && !composing && !publishing}
-          <div class="row"><button class="btn" disabled={busy} onclick={requestTheseChanges}>Request these changes…</button></div>
-        {/if}
-      </div>
-    </div>
-  {/if}
-
-  {#if control?.kind === 'running'}
-    <div class="banner dim">
-      a fresh session is reading this review{control.since ? ` · ${formatAge(control.since, clock.now)}` : ''} <b>· its verdict lands here; yours decides</b>
-    </div>
-  {:else if remoteOwner && review.review_session_id && !verdict}
-    <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
-  {:else if control?.kind === 'no_model'}
-    <div class="recover">
-      <span class="note">No review model on {review.channel} · <a class="lnk" href="/settings#channels">Settings → Channels</a></span>
-    </div>
-  {:else if control?.kind === 'start'}
-    <div class="recover">
-      {#if control.note}<span class="note">{control.note}</span>{/if}
-      <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>
-    </div>
-  {:else if control?.kind === 'retry'}
-    <div class="recover">
-      <span class="note">{control.reason}</span>
-      <button class="btn" disabled={busy} onclick={startReviewer}>Retry reviewer</button>
-    </div>
-  {:else if control?.kind === 'stale'}
-    <div class="recover">
-      <span class="note">the reviewer's verdict is on revision {control.revision ?? 'an earlier one'}; this is revision {reviewerView?.revision ?? 'a later one'}</span>
-      <button class="btn" disabled={busy} onclick={startReviewer}>Review this revision</button>
-    </div>
-  {:else if control?.kind === 'again'}
-    <div class="recover">
-      {#if confirmingAgain}
-        <span class="note">A new reviewer replaces the verdict shown.</span>
-        <button class="btn" disabled={busy} onclick={() => { confirmingAgain = false; void startReviewer() }}>Review again</button>
-        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = false)}>Keep this verdict</button>
-      {:else}
-        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = true)}>Review again…</button>
-      {/if}
-    </div>
-  {/if}
 
   {#if review.state === 'revising'}
     <div class="banner ok">
