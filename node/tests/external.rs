@@ -453,6 +453,69 @@ async fn a_retried_submission_answers_with_the_review_it_already_made() {
     );
 }
 
+/// A harness removes its worktree once the review is out, and fixes it
+/// later from a fresh one: the same repository and branch is the same
+/// review's, and the review then reads from the new worktree (#752).
+#[tokio::test]
+async fn a_review_is_resubmitted_from_another_worktree_of_its_repository_and_branch() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("moved");
+    let h = harness_with(with_roots(&root)).await;
+    let submit = |args: Value| mcp(&h.operator, "work", tool_call("submit_review", args));
+    let (err, out) = outcome(&submit(submit_args(&wt)).await.1);
+    assert!(!err, "{out}");
+    let id = out["review_id"].as_str().unwrap().to_string();
+
+    let scratch = root.parent().unwrap();
+    sh(
+        &root.join("repo"),
+        "git worktree remove --force ../../wt && git worktree add -q ../../wt2 feat/x \
+         && git worktree add -q -b other ../../wt3 main \
+         && cd ../../wt2 && echo three >> a.txt && git -c user.email=t@e -c user.name=t \
+            commit -q --amend -am work",
+    );
+    sh(
+        scratch,
+        "git clone -q origin.git root/elsewhere && cd root/elsewhere \
+         && git checkout -qb feat/x",
+    );
+    let again = |worktree: &std::path::Path| {
+        let mut args = submit_args(&worktree.to_string_lossy());
+        args["review_id"] = json!(id);
+        args["body"] = json!("fixed");
+        args
+    };
+
+    // Another branch, or another repository, is not this review's.
+    for (worktree, branch) in [
+        (scratch.join("wt3"), "other"),
+        (root.join("elsewhere"), "feat/x"),
+    ] {
+        let (err, refused) = outcome(&submit(again(&worktree)).await.1);
+        assert!(err, "{refused}");
+        let refused = refused.to_string();
+        assert!(
+            refused.contains("with feat/x checked out")
+                && refused.contains(&format!("has {branch} checked out")),
+            "{refused}"
+        );
+    }
+
+    let (err, out) = outcome(&submit(again(&scratch.join("wt2"))).await.1);
+    assert!(!err, "{out}");
+    assert_eq!(out["review_id"], json!(id), "{out}");
+    let r = h.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(r.body, "fixed");
+    let target: Value = serde_json::from_str(&r.target).unwrap();
+    let moved = std::fs::canonicalize(scratch.join("wt2")).unwrap();
+    assert_eq!(
+        target["worktree"],
+        json!(moved.to_string_lossy()),
+        "{target}"
+    );
+    assert_eq!(target["checkout"]["branch"], "feat/x", "{target}");
+}
+
 #[tokio::test]
 async fn a_forge_that_does_not_answer_does_not_hold_up_a_submission() {
     state::isolate();

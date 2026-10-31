@@ -1130,6 +1130,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         base: "main".into(),
         branch: "feat/x".into(),
         worktree: None,
+        checkout: None,
         repo: None,
         change: None,
         initial: false,

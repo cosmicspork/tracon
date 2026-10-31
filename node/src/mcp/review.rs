@@ -340,14 +340,15 @@ async fn submit(
                         .into(),
                 );
             }
-            let was = serde_json::from_str::<Target>(&existing.target)
-                .ok()
-                .and_then(|target| target.worktree);
-            if external && was.as_deref() != Some(worktree.as_str()) {
-                return Err(format!(
-                    "resubmit from the worktree the review was made from ({})",
-                    was.unwrap_or_default()
-                ));
+            if external {
+                let was = stored_target(store, &existing).ok();
+                let repo = repo_path
+                    .as_deref()
+                    .map(|repo| repo.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Some(refusal) = elsewhere(was.as_ref(), &worktree, &repo, &branch) {
+                    return Err(refusal);
+                }
             }
             Some(existing)
         }
@@ -528,6 +529,15 @@ async fn submit(
             .into_owned(),
         )
     };
+    // The repository and branch an external worktree has checked out.
+    let checkout =
+        repo_path
+            .as_deref()
+            .filter(|_| external)
+            .map(|repo| review::publish::Checkout {
+                repo: repo.to_string_lossy().into_owned(),
+                branch: branch.clone(),
+            });
     // Where this review publishes. A resubmission keeps the target it was
     // first submitted with, including the change it updates; only the base
     // of a change not yet opened may move.
@@ -546,9 +556,17 @@ async fn submit(
                 Some(repo) => Some(repo),
                 None => external_repo(&target.provider, &target.project),
             };
+            // An external resubmission may come from another worktree of
+            // the same repository and branch; later steps use that one.
+            let (worktree, checkout) = match external {
+                true => (Some(worktree.clone()), checkout.clone()),
+                false => (target.worktree, target.checkout),
+            };
             Target {
                 base: base.clone(),
                 repo,
+                worktree,
+                checkout,
                 ..target
             }
         }
@@ -558,6 +576,7 @@ async fn submit(
             base: base.clone(),
             branch: branch.clone(),
             worktree: external.then(|| worktree.clone()),
+            checkout: checkout.clone(),
             repo: external_repo(&provider, &project),
             change: asked_change.map(|number| ChangeRef {
                 number,
@@ -1891,6 +1910,38 @@ fn forge_arg(args: &Value) -> Result<Outputs, String> {
         comment: forge.comment.filter(|c| !c.trim().is_empty()),
         ..forge
     })
+}
+
+/// Why an external resubmission from `worktree`, a worktree of `repo` with
+/// `branch` checked out, cannot revise the review whose target `was` is;
+/// `None` when it can. The worktree the review was made from may be gone by
+/// then, so another worktree of the repository it recorded, on its branch or
+/// the branch it pushes to, serves as well.
+fn elsewhere(was: Option<&Target>, worktree: &str, repo: &str, branch: &str) -> Option<String> {
+    let was = match was {
+        Some(was) if was.worktree.as_deref() == Some(worktree) => return None,
+        Some(was) => was,
+        None => return Some("this review's target is unreadable".into()),
+    };
+    // A review submitted before its checkout was recorded names the
+    // repository its reviewer answers to, usually the worktree's own.
+    let (want_repo, want_branch) = match &was.checkout {
+        Some(checkout) => (Some(checkout.repo.as_str()), checkout.branch.as_str()),
+        None => (was.repo.as_deref(), was.branch.as_str()),
+    };
+    let Some(want_repo) = want_repo else {
+        return Some(format!(
+            "resubmit from the worktree the review was made from ({})",
+            was.worktree.as_deref().unwrap_or_default()
+        ));
+    };
+    if want_repo == repo && (branch == want_branch || branch == was.branch) {
+        return None;
+    }
+    Some(format!(
+        "resubmit from a worktree of {want_repo} with {want_branch} checked out; {worktree} \
+         has {branch} checked out in {repo}"
+    ))
 }
 
 /// Where a resubmission publishes: the review's stored target, and for a
