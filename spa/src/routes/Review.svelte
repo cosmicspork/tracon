@@ -47,13 +47,17 @@
     basisLabel,
     checksState,
     composerLabel,
+    lostOwner,
+    ownersReviewer,
     publishedChange,
     publishedLabel,
     rereadDelay,
+    rereadPeer,
     rereadReviewer,
     reviewerControl,
     startedHow,
     unavailable,
+    unreachableReviewer,
   } from '../lib/verdicts'
   import { openAiRequest, sentReason, withFinding } from '../lib/reviewerChanges'
   import { failuresOf, outcomeLabel, runDuration, runTone, runsSummary } from '../lib/checkRuns'
@@ -104,6 +108,8 @@
   let branchName = $state('')
   let busy = $state(false)
   let error = $state<string | null>(null)
+  /** Why the peer that owns this review would not start its reviewer, shown beside the control. */
+  let reviewerRefusal = $state<string | null>(null)
   /** The change the operator opened by hand, while "Published at…" is open;
    * `null` while it is closed. */
   let reconcileChange = $state<string | null>(null)
@@ -158,6 +164,9 @@
     loaded = false
     missing = false
     error = null
+    reviewerRefusal = null
+    ownerLost = false
+    pollFailures = 0
     openedFrom = router.previous
     draftSync?.stop()
     draftSync = null
@@ -509,7 +518,13 @@
   // update it streams, and the poll below must not be put off by each one.
   const liveReviewerId = $derived(reviewer?.id)
   const liveReviewerState = $derived(reviewer?.state)
-  const control = $derived(review ? reviewerControl(review.state, remoteOwner ? null : reviewerView, reviewerStarting) : null)
+  const control = $derived(
+    review ? reviewerControl(review.state, ownersReviewer(remoteOwner, ownerDetail, reviewerView), reviewerStarting) : null,
+  )
+  /** Why a peer's review offers no reviewer control: its owner starts one and cannot be read. */
+  const reviewerAway = $derived(
+    review && remoteOwner ? unreachableReviewer(review.state, remoteOwner, ownerDetail, nodeLabel(store.nodes, remoteOwner)) : null,
+  )
   /** The verdict on the card is on an earlier revision than this one. */
   const verdictRevision = $derived(
     reviewerView?.verdict_revision != null && reviewerView.verdict_revision !== reviewerView.revision
@@ -522,12 +537,18 @@
   // again, so its verdict or its failure shows without a reload.
   /** Polls in a row that failed: each schedules the next, further off. */
   let pollFailures = $state(0)
+  /** A poll of a peer's running reviewer lost its owner: read on until it answers. */
+  let ownerLost = $state(false)
   $effect(() => {
-    const when = rereadReviewer(
-      control,
-      reviewerView,
-      reviewerStarting,
-      liveReviewerId && liveReviewerState ? { id: liveReviewerId, state: liveReviewerState } : null,
+    const when = rereadPeer(
+      rereadReviewer(
+        control,
+        reviewerView,
+        reviewerStarting,
+        liveReviewerId && liveReviewerState ? { id: liveReviewerId, state: liveReviewerState } : null,
+      ),
+      ownerLost,
+      reviewerAway,
     )
     if (!when) return
     const delay = rereadDelay(when, pollFailures)
@@ -637,27 +658,40 @@
     }
   }
 
-  /** The review and its publication record, as they stand now. */
-  async function reread() {
+  /** The review and its publication record, as they stand now; false when it could not be read. */
+  async function reread(): Promise<boolean> {
     try {
       const d = await api.review(id)
       review = d.review
+      ownerDetail = d.owner_detail ?? null
       publication = d.publication ?? null
       forgeState = d.forge_state ?? null
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting ?? false
       reviewerView = d.reviewer ?? null
+      return true
     } catch {
       /* the error already shown is the one that matters */
+      return false
     }
   }
 
   /** The reviewer alone, as it stands now: what the page polls while one runs. A review decided meanwhile is read again whole. */
   async function refreshReviewer() {
     if (!review) return
+    // A peer's reviewer is the owner's to report: read the review from it
+    // again. One that fails, or finds the owner gone, is asked again later.
+    if (remoteOwner) {
+      ownerLost = lostOwner(await reread(), ownerDetail)
+      pollFailures = ownerLost ? pollFailures + 1 : 0
+      return
+    }
     try {
       const d = await api.reviewSession(id)
-      if (d.state !== review.state) return await reread()
+      if (d.state !== review.state) {
+        await reread()
+        return
+      }
       review = { ...review, review_session_id: d.review_session_id, ai_verdict_json: d.ai_verdict_json }
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting
@@ -674,11 +708,15 @@
     if (!review) return
     busy = true
     error = null
+    reviewerRefusal = null
     try {
-      await api.startReviewer(id)
+      await api.startReviewer(id, remoteOwner ? revision?.id : undefined)
       await store.refetch()
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e)
+      // The owner's refusal is about its reviewer, so it is shown there.
+      const message = e instanceof Error ? e.message : String(e)
+      if (remoteOwner) reviewerRefusal = message
+      else error = message
     } finally {
       busy = false
       await reread()
@@ -873,8 +911,10 @@
     <div class="banner dim">
       a fresh session is reading this review{control.since ? ` · ${formatAge(control.since, clock.now)}` : ''} <b>· its verdict lands here; yours decides</b>
     </div>
-  {:else if remoteOwner && review.review_session_id && !verdict}
+  {:else if remoteOwner && ownerDetail?.state !== 'fetched' && review.review_session_id && !verdict}
     <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
+  {:else if reviewerAway}
+    <div class="recover"><span class="note">{reviewerAway}</span></div>
   {:else if control?.kind === 'no_model'}
     <div class="recover">
       <span class="note">No review model on {review.channel} · <a class="lnk" href="/settings#channels">Settings → Channels</a></span>
@@ -882,20 +922,24 @@
   {:else if control?.kind === 'start'}
     <div class="recover">
       {#if control.note}<span class="note">{control.note}</span>{/if}
+      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
       <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>
     </div>
   {:else if control?.kind === 'retry'}
     <div class="recover">
       <span class="note">{control.reason}</span>
+      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
       <button class="btn" disabled={busy} onclick={startReviewer}>Retry reviewer</button>
     </div>
   {:else if control?.kind === 'stale'}
     <div class="recover">
       <span class="note">the reviewer's verdict is on revision {control.revision ?? 'an earlier one'}; this is revision {reviewerView?.revision ?? 'a later one'}</span>
+      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
       <button class="btn" disabled={busy} onclick={startReviewer}>Review this revision</button>
     </div>
   {:else if control?.kind === 'again'}
     <div class="recover">
+      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
       {#if confirmingAgain}
         <span class="note">A new reviewer replaces the verdict shown.</span>
         <button class="btn" disabled={busy} onclick={() => { confirmingAgain = false; void startReviewer() }}>Review again</button>

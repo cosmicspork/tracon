@@ -157,6 +157,13 @@ in `PATCH /api/config`'s shape; the owner runs it only for an admin peer, with a
 statement for exactly this command on itself, and never past `not_after_ms`. Both ops
 are additive and the contract version is unmoved: a node that predates them answers
 that it runs an older build.
+A `start_reviewer` command `{ review_id, revision_id?, statement? }` starts a fresh
+reviewer on a review the owner holds, as its own operator would. It spends the owner's
+models, so it is an admin command like `config_patch`: run only for an admin peer, with
+a statement for exactly this command on itself. The owner refuses it when `revision_id`
+is no longer the review's latest revision, and returns any refusal of the start itself
+verbatim. The op is additive and the contract version is unmoved: a node that predates
+it answers that it runs an older build.
 Version 4 lets a review row and a queued card name no session: a harness the operator
 runs themselves calls with none. `session_id` on a `reviews` row and on a `queue` card
 may be `null`, a review row gains an optional `lane` (the caller's display label), and

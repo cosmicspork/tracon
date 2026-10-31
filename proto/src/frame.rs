@@ -525,6 +525,21 @@ pub enum Command {
         statement: AdminStatement,
         not_after_ms: i64,
     },
+    /// Start a fresh reviewer on a review the owner holds, as its own
+    /// operator would from the review page. It spends the owner's models and
+    /// budget, so it is an admin command: run only for a peer the owner's
+    /// `[mesh] admin_peers` names, with the [`AdminStatement`] its operator
+    /// confirmed for exactly this start. `revision_id` is the revision the
+    /// operator was looking at; the owner refuses the start once it holds a
+    /// newer one. An older peer cannot read this op and answers that it runs
+    /// an older build.
+    StartReviewer {
+        review_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        statement: Option<AdminStatement>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1303,6 +1318,23 @@ mod tests {
         assert_eq!(v["op"], "config_patch");
         assert_eq!(v["statement"]["issuer"], a.node_id());
         assert_eq!(serde_json::from_value::<Command>(v).unwrap(), patch);
+    }
+
+    /// A reviewer start names itself on the wire, so a build without it
+    /// refuses it by name; what it leaves out stays off the wire.
+    #[test]
+    fn start_reviewer_wire_name_is_stable() {
+        let start = Command::StartReviewer {
+            review_id: "rv1".into(),
+            revision_id: None,
+            statement: None,
+        };
+        let v = serde_json::to_value(&start).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "op": "start_reviewer", "review_id": "rv1" })
+        );
+        assert_eq!(serde_json::from_value::<Command>(v).unwrap(), start);
     }
 
     #[derive(serde::Deserialize)]

@@ -2556,7 +2556,8 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         _ => None,
     };
     // Why no reviewer is reading it, as the node last found when it tried.
-    // Node-local: the owner is what starts one.
+    // Node-local: the owner is what starts one, and a mirror reads these
+    // three from it (`OWNER_FIELDS`).
     let review_session_reason = match remote_owner {
         Some(_) => None,
         None => s.store().review_session_reason(&id)?,
@@ -2603,8 +2604,12 @@ struct ReviewDetailRequest {
 }
 
 /// The fields of a review only its owner can fill: what the checks, the
-/// worktree and the revision's own requests say.
+/// worktree and the revision's own requests say, and what became of the
+/// reviewer it starts.
 const OWNER_FIELDS: &[&str] = &[
+    "reviewer",
+    "review_session_reason",
+    "review_session_starting",
     "stale",
     "evidence",
     "shown_work",
@@ -2615,6 +2620,10 @@ const OWNER_FIELDS: &[&str] = &[
     "publication",
     "forge_state",
 ];
+
+/// The review row's own fields the owner's reviewer writes, taken from the
+/// owner over the mirror's copy when its detail is read.
+const OWNER_REVIEW_FIELDS: &[&str] = &["review_session_id", "ai_verdict_json"];
 
 /// A mirrored review's detail as the node that owns it holds it, over the
 /// mesh; the error says why it could not be read.
@@ -2674,6 +2683,14 @@ async fn read_from_owner(
                 }
                 if mirrored.is_none() {
                     detail["revision"] = owned["revision"].clone();
+                }
+                // The page derives its reviewer control from the owner's
+                // reviewer and its verdict card from this row, so both come
+                // from one read: the mirror can lag the owner's `done`.
+                for field in OWNER_REVIEW_FIELDS {
+                    if let Some(value) = owned["review"].get(*field) {
+                        detail["review"][*field] = value.clone();
+                    }
                 }
                 json!({ "state": "fetched" })
             }
@@ -2984,31 +3001,98 @@ pub async fn get_review_session(
     })))
 }
 
+/// What a start of a reviewer by hand may name: the revision the operator
+/// was reading, which a peer that owns the review holds the start to.
+#[derive(Deserialize, Default)]
+pub struct StartReviewerBody {
+    #[serde(default)]
+    pub revision_id: Option<String>,
+}
+
 /// `POST /api/reviews/{id}/review-session`: start a fresh review session on
 /// a review by hand, on one that never had one or again after changes were
 /// requested. Refused while one is starting or still running, and on a review already
 /// approved or rejected, which takes no reviewer's verdict. It starts a
 /// session on the operator's models and budget, so it is an admin action.
+///
+/// A review a peer owns is started there: confirmed here for that peer, and
+/// run there only if it names this node in its `[mesh] admin_peers`. What
+/// the owner answers, a refusal included, is what this returns.
 pub async fn start_review_session(
     State(s): State<AppState>,
     Path(id): Path<String>,
-    super::auth::AdminAction(()): super::auth::AdminAction,
-) -> ApiResult<Json<serde_json::Value>> {
+    parts: axum::http::request::Parts,
+    bytes: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, super::config_api::Refused> {
+    use super::peer_admin::refused;
+    let body: StartReviewerBody = admin_body(&parts, &bytes)?;
     let r = s
         .store()
-        .get_review(&id)?
+        .get_review(&id)
+        .map_err(|error| refused(ApiError::from(error)))?
+        .ok_or_else(|| refused(ApiError(StatusCode::NOT_FOUND, "no such review".into())))?;
+    if r.node_id == s.node_id {
+        super::passkey::authorize(&s, &parts, &bytes)
+            .await
+            .map_err(refused)?;
+        return start_reviewer_here(&s, &id, body.revision_id.as_deref())
+            .await
+            .map(Json)
+            .map_err(refused);
+    }
+    if r.kind == crate::store::reports::KIND {
+        return Err(refused(ApiError(
+            StatusCode::CONFLICT,
+            "a report has no diff for a reviewer to read".into(),
+        )));
+    }
+    let Some(mesh) = s.mesh.as_ref() else {
+        return Err(refused(ApiError(
+            StatusCode::CONFLICT,
+            "this review belongs to another node and this node is not on a mesh".into(),
+        )));
+    };
+    if !mesh.peer_reachable(&r.node_id) {
+        return Err(refused(ApiError(
+            StatusCode::GATEWAY_TIMEOUT,
+            "the node that owns this review is unreachable; its reviewer cannot be started \
+             until it returns"
+                .into(),
+        )));
+    }
+    let short: String = id.chars().take(8).collect();
+    admin_on_peer(
+        &s,
+        &parts,
+        &r.node_id,
+        &format!("Start a reviewer on review {short}"),
+        |statement| proto::frame::Command::StartReviewer {
+            review_id: id.clone(),
+            revision_id: body.revision_id.clone(),
+            statement,
+        },
+        std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1)),
+    )
+    .await
+}
+
+/// Start a fresh reviewer on review `id`, which this node owns, by hand:
+/// from this node's review page, or for an admin peer (`StartReviewer`).
+/// `seen` is the revision the operator was reading; the start is refused
+/// once the review has a newer one.
+async fn start_reviewer_here(
+    s: &AppState,
+    id: &str,
+    seen: Option<&str>,
+) -> ApiResult<serde_json::Value> {
+    let r = s
+        .store()
+        .get_review(id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
     if r.kind == crate::store::reports::KIND {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "a report has no diff for a reviewer to read".into(),
-        ));
-    }
-    if r.node_id != s.node_id {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "this review's candidate is held by the node that owns it; start a reviewer there"
-                .into(),
         ));
     }
     // Files still being kept from a submission that started no reviewer
@@ -3017,26 +3101,23 @@ pub async fn start_review_session(
     // read again once claimed, so this one never starts on a later
     // revision with an earlier one's word on its files.
     let latest = |s: &AppState| -> ApiResult<String> {
-        Ok(s.store()
-            .review_revision_ids(&id)?
-            .pop()
-            .unwrap_or_default())
+        Ok(s.store().review_revision_ids(id)?.pop().unwrap_or_default())
     };
-    let mut revision = latest(&s)?;
+    let mut revision = latest(s)?;
     let mut tries = 0;
     let (start, unkept) = loop {
-        let unkept = s.manager.review_starts().kept(&id, &revision).await;
+        let unkept = s.manager.review_starts().kept(id, &revision).await;
         // Held from before the review is read again until the new reviewer
         // is recorded. The checks below run on that second read, so they
         // see any session another start recorded before it let go of its
         // claim, and two starts cannot both find none running.
-        let Some(start) = s.manager.review_starts().claim(&id) else {
+        let Some(start) = s.manager.review_starts().claim(id) else {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 crate::mcp::review::ALREADY_STARTING.into(),
             ));
         };
-        let now = latest(&s)?;
+        let now = latest(s)?;
         tries += 1;
         if now == revision || tries >= 3 {
             break (start, (now == revision).then_some(unkept).flatten());
@@ -3044,9 +3125,18 @@ pub async fn start_review_session(
         drop(start);
         revision = now;
     };
+    // Checked with the start claimed, so no resubmission slips in between.
+    if seen.is_some_and(|seen| latest(s).is_ok_and(|latest| latest != seen)) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "the node that owns this review has a newer revision of it than the one you were \
+             reading; reload"
+                .into(),
+        ));
+    }
     let r = s
         .store()
-        .get_review(&id)?
+        .get_review(id)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
     if !matches!(r.state.as_str(), "new" | "claimed" | "revising") {
         return Err(ApiError(
@@ -3091,7 +3181,7 @@ pub async fn start_review_session(
                 .to_string(),
         ));
     }
-    Ok(Json(started))
+    Ok(started)
 }
 
 /// Record a verdict; what the operator had written toward it stops being a
@@ -6494,8 +6584,8 @@ fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: 
 /// sign-in binds and in every one the credential it would replace serves. The
 /// commands not named here check their own scope as they run.
 ///
-/// An admin command (a provider sign-in, a read or edit of `node.toml`) is
-/// decided first, and needs more than a channel: the sender named in this
+/// An admin command (a provider sign-in, a read or edit of `node.toml`, a
+/// reviewer start) is decided first, and needs more than a channel: the sender named in this
 /// node's `[mesh] admin_peers`, with a statement its operator confirmed for
 /// exactly that command here ([`admin_peer`]). What that admits is returned,
 /// for the audit log.
@@ -6605,6 +6695,16 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
         )),
         C::RecipeOffer { from_channel, .. } => {
             sender_in_channel(s, sender, from_channel, "recipe offer")
+        }
+        // A reviewer starts on a review this node owns, for a member of its
+        // channel; one mirrored here is its owner's to start.
+        C::StartReviewer { review_id, .. } => {
+            let review = s
+                .store()
+                .get_review(review_id)?
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+            owned_here(s, &review.node_id, "review")?;
+            sender_in_channel(s, sender, &review.channel, "review")
         }
         _ => Ok(()),
     }
@@ -6978,6 +7078,14 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                     .map_err(provider_err),
                 Err(error) => Err(error),
             },
+            // As the owner's own operator would start one from the review
+            // page, on the statement `authorise_forwarded` spent; a refusal
+            // goes back to the sender in this node's words.
+            C::StartReviewer {
+                review_id,
+                revision_id,
+                ..
+            } => start_reviewer_here(self, &review_id, revision_id.as_deref()).await,
             // `authorise_forwarded` admitted the sender as an admin peer,
             // and for an edit spent the statement it carries.
             C::ConfigRead => Ok(super::config_api::peer_read(self).await),

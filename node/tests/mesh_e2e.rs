@@ -1168,6 +1168,117 @@ async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
     assert!(v["evidence"].is_null());
 }
 
+/// A peer's review is started by its owner: A forwards the start, B runs
+/// its own start on it, and what B answers, a refusal included, reaches A's
+/// caller in B's words. A then shows B's reviewer as B holds it.
+#[tokio::test]
+async fn a_reviewer_on_a_peers_review_is_started_by_the_node_that_holds_it() {
+    state::isolate();
+    let message = |v: &serde_json::Value| v["error"]["message"].as_str().unwrap_or("").to_string();
+    let open_review = |owner: &str| {
+        let id = uuid::Uuid::now_v7().to_string();
+        let review = tracon::store::ReviewRow {
+            state: "new".into(),
+            ..held_review(&id, owner)
+        };
+        (id, review)
+    };
+
+    // B names no admin peer: A's start is refused there, in B's words.
+    let (a, b) = pair_opts(&[], None, &[]).await;
+    let (id, review) = open_review(&b.id.node_id());
+    a.store.insert_review(&review).unwrap();
+    b.store.insert_review(&review).unwrap();
+    let start = format!("/api/reviews/{id}/review-session");
+    let (st, v) = call_local(&a.app, "POST", &start, None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(message(&v).contains("admin_peers"), "{v}");
+    drop((a, b));
+
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let (id, review) = open_review(&bi);
+    a.store.insert_review(&review).unwrap();
+    b.store.insert_review(&review).unwrap();
+    let start = format!("/api/reviews/{id}/review-session");
+
+    // B binds no review model, so its start finds none and records why.
+    let (st, v) = call_local(&a.app, "POST", &start, None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(message(&v).contains("no review model bound"), "{v}");
+    assert!(b
+        .store
+        .review_session_reason(&id)
+        .unwrap()
+        .is_some_and(|reason| reason.contains("no review model bound")));
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
+    assert!(
+        v["review_session_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("no review model bound")),
+        "{v}"
+    );
+    assert!(v["reviewer"].is_object(), "B's reviewer: {v}");
+    assert_eq!(v["review_session_starting"], false, "{v}");
+
+    // B's reviewer is done before A mirrors it: the detail read from B
+    // carries B's verdict, so the card agrees with the control B's reviewer
+    // sets instead of offering "Review again" over no verdict.
+    let verdict = json!({ "verdict": "approve", "summary": "fine", "model": "m" }).to_string();
+    let (ahead, mirrored) = open_review(&bi);
+    a.store.insert_review(&mirrored).unwrap();
+    b.store
+        .insert_review(&tracon::store::ReviewRow {
+            review_session_id: Some("reviewer-on-b".into()),
+            ai_verdict_json: Some(verdict.clone()),
+            ..mirrored.clone()
+        })
+        .unwrap();
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{ahead}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
+    assert_eq!(v["review"]["review_session_id"], "reviewer-on-b", "{v}");
+    assert_eq!(v["review"]["ai_verdict_json"], verdict, "{v}");
+    assert_eq!(
+        a.store.get_review(&ahead).unwrap().unwrap().ai_verdict_json,
+        None,
+        "the mirror's row is left for the Reviews frame to update"
+    );
+
+    // Read at a revision B no longer holds as its latest: refused.
+    let (st, v) = call_local(
+        &a.app,
+        "POST",
+        &start,
+        Some(json!({ "revision_id": "an-earlier-revision" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(message(&v).contains("newer revision"), "{v}");
+
+    // Decided on B: refused, and no reviewer is recorded.
+    assert!(b
+        .store
+        .resolve_review(&id, "rejected", Some("not now"), None, None, None, 1, None)
+        .unwrap());
+    let (st, v) = call_local(&a.app, "POST", &start, None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(message(&v).contains("already decided"), "{v}");
+    assert_eq!(
+        b.store.get_review(&id).unwrap().unwrap().review_session_id,
+        None
+    );
+
+    // Unreachable, nothing is sent and A says why.
+    a.store.set_reachable(&bi, false).unwrap();
+    let (st, v) = call_local(&a.app, "POST", &start, None).await;
+    assert_eq!(st, StatusCode::GATEWAY_TIMEOUT, "{v}");
+    assert!(message(&v).contains("unreachable"), "{v}");
+}
+
 /// A review leaves its owner's listing as soon as it is decided, so a peer
 /// that held it open reads it again from the owner: approved and published
 /// there, it is approved here, with the owner's result and checks. Only one
