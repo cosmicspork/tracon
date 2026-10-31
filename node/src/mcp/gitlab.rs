@@ -514,7 +514,7 @@ pub async fn call(
                 .ok_or("pipeline_id is required")?;
             let since = args.get("since").and_then(Value::as_str);
             let until = tokio::time::Instant::now()
-                + std::time::Duration::from_secs(super::wait::wait_secs(args));
+                + std::time::Duration::from_secs(super::wait::wait_secs(ctx, args));
             let mut baseline: Option<String> = since.map(str::to_string);
             loop {
                 let mut now = pipeline(http, token, &project_url, id).await?;

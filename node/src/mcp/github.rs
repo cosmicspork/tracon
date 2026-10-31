@@ -615,7 +615,7 @@ pub async fn call(
             let attempt = args.get("attempt").and_then(Value::as_i64).unwrap_or(0);
             let since = args.get("since").and_then(Value::as_str);
             let until = tokio::time::Instant::now()
-                + std::time::Duration::from_secs(super::wait::wait_secs(args));
+                + std::time::Duration::from_secs(super::wait::wait_secs(ctx, args));
             let mut baseline: Option<String> = since.map(str::to_string);
             loop {
                 let mut now = run_with_jobs(&gh, &base, run).await?;

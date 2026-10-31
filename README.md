@@ -865,7 +865,7 @@ enabled = true
 ```sh
 tracon external show     # prints the lines below, for each channel
 claude mcp add-json --scope user tracon-work \
-  '{"type":"http","url":"http://127.0.0.1:7420/mcp/external/work","headersHelper":"tracon external lane"}'
+  '{"type":"http","url":"http://127.0.0.1:7420/mcp/external/work","timeout":1200000,"headersHelper":"tracon external lane --wait-budget 1140"}'
 ```
 
 The `headersHelper` labels every call with the repository and branch the agent
@@ -877,6 +877,11 @@ off after a day without a call unless something of it is still open, and
 **dismiss** hides one until it calls again. The label is for display only:
 nothing is authorized or routed by it. A plain `claude mcp add --transport http
 … /mcp/external/work` works too; its calls show as one unlabelled lane.
+
+The `timeout` lifts Claude Code's per-call limit to twenty minutes, and
+`--wait-budget` (or `TRACON_WAIT_BUDGET`) tells the node so: a status tool such
+as `review_status` then holds up to ten minutes a call instead of 45 seconds.
+Without it the node assumes the 60-second default most MCP clients inherit.
 
 There is no session behind an external agent. Every call stands alone, so
 connecting, resuming or restarting the agent changes nothing on the node, and

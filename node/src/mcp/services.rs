@@ -106,7 +106,7 @@ pub async fn call(
         record: &record,
     };
     let wait = Duration::from_secs(if args.get("wait_secs").is_some() {
-        wait_secs(args)
+        wait_secs(ctx, args)
     } else {
         30
     });
