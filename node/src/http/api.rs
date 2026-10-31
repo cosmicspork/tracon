@@ -2621,6 +2621,10 @@ const OWNER_FIELDS: &[&str] = &[
     "forge_state",
 ];
 
+/// The review row's own fields the owner's reviewer writes, taken from the
+/// owner over the mirror's copy when its detail is read.
+const OWNER_REVIEW_FIELDS: &[&str] = &["review_session_id", "ai_verdict_json"];
+
 /// A mirrored review's detail as the node that owns it holds it, over the
 /// mesh; the error says why it could not be read.
 async fn owner_review_detail(
@@ -2679,6 +2683,14 @@ async fn read_from_owner(
                 }
                 if mirrored.is_none() {
                     detail["revision"] = owned["revision"].clone();
+                }
+                // The page derives its reviewer control from the owner's
+                // reviewer and its verdict card from this row, so both come
+                // from one read: the mirror can lag the owner's `done`.
+                for field in OWNER_REVIEW_FIELDS {
+                    if let Some(value) = owned["review"].get(*field) {
+                        detail["review"][*field] = value.clone();
+                    }
                 }
                 json!({ "state": "fetched" })
             }

@@ -31,3 +31,18 @@ test("the reviewer's verdict and its controls come before shown work, so a phone
   // The provenance line keeps who reviewed it.
   expect(markup.indexOf('<dl class="prov">')).toBeGreaterThan(shown)
 })
+
+test("a peer's reviewer control says when its owner is away, and shows the owner's refusal beside each start", () => {
+  const control = markup.indexOf("{#if control?.kind === 'running'}")
+  const shown = markup.indexOf('<ShownWork ')
+  const chain = markup.slice(control, shown)
+  // svelte-check does not flag a derived the markup stopped reading.
+  expect(chain).toContain('{:else if reviewerAway}')
+  expect(chain).toContain("ownerDetail?.state !== 'fetched' && review.review_session_id")
+  for (const kind of ['start', 'retry', 'stale', 'again']) {
+    const at = chain.indexOf(`{:else if control?.kind === '${kind}'}`)
+    expect(at).toBeGreaterThan(-1)
+    const next = chain.indexOf('{:else if', at + 1)
+    expect(chain.slice(at, next === -1 ? undefined : next)).toContain('{#if reviewerRefusal}')
+  }
+})

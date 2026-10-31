@@ -1224,6 +1224,30 @@ async fn a_reviewer_on_a_peers_review_is_started_by_the_node_that_holds_it() {
     assert!(v["reviewer"].is_object(), "B's reviewer: {v}");
     assert_eq!(v["review_session_starting"], false, "{v}");
 
+    // B's reviewer is done before A mirrors it: the detail read from B
+    // carries B's verdict, so the card agrees with the control B's reviewer
+    // sets instead of offering "Review again" over no verdict.
+    let verdict = json!({ "verdict": "approve", "summary": "fine", "model": "m" }).to_string();
+    let (ahead, mirrored) = open_review(&bi);
+    a.store.insert_review(&mirrored).unwrap();
+    b.store
+        .insert_review(&tracon::store::ReviewRow {
+            review_session_id: Some("reviewer-on-b".into()),
+            ai_verdict_json: Some(verdict.clone()),
+            ..mirrored.clone()
+        })
+        .unwrap();
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{ahead}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
+    assert_eq!(v["review"]["review_session_id"], "reviewer-on-b", "{v}");
+    assert_eq!(v["review"]["ai_verdict_json"], verdict, "{v}");
+    assert_eq!(
+        a.store.get_review(&ahead).unwrap().unwrap().ai_verdict_json,
+        None,
+        "the mirror's row is left for the Reviews frame to update"
+    );
+
     // Read at a revision B no longer holds as its latest: refused.
     let (st, v) = call_local(
         &a.app,

@@ -8,7 +8,9 @@ import {
   requestName,
   publishedLabel,
   rereadDelay,
+  lostOwner,
   ownersReviewer,
+  rereadPeer,
   rereadReviewer,
   reviewerControl,
   startedHow,
@@ -138,10 +140,16 @@ describe('the reviewer control', () => {
   test('a peer review not read from its owner offers nothing, and says why', () => {
     for (const detail of [{ state: 'unreachable' as const, reason: 'gone' }, { state: 'moved' as const }, null]) {
       expect(reviewerControl('new', ownersReviewer('peer', detail, view()))).toEqual({ kind: 'hidden' })
+    }
+    for (const detail of [{ state: 'unreachable' as const, reason: 'gone' }, null]) {
       expect(unreachableReviewer('new', 'peer', detail, 'homelab')).toBe(
         "Reviewer runs on homelab; it can't be reached from here right now",
       )
     }
+    // The owner answered, but this node has not mirrored its latest revision yet.
+    expect(unreachableReviewer('new', 'peer', { state: 'moved' }, 'homelab')).toBe(
+      'homelab holds a newer revision of this review; reload once it arrives',
+    )
     expect(unreachableReviewer('new', 'peer', { state: 'fetched' }, 'homelab')).toBeNull()
     expect(unreachableReviewer('approved', 'peer', null, 'homelab')).toBeNull()
     expect(unreachableReviewer('new', null, null, 'here')).toBeNull()
@@ -189,6 +197,29 @@ describe('reading the reviewer again', () => {
   test('not at all when nothing is starting or running', () => {
     const done = view({ state: 'done', session_id: 'r1' })
     expect(rereadReviewer(reviewerControl('new', done), done, false, { id: 'r1', state: 'closed' })).toBeNull()
+  })
+})
+
+describe("reading a peer's reviewer again", () => {
+  test('a poll that failed, or came back without the owner, lost it', () => {
+    expect(lostOwner(false, { state: 'fetched' })).toBe(true)
+    expect(lostOwner(true, { state: 'unreachable', reason: 'gone' })).toBe(true)
+    expect(lostOwner(true, { state: 'moved' })).toBe(true)
+    expect(lostOwner(true, null)).toBe(true)
+    expect(lostOwner(true, { state: 'fetched' })).toBe(false)
+  })
+
+  test('keeps going while the owner it lost is said to be away, until it is read again', () => {
+    const away = "Reviewer runs on homelab; it can't be reached from here right now"
+    // While running, the reviewer's own pace.
+    expect(rereadPeer('now', false, null)).toBe('now')
+    expect(rereadPeer('later', true, away)).toBe('later')
+    // A poll lost the owner mid-run: the control is hidden, the page still reads.
+    expect(rereadPeer(null, true, away)).toBe('later')
+    // Read again, and the owner says nothing is running: the poll stops.
+    expect(rereadPeer(null, false, null)).toBeNull()
+    // Away on load, with no reviewer seen running: nothing to follow.
+    expect(rereadPeer(null, false, away)).toBeNull()
   })
 })
 

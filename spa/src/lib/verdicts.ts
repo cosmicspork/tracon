@@ -156,8 +156,9 @@ export function ownersReviewer(
 
 /**
  * Why a mirrored open review offers no reviewer control: its owner, named
- * `ownerName`, starts the reviewer and could not be read from here. Null for
- * a review this node owns, one read from its owner, or one decided.
+ * `ownerName`, starts the reviewer and could not be read from here, or holds
+ * a newer revision than this node has mirrored. Null for a review this node
+ * owns, one read from its owner, or one decided.
  */
 export function unreachableReviewer(
   state: string,
@@ -167,7 +168,33 @@ export function unreachableReviewer(
 ): string | null {
   if (!remoteOwner || ownerDetail?.state === 'fetched') return null
   if (!['new', 'claimed', 'revising'].includes(state)) return null
+  if (ownerDetail?.state === 'moved') return `${ownerName} holds a newer revision of this review; reload once it arrives`
   return `Reviewer runs on ${ownerName}; it can't be reached from here right now`
+}
+
+/**
+ * Whether a poll of a peer's review lost sight of its reviewer: the read
+ * failed (`read` false) or the owner's account did not come back with it.
+ * Counted as a failed poll, so the next is further off.
+ */
+export function lostOwner(read: boolean, ownerDetail: OwnerDetail | null | undefined): boolean {
+  return !read || ownerDetail?.state !== 'fetched'
+}
+
+/**
+ * When to read a peer's review again: as `when` says while its reviewer is
+ * seen running; and, once a poll lost sight of the owner (`lost`), on a
+ * pause for as long as the page says it can't be read (`away`), so it picks
+ * the reviewer up again when the owner comes back instead of waiting for a
+ * reload.
+ */
+export function rereadPeer(
+  when: 'now' | 'later' | null,
+  lost: boolean,
+  away: string | null,
+): 'now' | 'later' | null {
+  if (when) return when
+  return lost && away ? 'later' : null
 }
 
 /**

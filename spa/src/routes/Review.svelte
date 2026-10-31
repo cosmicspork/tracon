@@ -47,10 +47,12 @@
     basisLabel,
     checksState,
     composerLabel,
+    lostOwner,
     ownersReviewer,
     publishedChange,
     publishedLabel,
     rereadDelay,
+    rereadPeer,
     rereadReviewer,
     reviewerControl,
     startedHow,
@@ -163,6 +165,8 @@
     missing = false
     error = null
     reviewerRefusal = null
+    ownerLost = false
+    pollFailures = 0
     openedFrom = router.previous
     draftSync?.stop()
     draftSync = null
@@ -533,12 +537,18 @@
   // again, so its verdict or its failure shows without a reload.
   /** Polls in a row that failed: each schedules the next, further off. */
   let pollFailures = $state(0)
+  /** A poll of a peer's running reviewer lost its owner: read on until it answers. */
+  let ownerLost = $state(false)
   $effect(() => {
-    const when = rereadReviewer(
-      control,
-      reviewerView,
-      reviewerStarting,
-      liveReviewerId && liveReviewerState ? { id: liveReviewerId, state: liveReviewerState } : null,
+    const when = rereadPeer(
+      rereadReviewer(
+        control,
+        reviewerView,
+        reviewerStarting,
+        liveReviewerId && liveReviewerState ? { id: liveReviewerId, state: liveReviewerState } : null,
+      ),
+      ownerLost,
+      reviewerAway,
     )
     if (!when) return
     const delay = rereadDelay(when, pollFailures)
@@ -648,8 +658,8 @@
     }
   }
 
-  /** The review and its publication record, as they stand now. */
-  async function reread() {
+  /** The review and its publication record, as they stand now; false when it could not be read. */
+  async function reread(): Promise<boolean> {
     try {
       const d = await api.review(id)
       review = d.review
@@ -659,19 +669,29 @@
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting ?? false
       reviewerView = d.reviewer ?? null
+      return true
     } catch {
       /* the error already shown is the one that matters */
+      return false
     }
   }
 
   /** The reviewer alone, as it stands now: what the page polls while one runs. A review decided meanwhile is read again whole. */
   async function refreshReviewer() {
     if (!review) return
-    // A peer's reviewer is the owner's to report: read the review from it again.
-    if (remoteOwner) return await reread()
+    // A peer's reviewer is the owner's to report: read the review from it
+    // again. One that fails, or finds the owner gone, is asked again later.
+    if (remoteOwner) {
+      ownerLost = lostOwner(await reread(), ownerDetail)
+      pollFailures = ownerLost ? pollFailures + 1 : 0
+      return
+    }
     try {
       const d = await api.reviewSession(id)
-      if (d.state !== review.state) return await reread()
+      if (d.state !== review.state) {
+        await reread()
+        return
+      }
       review = { ...review, review_session_id: d.review_session_id, ai_verdict_json: d.ai_verdict_json }
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting
