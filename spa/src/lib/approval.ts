@@ -59,6 +59,11 @@ export interface ApprovalDetails {
    * that replaces nothing.
    */
   document?: ReplacedDocument | null
+  /**
+   * The body a `doc_edit`'s edits make of the document as it stands, or
+   * null when they no longer apply to it. Absent for any other tool.
+   */
+  proposed_body?: string | null
   /** The `if_hash` the agent sent no longer matches: Allow would conflict. */
   stale?: boolean
   /**
@@ -121,12 +126,16 @@ function formatLabel(current: string | null, requested: unknown): string | null 
  * the diff follows their edit.
  */
 export function replacement(
-  details: Pick<ApprovalDetails, 'document' | 'memory'>,
+  details: Pick<ApprovalDetails, 'document' | 'memory' | 'proposed_body'>,
   args: Record<string, unknown>,
 ): Replacement | null {
-  const proposed = args[REPLACING_FIELD]
+  const body = args[REPLACING_FIELD]
+  // A `doc_edit` carries edits, not a body: the node sends the body they
+  // make, or null when they no longer apply, which changes nothing here.
+  const proposed = (before: string) =>
+    typeof body === 'string' ? body : details.proposed_body !== undefined ? (details.proposed_body ?? before) : ''
   const diff = (before: string) => {
-    const lines = diffLines(before, typeof proposed === 'string' ? proposed : '')
+    const lines = diffLines(before, proposed(before))
     return {
       key: REPLACING_FIELD,
       hunks: hunks(lines),

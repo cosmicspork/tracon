@@ -148,6 +148,18 @@ test('a document write diffs the draft against the document as it stands, or as 
   expect(replacement({}, { body: 'x' })).toBeNull()
 })
 
+test('a document edit diffs the body its edits make, sent by the node, against the document', () => {
+  const document = { body: '# Plan\n\nOne.\nTwo.', hash: 'h', format: 'markdown', title: 'Plan', updated_ms: 1 }
+  const edits = [{ old_str: 'Two.', new_str: 'Three.' }]
+  const edit = replacement({ document, proposed_body: '# Plan\n\nOne.\nThree.' }, { slug: 'plan-foo', edits })!
+  expect(edit).toMatchObject({ created: false, title: 'Plan', added: 1, removed: 1 })
+  // Edits that no longer apply make no body: nothing is shown as changed.
+  expect(replacement({ document, proposed_body: null }, { slug: 'plan-foo', edits })).toMatchObject({
+    added: 0,
+    removed: 0,
+  })
+})
+
 test('the diff names a change of format, from the document to what the call writes', () => {
   const html = { body: '<p>x</p>', hash: 'h', format: 'html', title: 'Page', updated_ms: 1 }
   expect(replacement({ document: html }, { body: '# x' })!.format).toBe('html → markdown')

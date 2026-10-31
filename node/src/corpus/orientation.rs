@@ -347,6 +347,7 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
                 docs::DOC_SEARCH,
                 docs::DOC_READ,
                 docs::DOC_WRITE,
+                docs::DOC_EDIT,
                 docs::DOC_DELETE,
             ],
         ),

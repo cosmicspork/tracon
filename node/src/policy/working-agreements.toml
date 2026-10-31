@@ -175,7 +175,7 @@ id = "unattended-notes"
 verdict = "allow"
 reason = "Keeping working notes current changes nothing the operator has not agreed to; plans, guides and references are asked."
 kinds = ["tool"]
-matches = ["doc_write"]
+matches = ["doc_write", "doc_edit"]
 args = { slug_working_note = true }
 
 # A catalogue service is the operator's image, run beside the session in its
