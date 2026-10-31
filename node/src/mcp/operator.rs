@@ -103,10 +103,7 @@ pub fn definitions() -> Vec<Value> {
 fn wait_secs_schema() -> Value {
     json!({
         "type": "integer",
-        "description": format!(
-            "How long to block, up to {MAX_WAIT_SECS}; larger values are capped. \
-             Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
-        ),
+        "description": super::wait::wait_secs_description(),
     })
 }
 

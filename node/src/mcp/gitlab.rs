@@ -174,7 +174,7 @@ pub fn definitions() -> Vec<Value> {
                     "pipeline_id": { "type": "integer" },
                     "since": { "type": "string", "description": "The `state` an earlier call returned." },
                     "until": super::wait::until_schema(),
-                    "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
+                    "wait_secs": { "type": "integer", "description": super::wait::wait_secs_description() },
                 },
                 "required": ["project", "pipeline_id"],
             },

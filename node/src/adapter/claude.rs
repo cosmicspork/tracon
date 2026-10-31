@@ -273,9 +273,11 @@ fn claude_model(model: &str) -> Result<&str, AdapterError> {
 /// live calls is not pinned down.
 ///
 /// Every tool that waits on a person still returns within
-/// `mcp::wait::MAX_WAIT_SECS` with a handle its status tool waits on, since
-/// twenty minutes is no bound on a person either. This value is headroom for
-/// slow tools that are not waiting on anyone, not permission to block.
+/// `mcp::wait::MAX_WAIT_SECS` (or, for an external lane that declared a wait
+/// budget, `mcp::wait::MAX_EXTERNAL_WAIT_SECS`) with a handle its status tool
+/// waits on, since twenty minutes is no bound on a person either. An external
+/// lane runs whatever Claude Code is installed, so the README names 2.1.274 as
+/// the oldest release the declared budget holds on.
 pub const MCP_CALL_TIMEOUT_MS: u64 = 20 * 60 * 1000;
 
 /// The node builds one neutral MCP descriptor; Claude Code wants a map keyed

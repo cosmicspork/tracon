@@ -238,7 +238,7 @@ pub fn definitions() -> Vec<Value> {
                         started: an earlier attempt's result is not taken for this one's." },
                     "since": { "type": "string", "description": "The `state` an earlier call returned." },
                     "until": super::wait::until_schema(),
-                    "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
+                    "wait_secs": { "type": "integer", "description": super::wait::wait_secs_description() },
                 },
                 "required": ["repo", "run_id"],
             },

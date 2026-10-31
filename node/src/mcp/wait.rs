@@ -44,6 +44,16 @@ pub fn cap(ctx: &CallContext) -> u64 {
         .unwrap_or(MAX_WAIT_SECS)
 }
 
+/// The `wait_secs` argument's description, shared so no tool tells an
+/// agent with a longer budget to ask for only the default.
+pub fn wait_secs_description() -> String {
+    format!(
+        "How long to block. Defaults to the most this call may wait: {MAX_WAIT_SECS} seconds, \
+         or longer when your client says it allows more. Larger values are capped there; \
+         0 returns the current state."
+    )
+}
+
 /// How long a status call should block, clamped to the call's [`cap`].
 ///
 /// An oversized request is honoured up to the cap rather than rejected: the

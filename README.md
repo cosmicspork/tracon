@@ -887,6 +887,9 @@ The `timeout` lifts Claude Code's per-call limit to twenty minutes, and
 `--wait-budget` (or `TRACON_WAIT_BUDGET`) tells the node so: a status tool such
 as `review_status` then holds up to ten minutes a call instead of 45 seconds.
 Without it the node assumes the 60-second default most MCP clients inherit.
+Claude Code before 2.1.274 cut HTTP MCP calls off at about five minutes
+whatever `timeout` said; on an older release, drop `--wait-budget` or set it to
+300 or less.
 
 There is no session behind an external agent. Every call stands alone, so
 connecting, resuming or restarting the agent changes nothing on the node, and

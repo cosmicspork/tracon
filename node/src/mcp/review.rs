@@ -40,10 +40,7 @@ pub const BASES: [&str; 3] = ["ran_checks", "cited_evidence", "diff_only"];
 pub fn definitions() -> Vec<Value> {
     let wait_secs_arg = json!({
         "type": "integer",
-        "description": format!(
-            "How long to block, up to {MAX_WAIT_SECS}; larger values are capped at \
-             {MAX_WAIT_SECS}. Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
-        ),
+        "description": super::wait::wait_secs_description(),
     });
     vec![
         json!({

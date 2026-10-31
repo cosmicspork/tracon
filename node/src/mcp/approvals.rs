@@ -6,10 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{
-    wait::{wait_secs, MAX_WAIT_SECS},
-    CallContext, SessionAccess,
-};
+use super::{wait::wait_secs, CallContext, SessionAccess};
 use crate::store::approvals::{ApprovalRow, CHANGES_REQUESTED, PENDING, REJECTED, RUNNING};
 
 pub const STATUS: &str = "approval_status";
@@ -36,10 +33,7 @@ pub fn definitions() -> Vec<Value> {
                 "approval_ids": { "type": "array", "items": { "type": "string" } },
                 "wait_secs": {
                     "type": "integer",
-                    "description": format!(
-                        "How long to block, up to {MAX_WAIT_SECS}; larger values are capped. \
-                         Defaults to {MAX_WAIT_SECS}. 0 returns the current state."
-                    ),
+                    "description": super::wait::wait_secs_description(),
                 },
             },
         },
