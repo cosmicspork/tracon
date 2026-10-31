@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.44.0](https://github.com/cosmicspork/tracon/compare/v0.43.0...v0.44.0) (2026-10-31)
+
+
+### Features
+
+* **jira:** return labels, parent, issue links and subtasks from issue ([#744](https://github.com/cosmicspork/tracon/issues/744)) ([bfbf0b2](https://github.com/cosmicspork/tracon/commit/bfbf0b2633de2b359b49fb2d5b6c8c692951931a))
+* **mcp:** add doc_edit, which changes a document by exact-match replacements ([#756](https://github.com/cosmicspork/tracon/issues/756)) ([241e785](https://github.com/cosmicspork/tracon/commit/241e785c8f5254b3518ee26f091b83c53374efc5))
+* **mcp:** let an external lane that declares a longer client timeout wait longer ([#764](https://github.com/cosmicspork/tracon/issues/764)) ([d75b9a0](https://github.com/cosmicspork/tracon/commit/d75b9a0e995d74c81a3c39c556fc86d309125d9f))
+* **mcp:** let pipeline_wait and run_wait wait until finished or a job fails ([#755](https://github.com/cosmicspork/tracon/issues/755)) ([704fc77](https://github.com/cosmicspork/tracon/commit/704fc77873224394bb68f2df86ff21618ade1687))
+* **review:** start a peer-owned review's reviewer from this node ([#762](https://github.com/cosmicspork/tracon/issues/762)) ([07a08bb](https://github.com/cosmicspork/tracon/commit/07a08bbb2b481bf42935bd1a790ff1d97b568328))
+
+
+### Bug Fixes
+
+* **environments:** warm the base cache when an entry's prepare_credentials change ([#760](https://github.com/cosmicspork/tracon/issues/760)) ([a59ec92](https://github.com/cosmicspork/tracon/commit/a59ec9299207bc8ceaa64211e31b53100578f57c))
+* **jira:** say the Jira writes are asked, and that issue_create's key comes later ([#741](https://github.com/cosmicspork/tracon/issues/741)) ([c0fcd91](https://github.com/cosmicspork/tracon/commit/c0fcd916b81e676336f0245232ed28117567c932))
+* **mesh:** mirror the owner's reviewer and verdict on a peer's review ([#761](https://github.com/cosmicspork/tracon/issues/761)) ([7451379](https://github.com/cosmicspork/tracon/commit/74513795e79491515fa89fe3ae06b3cbda1d65c5))
+* **review:** accept an external resubmission from another worktree of the same branch ([#765](https://github.com/cosmicspork/tracon/issues/765)) ([fbe97d0](https://github.com/cosmicspork/tracon/commit/fbe97d0477501bed1edbd389a107594acc9b5cb5))
+* **review:** send the AI reviewer's findings once in review_status ([#763](https://github.com/cosmicspork/tracon/issues/763)) ([788538c](https://github.com/cosmicspork/tracon/commit/788538cb01ae5500ac4808019e21b388b635217d))
+* **session:** bring the answer to request_egress back to a session that ended its turn ([#757](https://github.com/cosmicspork/tracon/issues/757)) ([db1d23e](https://github.com/cosmicspork/tracon/commit/db1d23e1732e646efaf81b7012155d7519baee6d))
+* **setup:** name a trial's refused hosts while it runs, and let it be cancelled ([#758](https://github.com/cosmicspork/tracon/issues/758)) ([122c988](https://github.com/cosmicspork/tracon/commit/122c98889ab42dfbecedaa0692c1504dd3b0fa0d))
+* **setup:** say trials are never lent prepare_credentials, and that given fields replace the draft ([#759](https://github.com/cosmicspork/tracon/issues/759)) ([62e4a9e](https://github.com/cosmicspork/tracon/commit/62e4a9e73f33ba98f194514f427272afc4b38b7e))
+* **spa:** fold stale shown work on a review to its header ([#753](https://github.com/cosmicspork/tracon/issues/753)) ([18334b8](https://github.com/cosmicspork/tracon/commit/18334b8c60b235c77c074d43ca5302d19d09e57f))
+* **spa:** mobile fixes for errors, the composer, tasks, and reconnects ([#730](https://github.com/cosmicspork/tracon/issues/730)) ([5448932](https://github.com/cosmicspork/tracon/commit/544893232e6faff12b48836e0fdc858cc24f779a))
+* **spa:** put the reviewer's verdict above shown work on a review ([#754](https://github.com/cosmicspork/tracon/issues/754)) ([0d1ba4f](https://github.com/cosmicspork/tracon/commit/0d1ba4fec68175a9621e260522d2cbf5a508f85d))
+
 ## [0.43.0](https://github.com/cosmicspork/tracon/compare/v0.42.0...v0.43.0) (2026-10-29)
 
 
