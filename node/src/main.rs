@@ -586,7 +586,12 @@ enum ExternalCommand {
     /// `headersHelper`: the repository and branch it was started in, and the
     /// harness process, so the interface can say it is still running. Needs
     /// no running node.
-    Lane,
+    Lane {
+        /// Seconds your harness's MCP client gives one call, when you have
+        /// lifted its timeout: status tools then hold for longer per call.
+        #[arg(long, env = "TRACON_WAIT_BUDGET")]
+        wait_budget: Option<u64>,
+    },
     /// Refuse every external harness on a channel, until `start`.
     Stop { channel: String },
     /// Allow external harnesses on a channel again after `stop`.
@@ -1770,21 +1775,24 @@ fn external_lane() -> String {
 async fn external_command(cmd: ExternalCommand) -> Result<()> {
     use reqwest::Method;
     // The helper runs on every connection a harness makes, node or no node.
-    if let ExternalCommand::Lane = cmd {
+    if let ExternalCommand::Lane { wait_budget } = cmd {
         // The harness runs the helper as its own child, so the parent is the
         // harness process: what the node checks to say a lane is running.
-        println!(
-            "{}",
-            serde_json::json!({
-                "X-Tracon-Agent": external_lane(),
-                "X-Tracon-Agent-Pid": std::os::unix::process::parent_id().to_string(),
-            })
-        );
+        let mut headers = serde_json::json!({
+            "X-Tracon-Agent": external_lane(),
+            "X-Tracon-Agent-Pid": std::os::unix::process::parent_id().to_string(),
+        });
+        if let Some(budget) = wait_budget {
+            headers["X-Tracon-Wait-Budget"] = budget.to_string().into();
+        }
+        println!("{headers}");
         return Ok(());
     }
     let v = node_call(Method::GET, "/api/external?identities=true", None, None).await?;
     match cmd {
-        ExternalCommand::Lane => unreachable!("answered above, without asking the node"),
+        ExternalCommand::Lane { .. } => {
+            unreachable!("answered above, without asking the node")
+        }
         ExternalCommand::Show => {
             if v["enabled"] != true {
                 println!(
@@ -1816,12 +1824,16 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
             } else {
                 r#","headers":{"Authorization":"Bearer ${TRACON_TOKEN}"}"#.to_string()
             };
+            // The timeout Claude Code gives a managed session's calls, and the
+            // helper declaring it less a minute, so status tools hold longer.
+            let timeout = tracon::adapter::claude::MCP_CALL_TIMEOUT_MS;
+            let budget = timeout / 1000 - 60;
             println!("\nOr, so the interface can tell your Claude Code agents apart:\n");
             for c in v["channels"].as_array().unwrap_or(&vec![]) {
                 let Some(name) = c.as_str() else { continue };
                 println!(
                     "  claude mcp add-json --scope user tracon-{name} \
-                     '{{\"type\":\"http\",\"url\":\"{base}/mcp/external/{name}\",\"headersHelper\":\"{exe} external lane\"{auth}}}'"
+                     '{{\"type\":\"http\",\"url\":\"{base}/mcp/external/{name}\",\"timeout\":{timeout},\"headersHelper\":\"{exe} external lane --wait-budget {budget}\"{auth}}}'"
                 );
             }
             // The node launches nothing for this harness, so the identity its

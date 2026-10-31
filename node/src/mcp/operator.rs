@@ -224,7 +224,7 @@ async fn question_status(
     ids: &[String],
     args: &Value,
 ) -> Result<Value, String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs(args));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs(ctx, args));
     loop {
         let mut rows = Vec::with_capacity(ids.len());
         for id in ids {
@@ -566,7 +566,7 @@ async fn report_status(
     args: &Value,
 ) -> Result<Value, String> {
     let ids = ids(args, "issue_id", "issue_ids")?;
-    let wait = wait_secs(args);
+    let wait = wait_secs(ctx, args);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
     loop {
         let mut rows = Vec::with_capacity(ids.len());

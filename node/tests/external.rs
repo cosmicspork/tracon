@@ -453,6 +453,54 @@ async fn a_retried_submission_answers_with_the_review_it_already_made() {
     );
 }
 
+/// A harness that lifted its client's timeout says so, and its status calls
+/// may hold longer; one that says nothing keeps the default cap (#732).
+#[tokio::test]
+async fn a_harness_that_declares_a_longer_client_timeout_is_told_the_longer_cap() {
+    state::isolate();
+    let (root, wt) = repo_with_worktree("budget");
+    let h = harness_with(with_roots(&root)).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("submit_review", submit_args(&wt)),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err, "{out}");
+    let id = out["review_id"].as_str().unwrap().to_string();
+    let status = |budget: Option<&'static str>| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/mcp/external/work")
+            .header("host", "127.0.0.1:7420")
+            .header("content-type", "application/json");
+        if let Some(budget) = budget {
+            req = req.header("x-tracon-wait-budget", budget);
+        }
+        let body = tool_call("review_status", json!({ "review_id": id, "wait_secs": 0 }));
+        let req = req.body(Body::from(body.to_string())).unwrap();
+        let app = h.operator.clone();
+        async move {
+            let res = app.oneshot(req).await.unwrap();
+            let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let (err, out) = outcome(&serde_json::from_slice(&bytes).unwrap());
+            assert!(!err, "{out}");
+            out["message"].as_str().unwrap_or_default().to_string()
+        }
+    };
+    let declared = status(Some("1140")).await;
+    assert!(declared.contains("capped at 600 seconds"), "{declared}");
+    assert!(!declared.contains("will not help"), "{declared}");
+    for budget in [None, Some("soon")] {
+        let default = status(budget).await;
+        assert!(default.contains("capped at 45 seconds"), "{default}");
+        assert!(default.contains("will not help"), "{default}");
+    }
+}
+
 #[tokio::test]
 async fn a_forge_that_does_not_answer_does_not_hold_up_a_submission() {
     state::isolate();
