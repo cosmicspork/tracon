@@ -521,3 +521,186 @@ async fn a_dockerfile_the_entry_already_names_is_built_without_a_card() {
     assert_eq!(trial["image"], json!(base.image));
     assert_eq!(backend.builds().len(), 2);
 }
+
+/// The local backend, issuing egress grants served by a real per-client
+/// proxy on loopback, as Podman's are by the node.
+struct Granting {
+    grants: tracon::gateway::proxy::Grants,
+    proxy: std::net::SocketAddr,
+}
+
+impl Granting {
+    async fn serving() -> Arc<Self> {
+        let grants = tracon::gateway::proxy::Grants::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        tokio::spawn(tracon::gateway::proxy::serve_granted(
+            listener,
+            tracon::gateway::proxy::Granted::dialling_any_address(grants.clone()),
+        ));
+        Arc::new(Self { grants, proxy })
+    }
+}
+
+#[async_trait]
+impl Backend for Granting {
+    fn kind(&self) -> &'static str {
+        "granting"
+    }
+    async fn setup(&self, cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
+        LocalBackend.setup(cfg, rebuild).await
+    }
+    async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport {
+        LocalBackend.check_all(cfg, deep).await
+    }
+    fn runner(&self, extra: Vec<Mount>) -> Arc<dyn Runner> {
+        LocalBackend.runner(extra)
+    }
+    fn runner_for(&self, harness_id: &str, extra: Vec<Mount>) -> Arc<dyn Runner> {
+        LocalBackend.runner_for(harness_id, extra)
+    }
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        LocalBackend.import_volume(volume, source).await
+    }
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), BoundaryError> {
+        LocalBackend.export_volume(volume, destination).await
+    }
+    async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
+        LocalBackend.clone_volume(source, destination).await
+    }
+    async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+        LocalBackend.remove_volume(volume).await
+    }
+    fn harness_host(&self) -> String {
+        LocalBackend.harness_host()
+    }
+    fn harness_home(&self) -> String {
+        LocalBackend.harness_home()
+    }
+    async fn reconcile(&self, names: &[String]) {
+        LocalBackend.reconcile(names).await
+    }
+    fn egress_grants(&self) -> Option<&tracon::gateway::proxy::Grants> {
+        Some(&self.grants)
+    }
+    fn egress_grant(
+        &self,
+        spec: tracon::gateway::proxy::GrantSpec,
+    ) -> Result<tracon::boundary::EgressGrant, BoundaryError> {
+        let username = spec.client.clone();
+        let token = self
+            .grants
+            .issue(spec)
+            .map_err(|error| BoundaryError::Other(error.to_string()))?;
+        let (grants, revoked) = (self.grants.clone(), token.clone());
+        Ok(tracon::boundary::EgressGrant::new(
+            format!("http://{}", self.proxy),
+            username,
+            token,
+            move || grants.revoke(&revoked),
+        ))
+    }
+}
+
+/// A preparation that asks for a host nobody granted it, then keeps going
+/// as a package manager retrying it does.
+const REFUSED_PREPARATION: &str =
+    "curl -s -x \"$HTTPS_PROXY\" https://refused.example/ >/dev/null; sleep 60";
+
+/// A trial whose preparation was granted nothing still runs under a grant
+/// of its own, so a host it is refused is named while it runs; cancelling
+/// it ends it at once and frees the session for the next trial.
+#[tokio::test]
+async fn a_refused_trial_says_so_while_it_runs_and_can_be_cancelled() {
+    let h = harness_on(Config::default(), Granting::serving().await).await;
+    let _dir = repository_for(&h, "s-refused");
+    let started = tool_as(
+        &h,
+        "s-refused",
+        "repo_setup_try",
+        json!({
+            "prepare": [REFUSED_PREPARATION],
+            "checks": ["true"],
+            "wait_secs": 0,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(started["egress_tried"].as_array().unwrap().is_empty());
+    let mut running = started.clone();
+    for _ in 0..100 {
+        if running.get("refused").is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        running = tool_as(
+            &h,
+            "s-refused",
+            "repo_setup_try",
+            json!({ "trial_id": started["id"], "wait_secs": 0 }),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(running["state"], "running", "{running}");
+    assert_eq!(running["refused"], json!(["refused.example"]), "{running}");
+
+    let cancelled = tool_as(
+        &h,
+        "s-refused",
+        "repo_setup_try",
+        json!({ "trial_id": started["id"], "cancel": true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled["state"], "failed", "{cancelled}");
+    assert_eq!(cancelled["error"], "cancelled", "{cancelled}");
+    assert_eq!(cancelled["refused"], json!(["refused.example"]));
+
+    let next = tool_as(
+        &h,
+        "s-refused",
+        "repo_setup_try",
+        json!({ "checks": ["true"], "wait_secs": 30 }),
+    )
+    .await
+    .unwrap();
+    assert_ne!(next["id"], started["id"], "{next}");
+    assert_eq!(next["state"], "passed", "{next}");
+}
+
+/// A preparation that runs out of time after being refused a host says
+/// which, not just that it timed out.
+#[tokio::test]
+async fn a_trial_that_times_out_after_a_refusal_names_the_refused_host() {
+    let h = harness_on(Config::default(), Granting::serving().await).await;
+    let _dir = repository_for(&h, "s-timeout");
+    let trial = tool_as(
+        &h,
+        "s-timeout",
+        "repo_setup_try",
+        json!({
+            "prepare": [REFUSED_PREPARATION],
+            "checks": ["true"],
+            "timeout_secs": 2,
+            "wait_secs": 30,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(trial["state"], "failed", "{trial}");
+    assert_eq!(trial["refused"], json!(["refused.example"]), "{trial}");
+    let said = trial["steps"][0]["tail"].as_str().unwrap();
+    assert!(
+        said.contains("timed out after 2s; egress refused refused.example, which the repository's egress does not name"),
+        "{said}"
+    );
+}
