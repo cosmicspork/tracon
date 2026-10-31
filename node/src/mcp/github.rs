@@ -224,8 +224,9 @@ pub fn definitions() -> Vec<Value> {
                 "Wait for a GitHub Actions run to move: returns as soon as it or one of its \
                  jobs changes state, when it has completed, or after wait_secs, with the same \
                  run and jobs as run_status with run_id and a `state` token. Pass that token \
-                 back as `since` so a change between calls is not missed. A failed job's log \
-                 is run_logs. {}",
+                 back as `since` so a change between calls is not missed. `until: \"finished\"` \
+                 holds through job moves until the run completes, and `until: \"failure\"` \
+                 until then or a job fails. A failed job's log is run_logs. {}",
                 super::wait::pointer()
             ),
             "inputSchema": {
@@ -236,6 +237,7 @@ pub fn definitions() -> Vec<Value> {
                     "attempt": { "type": "integer", "description": "The attempt run_rerun \
                         started: an earlier attempt's result is not taken for this one's." },
                     "since": { "type": "string", "description": "The `state` an earlier call returned." },
+                    "until": super::wait::until_schema(),
                     "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
                 },
                 "required": ["repo", "run_id"],
@@ -614,25 +616,21 @@ pub async fn call(
             let run = positive(args, "run_id")?;
             let attempt = args.get("attempt").and_then(Value::as_i64).unwrap_or(0);
             let since = args.get("since").and_then(Value::as_str);
+            let wait_until = super::wait::until(args)?;
             let until = tokio::time::Instant::now()
                 + std::time::Duration::from_secs(super::wait::wait_secs(args));
             let mut baseline: Option<String> = since.map(str::to_string);
             loop {
                 let mut now = run_with_jobs(&gh, &base, run).await?;
-                // Until GitHub has started the attempt asked for, the run
-                // still reads as the attempt before it, finished.
-                let started = now["run"]["attempt"].as_i64().unwrap_or(0) >= attempt;
-                let state = run_state_token(&now);
-                let changed = baseline.as_deref().is_some_and(|b| b != state);
-                let done = started && now["run"]["status"] == "completed";
+                let read = wait_read(&now, attempt, baseline.as_deref(), wait_until);
                 let left = until.saturating_duration_since(tokio::time::Instant::now());
-                if (started && changed) || done || left.is_zero() {
-                    now["state"] = Value::from(state);
-                    now["changed"] = Value::from(started && changed);
-                    now["finished"] = Value::from(done);
+                if read.returns || left.is_zero() {
+                    now["state"] = Value::from(read.state);
+                    now["changed"] = Value::from(read.changed);
+                    now["finished"] = Value::from(read.done);
                     return Ok(now);
                 }
-                baseline.get_or_insert(state);
+                baseline.get_or_insert(read.state);
                 tokio::time::sleep(left.min(WAIT_EVERY)).await;
             }
         }
@@ -972,6 +970,40 @@ async fn run_with_jobs(gh: &Client<'_>, base: &str, run: i64) -> Result<Value, S
         "more_jobs": jobs["total_count"].as_u64().unwrap_or(0)
             > jobs["jobs"].as_array().map_or(0, |j| j.len() as u64),
     }))
+}
+
+/// What one read of the run means to `run_wait`, against the state the
+/// caller last saw.
+fn wait_read(
+    run: &Value,
+    attempt: i64,
+    baseline: Option<&str>,
+    until: super::wait::Until,
+) -> super::wait::Read {
+    // Until GitHub has started the attempt asked for, the run still reads
+    // as the attempt before it, finished, and its failed jobs are that
+    // attempt's.
+    let started = run["run"]["attempt"].as_i64().unwrap_or(0) >= attempt;
+    let state = run_state_token(run);
+    let changed = started && baseline.is_some_and(|b| b != state);
+    let done = started && run["run"]["status"] == "completed";
+    let failed = started && job_failed(run);
+    let returns = super::wait::returns(until, changed, baseline.is_none(), done, failed);
+    super::wait::Read {
+        state,
+        changed,
+        done,
+        returns,
+    }
+}
+
+/// Whether a job in the run has failed.
+fn job_failed(run: &Value) -> bool {
+    run["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|j| j["conclusion"] == "failure")
 }
 
 /// What `run_wait` compares: the run's attempt, status and conclusion, and
@@ -1502,5 +1534,78 @@ mod tests {
         assert_eq!(v["passed"], 2);
         assert_eq!(v["failed"], 1);
         assert_eq!(v["pending"], 1);
+    }
+
+    fn run_read(attempt: i64, status: &str, jobs: &[(i64, &str, Option<&str>)]) -> Value {
+        let jobs: Vec<Value> = jobs
+            .iter()
+            .map(|(id, status, conclusion)| json!({ "id": id, "status": status, "conclusion": conclusion }))
+            .collect();
+        json!({ "run": { "attempt": attempt, "status": status }, "jobs": jobs })
+    }
+
+    /// Feeds a scripted run of reads through `run_wait`'s decision, carrying
+    /// the state forward as one call does, and says at which read it returns.
+    fn returns_at(
+        reads: &[Value],
+        attempt: i64,
+        until: super::super::wait::Until,
+    ) -> Option<usize> {
+        let mut baseline: Option<String> = None;
+        for (i, now) in reads.iter().enumerate() {
+            let read = wait_read(now, attempt, baseline.as_deref(), until);
+            if read.returns {
+                return Some(i);
+            }
+            baseline.get_or_insert(read.state);
+        }
+        None
+    }
+
+    #[test]
+    fn a_run_wait_until_finished_or_failure_holds_through_job_moves() {
+        use super::super::wait::Until;
+        let reads = [
+            run_read(
+                1,
+                "in_progress",
+                &[(1, "queued", None), (2, "queued", None)],
+            ),
+            run_read(
+                1,
+                "in_progress",
+                &[(1, "in_progress", None), (2, "queued", None)],
+            ),
+            run_read(
+                1,
+                "in_progress",
+                &[(1, "completed", Some("failure")), (2, "in_progress", None)],
+            ),
+            run_read(
+                1,
+                "completed",
+                &[
+                    (1, "completed", Some("failure")),
+                    (2, "completed", Some("success")),
+                ],
+            ),
+        ];
+        assert_eq!(returns_at(&reads, 0, Until::Change), Some(1));
+        assert_eq!(returns_at(&reads, 0, Until::Finished), Some(3));
+        assert_eq!(returns_at(&reads, 0, Until::Failure), Some(2));
+    }
+
+    #[test]
+    fn a_run_wait_until_failure_does_not_take_the_last_attempts_failure_for_this_ones() {
+        use super::super::wait::Until;
+        let reads = [
+            // GitHub has not begun attempt 2: the run is still attempt 1, failed.
+            run_read(1, "completed", &[(1, "completed", Some("failure"))]),
+            run_read(2, "queued", &[(3, "queued", None)]),
+            run_read(2, "in_progress", &[(3, "in_progress", None)]),
+            run_read(2, "completed", &[(3, "completed", Some("success"))]),
+        ];
+        assert_eq!(returns_at(&reads, 2, Until::Failure), Some(3));
+        assert_eq!(returns_at(&reads, 2, Until::Finished), Some(3));
     }
 }

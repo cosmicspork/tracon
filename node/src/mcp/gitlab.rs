@@ -162,7 +162,9 @@ pub fn definitions() -> Vec<Value> {
                 "Wait for a pipeline to move: returns as soon as it or one of its jobs changes \
                  state, when it has finished, or after wait_secs, with the same status and jobs \
                  as pipeline_status and a `state` token. Pass that token back as `since` so a \
-                 change between calls is not missed. A failed job's log is job_trace. {}",
+                 change between calls is not missed. `until: \"finished\"` holds through job \
+                 moves until the pipeline finishes, and `until: \"failure\"` until then or a job \
+                 fails (one allowed to fail does not count). A failed job's log is job_trace. {}",
                 super::wait::pointer()
             ),
             "inputSchema": {
@@ -171,6 +173,7 @@ pub fn definitions() -> Vec<Value> {
                     "project": { "type": "string", "description": PROJECT },
                     "pipeline_id": { "type": "integer" },
                     "since": { "type": "string", "description": "The `state` an earlier call returned." },
+                    "until": super::wait::until_schema(),
                     "wait_secs": { "type": "integer", "description": "How long to hold, at most 45 (the default)." },
                 },
                 "required": ["project", "pipeline_id"],
@@ -513,22 +516,21 @@ pub async fn call(
                 .filter(|id| *id > 0)
                 .ok_or("pipeline_id is required")?;
             let since = args.get("since").and_then(Value::as_str);
+            let wait_until = super::wait::until(args)?;
             let until = tokio::time::Instant::now()
                 + std::time::Duration::from_secs(super::wait::wait_secs(args));
             let mut baseline: Option<String> = since.map(str::to_string);
             loop {
                 let mut now = pipeline(http, token, &project_url, id).await?;
-                let state = state_token(&now);
-                let changed = baseline.as_deref().is_some_and(|b| b != state);
-                let done = now["status"].as_str().is_some_and(finished);
+                let read = wait_read(&now, baseline.as_deref(), wait_until);
                 let left = until.saturating_duration_since(tokio::time::Instant::now());
-                if changed || done || left.is_zero() {
-                    now["state"] = Value::from(state);
-                    now["changed"] = Value::from(changed);
-                    now["finished"] = Value::from(done);
+                if read.returns || left.is_zero() {
+                    now["state"] = Value::from(read.state);
+                    now["changed"] = Value::from(read.changed);
+                    now["finished"] = Value::from(read.done);
                     return Ok(now);
                 }
-                baseline.get_or_insert(state);
+                baseline.get_or_insert(read.state);
                 tokio::time::sleep(left.min(WAIT_EVERY)).await;
             }
         }
@@ -862,7 +864,10 @@ pub(crate) async fn pipeline(
         .map(|a| {
             a.iter()
                 .map(|j| {
-                    json!({ "id": j["id"], "name": j["name"], "stage": j["stage"], "status": j["status"] })
+                    json!({
+                        "id": j["id"], "name": j["name"], "stage": j["stage"],
+                        "status": j["status"], "allow_failure": j["allow_failure"],
+                    })
                 })
                 .collect()
         })
@@ -886,6 +891,41 @@ pub fn finished(status: &str) -> bool {
         status,
         "success" | "failed" | "canceled" | "skipped" | "manual"
     )
+}
+
+/// What one read of the pipeline means to `pipeline_wait`, against the
+/// state the caller last saw.
+fn wait_read(
+    pipeline: &Value,
+    baseline: Option<&str>,
+    until: super::wait::Until,
+) -> super::wait::Read {
+    let state = state_token(pipeline);
+    let changed = baseline.is_some_and(|b| b != state);
+    let done = pipeline["status"].as_str().is_some_and(finished);
+    let returns = super::wait::returns(
+        until,
+        changed,
+        baseline.is_none(),
+        done,
+        job_failed(pipeline),
+    );
+    super::wait::Read {
+        state,
+        changed,
+        done,
+        returns,
+    }
+}
+
+/// Whether a job in the pipeline has failed in a way that fails it: one
+/// allowed to fail does not count.
+fn job_failed(pipeline: &Value) -> bool {
+    pipeline["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|j| j["status"] == "failed" && j["allow_failure"] != true)
 }
 
 /// What `pipeline_wait` compares: the pipeline's status and each job's.
@@ -1271,5 +1311,97 @@ mod tests {
         }
         let ok = pipeline_variables(Some(&json!({ "N": " 2 " }))).unwrap();
         assert_eq!(ok, vec![json!({ "key": "N", "value": " 2 " })]);
+    }
+
+    /// Feeds a scripted run of pipeline reads through `pipeline_wait`'s
+    /// decision, carrying the state forward as one call does, and says at
+    /// which read it returns.
+    fn returns_at(
+        reads: &[Value],
+        since: Option<&str>,
+        until: super::super::wait::Until,
+    ) -> Option<usize> {
+        let mut baseline = since.map(str::to_string);
+        for (i, now) in reads.iter().enumerate() {
+            let read = wait_read(now, baseline.as_deref(), until);
+            if read.returns {
+                return Some(i);
+            }
+            baseline.get_or_insert(read.state);
+        }
+        None
+    }
+
+    fn pipeline_read(status: &str, jobs: &[(i64, &str, bool)]) -> Value {
+        let jobs: Vec<Value> = jobs
+            .iter()
+            .map(
+                |(id, status, allow)| json!({ "id": id, "status": status, "allow_failure": allow }),
+            )
+            .collect();
+        json!({ "status": status, "jobs": jobs })
+    }
+
+    #[test]
+    fn a_wait_until_finished_holds_through_job_moves_and_a_failure() {
+        use super::super::wait::Until;
+        let reads = [
+            pipeline_read("running", &[(1, "pending", false), (2, "created", false)]),
+            pipeline_read("running", &[(1, "running", false), (2, "created", false)]),
+            pipeline_read("running", &[(1, "failed", false), (2, "pending", false)]),
+            pipeline_read("running", &[(1, "failed", false), (2, "running", false)]),
+            pipeline_read("failed", &[(1, "failed", false), (2, "success", false)]),
+        ];
+        assert_eq!(returns_at(&reads, None, Until::Change), Some(1));
+        assert_eq!(returns_at(&reads, None, Until::Finished), Some(4));
+        assert_eq!(returns_at(&reads, None, Until::Failure), Some(2));
+    }
+
+    #[test]
+    fn a_wait_until_failure_ignores_a_job_allowed_to_fail() {
+        use super::super::wait::Until;
+        let reads = [
+            pipeline_read("running", &[(1, "running", true), (2, "running", false)]),
+            pipeline_read("running", &[(1, "failed", true), (2, "running", false)]),
+            pipeline_read("success", &[(1, "failed", true), (2, "success", false)]),
+        ];
+        assert_eq!(returns_at(&reads, None, Until::Failure), Some(2));
+    }
+
+    #[test]
+    fn a_wait_until_failure_reports_a_failed_job_once_rather_than_on_every_call() {
+        use super::super::wait::Until;
+        let failed = pipeline_read("running", &[(1, "failed", false), (2, "running", false)]);
+        // A first look already sees the failure, and says so at once.
+        assert_eq!(
+            returns_at(std::slice::from_ref(&failed), None, Until::Failure),
+            Some(0)
+        );
+        // Handed that state back, the next call holds while nothing moves.
+        let seen = state_token(&failed);
+        assert_eq!(
+            returns_at(
+                &[failed.clone(), failed.clone()],
+                Some(&seen),
+                Until::Failure
+            ),
+            None
+        );
+        // A failure the caller missed between calls still ends the wait.
+        let before = pipeline_read("running", &[(1, "running", false), (2, "running", false)]);
+        assert_eq!(
+            returns_at(&[failed], Some(&state_token(&before)), Until::Failure),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_wait_until_change_still_returns_on_the_first_move_and_not_on_a_first_look() {
+        use super::super::wait::Until;
+        let still = pipeline_read("running", &[(1, "failed", false)]);
+        assert_eq!(
+            returns_at(&[still.clone(), still], None, Until::Change),
+            None
+        );
     }
 }

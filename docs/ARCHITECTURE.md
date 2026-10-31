@@ -1308,7 +1308,9 @@ follows it again. It is a subscription of its own, so a pipeline outlives the me
 request whose merge triggered it. Following never retries, cancels or plays a job. An
 agent that wants to see it through itself calls `pipeline_wait`, a read that holds up
 to 45 s like `review_status` and returns as soon as the pipeline or a job moves, with a
-`state` token to pass back so a change between calls is not missed. A GitHub Actions run
+`state` token to pass back so a change between calls is not missed; `until: "finished"`
+holds through job moves until the pipeline finishes, and `until: "failure"` until then or
+a job fails, so a long pipeline is not one model turn per job transition. A GitHub Actions run
 the agent reran (`run_rerun`) or started (`run_dispatch`) is followed the same way, under
 the provider `github`: the rerun's result names the attempt it started, the run reads as
 pending until GitHub has begun that attempt (so the last attempt's failure is not taken
