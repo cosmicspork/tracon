@@ -2,7 +2,7 @@
 // A disabled button with no reason is a puzzle; every action that cannot be
 // taken says so beside it instead.
 
-import type { ForgeState, ReviewerView } from './types'
+import type { ForgeState, OwnerDetail, ReviewerView } from './types'
 
 export type VerdictAction = 'approve' | 'revise' | 'reject'
 
@@ -102,7 +102,7 @@ export function publishedLabel(
 
 /** What the review page offers of its reviewer, from what happened to the latest revision. */
 export type ReviewerControl =
-  /** Decided, or another node's review: nothing to start here. */
+  /** Decided, or another node's review not read from it: nothing to start here. */
   | { kind: 'hidden' }
   /** The channel binds no review model, so no reviewer can start. */
   | { kind: 'no_model' }
@@ -119,7 +119,8 @@ export type ReviewerControl =
 
 /**
  * The reviewer control for a review in `state`. `reviewer` is the node's
- * account of the latest revision's reviewer (absent for a mirrored review);
+ * account of the latest revision's reviewer (for a mirrored review, its
+ * owner's, from `ownersReviewer`);
  * `starting` is the node saying one is being started that it has not
  * recorded yet.
  */
@@ -137,6 +138,36 @@ export function reviewerControl(
   if (reviewer.state === 'failed') return { kind: 'retry', reason: reviewer.reason ?? 'the reviewer ended without a verdict' }
   if (reviewer.verdict_revision != null) return { kind: 'stale', revision: reviewer.verdict_revision }
   return { kind: 'start', note: reviewer.reason }
+}
+
+/**
+ * Whose account of the reviewer the review page goes by: this node's for a
+ * review it owns; for one mirrored from `remoteOwner`, the owner's, but only
+ * once read from it, since the owner is the node that starts one.
+ */
+export function ownersReviewer(
+  remoteOwner: string | null,
+  ownerDetail: OwnerDetail | null | undefined,
+  reviewer: ReviewerView | null | undefined,
+): ReviewerView | null {
+  if (remoteOwner && ownerDetail?.state !== 'fetched') return null
+  return reviewer ?? null
+}
+
+/**
+ * Why a mirrored open review offers no reviewer control: its owner, named
+ * `ownerName`, starts the reviewer and could not be read from here. Null for
+ * a review this node owns, one read from its owner, or one decided.
+ */
+export function unreachableReviewer(
+  state: string,
+  remoteOwner: string | null,
+  ownerDetail: OwnerDetail | null | undefined,
+  ownerName: string,
+): string | null {
+  if (!remoteOwner || ownerDetail?.state === 'fetched') return null
+  if (!['new', 'claimed', 'revising'].includes(state)) return null
+  return `Reviewer runs on ${ownerName}; it can't be reached from here right now`
 }
 
 /**

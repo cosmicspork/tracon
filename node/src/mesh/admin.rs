@@ -1,7 +1,8 @@
 //! Administering a node from a peer.
 //!
 //! A node takes admin commands (reading and editing its `node.toml`, signing
-//! its providers in and out) only from the peers its own `[mesh]
+//! its providers in and out, starting a reviewer on its models) only from
+//! the peers its own `[mesh]
 //! admin_peers` names. Membership of a channel, or of the mesh, is not
 //! enough: it says which node asked, not that this node's operator lets that
 //! node run it.
@@ -50,6 +51,7 @@ pub fn is_admin_command(command: &Command) -> bool {
             | Command::ProviderDisconnect { .. }
             | Command::ConfigRead
             | Command::ConfigPatch { .. }
+            | Command::StartReviewer { .. }
     )
 }
 
@@ -57,7 +59,8 @@ fn statement_of(command: &Command) -> Option<&AdminStatement> {
     match command {
         Command::ProviderConnect { statement, .. }
         | Command::ProviderCode { statement, .. }
-        | Command::ProviderDisconnect { statement, .. } => statement.as_ref(),
+        | Command::ProviderDisconnect { statement, .. }
+        | Command::StartReviewer { statement, .. } => statement.as_ref(),
         Command::ConfigPatch { statement, .. } => Some(statement),
         _ => None,
     }
@@ -484,5 +487,33 @@ mod tests {
             not_after_ms: 99,
         };
         assert_eq!(op_hash(&b.node_id(), &command), before);
+    }
+
+    /// Starting a reviewer spends the owner's models, so it is an admin
+    /// command: refused from a peer not named, and from a named one without
+    /// a statement for exactly that start.
+    #[test]
+    fn a_reviewer_start_is_an_admin_command_that_needs_a_statement() {
+        let (a, b, c) = ids();
+        let (store, cfg) = setup(&[&a]);
+        let bi = b.node_id();
+        let none = |_: &str| false;
+        let start = |statement| Command::StartReviewer {
+            review_id: "rv1".into(),
+            revision_id: Some("rev-1".into()),
+            statement,
+        };
+        assert!(is_admin_command(&start(None)));
+
+        let e = admit(&store, &cfg, &bi, &c.node_id(), &start(None), 1, &none).unwrap_err();
+        assert!(e.contains("admin_peers"), "{e}");
+        let e = admit(&store, &cfg, &bi, &a.node_id(), &start(None), 1, &none).unwrap_err();
+        assert!(e.contains("carry the statement"), "{e}");
+
+        let s = signed(&a, &bi, &start(None), 1);
+        let admitted = admit(&store, &cfg, &bi, &a.node_id(), &start(Some(s)), 1, &none)
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted.issuer, a.node_id());
     }
 }
