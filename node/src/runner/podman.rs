@@ -298,6 +298,13 @@ impl RunSpec {
             launch.socket_dir.display()
         ));
         for m in self.extra_mounts.iter().chain(mounts.iter()) {
+            if m.is_local() {
+                // Anonymous, so `--rm` takes it with the container; owned by
+                // the image's user, so the supervisor can write into it.
+                a.push("--mount".into());
+                a.push(format!("type=volume,dst={},U=true", m.target));
+                continue;
+            }
             let mut mount = format!("type=volume,src={},dst={}", m.volume, m.target);
             if !m.sub_path.is_empty() {
                 mount.push_str(",volume-subpath=");

@@ -269,6 +269,65 @@ impl PodmanBackend {
         RunSpec::from_config(&self.cfg, self.selinux)
     }
 
+    /// The node's own store when it keeps `volume` (whatever the setting is
+    /// now, so a tree it kept is still found), or when it is to keep a new
+    /// one of this name.
+    fn files_for(&self, volume: &str) -> Option<crate::runner::sandbox_files::FilesStore> {
+        let store = crate::runner::sandbox_files::FilesStore::for_node();
+        let keeps = store.holds(volume)
+            || (uses_sandbox_files(&self.cfg) && crate::runner::sandbox_files::backs(volume));
+        keeps.then_some(store)
+    }
+
+    /// Copy a staging tree into a volume the node keeps. A check's copy of
+    /// an immutable snapshot is the snapshot itself, sent straight into its
+    /// sandbox; nothing reads a check's changes back.
+    fn files_import(
+        store: &crate::runner::sandbox_files::FilesStore,
+        volume: &str,
+        source: &Path,
+    ) -> Result<(), BoundaryError> {
+        use crate::runner::sandbox_files as files;
+        if files::is_live(volume) {
+            return Err(BoundaryError::Other(format!(
+                "volume {volume} is in use by a running sandbox"
+            )));
+        }
+        let done = match files::is_check(volume) {
+            true => crate::workspace::validate_tree(source)
+                .map_err(files::FilesError::from)
+                .and_then(|()| store.alias(volume, source)),
+            false => store.import(volume, source),
+        };
+        done.map_err(|e| BoundaryError::Other(format!("copy into {volume}: {e}")))
+    }
+
+    /// Export a volume the node keeps: from the sandbox holding it while one
+    /// runs, else the node's copy.
+    async fn files_export(
+        store: &crate::runner::sandbox_files::FilesStore,
+        volume: &str,
+        destination: &Path,
+        checkout: bool,
+    ) -> Result<(), BoundaryError> {
+        let failed = |e: crate::runner::sandbox_files::FilesError| {
+            BoundaryError::Other(format!("copy out of {volume}: {e}"))
+        };
+        match crate::runner::sandbox_files::export_live(volume, destination, checkout).await {
+            Some(exported) => exported.map(|_| ()).map_err(failed)?,
+            None => {
+                let store = store.clone();
+                let (volume, destination) = (volume.to_string(), destination.to_path_buf());
+                tokio::task::spawn_blocking(move || store.export(&volume, &destination, checkout))
+                    .await
+                    .map_err(|e| BoundaryError::Other(e.to_string()))?
+                    .map_err(failed)?
+            }
+        }
+        crate::workspace::validate_tree(destination)
+            .map_err(|e| BoundaryError::Other(e.to_string()))
+    }
+
     /// The runner for `spec`: `podman run` itself, or, with
     /// `[runtime.podman] sandbox_protocol`, a sandbox per command over the
     /// sandbox protocol.
@@ -300,6 +359,26 @@ pub fn uses_sandbox_protocol(cfg: &Config) -> bool {
     true
 }
 
+/// Whether this node keeps workspaces and harness state on each sandbox's
+/// own disk and moves them over the sandbox protocol
+/// (`runner::sandbox_files`). Only over the protocol: without it the setting
+/// is refused, and volumes are mounted as before.
+pub fn uses_sandbox_files(cfg: &Config) -> bool {
+    if !cfg.runtime.podman.sandbox_files || cfg.runtime.kind != crate::config::RuntimeKind::Podman {
+        return false;
+    }
+    if !uses_sandbox_protocol(cfg) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "[runtime.podman] sandbox_files needs sandbox_protocol; mounting volumes as before"
+            )
+        });
+        return false;
+    }
+    true
+}
+
 /// A sandbox per command, made by the Podman provider around `spec`. The
 /// provider takes the boundary; the runner keeps `spec`'s mounts, image and
 /// working directory, and hands image identity and services on to a plain
@@ -311,12 +390,14 @@ pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
     let mut boundary = spec.clone();
     boundary.extra_mounts = Vec::new();
     let provider = crate::provider::podman::PodmanProvider::from_config(cfg, boundary);
-    Arc::new(
-        crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
-            .with_mounts(mounts)
-            .with_workdir(workdir)
-            .with_delegate(Arc::new(PodmanRunner::new(spec))),
-    )
+    let mut runner = crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
+        .with_mounts(mounts)
+        .with_workdir(workdir)
+        .with_delegate(Arc::new(PodmanRunner::new(spec)));
+    if uses_sandbox_files(cfg) {
+        runner = runner.with_files(crate::runner::sandbox_files::FilesStore::for_node());
+    }
+    Arc::new(runner)
 }
 
 #[async_trait]
@@ -395,6 +476,9 @@ impl Backend for PodmanBackend {
     }
 
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
+        if let Some(store) = self.files_for(volume) {
+            return Self::files_import(&store, volume, source);
+        }
         let _images = super::reconcile::images_in_use().await;
         volume_copy_in(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
@@ -406,6 +490,11 @@ impl Backend for PodmanBackend {
     }
 
     async fn import_writable(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
+        // The node's copy carries only whether a file is executable, so a
+        // tree it keeps is writable already.
+        if let Some(store) = self.files_for(volume) {
+            return Self::files_import(&store, volume, source);
+        }
         let _images = super::reconcile::images_in_use().await;
         volume_copy_in(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
@@ -437,6 +526,9 @@ impl Backend for PodmanBackend {
     }
 
     async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
+        if let Some(store) = self.files_for(volume).filter(|s| s.holds(volume)) {
+            return Self::files_export(&store, volume, destination, false).await;
+        }
         let _images = super::reconcile::images_in_use().await;
         volume_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
@@ -452,6 +544,9 @@ impl Backend for PodmanBackend {
         volume: &str,
         destination: &Path,
     ) -> Result<(), BoundaryError> {
+        if let Some(store) = self.files_for(volume).filter(|s| s.holds(volume)) {
+            return Self::files_export(&store, volume, destination, true).await;
+        }
         let _images = super::reconcile::images_in_use().await;
         workspace_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
@@ -496,10 +591,29 @@ impl Backend for PodmanBackend {
             "{{.Name}} {{.CreatedAt.Unix}}",
         ])
         .await?;
-        Ok(parse_volume_list(&out))
+        let mut volumes = parse_volume_list(&out);
+        let kept = crate::runner::sandbox_files::FilesStore::for_node()
+            .list()
+            .map_err(|e| BoundaryError::Other(e.to_string()))?;
+        volumes.extend(kept);
+        volumes.sort_by(|a, b| a.name.cmp(&b.name));
+        volumes.dedup_by(|a, b| a.name == b.name);
+        Ok(volumes)
     }
 
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+        let store = crate::runner::sandbox_files::FilesStore::for_node();
+        if store.holds(volume) {
+            // As Podman refuses to remove a volume a container mounts.
+            if crate::runner::sandbox_files::is_live(volume) {
+                return Err(BoundaryError::Other(format!(
+                    "volume {volume} is in use by a running sandbox"
+                )));
+            }
+            return store
+                .remove(volume)
+                .map_err(|e| BoundaryError::Other(e.to_string()));
+        }
         // Never `--force`: a volume a harness still mounts is refused.
         match podman(&["volume", "rm", volume]).await {
             Ok(_) => Ok(()),
@@ -509,7 +623,8 @@ impl Backend for PodmanBackend {
     }
 
     async fn volume_exists(&self, volume: &str) -> bool {
-        podman(&["volume", "exists", volume]).await.is_ok()
+        crate::runner::sandbox_files::FilesStore::for_node().holds(volume)
+            || podman(&["volume", "exists", volume]).await.is_ok()
     }
 
     /// A reflink where the storage has them, so a prepared tree or a warmed
@@ -518,6 +633,14 @@ impl Backend for PodmanBackend {
     /// its source read-only. A source that does not exist is created empty by
     /// the mount, which is what an empty destination is a copy of.
     async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
+        // A tree the node keeps is copied (or, for a check, named) here; the
+        // check's sandbox is sent it straight from the node's copy.
+        if let Some(store) = self.files_for(source).filter(|s| s.holds(source)) {
+            return store
+                .clone_volume(source, destination)
+                .await
+                .map_err(|e| BoundaryError::Other(format!("copy {source}: {e}")));
+        }
         let _images = super::reconcile::images_in_use().await;
         podman(&[
             "run",
@@ -902,6 +1025,68 @@ mod tests {
         scratch.gateway.harness_listen =
             crate::config::HarnessListen::Unix("/tmp/n1/harness.sock".into());
         assert_eq!(scratch.sandbox_socket_dir(), Path::new("/tmp/n1/sandbox"));
+    }
+
+    /// Files over the protocol are off unless asked, and asked for without
+    /// the protocol they stay off: volumes are mounted as before.
+    #[test]
+    fn files_over_the_protocol_are_off_unless_asked_with_the_protocol() {
+        assert!(!super::uses_sandbox_files(&crate::config::Config::default()));
+        let alone: crate::config::Config =
+            toml::from_str("[runtime.podman]\nsandbox_files = true\n").unwrap();
+        assert!(alone.runtime.podman.sandbox_files);
+        assert!(!super::uses_sandbox_files(&alone));
+        let both: crate::config::Config =
+            toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_files = true\n")
+                .unwrap();
+        assert_eq!(super::uses_sandbox_files(&both), cfg!(target_os = "linux"));
+        let mut kube = both.clone();
+        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        assert!(!super::uses_sandbox_files(&kube));
+    }
+
+    /// Off, a sandbox's mounts are what they were: named volumes the
+    /// provider mounts. Storage of the sandbox's own is an anonymous volume
+    /// owned by the image's user, which `--rm` removes with it.
+    #[test]
+    fn only_a_planned_mount_is_storage_of_the_sandboxs_own() {
+        use crate::runner::podman::{SandboxEntry, SandboxLaunch};
+        use crate::runner::Mount;
+        let launch = SandboxLaunch {
+            bundle: "/b".into(),
+            socket_dir: "/s".into(),
+            pin: "sha256:00".into(),
+            entry: SandboxEntry::Pid1,
+            cpu_millis: None,
+            memory_bytes: None,
+            connect_timeout_ms: 1000,
+            log_file: None,
+        };
+        let spec = super::RunSpec::from_config(&crate::config::Config::default(), false);
+        let mounts = vec![
+            Mount::volume(
+                crate::session::materialize::harness_state_volume(),
+                "/root/.claude",
+                false,
+            ),
+            Mount::volume("tracon-workspace-x", "/work", false),
+        ];
+        let joined = spec
+            .sandbox_args("tracon-h-x", "img", &mounts, &launch, false)
+            .join(" ");
+        assert!(joined.contains("type=volume,src=tracon-harness-state,dst=/root/.claude"));
+        assert!(joined.contains("type=volume,src=tracon-workspace-x,dst=/work"));
+        assert!(!joined.contains("U=true"));
+        let local = spec
+            .sandbox_args(
+                "tracon-h-x",
+                "img",
+                &[Mount::local("/work")],
+                &launch,
+                false,
+            )
+            .join(" ");
+        assert!(local.contains("--mount type=volume,dst=/work,U=true"));
     }
 
     #[test]

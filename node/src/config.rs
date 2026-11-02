@@ -966,6 +966,13 @@ pub struct PodmanRuntime {
     /// Start `tracon-sandbox` under Podman's `--init` rather than as the
     /// container's PID 1.
     pub sandbox_init: bool,
+    /// Keep a sandbox's workspace and harness state on its own disk rather
+    /// than on mounted volumes: the node sends them in when it starts, reads
+    /// the workspace back over the protocol whenever it is exported, and
+    /// takes the session's own state back at each turn end, every
+    /// `runner::sandbox_files::SYNC_EVERY` during a turn, and at exit. Needs
+    /// `sandbox_protocol`.
+    pub sandbox_files: bool,
 }
 
 /// The `[[repo]]` table a running node resolves against, once the operator

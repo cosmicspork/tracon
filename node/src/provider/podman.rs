@@ -377,7 +377,7 @@ impl PodmanProvider {
     async fn ensure_volumes(&self, spec: &CreateSpec<'_>) -> Result<(), ProviderError> {
         let mut seen = std::collections::BTreeSet::new();
         for mount in self.options.spec.extra_mounts.iter().chain(spec.mounts) {
-            if !seen.insert(&mount.volume) {
+            if mount.is_local() || !seen.insert(&mount.volume) {
                 continue;
             }
             self.cli(&["volume", "create", "--ignore", &mount.volume])
@@ -598,7 +598,10 @@ impl SandboxProvider for PodmanProvider {
         let _ = self
             .cli(&["stop", "--time", &timeout, "--ignore", &handle.0])
             .await;
-        let removed = self.cli(&["rm", "--force", "--ignore", &handle.0]).await;
+        // `--volumes`: the sandbox's own storage goes with it.
+        let removed = self
+            .cli(&["rm", "--force", "--volumes", "--ignore", &handle.0])
+            .await;
         let _ = std::fs::remove_file(self.log_file(&handle.0));
         let dir = self.socket_dir(&handle.0);
         match std::fs::remove_dir_all(&dir) {
@@ -992,7 +995,7 @@ mod tests {
             .map(|(a, _)| a.join(" "))
             .collect();
         assert!(
-            calls.contains(&"rm --force --ignore tracon-h-4".to_string()),
+            calls.contains(&"rm --force --volumes --ignore tracon-h-4".to_string()),
             "{calls:?}"
         );
         assert!(!s.provider.socket_dir("tracon-h-4").exists());

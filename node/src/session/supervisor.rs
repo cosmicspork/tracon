@@ -1860,6 +1860,10 @@ impl Supervisor {
         let done = self.self_tx.clone();
         let activity = self.last_activity.clone();
         *activity.lock().unwrap() = tokio::time::Instant::now();
+        // Where its sandbox keeps files on its own disk, what the turn changes
+        // comes back to the node while it runs and when it ends.
+        let container = self.container.clone();
+        crate::runner::sandbox_files::turn_began(&container);
         // The supervisor owns the result: a stalled harness cannot leave a
         // permanently active turn, and a late answer carries this turn id.
         tokio::spawn(async move {
@@ -1918,6 +1922,7 @@ impl Supervisor {
                 Ok(Err(error)) => payload["event_barrier_error"] = json!(error.to_string()),
                 Err(_) => payload["event_barrier_error"] = json!("event barrier timed out"),
             }
+            crate::runner::sandbox_files::turn_ended(&container).await;
             let _ = done
                 .send(Command::TurnDone {
                     turn_id,

@@ -181,6 +181,23 @@ pub fn state_mounts(home: &str, layout: Layout) -> std::io::Result<Vec<Mount>> {
     )])
 }
 
+/// Where in its scratch volume a session keeps its own harness state when
+/// sandboxes keep files on their own disk (`runner::sandbox_files`).
+pub const OWN_STATE: &str = "state";
+
+/// Give a session its own harness state rather than the state volume every
+/// session shares: a sandbox holding a copy of the shared one would hand
+/// every other session's transcripts back with its own. The session's state
+/// lives in its scratch volume, which is its alone, comes back to the node
+/// at each turn end, and is there again for the next launch (a reopening's
+/// `--resume`, a journal's `session/load`).
+pub fn own_state(mounts: &mut [Mount], scratch_volume: &str) {
+    let shared = harness_state_volume();
+    for mount in mounts.iter_mut().filter(|mount| mount.volume == shared) {
+        *mount = Mount::at(scratch_volume, OWN_STATE, mount.target.clone(), false);
+    }
+}
+
 /// A pre-volume credential database is retired rather than copied forward.
 pub fn retire_harness_credentials() -> Option<PathBuf> {
     let db = Config::harness_state_dir().join("agent/agent.db");
