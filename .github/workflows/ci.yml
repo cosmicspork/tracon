@@ -288,11 +288,17 @@ jobs:
   # artefact has to be static. Built on every change rather than at release, so
   # a dependency that cannot build against musl is caught by the PR that adds
   # it — that is how sqlite-vec's missing typedefs were found.
+  #
+  # tracon-sandbox runs inside every sandbox, which may be arm64 (an Apple
+  # Silicon Mac's Podman machine, an arm64 provider), so it is also
+  # cross-built for aarch64 here: clang compiles ring's C for the target and
+  # the toolchain's own rust-lld links against Rust's bundled musl, so no
+  # cross gcc is needed. Then the x86_64 build runs as a container's PID 1.
   musl:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       # The release profile's thin LTO over one codegen unit was nearly all of
       # this job, repeated on every push because the workspace crates are never
@@ -306,20 +312,34 @@ jobs:
       - run: |
           grep -rl dl.google.com /etc/apt/sources.list.d /etc/apt/sources.list 2>/dev/null | xargs -r sudo rm -f
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools clang
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.98.1
-          targets: x86_64-unknown-linux-musl
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: x86_64-unknown-linux-musl
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - run: cargo build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub --bin tracon-agent
+      - run: cargo build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub --bin tracon-agent --bin tracon-sandbox
       - name: assert the binaries are actually static
         run: |
-          for b in tracon tracon-hub tracon-agent; do
+          for b in tracon tracon-hub tracon-agent tracon-sandbox; do
             file target/x86_64-unknown-linux-musl/release/$b
             file target/x86_64-unknown-linux-musl/release/$b | grep -qE "statically linked|static-pie linked"
           done
+      - name: tracon-sandbox for aarch64
+        env:
+          CC_aarch64_unknown_linux_musl: clang
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: |
+          cargo build --release --target aarch64-unknown-linux-musl --bin tracon-sandbox
+          file target/aarch64-unknown-linux-musl/release/tracon-sandbox
+          file target/aarch64-unknown-linux-musl/release/tracon-sandbox | grep -qE "ARM aarch64.*(statically linked|static-pie linked)"
+      # The static binary, as PID 1 of a busybox container with no network,
+      # dialling the test's node over a mounted unix socket.
+      - name: tracon-sandbox as a container's PID 1
+        env:
+          TRACON_SANDBOX_CONTAINER_RUNTIME: docker
+        run: cargo test --release --target x86_64-unknown-linux-musl -p tracon-sandbox --test pid1 -- --nocapture
