@@ -347,6 +347,9 @@ pub fn anchor(host: &str) -> String {
 /// rather than the operator rerunning setup.
 pub const GATEWAY_UNIT: &str = "tracon-gateway.service";
 
+/// The subnet the gateway's proxy admits when it is told no other.
+const DEFAULT_SUBNET: &str = "10.89.0.0/24";
+
 /// The default gateway container, whose unit is [`GATEWAY_UNIT`].
 const DEFAULT_GATEWAY: &str = "tracon-gw";
 
@@ -533,6 +536,12 @@ fn gateway_run_args(cfg: &Config, selinux: bool) -> Result<Vec<String>, Boundary
     ] {
         args.push("-e".into());
         args.push(env);
+    }
+    // Only when it is not the subnet the gateway admits by default: a new
+    // argument would replace every running gateway once for nothing.
+    if cfg.boundary.subnet != DEFAULT_SUBNET {
+        args.push("-e".into());
+        args.push(format!("TRACON_ALLOW_SUBNET={}", cfg.boundary.subnet));
     }
     args.push(cfg.boundary.gateway_image.clone());
     Ok(args)
@@ -821,6 +830,19 @@ mod tests {
         assert_ne!(gateway_spec(&widened), Some(spec.as_str()));
         let labelled = gateway_args(&cfg, true, b"^a$\n").unwrap();
         assert_ne!(gateway_spec(&labelled), Some(spec.as_str()));
+    }
+
+    /// The proxy admits the internal network's own subnet; the default one's
+    /// gateway is started exactly as before there was a choice.
+    #[test]
+    fn the_gateway_admits_the_configured_subnet() {
+        let mut cfg = Config::default();
+        cfg.gateway.harness_listen = HarnessListen::Tcp("127.0.0.1:7421".parse().unwrap());
+        let args = gateway_run_args(&cfg, false).unwrap();
+        assert!(!args.iter().any(|a| a.starts_with("TRACON_ALLOW_SUBNET=")));
+        cfg.boundary.subnet = "10.89.17.0/24".into();
+        let args = gateway_run_args(&cfg, false).unwrap();
+        assert!(args.contains(&"TRACON_ALLOW_SUBNET=10.89.17.0/24".to_string()));
     }
 
     #[test]

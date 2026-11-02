@@ -1193,7 +1193,7 @@ impl HarnessAdapter for ClaudeAdapter {
         let out = runner
             .run_probe(RunnerCommand {
                 argv: vec![Self::BINARY.into(), "--version".into()],
-                name: "claude-version".into(),
+                name: crate::config::resource_name("claude-version"),
                 labels: RunLabels {
                     harness: Some(Self::ID.into()),
                     ..RunLabels::of(RunKind::Probe)

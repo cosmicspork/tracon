@@ -1981,12 +1981,14 @@ one's harness state, gateway, network, images, probes or sockets, and neither no
 `tracon gc` lists the other's volumes.
 
 ```sh
-export TRACON_STATE_DIR=$(mktemp -d) TRACON_CONFIG_DIR=$(mktemp -d) TRACON_LISTEN=127.0.0.1:7520
+# Not under the temp directory: sessions' worktrees go there, and it may not hold the config.
+export TRACON_STATE_DIR=$(mktemp -d -p ~/.cache) TRACON_CONFIG_DIR=$(mktemp -d -p ~/.cache)
+export TRACON_LISTEN=127.0.0.1:7520 TRACON_URL=http://127.0.0.1:7520  # serve, and the CLI's calls
 cat > "$TRACON_CONFIG_DIR/node.toml" <<TOML
 [boundary]
 resource_prefix = "scratch"        # volumes and containers: scratch-harness-state, scratch-h-…
 network = "scratch-int"
-subnet = "10.89.7.0/24"
+subnet = "10.89.7.0/24"            # a network of its own needs a subnet of its own
 gateway_ip = "10.89.7.2"
 gateway_container = "scratch-gw"   # also gives its gateway a user service of its own
 gateway_image = "localhost/scratch-gateway"

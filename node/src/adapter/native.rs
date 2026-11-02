@@ -229,7 +229,7 @@ impl HarnessAdapter for NativeAdapter {
         let out = runner
             .run_probe(RunnerCommand {
                 argv: vec![Self::BINARY.into(), "--version".into()],
-                name: "native-version".into(),
+                name: crate::config::resource_name("native-version"),
                 labels: RunLabels {
                     harness: Some(Self::ID.into()),
                     ..RunLabels::of(RunKind::Probe)
