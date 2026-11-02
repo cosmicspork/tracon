@@ -5,9 +5,9 @@
 //! only `lo`. Its one way out is a unix socket published with
 //! `--publish-socket`, which `container` relays over vsock from a listener
 //! inside the VM to a socket file on the host. The relay runs only that way
-//! round, so `tracon-sandbox` listens (`TRACON_SANDBOX_LISTEN`) and the node
-//! connects in at [`AppleProvider::node_socket`]; TLS, the pin and the token
-//! are as on every other provider. A node listening on the host's vmnet
+//! round, so `tracon-sandbox` listens (`TRACON_SANDBOX_LISTEN`) and
+//! [`SandboxProvider::connect`] connects in at [`AppleProvider::node_socket`];
+//! TLS, the pin and the token are as on every other provider. A node listening on the host's vmnet
 //! address is no alternative: the application firewall or an endpoint
 //! agent's network extension may hold an unsigned binary's traffic there,
 //! and an `--internal` network exposes every host service listening on all
@@ -29,16 +29,18 @@
 //! Isolation is read back from `container inspect`, never from inside.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use tracon_sandbox::node::{SandboxConn, SandboxServer};
 
 use super::capabilities::{
     Capabilities, Dns, ImageIdentityKind, Privilege, Route, RuntimeSocket, Tier,
 };
 use super::{
-    Bootstrap, Capacity, Handle, ImageIdentity, Network, ProviderError, ProviderKind, Resources,
-    SandboxProvider, SnapshotId, Status,
+    Bootstrap, Capacity, CreateSpec, Handle, ImageIdentity, Network, ProviderError, ProviderKind,
+    Resources, SandboxProvider, SnapshotId, Status,
 };
 use crate::runner::Mount;
 
@@ -486,16 +488,22 @@ impl SandboxProvider for AppleProvider {
         ProviderKind::Apple
     }
 
-    /// `bootstrap.node_addr` is not used: the node reaches this provider's
-    /// sandboxes at [`AppleProvider::node_socket`].
-    async fn create(
+    /// The provider names the VM itself; `spec.name` is not used.
+    async fn create(&self, spec: &CreateSpec<'_>) -> Result<Handle, ProviderError> {
+        self.start(spec.image, spec.resources, spec.mounts, spec.bootstrap)
+            .await
+    }
+
+    async fn connect(
         &self,
-        image: &str,
-        resources: &Resources,
-        mounts: &[Mount],
-        bootstrap: &Bootstrap,
-    ) -> Result<Handle, ProviderError> {
-        self.start(image, resources, mounts, bootstrap).await
+        handle: &Handle,
+        server: &SandboxServer,
+        within: Duration,
+    ) -> Result<SandboxConn, ProviderError> {
+        server
+            .connect_to(&self.node_socket(handle), within)
+            .await
+            .map_err(|e| ProviderError::Failed(format!("connect to {}: {e}", handle.0)))
     }
 
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
@@ -709,9 +717,28 @@ mod tests {
         }
     }
 
+    impl AppleProvider {
+        async fn create_with(
+            &self,
+            image: &str,
+            resources: &Resources,
+            mounts: &[Mount],
+            bootstrap: &Bootstrap,
+        ) -> Result<Handle, ProviderError> {
+            self.create(&CreateSpec {
+                name: None,
+                image,
+                resources,
+                mounts,
+                bootstrap,
+            })
+            .await
+        }
+    }
+
     fn bootstrap() -> Bootstrap {
         Bootstrap {
-            node_addr: "unused".into(),
+            run: "run-1".into(),
             cert_pin: "ab".repeat(32),
             token: "run-secret".into(),
         }
@@ -744,7 +771,7 @@ mod tests {
         let work = s._dir.path().join("work");
         let handle = s
             .provider
-            .create(
+            .create_with(
                 "ubuntu:24.04",
                 &Resources {
                     cpu_millis: Some(1500),
@@ -813,7 +840,7 @@ mod tests {
         ] {
             assert!(
                 s.provider
-                    .create(
+                    .create_with(
                         "img",
                         &Resources::default(),
                         std::slice::from_ref(&mount),
@@ -835,7 +862,7 @@ mod tests {
         });
         let error = s
             .provider
-            .create("nope", &Resources::default(), &[], &bootstrap())
+            .create_with("nope", &Resources::default(), &[], &bootstrap())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("no such image"), "{error}");
@@ -849,7 +876,7 @@ mod tests {
         s.provider.options.socket_dir = s._dir.path().join("d".repeat(90));
         let error = s
             .provider
-            .create("img", &Resources::default(), &[], &bootstrap())
+            .create_with("img", &Resources::default(), &[], &bootstrap())
             .await
             .unwrap_err();
         assert!(

@@ -160,6 +160,178 @@ impl RunSpec {
     }
 }
 
+/// How `tracon-sandbox` starts in its container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxEntry {
+    /// As the container's entrypoint, PID 1 of its namespace: it reaps
+    /// orphans and turns the stop signal into its own teardown.
+    Pid1,
+    /// Under Podman's `--init`, as that init's child and the subreaper of
+    /// everything it starts.
+    UnderInit,
+    /// As the command of an image whose own entrypoint must run first (it
+    /// prepares the environment and `exec`s its arguments, typically).
+    UnderImageEntrypoint,
+}
+
+/// What a sandbox container carries beyond a harness container: the bundle
+/// and its supervisor, the directory holding the node's socket, and the
+/// supervisor's bootstrap. The token is not here: it is passed as
+/// `--env TRACON_SANDBOX_TOKEN` with its value in podman's own environment,
+/// as a command's secret variables are.
+#[derive(Debug, Clone)]
+pub struct SandboxLaunch {
+    pub bundle: std::path::PathBuf,
+    /// The node's listener is `node.sock` in here.
+    pub socket_dir: std::path::PathBuf,
+    /// `sha256:<hex>` of the node's certificate.
+    pub pin: String,
+    pub entry: SandboxEntry,
+    pub cpu_millis: Option<u32>,
+    pub memory_bytes: Option<u64>,
+    /// How long the supervisor keeps dialling a node not yet listening.
+    pub connect_timeout_ms: u64,
+    /// Where the container's own output (the supervisor's log) goes, so it
+    /// outlives the container.
+    pub log_file: Option<std::path::PathBuf>,
+}
+
+/// Where the bundle is mounted inside a sandbox.
+pub const BUNDLE_TARGET: &str = "/opt/tracon";
+/// The supervisor, inside the bundle.
+pub const SANDBOX_BIN: &str = "/opt/tracon/bin/tracon-sandbox";
+/// Where the socket directory is mounted inside a sandbox.
+pub const SOCKET_DIR_TARGET: &str = "/run/tracon";
+/// The node's socket, inside.
+pub const SOCKET_INSIDE: &str = "/run/tracon/node.sock";
+/// Marks the containers the sandbox provider made.
+pub const SANDBOX_LABEL: &str = "tracon.provider=podman";
+
+impl RunSpec {
+    /// The argv for a sandbox container: the same gate, network and
+    /// boundary environment as `podman_args`, with `tracon-sandbox` from the
+    /// mounted bundle in place of the harness, which it starts later over
+    /// the protocol. Detached and removed when it exits, as a lost
+    /// connection ends it; its log is written to `launch.log_file`, which the
+    /// provider removes with the sandbox. `create_only` creates it without
+    /// starting it, for the boundary checks' probe.
+    ///
+    /// Never `label=disable`: the bundle is relabelled shared (readable by
+    /// every container, writable through this mount by none), the socket
+    /// directory is labelled by the node, and the named volumes carry
+    /// Podman's own shared label.
+    pub fn sandbox_args(
+        &self,
+        name: &str,
+        image: &str,
+        mounts: &[Mount],
+        launch: &SandboxLaunch,
+        create_only: bool,
+    ) -> Vec<String> {
+        let mut a: Vec<String> = vec![if create_only { "create" } else { "run" }.into()];
+        if !create_only {
+            a.push("--detach".into());
+            a.push("--rm".into());
+        }
+        a.extend([
+            "--name".into(),
+            name.into(),
+            "--label".into(),
+            SANDBOX_LABEL.into(),
+            "--network".into(),
+            self.network.clone(),
+            "--add-host".into(),
+            format!("{}:{}", self.gateway_host, self.gateway_ip),
+            "--cap-drop=ALL".into(),
+            "--security-opt=no-new-privileges".into(),
+        ]);
+        if launch.entry == SandboxEntry::UnderInit {
+            a.push("--init".into());
+        }
+        a.extend([
+            "--stop-signal".into(),
+            "SIGTERM".into(),
+            "--stop-timeout".into(),
+            self.stop_timeout_secs.to_string(),
+        ]);
+        let proxy = format!("http://{}:{}", self.gateway_host, self.proxy_port);
+        let direct = super::no_proxy(&self.gateway_host);
+        let state = format!("{}/{}", self.home, self.state_dir);
+        for (k, v) in [
+            ("HTTPS_PROXY", proxy.as_str()),
+            ("HTTP_PROXY", proxy.as_str()),
+            ("NO_PROXY", direct.as_str()),
+            ("no_proxy", direct.as_str()),
+            (self.state_env, state.as_str()),
+            ("TRACON_SANDBOX_SOCKET", SOCKET_INSIDE),
+            ("TRACON_SANDBOX_PIN", launch.pin.as_str()),
+        ] {
+            if k.is_empty() {
+                continue;
+            }
+            a.push("-e".into());
+            a.push(format!("{k}={v}"));
+        }
+        a.push("-e".into());
+        a.push(format!(
+            "TRACON_SANDBOX_CONNECT_TIMEOUT_MS={}",
+            launch.connect_timeout_ms
+        ));
+        a.push("--env".into());
+        a.push("TRACON_SANDBOX_TOKEN".into());
+        if let Some(log) = &launch.log_file {
+            a.push("--log-driver".into());
+            a.push("k8s-file".into());
+            a.push("--log-opt".into());
+            a.push(format!("path={}", log.display()));
+        }
+        a.push("--mount".into());
+        a.push(format!(
+            "type=bind,src={},dst={BUNDLE_TARGET},ro,relabel=shared",
+            launch.bundle.display()
+        ));
+        // Read-only: the supervisor dials the socket, and nothing inside may
+        // put another in its place.
+        a.push("--mount".into());
+        a.push(format!(
+            "type=bind,src={},dst={SOCKET_DIR_TARGET},ro",
+            launch.socket_dir.display()
+        ));
+        for m in self.extra_mounts.iter().chain(mounts.iter()) {
+            let mut mount = format!("type=volume,src={},dst={}", m.volume, m.target);
+            if !m.sub_path.is_empty() {
+                mount.push_str(",volume-subpath=");
+                mount.push_str(&m.sub_path);
+            }
+            if m.read_only {
+                mount.push_str(",ro");
+            }
+            a.push("--mount".into());
+            a.push(mount);
+        }
+        if let Some(millis) = launch.cpu_millis {
+            a.push("--cpus".into());
+            a.push(format!("{:.3}", f64::from(millis) / 1000.0));
+        }
+        if let Some(bytes) = launch.memory_bytes {
+            a.push("--memory".into());
+            a.push(bytes.to_string());
+        }
+        match launch.entry {
+            SandboxEntry::Pid1 | SandboxEntry::UnderInit => {
+                a.push("--entrypoint".into());
+                a.push(SANDBOX_BIN.into());
+                a.push(image.into());
+            }
+            SandboxEntry::UnderImageEntrypoint => {
+                a.push(image.into());
+                a.push(SANDBOX_BIN.into());
+            }
+        }
+        a
+    }
+}
+
 /// `--env NAME` for each of the command's secret variables, with no value:
 /// podman reads the value from its own environment, which the runner sets on
 /// the `podman` process alone (`secret_env_for`). An argv is world-readable in

@@ -1290,6 +1290,16 @@ suspend_published_after_secs = 1800 # a published session idle this long is susp
 
 [runtime]
 kind = "podman"                     # or "kubernetes", for a pod-hosted node
+# [runtime.podman]
+# sandbox_protocol = false          # run each harness, check and preparation under tracon-sandbox
+                                    # from [sandbox] bundle, with control and stdio over the sandbox
+                                    # protocol instead of podman's pipes; network, volumes and
+                                    # images as before. Linux hosts only
+# sandbox_init = false              # start tracon-sandbox under podman's --init, not as PID 1
+# [sandbox]
+# bundle = "/path/to/<version>/amd64" # the harness bundle (scripts/harness-bundle.sh --sandbox)
+                                    # holding bin/tracon-sandbox, mounted read-only at /opt/tracon;
+                                    # set at the node only
 # [runtime.kubernetes]              # namespace, harness_image,
                                     # state_claim, state_mount, harness_home, uid, gateway_host
 # start_timeout_secs = 900          # (under [runtime.kubernetes]) how long a pod may take to be

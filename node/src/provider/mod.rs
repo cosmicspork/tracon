@@ -8,19 +8,41 @@
 //! session runs on from those reports and what the session's channel and
 //! repository require (`[placement]`, [`requirements`]).
 //!
-//! Today the boundary backends (`crate::boundary`) still run every session.
-//! What this module adds alongside them is the vocabulary: Podman's and
-//! Kubernetes's checks read as capabilities ([`capabilities::from_checks`]),
-//! shown in the checks interface and acted on by nothing yet.
+//! The boundary backends (`crate::boundary`) still run sessions; with
+//! `[runtime.podman] sandbox_protocol` on, Podman's runs them through
+//! [`podman::PodmanProvider`] and `crate::runner::protocol`. Podman's and
+//! Kubernetes's checks also read as capabilities
+//! ([`capabilities::from_checks`]), shown in the checks interface and acted
+//! on by nothing yet.
+//!
+//! # How the node reaches a sandbox
+//!
+//! Every provider ends in one [`SandboxConn`]: the node is the TLS server,
+//! the sandbox proves its run's token, and HTTP/2 runs over that. Which side
+//! opens the carrier underneath is the provider's, so it is behind
+//! [`SandboxProvider::connect`]:
+//!
+//! - Podman: the node binds a socket in a directory mounted read-only into
+//!   the container, and the sandbox dials it.
+//! - Apple: `container` relays a socket only out of the VM, so the sandbox
+//!   listens and the node connects in.
+//! - A provider whose sandboxes dial the node's address over a network (a
+//!   pod, a DigitalOcean session) holds one listener for all of them and
+//!   hands each connection to the handle whose [`Bootstrap::run`] the token
+//!   was issued for.
 
 pub mod apple;
 pub mod capabilities;
 pub mod placement;
+pub mod podman;
 pub mod probe;
 pub mod requirements;
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracon_sandbox::node::{SandboxConn, SandboxServer};
 
 pub use capabilities::{Capabilities, CapabilityReport};
 pub use placement::{place, Candidate, Placement};
@@ -140,13 +162,16 @@ pub struct Resources {
     pub disk_bytes: Option<u64>,
 }
 
-/// How the in-sandbox supervisor finds the node: the one connection out it
-/// makes, to `node_addr`, trusting only the certificate `cert_pin` names and
-/// presenting `token`, which grants that one run's channels.
+/// What the in-sandbox supervisor proves itself with: it trusts only the
+/// certificate `cert_pin` names and presents `token`, which grants that one
+/// run's channels. Where it meets the node is the provider's (see
+/// [`SandboxProvider::connect`]).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bootstrap {
-    pub node_addr: String,
-    /// SHA-256 of the node's certificate, hex.
+    /// The run `token` was issued for, as the node's `SandboxConn::run`
+    /// will name it.
+    pub run: String,
+    /// SHA-256 of the node's certificate, `sha256:<hex>`.
     pub cert_pin: String,
     pub token: String,
 }
@@ -154,11 +179,27 @@ pub struct Bootstrap {
 impl std::fmt::Debug for Bootstrap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Bootstrap")
-            .field("node_addr", &self.node_addr)
+            .field("run", &self.run)
             .field("cert_pin", &self.cert_pin)
             .field("token", &"<redacted>")
             .finish()
     }
+}
+
+/// One sandbox to make.
+#[derive(Debug, Clone, Copy)]
+pub struct CreateSpec<'a> {
+    /// The name the node knows the sandbox by, for a provider that can give
+    /// it one (Podman's container name, which a later `kill` and the
+    /// session's services address it by). `None`, or a provider that names
+    /// its own, leaves it to the provider; the handle says what it got.
+    pub name: Option<&'a str>,
+    /// By digest.
+    pub image: &'a str,
+    pub resources: &'a Resources,
+    /// The session's directories; the harness bundle is the provider's own.
+    pub mounts: &'a [Mount],
+    pub bootstrap: &'a Bootstrap,
 }
 
 /// A sandbox's network, as the provider reports it.
@@ -184,8 +225,9 @@ pub enum ProviderError {
     Failed(String),
 }
 
-/// One way of making sandboxes. Implemented by each provider; nothing calls
-/// it to place a session yet.
+/// One way of making sandboxes. Implemented by each provider; the protocol
+/// runner (`crate::runner::protocol`) drives one, and placement does not
+/// choose between them yet.
 ///
 /// What a provider reports about a sandbox is read back from the provider,
 /// never from inside the sandbox: the harness may have changed anything in
@@ -194,15 +236,19 @@ pub enum ProviderError {
 pub trait SandboxProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
 
-    /// Make and start a sandbox from `image` (by digest), with the harness
-    /// bundle and the session's directories among `mounts`.
-    async fn create(
+    /// Make and start a sandbox, with the harness bundle mounted and its
+    /// supervisor told how to meet the node.
+    async fn create(&self, spec: &CreateSpec<'_>) -> Result<Handle, ProviderError>;
+
+    /// The sandbox's connection, handshake done, within `within` of being
+    /// asked: accepted from it or made to it, whichever way this provider's
+    /// carrier runs. Called once per sandbox, after `create`.
+    async fn connect(
         &self,
-        image: &str,
-        resources: &Resources,
-        mounts: &[Mount],
-        bootstrap: &Bootstrap,
-    ) -> Result<Handle, ProviderError>;
+        handle: &Handle,
+        server: &SandboxServer,
+        within: Duration,
+    ) -> Result<SandboxConn, ProviderError>;
 
     /// Stop it and remove everything the provider made for it. Idempotent.
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError>;
@@ -272,14 +318,16 @@ mod tests {
         fn kind(&self) -> ProviderKind {
             ProviderKind::Podman
         }
-        async fn create(
-            &self,
-            _: &str,
-            _: &Resources,
-            _: &[Mount],
-            _: &Bootstrap,
-        ) -> Result<Handle, ProviderError> {
+        async fn create(&self, _: &CreateSpec<'_>) -> Result<Handle, ProviderError> {
             Ok(Handle("one".into()))
+        }
+        async fn connect(
+            &self,
+            h: &Handle,
+            _: &SandboxServer,
+            _: Duration,
+        ) -> Result<SandboxConn, ProviderError> {
+            Err(ProviderError::NotFound(h.0.clone()))
         }
         async fn destroy(&self, _: &Handle) -> Result<(), ProviderError> {
             Ok(())
@@ -324,7 +372,7 @@ mod tests {
 
     fn bootstrap() -> Bootstrap {
         Bootstrap {
-            node_addr: "node.example:443".into(),
+            run: "run-1".into(),
             cert_pin: "ab".repeat(32),
             token: "run-secret".into(),
         }
@@ -334,7 +382,13 @@ mod tests {
     async fn what_a_provider_does_not_implement_is_refused_by_name() {
         let p = Minimal;
         let h = p
-            .create("img@sha256:aa", &Resources::default(), &[], &bootstrap())
+            .create(&CreateSpec {
+                name: None,
+                image: "img@sha256:aa",
+                resources: &Resources::default(),
+                mounts: &[],
+                bootstrap: &bootstrap(),
+            })
             .await
             .unwrap();
         assert_eq!(p.status(&h).await.unwrap(), Status::Paused);
@@ -394,7 +448,7 @@ mod tests {
     fn the_token_never_reaches_a_log() {
         let shown = format!("{:?}", bootstrap());
         assert!(!shown.contains("run-secret"), "{shown}");
-        assert!(shown.contains("node.example:443"));
+        assert!(shown.contains("run-1"));
     }
 
     #[test]

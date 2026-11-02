@@ -42,26 +42,7 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
         crate::adapter::layout(&cfg.harness.id),
     )
     .unwrap_or_default();
-    match create_probe(&spec).await {
-        Ok(inspect) => {
-            checks.push(check_unprivileged(&inspect));
-            checks.push(check_no_runtime_socket(&inspect));
-            checks.push(check_network(cfg, &inspect).await);
-            let _ = podman(&["rm", "-f", "-i", PROBE]).await;
-        }
-        Err(e) => {
-            for id in [
-                CheckId::HarnessUnprivileged,
-                CheckId::NoRuntimeSocket,
-                CheckId::NetworkIsolated,
-            ] {
-                checks.push(CheckResult::fail(
-                    id,
-                    format!("probe container failed: {e}"),
-                ));
-            }
-        }
-    }
+    checks.extend(probe_checks(cfg, &spec, PROBE).await);
 
     if deep {
         checks.push(check_egress(cfg, selinux).await);
@@ -120,24 +101,126 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
             }
         }
     }
+    if super::uses_sandbox_protocol(cfg) {
+        let bundle = cfg.sandbox.bundle.clone().unwrap_or_default();
+        if !bundle.join("bin/tracon-sandbox").is_file() {
+            return CheckResult::fail(
+                CheckId::Runtime,
+                format!(
+                    "[runtime.podman] sandbox_protocol is on, and [sandbox] bundle {:?} has no bin/tracon-sandbox",
+                    bundle.display().to_string()
+                ),
+            );
+        }
+        return CheckResult::ok(
+            CheckId::Runtime,
+            format!(
+                "podman {version}, rootless, images present; commands run over the sandbox protocol from {}",
+                bundle.display()
+            ),
+        );
+    }
     CheckResult::ok(
         CheckId::Runtime,
         format!("podman {version}, rootless, images present"),
     )
 }
 
+/// The checks a probe container answers (`harness_unprivileged`,
+/// `no_runtime_socket`, `network_isolated`), against one created as
+/// sessions run under `cfg`, named `probe`, and removed afterwards.
+pub async fn probe_checks(cfg: &Config, spec: &RunSpec, probe: &str) -> Vec<CheckResult> {
+    let created = match super::uses_sandbox_protocol(cfg) {
+        true => create_sandbox_probe(cfg, spec, probe).await,
+        false => create_probe(spec, probe).await,
+    };
+    let mut checks = Vec::new();
+    match created {
+        Ok(inspect) => {
+            checks.push(check_unprivileged(&inspect));
+            checks.push(check_no_runtime_socket(&inspect));
+            checks.push(check_network(cfg, &inspect).await);
+            let _ = podman(&["rm", "-f", "-i", probe]).await;
+        }
+        Err(e) => {
+            for id in [
+                CheckId::HarnessUnprivileged,
+                CheckId::NoRuntimeSocket,
+                CheckId::NetworkIsolated,
+            ] {
+                checks.push(CheckResult::fail(
+                    id,
+                    format!("probe container failed: {e}"),
+                ));
+            }
+        }
+    }
+    checks
+}
+
 /// Create (do not start) a container from the real session spec, and return its
 /// inspect JSON.
-async fn create_probe(spec: &RunSpec) -> Result<serde_json::Value, BoundaryError> {
-    let _ = podman(&["rm", "-f", "-i", PROBE]).await;
+async fn create_probe(spec: &RunSpec, probe: &str) -> Result<serde_json::Value, BoundaryError> {
+    let _ = podman(&["rm", "-f", "-i", probe]).await;
     let cmd = RunnerCommand {
         argv: vec!["true".into()],
         ..Default::default()
     };
-    let args = spec.podman_args(PROBE, &cmd, true);
+    let args = spec.podman_args(probe, &cmd, true);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     podman(&argv).await?;
-    let v = podman_json(&["inspect", PROBE, "--format", "json"]).await?;
+    let v = podman_json(&["inspect", probe, "--format", "json"]).await?;
+    Ok(v.get(0).cloned().unwrap_or(serde_json::Value::Null))
+}
+
+/// The probe for a node running its commands over the sandbox protocol: a
+/// sandbox container as the provider makes one, with the bundle and the
+/// socket directory mounted, created and not started.
+async fn create_sandbox_probe(
+    cfg: &Config,
+    spec: &RunSpec,
+    probe: &str,
+) -> Result<serde_json::Value, BoundaryError> {
+    use crate::provider::{Bootstrap, CreateSpec, Resources};
+    let _ = podman(&["rm", "-f", "-i", probe]).await;
+    let mut boundary = spec.clone();
+    let mounts = std::mem::take(&mut boundary.extra_mounts);
+    let provider = crate::provider::podman::PodmanProvider::from_config(cfg, boundary);
+    let pin = crate::runner::protocol::node_server()
+        .map_err(|e| BoundaryError::Other(e.to_string()))?
+        .pin()
+        .to_string();
+    let bootstrap = Bootstrap {
+        run: probe.into(),
+        cert_pin: pin,
+        token: String::new(),
+    };
+    let create = CreateSpec {
+        name: Some(probe),
+        image: &spec.image,
+        resources: &Resources::default(),
+        mounts: &mounts,
+        bootstrap: &bootstrap,
+    };
+    let bundle = &provider.options().bundle;
+    if !bundle.join("bin/tracon-sandbox").is_file() {
+        return Err(BoundaryError::Other(format!(
+            "[sandbox] bundle {} has no bin/tracon-sandbox",
+            bundle.display()
+        )));
+    }
+    provider
+        .prepare_dir(probe)
+        .map_err(|e| BoundaryError::Other(e.to_string()))?;
+    let entry = provider
+        .entry_for(&spec.image)
+        .await
+        .map_err(|e| BoundaryError::Other(e.to_string()))?;
+    let args = provider.run_args(probe, &create, entry, true);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    podman(&argv).await?;
+    let v = podman_json(&["inspect", probe, "--format", "json"]).await?;
+    let _ = std::fs::remove_dir_all(provider.socket_dir(probe));
     Ok(v.get(0).cloned().unwrap_or(serde_json::Value::Null))
 }
 
@@ -333,6 +416,34 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
     // Clear a leftover of the same name from a crashed prior `--deep` run, or
     // this run fails with a name conflict instead of re-probing.
     let _ = podman(&["rm", "-f", "-i", "tracon-egress-probe"]).await;
+    if super::uses_sandbox_protocol(cfg) {
+        // Run as everything else runs: in a sandbox, over the protocol.
+        let runner = super::protocol_runner(cfg, spec);
+        let cmd = RunnerCommand {
+            name: "tracon-egress-probe".into(),
+            ..cmd
+        };
+        return match runner.run_capture(cmd).await {
+            Ok(out) if out.status.success() => {
+                let out = String::from_utf8_lossy(&out.stdout);
+                match out.contains(ANONYMOUS_GRANT) {
+                    true => CheckResult::fail(
+                        CheckId::Egress,
+                        "the per-client egress proxy served a request that presented no grant",
+                    ),
+                    false => egress_verdict(&out, Denial::Rejects),
+                }
+            }
+            Ok(out) => CheckResult::fail(
+                CheckId::Egress,
+                format!(
+                    "probe failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            ),
+            Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
+        };
+    }
     let args = spec.podman_args("tracon-egress-probe", &cmd, false);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     match podman(&argv).await {
