@@ -6,6 +6,7 @@ import {
   changedArguments,
   editProblems,
   grantsAccess,
+  itemSections,
   outcome,
   problemsByField,
   amendsNothing,
@@ -243,4 +244,53 @@ test('a Jira edit diffs the description and the fields it sets against the issue
   // The same labels in another order are no change: Jira answers them sorted.
   expect(issueChanges({ issue: { ...issue, labels: ['etl', 'nead'] } }, { labels: ['nead', 'etl'] })).toEqual([])
   expect(issueChanges({}, { summary: 'x' })).toEqual([])
+})
+
+test('each item of a list argument is a section: its fields in schema order, and its prose to render', () => {
+  const issueSchema: JsonSchema = {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+      issues: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            project: { type: 'string' },
+            type: { type: 'string' },
+            summary: { type: 'string' },
+            description: { type: 'string' },
+            labels: { type: 'array', items: { type: 'string' } },
+            parent: { type: 'string' },
+          },
+        },
+      },
+    },
+  }
+  const set = {
+    issues: [
+      { summary: 'Port the feed', type: 'Epic', project: 'WRK', description: 'h2. Why', labels: [] },
+      { project: 'WRK', type: 'Story', summary: 'Read it', parent: '#0', labels: ['etl', 'feed'], extra: 1 },
+    ],
+  }
+  const sections = itemSections(issueSchema, set, 'issues', ['description'])
+  expect(sections.map((s) => s.index)).toEqual([0, 1])
+  expect(sections[0]!.rows).toEqual([
+    { key: 'project', value: 'WRK' },
+    { key: 'type', value: 'Epic' },
+    { key: 'summary', value: 'Port the feed' },
+  ])
+  expect(sections[0]!.prose).toEqual([{ key: 'description', text: 'h2. Why' }])
+  expect(sections[1]!.rows.map((r) => `${r.key}=${r.value}`)).toEqual([
+    'project=WRK',
+    'type=Story',
+    'summary=Read it',
+    'labels=etl, feed',
+    'parent=#0',
+    'extra=1',
+  ])
+  expect(sections[1]!.prose).toEqual([])
+  // A single-issue call, or a tool that takes no list, has no sections.
+  expect(itemSections(issueSchema, { summary: 'One' }, 'issues', ['description'])).toEqual([])
+  expect(itemSections(issueSchema, set, null, ['description'])).toEqual([])
 })

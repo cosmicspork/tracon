@@ -2368,6 +2368,7 @@ pub async fn get_approval(
         "format": shown.format,
         "prose_fields": shown.prose_fields,
         "locked_fields": shown.locked_fields,
+        "item_list": shown.item_list,
         "lane": a.lane,
         // Someone already had it open, unless that was this same client.
         "claimed_before_ms": before.claimed_ms,

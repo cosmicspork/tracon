@@ -1,8 +1,9 @@
 //! Jira, as narrow tools: search, read an issue, comment on it, edit its
-//! fields, create one, link two, and transition one. A transition moves what the
-//! operator is actually working on, so it runs only with current scoped
-//! authority for that issue; the fields the other writes touch are named
-//! rather than passed through. The API token never leaves the node.
+//! fields, create one or a related set, link two, and transition one. A
+//! transition moves what the operator is actually working on, so it runs
+//! only with current scoped authority for that issue; the fields the other
+//! writes touch are named rather than passed through. The API token never
+//! leaves the node.
 
 use serde_json::{json, Map, Value};
 
@@ -35,6 +36,10 @@ const EDITABLE: &[&str] = &["summary", "description", "priority", "labels", "par
 /// only `issue_update` takes: a held replacement would drop a label someone
 /// added while it waited on the operator.
 const RELATIVE: &[&str] = &["add_labels", "remove_labels"];
+
+/// The most issues one `issue_create` makes: a set an operator can read on
+/// one card.
+const MAX_ISSUES: usize = 10;
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -111,9 +116,14 @@ pub fn definitions() -> Vec<Value> {
             "name": ISSUE_CREATE,
             "description": format!(
                 "Create an issue in a project. Once it is allowed and has run, approval_status's \
-                 result carries its key and a link to it. {}",
+                 result carries its key and a link to it. Pass `issues` to create several under \
+                 one approval; a child's parent may be `#N`. They are created in order and the run \
+                 stops at the first Jira refusal: the result lists what was created, the item that \
+                 failed, and the indexes skipped, so ask again for only those. {}",
                 super::aside::ASKED
             ),
+            // project, type and summary are required of a single issue and
+            // of each item of `issues`; the handler checks which form it got.
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -124,8 +134,29 @@ pub fn definitions() -> Vec<Value> {
                     "priority": { "type": "string" },
                     "labels": { "type": "array", "items": { "type": "string" } },
                     "parent": { "type": "string", "description": "Parent issue key." },
+                    "issues": {
+                        "type": "array",
+                        "description": format!(
+                            "Several issues under one approval, in place of the fields above: \
+                             at most {MAX_ISSUES}, created in order. An item's parent may be \
+                             \"#N\", the earlier item at zero-based index N."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "project": { "type": "string" },
+                                "type": { "type": "string" },
+                                "summary": { "type": "string" },
+                                "description": { "type": "string" },
+                                "priority": { "type": "string" },
+                                "labels": { "type": "array", "items": { "type": "string" } },
+                                "parent": { "type": "string",
+                                            "description": "Parent issue key, or #N for an earlier item." },
+                            },
+                            "required": ["project", "type", "summary"],
+                        },
+                    },
                 },
-                "required": ["project", "type", "summary"],
             },
         }),
         json!({
@@ -319,40 +350,13 @@ pub async fn call(
             Ok(answer(named))
         }
         ISSUE_CREATE => {
-            let project = args
-                .get("project")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|p| {
-                    !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                })
-                .ok_or("project is required (a project key, e.g. WRK)")?;
-            let kind = args
-                .get("type")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .ok_or("type is required (an issue type name, e.g. Task)")?;
-            let mut fields = fields_from(args, ISSUE_CREATE, &["project", "type"])?;
-            if !fields.contains_key("summary") {
-                return Err("summary is required".into());
+            let plan = create_plan(args)?;
+            let create = |fields| create_one(http, &url, email, token, fields);
+            if args.get("issues").is_none() {
+                let only = plan.into_iter().next().ok_or("nothing to create")?;
+                return create(only.fields).await;
             }
-            fields.insert("project".into(), json!({ "key": project }));
-            fields.insert("issuetype".into(), json!({ "name": kind }));
-            let res = http
-                .post(format!("{url}/rest/api/2/issue"))
-                .basic_auth(email, Some(token))
-                .json(&json!({ "fields": fields }))
-                .send()
-                .await
-                .map_err(|e| format!("jira: {e}"))?;
-            let status = res.status();
-            let v: Value = res.json().await.unwrap_or(Value::Null);
-            if !status.is_success() {
-                return Err(refusal("jira refused the new issue", status, &v));
-            }
-            let key = v["key"].as_str().unwrap_or_default().to_string();
-            Ok(json!({ "key": key, "id": v["id"], "url": format!("{url}/browse/{key}") }))
+            create_in_order(plan, create).await
         }
         ISSUE_LINK => {
             let (from, to, asked) = link_args(args)?;
@@ -807,6 +811,182 @@ fn issue_key<'a>(v: Option<&'a Value>, what: &str) -> Result<&'a str, String> {
         .map(str::trim)
         .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
         .ok_or_else(|| format!("{what} is required (e.g. WRK-123)"))
+}
+
+/// One issue an `issue_create` makes, checked before anything is sent: its
+/// fields as Jira takes them, and the earlier item of the same call that is
+/// its parent, when it names one as `#N`.
+#[derive(Debug)]
+pub struct NewIssue {
+    fields: Map<String, Value>,
+    parent_item: Option<usize>,
+}
+
+/// What an `issue_create` call would create, in order, every item checked up
+/// front so that a mistake in the fifth is refused before the first exists.
+/// `issues` is the call's alternative to the single-issue fields, never an
+/// addition to them.
+pub fn create_plan(args: &Value) -> Result<Vec<NewIssue>, String> {
+    let Some(issues) = args.get("issues") else {
+        return Ok(vec![new_issue(args, None)?]);
+    };
+    if let Some(other) = args
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(k, _)| k)
+        .find(|k| *k != "issues")
+    {
+        return Err(format!(
+            "pass either issues or the single-issue fields, not both (got issues and {other})"
+        ));
+    }
+    let items = issues
+        .as_array()
+        .filter(|items| !items.is_empty())
+        .ok_or("issues expects a list of at least one issue")?;
+    if items.len() > MAX_ISSUES {
+        return Err(format!(
+            "issues has {} items; one call creates at most {MAX_ISSUES}",
+            items.len()
+        ));
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            if !item.is_object() {
+                return Err(format!("issues[{i}]: expects an object"));
+            }
+            new_issue(item, Some(i)).map_err(|e| format!("issues[{i}]: {e}"))
+        })
+        .collect()
+}
+
+/// One issue's fields, from the single-issue arguments or from the item at
+/// `index` of `issues`, where alone a parent may be `#N`.
+fn new_issue(args: &Value, index: Option<usize>) -> Result<NewIssue, String> {
+    let project = args
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .ok_or("project is required (a project key, e.g. WRK)")?;
+    let kind = args
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or("type is required (an issue type name, e.g. Task)")?;
+    let reference = args
+        .get("parent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .and_then(|p| p.strip_prefix('#'));
+    let parent_item = match (reference, index) {
+        (None, _) => None,
+        (Some(_), None) => {
+            return Err("parent #N names an item of issues; this call has none".into());
+        }
+        (Some(n), Some(own)) => {
+            let n: usize = n
+                .parse()
+                .map_err(|_| format!("parent #{n} is not an item index"))?;
+            if n == own {
+                return Err(format!(
+                    "parent #{n} is this item; an issue is not its own parent"
+                ));
+            }
+            if n > own {
+                return Err(format!(
+                    "parent #{n} comes later; a parent must be an earlier item, created first"
+                ));
+            }
+            Some(n)
+        }
+    };
+    let mut structural = vec!["project", "type"];
+    if parent_item.is_some() {
+        structural.push("parent");
+    }
+    let mut fields = fields_from(args, ISSUE_CREATE, &structural)?;
+    if !fields.contains_key("summary") {
+        return Err("summary is required".into());
+    }
+    fields.insert("project".into(), json!({ "key": project }));
+    fields.insert("issuetype".into(), json!({ "name": kind }));
+    Ok(NewIssue {
+        fields,
+        parent_item,
+    })
+}
+
+/// Create one issue: its key, id and link, or why Jira refused it.
+async fn create_one(
+    http: &reqwest::Client,
+    url: &str,
+    email: &str,
+    token: &str,
+    fields: Map<String, Value>,
+) -> Result<Value, String> {
+    let res = http
+        .post(format!("{url}/rest/api/2/issue"))
+        .basic_auth(email, Some(token))
+        .json(&json!({ "fields": fields }))
+        .send()
+        .await
+        .map_err(|e| format!("jira: {e}"))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(refusal("jira refused the new issue", status, &v));
+    }
+    let key = v["key"].as_str().unwrap_or_default().to_string();
+    Ok(json!({ "key": key, "id": v["id"], "url": format!("{url}/browse/{key}") }))
+}
+
+/// Create a planned set in order, each `#N` parent made the key item N was
+/// created as, stopping at the first refusal. The result says what exists
+/// now and what does not, so the agent asks again for only what is missing.
+/// A run that created nothing is an error, as a refused single issue is.
+async fn create_in_order<F, Fut>(plan: Vec<NewIssue>, mut create: F) -> Result<Value, String>
+where
+    F: FnMut(Map<String, Value>) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let total = plan.len();
+    let mut keys: Vec<String> = Vec::with_capacity(total);
+    let mut created = Vec::new();
+    for (index, mut issue) in plan.into_iter().enumerate() {
+        if let Some(n) = issue.parent_item {
+            issue
+                .fields
+                .insert("parent".into(), json!({ "key": keys[n] }));
+        }
+        match create(issue.fields).await {
+            Ok(v) => {
+                let key = v["key"].as_str().unwrap_or_default().to_string();
+                created.push(json!({ "index": index, "key": key, "url": v["url"] }));
+                keys.push(key);
+            }
+            Err(error) if created.is_empty() => {
+                let untried = match total - 1 {
+                    0 => String::new(),
+                    1 => "; the other item was not tried".into(),
+                    n => format!("; the other {n} were not tried"),
+                };
+                return Err(format!("issues[0]: {error}; nothing was created{untried}"));
+            }
+            Err(error) => {
+                return Ok(json!({
+                    "created": created,
+                    "failed": { "index": index, "error": error },
+                    "skipped": ((index + 1)..total).collect::<Vec<_>>(),
+                }));
+            }
+        }
+    }
+    Ok(json!({ "created": created, "failed": null, "skipped": [] }))
 }
 
 /// The `fields` object for a write, from the arguments the tool was given.
@@ -1391,5 +1571,164 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("does not set add_labels"), "{e}");
+    }
+
+    fn epic_and_children() -> Value {
+        json!({ "issues": [
+            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
+            { "project": "WRK", "type": "Story", "summary": "Read it", "parent": "#0" },
+            { "project": "WRK", "type": "Story", "summary": "Write it", "parent": "WRK-3",
+              "labels": ["etl"] },
+        ] })
+    }
+
+    #[test]
+    fn a_child_may_name_an_earlier_item_as_its_parent() {
+        let plan = create_plan(&epic_and_children()).unwrap();
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan[1].parent_item, Some(0));
+        assert!(!plan[1].fields.contains_key("parent"));
+        assert_eq!(plan[2].parent_item, None);
+        assert_eq!(plan[2].fields["parent"], json!({ "key": "WRK-3" }));
+        assert_eq!(plan[0].fields["issuetype"], json!({ "name": "Epic" }));
+    }
+
+    #[test]
+    fn a_parent_reference_must_name_an_earlier_item() {
+        let with_parent = |own: usize, parent: &str| {
+            let mut args = epic_and_children();
+            args["issues"][own]["parent"] = json!(parent);
+            create_plan(&args).unwrap_err()
+        };
+        let e = with_parent(1, "#2");
+        assert!(
+            e.starts_with("issues[1]:") && e.contains("comes later"),
+            "{e}"
+        );
+        let e = with_parent(1, "#1");
+        assert!(e.contains("its own parent"), "{e}");
+        let e = with_parent(0, "#x");
+        assert!(e.contains("not an item index"), "{e}");
+        // Outside issues there is no item to name.
+        let e = create_plan(&json!({ "project": "WRK", "type": "Task", "summary": "s",
+                                     "parent": "#0" }))
+        .unwrap_err();
+        assert!(e.contains("this call has none"), "{e}");
+    }
+
+    #[test]
+    fn every_item_is_checked_before_anything_is_created() {
+        let mut args = epic_and_children();
+        args["issues"][2]["status"] = json!("Done");
+        let e = create_plan(&args).unwrap_err();
+        assert!(e.starts_with("issues[2]:") && e.contains("status"), "{e}");
+        let mut args = epic_and_children();
+        args["issues"][1].as_object_mut().unwrap().remove("summary");
+        assert!(create_plan(&args)
+            .unwrap_err()
+            .contains("summary is required"));
+        let e = create_plan(&json!({ "issues": [] })).unwrap_err();
+        assert!(e.contains("at least one"), "{e}");
+        let many = vec![json!({ "project": "WRK", "type": "Task", "summary": "s" }); 11];
+        let e = create_plan(&json!({ "issues": many })).unwrap_err();
+        assert!(e.contains("at most 10"), "{e}");
+    }
+
+    #[test]
+    fn issues_replaces_the_single_issue_fields_rather_than_joining_them() {
+        let mut args = epic_and_children();
+        args["summary"] = json!("Which one?");
+        let e = create_plan(&args).unwrap_err();
+        assert!(e.contains("not both") && e.contains("summary"), "{e}");
+    }
+
+    #[test]
+    fn a_single_issue_is_planned_as_before() {
+        let plan = create_plan(&json!({ "project": "WRK", "type": "Task", "summary": "s",
+                                        "parent": "WRK-1" }))
+        .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].fields["parent"], json!({ "key": "WRK-1" }));
+        assert_eq!(plan[0].fields["project"], json!({ "key": "WRK" }));
+        let e = create_plan(&json!({ "type": "Task", "summary": "s" })).unwrap_err();
+        assert!(e.starts_with("project is required"), "{e}");
+    }
+
+    /// Creates as Jira would, numbering from WRK-10, refusing any summary
+    /// named in `refused`, and keeping every `fields` it was sent.
+    async fn run(
+        plan: Vec<NewIssue>,
+        refused: &[&str],
+    ) -> (Result<Value, String>, Vec<Map<String, Value>>) {
+        let sent = std::cell::RefCell::new(Vec::new());
+        let result = create_in_order(plan, |fields: Map<String, Value>| {
+            let refuse = refused.contains(&fields["summary"].as_str().unwrap_or_default());
+            sent.borrow_mut().push(fields);
+            let key = format!("WRK-{}", 9 + sent.borrow().len());
+            async move {
+                if refuse {
+                    Err("jira refused the new issue (400 Bad Request): []".to_string())
+                } else {
+                    Ok(json!({ "key": key, "id": "1", "url": format!("https://j/browse/{key}") }))
+                }
+            }
+        })
+        .await;
+        (result, sent.into_inner())
+    }
+
+    #[tokio::test]
+    async fn a_child_is_created_under_the_key_its_parent_was_given() {
+        let (result, sent) = run(create_plan(&epic_and_children()).unwrap(), &[]).await;
+        let result = result.unwrap();
+        assert_eq!(sent[1]["parent"], json!({ "key": "WRK-10" }));
+        assert_eq!(sent[2]["parent"], json!({ "key": "WRK-3" }));
+        assert_eq!(
+            result,
+            json!({
+                "created": [
+                    { "index": 0, "key": "WRK-10", "url": "https://j/browse/WRK-10" },
+                    { "index": 1, "key": "WRK-11", "url": "https://j/browse/WRK-11" },
+                    { "index": 2, "key": "WRK-12", "url": "https://j/browse/WRK-12" },
+                ],
+                "failed": null,
+                "skipped": [],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_stops_the_run_and_the_result_says_what_was_not_created() {
+        let (result, sent) = run(create_plan(&epic_and_children()).unwrap(), &["Read it"]).await;
+        let result = result.unwrap();
+        assert_eq!(sent.len(), 2, "nothing is sent after the refusal");
+        assert_eq!(
+            result["created"],
+            json!([
+                { "index": 0, "key": "WRK-10", "url": "https://j/browse/WRK-10" },
+            ])
+        );
+        assert_eq!(result["failed"]["index"], json!(1));
+        assert!(result["failed"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("refused"));
+        assert_eq!(result["skipped"], json!([2]));
+    }
+
+    #[tokio::test]
+    async fn a_run_that_created_nothing_is_an_error() {
+        let (result, sent) = run(
+            create_plan(&epic_and_children()).unwrap(),
+            &["Port the feed"],
+        )
+        .await;
+        let e = result.unwrap_err();
+        assert_eq!(sent.len(), 1);
+        assert!(e.starts_with("issues[0]: jira refused"), "{e}");
+        assert!(
+            e.contains("nothing was created; the other 2 were not tried"),
+            "{e}"
+        );
     }
 }

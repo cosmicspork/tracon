@@ -50,6 +50,10 @@ pub struct Presentation {
     /// The arguments an edit may not change: [`IDENTIFYING`] and the tool's
     /// own.
     pub locked_fields: Vec<&'static str>,
+    /// The argument that, when the call carries it, is a list of items each
+    /// laid out as its own section, with the prose fields read inside each
+    /// item. An edit keeps its items, and what each one acts on.
+    pub item_list: Option<&'static str>,
 }
 
 /// `(tool, format, prose fields, locked fields beyond IDENTIFYING)`.
@@ -123,6 +127,9 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (gitlab::MR_READY, "markdown", &[], &["ready"]),
 ];
 
+/// `(tool, argument)`: the tools that take a list of items in one call.
+const ITEM_LISTS: &[(&str, &str)] = &[(jira::ISSUE_CREATE, "issues")];
+
 pub fn presentation(tool: &str) -> Presentation {
     let entry = PRESENTATIONS.iter().find(|(name, ..)| *name == tool);
     let (format, prose, locked) = entry
@@ -132,6 +139,10 @@ pub fn presentation(tool: &str) -> Presentation {
         format,
         prose_fields: prose.to_vec(),
         locked_fields: IDENTIFYING.iter().chain(locked).copied().collect(),
+        item_list: ITEM_LISTS
+            .iter()
+            .find(|(name, _)| *name == tool)
+            .map(|(_, list)| *list),
     }
 }
 
@@ -197,17 +208,22 @@ pub fn check_edit(tool: &str, original: &Value, edited: &Value) -> Vec<FieldErro
             message: "the arguments must be an object".into(),
         }];
     };
-    let locked = presentation(tool).locked_fields;
+    let shown = presentation(tool);
+    let locked = shown.locked_fields;
+    let fixed = |field: String| FieldError {
+        field,
+        message: "names what this call acts on and cannot be edited; reject the call and ask \
+                  for a new one instead"
+            .into(),
+    };
     let mut errors: Vec<FieldError> = locked
         .iter()
         .filter(|name| original.get(**name) != edited_map.get(**name))
-        .map(|name| FieldError {
-            field: (*name).to_string(),
-            message: "names what this call acts on and cannot be edited; reject the call and \
-                      ask for a new one instead"
-                .into(),
-        })
+        .map(|name| fixed((*name).to_string()))
         .collect();
+    if let Some(list) = shown.item_list {
+        errors.extend(item_list_edit(list, original, edited, &locked, fixed));
+    }
     if let Some(schema) = input_schema(tool) {
         let touched = |field: &str| {
             let top = field.split(['.', '[']).next().unwrap_or(field);
@@ -219,7 +235,63 @@ pub fn check_edit(tool: &str, original: &Value, edited: &Value) -> Vec<FieldErro
                 .filter(|e| touched(&e.field) && !locked.contains(&e.field.as_str())),
         );
     }
+    // What the schema cannot say: how the items of a set fit together. An
+    // edit that breaks a call that fitted is refused here, not when it runs.
+    if tool == jira::ISSUE_CREATE && errors.is_empty() && jira::create_plan(original).is_ok() {
+        if let Err(message) = jira::create_plan(edited) {
+            let field = if edited.get("issues").is_some() {
+                "issues"
+            } else {
+                ""
+            };
+            errors.push(FieldError {
+                field: field.into(),
+                message,
+            });
+        }
+    }
     errors
+}
+
+/// Why an edit of the item list `list` is not the same set: an item added
+/// or dropped shifts every `#N` after it, and an item's own target is
+/// locked as a single call's is. Changing the rest of an item is an edit.
+fn item_list_edit(
+    list: &str,
+    original: &Value,
+    edited: &Value,
+    locked: &[&str],
+    fixed: impl Fn(String) -> FieldError,
+) -> Vec<FieldError> {
+    let (Some(before), Some(after)) = (
+        original.get(list).and_then(Value::as_array),
+        edited.get(list).and_then(Value::as_array),
+    ) else {
+        return Vec::new();
+    };
+    if before.len() != after.len() {
+        return vec![FieldError {
+            field: list.to_string(),
+            message: format!(
+                "has {} items where the call asked for {}; an item cannot be added or dropped \
+                 here, so reject the call and ask for a new one instead",
+                after.len(),
+                before.len()
+            ),
+        }];
+    }
+    before
+        .iter()
+        .zip(after)
+        .enumerate()
+        .flat_map(|(i, (was, now))| {
+            locked
+                .iter()
+                .filter(move |name| was.get(**name) != now.get(**name))
+                .map(move |name| format!("{list}[{i}].{name}"))
+        })
+        .map(fixed)
+        .collect()
 }
 
 /// Every way `value` falls outside `schema`.
@@ -410,12 +482,21 @@ mod tests {
         let schema = input_schema("issue_create").unwrap();
         let ok = json!({ "project": "WRK", "type": "Task", "summary": "s", "labels": ["a"] });
         assert!(validate(schema, &ok).is_empty());
-        let bad = json!({ "project": "WRK", "type": "Task", "labels": ["a", 2], "priority": 3 });
+        let bad = json!({ "issues": [
+            { "project": "WRK", "type": "Task", "labels": ["a", 2], "priority": 3 },
+        ] });
         let fields: Vec<String> = validate(schema, &bad)
             .into_iter()
             .map(|e| e.field)
             .collect();
-        assert_eq!(fields, ["summary", "labels[1]", "priority"]);
+        assert_eq!(
+            fields,
+            [
+                "issues[0].summary",
+                "issues[0].labels[1]",
+                "issues[0].priority"
+            ]
+        );
         let schema = input_schema("doc_search").unwrap();
         let errors = validate(schema, &json!({ "query": "q", "kind": "nope" }));
         assert_eq!(errors[0].field, "kind");
@@ -474,5 +555,67 @@ mod tests {
         let asked = json!({ "project": "g/p", "iid": 8, "ready": false });
         let ready = json!({ "project": "g/p", "iid": 8, "ready": true });
         assert_eq!(check_edit("mr_ready", &asked, &ready)[0].field, "ready");
+    }
+
+    fn issue_set() -> Value {
+        json!({ "issues": [
+            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
+            { "project": "WRK", "type": "Story", "summary": "Read it", "parent": "#0" },
+        ] })
+    }
+
+    #[test]
+    fn each_item_of_an_issue_set_is_checked_against_the_item_schema() {
+        assert_eq!(presentation("issue_create").item_list, Some("issues"));
+        assert_eq!(presentation("issue_update").item_list, None);
+        let asked = issue_set();
+        let mut edited = issue_set();
+        edited["issues"][1]["description"] = json!("h2. Why");
+        assert!(check_edit("issue_create", &asked, &edited).is_empty());
+        edited["issues"][1]["labels"] = json!(["a", 2]);
+        edited["issues"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("summary");
+        let fields: Vec<String> = check_edit("issue_create", &asked, &edited)
+            .into_iter()
+            .map(|e| e.field)
+            .collect();
+        assert_eq!(fields, ["issues[0].summary", "issues[1].labels[1]"]);
+    }
+
+    #[test]
+    fn an_edit_keeps_the_items_of_a_set_and_what_each_acts_on() {
+        let asked = issue_set();
+        let mut moved = issue_set();
+        moved["issues"][1]["project"] = json!("OPS");
+        let errors = check_edit("issue_create", &asked, &moved);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].field, "issues[1].project");
+        let mut dropped = issue_set();
+        dropped["issues"].as_array_mut().unwrap().pop();
+        let errors = check_edit("issue_create", &asked, &dropped);
+        assert_eq!(errors[0].field, "issues");
+        assert!(errors[0].message.contains("added or dropped"), "{errors:?}");
+    }
+
+    #[test]
+    fn an_edit_that_breaks_how_the_set_fits_together_is_refused() {
+        let asked = issue_set();
+        let mut forward = issue_set();
+        forward["issues"][0]["parent"] = json!("#1");
+        let errors = check_edit("issue_create", &asked, &forward);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].field, "issues");
+        assert!(errors[0].message.contains("comes later"), "{errors:?}");
+        // A single issue whose summary the operator clears is refused too,
+        // though the schema cannot require it of both forms.
+        let single = json!({ "project": "WRK", "type": "Task", "summary": "s" });
+        let cleared = json!({ "project": "WRK", "type": "Task" });
+        let errors = check_edit("issue_create", &single, &cleared);
+        assert!(
+            errors[0].message.contains("summary is required"),
+            "{errors:?}"
+        );
     }
 }

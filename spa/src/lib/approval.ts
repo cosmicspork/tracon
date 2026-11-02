@@ -51,6 +51,12 @@ export interface ApprovalDetails {
   format: string
   prose_fields: string[]
   locked_fields: string[]
+  /**
+   * The argument that, when given, is a list of items each shown as its own
+   * section, with the prose fields read inside each item; null for a tool
+   * that takes no list.
+   */
+  item_list?: string | null
   lane: string | null
   /** When an operator last had it open before this load, or null. */
   claimed_before_ms: number | null
@@ -222,6 +228,54 @@ export function issueChanges(
     .filter((key) => key in args && args[key] !== null)
     .map((key) => ({ key, before: shown(issue[key]), after: shown(args[key]) }))
     .filter((c) => c.before !== c.after)
+}
+
+/** One item of a list argument, as the page shows it. */
+export interface ItemSection {
+  index: number
+  /** Every other field with a value, in the item schema's order, as text. */
+  rows: { key: string; value: string }[]
+  /** The prose fields with text, to render as documents. */
+  prose: { key: string; text: string }[]
+}
+
+/**
+ * The items of the list argument `list` in `args`, each as its own section,
+ * or [] when the call does not carry one. The page shows the set as it
+ * would run; the list itself is edited as JSON.
+ */
+export function itemSections(
+  schema: JsonSchema,
+  args: Record<string, unknown>,
+  list: string | null | undefined,
+  prose: readonly string[],
+): ItemSection[] {
+  const items = list ? args[list] : undefined
+  if (!Array.isArray(items)) return []
+  const order = Object.keys(schema.properties?.[list!]?.items?.properties ?? {})
+  return items.map((item, index) => {
+    const fields = asArguments(item)
+    const keys = [...order.filter((k) => k in fields), ...Object.keys(fields).filter((k) => !order.includes(k))]
+    const shown = (v: unknown) => v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length)
+    return {
+      index,
+      rows: keys
+        .filter((k) => !prose.includes(k) && shown(fields[k]))
+        .map((k) => {
+          const v = fields[k]
+          const value =
+            typeof v === 'string'
+              ? v
+              : Array.isArray(v) && v.every((x) => typeof x === 'string')
+                ? v.join(', ')
+                : JSON.stringify(v)
+          return { key: k, value }
+        }),
+      prose: prose
+        .filter((k) => typeof fields[k] === 'string' && fields[k] !== '')
+        .map((k) => ({ key: k, text: fields[k] as string })),
+    }
+  })
 }
 
 /** A held `memory_amend` whose memory is gone or no longer live: Allow would fail. */

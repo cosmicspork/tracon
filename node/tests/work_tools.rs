@@ -47,11 +47,11 @@ async fn stub(
         return (axum::http::StatusCode::NO_CONTENT, Json(Value::Null));
     }
     // An issue whose labels are read before a removal is sent.
-    if path == "/rest/api/2/issue/WRK-3" {
+    if path == "/rest/api/2/issue/WRK-4" {
         return match method.as_str() {
             "GET" => (
                 axum::http::StatusCode::OK,
-                Json(json!({ "key": "WRK-3", "fields": { "labels": ["Stale", "etl"] } })),
+                Json(json!({ "key": "WRK-4", "fields": { "labels": ["Stale", "etl"] } })),
             ),
             _ => (axum::http::StatusCode::NO_CONTENT, Json(Value::Null)),
         };
@@ -62,10 +62,24 @@ async fn stub(
             Json(json!({ "errorMessages": [], "errors": { "priority": "Specify a valid value" } })),
         );
     }
+    // New issues are numbered from WRK-9 in the order they arrive; one
+    // titled "Refused" is turned away as Jira turns away a bad field.
     if path == "/rest/api/2/issue" && method == "POST" {
+        let bodies = bodies.0.lock().unwrap();
+        let (_, _, sent) = bodies.last().unwrap();
+        if sent["fields"]["summary"] == "Refused" {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "errorMessages": [], "errors": { "summary": "Not this one" } })),
+            );
+        }
+        let n = bodies
+            .iter()
+            .filter(|(m, p, _)| m == "POST" && p == "/rest/api/2/issue")
+            .count();
         return (
             axum::http::StatusCode::CREATED,
-            Json(json!({ "id": "1042", "key": "WRK-9" })),
+            Json(json!({ "id": format!("{}", 1041 + n), "key": format!("WRK-{}", 8 + n) })),
         );
     }
     if path == "/rest/api/2/issueLinkType" {
@@ -699,7 +713,7 @@ async fn a_label_removal_matches_the_issues_spelling_and_reports_one_it_lacks() 
         &t,
         &c,
         "issue_update",
-        json!({ "key": "WRK-3", "remove_labels": ["stale", "gone"] }),
+        json!({ "key": "WRK-4", "remove_labels": ["stale", "gone"] }),
     )
     .await;
     assert!(!err, "{v}");
@@ -716,7 +730,7 @@ async fn a_label_removal_matches_the_issues_spelling_and_reports_one_it_lacks() 
         &t,
         &c,
         "issue_update",
-        json!({ "key": "WRK-3", "remove_labels": ["gone"] }),
+        json!({ "key": "WRK-4", "remove_labels": ["gone"] }),
     )
     .await;
     assert!(!err, "{v}");
@@ -877,6 +891,75 @@ async fn an_unknown_link_type_is_refused_with_the_known_ones_before_asking() {
     assert!(v.as_str().unwrap().contains("approval"), "{v}");
     // Only the link types were read, once, and nothing was linked.
     assert_eq!(paths(&seen), vec!["GET /rest/api/2/issueLinkType"]);
+}
+
+#[tokio::test]
+async fn a_set_of_issues_is_created_in_order_under_the_parents_it_names() {
+    state::isolate();
+    let (mut t, _, bodies, base) = rig_with_bodies().await;
+    t.policy = allowing(r#""issue_create""#);
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "issue_create",
+        json!({ "issues": [
+            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
+            { "project": "WRK", "type": "Story", "summary": "Read it", "parent": "#0" },
+            { "project": "WRK", "type": "Story", "summary": "Refused", "parent": "#0" },
+            { "project": "WRK", "type": "Story", "summary": "Write it", "parent": "#1" },
+        ] }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(
+        v["created"],
+        json!([
+            { "index": 0, "key": "WRK-9", "url": format!("{base}/browse/WRK-9") },
+            { "index": 1, "key": "WRK-10", "url": format!("{base}/browse/WRK-10") },
+        ])
+    );
+    assert_eq!(v["failed"]["index"], 2);
+    assert!(
+        v["failed"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Not this one"),
+        "{v}"
+    );
+    assert_eq!(v["skipped"], json!([3]));
+
+    let bodies = bodies.0.lock().unwrap().clone();
+    let posted: Vec<&Value> = bodies
+        .iter()
+        .filter(|(m, p, _)| m == "POST" && p == "/rest/api/2/issue")
+        .map(|(_, _, b)| b)
+        .collect();
+    assert_eq!(posted.len(), 3, "nothing is sent after a refusal");
+    assert!(posted[0]["fields"].get("parent").is_none());
+    assert_eq!(posted[1]["fields"]["parent"], json!({ "key": "WRK-9" }));
+}
+
+#[tokio::test]
+async fn a_set_that_names_a_later_parent_is_refused_before_it_is_asked() {
+    state::isolate();
+    let (t, seen, _, _) = rig_with_bodies().await;
+    let (err, v) = call(
+        &t,
+        &ctx("work", "n1"),
+        "issue_create",
+        json!({ "issues": [
+            { "project": "WRK", "type": "Story", "summary": "Read it", "parent": "#1" },
+            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
+        ] }),
+    )
+    .await;
+    assert!(err, "{v}");
+    let text = v.as_str().unwrap_or_default();
+    assert!(
+        text.contains("issues[0]") && text.contains("comes later"),
+        "{v}"
+    );
+    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached Jira");
 }
 
 fn paths(seen: &Seen) -> Vec<String> {
