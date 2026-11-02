@@ -13,10 +13,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tracon_sandbox::node::{SandboxConn, SandboxServer, ServerOptions};
+use tracon_sandbox::node::{SandboxConn, SandboxServer, ServerOptions, Tunnel};
 use tracon_sandbox::protocol::{ExitStatus, SpawnSpec};
 use tracon_sandbox::tls::NodeIdentity;
 
+use super::tunnels::TunnelSpec;
 use super::{Mount, Runner, RunnerCommand, RunnerError, Sidecar, Spawned};
 use crate::provider::{Bootstrap, CreateSpec, Handle, Resources, SandboxProvider};
 use crate::telemetry::{run_kind, telemetry};
@@ -74,6 +75,8 @@ pub struct ProtocolRunner {
     /// Where the volumes it sends over the files channel are kept, rather
     /// than mounted (`sandbox_files`).
     files: Option<super::sandbox_files::FilesStore>,
+    /// Opened on every sandbox's connection before its command starts.
+    tunnels: Vec<TunnelSpec>,
 }
 
 impl ProtocolRunner {
@@ -87,6 +90,7 @@ impl ProtocolRunner {
             connect_within: CONNECT_WITHIN,
             delegate: None,
             files: None,
+            tunnels: Vec::new(),
         }
     }
 
@@ -94,6 +98,13 @@ impl ProtocolRunner {
     /// mounting them.
     pub fn with_files(mut self, store: super::sandbox_files::FilesStore) -> Self {
         self.files = Some(store);
+        self
+    }
+
+    /// Open `tunnels` on each sandbox's connection before its command
+    /// starts, and close them with it.
+    pub fn with_tunnels(mut self, tunnels: Vec<TunnelSpec>) -> Self {
+        self.tunnels = tunnels;
         self
     }
 
@@ -193,6 +204,7 @@ impl ProtocolRunner {
             run,
             conn: None,
             files: None,
+            tunnels: Vec::new(),
             armed: true,
         };
         running()
@@ -228,6 +240,13 @@ impl ProtocolRunner {
                         "send files to sandbox {name}: {error}"
                     )));
                 }
+            }
+        }
+        match super::tunnels::open(&conn, &self.tunnels).await {
+            Ok(tunnels) => teardown.tunnels = tunnels,
+            Err(error) => {
+                teardown.finish().await;
+                return Err(RunnerError::Other(format!("sandbox {name}: {error}")));
             }
         }
         let workdir = cmd.workdir.clone().unwrap_or_else(|| self.workdir.clone());
@@ -281,12 +300,16 @@ struct Teardown {
     run: String,
     conn: Option<SandboxConn>,
     files: Option<super::sandbox_files::Attached>,
+    /// Kept open for as long as the sandbox is; dropping one stops it
+    /// taking connections.
+    tunnels: Vec<Tunnel>,
     armed: bool,
 }
 
 impl Teardown {
     async fn finish(mut self) {
         self.armed = false;
+        let _tunnels = std::mem::take(&mut self.tunnels);
         teardown(
             self.provider.clone(),
             self.server.clone(),
@@ -308,6 +331,7 @@ impl Drop for Teardown {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        drop(std::mem::take(&mut self.tunnels));
         runtime.spawn(teardown(
             self.provider.clone(),
             self.server.clone(),

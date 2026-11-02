@@ -15,9 +15,12 @@
 //! supervisor stops listening after one connection, where a node listener
 //! can take the supervisor's connection again.
 //!
-//! **Network.** Unchanged from a harness container: the boundary's internal
-//! network, the gateway its only peer, the same proxy environment. Only
-//! control and stdio move to the protocol.
+//! **Network.** By default unchanged from a harness container: the
+//! boundary's internal network, the gateway its only peer, the same proxy
+//! environment. With `sandbox_tunnels` (`RunSpec::node_only`) the sandbox
+//! has no network at all (`--network none`): the socket is its only route,
+//! and the gateway's name is its loopback, where the runner's tunnels to the
+//! node listen.
 //!
 //! **Bundle.** Mounted read-only at `/opt/tracon` and relabelled shared, never
 //! with `label=disable`.
@@ -457,11 +460,41 @@ fn breaches(c: &serde_json::Value, bundle: &Path, selinux: bool) -> Vec<String> 
     found
 }
 
+/// Host paths bind-mounted into a sandbox other than the bundle and its
+/// socket directory: with no network, the socket is meant to be the only
+/// thing of the host's it can reach, and a bind mount is a way round that.
+/// Named volumes are the sandbox's own.
+pub fn other_binds(c: &serde_json::Value) -> Vec<String> {
+    c["Mounts"]
+        .as_array()
+        .map(|mounts| {
+            mounts
+                .iter()
+                .filter(|m| m["Type"].as_str() == Some("bind"))
+                .filter_map(|m| m["Destination"].as_str())
+                .filter(|d| *d != BUNDLE_TARGET && *d != SOCKET_DIR_TARGET)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn networks(c: &serde_json::Value) -> Vec<String> {
     c["NetworkSettings"]["Networks"]
         .as_object()
         .map(|o| o.keys().cloned().collect())
         .unwrap_or_default()
+}
+
+/// Whether a node-only sandbox has no network: Podman's `none`, and no
+/// interface beside it. Nothing then resolves names either.
+fn node_only_route(c: &serde_json::Value) -> Route {
+    let mode = c["HostConfig"]["NetworkMode"].as_str().unwrap_or("");
+    let attached = networks(c);
+    match mode == "none" && attached.iter().all(|n| n == "none") {
+        true => Route::NodeOnly,
+        false => Route::Unverified,
+    }
 }
 
 /// Whether the sandbox's one network is the boundary's internal one, and
@@ -650,6 +683,20 @@ impl SandboxProvider for PodmanProvider {
 
     async fn network(&self, handle: &Handle) -> Result<Network, ProviderError> {
         let c = self.inspect(handle).await?;
+        let socket = format!(
+            "unix:{}",
+            self.socket_dir(&handle.0).join(SOCKET_NAME).display()
+        );
+        if self.options.spec.node_only {
+            let mut destinations = vec![socket];
+            if node_only_route(&c) == Route::Unverified {
+                destinations.extend(networks(&c).into_iter().map(|n| format!("network:{n}")));
+            }
+            return Ok(Network {
+                destinations,
+                dns: Dns::None,
+            });
+        }
         let attached = networks(&c);
         let network = self.network_inspect().await?;
         let (_, dns) = route_and_dns(&attached, &self.options.spec.network, &network);
@@ -672,16 +719,28 @@ impl SandboxProvider for PodmanProvider {
                 handle.0
             )));
         }
-        let found = breaches(
+        let mut found = breaches(
             &c,
             &self.options.bundle,
             tracon_sandbox::carrier::selinux_enabled(),
         );
+        if self.options.spec.node_only {
+            found.extend(
+                other_binds(&c)
+                    .into_iter()
+                    .map(|d| format!("a host path is bind-mounted at {d}")),
+            );
+        }
         if !found.is_empty() {
             return Err(ProviderError::Failed(found.join("; ")));
         }
-        let network = self.network_inspect().await?;
-        let (route, dns) = route_and_dns(&networks(&c), &self.options.spec.network, &network);
+        let (route, dns) = match self.options.spec.node_only {
+            true => (node_only_route(&c), Dns::None),
+            false => {
+                let network = self.network_inspect().await?;
+                route_and_dns(&networks(&c), &self.options.spec.network, &network)
+            }
+        };
         Ok(Capabilities {
             route,
             dns,
@@ -1017,9 +1076,9 @@ mod tests {
             "Config": {"Labels": {"tracon.provider": "podman"}, "Annotations": {}},
             "HostConfig": {"Privileged": false, "CapAdd": [], "SecurityOpt": ["no-new-privileges"]},
             "Mounts": [
-                {"Source": s.provider.options.bundle, "Destination": "/opt/tracon", "RW": false},
-                {"Source": s.provider.socket_dir("tracon-h-1"), "Destination": "/run/tracon", "RW": false},
-                {"Source": "/var/lib/vol", "Destination": "/work", "RW": true},
+                {"Type": "bind", "Source": s.provider.options.bundle, "Destination": "/opt/tracon", "RW": false},
+                {"Type": "bind", "Source": s.provider.socket_dir("tracon-h-1"), "Destination": "/run/tracon", "RW": false},
+                {"Type": "volume", "Source": "/var/lib/vol", "Destination": "/work", "RW": true},
             ],
             "NetworkSettings": {"Networks": {"tracon-int": {"IPAddress": "10.89.0.5"}}},
             "State": {"Status": "running", "ExitCode": 0},
@@ -1100,6 +1159,67 @@ mod tests {
             let error = s.provider.verify_isolation(&handle).await.unwrap_err();
             assert!(error.to_string().contains(expect), "{pointer}: {error}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_node_only_sandbox_has_no_network_and_the_gateway_is_its_loopback() {
+        let mut s = setup(Fake::default());
+        s.provider.options.spec.node_only = true;
+        create(&s, "tracon-h-7", &[]).await.unwrap();
+        let line = run_call(&s).0.join(" ");
+        assert!(
+            line.contains("--network none --add-host tracon-gw:127.0.0.1 --cap-drop=ALL"),
+            "{line}"
+        );
+        assert!(!line.contains("tracon-int"), "{line}");
+        // The harness still finds the proxy where it always has.
+        assert!(
+            line.contains("-e HTTPS_PROXY=http://tracon-gw:8888"),
+            "{line}"
+        );
+
+        // Read back: Podman's `none`, so node-only with no resolver, without
+        // asking after a network that need not exist.
+        let mut doc = inspected(&s);
+        doc[0]["HostConfig"]["NetworkMode"] = serde_json::json!("none");
+        doc[0]["NetworkSettings"]["Networks"] = serde_json::json!({"none": {"IPAddress": ""}});
+        *s.fake.inspect.lock().unwrap() = Some(doc.to_string());
+        let handle = Handle("tracon-h-1".into());
+        let caps = s.provider.verify_isolation(&handle).await.unwrap();
+        assert_eq!((caps.route, caps.dns), (Route::NodeOnly, Dns::None));
+        let network = s.provider.network(&handle).await.unwrap();
+        assert_eq!(network.destinations.len(), 1, "{:?}", network.destinations);
+        assert!(network.destinations[0].starts_with("unix:"));
+        assert!(!s
+            .fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(a, _)| a[0] == "network"));
+
+        // Attached to a network after all: not node-only.
+        let mut doc = inspected(&s);
+        doc[0]["HostConfig"]["NetworkMode"] = serde_json::json!("bridge");
+        *s.fake.inspect.lock().unwrap() = Some(doc.to_string());
+        assert_eq!(
+            s.provider.verify_isolation(&handle).await.unwrap().route,
+            Route::Unverified
+        );
+
+        // A host path bind-mounted beside the socket is a way round it.
+        let mut doc = inspected(&s);
+        doc[0]["HostConfig"]["NetworkMode"] = serde_json::json!("none");
+        doc[0]["Mounts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"Type": "bind", "Source": "/home", "Destination": "/home", "RW": true}));
+        *s.fake.inspect.lock().unwrap() = Some(doc.to_string());
+        let error = s.provider.verify_isolation(&handle).await.unwrap_err();
+        assert!(
+            error.to_string().contains("bind-mounted at /home"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

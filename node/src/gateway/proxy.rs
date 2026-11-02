@@ -112,19 +112,50 @@ pub async fn run_refusing(
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
-        let proxied = proxied.clone();
-        tokio::spawn(async move {
-            let io = TokioIo::new(stream);
-            let svc = service_fn(move |req| handle(req, peer, proxied.clone()));
-            if let Err(e) = http1::Builder::new()
-                .serve_connection(io, svc)
-                .with_upgrades()
-                .await
-            {
-                tracing::debug!(%peer, error = %e, "proxy connection ended");
-            }
-        });
+        spawn_proxied(TokioIo::new(stream), peer.to_string(), proxied.clone());
     }
+}
+
+/// The allowlist proxy on a Unix socket: how a sandbox whose only route is
+/// the node reaches it, through a tunnel, where the gateway container's
+/// tinyproxy would otherwise have answered. The same contract, and what it
+/// never dials is `refusal`, as the pod-hosted node's.
+#[cfg(unix)]
+pub async fn run_unix_refusing(
+    listener: tokio::net::UnixListener,
+    allow: Allowlist,
+    refusal: Refusal,
+) {
+    let proxied = Proxied {
+        allow,
+        refusal,
+        resolve: system_resolver(),
+    };
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
+        spawn_proxied(TokioIo::new(stream), "tunnel".into(), proxied.clone());
+    }
+}
+
+fn spawn_proxied<I>(io: I, peer: String, proxied: Proxied)
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let svc = {
+            let peer = peer.clone();
+            service_fn(move |req| handle(req, peer.clone(), proxied.clone()))
+        };
+        if let Err(e) = http1::Builder::new()
+            .serve_connection(io, svc)
+            .with_upgrades()
+            .await
+        {
+            tracing::debug!(%peer, error = %e, "proxy connection ended");
+        }
+    });
 }
 
 /// The allowlist proxy's state: what it admits, what it never dials, and
@@ -140,7 +171,7 @@ type Body = http_body_util::Either<Empty<Bytes>, Full<Bytes>>;
 
 async fn handle(
     req: Request<Incoming>,
-    peer: SocketAddr,
+    peer: String,
     proxied: Proxied,
 ) -> Result<Response<Body>, hyper::Error> {
     let refused = |why: &str| {
@@ -1100,6 +1131,39 @@ mod tests {
 
     fn allow() -> Allowlist {
         Allowlist::new(&[r"^api\.anthropic\.com$".into(), "api.openai.com".into()]).unwrap()
+    }
+
+    /// Over a Unix socket, as a sandbox's tunnel reaches it: the same
+    /// refusals as on TCP, before anything is dialled.
+    #[tokio::test]
+    async fn the_allowlist_proxy_answers_on_a_unix_socket() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allow.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(run_unix_refusing(
+            listener,
+            allow(),
+            Refusal::this_machine(),
+        ));
+        for (request, expect) in [
+            (
+                "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+                "not allowlisted",
+            ),
+            (
+                "GET http://api.anthropic.com/ HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n",
+                "only CONNECT",
+            ),
+        ] {
+            let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut got = vec![0u8; 512];
+            let n = stream.read(&mut got).await.unwrap();
+            let got = String::from_utf8_lossy(&got[..n]);
+            assert!(got.starts_with("HTTP/1.1 403"), "{got}");
+            assert!(got.contains(expect), "{got}");
+        }
     }
 
     #[test]

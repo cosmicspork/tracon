@@ -33,6 +33,11 @@ pub struct RunSpec {
     pub state_dir: &'static str,
     /// Seconds a stopped container gets between SIGTERM and SIGKILL.
     pub stop_timeout_secs: u16,
+    /// A sandbox (`sandbox_args`) gets no network at all, and the gateway's
+    /// name is its own loopback, where the node's tunnels listen
+    /// (`[runtime.podman] sandbox_tunnels`). A plain harness container is
+    /// unaffected.
+    pub node_only: bool,
 }
 
 impl RunSpec {
@@ -58,6 +63,7 @@ impl RunSpec {
             state_env: layout.env,
             state_dir: layout.dir,
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
+            node_only: crate::boundary::podman::uses_sandbox_tunnels(cfg),
         }
     }
 
@@ -233,15 +239,22 @@ impl RunSpec {
             a.push("--detach".into());
             a.push("--rm".into());
         }
+        // Node-only: no interface but loopback, so the protocol's socket is
+        // the one way out, and the gateway's name is loopback, where the
+        // tunnels stand in for it on the ports it used.
+        let (network, gateway_ip) = match self.node_only {
+            true => ("none", "127.0.0.1"),
+            false => (self.network.as_str(), self.gateway_ip.as_str()),
+        };
         a.extend([
             "--name".into(),
             name.into(),
             "--label".into(),
             SANDBOX_LABEL.into(),
             "--network".into(),
-            self.network.clone(),
+            network.into(),
             "--add-host".into(),
-            format!("{}:{}", self.gateway_host, self.gateway_ip),
+            format!("{}:{gateway_ip}", self.gateway_host),
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
         ]);

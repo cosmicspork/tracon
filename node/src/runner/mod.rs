@@ -9,6 +9,7 @@ pub mod kube;
 pub mod podman;
 pub mod protocol;
 pub mod sandbox_files;
+pub mod tunnels;
 
 use async_trait::async_trait;
 use futures_core::future::BoxFuture;

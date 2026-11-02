@@ -90,8 +90,13 @@ pub fn harness_dir(cfg: &Config) -> &'static str {
 /// gateway, and one harness image per supported harness. Both harnesses are
 /// built because a session names its own harness and the node runs whichever
 /// it names; the configured `[harness] id` is only the default.
+///
+/// With `sandbox_tunnels` there is no gateway container, so no gateway image.
 pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
-    let mut out = vec![(cfg.boundary.gateway_image.clone(), "gateway")];
+    let mut out = Vec::new();
+    if !super::uses_sandbox_tunnels(cfg) {
+        out.push((cfg.boundary.gateway_image.clone(), "gateway"));
+    }
     for id in crate::adapter::enabled(cfg) {
         out.push((cfg.podman_harness_image(id), harness_dir_for(id)));
     }
@@ -186,10 +191,17 @@ pub async fn converge(cfg: &Config) -> Result<bool, BoundaryError> {
 async fn steps(cfg: &Config, rebuild: bool, restart_gateway: bool) -> Result<bool, BoundaryError> {
     super::ensure_machine(cfg).await?;
     let built = ensure_images(cfg, rebuild).await?;
+    std::fs::create_dir_all(Config::harness_state_dir())?;
+    // Sandboxes on no network reach the node through tunnels, and the node
+    // serves the allowlist itself: no internal network, allowlist file or
+    // gateway to keep. One left from before is not removed; nothing joins
+    // it.
+    if super::uses_sandbox_tunnels(cfg) {
+        return Ok(built);
+    }
     let created = ensure_network(cfg).await?;
     let rewritten = write_allowlist(cfg)?;
     let restarted = ensure_gateway(cfg, restart_gateway).await?;
-    std::fs::create_dir_all(Config::harness_state_dir())?;
     Ok(built || created || rewritten || restarted)
 }
 
