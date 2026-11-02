@@ -21,3 +21,13 @@ updates:
       interval: weekly
     commit-message:
       prefix: build
+
+  # The sandbox base image's Ubuntu digest, monthly. The apt snapshot date and
+  # the toolchain pins beside it move by hand; `sandbox-base.yml` builds and
+  # smoke-tests either kind of change on both architectures.
+  - package-ecosystem: docker
+    directory: /containers/sandbox-base
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build

@@ -1,0 +1,61 @@
+name: sandbox-base
+
+# The stock sandbox base image and the harness bundle, built for both
+# architectures on every PR that touches either, each on a native runner, and
+# smoke-tested together the way a session mounts them. Not a required check:
+# nothing a node runs today uses either yet. `release.yml` publishes both.
+on:
+  pull_request:
+    paths:
+      - containers/sandbox-base/**
+      - scripts/harness-bundle.sh
+      # The bundle takes Claude Code's version and digests from here.
+      - containers/harness-claude/Containerfile
+      - .github/workflows/sandbox-base.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-base-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sandbox-base:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the image
+        run: docker build -t localhost/tracon-sandbox-base:ci containers/sandbox-base
+
+      # A PR has no tracon-agent of its own to bundle without a musl build, and
+      # the script's own checks do not depend on which one it is, so this takes
+      # the newest release's.
+      - name: Assemble the harness bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --repo "${{ github.repository }}" --json tagName --jq .tagName)
+          scripts/harness-bundle.sh --arch ${{ matrix.arch }} --agent-release "${tag#v}" --out "$RUNNER_TEMP/bundle"
+          ls -l "$RUNNER_TEMP/bundle"
+
+      - name: Smoke test
+        env:
+          ENGINE: docker
+        run: |
+          set -euo pipefail
+          dir=$(find "$RUNNER_TEMP/bundle" -mindepth 2 -maxdepth 2 -type d -name ${{ matrix.arch }})
+          containers/sandbox-base/smoke.sh localhost/tracon-sandbox-base:ci "$dir"
+          docker image ls localhost/tracon-sandbox-base:ci
