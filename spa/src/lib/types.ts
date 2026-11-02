@@ -1138,7 +1138,7 @@ export interface CeilingInfo {
 }
 
 /** The verdict on one turn's two usage sources. */
-export type UsageState = 'open' | 'reconciled' | 'mismatch' | 'unmetered' | 'interrupted'
+export type UsageState = 'open' | 'reconciled' | 'mismatch' | 'unmetered' | 'interrupted' | 'unreported'
 
 /** One turn as both sources saw it. `charged_tokens` is what the budget paid:
  *  never less than the gateway counted on the wire. */

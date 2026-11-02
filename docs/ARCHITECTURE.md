@@ -1777,7 +1777,12 @@ a flag on the turn, and a figure the channel's ceiling reports beside the day's
 counted spend, because a meter that has silently stopped is worse than one reading high.
 A turn the session ends under — stopped, killed, its harness gone — will never be
 reported by the harness, so it is settled `interrupted` from the gateway's count
-alone; it used to stay open and cost nothing. A harness that reports each upstream
+alone; it used to stay open and cost nothing. A Claude Code turn that compacted,
+by `/compact` or automatically, leaves its summary requests out of its usage, so it is
+counted by what its `modelUsage` rose by when that is more; a rise it cannot trust (no
+earlier result in the process to measure from) or a turn that reports nothing is
+settled `unreported` the same way, and a `/compact` turn's context size is taken from
+the compaction's `post_tokens`, not read as zero. A harness that reports each upstream
 request (the native one) is also matched request by request, by the provider's
 response id, which the gateway records beside its count: a turn whose totals agree but
 that has a request one side saw alone, or the two counted differently, is a mismatch

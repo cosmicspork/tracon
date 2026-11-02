@@ -361,6 +361,20 @@ export function missingLine(m: MissingContext): string {
   return `${m.what} ${scope}${size}${m.fetch ? ` — ${m.fetch}` : ''}`
 }
 
+/// The line a turn ends with: what it spent, as the harness counted it, or
+/// as the gateway did when the harness counted nothing (Claude Code's
+/// `/compact`), and that it compacted when it did.
+export function turnEndLine(p: Record<string, unknown>): string {
+  const usage = p.usage as { total_tokens?: number } | undefined
+  const total = usage?.total_tokens ?? (typeof p.charged_tokens === 'number' ? p.charged_tokens : undefined)
+  const spent = total !== undefined ? ` · ${formatTokens(total)} tokens` : ''
+  if (p.stop_reason === 'max_turn_requests') {
+    return `turn stopped at the harness's request limit${spent} · a prompt carries on`
+  }
+  const compacted = p.compact === true ? ' · compacted' : ''
+  return total !== undefined ? `turn ended${compacted}${spent}` : `turn ended${compacted} · ${p.stop_reason ?? ''}`
+}
+
 /** One line of the log for an event with no markup of its own. */
 export interface EventLine {
   text: string

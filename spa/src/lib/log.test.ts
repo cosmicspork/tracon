@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import {
   eventLine,
+  turnEndLine,
   fallbackLine,
   SILENT,
   groupLog,
@@ -465,4 +466,15 @@ test("a subagent's calls and asks sit under the spawn, not in the parent's run",
     ['c1/b', undefined, undefined],
   ])
   expect(children[1].event!.kind).toBe('permission_request')
+})
+
+test('a turn says what it spent, and a compaction the harness counted nothing of says what the gateway saw', () => {
+  expect(turnEndLine({ stop_reason: 'end_turn', usage: { total_tokens: 1_200 } })).toBe(`turn ended · ${formatTokens(1_200)} tokens`)
+  expect(turnEndLine({ stop_reason: 'end_turn', compact: true, usage_unreported: true, charged_tokens: 166_933 })).toBe(
+    `turn ended · compacted · ${formatTokens(166_933)} tokens`,
+  )
+  expect(turnEndLine({ stop_reason: 'end_turn', compact: true, usage_unreported: true })).toBe('turn ended · compacted · end_turn')
+  expect(turnEndLine({ stop_reason: 'max_turn_requests', usage: { total_tokens: 900 } })).toBe(
+    `turn stopped at the harness's request limit · ${formatTokens(900)} tokens · a prompt carries on`,
+  )
 })

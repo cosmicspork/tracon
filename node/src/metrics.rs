@@ -100,6 +100,10 @@ pub mod usage_state {
     /// The session ended under the turn (stopped, killed, the harness gone):
     /// the harness never reported, so the gateway's count is the charge.
     pub const INTERRUPTED: &str = "interrupted";
+    /// The harness reports nothing for this kind of turn (Claude Code's
+    /// `/compact`), so there is no second count to disagree with: the
+    /// gateway's count is the charge.
+    pub const UNREPORTED: &str = "unreported";
 }
 
 /// How far the two sources may differ before it is worth telling the operator.
@@ -244,6 +248,23 @@ pub fn settle_interrupted_turn(
         None,
         harness_cost_usd,
         Some(usage_state::INTERRUPTED),
+    )
+}
+
+/// Close the ledger row of a turn whose harness says nothing of what it
+/// spent (see `TurnResult::unreported`): charged what the gateway counted,
+/// as an interrupted turn is, and not told on as a harness that said zero.
+pub fn settle_unreported_turn(
+    store: &Store,
+    session_id: &str,
+    harness_cost_usd: Option<f64>,
+) -> Reconciled {
+    settle(
+        store,
+        session_id,
+        None,
+        harness_cost_usd,
+        Some(usage_state::UNREPORTED),
     )
 }
 

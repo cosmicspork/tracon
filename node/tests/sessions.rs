@@ -2372,6 +2372,43 @@ async fn a_turn_whose_two_sources_agree_is_recorded_reconciled_and_says_nothing(
     );
 }
 
+/// Claude Code's `/compact` counts none of its summary requests. Its turn
+/// is charged what the gateway saw and shows it, and is not told on as a
+/// harness that said it spent nothing.
+#[tokio::test]
+async fn a_compaction_the_harness_counts_nothing_of_is_charged_the_wire_without_a_mismatch() {
+    state::isolate();
+    let rig =
+        Rig::start_with_handle(1_000_000, Duration::from_secs(60), Arc::new(BlockingHandle)).await;
+    rig.open_turn().await;
+    rig.gateway_counted(160_638, 6_295);
+    rig.commands
+        .send(Command::TurnDone {
+            turn_id: 1,
+            kind: "turn_end",
+            payload: json!({ "stop_reason": "end_turn", "usage_unreported": true, "compact": true }),
+            tokens: 0,
+        })
+        .await
+        .unwrap();
+
+    assert!(rig.await_events("turn_end", 1).await);
+    let s = rig.store.get_session(&rig.session_id).unwrap().unwrap();
+    assert_eq!(s.tokens_used, 166_933);
+    let ledger = rig.ledger();
+    assert_eq!(ledger[0].state, "unreported");
+    assert_eq!(ledger[0].harness_tokens, None);
+    assert_eq!(ledger[0].charged_tokens, 166_933);
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    let end = events.iter().find(|e| e.kind == "turn_end").unwrap();
+    assert_eq!(end.payload["charged_tokens"], 166_933);
+    assert!(
+        !events.iter().any(|e| e.kind.starts_with("usage_")),
+        "{:?}",
+        rig.kinds()
+    );
+}
+
 #[tokio::test]
 async fn a_harness_under_reporting_a_turn_is_told_on_and_charged_the_wire() {
     state::isolate();
@@ -5531,6 +5568,7 @@ impl HarnessHandle for GatedHandle {
                 cached_read_tokens: 0,
                 cache_write_tokens: 0,
             },
+            unreported: false,
         })
     }
     async fn cancel(&self) -> Result<(), AdapterError> {
@@ -6242,6 +6280,7 @@ impl HarnessHandle for CompactingHandle {
         Ok(TurnResult {
             stop_reason: "end_turn".into(),
             usage: Default::default(),
+            unreported: false,
         })
     }
     async fn cancel(&self) -> Result<(), AdapterError> {

@@ -691,6 +691,7 @@ impl HarnessHandle for NativeHandle {
         Ok(TurnResult {
             stop_reason: res.stop_reason,
             usage: res.usage.unwrap_or_default(),
+            unreported: false,
         })
     }
 

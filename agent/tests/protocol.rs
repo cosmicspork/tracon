@@ -706,9 +706,22 @@ async fn a_compaction_is_reported_and_survives_a_reload() {
         c["tokensBefore"].as_u64() > c["tokensAfter"].as_u64(),
         "{c}"
     );
-    // The summariser's request is reported like any other, by its id.
+    // The summariser's request is reported like any other, by its id, and
+    // the turn's own count holds it too, so the node's two counts agree.
     let usage = updates(&seen, "usage_update");
     assert_eq!(usage.len(), 3);
+    let requested: u64 = usage
+        .iter()
+        .map(|u| &u["update"]["request"])
+        .map(|r| {
+            r["inputTokens"].as_u64().unwrap()
+                + r["cachedReadTokens"].as_u64().unwrap()
+                + r["outputTokens"].as_u64().unwrap()
+        })
+        .sum();
+    let turn = result.usage.as_ref().unwrap();
+    assert!(requested > 0);
+    assert_eq!(turn.total_tokens, requested);
     first.child.kill().await.unwrap();
 
     let second = start_with(&base, &events, &window).await;
