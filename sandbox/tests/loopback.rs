@@ -523,6 +523,92 @@ async fn a_crashing_service_restarts_with_backoff() {
     assert!(sandbox.finish().await.success());
 }
 
+/// Answers each request on `listener` with the next of `statuses`, the last
+/// one for ever after.
+fn http_server(listener: tokio::net::TcpListener, statuses: &'static [u16]) {
+    tokio::spawn(async move {
+        let mut asked = 0;
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let status = statuses[asked.min(statuses.len() - 1)];
+            asked += 1;
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut reader = tokio::io::BufReader::new(&mut stream);
+                // Up to the blank line ending the head.
+                loop {
+                    let mut line = Vec::new();
+                    if reader.read_until(b'\n', &mut line).await.unwrap_or(0) == 0
+                        || line == b"\r\n"
+                    {
+                        break;
+                    }
+                    request.extend(line);
+                }
+                assert!(request.starts_with(b"GET /json/version HTTP/1.1"));
+                let reply = format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+}
+
+#[tokio::test]
+async fn an_http_probe_waits_for_a_2xx() {
+    let sandbox = start().await;
+    let mut events = sandbox.conn.events().await.unwrap();
+    let late = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let late_addr = late.local_addr().unwrap().to_string();
+    http_server(late, &[503, 503, 200]);
+    let missing = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let missing_addr = missing.local_addr().unwrap().to_string();
+    http_server(missing, &[404]);
+    let mut web = ServiceSpec::new("web", ["sleep", "30"]);
+    web.readiness = Some(Readiness {
+        probe: Probe::Http {
+            addr: late_addr,
+            path: "/json/version".into(),
+        },
+        interval_ms: 50,
+        timeout_ms: 5_000,
+    });
+    let mut wrong = ServiceSpec::new("wrong", ["sleep", "30"]);
+    wrong.restart = RestartPolicy::Never;
+    wrong.readiness = Some(Readiness {
+        probe: Probe::Http {
+            addr: missing_addr,
+            path: "/json/version".into(),
+        },
+        interval_ms: 50,
+        timeout_ms: 500,
+    });
+    sandbox
+        .conn
+        .services()
+        .start(vec![web, wrong])
+        .await
+        .unwrap();
+    let (mut ready, mut failed) = (None, None);
+    while ready.is_none() || failed.is_none() {
+        match next_event(&mut events).await {
+            Event::Service {
+                name,
+                state: ServiceState::Ready,
+            } => ready = Some(name),
+            Event::Service {
+                name,
+                state: ServiceState::Failed { .. },
+            } => failed = Some(name),
+            _ => {}
+        }
+    }
+    assert_eq!(ready.as_deref(), Some("web"));
+    assert_eq!(failed.as_deref(), Some("wrong"), "a 404 is not ready");
+    assert!(sandbox.finish().await.success());
+}
+
 #[tokio::test]
 async fn readiness_probes_and_teardown() {
     let sandbox = start().await;

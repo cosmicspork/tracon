@@ -396,6 +396,13 @@ pub fn uses_sandbox_tunnels(cfg: &Config) -> bool {
     uses_sandbox_protocol(cfg)
 }
 
+/// Whether catalogue services with a bundle run inside each session's
+/// sandbox (`[runtime.podman] sandbox_services`). Only where sessions run
+/// in sandboxes at all.
+pub fn uses_sandbox_services(cfg: &Config) -> bool {
+    cfg.runtime.podman.sandbox_services && uses_sandbox_protocol(cfg)
+}
+
 /// A sandbox per command, made by the Podman provider around `spec`. The
 /// provider takes the boundary; the runner keeps `spec`'s mounts, image and
 /// working directory, and hands image identity and services on to a plain
@@ -412,7 +419,8 @@ pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
         .with_mounts(mounts)
         .with_workdir(workdir)
         .with_delegate(Arc::new(PodmanRunner::new(spec)))
-        .with_bundled_harness(crate::sandbox_images::enabled(cfg));
+        .with_bundled_harness(crate::sandbox_images::enabled(cfg))
+        .with_sandbox_services(uses_sandbox_services(cfg));
     if uses_sandbox_files(cfg) {
         runner = runner.with_files(crate::runner::sandbox_files::FilesStore::for_node());
     }
@@ -1095,7 +1103,7 @@ pub async fn selinux_enabled() -> bool {
 mod tests {
     use super::{machine_state_from, resolve_podman, MachineState, RunSpec};
     use serde_json::json;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// Off unless asked, so a node's sessions run as they always have.
     #[test]
@@ -1156,6 +1164,7 @@ mod tests {
             user: None,
             userns: None,
             env: Vec::new(),
+            service_bundles: Vec::new(),
         };
         let spec = super::RunSpec::from_config(&crate::config::Config::default(), false);
         let mounts = vec![
@@ -1221,6 +1230,42 @@ mod tests {
             "no gateway image when there is no gateway"
         );
         assert_eq!(on.allow_proxy_socket(), Path::new("/tmp/n1/allow.sock"));
+    }
+
+    #[test]
+    fn services_stay_sidecars_unless_asked_and_need_the_sandbox_protocol() {
+        let catalogue = "[[service]]\nname = \"browser\"\nport = 9222\n\
+                         bundle = \"/srv/browser/amd64\"\n\
+                         [[service]]\nname = \"db\"\nport = 5432\n\
+                         image = \"pg@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n";
+        let default: crate::config::Config = toml::from_str(catalogue).unwrap();
+        assert!(!default.runtime.podman.sandbox_services);
+        assert!(!super::uses_sandbox_services(&default));
+        assert!(crate::provider::podman::service_bundles(&default).is_empty());
+
+        // Asked for without the sandbox protocol: still sidecars.
+        let alone: crate::config::Config = toml::from_str(&format!(
+            "[runtime.podman]\nsandbox_services = true\n{catalogue}"
+        ))
+        .unwrap();
+        assert!(!super::uses_sandbox_services(&alone));
+        assert!(crate::provider::podman::service_bundles(&alone).is_empty());
+
+        let on: crate::config::Config = toml::from_str(&format!(
+            "[runtime.podman]\nsandbox_protocol = true\nsandbox_services = true\n{catalogue}"
+        ))
+        .unwrap();
+        assert_eq!(super::uses_sandbox_services(&on), cfg!(target_os = "linux"));
+        if cfg!(target_os = "linux") {
+            // Only the bundled service is mounted; the image one stays a sidecar.
+            assert_eq!(
+                crate::provider::podman::service_bundles(&on),
+                [(
+                    PathBuf::from("/srv/browser/amd64"),
+                    "/opt/tracon-services/browser".to_string()
+                )]
+            );
+        }
     }
 
     #[test]

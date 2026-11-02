@@ -80,6 +80,9 @@ pub struct ProtocolRunner {
     /// Start a harness from the mounted bundle, where its adapter names the
     /// path a harness image had it at (`sandbox_images`).
     bundled_harness: bool,
+    /// Run a catalogue service that has a bundle inside the session's
+    /// sandbox, under its supervisor, rather than handing it to `delegate`.
+    sandbox_services: bool,
 }
 
 impl ProtocolRunner {
@@ -95,6 +98,7 @@ impl ProtocolRunner {
             files: None,
             tunnels: Vec::new(),
             bundled_harness: false,
+            sandbox_services: false,
         }
     }
 
@@ -115,6 +119,20 @@ impl ProtocolRunner {
     pub fn with_bundled_harness(mut self, bundled: bool) -> Self {
         self.bundled_harness = bundled;
         self
+    }
+
+    pub fn with_sandbox_services(mut self, on: bool) -> Self {
+        self.sandbox_services = on;
+        self
+    }
+
+    /// How `sidecar` runs in its session's sandbox, when this runner runs it
+    /// there.
+    fn in_sandbox<'a>(&self, sidecar: &'a Sidecar) -> Option<&'a super::InSandbox> {
+        sidecar
+            .in_sandbox
+            .as_ref()
+            .filter(|_| self.sandbox_services)
     }
 
     /// Accept sandboxes with `server` rather than this process's own.
@@ -235,6 +253,7 @@ impl ProtocolRunner {
         };
         let mut teardown = teardown;
         teardown.conn = Some(conn.clone());
+        super::services::register(name, &teardown.run, conn.clone());
         if let Some(files) = files {
             // A spawn is a session's harness unless it says otherwise.
             let kind = cmd.labels.kind.unwrap_or(match stdin {
@@ -369,6 +388,7 @@ async fn teardown(
     files: Option<super::sandbox_files::Attached>,
 ) {
     server.tokens().revoke(&run);
+    super::services::unregister(&name, &run);
     // While the sandbox is still there to read from.
     if let Some(files) = files {
         files.finish().await;
@@ -455,6 +475,10 @@ impl Runner for ProtocolRunner {
     /// The sandbox the name is running in, else a sandbox of that name (one
     /// left by an earlier node process, which the provider named as asked).
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
+        // A service in a session's sandbox stops there; its sandbox stays.
+        if let Some(stopped) = super::services::stop(name).await {
+            return stopped;
+        }
         // What it changed comes back before it goes.
         super::sandbox_files::finish_named(name).await;
         let handle = running()
@@ -489,13 +513,23 @@ impl Runner for ProtocolRunner {
     }
 
     async fn start_sidecar(&self, sidecar: &Sidecar) -> Result<(), RunnerError> {
+        if let Some(spec) = self.in_sandbox(sidecar) {
+            return super::services::start(sidecar, spec).await;
+        }
         match &self.delegate {
             Some(delegate) => delegate.start_sidecar(sidecar).await,
             None => Err(RunnerError::Other(super::SIDECARS_UNSUPPORTED.into())),
         }
     }
 
+    fn supervises_sidecar(&self, sidecar: &Sidecar) -> bool {
+        self.in_sandbox(sidecar).is_some()
+    }
+
     async fn probe_sidecar(&self, sidecar: &Sidecar) -> Result<bool, RunnerError> {
+        if let Some(spec) = self.in_sandbox(sidecar) {
+            return super::services::probe(sidecar, spec).await;
+        }
         match &self.delegate {
             Some(delegate) => delegate.probe_sidecar(sidecar).await,
             None => Err(RunnerError::Other(super::SIDECARS_UNSUPPORTED.into())),

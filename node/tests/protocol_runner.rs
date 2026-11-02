@@ -388,6 +388,7 @@ async fn the_podman_provider_takes_the_supervisors_connection_past_a_bad_one() {
             userns: None,
             env: Vec::new(),
             snapshot_repo: "localhost/spike-snapshot".into(),
+            service_bundles: Vec::new(),
         },
         Box::new(Script),
     );

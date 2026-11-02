@@ -9,6 +9,7 @@ pub mod kube;
 pub mod podman;
 pub mod protocol;
 pub mod sandbox_files;
+pub mod services;
 pub mod tunnels;
 
 use async_trait::async_trait;
@@ -285,6 +286,10 @@ pub enum RunnerError {
         reason: &'static str,
         message: String,
     },
+    /// A service in a session's sandbox that its supervisor gave up on: it
+    /// will not become ready however long it is waited for.
+    #[error("{0}")]
+    ServiceFailed(String),
 }
 
 /// A running harness, reduced to what a stdio transport needs: its pipes and
@@ -370,6 +375,14 @@ pub trait Runner: Send + Sync {
         let _ = sidecar;
         Err(RunnerError::Other(SIDECARS_UNSUPPORTED.into()))
     }
+    /// Whether the runtime keeps `sidecar` up itself and decides when it
+    /// has failed (a sandbox's supervisor, with a readiness timeout for each
+    /// start and a restart policy), so a caller waiting for it applies no
+    /// timeout of its own: a restart is not a failure.
+    fn supervises_sidecar(&self, sidecar: &Sidecar) -> bool {
+        let _ = sidecar;
+        false
+    }
 }
 
 pub const SIDECARS_UNSUPPORTED: &str =
@@ -389,6 +402,22 @@ pub struct Sidecar {
     pub port: u16,
     /// An HTTP path answering 2xx when ready; `None` is a TCP connect.
     pub ready: Option<String>,
+    /// How the session's sandbox runs it under its own supervisor, when the
+    /// catalogue entry has a bundle. A runner that runs services in the
+    /// sandbox uses this and ignores `image`; any other ignores this.
+    pub in_sandbox: Option<InSandbox>,
+}
+
+/// A catalogue service as a sandbox's supervisor runs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InSandbox {
+    /// The catalogue name, which the supervisor knows it by.
+    pub service: String,
+    pub argv: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub restart: crate::config::ServiceRestart,
+    /// How long it may take to answer, each time it starts.
+    pub ready_within: std::time::Duration,
 }
 
 /// The container name of a session's service: derived, so everything that

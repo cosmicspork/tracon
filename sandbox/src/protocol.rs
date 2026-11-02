@@ -403,6 +403,9 @@ pub enum Probe {
     Tcp(String),
     /// The command exits 0.
     Command(Vec<String>),
+    /// An HTTP/1.1 `GET path` to `addr` (`host:port`) answers 2xx. Asked
+    /// directly, never through a proxy the sandbox's environment names.
+    Http { addr: String, path: String },
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -149,6 +149,9 @@ pub struct PodmanOptions {
     pub env: Vec<(String, String)>,
     /// What [`SandboxProvider::snapshot`] names its images (`<repo>:<id>`).
     pub snapshot_repo: String,
+    /// Catalogue service bundles mounted read-only into every sandbox, with
+    /// where (`[runtime.podman] sandbox_services`).
+    pub service_bundles: Vec<(PathBuf, String)>,
 }
 
 pub struct PodmanProvider {
@@ -190,6 +193,7 @@ impl PodmanProvider {
                 false => Vec::new(),
             },
             snapshot_repo: crate::sandbox_images::snapshot_repo(),
+            service_bundles: service_bundles(cfg),
         })
     }
 
@@ -238,6 +242,7 @@ impl PodmanProvider {
             user: self.options.user.clone(),
             userns: self.options.userns.clone(),
             env: self.options.env.clone(),
+            service_bundles: self.options.service_bundles.clone(),
         };
         let image = match spec.image.is_empty() {
             true => self.options.spec.image.as_str(),
@@ -556,6 +561,18 @@ fn commit_changes(
     changes
 }
 
+/// Each catalogue service's bundle and where it is mounted, when this node
+/// runs services in its sandboxes.
+pub fn service_bundles(cfg: &crate::config::Config) -> Vec<(PathBuf, String)> {
+    if !crate::boundary::podman::uses_sandbox_services(cfg) {
+        return Vec::new();
+    }
+    cfg.service
+        .iter()
+        .filter_map(|service| Some((service.bundle.clone()?, service.bundle_target())))
+        .collect()
+}
+
 /// What `podman inspect` shows of a container's boundary, as the checks read
 /// it.
 fn breaches(c: &serde_json::Value, bundle: &Path, selinux: bool) -> Vec<String> {
@@ -601,6 +618,14 @@ fn breaches(c: &serde_json::Value, bundle: &Path, selinux: bool) -> Vec<String> 
             }
         }
     }
+    for m in &mounts {
+        let target = m["Destination"].as_str().unwrap_or("");
+        if target.starts_with(crate::config::SERVICE_BUNDLES_TARGET)
+            && m["RW"].as_bool().unwrap_or(true)
+        {
+            found.push(format!("a service bundle is mounted writable at {target}"));
+        }
+    }
     if let Some(m) = mounts
         .iter()
         .find(|m| m["Destination"].as_str() == Some(SOCKET_DIR_TARGET))
@@ -623,19 +648,26 @@ fn breaches(c: &serde_json::Value, bundle: &Path, selinux: bool) -> Vec<String> 
     found
 }
 
-/// Host paths bind-mounted into a sandbox other than the bundle and its
-/// socket directory: with no network, the socket is meant to be the only
-/// thing of the host's it can reach, and a bind mount is a way round that.
-/// Named volumes are the sandbox's own.
+/// Host paths bind-mounted into a sandbox other than the bundle, its
+/// socket directory and read-only service bundles: with no network, the
+/// socket is meant to be the only thing of the host's it can reach, and a
+/// bind mount is a way round that. Named volumes are the sandbox's own.
 pub fn other_binds(c: &serde_json::Value) -> Vec<String> {
+    let service_bundle = |m: &serde_json::Value, d: &str| {
+        d.starts_with(&format!("{}/", crate::config::SERVICE_BUNDLES_TARGET))
+            && m["RW"].as_bool() == Some(false)
+    };
     c["Mounts"]
         .as_array()
         .map(|mounts| {
             mounts
                 .iter()
                 .filter(|m| m["Type"].as_str() == Some("bind"))
-                .filter_map(|m| m["Destination"].as_str())
-                .filter(|d| *d != BUNDLE_TARGET && *d != SOCKET_DIR_TARGET)
+                .filter_map(|m| Some((m, m["Destination"].as_str()?)))
+                .filter(|(m, d)| {
+                    *d != BUNDLE_TARGET && *d != SOCKET_DIR_TARGET && !service_bundle(m, d)
+                })
+                .map(|(_, d)| d)
                 .map(str::to_string)
                 .collect()
         })
@@ -1081,6 +1113,10 @@ mod tests {
                 userns: None,
                 env: Vec::new(),
                 snapshot_repo: "localhost/spike-snapshot".into(),
+                service_bundles: vec![(
+                    dir.path().join("browser"),
+                    "/opt/tracon-services/browser".into(),
+                )],
             },
             Box::new(fake.clone()),
         );
@@ -1153,6 +1189,10 @@ mod tests {
             &format!(
                 "--mount type=bind,src={},dst=/run/tracon,ro",
                 s.provider.socket_dir("tracon-h-1").display()
+            ),
+            &format!(
+                "--mount type=bind,src={},dst=/opt/tracon-services/browser,ro,relabel=shared",
+                s.dir.path().join("browser").display()
             ),
             "--mount type=volume,src=tracon-harness-state,dst=/root/.claude",
             "--mount type=volume,src=tracon-ws-1,dst=/work",
@@ -1277,6 +1317,7 @@ mod tests {
                 {"Type": "bind", "Source": s.provider.options.bundle, "Destination": "/opt/tracon", "RW": false},
                 {"Type": "bind", "Source": s.provider.socket_dir("tracon-h-1"), "Destination": "/run/tracon", "RW": false},
                 {"Type": "volume", "Source": "/var/lib/vol", "Destination": "/work", "RW": true},
+                {"Type": "bind", "Source": "/srv/browser", "Destination": "/opt/tracon-services/browser", "RW": false},
             ],
             "NetworkSettings": {"Networks": {"tracon-int": {"IPAddress": "10.89.0.5"}}},
             "State": {"Status": "running", "ExitCode": 0},
@@ -1322,7 +1363,7 @@ mod tests {
             ..Fake::default()
         });
         let handle = Handle("tracon-h-1".into());
-        let cases: [(&str, serde_json::Value, &str); 6] = [
+        let cases: [(&str, serde_json::Value, &str); 7] = [
             (
                 "/HostConfig/Privileged",
                 serde_json::json!(true),
@@ -1344,6 +1385,11 @@ mod tests {
                 "bundle is mounted writable",
             ),
             ("/Mounts/1/RW", serde_json::json!(true), "socket directory"),
+            (
+                "/Mounts/3/RW",
+                serde_json::json!(true),
+                "service bundle is mounted writable",
+            ),
             (
                 "/Config/Labels",
                 serde_json::json!({}),
@@ -1417,6 +1463,14 @@ mod tests {
         assert!(
             error.to_string().contains("bind-mounted at /home"),
             "{error}"
+        );
+        // A service bundle is read-only, or it is one too.
+        let mut doc = inspected(&s);
+        doc[0]["HostConfig"]["NetworkMode"] = serde_json::json!("none");
+        doc[0]["Mounts"][3]["RW"] = serde_json::json!(true);
+        assert_eq!(
+            other_binds(&doc[0]),
+            ["/opt/tracon-services/browser".to_string()]
         );
     }
 
@@ -1535,6 +1589,7 @@ mod snapshot_tests {
                 userns: Some("keep-id:uid=65532,gid=65532".into()),
                 env: vec![("DISABLE_TELEMETRY".into(), "1".into())],
                 snapshot_repo: "localhost/spike-snapshot".into(),
+                service_bundles: Vec::new(),
             },
             Box::new(fake.clone()),
         )

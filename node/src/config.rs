@@ -257,10 +257,31 @@ pub struct Service {
     /// What a session asks for: `browser`, `postgres`.
     pub name: String,
     /// Pinned by digest, as a repository image is: what ran is what was named.
+    /// Started as a container beside the session. May be left out when
+    /// `bundle` is set and every session runs in a sandbox.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub image: String,
-    /// The image's arguments, when its own entrypoint needs them.
+    /// The image's arguments, when its own entrypoint needs them; with
+    /// `bundle`, the arguments after `run`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
+    /// A directory of binaries for this host's architecture (one
+    /// `<version>/<arch>` of `scripts/browser-bundle.sh`'s output, say).
+    /// With `[runtime.podman] sandbox_services`, it is mounted read-only at
+    /// `/opt/tracon-services/<name>` in every sandbox, and the service runs
+    /// there under the sandbox's supervisor instead of in `image`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<PathBuf>,
+    /// With `bundle`: what the supervisor starts, inside the sandbox.
+    /// Default `/opt/tracon-services/<name>/run`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub run: Vec<String>,
+    /// With `bundle`: environment added to the sandbox's own.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// With `bundle`: whether the supervisor starts it again when it exits.
+    #[serde(skip_serializing_if = "ServiceRestart::is_default")]
+    pub restart: ServiceRestart,
     /// The port the service listens on, on the session's loopback.
     pub port: u16,
     /// An HTTP path that answers 2xx once the service is ready (`/json/version`
@@ -273,8 +294,44 @@ pub struct Service {
     pub timeout_secs: u64,
 }
 
+/// When a bundled service is started again after it exits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceRestart {
+    Never,
+    #[default]
+    OnFailure,
+    Always,
+}
+
+impl ServiceRestart {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Where a bundled service's directory is mounted inside a sandbox, under
+/// its name.
+pub const SERVICE_BUNDLES_TARGET: &str = "/opt/tracon-services";
+
 impl Service {
     pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+    /// Where its bundle is inside a sandbox.
+    pub fn bundle_target(&self) -> String {
+        format!("{SERVICE_BUNDLES_TARGET}/{}", self.name)
+    }
+
+    /// What the supervisor runs: `run` (or the bundle's `run`), then
+    /// `command`.
+    pub fn sandbox_argv(&self) -> Vec<String> {
+        let mut argv = match self.run.is_empty() {
+            true => vec![format!("{}/run", self.bundle_target())],
+            false => self.run.clone(),
+        };
+        argv.extend(self.command.iter().cloned());
+        argv
+    }
 
     pub fn timeout_secs(&self) -> u64 {
         match self.timeout_secs {
@@ -304,7 +361,37 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
         if !seen.insert(name) {
             return Err(format!("service {name}: named twice"));
         }
-        immutable_image(&service.image).map_err(|e| format!("service {name}: image {e}"))?;
+        match (&service.bundle, service.image.is_empty()) {
+            (None, true) => {
+                return Err(format!("service {name}: needs an image or a bundle"));
+            }
+            (Some(bundle), _) if !bundle.is_absolute() => {
+                return Err(format!("service {name}: bundle must be an absolute path"));
+            }
+            _ => {}
+        }
+        if !service.image.is_empty() {
+            immutable_image(&service.image).map_err(|e| format!("service {name}: image {e}"))?;
+        }
+        if service.bundle.is_none()
+            && (!service.run.is_empty()
+                || !service.env.is_empty()
+                || service.restart != ServiceRestart::default())
+        {
+            return Err(format!(
+                "service {name}: run, env and restart apply to a bundle, and it has none"
+            ));
+        }
+        if service.run.iter().any(String::is_empty) {
+            return Err(format!("service {name}: run has an empty argument"));
+        }
+        if let Some(key) = service
+            .env
+            .keys()
+            .find(|k| k.is_empty() || k.contains('=') || k.contains('\0'))
+        {
+            return Err(format!("service {name}: env name {key:?} is not one"));
+        }
         if service.port == 0 {
             return Err(format!("service {name}: port is required"));
         }
@@ -1041,6 +1128,11 @@ pub struct PodmanRuntime {
     /// preparation is run once and snapshotted for its sessions and checks
     /// to start from.
     pub sandbox_images: bool,
+    /// Run each `[[service]]` that has a `bundle` inside the session's
+    /// sandbox, under its supervisor, rather than as a container beside it.
+    /// Needs `sandbox_protocol`. A service with only an image stays a
+    /// container.
+    pub sandbox_services: bool,
 }
 
 /// The `[[repo]]` table a running node resolves against, once the operator
@@ -3243,9 +3335,74 @@ mod tests {
             let err = validate_services(&[bad]).unwrap_err();
             assert!(err.contains(why), "{err}");
         }
-        assert!(validate_services(&[ok.clone(), ok])
+        assert!(validate_services(&[ok.clone(), ok.clone()])
             .unwrap_err()
             .contains("twice"));
+
+        // A bundle in place of an image, run in the sandbox.
+        let bundled = Service {
+            image: String::new(),
+            bundle: Some("/srv/browser/157/amd64".into()),
+            ..ok.clone()
+        };
+        assert!(validate_services(std::slice::from_ref(&bundled)).is_ok());
+        assert_eq!(bundled.sandbox_argv(), ["/opt/tracon-services/browser/run"]);
+        let custom = Service {
+            run: vec!["/opt/tracon-services/browser/bin/chrome".into()],
+            command: vec!["--headless".into()],
+            ..bundled.clone()
+        };
+        assert_eq!(
+            custom.sandbox_argv(),
+            ["/opt/tracon-services/browser/bin/chrome", "--headless"]
+        );
+        for (bad, why) in [
+            (
+                Service {
+                    bundle: None,
+                    ..bundled.clone()
+                },
+                "an image or a bundle",
+            ),
+            (
+                Service {
+                    bundle: Some("srv/browser".into()),
+                    ..bundled.clone()
+                },
+                "absolute",
+            ),
+            (
+                Service {
+                    restart: ServiceRestart::Always,
+                    ..ok.clone()
+                },
+                "apply to a bundle",
+            ),
+            (
+                Service {
+                    env: [("A=B".to_string(), "c".to_string())].into(),
+                    ..bundled.clone()
+                },
+                "env name",
+            ),
+        ] {
+            let err = validate_services(&[bad]).unwrap_err();
+            assert!(err.contains(why), "{err}");
+        }
+        let toml_in =
+            "name = \"browser\"\nport = 9222\nbundle = \"/srv/b\"\nrestart = \"always\"\n";
+        let parsed: Service = toml::from_str(toml_in).unwrap();
+        assert_eq!(parsed.restart, ServiceRestart::Always);
+        // Saved without the defaults it did not set.
+        let saved = toml::to_string(&Service {
+            restart: ServiceRestart::OnFailure,
+            ..parsed
+        })
+        .unwrap();
+        assert!(
+            !saved.contains("restart") && !saved.contains("image"),
+            "{saved}"
+        );
     }
 
     /// The README's `node.toml` reference is checked, not trusted: every key it

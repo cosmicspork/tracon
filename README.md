@@ -1320,6 +1320,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # snapshotted (podman commit) for its sessions and checks.
                                     # Sandboxes run as the base's user 65532, mapped to the node's
                                     # own (--userns=keep-id), with the harness home /home/harness
+# sandbox_services = false          # with sandbox_protocol: run each [[service]] that has a bundle
+                                    # inside the session's sandbox under tracon-sandbox, not as a
+                                    # container beside it; one with only an image stays a container
 # [sandbox]
 # bundle = "/path/to/<version>/amd64" # the harness bundle (scripts/harness-bundle.sh --sandbox)
                                     # holding bin/tracon-sandbox, mounted read-only at /opt/tracon;
@@ -1452,6 +1455,18 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # port = 9222                       # where the session reaches it
 # ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed
+# bundle = "/path/to/<version>/amd64" # with [runtime.podman] sandbox_services: a directory of
+                                    # binaries (scripts/browser-bundle.sh for `browser`; each release
+                                    # attaches tracon-browser-<chrome>-<arch>.tar.gz) mounted
+                                    # read-only at /opt/tracon-services/<name> in every sandbox. The
+                                    # session's sandbox runs it under its supervisor, on its loopback,
+                                    # instead of a container from `image`, which may then be left out.
+                                    # Set at the node only
+# run = []                          # with bundle: what to start; default /opt/tracon-services/<name>/run,
+                                    # followed by `command`
+# env = {}                          # with bundle: environment added to the sandbox's own
+# restart = "on-failure"            # with bundle: "never", "on-failure" or "always"; `timeout_secs`
+                                    # then bounds each start, and a restart is not a failure
 # native_binary = "/path/to/tracon-agent"  # a Linux build for tracon-agent's image (`just
                                     # native-agent`) in place of this version's release asset
 
