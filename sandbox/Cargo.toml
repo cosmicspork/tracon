@@ -1,0 +1,48 @@
+[package]
+name = "tracon-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The in-sandbox supervisor that dials its node over one pinned TLS connection, and the node's side of that protocol."
+
+[lib]
+name = "tracon_sandbox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tracon-sandbox"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bytes = "1"
+h2 = "0.4"
+hex.workspace = true
+http = "1"
+ignore = "0.4"
+libc = "0.2"
+# ring rather than aws-lc-rs everywhere TLS is involved: no cmake or Go in the
+# static musl build, and the same provider the node's reqwest already uses.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17"
+rustix = { version = "1.1", features = ["fs", "pty", "termios", "process"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# An export is unpacked into a staging directory beside its destination.
+tempfile = "3"
+# No `xattr`: an archive carries bytes, the executable bit and links, never
+# labels or capabilities.
+tar = { version = "0.4", default-features = false }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tokio-util = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

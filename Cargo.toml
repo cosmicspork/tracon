@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["proto", "sync", "acp", "node", "hub", "agent"]
+members = ["proto", "sync", "acp", "node", "hub", "agent", "sandbox"]
 # The desktop wrapper is its own workspace: building it needs webkit2gtk and
 # gtk development headers, and the node and hub must stay buildable on a
 # machine that has neither.
