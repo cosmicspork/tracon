@@ -1,11 +1,13 @@
-# The source image of a node's DigitalOcean Harness Runtime template
-# (`[digitalocean] image`): a harness image with the harness bundle at
-# /opt/tracon and the `tracon-sandbox` s6 service, which waits for the
-# bootstrap the node delivers by exec after each create and then runs the
-# supervisor as its child under the runtime's own init.
+# The source image of a node's DigitalOcean Harness Runtime template: one of
+# the node's sandbox images (the stock base, a prepared snapshot) with the
+# harness bundle at /opt/tracon and the `tracon-sandbox` s6 service, which
+# waits for the bootstrap the node delivers by exec after each create and
+# then runs the supervisor as its child under the runtime's own init. With
+# `[digitalocean] registry` the node builds and pushes these itself, from
+# this file; by hand, for `[digitalocean] image`:
 #
-#   podman build --build-arg BASE=<harness image> \
-#     --build-context bundle=<bundle>/<version>/amd64 \
+#   cp -a <bundle>/<version>/amd64 containers/do-sandbox/bundle
+#   podman build --build-arg BASE=<sandbox image> \
 #     -t <registry>/tracon-do-sandbox containers/do-sandbox
 #   podman push <registry>/tracon-do-sandbox   # then name it by digest
 #
@@ -13,9 +15,9 @@
 # the runtime's own build of this one.
 ARG BASE
 FROM ${BASE}
+# Root to install; the runtime's init starts the service as root either way.
 USER root
-RUN --mount=type=bind,from=bundle,target=/bundle \
-    mkdir -p /opt/tracon && cp -a /bundle/. /opt/tracon/ \
- && test -x /opt/tracon/bin/tracon-sandbox
+COPY bundle/ /opt/tracon/
+RUN test -x /opt/tracon/bin/tracon-sandbox
 COPY run /etc/services.d/tracon-sandbox/run
 RUN chmod 0755 /etc/services.d/tracon-sandbox/run

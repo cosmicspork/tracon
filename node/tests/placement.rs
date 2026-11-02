@@ -27,6 +27,7 @@ use tracon::config::{Config, Provider, SHAPE_ANTHROPIC};
 use tracon::http::api::AppState;
 use tracon::provider::digitalocean::listener::DoListener;
 use tracon::provider::digitalocean::runtime::{self, DoRuntime};
+use tracon::provider::digitalocean::templates::{Source, TemplateState};
 use tracon::provider::digitalocean::{ClientSource, Owner, Settings};
 use tracon::provider::requirements::{DoMode, RepoPlacement};
 use tracon::runner::local::LocalBackend;
@@ -188,13 +189,17 @@ async fn node(fake: &FakeDo, client_repo: &str) -> Node {
     let do_runtime = DoRuntime::with(
         client,
         cfg.digitalocean.clone(),
+        Source::Given(IMAGE.into()),
         owner,
         "tracon-gw".into(),
         listener,
         Arc::new(|| None),
     )
     .unwrap();
-    assert!(do_runtime.ensure_template().await);
+    assert!(matches!(
+        do_runtime.ensure_template(IMAGE).await,
+        TemplateState::Ready { .. }
+    ));
     assert!(runtime::install(do_runtime));
     assert!(runtime::enabled(&cfg));
 

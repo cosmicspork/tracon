@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use super::listener::DoListener;
-use super::templates::{TemplateState, Templates};
+use super::templates::{Source, TemplateState, Templates};
 use super::{upkeep, ClientSource, DoProvider, Options, Owner, ServerName, Settings};
 use crate::config::Config;
 use crate::provider::requirements::DoMode;
@@ -96,9 +96,19 @@ impl DoRuntime {
             .map_err(|e| format!("digitalocean.listen {}: {e}", settings.listen))?;
         let client = client_source(settings.clone(), broker, node_id.to_string());
         let server_name: ServerName = Arc::new(crate::mesh::sandbox_relay::current_host);
+        let source = match settings.image.is_empty() {
+            false => Source::Given(settings.image.clone()),
+            true => Source::Built {
+                registry: settings.registry.clone(),
+                prefix: crate::config::resource_prefix().to_string(),
+                bundle: crate::bundle::effective(cfg)
+                    .ok_or("digitalocean.registry needs the harness bundle this node mounts")?,
+            },
+        };
         let runtime = Self::with(
             client,
             settings,
+            source,
             Owner::new(crate::config::resource_prefix(), node_id),
             cfg.boundary.gateway_container.clone(),
             listener,
@@ -108,7 +118,6 @@ impl DoRuntime {
         tokio::spawn(runtime.clone().upkeep());
         tracing::info!(
             listen = %runtime.provider.listener().local_addr(),
-            template = %runtime.provider.templates().name(),
             "DigitalOcean sandbox provider started"
         );
         Ok(Some(runtime))
@@ -118,13 +127,14 @@ impl DoRuntime {
     pub fn with(
         client: ClientSource,
         settings: Settings,
+        source: Source,
         owner: Owner,
         gateway_host: String,
         listener: Arc<DoListener>,
         server_name: ServerName,
     ) -> Result<Arc<Self>, String> {
         let templates = Arc::new(Templates::new(
-            &settings.image,
+            source,
             &settings.base_template,
             &owner.template_stem(),
         )?);
@@ -150,8 +160,74 @@ impl DoRuntime {
         &self.provider
     }
 
-    pub fn template(&self) -> TemplateState {
-        self.provider.templates().state()
+    /// The image a session there runs in when it has none of its own: the
+    /// operator's, else this node's pinned base.
+    pub fn default_image(&self) -> Option<String> {
+        self.provider
+            .templates()
+            .default_image(crate::sandbox_images::active_base())
+    }
+
+    /// The image a session there runs in: `own` (its repository's prepared
+    /// snapshot) when its template is ready, else the default. One whose
+    /// template is not ready yet has it prepared in the background, for the
+    /// sessions after this one.
+    pub fn image_for(self: &Arc<Self>, own: Option<String>) -> Option<String> {
+        if let Some(own) = own.filter(|own| self.provider.templates().serves(own)) {
+            if self.provider.templates().ready(&own).is_ok() {
+                return Some(own);
+            }
+            self.prepare(own);
+        }
+        self.default_image()
+    }
+
+    /// Register `image`'s template in the background, looking until it is
+    /// ready or failed: part of preparing that image, never of a session.
+    pub fn prepare(self: &Arc<Self>, image: String) {
+        if !self.provider.templates().serves(&image) {
+            return;
+        }
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match runtime.ensure_template(&image).await {
+                    TemplateState::Ready { .. } | TemplateState::Failed { .. } => return,
+                    TemplateState::Preparing
+                    | TemplateState::Building { .. }
+                    | TemplateState::Unknown => {}
+                }
+                tokio::time::sleep(TEMPLATE_BUILDING_POLL).await;
+            }
+        });
+    }
+
+    /// Prepare `image`'s template, when this node has a DigitalOcean
+    /// provider: what a repository's preparation calls once it has made a
+    /// snapshot.
+    pub fn prepare_if_running(image: &str) {
+        if let Some(runtime) = global() {
+            runtime.prepare(image.to_string());
+        }
+    }
+
+    /// The templates this node keeps: the default image's and each current
+    /// snapshot's.
+    async fn wanted(&self) -> std::collections::HashSet<String> {
+        let templates = self.provider.templates();
+        let mut images: Vec<String> = self.default_image().into_iter().collect();
+        if matches!(templates.source(), Source::Built { .. }) {
+            images.extend(
+                crate::sandbox_images::snapshot_images()
+                    .await
+                    .into_iter()
+                    .map(|(pinned, _)| pinned),
+            );
+        }
+        images
+            .iter()
+            .filter_map(|image| templates.name_for(image).ok())
+            .collect()
     }
 
     /// Orphans once, then the template until it is ready and the sweeps.
@@ -172,7 +248,13 @@ impl DoRuntime {
         }
         let mut swept_at: Option<tokio::time::Instant> = None;
         loop {
-            let ready = self.ensure_template().await;
+            let ready = match self.default_image() {
+                Some(image) => matches!(
+                    self.ensure_template(&image).await,
+                    TemplateState::Ready { .. }
+                ),
+                None => false,
+            };
             if swept_at.is_none_or(|at| at.elapsed() >= SWEEP_EVERY) {
                 self.sweep().await;
                 swept_at = Some(tokio::time::Instant::now());
@@ -185,34 +267,42 @@ impl DoRuntime {
         }
     }
 
-    /// Register or look at the template; whether it is ready.
-    pub async fn ensure_template(&self) -> bool {
+    /// Register or look at `image`'s template, and say where it stands.
+    pub async fn ensure_template(&self, image: &str) -> TemplateState {
         let client = match self.provider.client() {
             Ok(client) => client,
             Err(error) => {
                 tracing::debug!(%error, "DigitalOcean template not looked at");
-                return false;
+                return TemplateState::Unknown;
             }
         };
-        match self.provider.templates().ensure(&client).await {
-            Ok(TemplateState::Ready { .. }) => true,
+        match self
+            .provider
+            .templates()
+            .ensure(&client, client.token(), image)
+            .await
+        {
             Ok(state) => {
-                tracing::info!(state = %state.describe(), "DigitalOcean template not ready");
-                false
+                if !matches!(state, TemplateState::Ready { .. }) {
+                    tracing::info!(%image, state = %state.describe(), "DigitalOcean template not ready");
+                }
+                state
             }
             Err(error) => {
-                tracing::warn!(%error, "could not look at the DigitalOcean template");
-                false
+                tracing::warn!(%image, %error, "could not look at a DigitalOcean template");
+                TemplateState::Unknown
             }
         }
     }
 
     pub async fn sweep(&self) -> Option<upkeep::Swept> {
         let client = self.provider.client().ok()?;
+        let wanted = self.wanted().await;
         let swept = upkeep::sweep(
             &client,
             &self.provider.options().owner,
             self.provider.templates(),
+            &wanted,
             crate::store::now_ms(),
         )
         .await;
@@ -245,7 +335,10 @@ impl DoRuntime {
                     .into(),
             );
         }
-        self.provider.templates().ready()?;
+        let image = self
+            .default_image()
+            .ok_or("this node has not pinned its base image yet")?;
+        self.provider.templates().ready(&image)?;
         let settings = &self.provider.options().settings;
         if settings.relay
             && settings.server_name.is_empty()
@@ -292,11 +385,13 @@ impl DoRuntime {
         cfg: &Config,
         requirements: Requirements,
         mounts: Vec<Mount>,
+        image: String,
     ) -> Arc<dyn Runner> {
         self.runner_with(
             cfg,
             requirements,
             mounts,
+            image,
             crate::runner::sandbox_files::FilesStore::for_node(),
         )
     }
@@ -306,20 +401,20 @@ impl DoRuntime {
         cfg: &Config,
         requirements: Requirements,
         mounts: Vec<Mount>,
+        image: String,
         files: crate::runner::sandbox_files::FilesStore,
     ) -> Arc<dyn Runner> {
         let provider: Arc<dyn crate::provider::SandboxProvider> = self.provider.clone();
         Arc::new(
-            crate::runner::protocol::ProtocolRunner::new(
-                provider,
-                self.provider.templates().image().to_string(),
-            )
-            .with_mounts(mounts)
-            .with_workdir("/work")
-            .with_files(files)
-            .with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg))
-            .with_requirements(requirements)
-            .with_token_window(TOKEN_WINDOW),
+            crate::runner::protocol::ProtocolRunner::new(provider, image)
+                // The template's image holds the bundle at /opt/tracon.
+                .with_bundled_harness(true)
+                .with_mounts(mounts)
+                .with_workdir("/work")
+                .with_files(files)
+                .with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg))
+                .with_requirements(requirements)
+                .with_token_window(TOKEN_WINDOW),
         )
     }
 }

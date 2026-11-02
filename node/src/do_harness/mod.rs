@@ -309,6 +309,12 @@ impl Client {
         })
     }
 
+    /// The token it was made with: DigitalOcean's container registry takes
+    /// the same one, for a push to it.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base
     }

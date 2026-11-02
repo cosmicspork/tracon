@@ -505,6 +505,8 @@ pub async fn warm(
             }
             record_seed(&environment.cache_volume, &pinned);
             tracing::info!(repo = %repo.display(), snapshot = %pinned, "prepared the repository and snapshotted it");
+            // Its DigitalOcean template too, where sessions may run there.
+            crate::provider::digitalocean::runtime::DoRuntime::prepare_if_running(&pinned);
             Ok(Some(pinned))
         }
         Err(error) => {

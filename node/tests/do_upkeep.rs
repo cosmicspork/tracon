@@ -6,7 +6,7 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use tracon::provider::digitalocean::templates::Templates;
+use tracon::provider::digitalocean::templates::{Source, Templates};
 use tracon::provider::digitalocean::{upkeep, Owner};
 
 use support::do_api::FakeDo;
@@ -41,7 +41,14 @@ async fn orphans_go_at_start_and_only_this_nodes() {
 async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
     let fake = FakeDo::start().await;
     let owner = Owner::new("tracon", "abcd1234");
-    let templates = Templates::new(IMAGE, "sandbox", &owner.template_stem()).unwrap();
+    let templates = Templates::new(
+        Source::Given(IMAGE.into()),
+        "sandbox",
+        &owner.template_stem(),
+    )
+    .unwrap();
+    let current = templates.name_for(IMAGE).unwrap();
+    let wanted: std::collections::HashSet<String> = [current.clone()].into();
     let (keep, older, failed, pending, theirs_cp, leftover, live_config) = {
         let mut api = fake.api.lock().unwrap();
         // A preparation's sandboxes: one environment across two sessions.
@@ -67,7 +74,7 @@ async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
             &format!("{}-3333333333333333", owner.template_stem()),
             "TEMPLATE_STATUS_READY",
         );
-        api.put_template(templates.name(), "TEMPLATE_STATUS_READY");
+        api.put_template(&current, "TEMPLATE_STATUS_READY");
         (
             keep,
             older,
@@ -79,9 +86,15 @@ async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
         )
     };
 
-    let swept = upkeep::sweep(&fake.client(), &owner, &templates, tracon::store::now_ms())
-        .await
-        .unwrap();
+    let swept = upkeep::sweep(
+        &fake.client(),
+        &owner,
+        &templates,
+        &wanted,
+        tracon::store::now_ms(),
+    )
+    .await
+    .unwrap();
     assert!(swept.failed.is_empty(), "{:?}", swept.failed);
     assert_eq!(swept.freed_bytes, 51_000_000_000);
     let mut deleted = swept.checkpoints.clone();
@@ -112,9 +125,15 @@ async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
         .unwrap()
         .sessions
         .retain(|_, s| !owner.owns(s["name"].as_str().unwrap_or("")));
-    let swept = upkeep::sweep(&fake.client(), &owner, &templates, tracon::store::now_ms())
-        .await
-        .unwrap();
+    let swept = upkeep::sweep(
+        &fake.client(),
+        &owner,
+        &templates,
+        &wanted,
+        tracon::store::now_ms(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         swept.templates,
         [format!("{}-3333333333333333", owner.template_stem())]
@@ -123,5 +142,5 @@ async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
     assert!(api
         .templates
         .values()
-        .any(|t| t["name"] == templates.name()));
+        .any(|t| t["name"] == current.as_str()));
 }

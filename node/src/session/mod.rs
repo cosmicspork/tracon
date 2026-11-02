@@ -3190,10 +3190,31 @@ impl Manager {
             placing::Placed::DigitalOcean {
                 runtime,
                 requirements,
-            } => (
-                runtime.runner(&self.cfg, requirements.clone(), mounts),
-                Vec::new(),
-            ),
+            } => {
+                // Its repository's prepared snapshot where that has a
+                // template there; never prepared for this session.
+                let own = match &origin {
+                    Some(origin) => {
+                        crate::sandbox_images::snapshot_for(
+                            self.backend.as_ref(),
+                            &self.cfg,
+                            &self.store,
+                            origin,
+                            &environment,
+                            false,
+                        )
+                        .await
+                    }
+                    None => None,
+                };
+                let image = runtime.image_for(own).ok_or_else(|| {
+                    anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
+                })?;
+                (
+                    runtime.runner(&self.cfg, requirements.clone(), mounts, image),
+                    Vec::new(),
+                )
+            }
             placing::Placed::Local => session_runner(
                 self.backend.as_ref(),
                 adapter.id(),

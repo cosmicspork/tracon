@@ -414,6 +414,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("digitalocean.region"),
     restart("digitalocean.api_url").host_only(),
     restart("digitalocean.image"),
+    restart("digitalocean.registry").host_only(),
     restart("digitalocean.base_template"),
     restart("digitalocean.size"),
     restart("digitalocean.limit"),
@@ -514,7 +515,7 @@ pub fn host_only_reason(key: &str) -> &'static str {
         "boundary.resource_prefix" => {
             "names every volume this node mounts, the shared harness state among them, so a node set to another's would run on that node's state; it is changed at the node, not from elsewhere"
         }
-        "digitalocean.api_url" => {
+        "digitalocean.api_url" | "digitalocean.registry" => {
             "is where the node sends its DigitalOcean token, so it is changed at the node, not from elsewhere"
         }
         "gateway.harness_listen" => {
@@ -1027,6 +1028,8 @@ mod tests {
                 "boundary.gateway_image",
                 "boundary.harness_image",
                 "boundary.resource_prefix",
+                "digitalocean.api_url",
+                "digitalocean.registry",
                 "gateway.harness_listen",
                 "runtime.kubernetes.harness_image",
                 "runtime.kubernetes.state_mount",

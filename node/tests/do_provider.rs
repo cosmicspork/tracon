@@ -29,6 +29,7 @@ use tracon::provider::capabilities::Route;
 use tracon::provider::digitalocean::bootstrap::Delivery;
 use tracon::provider::digitalocean::listener::DoListener;
 use tracon::provider::digitalocean::runtime::DoRuntime;
+use tracon::provider::digitalocean::templates::{Source, TemplateState};
 use tracon::provider::digitalocean::{ClientSource, Owner, Settings};
 use tracon::provider::{Handle, Requirements, SandboxProvider as _, Status};
 use tracon::runner::sandbox_files::FilesStore;
@@ -42,7 +43,10 @@ use support::do_api::FakeDo;
 const IMAGE: &str =
     "ghcr.io/example/tracon-do-sandbox@sha256:1111111111111111222222222222222222222222222222222222222222222222";
 
-fn sandbox(config: inside::Config) -> std::thread::JoinHandle<Result<(), String>> {
+/// A sandbox's loop on its thread, and how it ended.
+type Sandbox = std::thread::JoinHandle<Result<(), String>>;
+
+fn sandbox(config: inside::Config) -> Sandbox {
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -55,7 +59,7 @@ fn sandbox(config: inside::Config) -> std::thread::JoinHandle<Result<(), String>
     })
 }
 
-async fn join(thread: std::thread::JoinHandle<Result<(), String>>) -> Result<(), String> {
+async fn join(thread: Sandbox) -> Result<(), String> {
     tokio::time::timeout(
         Duration::from_secs(30),
         tokio::task::spawn_blocking(move || thread.join().unwrap()),
@@ -133,6 +137,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     let runtime = DoRuntime::with(
         client,
         settings,
+        Source::Given(IMAGE.into()),
         Owner::new("tracon", "abcd1234"),
         "tracon-gw".into(),
         listener.clone(),
@@ -143,7 +148,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
 
     // Each exec plays the template's service: read the bootstrap the node
     // delivered and dial as a sandbox there would.
-    let threads: Arc<Mutex<Vec<std::thread::JoinHandle<Result<(), String>>>>> = Arc::default();
+    let threads: Arc<Mutex<Vec<Sandbox>>> = Arc::default();
     let widen: Arc<Mutex<bool>> = Arc::default();
     fake.on_exec({
         let threads = threads.clone();
@@ -177,12 +182,18 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     // No session before its template is ready, and none is registered per
     // session: the first look registers it, a later one finds it ready.
     assert!(runtime.health(&cfg).is_err());
-    assert!(!runtime.ensure_template().await);
+    assert!(matches!(
+        runtime.ensure_template(IMAGE).await,
+        TemplateState::Building { .. }
+    ));
     assert!(runtime.health(&cfg).is_err());
-    assert!(runtime.ensure_template().await);
+    assert!(matches!(
+        runtime.ensure_template(IMAGE).await,
+        TemplateState::Ready { .. }
+    ));
     runtime.health(&cfg).unwrap();
     assert_eq!(fake.api.lock().unwrap().templates.len(), 1);
-    let template = provider.templates().name().to_string();
+    let template = provider.templates().name_for(IMAGE).unwrap();
     assert_eq!(template, "tracon-tabcd1234-1111111111111111");
 
     // A workspace the node keeps, sent over the files channel.
@@ -202,6 +213,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
             ..Requirements::default()
         },
         mounts.clone(),
+        IMAGE.into(),
         store.clone(),
     );
 
@@ -268,9 +280,10 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     assert_eq!(delivered.gateway_host, "tracon-gw");
     assert!(!manifest.to_string().contains(delivered.token));
     // Destroyed with the config its create left.
-    assert_eq!(deleted_sessions, [exec.0.clone()]);
+    assert_eq!(deleted_sessions, std::slice::from_ref(&exec.0));
     assert_eq!(deleted_configs.len(), 1);
-    for thread in std::mem::take(&mut *threads.lock().unwrap()) {
+    let ended = std::mem::take(&mut *threads.lock().unwrap());
+    for thread in ended {
         join(thread).await.unwrap();
     }
 
@@ -321,7 +334,8 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
         .to_string();
     assert!(refused.contains("not isolated as required"), "{refused}");
     assert!(refused.contains("route is unverified"), "{refused}");
-    for thread in std::mem::take(&mut *threads.lock().unwrap()) {
+    let ended = std::mem::take(&mut *threads.lock().unwrap());
+    for thread in ended {
         let _ = join(thread).await;
     }
     {

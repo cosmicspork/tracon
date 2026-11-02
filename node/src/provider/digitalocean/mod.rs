@@ -28,6 +28,7 @@
 //! `[runtime.podman] sandbox_files` and `sandbox_tunnels` do locally.
 
 pub mod bootstrap;
+pub mod images;
 pub mod listener;
 pub mod runtime;
 pub mod templates;
@@ -69,10 +70,17 @@ pub struct Settings {
     pub region: String,
     /// The API's base URL, for a stand-in; empty for DigitalOcean's.
     pub api_url: String,
-    /// The image templates are built from, by digest: the session's harness
-    /// image with the harness bundle at `/opt/tracon` and the
-    /// `tracon-sandbox` service (`containers/do-sandbox`).
+    /// An image of the operator's that every session there runs in, by
+    /// digest: one with the harness bundle at `/opt/tracon` and the
+    /// `tracon-sandbox` service (`containers/do-sandbox`). Or leave it out
+    /// and name `registry`.
     pub image: String,
+    /// Where the node pushes the template sources it builds itself: each of
+    /// its own sandbox images (the pinned base, a repository's prepared
+    /// snapshot) with the bundle it verified. DigitalOcean's container
+    /// registry takes the same token. Needs `[runtime.podman]
+    /// sandbox_images`.
+    pub registry: String,
     /// The runtime's base template the image is rebased onto.
     pub base_template: String,
     /// The sandbox size slug; empty for the runtime's default.
@@ -101,6 +109,7 @@ impl Default for Settings {
             region: String::new(),
             api_url: String::new(),
             image: String::new(),
+            registry: String::new(),
             base_template: "sandbox".into(),
             size: String::new(),
             limit: 4,
@@ -145,13 +154,37 @@ impl Settings {
 
 /// Refuse a `[digitalocean]` block the node could not run sessions with.
 /// One with no credential is not in use and is not checked.
-pub fn validate(settings: &Settings, relay_enabled: bool) -> Result<(), String> {
+pub fn validate(
+    settings: &Settings,
+    relay_enabled: bool,
+    sandbox_images: bool,
+) -> Result<(), String> {
     if !settings.is_configured() {
         return Ok(());
     }
     settings.node_addr()?;
     settings.listen_addr()?;
-    templates::digest_of(&settings.image).map_err(|e| format!("digitalocean.image: {e}"))?;
+    match (settings.image.is_empty(), settings.registry.is_empty()) {
+        (false, true) => {
+            templates::digest_of(&settings.image)
+                .map_err(|e| format!("digitalocean.image: {e}"))?;
+        }
+        (true, false) if !sandbox_images => {
+            return Err(
+                "digitalocean.registry builds templates from the node's own sandbox \
+                        images, which needs [runtime.podman] sandbox_images"
+                    .into(),
+            )
+        }
+        (true, false) => {}
+        _ => {
+            return Err(
+                "name exactly one of digitalocean.image (an image of your own) and \
+                 digitalocean.registry (where the node pushes the ones it builds)"
+                    .into(),
+            )
+        }
+    }
     if settings.base_template.trim().is_empty() {
         return Err("digitalocean.base_template is empty".into());
     }
@@ -200,6 +233,8 @@ pub type ServerName = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 /// One sandbox this provider made, while it is the node's.
 struct Made {
     run: String,
+    /// The local image it runs (its template's source).
+    image: String,
     config_id: Option<String>,
     /// Taken by the first `connect`.
     arrival: Option<oneshot::Receiver<SandboxConn>>,
@@ -390,10 +425,10 @@ impl DoProvider {
     }
 
     /// The manifest of every sandbox: nothing of the run in it.
-    pub fn manifest(&self, name: &str) -> Result<Manifest, ProviderError> {
+    pub fn manifest(&self, name: &str, template: &str) -> Result<Manifest, ProviderError> {
         let settings = &self.options.settings;
         Ok(Manifest {
-            template: Some(self.templates.name().to_string()),
+            template: Some(template.to_string()),
             size: (!settings.size.is_empty()).then(|| settings.size.clone()),
             keep_warm: true,
             egress: Some(Egress::Rules {
@@ -476,6 +511,7 @@ impl DoProvider {
         &self,
         client: &Client,
         session: Session,
+        image: &str,
         bootstrap: &Bootstrap,
     ) -> Result<Handle, ProviderError> {
         let id = session.session_id.clone();
@@ -492,6 +528,7 @@ impl DoProvider {
                     id.clone(),
                     Made {
                         run: bootstrap.run.clone(),
+                        image: image.to_string(),
                         config_id: ready.config_id.or(session.config_id),
                         arrival: Some(arrival),
                     },
@@ -564,26 +601,23 @@ impl SandboxProvider for DoProvider {
                 mount.volume, mount.target
             )));
         }
-        if !spec.image.is_empty() && spec.image != self.templates.image() {
-            return Err(failed(format!(
-                "DigitalOcean runs sandboxes in its template of {}, not {}",
-                self.templates.image(),
+        let template = self.templates.ready(spec.image).map_err(|why| {
+            failed(format!(
+                "DigitalOcean cannot start a sandbox in {} yet: {why}",
                 spec.image
-            )));
-        }
-        self.templates
-            .ready()
-            .map_err(|why| failed(format!("DigitalOcean cannot start a sandbox yet: {why}")))?;
+            ))
+        })?;
         let name = spec
             .name
             .ok_or_else(|| failed("a DigitalOcean sandbox needs a name"))?;
-        let manifest = self.manifest(name)?;
+        let manifest = self.manifest(name, &template)?;
         // Said before anything is made: a relay not held now would leave a
         // session nobody can reach.
         self.server_name()?;
         let client = self.client()?;
         let session = client.create_session(&manifest).await.map_err(failed)?;
-        self.start_run(&client, session, spec.bootstrap).await
+        self.start_run(&client, session, spec.image, spec.bootstrap)
+            .await
     }
 
     async fn connect(
@@ -688,6 +722,13 @@ impl SandboxProvider for DoProvider {
             .0
             .split_once('/')
             .ok_or_else(|| failed(format!("{} is not a DigitalOcean checkpoint", snapshot.0)))?;
+        let image = self
+            .made
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|m| m.image.clone())
+            .unwrap_or_default();
         let client = self.client()?;
         let child = client
             .fork_session(session, Some(checkpoint), 1)
@@ -696,16 +737,28 @@ impl SandboxProvider for DoProvider {
             .into_iter()
             .next()
             .ok_or_else(|| failed("DigitalOcean forked no session"))?;
-        self.start_run(&client, child, bootstrap).await
+        self.start_run(&client, child, &image, bootstrap).await
     }
 
     /// Derived: the runtime rebuilt the image as its template, under a
     /// digest of its own that this API does not report, so the template
     /// stands for it.
-    async fn image_identity(&self, _handle: &Handle) -> Result<ImageIdentity, ProviderError> {
-        let template = self.templates.ready().map_err(ProviderError::Failed)?;
+    async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {
+        let image = self
+            .made
+            .lock()
+            .unwrap()
+            .get(&handle.0)
+            .map(|m| m.image.clone())
+            .ok_or_else(|| ProviderError::NotFound(handle.0.clone()))?;
+        let template = self
+            .templates
+            .ready(&image)
+            .map_err(ProviderError::Failed)?;
         Ok(ImageIdentity::Derived {
-            from: self.templates.digest().to_string(),
+            from: templates::digest_of(&image)
+                .map_err(ProviderError::Failed)?
+                .to_string(),
             actual: format!("digitalocean-template:{template}"),
         })
     }
@@ -856,8 +909,8 @@ mod tests {
 
     #[test]
     fn settings_are_checked_only_when_in_use() {
-        assert!(validate(&Settings::default(), false).is_ok());
-        assert!(validate(&settings(), false).is_ok());
+        assert!(validate(&Settings::default(), false, false).is_ok());
+        assert!(validate(&settings(), false, false).is_ok());
         for bad in [
             Settings {
                 node_addr: "node.example.net:443".into(),
@@ -880,13 +933,32 @@ mod tests {
                 ..settings()
             },
         ] {
-            assert!(validate(&bad, false).is_err(), "{bad:?}");
+            assert!(validate(&bad, false, true).is_err(), "{bad:?}");
         }
         let relayed = Settings {
             relay: true,
             ..settings()
         };
-        assert!(validate(&relayed, false).is_err());
-        assert!(validate(&relayed, true).is_ok());
+        assert!(validate(&relayed, false, false).is_err());
+        assert!(validate(&relayed, true, false).is_ok());
+        // The node builds its own templates only from its own sandbox
+        // images, and only one source is named.
+        let built = Settings {
+            image: String::new(),
+            registry: "registry.digitalocean.com/acme".into(),
+            ..settings()
+        };
+        assert!(validate(&built, false, false).is_err());
+        assert!(validate(&built, false, true).is_ok());
+        let both = Settings {
+            registry: "registry.digitalocean.com/acme".into(),
+            ..settings()
+        };
+        assert!(validate(&both, false, true).is_err());
+        let neither = Settings {
+            image: String::new(),
+            ..settings()
+        };
+        assert!(validate(&neither, false, true).is_err());
     }
 }

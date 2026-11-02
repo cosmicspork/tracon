@@ -1455,9 +1455,15 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # [runtime.podman] sandbox_protocol, sandbox_files and
                                     # sandbox_tunnels: nothing is mounted there
 # credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
-# image = "registry.example/tracon-do-sandbox@sha256:…"  # by digest; built with
-                                    # containers/do-sandbox. Registered as a template once per digest
-                                    # (about seven minutes), never per session
+# registry = "registry.digitalocean.com/acme"  # where the node pushes the template sources it
+                                    # builds: its pinned base and each repository's prepared snapshot,
+                                    # with the bundle it verified and the tracon-sandbox service
+                                    # (containers/do-sandbox). Needs sandbox_images. Each is registered
+                                    # as a template once per image digest (about seven minutes), as
+                                    # part of preparing it, never per session; until a snapshot's is
+                                    # ready its sessions there run in the base's
+# image = "…@sha256:…"              # or one image of your own for every session there, built with
+                                    # containers/do-sandbox; name this or registry, not both
 # base_template = "sandbox"         # the runtime's base the image is rebased onto
 # region = ""                       # the API host's region; empty for the default
 # size = ""                         # a sandbox size slug; empty for the runtime's default

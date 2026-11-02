@@ -8,8 +8,8 @@
 //!   leaves behind (`do_harness::cleanup`).
 //! - **Checkpoints**: one per prepared environment is kept to fork from, the
 //!   newest ready; every older one (51 GB each, as recorded) goes.
-//! - **Templates** for images the node no longer uses, once no session of
-//!   its runs.
+//! - **Templates** for images the node no longer has (a superseded snapshot,
+//!   an old base), once no session of its runs.
 //!
 //! Only names this node owns (`Owner::owns`, or its template stem) are ever
 //! touched.
@@ -79,6 +79,7 @@ pub async fn sweep(
     client: &Client,
     owner: &Owner,
     templates: &Templates,
+    wanted: &std::collections::HashSet<String>,
     now_ms: i64,
 ) -> Result<Swept, DoError> {
     let mut swept = Swept::default();
@@ -114,7 +115,7 @@ pub async fn sweep(
         .any(|s| owner.owns(&s.name) && !s.status.is_terminal());
     if !running {
         for template in client.list_templates().await? {
-            if !templates.is_stale(&template.name) {
+            if !templates.is_stale(&template.name, wanted) {
                 continue;
             }
             match client.delete_template(&template.template_id).await {
