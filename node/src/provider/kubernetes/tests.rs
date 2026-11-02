@@ -397,6 +397,9 @@ fn a_pod_the_scheduler_has_no_room_for_is_refused() {
 /// A connection is handed only to the run expected at its address, whether
 /// it arrived before the node learned that address or after; one from any
 /// other address is never handed over.
+// The stranger dials from 127.0.0.2, which only Linux routes as loopback
+// without configuration; a pod-hosted node runs on Linux.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn connections_go_to_the_run_expected_at_their_address() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
