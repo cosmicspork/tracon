@@ -8,6 +8,7 @@
     changedArguments,
     editProblems,
     grantsAccess,
+    issueChanges,
     outcome,
     problemsByField,
     amendsNothing,
@@ -113,6 +114,8 @@
    * what ran, so there is nothing left to compare.
    */
   const replacing = $derived(pending && details ? replacement(details, edited) : null)
+  /** A Jira edit's short fields against the issue as it stands, while it waits. */
+  const fieldChanges = $derived(pending && details ? issueChanges(details, edited) : [])
   const prose = $derived(
     (details?.prose_fields ?? []).filter(
       (k) => typeof shown[k] === 'string' && shown[k] !== '' && k !== replacing?.key,
@@ -277,6 +280,25 @@
     <div class="banner crit" role="alert">
       the memory is gone or no longer live <b>· there is nothing left to amend; Allow will fail, so reject</b>
     </div>
+  {/if}
+
+  {#if pending && details.issue?.stale}
+    <div class="banner crit" role="alert">
+      the issue was updated in Jira since this was asked <b
+        >· a field, comment, link or status; what is shown is the issue as it is now, and Allow overwrites only the fields
+        the call sets</b
+      >
+    </div>
+  {/if}
+
+  {#if fieldChanges.length}
+    <div class="h4">Changes to the issue <b>{details.issue?.key} · as it is now → as the call leaves it</b></div>
+    <dl class="kv">
+      {#each fieldChanges as c (c.key)}
+        <dt>{c.key}</dt>
+        <dd><del>{c.before || '—'}</del> → <ins>{c.after || '—'}</ins></dd>
+      {/each}
+    </dl>
   {/if}
 
   {#if replacing}
