@@ -734,7 +734,8 @@ fn string_array(
         })
         .collect()
 }
-fn scrub(s: &str) -> String {
+/// `s` with every line that looks like a credential replaced.
+pub(crate) fn scrub(s: &str) -> String {
     let mut in_pem = false;
     let mut out = Vec::new();
     for line in s.lines() {

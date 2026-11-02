@@ -373,6 +373,11 @@ pub enum Command {
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notes: Option<String>,
+        /// The hash of the arguments the operator read, so the owner decides
+        /// the call only if it still holds exactly those. Additive: an older
+        /// peer sends none and is decided as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments_hash: Option<String>,
     },
     /// Answer an operator question the receiver holds: a choice it offered,
     /// the operator's own words, or both. The owner answers it as a local
@@ -914,6 +919,7 @@ mod tests {
             arguments: None,
             reason: None,
             notes: None,
+            arguments_hash: None,
         };
         assert_eq!(serde_json::to_value(&plain).unwrap(), old);
         let said = Command::Answer {
@@ -922,6 +928,7 @@ mod tests {
             arguments: None,
             reason: None,
             notes: Some("shorter".into()),
+            arguments_hash: None,
         };
         assert_eq!(serde_json::to_value(&said).unwrap()["notes"], "shorter");
     }

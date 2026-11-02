@@ -215,6 +215,11 @@ pub mod event_kind {
     pub const PERMISSION_EXPIRED: &str = "permission_expired";
     /// An approved call ran: `state` is how it ended.
     pub const APPROVAL_SETTLED: &str = "approval_settled";
+    /// A call to the node's own tools and how it was decided (`tool`,
+    /// redacted `arguments`, `decision`, `decided_by`, `rule`, `reason`,
+    /// `approval_id` when it was held for the operator, `outcome`). The
+    /// session's audit is read from these; the log shows the call itself.
+    pub const TOOL_DECIDED: &str = "tool_decided";
     /// Answered by policy without interrupting the operator.
     pub const POLICY_ALLOWED: &str = "policy_allowed";
     pub const POLICY_DENIED: &str = "policy_denied";

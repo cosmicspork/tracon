@@ -52,6 +52,7 @@ import type {
   Queue,
   RecallHit,
   RecentRepo,
+  SessionAudit,
   SessionAuthority,
   PreparationPreview,
   RepoReadiness,
@@ -563,19 +564,26 @@ export const api = {
       review_session_starting: boolean
       reviewer: ReviewerView | null
     }>('GET', `/api/reviews/${id}/review-session`),
-  /** `reason` goes back with a rejection, `notes` with a request for changes. */
+  /**
+   * `reason` goes back with a rejection, `notes` with a request for changes.
+   * `argumentsHash` names the call as it was read: an approval that no longer
+   * holds those arguments is not decided (409).
+   */
   answer: (
     permissionId: string,
     optionId: string,
     args?: Record<string, unknown>,
-    said: { reason?: string; notes?: string } = {},
+    said: { reason?: string; notes?: string; argumentsHash?: string } = {},
   ) =>
     call<void>('POST', `/api/permissions/${permissionId}/answer`, {
       option_id: optionId,
       arguments: args,
       reason: said.reason,
       notes: said.notes,
+      arguments_hash: said.argumentsHash,
     }),
+  /** Every call the session made to the node's tools and who decided each. */
+  sessionAudit: (id: string) => call<SessionAudit>('GET', `/api/sessions/${id}/audit`),
   /** Reading an approval claims it, as opening a review does. */
   approval: (id: string) => call<ApprovalDetails>('GET', `/api/approvals/${id}`),
   releaseApproval: (id: string) => call<void>('POST', `/api/approvals/${id}/release`),

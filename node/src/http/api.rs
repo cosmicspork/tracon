@@ -1687,6 +1687,24 @@ pub async fn session_authority(
     )))
 }
 
+/// `GET /api/sessions/{id}/audit`: every call the session made to the
+/// node's tools, how each was decided and by whom, arguments redacted.
+pub async fn session_audit(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let session = s
+        .store()
+        .get_session(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such session".into()))?;
+    let calls = crate::mcp::audit::session_audit(s.store(), &id)?;
+    Ok(Json(json!({
+        "session_id": id,
+        "node_id": session.node_id,
+        "calls": calls,
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct EventsQuery {
     #[serde(default)]
@@ -2109,6 +2127,22 @@ pub struct AnswerBody {
     /// with any other answer.
     #[serde(default)]
     notes: Option<String>,
+    /// The `arguments_hash` of the approval as the operator read it: an
+    /// answer that names one applies only to a call that still holds it.
+    #[serde(default)]
+    arguments_hash: Option<String>,
+}
+
+/// Who an answer came from, as an approval's audit names them. One operator
+/// runs a node; what differs is where they answered from.
+fn answered_by(s: &AppState, parts: &axum::http::request::Parts) -> String {
+    match super::passkey::caller(s, parts) {
+        super::passkey::Caller::Local => "operator (at the node)".into(),
+        super::passkey::Caller::Session(h) => {
+            format!("operator (browser {})", &h[..12.min(h.len())])
+        }
+        super::passkey::Caller::Other => "operator (token)".into(),
+    }
 }
 
 /// Whether answering approval `id` with `option_id` changes the node rather
@@ -2261,6 +2295,8 @@ pub async fn answer_permission(
         arguments: b.arguments,
         reason: b.reason,
         notes: b.notes,
+        arguments_hash: b.arguments_hash,
+        by: Some(answered_by(&s, &parts)),
     };
     match s.manager.answer(&id, answer).await {
         Ok(()) => StatusCode::OK.into_response(),
@@ -2302,6 +2338,7 @@ pub async fn get_approval(
     let mut details = json!({
         "approval": a,
         "arguments": arguments,
+        "arguments_hash": a.arguments_hash(),
         "edited_arguments": parse(a.edited_arguments.as_deref()),
         "result": parse(a.result.as_deref()),
         "input_schema": crate::mcp::schema::input_schema(&a.tool),
@@ -6915,6 +6952,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 arguments,
                 reason,
                 notes,
+                arguments_hash,
             } => self
                 .manager
                 .answer(
@@ -6924,6 +6962,17 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         arguments,
                         reason,
                         notes,
+                        arguments_hash,
+                        by: Some(format!(
+                            "operator (through {})",
+                            self.store()
+                                .get_node(sender)
+                                .ok()
+                                .flatten()
+                                .map(|n| n.name)
+                                .filter(|n| !n.is_empty())
+                                .unwrap_or_else(|| format!("node {sender}"))
+                        )),
                     },
                 )
                 .await

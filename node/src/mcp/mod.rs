@@ -9,6 +9,7 @@
 
 pub mod approvals;
 pub mod aside;
+pub mod audit;
 pub mod checking;
 pub mod consulta;
 pub mod docs;
@@ -429,6 +430,31 @@ impl Tools {
     }
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
+        let mut gate = audit::Gate::default();
+        let result = self.call_gated(ctx, name, args, &mut gate).await;
+        // A session's calls are its audit; a session-less caller's channel
+        // log already records each call it makes.
+        if let (Some(session_id), Some(access)) = (ctx.session_id(), self.session.get()) {
+            if gate.decision == audit::REFUSED && gate.reason.is_none() {
+                gate.reason = result.as_ref().err().cloned();
+            }
+            access.manager.record_event(
+                session_id,
+                crate::session::state::event_kind::TOOL_DECIDED,
+                audit::record(name, args, &gate, &result),
+            );
+        }
+        result
+    }
+
+    /// [`Self::call`], saying in `gate` how it was decided.
+    async fn call_gated(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+        gate: &mut audit::Gate,
+    ) -> Result<Value, String> {
         let defaulted = self.with_defaults(ctx, name, args)?;
         let args = defaulted.as_ref().unwrap_or(args);
         // A plan session's own plan document is the phase's artifact: writing
@@ -472,6 +498,7 @@ impl Tools {
                 .session
                 .get()
                 .ok_or("operator interventions are not available on this node")?;
+            *gate = audit::Gate::node("operator-intervention");
             return operator::call(&access.store, &access.manager, &self.cfg, ctx, name, args)
                 .await;
         }
@@ -484,7 +511,12 @@ impl Tools {
                 .manager
                 .caller_active(ctx)
                 .map_err(|error| error.to_string())?;
-            return egress::call(access, ctx, args).await;
+            let result = egress::call(access, ctx, args).await;
+            *gate = match audit::approval_of(&result) {
+                Some(_) => audit::Gate::asked(&result, "node", Some("egress".into())),
+                None => audit::Gate::node("egress"),
+            };
+            return result;
         }
         if matches!(name, setup::DRAFT | setup::TRY | setup::PROPOSE) {
             let access = self
@@ -499,16 +531,21 @@ impl Tools {
                 // Always the operator's, whatever the policy says: an agent
                 // does not write its own repository's environment.
                 let asked = setup::proposal(access, ctx, args)?;
-                return self.request_approval(ctx, name, &asked).await;
+                let result = self.request_approval(ctx, name, &asked).await;
+                *gate = audit::Gate::asked(&result, "node", Some("always-asked".into()));
+                return result;
             }
             if name == setup::TRY {
                 // Building a repository's Dockerfile runs it with the network,
                 // outside the boundary: the operator's, as when they name one
                 // in an entry themselves.
                 if let Some(asked) = setup::build_to_ask(access, ctx, args).await? {
-                    return self.request_approval(ctx, name, &asked).await;
+                    let result = self.request_approval(ctx, name, &asked).await;
+                    *gate = audit::Gate::asked(&result, "node", Some("always-asked".into()));
+                    return result;
                 }
             }
+            *gate = audit::Gate::node("repository-setup");
             return setup::call(access, ctx, name, args).await;
         }
         if name == show::SHOW {
@@ -520,6 +557,7 @@ impl Tools {
                 .manager
                 .caller_active(ctx)
                 .map_err(|error| error.to_string())?;
+            *gate = audit::Gate::node("show-work");
             return show::call(access, ctx, args).await;
         }
         if name == approvals::STATUS {
@@ -527,6 +565,7 @@ impl Tools {
                 .session
                 .get()
                 .ok_or("approvals are not available on this node")?;
+            *gate = audit::Gate::node("approval-status");
             return approvals::status(access, ctx, args).await;
         }
         if consequential_name(name) && consequential(name, args).is_none() {
@@ -539,11 +578,30 @@ impl Tools {
         if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
             return Err(refusal);
         }
-        if !plan_write {
+        if plan_write {
+            *gate = audit::Gate::node("plan-artifact");
+        } else {
             let decision = self.decide(ctx, name, args);
             match decision.verdict {
-                Verdict::Allow if !always_asked => {}
-                Verdict::Deny => return Err(refusal(decision)),
+                Verdict::Allow if !always_asked => {
+                    *gate = audit::Gate {
+                        decision: audit::POLICY_ALLOWED,
+                        decided_by: self.decided_by(&decision),
+                        rule: decision.rule_id.clone(),
+                        reason: decision.reason.clone(),
+                        approval_id: None,
+                    };
+                }
+                Verdict::Deny => {
+                    *gate = audit::Gate {
+                        decision: audit::DENIED,
+                        decided_by: self.decided_by(&decision),
+                        rule: decision.rule_id.clone(),
+                        reason: decision.reason.clone(),
+                        approval_id: None,
+                    };
+                    return Err(refusal(decision));
+                }
                 // Nothing waits on the operator: the call is held as an
                 // approval and the caller is told so at once.
                 Verdict::Allow | Verdict::Ask => {
@@ -554,19 +612,45 @@ impl Tools {
                             .and_then(|access| docs::pinned(&access.store, &ctx.channel, args)),
                         _ => None,
                     };
-                    return self
+                    let result = self
                         .request_approval(ctx, name, pinned.as_ref().unwrap_or(args))
                         .await;
+                    let (by, rule) = if always_asked {
+                        ("node", Some("always-asked".to_string()))
+                    } else {
+                        (self.decided_by(&decision), decision.rule_id.clone())
+                    };
+                    *gate = audit::Gate {
+                        reason: decision.reason.clone(),
+                        ..audit::Gate::asked(&result, by, rule)
+                    };
+                    return result;
                 }
             }
         }
         if let Some(access) = self.session.get() {
-            access
-                .manager
-                .caller_active(ctx)
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = access.manager.caller_active(ctx) {
+                *gate = audit::Gate::default();
+                return Err(error.to_string());
+            }
         }
         self.dispatch(ctx, name, args, false).await
+    }
+
+    /// Whether a decision was the signed policy's or an operator's scoped
+    /// grant, which an authority decision names by its id.
+    fn decided_by(&self, decision: &Decision) -> &'static str {
+        let grant = decision.rule_id.as_deref().is_some_and(|id| {
+            self.session
+                .get()
+                .and_then(|access| access.store.authority_grant(id).ok().flatten())
+                .is_some()
+        });
+        if grant {
+            "grant"
+        } else {
+            "policy"
+        }
     }
 
     /// Run a call that is allowed: by policy, by a grant, or by the operator
@@ -1382,6 +1466,18 @@ impl Tools {
         if approval.expires_ms <= crate::store::now_ms() {
             return Err(rejected("this approval has expired"));
         }
+        // The answer names the call it was given for. Arguments that no
+        // longer hash to what the operator read are another call, whatever
+        // put them there; nothing is decided on it.
+        if let Some(read) = answer.arguments_hash.as_deref().map(str::trim) {
+            if read != approval.arguments_hash() {
+                return Err(rejected(
+                    "this approval's arguments are not the ones you read; nothing was decided. \
+                     Open it again to see the call as it stands",
+                ));
+            }
+        }
+        let by = answer.by.clone();
         let said = |text: &Option<String>| {
             text.as_deref()
                 .map(str::trim)
@@ -1390,16 +1486,39 @@ impl Tools {
         };
         let (reason, notes) = (said(&answer.reason), said(&answer.notes));
         let option_id = answer.option_id.as_str();
+        // An egress card opens or saves the host it asked about and runs no
+        // call, so an edit to it would be silently dropped: what the operator
+        // allowed would not be what happened. Refused instead.
+        if matches!(approval.tool.as_str(), egress::REQUEST | egress::PREPARE)
+            && option_id != OPTION_REQUEST_CHANGES
+            && option_id != crate::adapter::types::OPTION_REJECT_ONCE
+        {
+            if let Some(edited) = &answer.arguments {
+                let asked: Value = serde_json::from_str(&approval.arguments).unwrap_or_default();
+                if *edited != asked {
+                    return Err(SessionError::Unfit(vec![schema::FieldError {
+                        field: String::new(),
+                        message: "this card opens the host it asked about and takes no edit; \
+                                  reject it instead"
+                            .into(),
+                    }]));
+                }
+            }
+        }
         if approval.tool == egress::REQUEST {
             if let Some(opened) = egress::scope_of(option_id) {
-                return self.allow_egress(&approval, option_id, opened, notes).await;
+                return self
+                    .allow_egress(&approval, option_id, opened, notes, by.as_deref())
+                    .await;
             }
         }
         // A warm-up's ask is saved or refused: the warm-up is over, so there
         // is nothing to open once, and no call to run or to change.
         if approval.tool == egress::PREPARE {
             if option_id == crate::store::approvals::OPTION_ALLOW_REPO {
-                return self.save_warming_host(&approval, option_id, notes).await;
+                return self
+                    .save_warming_host(&approval, option_id, notes, by.as_deref())
+                    .await;
             }
             if option_id == OPTION_ALLOW_ONCE || option_id == OPTION_REQUEST_CHANGES {
                 return Err(rejected(
@@ -1432,13 +1551,17 @@ impl Tools {
                 option_id,
                 reason: Some(&reason),
                 note: note.as_deref(),
+                bound_to: Some(&approval.arguments),
                 ..Default::default()
             };
             if !access.store.decide_approval(id, &decision)? {
                 return Err(no_longer_waiting());
             }
             let decided = access.store.get_approval(id)?.unwrap_or(approval);
-            access.manager.approval_decided(&decided, state).await;
+            access
+                .manager
+                .approval_answered(&decided, state, by.as_deref())
+                .await;
             return Ok(());
         }
         let original: Value = serde_json::from_str(&approval.arguments)
@@ -1475,19 +1598,26 @@ impl Tools {
         // wrote the words.
         let edited = answer.arguments.as_ref().map(Value::to_string);
         let run_args = answer.arguments.unwrap_or(original);
+        // Bound to the arguments read above, which are what runs unless the
+        // operator rewrote them: a row changed in between is not decided.
         let decision = Decision {
             state: RUNNING,
             option_id,
             edited_arguments: edited.as_deref(),
             note: notes.as_deref(),
+            bound_to: Some(&approval.arguments),
             ..Default::default()
         };
         if !access.store.decide_approval(id, &decision)? {
             return Err(no_longer_waiting());
         }
-        access.manager.approval_decided(&approval, RUNNING).await;
+        let decided = access.store.get_approval(id)?.unwrap_or(approval);
+        access
+            .manager
+            .approval_answered(&decided, RUNNING, by.as_deref())
+            .await;
         let tools = Arc::clone(self);
-        let name = approval.tool.clone();
+        let name = decided.tool.clone();
         let id = id.to_string();
         tokio::spawn(async move {
             let outcome = tools.run_approved(&ctx, &name, &run_args).await;
@@ -1506,6 +1636,7 @@ impl Tools {
         option_id: &str,
         opened: egress::Opened,
         notes: Option<String>,
+        by: Option<&str>,
     ) -> Result<(), crate::session::SessionError> {
         use crate::session::SessionError;
         use crate::store::approvals::{Decision, FAILED, RUNNING, SUCCEEDED};
@@ -1530,6 +1661,7 @@ impl Tools {
             state: RUNNING,
             option_id,
             note: notes.as_deref(),
+            bound_to: Some(&approval.arguments),
             ..Default::default()
         };
         if !access.store.decide_approval(&approval.id, &decision)? {
@@ -1537,7 +1669,11 @@ impl Tools {
                 "this approval is no longer waiting".into(),
             ));
         }
-        access.manager.approval_decided(approval, RUNNING).await;
+        let decided = access.store.get_approval(&approval.id)?;
+        access
+            .manager
+            .approval_answered(decided.as_ref().unwrap_or(approval), RUNNING, by)
+            .await;
         let widened = access
             .manager
             .egress_grants()
@@ -1581,6 +1717,7 @@ impl Tools {
         approval: &crate::store::approvals::ApprovalRow,
         option_id: &str,
         notes: Option<String>,
+        by: Option<&str>,
     ) -> Result<(), crate::session::SessionError> {
         use crate::session::SessionError;
         use crate::store::approvals::{Decision, RUNNING, SUCCEEDED};
@@ -1597,6 +1734,7 @@ impl Tools {
             state: RUNNING,
             option_id,
             note: notes.as_deref(),
+            bound_to: Some(&approval.arguments),
             ..Default::default()
         };
         if !access.store.decide_approval(&approval.id, &decision)? {
@@ -1604,7 +1742,11 @@ impl Tools {
                 "this approval is no longer waiting".into(),
             ));
         }
-        access.manager.approval_decided(approval, RUNNING).await;
+        let decided = access.store.get_approval(&approval.id)?;
+        access
+            .manager
+            .approval_answered(decided.as_ref().unwrap_or(approval), RUNNING, by)
+            .await;
         let result = json!({ "host": host, "scope": "repository", "repository": saved });
         access
             .store

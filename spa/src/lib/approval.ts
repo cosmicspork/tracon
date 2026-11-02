@@ -42,6 +42,8 @@ export interface ApprovalRow {
 export interface ApprovalDetails {
   approval: ApprovalRow
   arguments: unknown
+  /** What an answer names to say it was given for these arguments. */
+  arguments_hash?: string
   edited_arguments: unknown
   result: unknown
   input_schema: JsonSchema | null

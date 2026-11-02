@@ -122,6 +122,12 @@ impl ApprovalRow {
         })
     }
 
+    /// The hash of the arguments as asked ([`arguments_hash`]): what an
+    /// operator's answer names to say which call it read.
+    pub fn arguments_hash(&self) -> String {
+        arguments_hash(&self.arguments)
+    }
+
     /// Decided, and nothing more will happen to it.
     pub fn is_settled(&self) -> bool {
         matches!(
@@ -150,6 +156,7 @@ impl ApprovalRow {
                         "tool": self.tool,
                         "arguments": arguments,
                         "approval_id": self.id,
+                        "arguments_hash": self.arguments_hash(),
                         "lane": self.lane,
                     })
                     .to_string(),
@@ -167,6 +174,16 @@ impl ApprovalRow {
     }
 }
 
+/// The SHA-256 of `arguments` in canonical form: object keys in order and no
+/// whitespace, so the same call hashes the same however its JSON was spelled.
+/// Text that is not JSON is hashed as it is.
+pub fn arguments_hash(arguments: &str) -> String {
+    let canonical = serde_json::from_str::<serde_json::Value>(arguments)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| arguments.to_string());
+    crate::corpus::hash_body(&canonical)
+}
+
 /// The operator's answer to a pending approval, as it is recorded.
 #[derive(Debug, Default)]
 pub struct Decision<'a> {
@@ -175,6 +192,10 @@ pub struct Decision<'a> {
     pub edited_arguments: Option<&'a str>,
     pub reason: Option<&'a str>,
     pub note: Option<&'a str>,
+    /// The stored arguments the decision was made against. When given, the
+    /// decision lands only if the row still holds exactly these, so an answer
+    /// never applies to a call other than the one that was read.
+    pub bound_to: Option<&'a str>,
 }
 
 impl Store {
@@ -282,7 +303,8 @@ impl Store {
     }
 
     /// Move a pending approval to `state` with the operator's answer. False
-    /// when it was no longer pending: answered twice, or expired first.
+    /// when it was no longer pending (answered twice, or expired first), or
+    /// no longer holds the arguments the decision is bound to.
     pub fn decide_approval(&self, id: &str, decision: &Decision<'_>) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
@@ -290,7 +312,8 @@ impl Store {
             "UPDATE approval SET state=?2, answer_option_id=?3, edited_arguments=?4, reason=?5,
                 operator_note=?6, claimed_ms=NULL, decided_ms=?7,
                 finished_ms=CASE WHEN ?2 IN ('rejected','changes_requested') THEN ?7 ELSE NULL END
-             WHERE id=?1 AND state='pending' AND expires_ms > ?7",
+             WHERE id=?1 AND state='pending' AND expires_ms > ?7
+               AND (?8 IS NULL OR arguments = ?8)",
             rusqlite::params![
                 id,
                 decision.state,
@@ -298,10 +321,37 @@ impl Store {
                 decision.edited_arguments,
                 decision.reason,
                 decision.note,
-                now
+                now,
+                decision.bound_to
             ],
         )?;
         Ok(n == 1)
+    }
+
+    /// A session's events of the given kinds, oldest first: what its audit
+    /// is read from.
+    pub fn session_events_of_kinds(
+        &self,
+        session_id: &str,
+        kinds: &[&str],
+    ) -> Result<Vec<super::EventRow>> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let marks = vec!["?"; kinds.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT seq, node_id, session_id, work_item_id, kind, ref_id, payload, at_ms, mono_ms
+             FROM event WHERE session_id=? AND kind IN ({marks}) ORDER BY seq"
+        ))?;
+        let params = std::iter::once(session_id).chain(kinds.iter().copied());
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(params),
+                super::EventRow::from_row,
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
     }
 
     /// Mark a waiting approval as open in front of an operator. Each open
@@ -547,6 +597,56 @@ mod tests {
         let a = store.get_approval("a2").unwrap().unwrap();
         assert_eq!(a.reason.as_deref(), Some("jira said no"));
         assert_eq!(a.operator_note.as_deref(), Some("ship it"));
+    }
+
+    #[test]
+    fn the_same_arguments_hash_the_same_however_they_were_spelled() {
+        assert_eq!(
+            arguments_hash(r#"{"slug":"plan-x","body":"b"}"#),
+            arguments_hash("{ \"body\": \"b\",\n  \"slug\": \"plan-x\" }")
+        );
+        assert_ne!(
+            arguments_hash(r#"{"slug":"plan-x","body":"b"}"#),
+            arguments_hash(r#"{"slug":"plan-x","body":"c"}"#)
+        );
+        let a = row("a1", "k", now_ms() + 60_000);
+        assert_eq!(a.arguments_hash(), arguments_hash(&a.arguments));
+        let card = a.as_card("[]", PermissionIntent::default());
+        let raw: serde_json::Value =
+            serde_json::from_str(card.request.raw_input.as_deref().unwrap()).unwrap();
+        assert_eq!(raw["arguments_hash"], a.arguments_hash());
+    }
+
+    /// A decision bound to the arguments it was made against does not land on
+    /// a row that holds anything else, and a bound decision is still used once.
+    #[test]
+    fn a_decision_lands_only_on_the_arguments_it_was_made_against() {
+        let store = Store::open_in_memory().unwrap();
+        let asked = row("a1", "k", now_ms() + 60_000);
+        store.insert_approval(&asked).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE approval SET arguments=?2 WHERE id=?1",
+                rusqlite::params!["a1", r#"{"slug":"plan-y","body":"b"}"#],
+            )
+            .unwrap();
+        let bound = Decision {
+            bound_to: Some(&asked.arguments),
+            ..allow()
+        };
+        assert!(!store.decide_approval("a1", &bound).unwrap());
+        assert_eq!(store.get_approval("a1").unwrap().unwrap().state, PENDING);
+
+        let now_held = store.get_approval("a1").unwrap().unwrap().arguments;
+        let bound = Decision {
+            bound_to: Some(&now_held),
+            ..allow()
+        };
+        assert!(store.decide_approval("a1", &bound).unwrap());
+        assert!(!store.decide_approval("a1", &bound).unwrap());
     }
 
     #[test]

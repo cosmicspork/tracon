@@ -378,6 +378,7 @@ async fn a_peer_cannot_answer_an_admin_approval_over_the_mesh() {
                     arguments: None,
                     reason: None,
                     notes: None,
+                    arguments_hash: None,
                 },
             )
             .await;
@@ -400,6 +401,7 @@ async fn a_peer_cannot_answer_an_admin_approval_over_the_mesh() {
                 arguments: None,
                 reason: None,
                 notes: None,
+                arguments_hash: None,
             },
         )
         .await
