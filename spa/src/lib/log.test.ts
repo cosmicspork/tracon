@@ -428,6 +428,17 @@ test('a compaction the operator asked for says so', () => {
   expect(manual?.text).toBe(`context compacted on request · ~${formatTokens(48_000)} → ~${formatTokens(3_100)} tokens`)
 })
 
+test('a compaction shows as running until it is done or its turn ends', () => {
+  const started = ev('context_compacting', null, { trigger: 'manual' })
+  expect(eventLine(started)).toEqual({ text: 'compacting the conversation… · on request', tone: 'wait' })
+  expect(eventLine(ev('context_compacting', null, {}))?.text).toBe('compacting the conversation…')
+  const leaves = (events: Event[]) => groupLog(events).map((l) => l.event?.kind)
+  expect(leaves([ev('user_prompt'), started])).toEqual(['user_prompt', 'context_compacting'])
+  expect(leaves([started, ev('context_compacted', null, { trigger: 'manual' }), ev('turn_end')])).toEqual(['context_compacted', 'turn_end'])
+  // One whose summary could not be had ends with its turn.
+  expect(leaves([ev('context_compacting', null, { trigger: 'threshold' }), ev('turn_end')])).toEqual(['turn_end'])
+})
+
 test('asking an ended session again says it is the same conversation, or why it is not', () => {
   const resumed = eventLine(ev('conversation_resumed', null, { outcome: 'resumed', from_state: 'closed', end_reason: 'killed_user' }))
   expect(resumed?.text).toBe('asked again after it ended · in its own conversation')

@@ -6230,9 +6230,26 @@ impl HarnessHandle for CompactingHandle {
         self.inner.compat()
     }
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
+        // A harness that compacts on its own says so as it starts.
+        if text == "fill the window" {
+            let _ = self
+                .tx
+                .send(HarnessEvent::Other(json!({
+                    "sessionUpdate": "context_compacting",
+                    "trigger": "threshold",
+                })))
+                .await;
+        }
         self.inner.prompt(text).await
     }
     async fn compact(&self) -> Result<TurnResult, AdapterError> {
+        // Its own start signal, as Claude Code's carries no trigger.
+        let _ = self
+            .tx
+            .send(HarnessEvent::Other(json!({
+                "sessionUpdate": "context_compacting",
+            })))
+            .await;
         let _ = self
             .tx
             .send(HarnessEvent::Other(json!({
@@ -6594,6 +6611,58 @@ async fn compacting_records_the_harnesss_compaction_live_or_ended() {
     );
     let resumed = events_of(&o.store, &id, "conversation_resumed");
     assert_eq!(resumed[0]["compact"], true, "{resumed:?}");
+    tracon::session::materialize::remove(&id);
+}
+
+/// A compaction is in the transcript from the moment it starts: the
+/// operator's as its turn is dispatched, once even when the harness says so
+/// too, and the harness's own when it says it has begun.
+#[tokio::test]
+async fn a_compaction_is_recorded_as_it_starts_not_only_when_it_ends() {
+    state::isolate();
+    let (o, _adapter, _operator) = reopening("compacting").await;
+    let id = o.row.id.clone();
+    let ends = events_of(&o.store, &id, "turn_end").len();
+    let since = o
+        .store
+        .events_after(&id, 0, 2000)
+        .unwrap()
+        .last()
+        .map_or(0, |e| e.seq);
+    o.manager.compact(&id).await.unwrap();
+    until_row(&o.store, &id, "compacted", |s| {
+        s.turn_active == 0 && events_of(&o.store, &id, "turn_end").len() == ends + 1
+    })
+    .await;
+    let kinds: Vec<String> = o
+        .store
+        .events_after(&id, since, 2000)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .filter(|k| k.starts_with("context_compact") || k == "turn_end")
+        .collect();
+    assert_eq!(
+        kinds,
+        ["context_compacting", "context_compacted", "turn_end"],
+        "{kinds:?}"
+    );
+    assert_eq!(
+        events_of(&o.store, &id, "context_compacting")[0]["trigger"],
+        "manual"
+    );
+
+    o.manager
+        .prompt(&id, "fill the window".into())
+        .await
+        .unwrap();
+    until_row(&o.store, &id, "turned", |s| {
+        s.turn_active == 0 && events_of(&o.store, &id, "turn_end").len() == ends + 2
+    })
+    .await;
+    let started = events_of(&o.store, &id, "context_compacting");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[1]["trigger"], "threshold");
     tracon::session::materialize::remove(&id);
 }
 

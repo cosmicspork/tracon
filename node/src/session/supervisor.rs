@@ -238,6 +238,10 @@ pub struct Supervisor {
     died_in_turn: bool,
     /// Said of the next prompt dispatched: who it is from, when not the operator.
     next_prompt_origin: Option<&'static str>,
+    /// A `context_compacting` is recorded and its compaction has not ended,
+    /// so the harness's own start signal for the same compaction is not
+    /// recorded twice.
+    compacting: bool,
 }
 
 /// What a turn does: answer a prompt, or compact the conversation.
@@ -280,6 +284,7 @@ impl Supervisor {
             consecutive_failures: 0,
             last_tool_call: None,
             repeated_tool_calls: 0,
+            compacting: false,
             paused_turn: None,
             checks: Vec::new(),
             grants: Default::default(),
@@ -1256,7 +1261,18 @@ impl Supervisor {
                     }
                     self.record(ek::PROVIDER_ERROR, None, payload);
                     let _ = self.watchdog_pause_if_needed().await;
+                } else if v["sessionUpdate"] == "context_compacting" {
+                    // Recorded already when the operator asked for it.
+                    if !self.compacting {
+                        self.compacting = true;
+                        self.record(
+                            ek::CONTEXT_COMPACTING,
+                            None,
+                            json!({ "trigger": v["trigger"] }),
+                        );
+                    }
                 } else if v["sessionUpdate"] == "context_compacted" {
+                    self.compacting = false;
                     self.record(
                         ek::CONTEXT_COMPACTED,
                         None,
@@ -1813,6 +1829,12 @@ impl Supervisor {
             }
             self.record(ek::USER_PROMPT, None, payload);
         }
+        // Said now, not when it is done: the harness may take a minute over
+        // it and say nothing until the end.
+        self.compacting = matches!(work, Work::Compact);
+        if self.compacting {
+            self.record(ek::CONTEXT_COMPACTING, None, json!({ "trigger": "manual" }));
+        }
         self.publish_session();
 
         let handle = self.handle.clone();
@@ -1913,6 +1935,7 @@ impl Supervisor {
         // made it; the next turn starts from a different prompt.
         self.last_tool_call = None;
         self.repeated_tool_calls = 0;
+        self.compacting = false;
         self.record(kind, None, payload);
         // After the turn it is about, not before: a note on what a turn spent
         // reads as nonsense above the line saying the turn ended.
@@ -1990,6 +2013,7 @@ impl Supervisor {
         let Some(session) = self.store.get_session(&self.session_id).ok().flatten() else {
             return;
         };
+        self.compacting = false;
         let cost = self.turn_cost(Some(&session));
         let usage = crate::metrics::settle_interrupted_turn(&self.store, &self.session_id, cost);
         let _ = self.store.update_session(

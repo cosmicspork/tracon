@@ -668,8 +668,9 @@ async fn an_upstream_that_asks_for_a_long_wait_ends_the_turn_instead() {
     assert_eq!(fake.requests.lock().unwrap().len(), 1);
 }
 
-/// The node is told of a compaction, and a process that replaces this one
-/// carries on the compacted conversation, not the one before it.
+/// The node is told of a compaction as it starts and when it is done, and a
+/// process that replaces this one carries on the compacted conversation, not
+/// the one before it.
 #[tokio::test]
 async fn a_compaction_is_reported_and_survives_a_reload() {
     let dir = tempfile::tempdir().unwrap();
@@ -699,6 +700,22 @@ async fn a_compaction_is_reported_and_survives_a_reload() {
     assert_eq!(compacted.len(), 1, "{seen:#?}");
     let c = &compacted[0]["update"];
     assert_eq!(c["trigger"], "threshold");
+    let kinds: Vec<&Value> = seen
+        .iter()
+        .filter_map(|s| match s {
+            Seen::Update(u) => Some(&u["update"]["sessionUpdate"]),
+            _ => None,
+        })
+        .filter(|k| k.as_str().is_some_and(|k| k.starts_with("context_compact")))
+        .collect();
+    assert_eq!(
+        kinds,
+        [&json!("context_compacting"), &json!("context_compacted")]
+    );
+    assert_eq!(
+        updates(&seen, "context_compacting")[0]["update"]["trigger"],
+        "threshold"
+    );
     assert_eq!(c["summarisedMessages"], 3);
     assert_eq!(c["summary"], "big.txt is 600 numbered lines.");
     assert_eq!(c["contextWindow"], 24000);

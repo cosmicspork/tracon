@@ -127,6 +127,10 @@ pub trait Hooks: Send + Sync {
     fn usage(&self, _usage: &Usage, _request_id: Option<&str>, _context_used: u64) {}
     /// A model request failed and is about to be made again.
     fn retrying(&self, _attempt: u32, _wait: Duration, _error: &WireError) {}
+    /// The conversation is about to be made smaller: told before the
+    /// summary request, which can take a while, and only when there is
+    /// something to do.
+    fn compacting(&self, _trigger: Trigger) {}
     /// The conversation was made smaller to fit the context window.
     fn compacted(&self, _compaction: &Compaction) {}
     /// A subagent's call, made under the parent's call `parent` that spawned
@@ -802,6 +806,7 @@ impl Agent<'_> {
         let limits = compact::Limits::for_window(self.context_window);
         let pruned = compact::prune_plan(conv, limits);
         if !pruned.is_empty() {
+            self.hooks.compacting(trigger);
             self.record(Record::Pruned {
                 results: pruned.clone(),
             });
@@ -824,6 +829,9 @@ impl Agent<'_> {
             ),
         };
         if let Some(upto) = upto {
+            if pruned.is_empty() {
+                self.hooks.compacting(trigger);
+            }
             // The summariser's own request has to fit, answer included.
             let budget = self.context_window.map(|w| {
                 compact::threshold(w).saturating_sub(u64::from(compact::SUMMARY_MAX_TOKENS) + 1024)

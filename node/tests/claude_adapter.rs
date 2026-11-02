@@ -321,8 +321,9 @@ async fn a_conversation_the_harness_has_no_record_of_fails_as_gone() {
     }
 }
 
-/// `/compact` is the CLI's own compaction: a turn of its own, whose summary
-/// reaches the supervisor as the event automatic compaction is recorded from.
+/// `/compact` is the CLI's own compaction: a turn of its own, whose start is
+/// told as it begins and whose summary reaches the supervisor as the event
+/// automatic compaction is recorded from.
 #[tokio::test]
 async fn compacting_runs_the_harnesss_own_compaction_and_tells_its_summary() {
     state::isolate();
@@ -334,17 +335,23 @@ async fn compacting_runs_the_harnesss_own_compaction_and_tells_its_summary() {
         .unwrap();
     assert_eq!(r.stop_reason, "end_turn");
     let deadline = tokio::time::Instant::now() + support::events::DEADLINE;
+    let mut started = Vec::new();
     let compacted = loop {
         let ev = tokio::time::timeout_at(deadline, rx.recv())
             .await
             .expect("a compaction event")
             .expect("the harness is still there");
         if let HarnessEvent::Other(v) = ev {
-            if v["sessionUpdate"] == "context_compacted" {
+            if v["sessionUpdate"] == "context_compacting" {
+                started.push(v);
+            } else if v["sessionUpdate"] == "context_compacted" {
                 break v;
             }
         }
     };
+    assert_eq!(started.len(), 1, "told once, before it ended: {started:?}");
+    // The CLI's status does not say why it compacts.
+    assert!(started[0]["trigger"].is_null(), "{started:?}");
     assert_eq!(compacted["trigger"], "manual");
     assert_eq!(compacted["tokensBefore"], 48000);
     assert_eq!(compacted["tokensAfter"], 3100);

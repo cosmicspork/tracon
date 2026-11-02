@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Agent, Compaction, Hooks, Outcome, Permit, Totals};
+use crate::agent::{Agent, Compaction, Hooks, Outcome, Permit, Totals, Trigger};
 use crate::conversation::{Block, Conversation, Role};
 use crate::events::{self, Events};
 use crate::journal::{self, Journal, Record, Restored};
@@ -745,6 +745,13 @@ impl Hooks for Wired<'_> {
             "status": status,
             "message": error.to_string(),
             "wait_ms": wait.as_millis() as u64,
+        })));
+    }
+
+    fn compacting(&self, trigger: Trigger) {
+        self.send(SessionUpdate::Other(json!({
+            "sessionUpdate": "context_compacting",
+            "trigger": trigger,
         })));
     }
 

@@ -158,6 +158,12 @@ pub mod event_kind {
     /// `first_kept_call` from which the session was kept as it was, and the
     /// `summary` the model now works from).
     pub const CONTEXT_COMPACTED: &str = "context_compacted";
+    /// A compaction began: the operator asked for one (`trigger`: `manual`,
+    /// recorded as its turn is dispatched), or the harness said it started
+    /// one (`threshold` or `overflow`, or no `trigger` when the harness does
+    /// not say why). The transcript shows it in progress until the
+    /// `context_compacted` it ends with, or the turn's end.
+    pub const CONTEXT_COMPACTING: &str = "context_compacting";
     /// The operator asked a session that had ended or was suspended, and its
     /// harness was started again in its own conversation (`outcome`:
     /// `resumed`, or `failed` with the `reason`, and `gone` when the

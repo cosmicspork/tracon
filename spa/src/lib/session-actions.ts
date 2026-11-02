@@ -3,7 +3,7 @@
 // supervisor, Resume a paused one, and a suspended session has neither — its
 // container is stopped, and the way on is Continue, in its banner.
 
-import { isTerminal, type Askable, type Session } from './types'
+import { isTerminal, type Askable, type Event, type Session } from './types'
 
 export interface SessionControls {
   pause: boolean
@@ -66,4 +66,21 @@ export function compactOffered(s: Pick<Session, 'state' | 'turn_active'>, askabl
   if (!askable?.compacts) return false
   if (s.state === 'running') return s.turn_active !== 1
   return (isTerminal(s.state) || s.state === 'suspended') && askable.restorable
+}
+
+/** Whether a compaction the operator asked for after event `since` is still
+ *  running. The node answers once the compaction's turn is dispatched, not
+ *  when it ends, so it runs until the log has a turn's end, an error, or a
+ *  failed reopen. Compact is offered only with no turn active, so any turn
+ *  that ends after `since` is the compaction's, however it ended (a Stop
+ *  settles it as interrupted, without the compact flag); a session that
+ *  could not be reopened to compact records only its failed resume. */
+export function compactionRunning(events: Pick<Event, 'seq' | 'kind' | 'payload'>[], since: number): boolean {
+  return !events.some(
+    (e) =>
+      e.seq > since &&
+      (e.kind === 'turn_end' ||
+        e.kind === 'error' ||
+        (e.kind === 'conversation_resumed' && e.payload.outcome === 'failed')),
+  )
 }

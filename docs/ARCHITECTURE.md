@@ -522,7 +522,8 @@ what was asked rests on the summariser's paraphrase: a local model asked to summ
 task half done has been seen to write the other half as done. Both steps are journaled,
 so a relaunch carries on the compacted conversation. The summariser's request goes
 through the gateway and is counted and matched like any other; the node records the
-compaction as `context_compacted`, with the summary, and never truncates a request.
+compaction's start as `context_compacting` and its end as `context_compacted`, with the
+summary, and never truncates a request.
 
 It can also hand tasks to subagents (`spawn`): child conversations in the same process
 that work with the same tools, run in parallel when spawned together, and return an
@@ -1728,7 +1729,10 @@ record, the workspace was removed, another session is on that workspace or task,
 harness cannot resume) the page says which and offers Continue. Compact runs the
 harness's own compaction (`/compact` for Claude Code) on a live session between turns,
 or on one that ended by reopening it for that, and records `context_compacted` as
-automatic compaction does.
+automatic compaction does. Its `context_compacting` is recorded as the turn is
+dispatched, since the harness may say nothing until the compaction is done; the
+harness's own start signal (Claude Code's `compacting` status, tracon-agent's
+`context_compacting`) is recorded for a compaction it starts itself.
 
 ## Sessions, phases, budgets
 
