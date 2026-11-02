@@ -36,7 +36,7 @@ async fn volume_copy_in(
             String::from_utf8_lossy(&created.stderr).trim()
         )));
     }
-    let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
+    let name = crate::config::resource_name(&format!("transfer-{}", uuid::Uuid::now_v7().simple()));
     let created = podman_at(podman_bin)
         .args([
             "create",
@@ -124,7 +124,7 @@ async fn workspace_copy_out(
     destination: &Path,
 ) -> Result<(), BoundaryError> {
     let podman_bin = &guarded_podman(podman_bin)?;
-    let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
+    let name = crate::config::resource_name(&format!("transfer-{}", uuid::Uuid::now_v7().simple()));
     let staged = podman_at(podman_bin)
         .args([
             "run",
@@ -198,7 +198,7 @@ async fn volume_copy_out(
     destination: &Path,
 ) -> Result<(), BoundaryError> {
     let podman_bin = &guarded_podman(podman_bin)?;
-    let name = format!("tracon-transfer-{}", uuid::Uuid::now_v7().simple());
+    let name = crate::config::resource_name(&format!("transfer-{}", uuid::Uuid::now_v7().simple()));
     let created = podman_at(podman_bin)
         .args([
             "create",
@@ -233,7 +233,7 @@ fn parse_volume_list(out: &str) -> Vec<super::VolumeInfo> {
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let name = fields.next()?.to_string();
-            if !name.starts_with("tracon-") {
+            if !crate::gc::is_own(&name) {
                 return None;
             }
             let created_ms = fields
@@ -486,11 +486,12 @@ impl Backend for PodmanBackend {
     }
 
     async fn list_volumes(&self) -> Result<Vec<super::VolumeInfo>, BoundaryError> {
+        let filter = format!("name=^{}-", crate::config::resource_prefix());
         let out = podman(&[
             "volume",
             "ls",
             "--filter",
-            "name=^tracon-",
+            &filter,
             "--format",
             "{{.Name}} {{.CreatedAt.Unix}}",
         ])

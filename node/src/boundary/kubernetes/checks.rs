@@ -22,7 +22,9 @@ use crate::config::{Config, HarnessListen};
 use crate::runner::kube::{ROLE_LABEL, STATE_VOLUME};
 use crate::runner::{Runner, RunnerCommand};
 
-const PROBE: &str = "tracon-boundary-probe";
+fn probe() -> String {
+    crate::config::resource_name("boundary-probe")
+}
 pub const HARNESS_POLICY: &str = "tracon-harness";
 /// The node's own ingress policy, read only to learn whether it admits
 /// harness pods on the egress port.
@@ -202,7 +204,7 @@ pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryRep
             checks.push(check_network(b, &runner, &pod).await);
             let _ = runner
                 .pods()
-                .delete(PROBE, &DeleteParams::default().grace_period(0))
+                .delete(&probe(), &DeleteParams::default().grace_period(0))
                 .await;
         }
         Err(e) => {
@@ -292,22 +294,22 @@ async fn check_runtime(b: &KubeBackend, cfg: &Config) -> CheckResult {
 async fn create_probe(runner: &crate::runner::kube::KubeRunner) -> Result<Pod, String> {
     let pods = runner.pods();
     let _ = pods
-        .delete(PROBE, &DeleteParams::default().grace_period(0))
+        .delete(&probe(), &DeleteParams::default().grace_period(0))
         .await;
     let cmd = RunnerCommand {
         argv: vec!["true".into()],
-        name: PROBE.into(),
+        name: probe(),
         labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
         ..Default::default()
     };
     let pod = runner
         .spec()
-        .pod(PROBE, &cmd, true)
+        .pod(&probe(), &cmd, true)
         .map_err(|e| e.to_string())?;
     pods.create(&PostParams::default(), &pod)
         .await
         .map_err(|e| e.to_string())?;
-    pods.get(PROBE).await.map_err(|e| e.to_string())
+    pods.get(&probe()).await.map_err(|e| e.to_string())
 }
 
 fn check_unprivileged(pod: &Pod) -> CheckResult {
@@ -778,7 +780,7 @@ async fn check_egress(
     }
     let cmd = RunnerCommand {
         argv: vec!["sh".into(), "-c".into(), script],
-        name: "tracon-egress-probe".into(),
+        name: crate::config::resource_name("egress-probe"),
         labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
         ..Default::default()
     };

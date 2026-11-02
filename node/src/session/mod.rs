@@ -2461,7 +2461,7 @@ impl Manager {
             self.backend.as_ref(),
             environment,
             (&workspace.volume, cache),
-            &format!("tracon-s-{slug}"),
+            &crate::config::resource_name(&format!("s-{slug}")),
             &Stopping {
                 store: &self.store,
                 id,
@@ -3041,7 +3041,7 @@ impl Manager {
             .import_volume(&scratch.volume, &scratch.dir)
             .await
             .map_err(anyhow::Error::msg)?;
-        let container = format!("tracon-h-{slug}");
+        let container = crate::config::resource_name(&format!("h-{slug}"));
         let mut mounts = scratch.mounts;
         mounts.push(workspace.mount("/work", false));
         let (runner, cache_env) = session_runner(

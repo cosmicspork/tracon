@@ -3,9 +3,12 @@
 //! The node creates runtime volumes on demand and, apart from a check run's,
 //! never removes them itself: a session's workspace outlives it for resume
 //! and export, and its harness state for backup and restore. Once nothing can
-//! use one, it is only disk. A sweep names every `tracon-` volume and the
-//! host directories that shadow them, says for each whether its owner is over
-//! and why, and removes only when asked to.
+//! use one, it is only disk. A sweep names every volume of this node's and
+//! the host directories that shadow them, says for each whether its owner is
+//! over and why, and removes only when asked to. This node's volumes are the
+//! ones named with its `[boundary] resource_prefix` (`tracon` unless set,
+//! which the names below assume); another node sharing the container host
+//! names its own differently, and the sweep never lists them.
 //!
 //! Ownership is read from the name. `tracon-scratch-<session>` belongs to a
 //! session; `tracon-workspace-<id>` to every open session using that
@@ -35,14 +38,27 @@ use crate::store::Store;
 /// is referenced only once a session starts on it.
 pub const WORKSPACE_GRACE_MS: i64 = 24 * 60 * 60 * 1000;
 
-const NODE_WIDE: [&str; 2] = [
-    crate::session::materialize::HARNESS_STATE_VOLUME,
-    "tracon-probe-scratch",
-];
+/// What `session::materialize` names the volumes every session shares,
+/// after the prefix.
+const NODE_WIDE: [&str; 2] = ["harness-state", "probe-scratch"];
+
+/// A volume name less this node's prefix and its `-`, or `None` when the
+/// volume is not named for a node with `prefix`.
+fn own_rest<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    name.strip_prefix(prefix)?.strip_prefix('-')
+}
+
+/// Whether a runtime volume is named for this node.
+pub fn is_own(name: &str) -> bool {
+    own_rest(name, crate::config::resource_prefix()).is_some()
+}
 
 /// What a sweep knows about the owners of runtime storage.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Owners {
+    /// This node's `[boundary] resource_prefix`: a volume without it is
+    /// another node's.
+    pub prefix: String,
     /// Sessions on this node that are not archived.
     pub open_sessions: HashSet<String>,
     /// Every session this node has run.
@@ -58,6 +74,21 @@ pub struct Owners {
     pub caches: bool,
 }
 
+impl Default for Owners {
+    fn default() -> Self {
+        Owners {
+            prefix: crate::config::DEFAULT_RESOURCE_PREFIX.into(),
+            open_sessions: HashSet::new(),
+            known_sessions: HashSet::new(),
+            used_workspaces: HashSet::new(),
+            running_checks: HashSet::new(),
+            unsettled_publications: HashSet::new(),
+            now_ms: 0,
+            caches: false,
+        }
+    }
+}
+
 impl Owners {
     pub fn read(
         store: &Store,
@@ -65,6 +96,7 @@ impl Owners {
         caches: bool,
     ) -> Result<Self, crate::store::StoreError> {
         let mut owners = Owners {
+            prefix: crate::config::resource_prefix().into(),
             now_ms: crate::store::now_ms(),
             caches,
             ..Default::default()
@@ -95,8 +127,10 @@ impl Owners {
 
 /// A workspace id as its volume name and host directories carry it.
 fn workspace_key(id: &str) -> String {
-    crate::workspace::volume_name(id)
-        .trim_start_matches("tracon-workspace-")
+    let volume = crate::workspace::volume_name(id);
+    volume
+        .strip_prefix(&crate::config::resource_name("workspace-"))
+        .unwrap_or(&volume)
         .to_string()
 }
 
@@ -144,20 +178,23 @@ fn session_verdict(id: &str, owners: &Owners, what: &str) -> (bool, String) {
 
 /// Whether a runtime volume's owner is over.
 pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> (bool, String) {
+    let Some(name) = own_rest(name, &owners.prefix) else {
+        return verdict(false, "not named for this node; another node may own it");
+    };
     if NODE_WIDE.contains(&name) {
         return verdict(false, "node-wide; every session uses it");
     }
-    if let Some(session) = name.strip_prefix("tracon-scratch-") {
+    if let Some(session) = name.strip_prefix("scratch-") {
         return session_verdict(
             session,
             owners,
             "its harness state can no longer be backed up, upgraded or restored",
         );
     }
-    if let Some(key) = name.strip_prefix("tracon-workspace-") {
+    if let Some(key) = name.strip_prefix("workspace-") {
         return workspace_verdict(key, created_ms, owners);
     }
-    if let Some(run) = name.strip_prefix("tracon-check-") {
+    if let Some(run) = name.strip_prefix("check-") {
         return if owners.running_checks.contains(run) {
             verdict(false, "the check is running")
         } else {
@@ -167,14 +204,9 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
     // What one check run, one cache warm-up or one fetch_branch made for
     // itself, and removes itself when it ends. One still here a day later was
     // left by a run that did not finish.
-    if [
-        "tracon-prep-",
-        "tracon-warm-",
-        "tracon-try-",
-        "tracon-fetch-",
-    ]
-    .iter()
-    .any(|prefix| name.starts_with(prefix))
+    if ["prep-", "warm-", "try-", "fetch-"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
     {
         return if created_ms.is_some_and(|created| owners.now_ms - created < WORKSPACE_GRACE_MS) {
             verdict(
@@ -187,10 +219,10 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
     }
     // A session's own cache lives and dies with its workspace; the
     // repositories' shared ones below go only when caches are asked for.
-    if let Some(key) = name.strip_prefix("tracon-cache-w-") {
+    if let Some(key) = name.strip_prefix("cache-w-") {
         return workspace_verdict(key, created_ms, owners);
     }
-    if name.starts_with("tracon-cache-r-") {
+    if name.starts_with("cache-r-") {
         return if owners.caches {
             verdict(true, "session build cache; the next session rebuilds it")
         } else {
@@ -200,7 +232,7 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
             )
         };
     }
-    if name.starts_with("tracon-cache-") {
+    if name.starts_with("cache-") {
         return if owners.caches {
             verdict(true, "dependency cache; rebuilt when next needed")
         } else {
@@ -210,7 +242,7 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
             )
         };
     }
-    if name.starts_with("tracon-provider-") {
+    if name.starts_with("provider-") {
         return verdict(
             true,
             "a sign-in container's volume; providers sign in natively now",
@@ -447,6 +479,35 @@ mod tests {
         assert!(classify_volume("tracon-cache-abc", None, &o).0);
         assert!(classify_volume("tracon-cache-r-abc", None, &o).0);
         assert!(classify_volume("tracon-provider-anthropic", None, &o).0);
+    }
+
+    /// A second node on the same container host names its volumes with its
+    /// own prefix, and neither node's sweep ever offers the other's.
+    #[test]
+    fn a_sweep_offers_only_volumes_named_for_this_node() {
+        let mut o = owners();
+        o.caches = true;
+        o.prefix = "spike-s".into();
+        for theirs in [
+            "tracon-scratch-gone",
+            "tracon-workspace-archived",
+            "tracon-check-done",
+            "tracon-cache-abc",
+            "tracon-harness-state",
+            "spike-scratch-gone",
+            "spike-sx-scratch-gone",
+        ] {
+            let (remove, reason) = classify_volume(theirs, None, &o);
+            assert!(!remove, "{theirs}");
+            assert!(reason.contains("not named for this node"), "{reason}");
+        }
+        assert!(classify_volume("spike-s-scratch-gone", None, &o).0);
+        assert!(classify_volume("spike-s-check-done", None, &o).0);
+        assert!(!classify_volume("spike-s-harness-state", None, &o).0);
+        assert!(!classify_volume("spike-s-probe-scratch", None, &o).0);
+        // And the default node does not take the other's for its own.
+        let o = owners();
+        assert!(!classify_volume("spike-s-scratch-gone", None, &o).0);
     }
 
     #[test]

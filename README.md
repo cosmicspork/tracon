@@ -380,7 +380,8 @@ Nothing is removed on its own except a check run's copy once the check is over.
 and state directories whose owner is over (an archived or vanished session, a
 workspace no open session uses and older than a day, a finished check run) and
 removes them with `--apply`; dependency caches only with `--caches`, and the
-node-wide volumes and any name it does not recognize never.
+node-wide volumes, any name it does not recognize, and another node's volumes (named with
+that node's `[boundary] resource_prefix`) never.
 Dependency preparation runs first as its own credential-free command in an
 isolated cache: a `devcontainer.json` may name a digest-pinned image, but hooks,
 mounts, sockets, and privilege in it are refused rather than partly honoured, and
@@ -1264,6 +1265,12 @@ harness_image = "localhost/tracon-harness-claude"  # the image for [harness] id;
 start_machine = true                # macOS: start the podman machine when it is stopped
 auto_reconcile = true               # set up the boundary at start and when its definitions
                                     # change; false leaves it to `tracon setup`
+resource_prefix = "tracon"          # every runtime volume and container this node names starts
+                                    # with it and a `-`: the shared harness state, the boundary
+                                    # probes, each session's and check's own. Only for a second
+                                    # node on the same container host (see "A scratch node"); set
+                                    # it before that node first runs, since a change strands the
+                                    # volumes the old one named. It may not begin with "tracon-"
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
 [gateway]
@@ -1749,9 +1756,10 @@ action the node reads it for, not one already dispatched.
 | the CLI, and the binary the service runs | `~/.local/bin/tracon` | `~/.local/bin/tracon` |
 | the service | `~/Library/LaunchAgents/com.tracon.node.plist`, logs in `~/Library/Logs/tracon.log` | `~/.config/systemd/user/tracon.service` |
 
-`TRACON_STATE_DIR` overrides the state directory outright — how a scratch node runs
-beside a real one. `TRACON_LISTEN` or `serve --listen` moves the API off
-`127.0.0.1:7420`.
+`TRACON_STATE_DIR` overrides the state directory outright and `TRACON_CONFIG_DIR` the
+directory holding `node.toml`. `TRACON_LISTEN` or `serve --listen` moves the API off
+`127.0.0.1:7420`. A node beside a real one needs all three and its own runtime names
+(see "A scratch node" under From source).
 
 ### The hub
 
@@ -1963,6 +1971,51 @@ The build runs as `tracon-dev` instead of replacing `~/.local/bin/tracon` becaus
 desktop app owns that path and reinstalls it whenever its version differs. Migrations run
 forward only, which is why the backup is taken. Podman volumes and images the dev build
 created are not backed up or removed.
+
+#### A scratch node
+
+To try a build without touching the node you run, start a second one beside it with its
+own state, configuration, port and runtime names. Everything a node creates in Podman is
+named from `node.toml`, so a scratch node with its own values shares none of the real
+one's harness state, gateway, network, images, probes or sockets, and neither node's
+`tracon gc` lists the other's volumes.
+
+```sh
+# Not under the temp directory: sessions' worktrees go there, and it may not hold the config.
+export TRACON_STATE_DIR=$(mktemp -d -p ~/.cache) TRACON_CONFIG_DIR=$(mktemp -d -p ~/.cache)
+export TRACON_LISTEN=127.0.0.1:7520 TRACON_URL=http://127.0.0.1:7520  # serve, and the CLI's calls
+cat > "$TRACON_CONFIG_DIR/node.toml" <<TOML
+[boundary]
+resource_prefix = "scratch"        # volumes and containers: scratch-harness-state, scratch-h-…
+network = "scratch-int"
+subnet = "10.89.7.0/24"            # a network of its own needs a subnet of its own
+gateway_ip = "10.89.7.2"
+gateway_container = "scratch-gw"   # also gives its gateway a user service of its own
+gateway_image = "localhost/scratch-gateway"
+harness_image = "localhost/scratch-harness-claude"  # the other harness follows its stem
+
+[gateway]
+harness_listen = "$XDG_RUNTIME_DIR/tracon-scratch/harness.sock"
+
+[docs]
+preview_listen = "127.0.0.1:7522"
+TOML
+./target/release/tracon setup && ./target/release/tracon check-boundary --deep
+./target/release/tracon serve
+```
+
+Repository images (`localhost/tracon-repo-…`) stay shared: a tag is keyed on what the
+image is built from, so both nodes build the same image under the same tag. To clean up,
+stop the node, then remove what carries its names, and its two directories:
+
+```sh
+podman ps -a --format '{{.Names}}' | grep '^scratch-' | xargs -r podman rm -f
+podman volume ls -q --filter name='^scratch-' | xargs -r podman volume rm
+podman network rm scratch-int
+podman image rm localhost/scratch-gateway localhost/scratch-harness-claude localhost/scratch-harness-native
+systemctl --user disable --now tracon-gateway-scratch-gw.service   # Linux, if setup made it
+rm -rf "$TRACON_STATE_DIR" "$TRACON_CONFIG_DIR"
+```
 
 ## Escape hatch
 

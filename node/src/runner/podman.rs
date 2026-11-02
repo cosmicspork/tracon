@@ -479,7 +479,7 @@ impl Runner for PodmanRunner {
     async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
         self.ensure_volumes(&cmd).await?;
         let name = if cmd.name.is_empty() {
-            "tracon-h".to_string()
+            crate::config::resource_name("h")
         } else {
             cmd.name.clone()
         };
@@ -586,7 +586,11 @@ impl Runner for PodmanRunner {
     fn capture_name(&self, name: &str) -> String {
         format!(
             "{}-{}",
-            if name.is_empty() { "tracon-x" } else { name },
+            if name.is_empty() {
+                crate::config::resource_name("x")
+            } else {
+                name.to_string()
+            },
             std::process::id()
         )
     }

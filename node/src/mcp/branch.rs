@@ -203,9 +203,11 @@ pub async fn call(
     let runner = manager
         .backend()
         .runner_for(&session.harness_id, Vec::new());
-    let name = workspace
-        .volume
-        .replacen("tracon-workspace-", "tracon-fetch-", 1);
+    let name = workspace.volume.replacen(
+        &crate::config::resource_name("workspace-"),
+        &crate::config::resource_name("fetch-"),
+        1,
+    );
     // One writer at a time on the volume: an export for a submission reads a
     // whole tree, and two fetches share the bundle's volume.
     let lock = crate::workspace::volume_lock(&workspace.volume);

@@ -178,6 +178,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("boundary.start_machine"),
     restart("boundary.stop_timeout_secs"),
     restart("boundary.auto_reconcile"),
+    restart("boundary.resource_prefix").host_only(),
     // [gateway]
     restart("gateway.allow_hosts"),
     restart("gateway.proxy_port"),
@@ -478,6 +479,9 @@ pub fn host_only_reason(key: &str) -> &'static str {
         "runtime.kubernetes.state_mount" => HOST_ONLY_REASON,
         "sandbox.bundle" => {
             "is the directory whose binaries every sandbox runs, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
+        }
+        "boundary.resource_prefix" => {
+            "names every volume this node mounts, the shared harness state among them, so a node set to another's would run on that node's state; it is changed at the node, not from elsewhere"
         }
         "gateway.harness_listen" => {
             "is the harness socket's path, whose directory the node creates and mounts writable into the gateway container, so it is changed at the node, not from elsewhere"
@@ -988,6 +992,7 @@ mod tests {
             [
                 "boundary.gateway_image",
                 "boundary.harness_image",
+                "boundary.resource_prefix",
                 "gateway.harness_listen",
                 "runtime.kubernetes.harness_image",
                 "runtime.kubernetes.state_mount",
