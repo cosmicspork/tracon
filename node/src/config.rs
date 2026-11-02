@@ -75,6 +75,48 @@ pub struct Config {
     /// Where sessions may run and what each channel and repository requires
     /// of the sandbox provider (`crate::provider`). Shown, not enforced yet.
     pub placement: crate::provider::requirements::Placement,
+    pub metrics: Metrics,
+}
+
+/// The Prometheus scrape target (`GET /metrics`, `telemetry`): unset, nothing
+/// listens. Unauthenticated and read-only, on a listener of its own, so it
+/// belongs on loopback on a host, and on all interfaces only in a pod behind
+/// a NetworkPolicy that admits the scraper alone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Metrics {
+    pub listen: Option<SocketAddr>,
+}
+
+/// The operator listener's default port (`tracon serve --listen`), which
+/// `[metrics] listen` may not take.
+pub const OPERATOR_PORT: u16 = 7420;
+
+/// Refuse a `[metrics] listen` port another of the node's listeners already
+/// has: it would fail to bind at start, or, worse, take a port a harness can
+/// reach.
+pub fn validate_metrics(config: &Config) -> Result<(), String> {
+    let Some(listen) = config.metrics.listen else {
+        return Ok(());
+    };
+    let gateway = &config.gateway;
+    let mut taken = vec![
+        ("the operator listener", OPERATOR_PORT),
+        ("gateway.forward_port", gateway.forward_port),
+        ("gateway.proxy_port", gateway.proxy_port),
+        ("gateway.qa_proxy_port", gateway.qa_proxy_port),
+        ("gateway.egress_port", gateway.egress_port),
+        ("docs.preview_listen", config.docs.preview_listen.port()),
+    ];
+    if let HarnessListen::Tcp(addr) = &gateway.harness_listen {
+        taken.push(("gateway.harness_listen", addr.port()));
+    }
+    match taken.iter().find(|(_, port)| *port == listen.port()) {
+        Some((what, port)) => Err(format!(
+            "metrics.listen: port {port} is {what}'s; give the metrics listener a port of its own (7425 is free)"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The tables an older `node.toml` may still carry for OpenCode, which is
@@ -2307,6 +2349,7 @@ impl Default for Config {
             work: Work::default(),
             upstreams: Upstreams::default(),
             placement: Default::default(),
+            metrics: Metrics::default(),
             harness: Harness {
                 id: crate::adapter::claude::ClaudeAdapter::ID.into(),
                 version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
@@ -2709,6 +2752,7 @@ impl Config {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_doc_kinds(&config.docs.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_metrics(&config).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_priorities(&config.work.priority)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         upstreams::validate_upstreams(&config.upstreams)
@@ -2879,6 +2923,33 @@ mod tests {
         );
     }
     use super::*;
+
+    /// The scrape listener binds nothing unless asked, and never a port one
+    /// of the node's other listeners has.
+    #[test]
+    fn a_metrics_listener_is_off_unless_given_a_port_of_its_own() {
+        let load = |text: &str| Config::from_toml(text, Path::new("node.toml"));
+        assert!(load("").unwrap().metrics.listen.is_none());
+        let cfg = load("[metrics]\nlisten = \"0.0.0.0:7425\"\n").unwrap();
+        assert_eq!(cfg.metrics.listen, Some("0.0.0.0:7425".parse().unwrap()));
+        for (port, owner) in [
+            (7420, "operator"),
+            (7421, "forward_port"),
+            (7422, "preview_listen"),
+            (7424, "egress_port"),
+            (8888, "proxy_port"),
+            (8890, "qa_proxy_port"),
+        ] {
+            let error = load(&format!("[metrics]\nlisten = \"127.0.0.1:{port}\"\n")).unwrap_err();
+            assert!(error.contains("metrics.listen"), "{error}");
+            assert!(error.contains(owner), "{port}: {error}");
+        }
+        let error = load(
+            "[gateway]\nharness_listen = \"127.0.0.1:7499\"\n[metrics]\nlisten = \"127.0.0.1:7499\"\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("harness_listen"), "{error}");
+    }
 
     #[test]
     fn a_service_is_named_safely_and_pinned() {

@@ -101,6 +101,9 @@ tempfile = "3"
 # static and no host's libssl is linked.
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 openssl = { version = "0.10", features = ["vendored"] }
+# The `[metrics] listen` scrape target: the Prometheus project's own client,
+# pure Rust, for its escaping and OpenMetrics histogram encoding.
+prometheus-client = "0.25"
 
 [features]
 # What only a test build has: `config::path_guard::Guard::unchecked` and

@@ -352,6 +352,8 @@ pub const KEYS: &[KeySpec] = &[
     live("docs.kind.label"),
     live("docs.kind.description"),
     live("docs.kind.working_note"),
+    // [metrics]
+    restart("metrics.listen"),
     // [work]
     live("work.default_priority"),
     // [[work.priority]]

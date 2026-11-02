@@ -58,6 +58,8 @@ const SENSITIVE: &[&str] = &[
     "service.name",
     "docs.preview_url",
     "docs.preview_listen",
+    // Opens a listener, as `gateway.harness_listen` does.
+    "metrics.listen",
     "docs.export_channel",
     "harness",
     "external.enabled",
@@ -792,6 +794,7 @@ mod tests {
             &["embed", "base_url"],
             &["docs", "preview_url"],
             &["docs", "preview_listen"],
+            &["metrics", "listen"],
             &["docs", "export_channel"],
             &["harness", "id"],
             &["harness", "tools"],

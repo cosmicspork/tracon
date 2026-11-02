@@ -242,6 +242,8 @@ pub struct Supervisor {
     /// so the harness's own start signal for the same compaction is not
     /// recorded twice.
     compacting: bool,
+    /// What this session's metric series are labelled with; see `with_series`.
+    series: crate::telemetry::SessionSeries,
 }
 
 /// What a turn does: answer a prompt, or compact the conversation.
@@ -300,6 +302,7 @@ impl Supervisor {
             turn_relaunches: 0,
             died_in_turn: false,
             next_prompt_origin: None,
+            series: Default::default(),
             self_tx,
             runner,
             container,
@@ -318,6 +321,13 @@ impl Supervisor {
     /// The operator's required check commands. Running one exactly as
     /// configured is what the operator already asked for at review, so it is
     /// not asked again before it runs.
+    /// The phase, harness, repository and channel its end is counted under
+    /// (`telemetry`).
+    pub fn with_series(mut self, series: crate::telemetry::SessionSeries) -> Self {
+        self.series = series;
+        self
+    }
+
     pub fn with_checks(mut self, checks: Vec<String>) -> Self {
         self.checks = checks
             .into_iter()
@@ -400,6 +410,15 @@ impl Supervisor {
             .store
             .update_session_unless(&self.session_id, SessionState::TERMINAL, patch)
         {
+            // The one write that ends a supervised session; the catch-up
+            // below is the same ending seen twice and is not counted again.
+            Ok(true) if state.is_terminal() => {
+                crate::telemetry::telemetry().session_ended(
+                    &self.series,
+                    end_reason.map_or(state.as_str(), |reason| reason.as_str()),
+                    Some(self.started.elapsed()),
+                );
+            }
             Ok(true) => {}
             Ok(false) => {
                 // Ending a session that has already ended is this task
@@ -2075,7 +2094,7 @@ impl Supervisor {
     /// or what a session the node stopped under was waiting on
     /// (`waiting_on`), which is what carries it on once that is decided.
     async fn suspend(&mut self, detail: serde_json::Value) {
-        let _ = self.store.update_session_unless(
+        let suspended = self.store.update_session_unless(
             &self.session_id,
             SessionState::TERMINAL,
             SessionPatch {
@@ -2084,6 +2103,13 @@ impl Supervisor {
                 ..Default::default()
             },
         );
+        if let Ok(true) = suspended {
+            crate::telemetry::telemetry().session_ran(
+                &self.series,
+                "suspended",
+                self.started.elapsed(),
+            );
+        }
         let mut state = json!({ "state": SessionState::Suspended.as_str(), "end_reason": null });
         if let Some(waiting_on) = detail.get("waiting_on") {
             state["waiting_on"] = waiting_on.clone();

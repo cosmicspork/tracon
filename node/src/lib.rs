@@ -47,5 +47,6 @@ pub mod session;
 pub mod sidecars;
 pub mod store;
 pub mod stream;
+pub mod telemetry;
 pub mod transfers;
 pub mod workspace;

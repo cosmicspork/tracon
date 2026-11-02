@@ -899,6 +899,13 @@ pub async fn prepare(
         })
         .await;
     drop(egress);
+    let prepared = output.as_ref().is_ok_and(|output| output.status.success());
+    crate::telemetry::telemetry().preparation_finished(
+        crate::telemetry::Purpose::Environment,
+        environment.repo.as_deref(),
+        if prepared { "prepared" } else { "failed" },
+        started.elapsed(),
+    );
     let output = output.map_err(|e| EnvironmentError::Runtime(e.to_string()))?;
     let exit = output.status.code().unwrap_or(-1);
     let tail = tail(&[output.stdout, output.stderr].concat());
@@ -945,7 +952,25 @@ pub async fn verify(
                 labels: RunLabels::of(RunKind::Check),
             })
             .await
+            .inspect_err(|_| {
+                crate::telemetry::telemetry().check_finished(
+                    "verify",
+                    None,
+                    "interrupted",
+                    Some(started.elapsed()),
+                )
+            })
             .map_err(|e| EnvironmentError::Runtime(e.to_string()))?;
+        crate::telemetry::telemetry().check_finished(
+            "verify",
+            None,
+            if output.status.success() {
+                "passed"
+            } else {
+                "failed"
+            },
+            Some(started.elapsed()),
+        );
         result.push(Verification {
             command: command.clone(),
             ok: output.status.success(),

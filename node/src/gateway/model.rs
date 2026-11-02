@@ -1210,6 +1210,7 @@ impl Counted {
         row.cache_read_tokens = self.scanner.cache_read();
         row.cache_write_tokens = self.scanner.cache_write;
         row.request_id = self.scanner.request_id.take();
+        crate::telemetry::telemetry().model_call(&row);
         let usage_id = match self.store.record_usage(&row) {
             Ok(id) => Some(id),
             Err(e) => {
