@@ -29,7 +29,10 @@ fn io(e: std::io::Error) -> (StatusCode, Json<Value>) {
 }
 
 /// The caller as a member record, or 403.
-fn member_of(state: &AppState, owner: &Owner) -> Result<Member, (StatusCode, Json<Value>)> {
+pub(crate) fn member_of(
+    state: &AppState,
+    owner: &Owner,
+) -> Result<Member, (StatusCode, Json<Value>)> {
     state
         .members
         .get(&owner.hex())
@@ -66,6 +69,7 @@ pub async fn info(State(s): State<AppState>) -> Json<Value> {
         "hub_binding_sig": s.replica.as_ref().map(|r| r.binding_sig()),
         "replica_channels": s.replica.as_ref().map(|r| r.readable_channels()),
         "replica_undecryptable": s.replica.as_ref().map(|r| r.undecryptable()),
+        "sandbox_relay": s.relay.as_ref().map(|r| json!({"domain": r.domain()})),
     }))
 }
 

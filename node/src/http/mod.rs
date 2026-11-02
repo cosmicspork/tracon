@@ -752,6 +752,13 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         bus.with_tap(client.spawn());
         manager.set_mesh(client.clone());
         tracing::info!(hub = %url, "mesh client started");
+        let relay = &cfg.mesh.sandbox_relay;
+        if relay.enabled && relay.target.is_empty() {
+            tracing::warn!("[mesh.sandbox_relay] is on but names no target; not serving the relay");
+        } else if relay.enabled {
+            crate::mesh::sandbox_relay::SandboxRelay::new(client.identity_shared(), url, relay)
+                .spawn();
+        }
         client
     });
     if mesh.is_none() {

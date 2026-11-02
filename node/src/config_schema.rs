@@ -223,6 +223,10 @@ pub const KEYS: &[KeySpec] = &[
     restart("mesh.stream_max_concurrent"),
     restart("mesh.renew_credentials"),
     live("mesh.admin_peers"),
+    // [mesh.sandbox_relay]
+    restart("mesh.sandbox_relay.enabled"),
+    restart("mesh.sandbox_relay.target"),
+    restart("mesh.sandbox_relay.max_streams"),
     // [runtime]
     restart("runtime.kind"),
     live("runtime.approved_images"),

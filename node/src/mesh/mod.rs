@@ -11,6 +11,7 @@ pub mod frames;
 pub mod identity;
 pub mod mirror;
 pub mod recipe;
+pub mod sandbox_relay;
 
 use serde::Serialize;
 
