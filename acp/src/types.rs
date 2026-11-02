@@ -411,6 +411,11 @@ pub mod methods {
     pub const SESSION_CLOSE: &str = "session/close";
     pub const SESSION_UPDATE: &str = "session/update";
     pub const SESSION_REQUEST_PERMISSION: &str = "session/request_permission";
+    /// tracon-agent's own: compact the session's conversation now, between
+    /// turns (`SessionIdParams`). Answered as a prompt is (`PromptResult`,
+    /// with the summary request's usage), and with `compacted: false` when
+    /// there was nothing to compact.
+    pub const TRACON_COMPACT: &str = "_tracon/compact";
 }
 
 pub fn model_choices(options: &[ConfigOption]) -> Option<&ConfigOption> {

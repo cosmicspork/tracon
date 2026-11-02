@@ -774,6 +774,120 @@ async fn a_compaction_is_reported_and_survives_a_reload() {
     assert_eq!(messages[3]["content"], "next");
 }
 
+/// The operator's compaction, between turns: the conversation is summarised
+/// though it is nowhere near a window, the node is told of it as of any
+/// other, the answer carries the summary request's usage, and a process that
+/// replaces this one carries on the compacted conversation.
+#[tokio::test]
+async fn a_compaction_on_request_summarises_and_survives_a_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = dir.path().join(".events.jsonl");
+    std::fs::write(dir.path().join("notes.txt"), "hello\n").unwrap();
+    let (base, fake) = serve(vec![
+        tool_call("c1", "read", json!({"path": "notes.txt"})),
+        answer("notes.txt says hello."),
+        answer("nothing else"),
+        answer("The notes say hello."),
+        answer("ok"),
+    ])
+    .await;
+    let mut first = start(&base, &events).await;
+    let session = new_session(&first, dir.path()).await;
+    for text in ["read notes.txt", "anything else?"] {
+        let _: PromptResult = first
+            .peer
+            .request(methods::SESSION_PROMPT, &prompt(&session, text))
+            .await
+            .unwrap();
+    }
+    let result: PromptResult = first
+        .peer
+        .request(
+            methods::TRACON_COMPACT,
+            &SessionIdParams {
+                session_id: session.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.stop_reason, "end_turn");
+    assert_eq!(result.extra["compacted"], true);
+    // The summary request's, and only that: `answer`'s 120 in and 3 out.
+    assert_eq!(result.usage.unwrap().total_tokens, 123);
+    let seen = first.seen.lock().unwrap().clone();
+    let compacted = updates(&seen, "context_compacted");
+    assert_eq!(compacted.len(), 1, "{seen:#?}");
+    assert_eq!(compacted[0]["update"]["trigger"], "manual");
+    assert_eq!(compacted[0]["update"]["summary"], "The notes say hello.");
+    first.child.kill().await.unwrap();
+
+    let second = start(&base, &events).await;
+    let _: Value = second
+        .peer
+        .request(
+            methods::SESSION_LOAD,
+            &LoadSessionParams {
+                session_id: session.clone(),
+                cwd: dir.path().display().to_string(),
+                mcp_servers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let _: PromptResult = second
+        .peer
+        .request(methods::SESSION_PROMPT, &prompt(&session, "next"))
+        .await
+        .unwrap();
+    let requests = fake.requests.lock().unwrap();
+    let messages = requests[4]["messages"].as_array().unwrap();
+    assert!(
+        messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with(SUMMARY_HEADER),
+        "{messages:#?}"
+    );
+    assert_eq!(messages.last().unwrap()["content"], "next");
+}
+
+/// Compacting is between turns: refused while a prompt holds the
+/// conversation, and a session with nothing to compact says so rather than
+/// failing.
+#[tokio::test]
+async fn a_compaction_on_request_waits_for_no_prompt_and_may_find_nothing_to_do() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, fake) = serve(vec![answer("slowly").after(Duration::from_millis(800))]).await;
+    let node = start(&base, &dir.path().join(".events.jsonl")).await;
+    let session = new_session(&node, dir.path()).await;
+    let params = SessionIdParams {
+        session_id: session.clone(),
+    };
+    let compact = || {
+        node.peer
+            .request::<_, PromptResult>(methods::TRACON_COMPACT, &params)
+    };
+    let nothing = compact().await.unwrap();
+    assert_eq!(nothing.stop_reason, "end_turn");
+    assert_eq!(nothing.extra["compacted"], false);
+
+    let go = prompt(&session, "go");
+    let running = node
+        .peer
+        .request::<_, PromptResult>(methods::SESSION_PROMPT, &go);
+    let refused = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        compact().await
+    };
+    let (ran, refused) = tokio::join!(running, refused);
+    assert_eq!(ran.unwrap().stop_reason, "end_turn");
+    let refused = refused.unwrap_err().to_string();
+    assert!(refused.contains("a prompt is running"), "{refused}");
+    assert_eq!(fake.requests.lock().unwrap().len(), 1);
+    let seen = node.seen.lock().unwrap().clone();
+    assert!(updates(&seen, "context_compacted").is_empty());
+}
+
 /// A long command's output reaches the node while it runs, as the call's
 /// running updates, before its result.
 #[tokio::test]

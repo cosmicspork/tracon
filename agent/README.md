@@ -78,6 +78,10 @@ down. A request the upstream refuses as too long (`exceed_context_size_error`) i
 compacted and made once more, with or without a declared window; a second refusal ends
 the turn. Each step is journaled (`pruned`, `compacted`) and reported to the node as a
 `context_compacting` update when it starts and a `context_compacted` update when it is done.
+The node can also ask for a compaction between turns (`_tracon/compact { sessionId }`,
+refused while a prompt runs): it summarises even a conversation pruning alone would fit,
+and is answered as a prompt is, with the summary request's usage and `compacted: false`
+when there was nothing to compact.
 
 **Credentials and the model** come from the command line, never from the session. The
 node passes `--providers`, a file it stages per session listing each `openai`-shaped

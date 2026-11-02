@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Agent, Compaction, Hooks, Outcome, Permit, Totals, Trigger};
+use crate::agent::{Agent, Compacting, Compaction, Hooks, Outcome, Permit, Totals, Trigger};
 use crate::conversation::{Block, Conversation, Role};
 use crate::events::{self, Events};
 use crate::journal::{self, Journal, Record, Restored};
@@ -158,6 +158,23 @@ pub async fn serve(settings: Settings, reader: Reader, writer: Writer) -> anyhow
                     // answers while the turn runs.
                     tokio::spawn(async move {
                         let _ = reply.send(session.prompt(p.prompt, &settings).await);
+                    });
+                }
+                methods::TRACON_COMPACT => {
+                    let p = match serde_json::from_value::<SessionIdParams>(params) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let _ = reply.send(Err(invalid(e.to_string())));
+                            continue;
+                        }
+                    };
+                    let Some(session) = sessions.get(&p.session_id).cloned() else {
+                        let _ = reply.send(Err(invalid(format!("no session {}", p.session_id))));
+                        continue;
+                    };
+                    let settings = settings.clone();
+                    tokio::spawn(async move {
+                        let _ = reply.send(session.compact(&settings).await);
                     });
                 }
                 methods::SESSION_CLOSE => {
@@ -377,38 +394,14 @@ impl Session {
             });
         }
         conv.push(Role::User, blocks);
-        let cancel = CancellationToken::new();
-        *self.turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
+        let cancel = self.begin();
         let before = totals.usage.clone();
-        let hooks = Wired {
-            session: self,
-            context_window: settings.context_window,
-            cancel: cancel.clone(),
-            pending: Mutex::new((false, String::new())),
-        };
-        let agent = Agent {
-            client: &settings.client,
-            tools: &self.tools,
-            cx: &self.cx,
-            events: &self.events,
-            hooks: &hooks,
-            cancel: &cancel,
-            journal: self.journal.as_ref(),
-            max_turns: settings.max_turns,
-            context_window: settings.context_window,
-            spawner: settings.spawner.as_ref(),
-            finish: None,
-            subagent: None,
-        };
-        let outcome = agent.run(conv, totals).await;
-        hooks.flush_text();
-        *self.turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        // The node reads the turn's result as its end: every update the turn
-        // made goes out first.
-        let (flushed, wait) = oneshot::channel();
-        if self.out.send(Out::Flush(flushed)).is_ok() {
-            let _ = wait.await;
-        }
+        let hooks = self.hooks(settings, &cancel);
+        let outcome = self
+            .agent(settings, &hooks, &cancel)
+            .run(conv, totals)
+            .await;
+        self.end(&hooks).await;
         let usage = turn_usage(&before, &totals.usage);
         let stop_reason = match outcome {
             // Only a subagent returns; a session's own turn never does.
@@ -432,6 +425,91 @@ impl Session {
             usage: Some(usage),
             extra: Default::default(),
         }))
+    }
+}
+
+impl Session {
+    /// Compacts the conversation because the operator asked: a turn of its
+    /// own, answered as a prompt is. Refused while a prompt is running, which
+    /// holds the conversation; nothing to compact is no error.
+    async fn compact(&self, settings: &Settings) -> Result<Value, RpcError> {
+        let Ok(mut state) = self.state.try_lock() else {
+            return Err(RpcError {
+                code: -32000,
+                message: "a prompt is running; compact between turns".into(),
+                data: None,
+            });
+        };
+        let (conv, totals) = &mut *state;
+        let cancel = self.begin();
+        let before = totals.usage.clone();
+        let hooks = self.hooks(settings, &cancel);
+        let outcome = self
+            .agent(settings, &hooks, &cancel)
+            .compact_on_request(conv, totals)
+            .await;
+        self.end(&hooks).await;
+        let (stop_reason, compacted) = match outcome {
+            Compacting::Done => ("end_turn", true),
+            Compacting::Nothing => ("end_turn", false),
+            Compacting::Cancelled => ("cancelled", false),
+        };
+        Ok(json!(PromptResult {
+            stop_reason: stop_reason.into(),
+            usage: Some(turn_usage(&before, &totals.usage)),
+            extra: [("compacted".to_string(), json!(compacted))]
+                .into_iter()
+                .collect(),
+        }))
+    }
+
+    /// A turn's start: what cancels it, held where `session/cancel` finds it.
+    fn begin(&self) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        *self.turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
+        cancel
+    }
+
+    fn hooks<'a>(&'a self, settings: &Settings, cancel: &CancellationToken) -> Wired<'a> {
+        Wired {
+            session: self,
+            context_window: settings.context_window,
+            cancel: cancel.clone(),
+            pending: Mutex::new((false, String::new())),
+        }
+    }
+
+    fn agent<'a>(
+        &'a self,
+        settings: &'a Settings,
+        hooks: &'a Wired<'a>,
+        cancel: &'a CancellationToken,
+    ) -> Agent<'a> {
+        Agent {
+            client: &settings.client,
+            tools: &self.tools,
+            cx: &self.cx,
+            events: &self.events,
+            hooks,
+            cancel,
+            journal: self.journal.as_ref(),
+            max_turns: settings.max_turns,
+            context_window: settings.context_window,
+            spawner: settings.spawner.as_ref(),
+            finish: None,
+            subagent: None,
+        }
+    }
+
+    /// A turn's end. The node reads the turn's result as its end: every
+    /// update the turn made goes out first.
+    async fn end(&self, hooks: &Wired<'_>) {
+        hooks.flush_text();
+        *self.turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let (flushed, wait) = oneshot::channel();
+        if self.out.send(Out::Flush(flushed)).is_ok() {
+            let _ = wait.await;
+        }
     }
 }
 

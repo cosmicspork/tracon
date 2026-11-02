@@ -75,6 +75,8 @@ pub enum Trigger {
     Threshold,
     /// The upstream refused a request as longer than its context.
     Overflow,
+    /// The operator asked, between turns.
+    Manual,
 }
 
 /// A compaction, as the operator is told of it. Token counts are estimates.
@@ -93,7 +95,8 @@ pub struct Compaction {
     pub summary: Option<String>,
 }
 
-enum Compacting {
+/// How a compaction went.
+pub enum Compacting {
     Done,
     /// Nothing could be made smaller, or the summary could not be had.
     Nothing,
@@ -257,6 +260,29 @@ impl Agent<'_> {
         conv.push(role, blocks);
     }
 
+    /// The tools the model is offered, whose size every request carries.
+    fn specs(&self) -> Vec<Value> {
+        let mut specs = self.tools.specs();
+        if self.spawner.is_some() {
+            specs.push(subagent::spawn_spec());
+        }
+        if let Some(schema) = self.finish {
+            specs.push(subagent::finish_spec(schema));
+        }
+        specs
+    }
+
+    /// Compacts the conversation because the operator asked, between turns.
+    /// Its summary request is counted in `totals` like any other.
+    pub async fn compact_on_request(
+        &self,
+        conv: &mut Conversation,
+        totals: &mut Totals,
+    ) -> Compacting {
+        let overhead = Value::Array(self.specs()).to_string().len();
+        self.compact(conv, totals, Trigger::Manual, overhead).await
+    }
+
     /// Boxed, so a parent's run can wait on a subagent's.
     pub fn run<'b>(
         &'b self,
@@ -271,13 +297,7 @@ impl Agent<'_> {
         conv: &mut Conversation,
         totals: &mut Totals,
     ) -> Result<Outcome, WireError> {
-        let mut specs = self.tools.specs();
-        if self.spawner.is_some() {
-            specs.push(subagent::spawn_spec());
-        }
-        if let Some(schema) = self.finish {
-            specs.push(subagent::finish_spec(schema));
-        }
+        let specs = self.specs();
         let overhead = Value::Array(specs.clone()).to_string().len();
         let mut requests = 0;
         // Responses in a row whose calls could not be run as written.
@@ -822,8 +842,10 @@ impl Agent<'_> {
             Trigger::Threshold if fits => None,
             Trigger::Threshold => compact::cut(conv, limits.keep_raw),
             // The estimate was wrong, so it is no guide to what fits: keep a
-            // quarter of the messages at most.
-            Trigger::Overflow => compact::cut(
+            // quarter of the messages at most. The operator's request is the
+            // same, so it summarises even a conversation that pruning alone
+            // would have brought under the threshold.
+            Trigger::Overflow | Trigger::Manual => compact::cut(
                 conv,
                 limits.keep_raw.min(compact::messages_tokens(conv) / 4),
             ),

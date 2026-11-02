@@ -251,3 +251,159 @@ async fn a_relaunch_loads_the_session_and_takes_nothing_twice() {
     assert_eq!(resume.harness_session_id, "0199-abc");
     assert_eq!(resume.last_seq, 15);
 }
+
+/// A supervisor over a native session launched with `runner`, once the
+/// session is running: its store, its id, and its command channel.
+async fn supervised(
+    runner: FakeRunner,
+) -> (
+    std::sync::Arc<tracon::store::Store>,
+    String,
+    tokio::sync::mpsc::Sender<tracon::session::supervisor::Command>,
+) {
+    use std::sync::Arc;
+    use tracon::session::supervisor::Supervisor;
+    use tracon::store::Store;
+
+    let (handle, events) = adapter().launch(&runner, spec()).await.unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store.ensure_peer_node("n1").unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut row = support::rows::session_row(&id, "n1", "personal");
+    row.harness_id = NativeAdapter::ID.into();
+    row.state = "starting".into();
+    row.budget_tokens = 0;
+    store.insert_session(&row).unwrap();
+    let (commands, rx) = tokio::sync::mpsc::channel(16);
+    let supervisor = Supervisor::new(
+        id.clone(),
+        "n1".into(),
+        store.clone(),
+        tracon::stream::Bus::new(),
+        Arc::from(handle),
+        std::time::Instant::now(),
+        std::time::Duration::from_secs(60),
+        commands.clone(),
+        Arc::new(runner),
+        "tracon-h-native-test".into(),
+        Default::default(),
+        "personal".into(),
+    );
+    tokio::spawn(supervisor.run(events, rx));
+    for _ in 0..500 {
+        if store.get_session(&id).unwrap().unwrap().state == "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    (store, id, commands)
+}
+
+/// The payloads of a session's events of one kind, in order.
+fn events_of(store: &tracon::store::Store, id: &str, kind: &str) -> Vec<serde_json::Value> {
+    store
+        .events_after(id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == kind)
+        .map(|e| e.payload)
+        .collect()
+}
+
+/// Waits for a session's first `turn_end`.
+async fn turn_ended(store: &tracon::store::Store, id: &str) {
+    for _ in 0..500 {
+        if !events_of(store, id, "turn_end").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Compact on a tracon-agent session: the agent's own compaction, recorded as
+/// a compact turn whose summary request both counts agree on.
+#[tokio::test]
+async fn compacting_on_request_is_a_compact_turn_that_reconciles() {
+    use tracon::session::supervisor::Command;
+    use tracon::store::{now_ms, UsageRow};
+
+    state::isolate();
+    assert!(adapter().compacts());
+    let gate = tempfile::tempdir().unwrap();
+    let open = gate.path().join("open");
+    let runner = FakeRunner {
+        env: vec![(
+            "FAKE_NATIVE_COMPACT_GATE".into(),
+            open.display().to_string(),
+        )],
+    };
+    let (store, id, commands) = supervised(runner).await;
+
+    let (ack, acked) = tokio::sync::oneshot::channel();
+    commands.send(Command::Compact { ack }).await.unwrap();
+    assert_eq!(acked.await.unwrap(), Ok(()));
+    // The gateway counts the summary request inside the compact turn.
+    store
+        .record_usage(&UsageRow {
+            channel: "personal".into(),
+            node_id: "n1".into(),
+            session_id: Some(id.clone()),
+            provider: "local".into(),
+            model: None,
+            at_ms: now_ms(),
+            input_tokens: 600,
+            output_tokens: 50,
+            requests: 1,
+            cache_read_tokens: 400,
+            cache_write_tokens: 0,
+            request_id: Some("req-summary".into()),
+        })
+        .unwrap();
+    std::fs::write(&open, "").unwrap();
+    turn_ended(&store, &id).await;
+
+    let compacted = events_of(&store, &id, "context_compacted");
+    assert_eq!(compacted.len(), 1, "{compacted:?}");
+    assert_eq!(compacted[0]["trigger"], "manual");
+    assert_eq!(compacted[0]["summary"], "ran git status");
+    let end = events_of(&store, &id, "turn_end");
+    assert_eq!(end.len(), 1, "{end:?}");
+    assert_eq!(end[0]["compact"], true);
+    assert_eq!(end[0]["stop_reason"], "end_turn");
+    assert_eq!(end[0]["usage"]["total_tokens"], 1050);
+    let ledger = store.turn_ledger(&id, 10).unwrap();
+    assert_eq!(ledger[0].state, "reconciled", "{ledger:?}");
+    assert_eq!(ledger[0].charged_tokens, 650);
+    assert_eq!(ledger[0].requests_matched, Some(1));
+    assert!(events_of(&store, &id, "usage_mismatch").is_empty());
+}
+
+/// A compaction on request that finds nothing to compact is still a compact
+/// turn, but one that says it compacted nothing rather than passing for a
+/// compaction that cost nothing.
+#[tokio::test]
+async fn compacting_with_nothing_to_compact_says_so() {
+    use tracon::session::supervisor::Command;
+
+    state::isolate();
+    let runner = FakeRunner {
+        env: vec![("FAKE_NATIVE_COMPACT_NOTHING".into(), "1".into())],
+    };
+    let (store, id, commands) = supervised(runner).await;
+
+    let (ack, acked) = tokio::sync::oneshot::channel();
+    commands.send(Command::Compact { ack }).await.unwrap();
+    assert_eq!(acked.await.unwrap(), Ok(()));
+    turn_ended(&store, &id).await;
+
+    let end = events_of(&store, &id, "turn_end");
+    assert_eq!(end.len(), 1, "{end:?}");
+    assert_eq!(end[0]["compact"], true);
+    assert_eq!(
+        end[0]["stop_reason"],
+        tracon::adapter::native::NOTHING_TO_COMPACT
+    );
+    assert_eq!(end[0]["usage"]["total_tokens"], 0);
+    assert!(events_of(&store, &id, "context_compacted").is_empty());
+    assert!(events_of(&store, &id, "usage_mismatch").is_empty());
+}

@@ -1727,12 +1727,15 @@ conversations under its state directory, which is the node-wide harness state vo
 so the record outlives the container. When it cannot be restored (the harness kept no
 record, the workspace was removed, another session is on that workspace or task, the
 harness cannot resume) the page says which and offers Continue. Compact runs the
-harness's own compaction (`/compact` for Claude Code) on a live session between turns,
+harness's own compaction (`/compact` for Claude Code, `_tracon/compact` for
+tracon-agent) on a live session between turns,
 or on one that ended by reopening it for that, and records `context_compacted` as
 automatic compaction does. Its `context_compacting` is recorded as the turn is
 dispatched, since the harness may say nothing until the compaction is done; the
 harness's own start signal (Claude Code's `compacting` status, tracon-agent's
-`context_compacting`) is recorded for a compaction it starts itself.
+`context_compacting`) is recorded for a compaction it starts itself. A tracon-agent
+compaction that found nothing to compact ends its turn as `nothing_to_compact`, and
+the log says so.
 
 ## Sessions, phases, budgets
 

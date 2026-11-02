@@ -485,6 +485,9 @@ test('a turn says what it spent, and a compaction the harness counted nothing of
     `turn ended · compacted · ${formatTokens(166_933)} tokens`,
   )
   expect(turnEndLine({ stop_reason: 'end_turn', compact: true, usage_unreported: true })).toBe('turn ended · compacted · end_turn')
+  expect(turnEndLine({ stop_reason: 'nothing_to_compact', compact: true, usage: { total_tokens: 0 } })).toBe(
+    'turn ended · nothing to compact',
+  )
   expect(turnEndLine({ stop_reason: 'max_turn_requests', usage: { total_tokens: 900 } })).toBe(
     `turn stopped at the harness's request limit · ${formatTokens(900)} tokens · a prompt carries on`,
   )

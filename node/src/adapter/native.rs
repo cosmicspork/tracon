@@ -209,6 +209,11 @@ impl HarnessAdapter for NativeAdapter {
         true
     }
 
+    /// The agent compacts on request with `_tracon/compact`.
+    fn compacts(&self) -> bool {
+        true
+    }
+
     /// The repository instruction files it reads into its prompt are the
     /// repository's to have; nothing in a workspace configures this harness.
     fn refused_workspace_entries(&self) -> &'static [&'static str] {
@@ -651,6 +656,32 @@ fn chunk_text(content: types::ContentBlock) -> String {
     }
 }
 
+/// The stop reason of a compaction on request that had nothing to compact:
+/// the turn is recorded, but no compaction happened.
+pub const NOTHING_TO_COMPACT: &str = "nothing_to_compact";
+
+impl NativeHandle {
+    /// One request the agent answers as a turn, and the `compacted` it
+    /// answers a compaction with.
+    async fn turn(
+        &self,
+        method: &str,
+        params: &impl serde::Serialize,
+    ) -> Result<(TurnResult, Option<bool>), AdapterError> {
+        let res: types::PromptResult =
+            self.peer.request(method, params).await.map_err(rpc_error)?;
+        let compacted = res.extra.get("compacted").and_then(Value::as_bool);
+        Ok((
+            TurnResult {
+                stop_reason: res.stop_reason,
+                usage: res.usage.unwrap_or_default(),
+                unreported: false,
+            },
+            compacted,
+        ))
+    }
+}
+
 struct NativeHandle {
     peer: Peer,
     session_id: String,
@@ -677,22 +708,35 @@ impl HarnessHandle for NativeHandle {
     }
 
     async fn prompt(&self, text: String) -> Result<TurnResult, AdapterError> {
-        let res: types::PromptResult = self
-            .peer
-            .request(
+        let (turn, _) = self
+            .turn(
                 methods::SESSION_PROMPT,
                 &types::PromptParams {
                     session_id: self.session_id.clone(),
                     prompt: vec![types::ContentBlock::Text { text }],
                 },
             )
-            .await
-            .map_err(rpc_error)?;
-        Ok(TurnResult {
-            stop_reason: res.stop_reason,
-            usage: res.usage.unwrap_or_default(),
-            unreported: false,
-        })
+            .await?;
+        Ok(turn)
+    }
+
+    /// Answered as a prompt is, with the summary request's usage; its
+    /// `context_compacted` arrives as an automatic compaction's does. One
+    /// that found nothing to compact ends as `nothing_to_compact`, so the
+    /// log does not call it a compaction.
+    async fn compact(&self) -> Result<TurnResult, AdapterError> {
+        let (mut turn, compacted) = self
+            .turn(
+                methods::TRACON_COMPACT,
+                &types::SessionIdParams {
+                    session_id: self.session_id.clone(),
+                },
+            )
+            .await?;
+        if compacted == Some(false) && turn.stop_reason == "end_turn" {
+            turn.stop_reason = NOTHING_TO_COMPACT.into();
+        }
+        Ok(turn)
     }
 
     async fn cancel(&self) -> Result<(), AdapterError> {
