@@ -2,7 +2,7 @@
 // caller so failures are the node's own bounded, authenticated explanation.
 
 import { call } from './api'
-import type { NodeInfo } from './types'
+import type { BoundaryResult, NodeInfo } from './types'
 
 export interface AdminAccess {
   authenticated: boolean
@@ -149,7 +149,7 @@ export const admin = {
       confirm: true,
     }),
   maintenance: () => call<Maintenance>('GET', '/api/admin/maintenance'),
-  boundaryCheck: () => call<unknown>('POST', '/api/admin/maintenance/boundary-check'),
+  boundaryCheck: () => call<BoundaryResult>('POST', '/api/admin/maintenance/boundary-check'),
   install: () =>
     call<{ scheduled: true; operation: 'install'; target: string; effect: string }>('POST', '/api/admin/maintenance/install', {
       confirm: true,

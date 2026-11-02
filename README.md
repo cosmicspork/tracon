@@ -1341,6 +1341,27 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # the credential's variables as ${NAME}, never a secret itself
 # sessions = false                  # attach it for sessions too, in channels the credential is bound to
 
+# [placement]                       # where sessions may run and what each channel and repository
+                                    # requires of the sandbox provider. Reported, not enforced yet:
+                                    # Settings → System shows each provider's capabilities beside
+                                    # the checks they rest on, and no session is placed by them
+# digitalocean = "off"              # off | overflow (only once every local provider is full) | prefer
+# [placement.channel.acme]          # one channel's requirements
+# client = true                     # client work: route must be node-only, and no open resolver
+# forbid_digitalocean = true
+# [[placement.repo]]                # one repository's, matched as a [[repo]] path is
+# path = "github.com/acme/site"
+# client = true
+# [placement.repo.require]          # each capability's accepted values; left out, any. Where a
+                                    # channel, a repository and client work all speak, the
+                                    # stricter wins
+# tier = ["microvm"]                # container | microvm
+# route = ["node-only"]             # node-only | unverified
+# dns = ["none", "node"]            # none | node | provider-open
+# privilege = ["unprivileged"]      # unprivileged | root-in-vm (asked only of a container)
+# runtime_socket = ["absent"]       # absent | present
+# image_identity = ["exact"]        # exact | derived
+
 # [[service]]                       # something a session may start beside itself by name
                                     # (`service_start`), never by image or command. It joins the
                                     # session's network: reached on its 127.0.0.1, reaching only what

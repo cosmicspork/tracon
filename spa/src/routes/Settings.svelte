@@ -50,6 +50,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
+  import { capabilityName, capabilityTone } from '../lib/capabilities'
   import { nodeHarnesses } from '../lib/nodes'
   import { versionLabel } from '../lib/version'
   import type { HarnessState } from '../lib/types'
@@ -69,7 +70,7 @@
   import { SETTINGS_SECTIONS, settingsSection } from '../lib/routes'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
-  import type { AuthorityGrant, ChannelInfo, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule, ReviewTrigger } from '../lib/types'
+  import type { AuthorityGrant, BoundaryCheck, BoundaryResult, ChannelInfo, ProviderCapabilities, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule, ReviewTrigger } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
@@ -126,6 +127,8 @@
 
   let busy = $state('')
   let error = $state('')
+  let checks = $state<BoundaryCheck[] | null>(null)
+  let sandboxes = $state<ProviderCapabilities[]>([])
 
   async function act(what: string, f: () => Promise<unknown>) {
     busy = what
@@ -140,6 +143,11 @@
   }
 
   // --- boundary ---------------------------------------------------------
+  function checked(result: BoundaryResult) {
+    checks = result.checks.checks
+    sandboxes = result.providers ?? []
+  }
+
   // A session runs whichever harness its model's credential allows, so each
   // image has to be there and current, not only the configured one's. The
   // node builds them itself as it starts; `tracon setup` is the manual way.
@@ -1162,7 +1170,7 @@
 {/if}
 
 {#if activeSection === 'system'}
-  <Maintenance>
+  <Maintenance onchecked={checked}>
     {#snippet boundary()}
       <div class="acts">
         <span class="chip" class:bad={refused && !store.node?.reconciling}>{store.node?.reconciling ? 'setting up' : store.node?.state ?? '…'}</span>
@@ -1174,6 +1182,15 @@
       {#if store.awake?.error}
         <p class="why"><b>Cannot keep this machine awake: {store.awake.error}</b><i>A sleep interrupts live sessions.</i></p>
       {/if}
+      {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok}>{c.ok ? 'ok' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
+      {#each sandboxes as p (p.provider)}
+        <p class="dim">Capabilities · {p.provider}{p.verified ? '' : ' · not verified'} <Help label="About capabilities">What this runtime's checks show it can promise a session, by the check each rests on. Reported only: sessions are not placed by them yet.</Help></p>
+        <ul class="checks">
+          {#each p.lines as l (l.capability)}
+            <li><span class="chip" class:off={capabilityTone(l) === 'off'} class:warn={capabilityTone(l) === 'warn'}>{capabilityName(l.capability)}</span> {l.value ?? 'not established'} · <small>{l.detail}</small></li>
+          {/each}
+        </ul>
+      {/each}
       {#if store.node && nodeHarnesses(store.node).length}
         <p class="dim">Harnesses <Help label="About harnesses">A session runs the harness its model's credential allows. The default breaks ties.</Help></p>
         <ul class="checks">

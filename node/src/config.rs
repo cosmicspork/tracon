@@ -69,6 +69,9 @@ pub struct Config {
     /// Hosts the node attaches a stored credential to, on behalf of a client
     /// that never holds it.
     pub upstreams: Upstreams,
+    /// Where sessions may run and what each channel and repository requires
+    /// of the sandbox provider (`crate::provider`). Shown, not enforced yet.
+    pub placement: crate::provider::requirements::Placement,
 }
 
 /// The tables an older `node.toml` may still carry for OpenCode, which is
@@ -2158,6 +2161,7 @@ impl Default for Config {
             docs: Docs::default(),
             work: Work::default(),
             upstreams: Upstreams::default(),
+            placement: Default::default(),
             harness: Harness {
                 id: crate::adapter::claude::ClaudeAdapter::ID.into(),
                 version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
@@ -2552,6 +2556,8 @@ impl Config {
             .trusted_proxies()
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_repos(&config.repo).map_err(|error| format!("{}: {error}", path.display()))?;
+        crate::provider::requirements::validate(&config.placement)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_doc_kinds(&config.docs.kind)

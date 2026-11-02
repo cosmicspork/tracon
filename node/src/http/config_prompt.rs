@@ -67,6 +67,7 @@ const SENSITIVE: &[&str] = &[
     "publish.commits",
     "repo.commits",
     "gateway.forward_port",
+    "placement",
 ];
 
 fn pattern_covers(pattern: &str, key: &[&str]) -> bool {

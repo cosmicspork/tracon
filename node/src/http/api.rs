@@ -7242,7 +7242,14 @@ pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde
     let row = reverify(&s)
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({ "state": row.state, "checks": report })))
+    // Shown beside the checks, acted on by nothing: no session is placed by
+    // a provider's capabilities yet.
+    let providers: Vec<_> = crate::provider::backend_report(backend.kind(), &report)
+        .into_iter()
+        .collect();
+    Ok(Json(
+        json!({ "state": row.state, "checks": report, "providers": providers }),
+    ))
 }
 
 /// Verify the boundary, record the verdict, and tell every client.
