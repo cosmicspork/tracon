@@ -313,6 +313,8 @@ impl Runner for PodmanRunner {
         let secrets = secret_env_for(&cmd)?;
         let args = self.spec.podman_args(&name, &cmd, false);
         tracing::debug!(container = %name, "podman run");
+        // While podman is started, not while the container runs.
+        let _images = crate::boundary::reconcile::images_in_use().await;
         let child = self
             .podman()?
             .args(&args)
@@ -330,12 +332,19 @@ impl Runner for PodmanRunner {
         let name = self.capture_name(&cmd.name);
         let secrets = secret_env_for(&cmd)?;
         let args = self.spec.podman_args(&name, &cmd, false);
-        self.podman()?
+        // While podman is started, not while the container runs: a capture
+        // can be a repository's whole check run.
+        let images = crate::boundary::reconcile::images_in_use().await;
+        let child = self
+            .podman()?
             .args(&args)
             .envs(secrets)
-            .output()
-            .await
-            .map_err(Into::into)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        drop(images);
+        child.wait_with_output().await.map_err(Into::into)
     }
 
     /// Stop, then remove. `podman rm --force` on its own is a SIGKILL: the

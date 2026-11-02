@@ -151,7 +151,7 @@ which configured OpenCode's web interface and its plugins, is ignored with a war
 What is left is two steps, and neither is needed for the node to serve:
 
 ```sh
-tracon setup                       # builds the harness images, retires omp's leftovers
+tracon setup                       # retires omp's leftovers (the node builds its images itself)
 tracon session archive-legacy      # puts the retired harnesses' sessions away, read-only
 ```
 

@@ -9,7 +9,6 @@ import type {
   ExternalView,
   AuthorityGrant,
   PolicyRule,
-  BoundaryResult,
   ChannelInfo,
   ChannelMetrics,
   CodexLimits,
@@ -703,7 +702,6 @@ export const api = {
     call<{ removed: string }>('DELETE', `/api/credentials/forge/${forge}`),
   createChannel: (name: string) =>
     call<{ name: string; created: boolean; note: string | null }>('POST', '/api/channels', { name }),
-  runSetup: (rebuild = false) => call<BoundaryResult>('POST', '/api/boundary/setup', { rebuild }),
   config: () => call<NodeConfig>('GET', '/api/config'),
   /** Typed edits of node.toml, decided against `expectedHash` (a 409 carries
       the hash now). Off the node's machine a passkey confirms it. */

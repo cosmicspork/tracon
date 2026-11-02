@@ -12,7 +12,11 @@ import type { HarnessState, MeshState, ModelOption, NodeInfo, ProviderInfo } fro
 export function upsertNode(nodes: NodeInfo[], node: NodeInfo): NodeInfo[] {
   const prev = nodes.find((n) => n.id === node.id)
   const next = nodes.filter((n) => n.id !== node.id)
-  next.push(node.loopback === undefined && prev?.loopback !== undefined ? { ...node, loopback: prev.loopback } : node)
+  // Both are facts about the serving node that only some frames carry.
+  let merged = node
+  if (node.loopback === undefined && prev?.loopback !== undefined) merged = { ...merged, loopback: prev.loopback }
+  if (node.reconciling === undefined && prev?.reconciling !== undefined) merged = { ...merged, reconciling: prev.reconciling }
+  next.push(merged)
   return next.sort((a, b) => {
     if (a.is_self !== b.is_self) return a.is_self ? -1 : 1
     return a.name.localeCompare(b.name)

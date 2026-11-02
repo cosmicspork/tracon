@@ -177,6 +177,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("boundary.selinux_label_disable"),
     restart("boundary.start_machine"),
     restart("boundary.stop_timeout_secs"),
+    restart("boundary.auto_reconcile"),
     // [gateway]
     restart("gateway.allow_hosts"),
     restart("gateway.proxy_port"),

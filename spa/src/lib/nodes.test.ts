@@ -141,6 +141,14 @@ test('a node frame without loopback keeps the flag the request answered with', (
   expect(list[0].loopback).toBe(false)
 })
 
+test('a node frame from the stored row keeps whether the node is setting up its boundary', () => {
+  let list = upsertNode([], node({ id: 'me', name: 'mine', is_self: true, state: 'refused', reconciling: true }))
+  list = upsertNode(list, node({ id: 'me', name: 'mine', is_self: true, state: 'refused' }))
+  expect(list[0].reconciling).toBe(true)
+  list = upsertNode(list, node({ id: 'me', name: 'mine', is_self: true, state: 'ready', reconciling: false }))
+  expect(list[0].reconciling).toBe(false)
+})
+
 test('an older node lists its one configured harness', () => {
   const [only] = nodeHarnesses(node({}))
   expect(only).toMatchObject({ id: 'omp', pinned: '1', default: true, image_state: 'unknown' })

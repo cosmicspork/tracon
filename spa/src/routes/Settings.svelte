@@ -69,7 +69,7 @@
   import { SETTINGS_SECTIONS, settingsSection } from '../lib/routes'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
-  import type { AuthorityGrant, BoundaryCheck, ChannelInfo, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule, ReviewTrigger } from '../lib/types'
+  import type { AuthorityGrant, ChannelInfo, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule, ReviewTrigger } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
   const origin = typeof location === 'undefined' ? '' : location.origin
@@ -126,7 +126,6 @@
 
   let busy = $state('')
   let error = $state('')
-  let checks = $state<BoundaryCheck[] | null>(null)
 
   async function act(what: string, f: () => Promise<unknown>) {
     busy = what
@@ -141,22 +140,18 @@
   }
 
   // --- boundary ---------------------------------------------------------
-  function setup(rebuild: boolean) {
-    return act('setup', async () => {
-      checks = (await api.runSetup(rebuild)).checks.checks
-    })
-  }
-
   // A session runs whichever harness its model's credential allows, so each
-  // image has to be there and current, not only the configured one's.
+  // image has to be there and current, not only the configured one's. The
+  // node builds them itself as it starts; `tracon setup` is the manual way.
   function imageNote(h: HarnessState): string {
+    const building = store.node?.reconciling === true
     switch (h.image_state) {
       case 'current':
         return 'image current'
       case 'stale':
-        return 'image stale · rebuild runtime images'
+        return building ? 'image stale · the node is rebuilding it' : 'image stale · run `tracon setup` at the node'
       case 'missing':
-        return 'image missing · prepare isolated runtime'
+        return building ? 'image missing · the node is building it' : 'image missing · run `tracon setup` at the node'
       default:
         return 'image not judged here'
     }
@@ -1170,18 +1165,15 @@
   <Maintenance>
     {#snippet boundary()}
       <div class="acts">
-        <span class="chip" class:bad={refused}>{store.node?.state ?? '…'}</span>
-        <button class="btn p" onclick={() => setup(false)} disabled={busy !== ''} title="Create the network, gateway and images this node needs">{busy === 'setup' ? 'Running setup…' : 'Prepare isolated runtime'}</button>
-        <button class="btn" onclick={() => setup(true)} disabled={busy !== ''} title="Rebuild the serving node gateway and harness images from scratch">Rebuild runtime images</button>
+        <span class="chip" class:bad={refused && !store.node?.reconciling}>{store.node?.reconciling ? 'setting up' : store.node?.state ?? '…'}</span>
       </div>
       {#if refused && store.node}
-        <p class="why"><b>{store.node.failed_check}: {store.node.failed_detail}</b><i>{remedy(store.node.failed_check)}</i></p>
+        <p class="why"><b>{store.node.failed_check}: {store.node.failed_detail}</b>{#if !store.node.reconciling}<i>{remedy(store.node.failed_check)}</i>{/if}</p>
       {/if}
       <!-- Off the rail, which shows a light rather than this sentence. -->
       {#if store.awake?.error}
         <p class="why"><b>Cannot keep this machine awake: {store.awake.error}</b><i>A sleep interrupts live sessions.</i></p>
       {/if}
-      {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok}>{c.ok ? 'ok' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
       {#if store.node && nodeHarnesses(store.node).length}
         <p class="dim">Harnesses <Help label="About harnesses">A session runs the harness its model's credential allows. The default breaks ties.</Help></p>
         <ul class="checks">

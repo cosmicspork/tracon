@@ -90,23 +90,32 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
             format!("podman {version} is rootful; the harness must not share a root domain with the node"),
         );
     }
+    // While the node is building them itself, the remedy is to wait; the
+    // desktop app reads "run `tracon setup`" as its cue to run one.
+    let building = crate::boundary::reconcile::running();
     for (image, dir) in super::setup::images(cfg) {
         let image = image.as_str();
         if podman(&["image", "exists", image]).await.is_err() {
             return CheckResult::fail(
                 CheckId::Runtime,
-                format!("image {image} is missing; run `tracon setup`"),
+                match building {
+                    true => format!("image {image} is missing; the node is building it"),
+                    false => format!("image {image} is missing; run `tracon setup`"),
+                },
             );
         }
         // An image without the label predates it or was built by hand, and
-        // cannot be judged; the next `tracon setup` rebuilds and labels it.
+        // cannot be judged; the next setup rebuilds and labels it.
         if let Some(built) = super::setup::image_digest(image).await {
             if built != super::setup::expected_digest(cfg, dir) {
                 return CheckResult::fail(
                     CheckId::Runtime,
-                    format!(
-                        "image {image} was built from other definitions than this binary's; run `tracon setup`"
-                    ),
+                    match building {
+                        true => format!("image {image} is out of date; the node is rebuilding it"),
+                        false => format!(
+                            "image {image} was built from other definitions than this binary's; run `tracon setup`"
+                        ),
+                    },
                 );
             }
         }

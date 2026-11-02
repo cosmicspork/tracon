@@ -280,6 +280,18 @@ impl Backend for PodmanBackend {
         setup::setup(cfg, rebuild).await
     }
 
+    async fn converge(&self, cfg: &Config) -> Result<bool, BoundaryError> {
+        setup::converge(cfg).await
+    }
+
+    fn converges(&self) -> bool {
+        true
+    }
+
+    fn definitions(&self, cfg: &Config) -> Option<String> {
+        Some(setup::definitions(cfg))
+    }
+
     async fn recover(&self, cfg: &Config) {
         match setup::recover_gateway(cfg).await {
             Ok(setup::Recovery::Running) => {}
@@ -289,7 +301,7 @@ impl Backend for PodmanBackend {
             ),
             Ok(setup::Recovery::Missing) => tracing::warn!(
                 container = %cfg.boundary.gateway_container,
-                "there is no gateway; `tracon setup` makes one"
+                "there is no gateway; setting up the boundary makes one"
             ),
             Err(error) => tracing::warn!(%error, "could not start the stopped gateway"),
         }
@@ -334,6 +346,7 @@ impl Backend for PodmanBackend {
     }
 
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
+        let _images = super::reconcile::images_in_use().await;
         volume_copy_in(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
             &self.cfg.boundary.harness_image,
@@ -344,7 +357,14 @@ impl Backend for PodmanBackend {
     }
 
     async fn import_writable(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
-        self.import_volume(volume, source).await?;
+        let _images = super::reconcile::images_in_use().await;
+        volume_copy_in(
+            &crate::boundary::podman::resolve_podman_env(&self.cfg),
+            &self.cfg.boundary.harness_image,
+            volume,
+            source,
+        )
+        .await?;
         // The owner may always change its own modes, so this needs no
         // capability, and nothing leaves the volume.
         podman(&[
@@ -368,6 +388,7 @@ impl Backend for PodmanBackend {
     }
 
     async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
+        let _images = super::reconcile::images_in_use().await;
         volume_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
             &self.cfg.boundary.harness_image,
@@ -382,6 +403,7 @@ impl Backend for PodmanBackend {
         volume: &str,
         destination: &Path,
     ) -> Result<(), BoundaryError> {
+        let _images = super::reconcile::images_in_use().await;
         workspace_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
             &self.cfg.boundary.harness_image,
@@ -437,6 +459,7 @@ impl Backend for PodmanBackend {
     /// its source read-only. A source that does not exist is created empty by
     /// the mount, which is what an empty destination is a copy of.
     async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
+        let _images = super::reconcile::images_in_use().await;
         podman(&[
             "run",
             "--rm",
