@@ -180,6 +180,180 @@ fn pod_labels(
     out
 }
 
+/// Why the cluster refused a harness pod for lack of capacity. Pods are bound
+/// to the node's own Kubernetes node by `nodeName`, so the scheduler never
+/// weighs them: one that does not fit is failed by the kubelet's admission
+/// (`OutOfcpu`, `OutOfmemory`, ...) with no container ever started, or a
+/// namespace's ResourceQuota or LimitRange refuses it at create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    OutOfCpu,
+    OutOfMemory,
+    OutOfPods,
+    OutOfEphemeralStorage,
+    /// Another `OutOf*`: an extended resource, a device.
+    OutOfOther,
+    /// A ResourceQuota or LimitRange refused the create.
+    Quota,
+}
+
+impl Refusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OutOfCpu => "out_of_cpu",
+            Self::OutOfMemory => "out_of_memory",
+            Self::OutOfPods => "out_of_pods",
+            Self::OutOfEphemeralStorage => "out_of_ephemeral_storage",
+            Self::OutOfOther => "out_of_other",
+            Self::Quota => "quota",
+        }
+    }
+
+    /// The kubelet's admission reason, read: `OutOf` and the resource it ran
+    /// out of.
+    fn from_reason(reason: &str) -> Option<Self> {
+        Some(match reason.strip_prefix("OutOf")? {
+            "cpu" => Self::OutOfCpu,
+            "memory" => Self::OutOfMemory,
+            "pods" => Self::OutOfPods,
+            "ephemeral-storage" => Self::OutOfEphemeralStorage,
+            _ => Self::OutOfOther,
+        })
+    }
+}
+
+/// The capacity refusal a pod's status reports, if that is how it ended: phase
+/// Failed, an `OutOf*` reason, and no container that ever ran. A pod whose
+/// container ran and ended is a command's own result, whatever its phase.
+fn refusal(status: &PodStatus) -> Option<Refusal> {
+    if status.phase.as_deref() != Some("Failed") {
+        return None;
+    }
+    let ran = status.container_statuses.iter().flatten().any(|c| {
+        [c.state.as_ref(), c.last_state.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|s| s.running.is_some() || s.terminated.is_some())
+    });
+    if ran {
+        return None;
+    }
+    Refusal::from_reason(status.reason.as_deref()?)
+}
+
+/// What a refused pod is reported as: the resource it was refused for, what
+/// it asked for, and the `[runtime.kubernetes.resources.*]` key that sizes
+/// it, which is what an operator changes. `said` is the cluster's own words.
+fn refusal_error(
+    name: &str,
+    refusal: Refusal,
+    sizing: Sizing,
+    resources: &KubeResources,
+    said: &str,
+) -> RunnerError {
+    let sized = sizing.sized(resources);
+    let table = format!("[runtime.kubernetes.resources.{}]", sizing.as_str());
+    let what = match refusal {
+        Refusal::OutOfCpu => format!(
+            "pod {name} refused by the node: not enough cpu (requested {}); {table} cpu_request sizes it",
+            sized.cpu_request
+        ),
+        Refusal::OutOfMemory => format!(
+            "pod {name} refused by the node: not enough memory (requested {}); {table} memory_request sizes it",
+            sized.memory_request
+        ),
+        Refusal::OutOfPods => {
+            format!("pod {name} refused by the node: it already runs as many pods as it may")
+        }
+        Refusal::OutOfEphemeralStorage => {
+            format!("pod {name} refused by the node: not enough ephemeral storage")
+        }
+        Refusal::OutOfOther => format!("pod {name} refused by the node: a resource ran out"),
+        Refusal::Quota => match quota_unspecified(said).as_slice() {
+            [] => format!(
+                "pod {name} refused by the namespace's ResourceQuota or LimitRange; {table} sizes it"
+            ),
+            keys => format!(
+                "pod {name} refused by the namespace's ResourceQuota: it requires every pod to set {}; set {} in {table}",
+                keys.iter()
+                    .map(|(resource, _)| *resource)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                keys.iter()
+                    .map(|(_, key)| *key)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        },
+    };
+    let message = match said.trim() {
+        "" => what,
+        said => format!("{what} ({said})"),
+    };
+    RunnerError::Refused {
+        reason: refusal.as_str(),
+        message,
+    }
+}
+
+/// Whether the API server refused a create for a ResourceQuota or a
+/// LimitRange: a 403 whose message is the quota's (`exceeded quota`, or
+/// `failed quota: <name>: must specify ...` when the quota covers a resource
+/// the pod leaves unset) or the LimitRange's (`... per Container ...`,
+/// `... per Pod ...`).
+fn quota_refused(code: u16, message: &str) -> bool {
+    code == 403
+        && [
+            "exceeded quota",
+            "failed quota",
+            "per Container",
+            "per Pod",
+            "LimitRange",
+        ]
+        .iter()
+        .any(|said| message.contains(said))
+}
+
+/// The resources a quota's `must specify limits.cpu,limits.memory[ for: ...]`
+/// says the pod left unset, each with the `[runtime.kubernetes.resources.*]`
+/// key that sets it. Empty when the refusal is not that one, or names
+/// nothing a key sets.
+fn quota_unspecified(said: &str) -> Vec<(&'static str, &'static str)> {
+    let Some((_, rest)) = said.split_once("must specify ") else {
+        return Vec::new();
+    };
+    let listed = rest.split(" for:").next().unwrap_or_default();
+    let mut keys = Vec::new();
+    for resource in listed.split(',').map(str::trim) {
+        let key = match resource {
+            "limits.cpu" => ("limits.cpu", "cpu_limit"),
+            "limits.memory" => ("limits.memory", "memory_limit"),
+            "requests.cpu" | "cpu" => ("requests.cpu", "cpu_request"),
+            "requests.memory" | "memory" => ("requests.memory", "memory_request"),
+            _ => continue,
+        };
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// The sizing a rendered pod says it has (`SIZING_LABEL`).
+fn sizing_of(pod: &Pod) -> Sizing {
+    match pod
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(SIZING_LABEL))
+        .map(String::as_str)
+    {
+        Some("command") => Sizing::Command,
+        Some("probe") => Sizing::Probe,
+        _ => Sizing::Session,
+    }
+}
+
 /// Everything that puts a harness inside a pod behind the boundary.
 #[derive(Debug, Clone)]
 pub struct KubeSpec {
@@ -652,7 +826,7 @@ impl KubeRunner {
     /// `KubeSpec::start_timeout`, because it is the part a cluster can stall
     /// on for reasons the command never sees. A pod that ran and ended before
     /// it was looked at has started too.
-    async fn wait_started(&self, name: &str) -> Result<(), RunnerError> {
+    async fn wait_started(&self, name: &str, sizing: Sizing) -> Result<(), RunnerError> {
         let pods = self.pods();
         let timeout = self.spec.start_timeout;
         let deadline = tokio::time::Instant::now() + timeout;
@@ -662,6 +836,17 @@ impl KubeRunner {
                 .await
                 .map_err(|e| RunnerError::Other(format!("get pod {name}: {e}")))?;
             let status = pod.status.unwrap_or_default();
+            // Refused for capacity: it never started and never will, and the
+            // reason is lost if it is read as a run that ended.
+            if let Some(refused) = refusal(&status) {
+                return Err(refusal_error(
+                    name,
+                    refused,
+                    sizing,
+                    &self.spec.resources,
+                    status.message.as_deref().unwrap_or_default(),
+                ));
+            }
             let phase = status.phase.as_deref().unwrap_or_default();
             if matches!(phase, "Running" | "Succeeded" | "Failed") {
                 return Ok(());
@@ -746,12 +931,15 @@ impl KubeRunner {
     async fn capture(
         &self,
         cmd: RunnerCommand,
-        render: fn(&KubeSpec, &str, &RunnerCommand) -> Result<Pod, RunnerError>,
+        sizing: Sizing,
     ) -> Result<std::process::Output, RunnerError> {
         self.ensure_mount_roots(&cmd).await?;
         let name = self.capture_name(&Self::name_for(&cmd, "tracon-x"));
         let asked = cmd.image.clone().unwrap_or_else(|| self.spec.image.clone());
-        let pod = render(&self.spec, &name, &cmd)?;
+        let pod = match sizing {
+            Sizing::Probe => self.spec.probe_pod(&name, &cmd)?,
+            _ => self.spec.capture_pod(&name, &cmd)?,
+        };
         let pods = self.pods();
         self.remove(&name).await;
         // Dropped with this future before it is released, the guard deletes
@@ -762,11 +950,11 @@ impl KubeRunner {
             name: name.clone(),
             armed: true,
         };
-        let started = self.wait_started(&name).await;
+        let started = self.wait_started(&name, sizing).await;
         secret::release(&mut env).await;
         let result = match started {
             Ok(()) => match self.wait_finished(&name).await {
-                Ok(finished) => self.captured(&name, finished).await,
+                Ok(finished) => self.captured(&name, finished, sizing).await,
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
@@ -784,8 +972,22 @@ impl KubeRunner {
 
     /// What a finished capture pod reports: the container's own exit code,
     /// its combined output, and the image the kubelet actually ran.
-    async fn captured(&self, name: &str, pod: Pod) -> Result<CaptureEnd, RunnerError> {
+    async fn captured(
+        &self,
+        name: &str,
+        pod: Pod,
+        sizing: Sizing,
+    ) -> Result<CaptureEnd, RunnerError> {
         let status = pod.status.unwrap_or_default();
+        if let Some(refused) = refusal(&status) {
+            return Err(refusal_error(
+                name,
+                refused,
+                sizing,
+                &self.spec.resources,
+                status.message.as_deref().unwrap_or_default(),
+            ));
+        }
         let container = harness_status(&status);
         let code = match container
             .and_then(|c| c.state.as_ref())
@@ -917,7 +1119,7 @@ impl Runner for KubeRunner {
         let pods = self.pods();
         self.remove(&name).await;
         let mut env = self.create_pod(&name, &pod, &cmd).await?;
-        let started = self.wait_started(&name).await;
+        let started = self.wait_started(&name, Sizing::Session).await;
         // Started or not, the Secret has done its work: the kubelet read it
         // into the container's environment when it created the container.
         secret::release(&mut env).await;
@@ -984,11 +1186,11 @@ impl Runner for KubeRunner {
     /// pod log, in which the cluster has already merged stdout and stderr, so
     /// it is all in `stdout`; see `captured`.
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
-        self.capture(cmd, KubeSpec::capture_pod).await
+        self.capture(cmd, Sizing::Command).await
     }
 
     async fn run_probe(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
-        self.capture(cmd, KubeSpec::probe_pod).await
+        self.capture(cmd, Sizing::Probe).await
     }
 
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
@@ -1651,6 +1853,131 @@ mod tests {
         let labels = labelled(&spec.capture_pod("tracon-x-1", &cmd()).unwrap());
         assert_eq!(labels[KIND_LABEL], "command");
         assert_eq!(labels[SIZING_LABEL], "command");
+    }
+
+    /// A pod the kubelet refuses at admission never ran: it is a refusal
+    /// naming the resource and the key that sizes it, not a command that
+    /// ended without an exit code.
+    #[test]
+    fn a_pod_refused_for_capacity_is_classified() {
+        use k8s_openapi::api::core::v1::{ContainerState, ContainerStateTerminated};
+        let failed = |reason: &str| PodStatus {
+            phase: Some("Failed".into()),
+            reason: Some(reason.into()),
+            message: Some("Pod was rejected: Node didn't have enough resource".into()),
+            ..Default::default()
+        };
+        assert_eq!(refusal(&failed("OutOfmemory")), Some(Refusal::OutOfMemory));
+        assert_eq!(refusal(&failed("OutOfcpu")), Some(Refusal::OutOfCpu));
+        assert_eq!(refusal(&failed("OutOfpods")), Some(Refusal::OutOfPods));
+        assert_eq!(
+            refusal(&failed("OutOfephemeral-storage")),
+            Some(Refusal::OutOfEphemeralStorage)
+        );
+        assert_eq!(
+            refusal(&failed("OutOfnvidia.com/gpu")),
+            Some(Refusal::OutOfOther)
+        );
+        assert_eq!(refusal(&failed("Evicted")), None);
+        let mut pending = failed("OutOfmemory");
+        pending.phase = Some("Pending".into());
+        assert_eq!(refusal(&pending), None);
+
+        // A container that ran and ended is the command's own result.
+        let mut ended = failed("OutOfmemory");
+        ended.container_statuses = Some(vec![ContainerStatus {
+            name: HARNESS_CONTAINER.into(),
+            state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]);
+        assert_eq!(refusal(&ended), None);
+
+        let resources = spec().resources;
+        let error = refusal_error(
+            "tracon-c-1",
+            Refusal::OutOfMemory,
+            Sizing::Command,
+            &resources,
+            "Node didn't have enough resource: memory",
+        );
+        let RunnerError::Refused { reason, message } = &error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(*reason, "out_of_memory");
+        assert!(
+            message.contains("not enough memory (requested 2Gi)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("[runtime.kubernetes.resources.command] memory_request"),
+            "{message}"
+        );
+        let error = refusal_error(
+            "tracon-h-1",
+            Refusal::OutOfCpu,
+            Sizing::Session,
+            &resources,
+            "",
+        );
+        assert!(
+            error.to_string().contains("not enough cpu (requested 250m); [runtime.kubernetes.resources.session] cpu_request"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_create_a_quota_refuses_is_told_apart_from_other_failures() {
+        assert!(quota_refused(
+            403,
+            "pods \"tracon-c-1\" is forbidden: exceeded quota: compute, requested: requests.memory=2Gi"
+        ));
+        assert!(quota_refused(
+            403,
+            "pods \"tracon-c-1\" is forbidden: maximum memory usage per Container is 1Gi, but limit is 4Gi"
+        ));
+        assert!(!quota_refused(
+            403,
+            "pods is forbidden: User cannot create resource"
+        ));
+        // The quota plugin's other refusal: the namespace's quota covers
+        // limits.cpu, which a pod renders only when cpu_limit is set.
+        let unset = "pods \"tracon-h-1\" is forbidden: failed quota: compute: must specify limits.cpu for: harness";
+        assert!(quota_refused(403, unset));
+        assert!(!quota_refused(409, "exceeded quota"));
+        let error = refusal_error(
+            "tracon-h-1",
+            Refusal::Quota,
+            Sizing::Session,
+            &spec().resources,
+            unset,
+        );
+        let RunnerError::Refused { reason, message } = &error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(*reason, "quota");
+        assert!(
+            message.contains("requires every pod to set limits.cpu; set cpu_limit in [runtime.kubernetes.resources.session]"),
+            "{message}"
+        );
+        assert_eq!(
+            quota_unspecified(
+                "failed quota: q: must specify limits.cpu,limits.memory,requests.memory"
+            ),
+            vec![
+                ("limits.cpu", "cpu_limit"),
+                ("limits.memory", "memory_limit"),
+                ("requests.memory", "memory_request"),
+            ]
+        );
+        assert!(quota_unspecified("exceeded quota: compute").is_empty());
+        let pod = spec().probe_pod("p", &cmd()).unwrap();
+        assert_eq!(sizing_of(&pod), Sizing::Probe);
     }
 
     #[test]

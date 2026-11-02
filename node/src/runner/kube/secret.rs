@@ -317,7 +317,20 @@ impl KubeRunner {
             Ok(created) => created,
             Err(e) => {
                 release(&mut env).await;
-                return Err(RunnerError::Other(format!("create pod {name}: {e}")));
+                return Err(match &e {
+                    kube::Error::Api(status)
+                        if super::quota_refused(status.code, &status.message) =>
+                    {
+                        super::refusal_error(
+                            name,
+                            super::Refusal::Quota,
+                            super::sizing_of(pod),
+                            &self.spec.resources,
+                            &status.message,
+                        )
+                    }
+                    _ => RunnerError::Other(format!("create pod {name}: {e}")),
+                });
             }
         };
         if let Some(guard) = env.as_mut() {
