@@ -1313,10 +1313,23 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # the allowlist proxy (served by the node) and the per-client
                                     # egress proxy are tunnels to the node on the gateway's ports.
                                     # No gateway container or internal network is made
+# sandbox_images = false            # with sandbox_protocol: no harness images. Sandboxes run the
+                                    # stock base ([sandbox] base_image) or the repository's image,
+                                    # harnesses run from the bundle the node fetches for its own
+                                    # release, and a repository's prepare runs once and is
+                                    # snapshotted (podman commit) for its sessions and checks.
+                                    # Sandboxes run as the base's user 65532, mapped to the node's
+                                    # own (--userns=keep-id), with the harness home /home/harness
 # [sandbox]
 # bundle = "/path/to/<version>/amd64" # the harness bundle (scripts/harness-bundle.sh --sandbox)
                                     # holding bin/tracon-sandbox, mounted read-only at /opt/tracon;
-                                    # set at the node only
+                                    # set at the node only. With sandbox_images and no bundle, the
+                                    # node fetches its release's bundle into <state>/bundles,
+                                    # checked against its .sha256 and manifest
+# base_image = "ghcr.io/cosmicspork/tracon-sandbox-base:<version>" # pinned by digest once pulled;
+                                    # a repository Dockerfile stands on it with
+                                    # FROM ${TRACON_SANDBOX_BASE}
+# release_url = "https://github.com/cosmicspork/tracon/releases/download" # where bundles come from
 # [runtime.kubernetes]              # namespace, harness_image,
                                     # state_claim, state_mount, harness_home, uid, gateway_host
 # start_timeout_secs = 900          # (under [runtime.kubernetes]) how long a pod may take to be

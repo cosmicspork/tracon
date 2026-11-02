@@ -46,8 +46,8 @@ use super::capabilities::{
     Capabilities, Dns, ImageIdentityKind, Privilege, Route, RuntimeSocket, Tier,
 };
 use super::{
-    Capacity, CreateSpec, Handle, ImageIdentity, Network, ProviderError, ProviderKind,
-    SandboxProvider, Status,
+    Bootstrap, Capacity, CreateSpec, Handle, ImageIdentity, Network, ProviderError, ProviderKind,
+    Resources, SandboxProvider, SnapshotId, Status,
 };
 use crate::runner::podman::{
     RunSpec, SandboxEntry, SandboxLaunch, BUNDLE_TARGET, SANDBOX_LABEL, SOCKET_DIR_TARGET,
@@ -141,6 +141,14 @@ pub struct PodmanOptions {
     pub limit: Option<u32>,
     /// How long the supervisor keeps dialling.
     pub connect_timeout: Duration,
+    /// The user every sandbox runs as, where not its image's own.
+    pub user: Option<String>,
+    /// The user namespace every sandbox runs in, where not Podman's default.
+    pub userns: Option<String>,
+    /// Environment every sandbox gets beyond the boundary's.
+    pub env: Vec<(String, String)>,
+    /// What [`SandboxProvider::snapshot`] names its images (`<repo>:<id>`).
+    pub snapshot_repo: String,
 }
 
 pub struct PodmanProvider {
@@ -167,13 +175,21 @@ impl PodmanProvider {
     /// The provider a node configured for it runs with, around `spec`.
     pub fn from_config(cfg: &crate::config::Config, mut spec: RunSpec) -> Self {
         spec.selinux_label_disable = false;
+        let images = crate::sandbox_images::enabled(cfg);
         Self::new(PodmanOptions {
             spec,
-            bundle: cfg.sandbox.bundle.clone().unwrap_or_default(),
+            bundle: crate::bundle::effective(cfg).unwrap_or_default(),
             socket_dir: cfg.sandbox_socket_dir(),
             init: cfg.runtime.podman.sandbox_init,
             limit: None,
             connect_timeout: crate::runner::protocol::CONNECT_WITHIN,
+            user: images.then(|| crate::sandbox_images::USER.to_string()),
+            userns: images.then(|| crate::sandbox_images::USERNS.to_string()),
+            env: match images {
+                true => crate::sandbox_images::sandbox_env(),
+                false => Vec::new(),
+            },
+            snapshot_repo: crate::sandbox_images::snapshot_repo(),
         })
     }
 
@@ -219,6 +235,9 @@ impl PodmanProvider {
             memory_bytes: spec.resources.memory_bytes,
             connect_timeout_ms: self.options.connect_timeout.as_millis() as u64,
             log_file: (!create_only).then(|| self.log_file(name)),
+            user: self.options.user.clone(),
+            userns: self.options.userns.clone(),
+            env: self.options.env.clone(),
         };
         let image = match spec.image.is_empty() {
             true => self.options.spec.image.as_str(),
@@ -391,6 +410,150 @@ impl PodmanProvider {
         }
         Ok(())
     }
+}
+
+impl PodmanProvider {
+    /// The configuration of the image `reference` (`podman image inspect`).
+    async fn image_inspect(&self, reference: &str) -> Result<serde_json::Value, ProviderError> {
+        let text = self
+            .cli(&["image", "inspect", "--format", "json", reference])
+            .await?;
+        let all: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .map_err(|e| ProviderError::Failed(format!("podman image inspect: {e}")))?;
+        all.into_iter()
+            .next()
+            .ok_or_else(|| ProviderError::NotFound(reference.to_string()))
+    }
+
+    /// Commit the sandbox's filesystem as the image `reference`, labelled
+    /// with `labels`, and configured as the image it was made from: a commit
+    /// otherwise keeps the run's entrypoint (the supervisor), user, working
+    /// directory and environment, the run's token among them. Its volumes
+    /// and bind mounts (the workspace, the bundle, the socket directory) are
+    /// not in it.
+    pub async fn snapshot_as(
+        &self,
+        handle: &Handle,
+        reference: &str,
+        labels: &[(String, String)],
+    ) -> Result<SnapshotId, ProviderError> {
+        let c = self.inspect(handle).await?;
+        let image = c["Image"].as_str().unwrap_or_default().to_string();
+        let parent = self.image_inspect(&image).await?;
+        let changes = commit_changes(&parent["Config"], &c["Config"]["Env"], labels);
+        let mut args: Vec<String> = vec!["commit".into(), "--quiet".into()];
+        for change in changes {
+            args.push("--change".into());
+            args.push(change);
+        }
+        args.push(handle.0.clone());
+        args.push(reference.to_string());
+        self.cli
+            .run(&args, &[])
+            .await
+            .map_err(|e| ProviderError::Failed(format!("commit {}: {e}", handle.0)))?;
+        Ok(SnapshotId(reference.to_string()))
+    }
+
+    /// The image a sandbox runs: exact, or derived from another by a
+    /// snapshot (its label names which).
+    async fn identity_of(&self, c: &serde_json::Value) -> Result<ImageIdentity, ProviderError> {
+        let digest = c["ImageDigest"]
+            .as_str()
+            .filter(|d| !d.is_empty())
+            .or_else(|| c["Image"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let digest = match digest.starts_with("sha256:") || digest.is_empty() {
+            true => digest,
+            false => format!("sha256:{digest}"),
+        };
+        let image = c["Image"].as_str().unwrap_or_default();
+        let from = match image.is_empty() {
+            true => None,
+            false => self.image_inspect(image).await.ok().and_then(|i| {
+                i["Labels"][crate::sandbox_images::FROM_LABEL]
+                    .as_str()
+                    .or_else(|| i["Config"]["Labels"][crate::sandbox_images::FROM_LABEL].as_str())
+                    .map(str::to_string)
+            }),
+        };
+        Ok(match from {
+            Some(from) => ImageIdentity::Derived {
+                from,
+                actual: digest,
+            },
+            None => ImageIdentity::Exact { digest },
+        })
+    }
+}
+
+/// What a commit changes so the snapshot is configured as `parent` was, plus
+/// `labels`. An environment variable the run added is emptied (a commit
+/// cannot remove one); a value the parent had is restored.
+fn commit_changes(
+    parent: &serde_json::Value,
+    run_env: &serde_json::Value,
+    labels: &[(String, String)],
+) -> Vec<String> {
+    let json_list = |v: &serde_json::Value| -> String {
+        match v.as_array() {
+            Some(items) if !items.is_empty() => serde_json::to_string(items).unwrap_or("[]".into()),
+            _ => "[]".into(),
+        }
+    };
+    let quoted = |value: &str| {
+        format!(
+            "\"{}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('$', "\\$")
+        )
+    };
+    let mut changes = vec![
+        format!("ENTRYPOINT {}", json_list(&parent["Entrypoint"])),
+        format!("CMD {}", json_list(&parent["Cmd"])),
+        format!(
+            "USER {}",
+            parent["User"]
+                .as_str()
+                .filter(|u| !u.is_empty())
+                .unwrap_or("0:0")
+        ),
+        format!(
+            "WORKDIR {}",
+            parent["WorkingDir"]
+                .as_str()
+                .filter(|w| !w.is_empty())
+                .unwrap_or("/")
+        ),
+    ];
+    let parent_env: HashMap<&str, &str> = parent["Env"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e.as_str()?.split_once('='))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut names = std::collections::BTreeSet::new();
+    for entry in run_env.as_array().into_iter().flatten() {
+        let Some((name, value)) = entry.as_str().and_then(|e| e.split_once('=')) else {
+            continue;
+        };
+        if parent_env.get(name) == Some(&value) || !names.insert(name.to_string()) {
+            continue;
+        }
+        changes.push(match parent_env.get(name) {
+            Some(original) => format!("ENV {name}={}", quoted(original)),
+            None => format!("ENV {name}="),
+        });
+    }
+    for (key, value) in labels {
+        changes.push(format!("LABEL {key}={}", quoted(value)));
+    }
+    changes
 }
 
 /// What `podman inspect` shows of a container's boundary, as the checks read
@@ -666,19 +829,48 @@ impl SandboxProvider for PodmanProvider {
         })
     }
 
+    /// A commit of the sandbox (see [`PodmanProvider::snapshot_as`]), under
+    /// `snapshot_repo`.
+    async fn snapshot(&self, handle: &Handle) -> Result<SnapshotId, ProviderError> {
+        let from = match self.identity_of(&self.inspect(handle).await?).await? {
+            ImageIdentity::Exact { digest } => digest,
+            ImageIdentity::Derived { from, .. } => from,
+        };
+        let reference = format!(
+            "{}:{}",
+            self.options.snapshot_repo,
+            uuid::Uuid::now_v7().simple()
+        );
+        self.snapshot_as(
+            handle,
+            &reference,
+            &[(crate::sandbox_images::FROM_LABEL.to_string(), from)],
+        )
+        .await
+    }
+
+    /// A sandbox made from the snapshot's image: a commit is an image like
+    /// any other here, so a fork is a create from it, with nothing of the
+    /// snapshot's processes and the bundle mounted afresh.
+    async fn fork(
+        &self,
+        snapshot: &SnapshotId,
+        resources: &Resources,
+        bootstrap: &Bootstrap,
+    ) -> Result<Handle, ProviderError> {
+        self.create(&CreateSpec {
+            name: None,
+            image: &snapshot.0,
+            resources,
+            mounts: &[],
+            bootstrap,
+        })
+        .await
+    }
+
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {
         let c = self.inspect(handle).await?;
-        let digest = c["ImageDigest"]
-            .as_str()
-            .filter(|d| !d.is_empty())
-            .or_else(|| c["Image"].as_str())
-            .unwrap_or("")
-            .to_string();
-        let digest = match digest.starts_with("sha256:") || digest.is_empty() {
-            true => digest,
-            false => format!("sha256:{digest}"),
-        };
-        Ok(ImageIdentity::Exact { digest })
+        self.identity_of(&c).await
     }
 
     async fn network(&self, handle: &Handle) -> Result<Network, ProviderError> {
@@ -741,9 +933,11 @@ impl SandboxProvider for PodmanProvider {
                 route_and_dns(&networks(&c), &self.options.spec.network, &network)
             }
         };
+        let image_identity = self.identity_of(&c).await?.kind();
         Ok(Capabilities {
             route,
             dns,
+            image_identity,
             ..self.capabilities()
         })
     }
@@ -883,6 +1077,10 @@ mod tests {
                 init: false,
                 limit: Some(4),
                 connect_timeout: Duration::from_secs(60),
+                user: None,
+                userns: None,
+                env: Vec::new(),
+                snapshot_repo: "localhost/spike-snapshot".into(),
             },
             Box::new(fake.clone()),
         );
@@ -1272,5 +1470,185 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(error.contains("stopped before connecting"), "{error}");
         assert!(error.contains("dial: refused"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::runner::podman::RunSpec;
+    use std::sync::Arc;
+
+    /// A container made from `localhost/base`, and that image with a
+    /// snapshot of it once committed.
+    #[derive(Clone, Default)]
+    struct Fake {
+        calls: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait]
+    impl PodmanCli for Fake {
+        async fn run(&self, args: &[String], _: &[(String, String)]) -> Result<String, CliError> {
+            self.calls.lock().unwrap().push(args.to_vec());
+            let a: Vec<&str> = args.iter().map(String::as_str).collect();
+            Ok(match a.as_slice() {
+                ["container", "inspect", "--format", "json", name] => serde_json::json!([{
+                    "Image": if name.starts_with("fork") { "snapid" } else { "baseid" },
+                    "ImageDigest": if name.starts_with("fork") { "sha256:snap" } else { "sha256:base" },
+                    "Config": {"Env": [
+                        "PATH=/usr/bin", "HOME=/root", "HTTPS_PROXY=http://gw:8888",
+                        "TRACON_SANDBOX_TOKEN=run-secret", "TRACON_SANDBOX_PIN=sha256:ab"
+                    ]},
+                }])
+                .to_string(),
+                ["image", "inspect", "--format", "json", "baseid"] => serde_json::json!([{
+                    "Config": {"Env": ["PATH=/usr/bin", "HOME=/home/harness"],
+                               "User": "65532:65532", "WorkingDir": "/work", "Cmd": ["bash"]},
+                    "Labels": {},
+                }])
+                .to_string(),
+                ["image", "inspect", "--format", "json", _] => serde_json::json!([{
+                    "Config": {"Env": ["PATH=/usr/bin"]},
+                    "Labels": {crate::sandbox_images::FROM_LABEL: "localhost/base@sha256:base"},
+                }])
+                .to_string(),
+                ["image", "inspect", "--format", _, _] => "null".into(),
+                ["commit", ..] | ["volume", "create", ..] | ["run", ..] | ["stop", ..] | ["rm", ..] => String::new(),
+                other => panic!("unexpected podman {other:?}"),
+            })
+        }
+    }
+
+    fn provider(fake: &Fake, dir: &Path) -> PodmanProvider {
+        let bundle = dir.join("bundle");
+        std::fs::create_dir_all(bundle.join("bin")).unwrap();
+        std::fs::write(bundle.join("bin/tracon-sandbox"), b"").unwrap();
+        PodmanProvider::with_cli(
+            PodmanOptions {
+                spec: RunSpec::from_config(&crate::config::Config::default(), true),
+                bundle,
+                socket_dir: dir.join("s"),
+                init: false,
+                limit: None,
+                connect_timeout: Duration::from_secs(60),
+                user: Some("65532:65532".into()),
+                userns: Some("keep-id:uid=65532,gid=65532".into()),
+                env: vec![("DISABLE_TELEMETRY".into(), "1".into())],
+                snapshot_repo: "localhost/spike-snapshot".into(),
+            },
+            Box::new(fake.clone()),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_configured_as_its_image_and_keeps_no_token() {
+        let fake = Fake::default();
+        let dir = tempfile::Builder::new()
+            .prefix("ps")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let p = provider(&fake, dir.path());
+        let id = p.snapshot(&Handle("prep".into())).await.unwrap();
+        assert!(id.0.starts_with("localhost/spike-snapshot:"), "{id:?}");
+        let calls = fake.calls.lock().unwrap().clone();
+        let commit = calls.iter().find(|c| c[0] == "commit").unwrap();
+        let changes: Vec<&str> = commit
+            .windows(2)
+            .filter(|w| w[0] == "--change")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert!(changes.contains(&"ENTRYPOINT []"), "{changes:?}");
+        assert!(changes.contains(&"CMD [\"bash\"]"), "{changes:?}");
+        assert!(changes.contains(&"USER 65532:65532"), "{changes:?}");
+        assert!(changes.contains(&"WORKDIR /work"), "{changes:?}");
+        assert!(
+            changes.contains(&"ENV TRACON_SANDBOX_TOKEN="),
+            "{changes:?}"
+        );
+        assert!(changes.contains(&"ENV HTTPS_PROXY="), "{changes:?}");
+        assert!(
+            changes.contains(&"ENV HOME=\"/home/harness\""),
+            "{changes:?}"
+        );
+        assert!(
+            !changes.iter().any(|c| c.starts_with("ENV PATH")),
+            "{changes:?}"
+        );
+        assert!(changes.contains(&"LABEL io.tracon.snapshot.from=\"sha256:base\""));
+        assert!(
+            !commit.iter().any(|a| a.contains("run-secret")),
+            "{commit:?}"
+        );
+        assert_eq!(
+            commit[commit.len() - 2..],
+            ["prep".to_string(), id.0.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_is_a_sandbox_of_the_snapshot_and_reads_as_derived() {
+        let fake = Fake::default();
+        let dir = tempfile::Builder::new()
+            .prefix("pf")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let p = provider(&fake, dir.path());
+        let bootstrap = crate::provider::Bootstrap {
+            run: "fork-run".into(),
+            cert_pin: format!("sha256:{}", "ab".repeat(32)),
+            token: "fork-secret".into(),
+        };
+        let handle = p
+            .fork(
+                &SnapshotId("localhost/spike-snapshot:1".into()),
+                &Resources::default(),
+                &bootstrap,
+            )
+            .await
+            .unwrap();
+        let calls = fake.calls.lock().unwrap().clone();
+        let run = calls.iter().find(|c| c[0] == "run").unwrap();
+        assert_eq!(run.last().unwrap(), "localhost/spike-snapshot:1");
+        // The sandbox runs as the base's user, which is the node's own.
+        let user = run.iter().position(|a| a == "--user").unwrap();
+        assert_eq!(run[user + 1], "65532:65532");
+        assert!(run.contains(&"--userns=keep-id:uid=65532,gid=65532".to_string()));
+        assert!(run.contains(&"DISABLE_TELEMETRY=1".to_string()));
+        p.destroy(&handle).await.unwrap();
+
+        let derived = p.image_identity(&Handle("fork-1".into())).await.unwrap();
+        assert_eq!(
+            derived,
+            ImageIdentity::Derived {
+                from: "localhost/base@sha256:base".into(),
+                actual: "sha256:snap".into(),
+            }
+        );
+        let exact = p.image_identity(&Handle("prep".into())).await.unwrap();
+        assert_eq!(
+            exact,
+            ImageIdentity::Exact {
+                digest: "sha256:base".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_restored_value_is_quoted_and_an_added_one_emptied() {
+        let parent = serde_json::json!({"Env": ["A=x y\"$z"], "Entrypoint": ["/init"]});
+        let run = serde_json::json!(["A=changed", "B=new", "B=again"]);
+        let changes = commit_changes(&parent, &run, &[("k".into(), "v".into())]);
+        assert_eq!(
+            changes,
+            [
+                "ENTRYPOINT [\"/init\"]",
+                "CMD []",
+                "USER 0:0",
+                "WORKDIR /",
+                "ENV A=\"x y\\\"\\$z\"",
+                "ENV B=",
+                "LABEL k=\"v\"",
+            ]
+        );
     }
 }

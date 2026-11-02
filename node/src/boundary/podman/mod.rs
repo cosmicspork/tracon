@@ -19,7 +19,7 @@ use crate::runner::{Mount, Runner};
 
 async fn volume_copy_in(
     podman_bin: &str,
-    image: &str,
+    (image, user): (&str, Option<&str>),
     volume: &str,
     source: &Path,
 ) -> Result<(), BoundaryError> {
@@ -38,10 +38,9 @@ async fn volume_copy_in(
     }
     let name = crate::config::resource_name(&format!("transfer-{}", uuid::Uuid::now_v7().simple()));
     let created = podman_at(podman_bin)
+        .args(["create", "--name", &name])
+        .args(user_args(user))
         .args([
-            "create",
-            "--name",
-            &name,
             "--mount",
             &format!("type=volume,src={volume},dst=/data"),
             image,
@@ -119,17 +118,16 @@ const CLONE_TREE: &str = "cp -dRp --reflink=auto /from/. /to/";
 /// read-only, whose output is validated like any other export.
 async fn workspace_copy_out(
     podman_bin: &str,
-    image: &str,
+    (image, user): (&str, Option<&str>),
     volume: &str,
     destination: &Path,
 ) -> Result<(), BoundaryError> {
     let podman_bin = &guarded_podman(podman_bin)?;
     let name = crate::config::resource_name(&format!("transfer-{}", uuid::Uuid::now_v7().simple()));
     let staged = podman_at(podman_bin)
+        .args(["run", "--name", &name])
+        .args(user_args(user))
         .args([
-            "run",
-            "--name",
-            &name,
             "--network",
             "none",
             "--cap-drop=ALL",
@@ -193,17 +191,16 @@ async fn copy_out(podman_bin: &str, source: &str, destination: &Path) -> Result<
 
 async fn volume_copy_out(
     podman_bin: &str,
-    image: &str,
+    (image, user): (&str, Option<&str>),
     volume: &str,
     destination: &Path,
 ) -> Result<(), BoundaryError> {
     let podman_bin = &guarded_podman(podman_bin)?;
     let name = crate::config::resource_name(&format!("transfer-{}", uuid::Uuid::now_v7().simple()));
     let created = podman_at(podman_bin)
+        .args(["create", "--name", &name])
+        .args(user_args(user))
         .args([
-            "create",
-            "--name",
-            &name,
             "--mount",
             &format!("type=volume,src={volume},dst=/data"),
             image,
@@ -414,7 +411,8 @@ pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
     let mut runner = crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
         .with_mounts(mounts)
         .with_workdir(workdir)
-        .with_delegate(Arc::new(PodmanRunner::new(spec)));
+        .with_delegate(Arc::new(PodmanRunner::new(spec)))
+        .with_bundled_harness(crate::sandbox_images::enabled(cfg));
     if uses_sandbox_files(cfg) {
         runner = runner.with_files(crate::runner::sandbox_files::FilesStore::for_node());
     }
@@ -422,6 +420,27 @@ pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
         runner = runner.with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg));
     }
     Arc::new(runner)
+}
+
+/// The image the node's own short-lived containers (volume transfers and
+/// copies) run, and the user they run as: the harness image as root, as it
+/// runs, or with `sandbox_images` the stock base, as root too (the base's
+/// own user would be a subordinate one here), which is the node's own user.
+fn utility_image(cfg: &Config) -> (String, Option<&'static str>) {
+    match crate::sandbox_images::enabled(cfg) {
+        true => (
+            crate::sandbox_images::base_image(cfg),
+            Some(crate::sandbox_images::UTILITY_USER),
+        ),
+        false => (cfg.boundary.harness_image.clone(), None),
+    }
+}
+
+/// `--user` for a utility container, where its image's own user is not the
+/// one.
+fn user_args(user: Option<&str>) -> Vec<String> {
+    user.map(|user| vec!["--user".to_string(), user.to_string()])
+        .unwrap_or_default()
 }
 
 #[async_trait]
@@ -508,9 +527,10 @@ impl Backend for PodmanBackend {
             return Self::files_import(&store, volume, source);
         }
         let _images = super::reconcile::images_in_use().await;
+        let (image, user) = utility_image(&self.cfg);
         volume_copy_in(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
-            &self.cfg.boundary.harness_image,
+            (&image, user),
             volume,
             source,
         )
@@ -524,33 +544,33 @@ impl Backend for PodmanBackend {
             return Self::files_import(&store, volume, source);
         }
         let _images = super::reconcile::images_in_use().await;
+        let (image, user) = utility_image(&self.cfg);
         volume_copy_in(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
-            &self.cfg.boundary.harness_image,
+            (&image, user),
             volume,
             source,
         )
         .await?;
         // The owner may always change its own modes, so this needs no
         // capability, and nothing leaves the volume.
-        podman(&[
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
+        let mount = format!("type=volume,src={volume},dst=/data");
+        let mut args = vec!["run", "--rm", "--network", "none", "--cap-drop=ALL"];
+        args.extend(["--security-opt=no-new-privileges"]);
+        if let Some(user) = user {
+            args.extend(["--user", user]);
+        }
+        args.extend([
             "--entrypoint",
             "chmod",
             "--mount",
-            &format!("type=volume,src={volume},dst=/data"),
-            &self.cfg.boundary.harness_image,
+            &mount,
+            &image,
             "-R",
             "u+w",
             "/data",
-        ])
-        .await
-        .map(|_| ())
+        ]);
+        podman(&args).await.map(|_| ())
     }
 
     async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
@@ -558,9 +578,10 @@ impl Backend for PodmanBackend {
             return Self::files_export(&store, volume, destination, false).await;
         }
         let _images = super::reconcile::images_in_use().await;
+        let (image, user) = utility_image(&self.cfg);
         volume_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
-            &self.cfg.boundary.harness_image,
+            (&image, user),
             volume,
             destination,
         )
@@ -576,9 +597,10 @@ impl Backend for PodmanBackend {
             return Self::files_export(&store, volume, destination, true).await;
         }
         let _images = super::reconcile::images_in_use().await;
+        let (image, user) = utility_image(&self.cfg);
         workspace_copy_out(
             &crate::boundary::podman::resolve_podman_env(&self.cfg),
-            &self.cfg.boundary.harness_image,
+            (&image, user),
             volume,
             destination,
         )
@@ -590,7 +612,10 @@ impl Backend for PodmanBackend {
     }
 
     fn harness_home(&self) -> String {
-        crate::session::materialize::PODMAN_HARNESS_HOME.into()
+        match crate::sandbox_images::enabled(&self.cfg) {
+            true => crate::sandbox_images::HOME.into(),
+            false => crate::session::materialize::PODMAN_HARNESS_HOME.into(),
+        }
     }
 
     async fn reconcile(&self, names: &[String]) {
@@ -670,25 +695,54 @@ impl Backend for PodmanBackend {
                 .map_err(|e| BoundaryError::Other(format!("copy {source}: {e}")));
         }
         let _images = super::reconcile::images_in_use().await;
-        podman(&[
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
+        let (image, user) = utility_image(&self.cfg);
+        // A copy of a base cache whose repository has a prepared snapshot is
+        // filled from the snapshot's cache instead: Podman copies what the
+        // image has at a mount point into a new, empty volume mounted there.
+        // In the sandboxes' own user namespace, so what it copies is the
+        // node's, as the sandboxes see it.
+        if let Some(snapshot) = crate::sandbox_images::seed_for(source) {
+            podman(&["volume", "create", "--ignore", destination]).await?;
+            let mount = format!("type=volume,src={destination},dst=/cache");
+            let userns = format!("--userns={}", crate::sandbox_images::USERNS);
+            return podman(&[
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                &userns,
+                "--user",
+                crate::sandbox_images::USER,
+                "--entrypoint",
+                "true",
+                "--mount",
+                &mount,
+                &snapshot,
+            ])
+            .await
+            .map(|_| ());
+        }
+        let from = format!("type=volume,src={source},dst=/from,ro");
+        let to = format!("type=volume,src={destination},dst=/to");
+        let mut args = vec!["run", "--rm", "--network", "none", "--cap-drop=ALL"];
+        args.extend(["--security-opt=no-new-privileges"]);
+        if let Some(user) = user {
+            args.extend(["--user", user]);
+        }
+        args.extend([
             "--entrypoint",
             "sh",
             "--mount",
-            &format!("type=volume,src={source},dst=/from,ro"),
+            &from,
             "--mount",
-            &format!("type=volume,src={destination},dst=/to"),
-            &self.cfg.boundary.harness_image,
+            &to,
+            &image,
             "-c",
             CLONE_TREE,
-        ])
-        .await
-        .map(|_| ())
+        ]);
+        podman(&args).await.map(|_| ())
     }
 
     fn egress_grants(&self) -> Option<&crate::gateway::proxy::Grants> {
@@ -878,23 +932,33 @@ impl super::ImageBuilder for PodmanBackend {
     }
 
     async fn identity(&self, image: &str) -> Option<String> {
-        let digest = podman(&["image", "inspect", "--format", "{{.Digest}}", image])
-            .await
-            .ok()?;
-        // A tag is the last `:` after the last `/`; a registry's port is not.
-        let name = match image.rsplit_once(':') {
-            Some((name, tag)) if !tag.contains('/') => name,
-            _ => image,
-        };
-        let identity = format!("{name}@{}", digest.trim());
-        crate::config::immutable_image(&identity)
-            .is_ok()
-            .then_some(identity)
+        image_identity(image).await
     }
 
     async fn remove(&self, image: &str) {
         let _ = podman(&["image", "rm", image]).await;
     }
+}
+
+/// `image` as `name@sha256:…`, the reference a later tag cannot move, if
+/// the store has it.
+pub(crate) async fn image_identity(image: &str) -> Option<String> {
+    let digest = podman(&["image", "inspect", "--format", "{{.Digest}}", image])
+        .await
+        .ok()?;
+    // A name already pinned keeps its name; a tag is the last `:` after the
+    // last `/`; a registry's port is not.
+    let name = match image.split_once('@') {
+        Some((name, _)) => name,
+        None => match image.rsplit_once(':') {
+            Some((name, tag)) if !tag.contains('/') => name,
+            _ => image,
+        },
+    };
+    let identity = format!("{name}@{}", digest.trim());
+    crate::config::immutable_image(&identity)
+        .is_ok()
+        .then_some(identity)
 }
 
 pub(crate) fn log_tail(bytes: &[u8]) -> String {
@@ -1089,6 +1153,9 @@ mod tests {
             memory_bytes: None,
             connect_timeout_ms: 1000,
             log_file: None,
+            user: None,
+            userns: None,
+            env: Vec::new(),
         };
         let spec = super::RunSpec::from_config(&crate::config::Config::default(), false);
         let mounts = vec![
@@ -1336,8 +1403,8 @@ mod tests {
         let exported = tempfile::tempdir().unwrap();
         let destination = exported.path().join("workspace");
         let result = async {
-            super::volume_copy_in(podman, &image, &volume, source.path()).await?;
-            super::workspace_copy_out(podman, &image, &volume, &destination).await
+            super::volume_copy_in(podman, (&image, None), &volume, source.path()).await?;
+            super::workspace_copy_out(podman, (&image, None), &volume, &destination).await
         }
         .await;
         let _ = super::podman_at(&super::guarded_podman(podman).unwrap())

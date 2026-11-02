@@ -102,13 +102,43 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
         }
     }
     if super::uses_sandbox_protocol(cfg) {
-        let bundle = cfg.sandbox.bundle.clone().unwrap_or_default();
+        let bundle = crate::bundle::effective(cfg).unwrap_or_default();
         if !bundle.join("bin/tracon-sandbox").is_file() {
             return CheckResult::fail(
                 CheckId::Runtime,
+                match crate::bundle::managed(cfg) {
+                    true if building => format!(
+                        "the harness bundle {} is not here yet; the node is fetching it",
+                        bundle.display()
+                    ),
+                    true => format!(
+                        "the harness bundle {} is not here; the node fetches it from {} when it sets up its boundary (`tracon setup`)",
+                        bundle.display(),
+                        cfg.sandbox.release_url()
+                    ),
+                    false => format!(
+                        "[runtime.podman] sandbox_protocol is on, and [sandbox] bundle {:?} has no bin/tracon-sandbox",
+                        bundle.display().to_string()
+                    ),
+                },
+            );
+        }
+        if crate::sandbox_images::enabled(cfg) {
+            let base = crate::sandbox_images::base_image(cfg);
+            if podman(&["image", "exists", &base]).await.is_err() {
+                return CheckResult::fail(
+                    CheckId::Runtime,
+                    match building {
+                        true => format!("image {base} is missing; the node is pulling it"),
+                        false => format!("image {base} is missing; run `tracon setup`"),
+                    },
+                );
+            }
+            return CheckResult::ok(
+                CheckId::Runtime,
                 format!(
-                    "[runtime.podman] sandbox_protocol is on, and [sandbox] bundle {:?} has no bin/tracon-sandbox",
-                    bundle.display().to_string()
+                    "podman {version}, rootless, images present; sandboxes run {base} with the harnesses from {}",
+                    bundle.display()
                 ),
             );
         }

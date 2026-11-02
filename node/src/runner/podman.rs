@@ -59,7 +59,10 @@ impl RunSpec {
             selinux_label_disable: cfg.boundary.selinux_label_disable.unwrap_or(selinux),
             extra_mounts: Vec::new(),
             workdir: "/work".into(),
-            home: crate::session::materialize::PODMAN_HARNESS_HOME.into(),
+            home: match crate::sandbox_images::enabled(cfg) {
+                true => crate::sandbox_images::HOME.into(),
+                false => crate::session::materialize::PODMAN_HARNESS_HOME.into(),
+            },
             state_env: layout.env,
             state_dir: layout.dir,
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
@@ -200,6 +203,12 @@ pub struct SandboxLaunch {
     /// Where the container's own output (the supervisor's log) goes, so it
     /// outlives the container.
     pub log_file: Option<std::path::PathBuf>,
+    /// The user the container runs as, where not the image's own.
+    pub user: Option<String>,
+    /// The user namespace it runs in, where not Podman's default.
+    pub userns: Option<String>,
+    /// Environment the image does not set and the sandbox needs.
+    pub env: Vec<(String, String)>,
 }
 
 /// Where the bundle is mounted inside a sandbox.
@@ -290,6 +299,17 @@ impl RunSpec {
             "TRACON_SANDBOX_CONNECT_TIMEOUT_MS={}",
             launch.connect_timeout_ms
         ));
+        for (k, v) in &launch.env {
+            a.push("-e".into());
+            a.push(format!("{k}={v}"));
+        }
+        if let Some(userns) = &launch.userns {
+            a.push(format!("--userns={userns}"));
+        }
+        if let Some(user) = &launch.user {
+            a.push("--user".into());
+            a.push(user.clone());
+        }
         a.push("--env".into());
         a.push("TRACON_SANDBOX_TOKEN".into());
         if let Some(log) = &launch.log_file {

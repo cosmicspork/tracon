@@ -91,6 +91,61 @@ pub struct Sandbox {
     /// SELinux host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PathBuf>,
+    /// The stock image a sandbox runs when its repository names none, with
+    /// `[runtime.podman] sandbox_images` on. Pinned by digest once pulled.
+    /// Unset, the release's own `tracon-sandbox-base` at this node's version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_image: Option<String>,
+    /// Where the node fetches its harness bundle from, with
+    /// `[runtime.podman] sandbox_images` on and no `bundle` set:
+    /// `<release_url>/v<version>/tracon-bundle-<version>-<arch>.tar.gz` and
+    /// its `.sha256`. Unset, this project's GitHub releases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_url: Option<String>,
+}
+
+/// Where releases are downloaded from, unless `[sandbox] release_url` says.
+pub const RELEASE_URL: &str = "https://github.com/cosmicspork/tracon/releases/download";
+
+impl Sandbox {
+    /// `base_image`, or the release's own base at this node's version.
+    pub fn base_image_ref(&self) -> String {
+        match self.base_image.as_deref().map(str::trim) {
+            Some(image) if !image.is_empty() => image.to_string(),
+            _ => format!(
+                "ghcr.io/cosmicspork/tracon-sandbox-base:{}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+
+    /// `release_url` without a trailing slash, or [`RELEASE_URL`].
+    pub fn release_url(&self) -> String {
+        match self.release_url.as_deref().map(str::trim) {
+            Some(url) if !url.is_empty() => url.trim_end_matches('/').to_string(),
+            _ => RELEASE_URL.to_string(),
+        }
+    }
+}
+
+/// `[runtime.podman] sandbox_images` stands on the sandbox protocol, and the
+/// bundle it fetches is the release's: refuse a setting that cannot work
+/// rather than run sessions in images that are not there.
+pub fn validate_sandbox(config: &Config) -> Result<(), String> {
+    let podman = &config.runtime.podman;
+    if podman.sandbox_images && !podman.sandbox_protocol {
+        return Err(
+            "runtime.podman.sandbox_images needs runtime.podman.sandbox_protocol = true".into(),
+        );
+    }
+    if let Some(url) = config.sandbox.release_url.as_deref() {
+        let parsed =
+            url::Url::parse(url.trim()).map_err(|error| format!("sandbox.release_url: {error}"))?;
+        if !matches!(parsed.scheme(), "https" | "http") {
+            return Err("sandbox.release_url: must be an http(s) URL".into());
+        }
+    }
+    Ok(())
 }
 
 /// The Prometheus scrape target (`GET /metrics`, `telemetry`): unset, nothing
@@ -979,6 +1034,13 @@ pub struct PodmanRuntime {
     /// that connection to the node, which serves the allowlist proxy itself;
     /// no gateway container or internal network is made for them.
     pub sandbox_tunnels: bool,
+    /// With `sandbox_protocol`: no harness images. Sandboxes run the stock
+    /// base image (`[sandbox] base_image`) or the repository's image, the
+    /// harnesses come from the harness bundle the node fetches for its own
+    /// version (unless `[sandbox] bundle` names one), and a repository's
+    /// preparation is run once and snapshotted for its sessions and checks
+    /// to start from.
+    pub sandbox_images: bool,
 }
 
 /// The `[[repo]]` table a running node resolves against, once the operator
@@ -2620,6 +2682,10 @@ impl Config {
     /// names its own images builds and checks its own, rather than rebuilding
     /// the first node's as it sets itself up.
     pub fn podman_harness_image(&self, harness_id: &str) -> String {
+        // No harness images at all: every harness runs from the bundle.
+        if crate::sandbox_images::enabled(self) {
+            return crate::sandbox_images::base_image(self);
+        }
         if harness_id == self.harness.id {
             return self.boundary.harness_image.clone();
         }
@@ -2891,6 +2957,7 @@ impl Config {
         validate_doc_kinds(&config.docs.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_metrics(&config).map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_sandbox(&config).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_priorities(&config.work.priority)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         upstreams::validate_upstreams(&config.upstreams)

@@ -77,6 +77,9 @@ pub struct ProtocolRunner {
     files: Option<super::sandbox_files::FilesStore>,
     /// Opened on every sandbox's connection before its command starts.
     tunnels: Vec<TunnelSpec>,
+    /// Start a harness from the mounted bundle, where its adapter names the
+    /// path a harness image had it at (`sandbox_images`).
+    bundled_harness: bool,
 }
 
 impl ProtocolRunner {
@@ -91,6 +94,7 @@ impl ProtocolRunner {
             delegate: None,
             files: None,
             tunnels: Vec::new(),
+            bundled_harness: false,
         }
     }
 
@@ -105,6 +109,11 @@ impl ProtocolRunner {
     /// starts, and close them with it.
     pub fn with_tunnels(mut self, tunnels: Vec<TunnelSpec>) -> Self {
         self.tunnels = tunnels;
+        self
+    }
+
+    pub fn with_bundled_harness(mut self, bundled: bool) -> Self {
+        self.bundled_harness = bundled;
         self
     }
 
@@ -261,8 +270,14 @@ impl ProtocolRunner {
             .chain(cmd.secret_env.iter())
             .cloned()
             .collect();
+        let mut argv = cmd.argv.clone();
+        if self.bundled_harness {
+            if let Some(bundled) = crate::sandbox_images::bundled_argv0(&argv[0]) {
+                argv[0] = bundled;
+            }
+        }
         let spec = SpawnSpec {
-            argv: cmd.argv.clone(),
+            argv,
             env,
             cwd,
             stdin,

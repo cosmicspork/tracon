@@ -24,6 +24,12 @@
 //! does not recognize. A publication's working repository under
 //! `publishers/`, and its bundle beside it, belong to that publication until
 //! it is settled.
+//!
+//! With `[runtime.podman] sandbox_images`: a harness bundle under
+//! `bundles/` belongs to the node's version, and one of any other version is
+//! never mounted again; a repository's prepared snapshot (an image) belongs
+//! to the repository while it is the latest one prepared, and is otherwise
+//! superseded.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -72,6 +78,10 @@ pub struct Owners {
     pub now_ms: i64,
     /// Dependency caches are candidates too.
     pub caches: bool,
+    /// The snapshot each repository runs now (`name@sha256:…`).
+    pub snapshots: HashSet<String>,
+    /// The version whose harness bundle this node mounts.
+    pub version: String,
 }
 
 impl Default for Owners {
@@ -85,6 +95,8 @@ impl Default for Owners {
             unsettled_publications: HashSet::new(),
             now_ms: 0,
             caches: false,
+            snapshots: HashSet::new(),
+            version: String::new(),
         }
     }
 }
@@ -121,6 +133,21 @@ impl Owners {
         }
         owners.running_checks = store.running_check_run_ids()?;
         owners.unsettled_publications = store.publications_unsettled()?;
+        owners.version = env!("CARGO_PKG_VERSION").to_string();
+        // The latest ready snapshot of each repository; rows are newest first
+        // within a repository.
+        let mut repos = HashSet::new();
+        let mut rows: Vec<_> = store
+            .repo_images()?
+            .into_iter()
+            .filter(|row| row.kind == crate::sandbox_images::SNAPSHOT && row.status == "ready")
+            .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.started_ms));
+        for row in rows {
+            if repos.insert(row.repo_path.clone()) {
+                owners.snapshots.insert(row.image);
+            }
+        }
         Ok(owners)
     }
 }
@@ -137,7 +164,8 @@ fn workspace_key(id: &str) -> String {
 /// One piece of runtime storage and what the sweep makes of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Item {
-    /// `volume`, `directory`, or `file` (a publication's bundle).
+    /// `volume`, `directory`, `file` (a publication's bundle), or `image` (a
+    /// prepared snapshot).
     pub kind: &'static str,
     /// The volume name, or the directory relative to the node's state dir.
     pub name: String,
@@ -251,6 +279,17 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
     verdict(false, "not a volume this node recognizes")
 }
 
+/// Whether a prepared snapshot image is still a repository's.
+pub fn classify_snapshot(pinned: &str, owners: &Owners) -> (bool, String) {
+    match owners.snapshots.contains(pinned) {
+        true => verdict(false, "a repository's current prepared snapshot"),
+        false => verdict(
+            true,
+            "a superseded prepared snapshot; the next session prepares again if it needs one",
+        ),
+    }
+}
+
 /// Whether a host directory under the state dir is still needed. `area` is
 /// the directory it sits in, `entry` its own name.
 pub fn classify_directory(
@@ -266,6 +305,18 @@ pub fn classify_directory(
             "its staged configuration is unused",
         )),
         "workspaces" | "workspace-staging" => Some(workspace_verdict(entry, created_ms, owners)),
+        "bundles" => Some(match entry {
+            version if version == owners.version => {
+                verdict(false, "the harness bundle this node mounts")
+            }
+            incoming if incoming.starts_with(".incoming-") => {
+                verdict(true, "an interrupted download of a harness bundle")
+            }
+            _ => verdict(
+                true,
+                "a harness bundle of another version; this node never mounts it",
+            ),
+        }),
         // Every attempt makes both afresh from the candidate, so once the
         // publication is settled they serve nothing.
         "publishers" => {
@@ -325,7 +376,13 @@ fn directory_items(state_dir: &Path, owners: &Owners) -> Vec<(Item, PathBuf)> {
             items.push((item("directory", name.into(), true, reason.into()), path));
         }
     }
-    for area in ["sessions", "workspaces", "workspace-staging", "publishers"] {
+    for area in [
+        "sessions",
+        "workspaces",
+        "workspace-staging",
+        "publishers",
+        crate::bundle::DIR,
+    ] {
         let Ok(entries) = std::fs::read_dir(state_dir.join(area)) else {
             continue;
         };
@@ -385,6 +442,19 @@ pub async fn sweep(
         }
         items.push(item);
     }
+    if backend.kind() == "podman" {
+        for (pinned, reference) in crate::sandbox_images::snapshot_images().await {
+            let (remove, reason) = classify_snapshot(&pinned, &owners);
+            let mut item = item("image", pinned, remove, reason);
+            if apply && remove {
+                match crate::boundary::podman::podman(&["image", "rm", &reference]).await {
+                    Ok(_) => item.removed = true,
+                    Err(error) => item.error = Some(error.to_string()),
+                }
+            }
+            items.push(item);
+        }
+    }
     for (mut item, path) in directory_items(&Config::state_dir(), &owners) {
         if apply && item.remove {
             let removed = match path.is_dir() {
@@ -420,6 +490,23 @@ mod tests {
         owners.running_checks.insert("live".into());
         owners.unsettled_publications.insert("pending".into());
         owners
+    }
+
+    #[test]
+    fn only_the_current_snapshot_and_bundle_stay() {
+        let mut o = owners();
+        o.version = "1.2.0".into();
+        o.snapshots
+            .insert("localhost/tracon-repo-app-1-snapshot@sha256:aa".into());
+        assert!(!classify_snapshot("localhost/tracon-repo-app-1-snapshot@sha256:aa", &o).0);
+        assert!(classify_snapshot("localhost/tracon-repo-app-1-snapshot@sha256:bb", &o).0);
+        assert!(!classify_directory("bundles", "1.2.0", None, &o).unwrap().0);
+        assert!(classify_directory("bundles", "1.1.0", None, &o).unwrap().0);
+        assert!(
+            classify_directory("bundles", ".incoming-x", None, &o)
+                .unwrap()
+                .0
+        );
     }
 
     #[test]

@@ -2768,7 +2768,14 @@ impl Manager {
         // the grant.
         // Upstreams that opt sessions in are attached by the grant, so the
         // agent reaches them as the credential's owner without holding it.
-        let environment = crate::environment::session_environment(&self.cfg, &self.store, id);
+        let mut environment = crate::environment::session_environment(&self.cfg, &self.store, id);
+        // Its workspace is prepared where the session runs: with
+        // `sandbox_images`, the repository's prepared snapshot.
+        if crate::sandbox_images::enabled(&self.cfg) {
+            if let Some(image) = &image.image {
+                environment.image = image.clone();
+            }
+        }
         let upstreams = self
             .tools
             .broker
