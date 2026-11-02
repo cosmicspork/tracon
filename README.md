@@ -1293,6 +1293,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # memory_limit = "4Gi"              # Every pod renders its requests and memory limit, so a
 # cpu_limit = "2"                   # LimitRange never fills them in; no CPU limit unless one is
                                     # set (cpu_limit). A limit below its request is refused at load
+                                    # Each pod is labelled tracon.dev/kind (session, check, prepare,
+                                    # probe) and tracon.dev/sizing (the table that sized it), plus
+                                    # repo, channel, harness and phase where they apply
 # internal_cidrs = []               # (under [runtime.kubernetes]) address blocks the per-client
                                     # egress proxy refuses besides the private ones (RFC 1918,
                                     # 100.64.0.0/10, fc00::/7), which it always refuses in a

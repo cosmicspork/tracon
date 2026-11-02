@@ -28,7 +28,7 @@ use crate::{
         cache_env, check_env, environment_for, origin_repo, scoped_egress, PrepareSecrets,
         Refusals, RepoEnvironment,
     },
-    runner::{Mount, Runner, RunnerCommand, RunnerError},
+    runner::{Mount, RunKind, RunLabels, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
 };
 
@@ -490,6 +490,10 @@ pub async fn run_required_for(
             workdir: Some("/work".into()),
             name: runner_name.clone(),
             image: Some(raw_image.clone()),
+            labels: RunLabels {
+                repo: environment.repo.clone(),
+                ..RunLabels::of(RunKind::Check)
+            },
         };
         let finished = match unprepared {
             Some(stopped) => Err(stopped),
@@ -1028,6 +1032,10 @@ async fn prepare_steps(
             workdir: Some("/work".into()),
             name,
             image: Some(environment.image.clone()),
+            labels: RunLabels {
+                repo: environment.repo.clone(),
+                ..RunLabels::of(RunKind::Prepare)
+            },
         };
         let finished: Result<std::process::Output, RunnerError> = until_stopped(
             runner.run_capture(cmd),
@@ -1300,6 +1308,7 @@ mod tests {
             egress: Vec::new(),
             session_egress: Vec::new(),
             cache_volume: "tracon-cache-base-unused".into(),
+            repo: None,
         };
         assert!(check_inputs(&cfg, &environment).get("env").is_none());
 

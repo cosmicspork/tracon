@@ -975,6 +975,10 @@ async fn run(
                         workdir: Some("/work".into()),
                         name,
                         image: Some(environment.image.clone()),
+                        labels: crate::runner::RunLabels {
+                            repo: environment.repo.clone(),
+                            ..crate::runner::RunLabels::of(crate::runner::RunKind::Check)
+                        },
                     };
                     let finished = tokio::select! {
                         finished = tokio::time::timeout(timeout, runner.run_capture(cmd)) => finished,

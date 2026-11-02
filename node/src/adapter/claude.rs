@@ -25,7 +25,7 @@ use super::{
     TurnResult,
 };
 use crate::adapter::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
-use crate::runner::{Runner, RunnerCommand, RunnerError, Spawned};
+use crate::runner::{RunKind, RunLabels, Runner, RunnerCommand, RunnerError, Spawned};
 
 /// The models this adapter offers. Claude Code has no catalogue endpoint of
 /// its own; these are the aliases it resolves to whatever is current, which is
@@ -227,7 +227,17 @@ impl ClaudeAdapter {
             secret_env: spec.secret_env.clone(),
             workdir: Some(spec.cwd_in_runner.clone()),
             name: name.into(),
+            labels: Self::labels(spec, RunKind::Session),
             ..Default::default()
+        }
+    }
+
+    /// `spec`'s labels for a run of `kind` of this harness.
+    fn labels(spec: &LaunchSpec, kind: RunKind) -> RunLabels {
+        RunLabels {
+            kind: Some(kind),
+            harness: Some(Self::ID.into()),
+            ..spec.labels.clone()
         }
     }
 }
@@ -1164,6 +1174,7 @@ impl HarnessAdapter for ClaudeAdapter {
                     harness_session_id.into(),
                 ],
                 name: format!("{}-conversation", spec.container_name),
+                labels: Self::labels(spec, RunKind::Probe),
                 ..Default::default()
             })
             .await?;
@@ -1183,6 +1194,10 @@ impl HarnessAdapter for ClaudeAdapter {
             .run_probe(RunnerCommand {
                 argv: vec![Self::BINARY.into(), "--version".into()],
                 name: "claude-version".into(),
+                labels: RunLabels {
+                    harness: Some(Self::ID.into()),
+                    ..RunLabels::of(RunKind::Probe)
+                },
                 ..Default::default()
             })
             .await?;
@@ -1338,6 +1353,7 @@ mod tests {
             )],
             system_prompt_file: Some("/root/.claude/orientation.md".into()),
             resume: None,
+            labels: Default::default(),
         }
     }
 

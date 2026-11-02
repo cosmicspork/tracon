@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     boundary::Backend,
     config::{Config, Repo},
-    runner::{Mount, RunnerCommand},
+    runner::{Mount, RunKind, RunLabels, RunnerCommand},
     store::Store,
     workspace::Workspace,
 };
@@ -103,6 +103,10 @@ pub struct RepoEnvironment {
     /// of the default branch, and never mounted into a candidate's run. Each
     /// candidate, and each session, starts its own cache as a copy of it.
     pub cache_volume: String,
+    /// The repository's short name (its directory, as a project's identity
+    /// names it), for what labels the runs made for it. `None` for work tied
+    /// to no repository.
+    pub repo: Option<String>,
 }
 
 /// The environment for `repo`: the first matching `[[repo]]` entry over the
@@ -189,6 +193,9 @@ pub fn environment_with(
         cache_volume: base_cache_volume(repo, &image),
         image,
         image_source,
+        repo: repo
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned()),
     }
 }
 
@@ -885,6 +892,10 @@ pub async fn prepare(
             workdir: Some("/work".into()),
             image: Some(image.clone()),
             name: format!("tracon-prepare-{}", workspace.id),
+            labels: RunLabels {
+                repo: environment.repo.clone(),
+                ..RunLabels::of(RunKind::Prepare)
+            },
         })
         .await;
     drop(egress);
@@ -931,6 +942,7 @@ pub async fn verify(
                 workdir: Some("/work".into()),
                 image: Some(prepared.image.clone()),
                 name: format!("tracon-verify-{}-{n}", workspace.id),
+                labels: RunLabels::of(RunKind::Check),
             })
             .await
             .map_err(|e| EnvironmentError::Runtime(e.to_string()))?;

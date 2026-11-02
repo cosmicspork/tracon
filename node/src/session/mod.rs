@@ -3071,6 +3071,14 @@ impl Manager {
             secret_env: harness_secret_env,
             system_prompt_file: Some(scratch.orientation_path.clone()),
             resume: reopened.as_ref().map(|r| r.resume.clone()),
+            labels: crate::runner::RunLabels {
+                channel: Some(spec.channel.clone()),
+                phase: Some(spec.phase.as_str()),
+                ..crate::runner::RunLabels::of(crate::runner::RunKind::Session)
+            }
+            // From the repository the work came from: a continued session's
+            // own path is `workspace://<session>`, which names no repository.
+            .repo_dir(origin.as_deref()),
         };
         // Asked before anything runs in it, so a conversation the harness
         // has no record of refuses the reopening rather than its first turn.
@@ -4824,6 +4832,7 @@ mod tests {
             egress: Vec::new(),
             session_egress: Vec::new(),
             cache_volume: "tracon-cache-base-unused".into(),
+            repo: None,
         }
     }
 

@@ -146,6 +146,7 @@ fn spec() -> LaunchSpec {
         secret_env: Default::default(),
         system_prompt_file: None,
         resume: None,
+        labels: Default::default(),
     }
 }
 

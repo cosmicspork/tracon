@@ -22,7 +22,7 @@ use super::{
 use crate::adapter::types::{self, methods};
 use crate::config::{SHAPE_OPENAI, SHAPE_OPENAI_CODEX};
 use crate::gateway::model::{key_env_name, Wiring};
-use crate::runner::{Runner, RunnerCommand, Spawned};
+use crate::runner::{RunKind, RunLabels, Runner, RunnerCommand, Spawned};
 use acp::codec::RpcError;
 use acp::rpc::{Incoming, Peer};
 
@@ -93,6 +93,11 @@ impl NativeAdapter {
             secret_env: spec.secret_env.clone(),
             workdir: Some(spec.cwd_in_runner.clone()),
             name: spec.container_name.clone(),
+            labels: RunLabels {
+                kind: Some(RunKind::Session),
+                harness: Some(Self::ID.into()),
+                ..spec.labels.clone()
+            },
             ..Default::default()
         }
     }
@@ -225,6 +230,10 @@ impl HarnessAdapter for NativeAdapter {
             .run_probe(RunnerCommand {
                 argv: vec![Self::BINARY.into(), "--version".into()],
                 name: "native-version".into(),
+                labels: RunLabels {
+                    harness: Some(Self::ID.into()),
+                    ..RunLabels::of(RunKind::Probe)
+                },
                 ..Default::default()
             })
             .await?;
@@ -931,6 +940,7 @@ mod tests {
             secret_env: Default::default(),
             system_prompt_file: Some("/root/.tracon/orientation.md".into()),
             resume: None,
+            labels: Default::default(),
         };
         let cmd = NativeAdapter::cmd(&spec);
         assert_eq!(
