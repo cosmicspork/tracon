@@ -3,7 +3,15 @@
 //! call. Knobs, read from its own environment:
 //!
 //! - `FAKE_NATIVE_VERSION`: the version it reports (default: this build's);
-//! - `FAKE_NATIVE_PROTOCOL`: the protocol version it answers (default 1).
+//! - `FAKE_NATIVE_PROTOCOL`: the protocol version it answers (default 1);
+//! - `FAKE_NATIVE_COMPACT_GATE`: a path `_tracon/compact` waits to exist
+//!   before it answers, so a test can count its request on the gateway first;
+//! - `FAKE_NATIVE_COMPACT_NOTHING`: set, `_tracon/compact` finds nothing to
+//!   compact.
+//!
+//! `_tracon/compact` answers as `tracon-agent` does: the compaction and its
+//! summary request's usage as updates, then a prompt's result; with nothing
+//! to compact, only the result, with no usage and `compacted: false`.
 //!
 //! A session it is asked to load (`session/load`) answers as `tracon-agent`
 //! does: first an update the node already has (seq 7, to be dropped), then the
@@ -95,6 +103,12 @@ async fn main() {
                     let from = if loaded.load(Ordering::SeqCst) { 10 } else { 0 };
                     tokio::spawn(async move {
                         let _ = reply.send(Ok(turn(&peer, &cancelled, from).await));
+                    });
+                }
+                methods::TRACON_COMPACT => {
+                    let peer = peer.clone();
+                    tokio::spawn(async move {
+                        let _ = reply.send(Ok(compact(&peer).await));
                     });
                 }
                 methods::SESSION_CLOSE => {
@@ -228,5 +242,65 @@ async fn turn(peer: &Peer, cancelled: &AtomicBool, from: u64) -> Value {
             cache_write_tokens: 0,
         }),
         extra: Default::default(),
+    })
+}
+
+async fn compact(peer: &Peer) -> Value {
+    if let Ok(gate) = std::env::var("FAKE_NATIVE_COMPACT_GATE") {
+        while !std::path::Path::new(&gate).exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    if std::env::var_os("FAKE_NATIVE_COMPACT_NOTHING").is_some() {
+        return json!(PromptResult {
+            stop_reason: "end_turn".into(),
+            usage: Some(Usage::default()),
+            extra: [("compacted".to_string(), json!(false))]
+                .into_iter()
+                .collect(),
+        });
+    }
+    update(
+        peer,
+        1,
+        SessionUpdate::Other(json!({
+            "sessionUpdate": "context_compacted",
+            "trigger": "manual",
+            "tokensBefore": 9_000,
+            "tokensAfter": 1_200,
+            "prunedResults": 0,
+            "summarisedMessages": 6,
+            "summary": "ran git status",
+        })),
+    )
+    .await;
+    update(
+        peer,
+        2,
+        SessionUpdate::UsageUpdate(UsageUpdate {
+            size: Some(32768),
+            used: Some(1_200),
+            cost: None,
+            request: Some(RequestUsage {
+                request_id: Some("req-summary".into()),
+                input_tokens: 600,
+                output_tokens: 50,
+                cached_read_tokens: 400,
+            }),
+        }),
+    )
+    .await;
+    json!(PromptResult {
+        stop_reason: "end_turn".into(),
+        usage: Some(Usage {
+            input_tokens: 600,
+            output_tokens: 50,
+            total_tokens: 1050,
+            cached_read_tokens: 400,
+            cache_write_tokens: 0,
+        }),
+        extra: [("compacted".to_string(), json!(true))]
+            .into_iter()
+            .collect(),
     })
 }

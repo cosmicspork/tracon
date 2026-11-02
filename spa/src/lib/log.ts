@@ -383,7 +383,8 @@ export function missingLine(m: MissingContext): string {
 
 /// The line a turn ends with: what it spent, as the harness counted it, or
 /// as the gateway did when the harness counted nothing (Claude Code's
-/// `/compact`), and that it compacted when it did.
+/// `/compact`), and that it compacted when it did, or that a compaction
+/// found nothing to compact.
 export function turnEndLine(p: Record<string, unknown>): string {
   const usage = p.usage as { total_tokens?: number } | undefined
   const total = usage?.total_tokens ?? (typeof p.charged_tokens === 'number' ? p.charged_tokens : undefined)
@@ -391,6 +392,7 @@ export function turnEndLine(p: Record<string, unknown>): string {
   if (p.stop_reason === 'max_turn_requests') {
     return `turn stopped at the harness's request limit${spent} · a prompt carries on`
   }
+  if (p.stop_reason === 'nothing_to_compact') return 'turn ended · nothing to compact'
   const compacted = p.compact === true ? ' · compacted' : ''
   return total !== undefined ? `turn ended${compacted}${spent}` : `turn ended${compacted} · ${p.stop_reason ?? ''}`
 }
