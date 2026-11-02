@@ -221,7 +221,9 @@
     {#if store.connectionLost}
       <div class="banner crit">Connection lost <b>· reconnecting. Saved work remains on the node; keep this page open to preserve unsent text.</b></div>
     {/if}
-    {#if store.node?.state === 'refused'}
+    {#if store.node?.state === 'refused' && store.node.reconciling}
+      <div class="banner dim">Setting up the isolated runtime <b>· local tasks start once its checks pass.</b> <a href="/settings#system">Details</a></div>
+    {:else if store.node?.state === 'refused'}
       <div class="banner crit">
         Local tasks unavailable <b>· this node failed its isolation check.</b>
         <a href="/settings#system">Review setup</a>

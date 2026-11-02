@@ -1140,7 +1140,7 @@ export default [
     note: 'What was the top and the tail of Maintenance (operator access, external harness MCP lines per channel) with Devices & notifications between.',
   }),
   S('maintenance-refused', '/settings#system', 'System: boundary refused, harness mismatch', {
-    note: 'Node refused because the Podman gateway service is stopped (#377 starts it when found stopped; this is the case it could not), a harness version mismatch, service state unknown, setup check list.',
+    note: 'Node refused because the Podman gateway service is stopped (#377 starts it when found stopped; this is the case it could not), a harness version mismatch, service state unknown. There is no setup button: the node sets its boundary up as it starts, and `tracon setup` is the manual trigger.',
     over: {
       '/api/nodes': [
         selfNode({
@@ -1157,16 +1157,24 @@ export default [
         service: { ...MAINTENANCE.service, state: { state: 'unknown', detail: 'systemctl --user is-active returned no answer within 5 s' }, restart: cap(true, 'No sessions are active.', 'The node answers again within a few seconds of a restart.') },
         boundary: selfNode({ state: 'refused' }),
       },
-      'POST /api/boundary/setup': { state: 'refused', checks: { checks: [
-        { id: 'podman', ok: true, detail: 'podman 5.6.1 rootless' },
-        { id: 'network', ok: false, detail: 'network tracon-boundary not found; recreated' },
-        { id: 'gateway', ok: false, detail: 'tracon-gateway.service failed to start: port 3128 in use by squid (pid 2231)' },
-        { id: 'image:claude', ok: true, detail: 'localhost/tracon-claude:2.5.0 present' },
-      ] } },
     },
     act: async (page) => {
-      await click(page, 'Prepare isolated runtime')
       await click(page, 'Restart this serving node…')
+    },
+  }),
+  S('maintenance-reconciling', '/settings#system', 'System: the node setting up its boundary after an update', {
+    note: 'Refused while the node rebuilds an out-of-date harness image itself: a quiet banner instead of the isolation failure, no remedy to follow, the image notes saying it is being rebuilt.',
+    over: {
+      '/api/nodes': [
+        selfNode({
+          state: 'refused',
+          reconciling: true,
+          failed_check: 'runtime',
+          failed_detail: 'image localhost/tracon-harness-claude is out of date; the node is rebuilding it; the node is setting up its boundary and checks again when it finishes',
+          harnesses: [{ ...HARNESSES[0], image_state: 'stale', found: null }, { ...HARNESSES[1], found: null }],
+        }),
+        peerNode(),
+      ],
     },
   }),
   // --- Configuration ---------------------------------------------------------

@@ -656,7 +656,8 @@ async fn main() -> Result<()> {
         Command::Setup { rebuild } => {
             let cfg = config::Config::load();
             let backend = boundary::backend_for(&cfg).await;
-            backend.setup(&cfg, rebuild).await?;
+            // Never beside the node's own setup of the same boundary.
+            boundary::reconcile::exclusive(backend.setup(&cfg, rebuild)).await??;
             println!("{} boundary is in place", backend.kind());
             // A credential with no client left is a credential nobody is
             // watching. Retired by name, and said out loud rather than

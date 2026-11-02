@@ -27,6 +27,12 @@ export interface NodeInfo {
    * serving node's own row, by the request that asked.
    */
   loopback?: boolean
+  /**
+   * Whether the node is setting its boundary up by itself (as it does when it
+   * starts): a refusal meanwhile is what that setup is fixing. Only on the
+   * serving node's row, and absent from older builds.
+   */
+  reconciling?: boolean
   /** The channel this node prefers the composer to start on; only on the serving node's row. */
   default_channel?: string | null
   /** How the ledger names priorities; only on the serving node's row, absent from older builds. */
@@ -1558,18 +1564,6 @@ export function permissionOptions(p: Permission): { option_id: string; name: str
   } catch {
     return []
   }
-}
-
-/** One boundary check, as the node reports it. */
-export interface BoundaryCheck {
-  id: string
-  ok: boolean
-  detail: string
-}
-
-export interface BoundaryResult {
-  state: string
-  checks: { checks: BoundaryCheck[] }
 }
 
 /** The settings the interface writes, and the context it needs to explain them. */

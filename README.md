@@ -123,8 +123,15 @@ If `tracon setup` cannot find podman — a node started from a desktop launcher
 inherits a minimal PATH — set `podman` under `[boundary]` in `node.toml` to its
 full path. The interface says so too, in the refusal it shows. On macOS the node
 starts the podman machine itself when it finds it stopped; create one once with
-`podman machine init`. After an upgrade, `tracon setup` rebuilds any image whose
-definitions changed, and the boundary check refuses until it has.
+`podman machine init`. The node keeps the boundary in step by itself: when it
+starts (after an upgrade, or a new pinned Claude Code), and when what an image is
+built from changes under it, it rebuilds any image whose definitions changed,
+recreates a missing network, rewrites the allowlist and replaces the gateway only if
+it differs from what this build describes, then checks the boundary again. The
+interface says nothing unless a check still fails, and the check refuses sessions
+until the images are current; a session that starts while the node is setting up
+waits for it. `tracon setup` does the same by hand, and is the only way with
+`auto_reconcile = false` under `[boundary]`.
 
 On Linux the gateway runs as its own user service, `tracon-gateway.service`, beside
 the node's: restarting the node leaves it running, systemd starts it again if it
@@ -1175,9 +1182,12 @@ gateway_ip = "10.89.0.2"
 gateway_container = "tracon-gw"
 gateway_image = "localhost/tracon-gateway"
 harness_image = "localhost/tracon-harness-claude"  # the image for [harness] id; the other
-                                    # harness runs from localhost/tracon-harness-<id>, which
-                                    # setup builds too
+                                    # harness runs from the same name ending in its own id
+                                    # (localhost/tracon-harness-<id> when this one does not
+                                    # end in [harness] id), which setup builds too
 start_machine = true                # macOS: start the podman machine when it is stopped
+auto_reconcile = true               # set up the boundary at start and when its definitions
+                                    # change; false leaves it to `tracon setup`
 # selinux_label_disable = true      # only if the boundary check says the labels fight you
 
 [gateway]

@@ -1663,6 +1663,11 @@ pub struct Boundary {
     /// with it every process the harness started. The same
     /// number is the pod's `terminationGracePeriodSeconds`.
     pub stop_timeout_secs: u16,
+    /// Bring the network, images, allowlist and gateway in step with this
+    /// binary by itself: when the node starts, and when what an image is
+    /// built from changes under it. Off, they change only when `tracon setup`
+    /// runs, and the boundary check refuses until it has.
+    pub auto_reconcile: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2140,6 +2145,7 @@ impl Default for Config {
                 selinux_label_disable: None,
                 start_machine: true,
                 stop_timeout_secs: 10,
+                auto_reconcile: true,
             },
             gateway: Gateway {
                 allow_hosts: vec![
@@ -2277,14 +2283,24 @@ fn hostname() -> String {
 impl Config {
     /// The Podman image a harness runs in. `[boundary] harness_image` names
     /// the image for the configured `[harness] id`, as it always has; every
-    /// other supported harness runs from the image `tracon setup` builds for
-    /// it under the conventional name, so a node can hold both without the
-    /// operator naming both.
+    /// other supported harness runs from the image setup builds for it under
+    /// the conventional name, so a node can hold both without the operator
+    /// naming both.
+    ///
+    /// The conventional name follows `harness_image` where that ends in the
+    /// configured id (`localhost/scratch-harness-claude` gives
+    /// `localhost/scratch-harness-native`): a second node on the machine that
+    /// names its own images builds and checks its own, rather than rebuilding
+    /// the first node's as it sets itself up.
     pub fn podman_harness_image(&self, harness_id: &str) -> String {
         if harness_id == self.harness.id {
             return self.boundary.harness_image.clone();
         }
-        format!("localhost/tracon-harness-{harness_id}")
+        let suffix = format!("-{}", self.harness.id);
+        match self.boundary.harness_image.strip_suffix(&suffix) {
+            Some(stem) if !stem.is_empty() => format!("{stem}-{harness_id}"),
+            _ => format!("localhost/tracon-harness-{harness_id}"),
+        }
     }
 
     /// The same for a pod-hosted node: the configured image for the configured
@@ -2575,6 +2591,37 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_other_harness_image_follows_the_configured_one() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            cfg.podman_harness_image("native"),
+            "localhost/tracon-harness-native"
+        );
+        assert_eq!(
+            cfg.podman_harness_image("claude"),
+            "localhost/tracon-harness-claude"
+        );
+        cfg.boundary.harness_image = "localhost/spike-u2-harness-claude".into();
+        assert_eq!(
+            cfg.podman_harness_image("native"),
+            "localhost/spike-u2-harness-native"
+        );
+        // A name that does not end in the configured id says nothing about
+        // the other's.
+        cfg.boundary.harness_image = "localhost/mine:1".into();
+        assert_eq!(
+            cfg.podman_harness_image("native"),
+            "localhost/tracon-harness-native"
+        );
+        cfg.harness.id = "native".into();
+        cfg.boundary.harness_image = "localhost/spike-u2-harness-native".into();
+        assert_eq!(
+            cfg.podman_harness_image("claude"),
+            "localhost/spike-u2-harness-claude"
+        );
+    }
 
     #[test]
     fn admin_peers_name_nodes_by_their_full_id() {

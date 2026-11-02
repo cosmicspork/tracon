@@ -10,6 +10,7 @@
 pub mod checks;
 pub mod kubernetes;
 pub mod podman;
+pub mod reconcile;
 pub mod registry;
 
 use std::sync::Arc;
@@ -204,6 +205,26 @@ pub trait Backend: Send + Sync {
     fn kind(&self) -> &'static str;
     /// `tracon setup`: make what the boundary needs exist. Idempotent.
     async fn setup(&self, cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>;
+    /// What the node runs on its own (`reconcile`): `setup`, touching only
+    /// what differs from what this binary and `node.toml` describe, so a
+    /// gateway sessions are using is left running unless it has to change.
+    /// `Ok(true)` when anything changed. Callers go through
+    /// `reconcile::converge`, which keeps it from overlapping container
+    /// starts and other setups.
+    async fn converge(&self, _cfg: &Config) -> Result<bool, BoundaryError> {
+        Ok(false)
+    }
+    /// Whether `converge` does anything here. Where the boundary is someone
+    /// else's to apply (a cluster's manifests), it does not.
+    fn converges(&self) -> bool {
+        false
+    }
+    /// A digest of what `converge` would build from: when it changes under a
+    /// running node (a rebuilt `[harness] native_binary`), the node converges
+    /// again. `None` where nothing is built.
+    fn definitions(&self, _cfg: &Config) -> Option<String> {
+        None
+    }
     /// Bring back what the boundary needs and finds stopped, without
     /// rerunning setup, before the checks look for it: at startup and on a
     /// re-check. Never creates what setup has not, and never touches what is

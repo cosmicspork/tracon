@@ -294,6 +294,7 @@ pub async fn list_nodes(
             // interface keeps its node in, so the answer has to live here too.
             if r.is_self == 1 {
                 v["loopback"] = json!(local);
+                v["reconciling"] = json!(crate::boundary::reconcile::running());
                 v["default_channel"] = json!(s.cfg.live().session.default_channel);
                 v["work"] = work_json(&s);
                 build_facts(&mut v);
@@ -605,6 +606,7 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
         return Ok(v);
     };
     let mut v = node_row_json(&n);
+    v["reconciling"] = json!(crate::boundary::reconcile::running());
     v["providers"] = json!(providers_json(s));
     v["default_channel"] = json!(s.cfg.live().session.default_channel);
     v["work"] = work_json(s);
@@ -7188,6 +7190,15 @@ impl crate::mesh::forward::CommandExecutor for AppState {
 pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let backend = s.manager.backend().clone();
     let report = backend.check_all(&s.cfg, false).await;
+    let row = reverify(&s)
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "state": row.state, "checks": report })))
+}
+
+/// Verify the boundary, record the verdict, and tell every client.
+pub(crate) async fn reverify(s: &AppState) -> anyhow::Result<crate::store::NodeRow> {
+    let backend = s.manager.backend().clone();
     let row = super::verify_node(
         s.store(),
         &s.cfg,
@@ -7196,11 +7207,10 @@ pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde
         &s.node_id,
         None,
     )
-    .await
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    s.manager
-        .bus()
-        .publish(crate::stream::Frame::Node(node_json(&s)?));
+    .await?;
+    if let Ok(v) = node_json(s) {
+        s.manager.bus().publish(crate::stream::Frame::Node(v));
+    }
     // The startup probe runs before the gateway is up and is refused, which
     // leaves whatever list the node last held — after a harness switch, the
     // previous harness's. A boundary that now passes is when the probe can
@@ -7212,7 +7222,7 @@ pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde
             let _ = probe_models_into_store(&probe, backend.as_ref()).await;
         });
     }
-    Ok(Json(json!({ "state": row.state, "checks": report })))
+    Ok(row)
 }
 
 #[derive(Deserialize)]
@@ -7222,8 +7232,12 @@ pub struct SetupBody {
 }
 
 /// Build the network, gateway and images this node's boundary needs, then
-/// re-check. Blocking: image builds are minutes, not seconds, and there is
-/// nothing useful to show mid-flight that the verdict does not say better.
+/// re-check: `tracon setup` through the node. A node sets its boundary up by
+/// itself as it starts; this stays for a desktop app that asks after an
+/// update, and for a node with `[boundary] auto_reconcile` off. Blocking:
+/// image builds are minutes, not seconds, and there is nothing useful to
+/// show mid-flight that the verdict does not say better. One the node is
+/// already running is waited for, inside the same ten minutes.
 pub async fn run_setup(
     State(s): State<AppState>,
     super::auth::AdminAction(body): super::auth::AdminAction<Option<Json<SetupBody>>>,
@@ -7232,7 +7246,7 @@ pub async fn run_setup(
     let backend = s.manager.backend().clone();
     tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        backend.setup(&s.cfg, rebuild),
+        crate::boundary::reconcile::exclusive(backend.setup(&s.cfg, rebuild)),
     )
     .await
     .map_err(|_| {
@@ -7241,6 +7255,7 @@ pub async fn run_setup(
             "setup is still running after ten minutes; check the node's log".into(),
         )
     })?
+    .and_then(|r| r)
     .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
     recheck_boundary(State(s)).await
 }

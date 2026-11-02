@@ -1,5 +1,7 @@
 //! `tracon setup`: create the network, allowlist, and gateway the node owns.
-//! Idempotent — running it again reconciles rather than failing.
+//! Idempotent — running it again reconciles rather than failing. The node
+//! runs the same steps itself (`converge`, through `boundary::reconcile`),
+//! touching only what is out of step.
 
 use rust_embed::Embed;
 
@@ -166,21 +168,50 @@ fn label_value(out: &str) -> Option<String> {
     (!v.is_empty() && v != "<no value>").then(|| v.to_string())
 }
 
+/// `tracon setup`: everything converged, the gateway restarted whatever it
+/// was running (so a gateway an operator suspects is put back as new), and
+/// with `rebuild` every image built again.
 pub async fn setup(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
+    steps(cfg, rebuild, true).await.map(|_| ())
+}
+
+/// The node's own setup: only what is out of step changes. A gateway already
+/// running this build's image with these arguments and this allowlist keeps
+/// running, with the sessions that are using it. `Ok(true)` when anything
+/// changed.
+pub async fn converge(cfg: &Config) -> Result<bool, BoundaryError> {
+    steps(cfg, false, false).await
+}
+
+async fn steps(cfg: &Config, rebuild: bool, restart_gateway: bool) -> Result<bool, BoundaryError> {
     super::ensure_machine(cfg).await?;
-    ensure_images(cfg, rebuild).await?;
-    ensure_network(cfg).await?;
-    write_allowlist(cfg)?;
-    ensure_gateway(cfg).await?;
+    let built = ensure_images(cfg, rebuild).await?;
+    let created = ensure_network(cfg).await?;
+    let rewritten = write_allowlist(cfg)?;
+    let restarted = ensure_gateway(cfg, restart_gateway).await?;
     std::fs::create_dir_all(Config::harness_state_dir())?;
-    Ok(())
+    Ok(built || created || rewritten || restarted)
+}
+
+/// A digest of everything [`converge`] builds images from, cheap enough to
+/// compare every few minutes: each image's name and expected label.
+pub fn definitions(cfg: &Config) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for (image, dir) in images(cfg) {
+        hash.update(image.as_bytes());
+        hash.update([0]);
+        hash.update(expected_digest(cfg, dir).as_bytes());
+        hash.update([0]);
+    }
+    hex::encode(hash.finalize())
 }
 
 /// Write the embedded container definitions out and build any image that is
 /// missing or was built from definitions other than this binary's. The
 /// harness image fetches the pinned harness release at build time, the one
-/// network fetch a fresh node makes.
-async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
+/// network fetch a fresh node makes. `Ok(true)` when it built one.
+async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<bool, BoundaryError> {
     let root = Config::containers_dir();
     for path in Containers::iter() {
         let Some(file) = Containers::get(&path) else {
@@ -192,6 +223,7 @@ async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>
         }
         std::fs::write(&dest, file.data.as_ref())?;
     }
+    let mut built = false;
     for (image, dir) in images(cfg) {
         let image = image.as_str();
         let digest = expected_digest(cfg, dir);
@@ -220,17 +252,19 @@ async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>
         tracing::info!(image, context = %ctx.display(), "building image");
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         podman(&argv).await?;
+        built = true;
     }
-    Ok(())
+    Ok(built)
 }
 
-async fn ensure_network(cfg: &Config) -> Result<(), BoundaryError> {
+/// `Ok(true)` when it had to create the network.
+async fn ensure_network(cfg: &Config) -> Result<bool, BoundaryError> {
     if podman(&["network", "exists", &cfg.boundary.network])
         .await
         .is_ok()
     {
         tracing::info!(network = %cfg.boundary.network, "network exists");
-        return Ok(());
+        return Ok(false);
     }
     // `--internal` removes the route out; `--disable-dns` stops the network's
     // resolver answering for every external name.
@@ -245,10 +279,11 @@ async fn ensure_network(cfg: &Config) -> Result<(), BoundaryError> {
     ])
     .await?;
     tracing::info!(network = %cfg.boundary.network, "network created");
-    Ok(())
+    Ok(true)
 }
 
-fn write_allowlist(cfg: &Config) -> Result<(), BoundaryError> {
+/// `Ok(true)` when what it wrote differs from what was there.
+fn write_allowlist(cfg: &Config) -> Result<bool, BoundaryError> {
     let path = Config::allow_file();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -264,9 +299,13 @@ fn write_allowlist(cfg: &Config) -> Result<(), BoundaryError> {
         .map(|h| anchor(h))
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&path, format!("{body}\n"))?;
+    let body = format!("{body}\n");
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(body.as_str()) {
+        return Ok(false);
+    }
+    std::fs::write(&path, body)?;
     tracing::info!(path = %path.display(), hosts = cfg.gateway.allow_hosts.len(), "allowlist written");
-    Ok(())
+    Ok(true)
 }
 
 /// Anchor one literal hostname as an exact-match tinyproxy filter entry.
@@ -308,9 +347,114 @@ pub fn anchor(host: &str) -> String {
 /// rather than the operator rerunning setup.
 pub const GATEWAY_UNIT: &str = "tracon-gateway.service";
 
+/// The default gateway container, whose unit is [`GATEWAY_UNIT`].
+const DEFAULT_GATEWAY: &str = "tracon-gw";
+
+/// The unit for this node's gateway. A second node on the machine (a scratch
+/// node with its own `gateway_container`) gets its own unit: it now writes and
+/// restarts its unit as it starts, and doing that to the first node's would
+/// take that node's gateway over.
+pub fn gateway_unit(cfg: &Config) -> String {
+    let name = cfg.boundary.gateway_container.as_str();
+    if name == DEFAULT_GATEWAY || name.is_empty() {
+        return GATEWAY_UNIT.into();
+    }
+    let safe: String = name
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect();
+    format!("tracon-gateway-{safe}.service")
+}
+
+/// The label a gateway container carries: a digest of the arguments it was
+/// started with and the allowlist it read, so a converge can tell a gateway
+/// that is already what this node describes from one to replace.
+const GATEWAY_LABEL: &str = "io.tracon.gateway";
+
 /// The `podman run` arguments that make the gateway, without the verb and
-/// without how it is supervised.
-fn gateway_args(cfg: &Config, selinux: bool) -> Result<Vec<String>, BoundaryError> {
+/// without how it is supervised, carrying [`GATEWAY_LABEL`] over themselves
+/// and `allow`, the allowlist it is started with: tinyproxy reads it once, so
+/// a changed allowlist needs a new gateway as much as changed arguments do.
+fn gateway_args(cfg: &Config, selinux: bool, allow: &[u8]) -> Result<Vec<String>, BoundaryError> {
+    let mut args = gateway_run_args(cfg, selinux)?;
+    let spec = {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for arg in &args {
+            hash.update(arg.as_bytes());
+            hash.update([0]);
+        }
+        hash.update(allow);
+        hex::encode(hash.finalize())
+    };
+    // Before the image, the last argument.
+    let at = args.len() - 1;
+    args.splice(
+        at..at,
+        ["--label".to_string(), format!("{GATEWAY_LABEL}={spec}")],
+    );
+    Ok(args)
+}
+
+/// The spec label `gateway_args` put in `args`.
+fn gateway_spec(args: &[String]) -> Option<&str> {
+    let prefix = format!("{GATEWAY_LABEL}=");
+    args.iter().find_map(|a| a.strip_prefix(prefix.as_str()))
+}
+
+/// The allowlist as the gateway will read it.
+fn allowlist_bytes() -> Vec<u8> {
+    std::fs::read(Config::allow_file()).unwrap_or_default()
+}
+
+/// Whether the running gateway is the one `args` describe: running, from the
+/// image the tag names now, and labelled with this spec. One an older node
+/// made carries no label and is replaced once.
+async fn gateway_current(cfg: &Config, args: &[String]) -> bool {
+    let Some(spec) = gateway_spec(args) else {
+        return false;
+    };
+    let format = format!(
+        "{{{{.State.Running}}}} {{{{.Image}}}} {{{{index .Config.Labels \"{GATEWAY_LABEL}\"}}}}"
+    );
+    let Ok(running) = podman(&[
+        "container",
+        "inspect",
+        "--format",
+        &format,
+        &cfg.boundary.gateway_container,
+    ])
+    .await
+    else {
+        return false;
+    };
+    let Ok(image) = podman(&[
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        &cfg.boundary.gateway_image,
+    ])
+    .await
+    else {
+        return false;
+    };
+    running_matches(&running, image.trim(), spec)
+}
+
+/// `true <image id> <spec>`, as `gateway_current` asks for it.
+fn running_matches(inspect: &str, image: &str, spec: &str) -> bool {
+    let mut fields = inspect.split_whitespace();
+    fields.next() == Some("true")
+        && fields.next() == Some(image)
+        && !image.is_empty()
+        && fields.next() == Some(spec)
+}
+
+fn gateway_run_args(cfg: &Config, selinux: bool) -> Result<Vec<String>, BoundaryError> {
     let allow = Config::allow_file();
     let net_int = format!("{}:ip={}", cfg.boundary.network, cfg.boundary.gateway_ip);
     // Two forwards. On a Podman machine the node is outside the VM and gvproxy
@@ -398,21 +542,29 @@ fn gateway_args(cfg: &Config, selinux: bool) -> Result<Vec<String>, BoundaryErro
 /// to run one, and as a plain container where there is not (a Podman
 /// machine, whose containers live in its VM and outside the node's cgroup
 /// anyway). Either way the result replaces whatever gateway was there.
-async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
-    let args = gateway_args(cfg, super::selinux_enabled().await)?;
-    if let Some(unit) = gateway_unit_path().filter(|_| !cfg!(target_os = "macos")) {
+///
+/// Without `restart`, a gateway that is already what this node describes is
+/// left running. `Ok(true)` when it started one.
+async fn ensure_gateway(cfg: &Config, restart: bool) -> Result<bool, BoundaryError> {
+    let args = gateway_args(cfg, super::selinux_enabled().await, &allowlist_bytes())?;
+    if !restart && gateway_current(cfg, &args).await {
+        tracing::info!(container = %cfg.boundary.gateway_container, "gateway current");
+        return Ok(false);
+    }
+    if let Some(unit) = gateway_unit_path(cfg).filter(|_| !cfg!(target_os = "macos")) {
         if user_manager_running().await {
+            let name = gateway_unit(cfg);
             // Checked here: systemd, not the node, runs what the unit names.
             let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
             let text = gateway_unit_text(&podman_bin, &args, &service_path());
             write_unit(&unit, &text)?;
             systemctl(&["daemon-reload"]).await?;
-            systemctl(&["enable", GATEWAY_UNIT]).await?;
-            // A restart, not a start: setup is also how a changed gateway
+            systemctl(&["enable", &name]).await?;
+            // A restart, not a start: this is also how a changed gateway
             // definition is applied.
-            systemctl(&["restart", GATEWAY_UNIT]).await?;
-            tracing::info!(unit = GATEWAY_UNIT, container = %cfg.boundary.gateway_container, "gateway started under its own user service");
-            return Ok(());
+            systemctl(&["restart", &name]).await?;
+            tracing::info!(unit = %name, container = %cfg.boundary.gateway_container, "gateway started under its own user service");
+            return Ok(true);
         }
     }
     let _ = podman(&["rm", "-f", "-i", &cfg.boundary.gateway_container]).await;
@@ -420,7 +572,7 @@ async fn ensure_gateway(cfg: &Config) -> Result<(), BoundaryError> {
     run.extend(args.iter().map(String::as_str));
     podman(&run).await?;
     tracing::info!(container = %cfg.boundary.gateway_container, "gateway started");
-    Ok(())
+    Ok(true)
 }
 
 /// What `recover_gateway` did.
@@ -454,20 +606,21 @@ pub async fn recover_gateway(cfg: &Config) -> Result<Recovery, BoundaryError> {
     let network_present = podman(&["network", "exists", &cfg.boundary.network])
         .await
         .is_ok();
-    if let Some(unit) = gateway_unit_path().filter(|_| !cfg!(target_os = "macos")) {
+    if let Some(unit) = gateway_unit_path(cfg).filter(|_| !cfg!(target_os = "macos")) {
         if image_present && network_present && user_manager_running().await {
             // Written again whatever is there: an older setup left none (its
             // gateway was a container in the node's own cgroup, which is how
             // it came to be stopped), and a newer binary may describe it
             // differently. Both converge on the same unit.
-            let args = gateway_args(cfg, super::selinux_enabled().await)?;
+            let args = gateway_args(cfg, super::selinux_enabled().await, &allowlist_bytes())?;
+            let name = gateway_unit(cfg);
             // Checked here: systemd, not the node, runs what the unit names.
             let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
             let text = gateway_unit_text(&podman_bin, &args, &service_path());
             write_unit(&unit, &text)?;
             systemctl(&["daemon-reload"]).await?;
-            systemctl(&["enable", GATEWAY_UNIT]).await?;
-            systemctl(&["start", GATEWAY_UNIT]).await?;
+            systemctl(&["enable", &name]).await?;
+            systemctl(&["start", &name]).await?;
             return Ok(Recovery::Started);
         }
     }
@@ -480,11 +633,11 @@ pub async fn recover_gateway(cfg: &Config) -> Result<Recovery, BoundaryError> {
 }
 
 /// Where the gateway's unit goes: beside the node's own.
-fn gateway_unit_path() -> Option<std::path::PathBuf> {
+fn gateway_unit_path(cfg: &Config) -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|home| {
         std::path::PathBuf::from(home)
             .join(".config/systemd/user")
-            .join(GATEWAY_UNIT)
+            .join(gateway_unit(cfg))
     })
 }
 
@@ -555,7 +708,7 @@ pub fn gateway_unit_text(podman_bin: &str, args: &[String], path: &str) -> Strin
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "# Written by `tracon setup` (and by the node, when it finds the gateway stopped).\n\
+        "# Written by the node as it sets up its boundary, and by `tracon setup`.\n\
          # The gateway runs as its own user service so that restarting or stopping the\n\
          # node's service, which ends everything in that service's cgroup, leaves the\n\
          # boundary's gateway running, and so a gateway that stops is started again.\n\
@@ -639,6 +792,61 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("ExecStop=\"/usr/bin/podman\" rm"), "{text}");
+    }
+
+    #[test]
+    fn a_second_gateway_gets_a_unit_of_its_own() {
+        let mut cfg = Config::default();
+        assert_eq!(gateway_unit(&cfg), GATEWAY_UNIT);
+        cfg.boundary.gateway_container = "spike-u2-gw".into();
+        assert_eq!(gateway_unit(&cfg), "tracon-gateway-spike-u2-gw.service");
+        cfg.boundary.gateway_container = "odd name/x".into();
+        assert_eq!(gateway_unit(&cfg), "tracon-gateway-odd_name_x.service");
+    }
+
+    /// The label is what lets a converge leave a running gateway alone, so it
+    /// has to move with anything the gateway was started from.
+    #[test]
+    fn the_gateway_label_follows_its_arguments_and_allowlist() {
+        let mut cfg = Config::default();
+        // A socket listener would have its directory made.
+        cfg.gateway.harness_listen = HarnessListen::Tcp("127.0.0.1:7421".parse().unwrap());
+        let args = gateway_args(&cfg, false, b"^a$\n").unwrap();
+        assert_eq!(args.last().unwrap(), &cfg.boundary.gateway_image);
+        let spec = gateway_spec(&args).unwrap().to_string();
+        assert_eq!(spec.len(), 64);
+        let same = gateway_args(&cfg, false, b"^a$\n").unwrap();
+        assert_eq!(gateway_spec(&same), Some(spec.as_str()));
+        let widened = gateway_args(&cfg, false, b"^a$\n^b$\n").unwrap();
+        assert_ne!(gateway_spec(&widened), Some(spec.as_str()));
+        let labelled = gateway_args(&cfg, true, b"^a$\n").unwrap();
+        assert_ne!(gateway_spec(&labelled), Some(spec.as_str()));
+    }
+
+    #[test]
+    fn only_a_running_gateway_from_the_current_image_with_its_spec_is_current() {
+        assert!(running_matches(
+            "true sha256abc spec1\n",
+            "sha256abc",
+            "spec1"
+        ));
+        assert!(!running_matches(
+            "false sha256abc spec1",
+            "sha256abc",
+            "spec1"
+        ));
+        assert!(!running_matches(
+            "true sha256old spec1",
+            "sha256abc",
+            "spec1"
+        ));
+        assert!(!running_matches(
+            "true sha256abc <no value>",
+            "sha256abc",
+            "spec1"
+        ));
+        assert!(!running_matches("true sha256abc", "sha256abc", "spec1"));
+        assert!(!running_matches("true  spec1", "", "spec1"));
     }
 
     #[test]

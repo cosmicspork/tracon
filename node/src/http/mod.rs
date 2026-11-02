@@ -675,6 +675,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     let backend = boundary::backend_for(&cfg).await;
     tracing::info!(runtime = backend.kind(), "boundary backend");
+    let self_reconciles = cfg.boundary.auto_reconcile && backend.converges();
+    if self_reconciles {
+        boundary::reconcile::mark_pending();
+    }
     let (node_id, identity) = init_node(&store, &cfg, adapter.as_ref(), backend.as_ref()).await?;
     crate::broker::lend_to_preparation(broker.clone(), &node_id);
     let cleaned = crate::session::reconcile_after_restart(&store, &node_id, backend.as_ref()).await;
@@ -897,6 +901,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         tokio::spawn(async move {
             let _ = api::probe_models_into_store(&probe_state, probe_backend.as_ref()).await;
         });
+    }
+    // With the harness listener up, so the checks that follow can reach it
+    // through the gateway.
+    if self_reconciles {
+        tokio::spawn(boundary_upkeep(state.clone(), backend.clone()));
     }
     let preview_listen = cfg.docs.preview_listen;
     let preview_listener = tokio::net::TcpListener::bind(preview_listen)
@@ -1207,6 +1216,11 @@ async fn harness_states(
     out
 }
 
+/// One verification at a time. A re-check that began while the node was
+/// setting up its boundary must not land after the check that followed the
+/// setup, and record a verdict on images that have since been rebuilt.
+static VERIFY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Run the boundary checks, probe the harness, and record what this node is.
 ///
 /// Startup calls it, and so does a re-check from the interface: an operator
@@ -1222,9 +1236,13 @@ pub(crate) async fn verify_node(
     id: &str,
     identity: Option<&proto::keys::Identity>,
 ) -> Result<NodeRow> {
+    let _one = VERIFY.lock().await;
     backend.recover(cfg).await;
     let report = backend.check_all(cfg, false).await;
-    let failed = report.first_failure().cloned();
+    let mut failed = report.first_failure().cloned();
+    if let (Some(f), Some(note)) = (failed.as_mut(), boundary::reconcile::note()) {
+        f.detail = format!("{}; {note}", f.detail);
+    }
     let ready = failed.is_none();
     if let Some(f) = &failed {
         tracing::warn!(check = f.id.as_str(), detail = %f.detail, "refusing to run harnesses");
@@ -1288,6 +1306,55 @@ pub(crate) async fn verify_node(
     };
     store.put_node(&row)?;
     Ok(row)
+}
+
+/// How often a running node looks for definitions that changed under it.
+const DEFINITIONS_POLL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Keep the boundary in step with this binary without an operator: converge
+/// once now, then again whenever what the images are built from changes
+/// (`Backend::definitions`). A converge that changed something, or that
+/// leaves the node still refused, is followed by the checks, which are what
+/// anyone sees.
+async fn boundary_upkeep(s: AppState, backend: Arc<dyn boundary::Backend>) {
+    let mut seen = backend.definitions(&s.cfg);
+    converge_and_check(&s, backend.as_ref()).await;
+    loop {
+        tokio::time::sleep(DEFINITIONS_POLL).await;
+        let now = backend.definitions(&s.cfg);
+        if now == seen {
+            continue;
+        }
+        tracing::info!("the boundary's definitions changed; setting it up again");
+        seen = now;
+        converge_and_check(&s, backend.as_ref()).await;
+    }
+}
+
+async fn converge_and_check(s: &AppState, backend: &dyn boundary::Backend) {
+    let changed = boundary::reconcile::converge(backend, &s.cfg).await;
+    match &changed {
+        Ok(true) => tracing::info!("boundary brought in step with this build"),
+        Ok(false) => tracing::info!("boundary already in step with this build"),
+        Err(error) => tracing::warn!(%error, "could not set up the boundary"),
+    }
+    let ready = s
+        .store()
+        .get_node(&s.node_id)
+        .ok()
+        .flatten()
+        .is_some_and(|n| n.state == "ready");
+    if matches!(changed, Ok(false)) && ready {
+        // Nothing moved, and the verdict that stands already passed; only
+        // the interface has to hear that the setup is over.
+        if let Ok(v) = api::node_json(s) {
+            s.manager.bus().publish(crate::stream::Frame::Node(v));
+        }
+        return;
+    }
+    if let Err(error) = api::reverify(s).await {
+        tracing::warn!(%error, "could not record the boundary check");
+    }
 }
 
 /// Bind a Unix socket at `path`, replacing one a previous run left behind but
