@@ -1062,7 +1062,13 @@ That warm-up is also the only preparation lent a registry credential: the entry'
 `prepare_credentials` name `env` credentials in the broker, each of which must name the
 repository in its own `repos` (by path, or by a `group/**` prefix matched segment by
 segment), and their environment goes into the warm-up's commands
-and is taken out of what they print. It travels as secret environment
+and is taken out of what they print. With `[upstreams] preparation = "attach"` it goes
+nowhere near the container: each credential has a declared host
+(`config::upstreams`), the broker renders it as one sensitive header bound to that host
+(`broker::upstream::Attachment`), and the warm-up's egress grant carries it. A plain
+`http://<host>/…` request on that grant is the one thing the granted proxy sends on over
+TLS of its own, to the declared host only, with the client's own credentials dropped and
+no redirect followed; a CONNECT is never intercepted. The lent environment travels as secret environment
 (`RunnerCommand::secret_env`), as every egress grant's proxy URL does, since that URL
 carries the grant's password. Neither is ever written where another reader finds it.
 Podman is given each name as `--env NAME` with the value in the `podman` process's own

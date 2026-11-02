@@ -980,7 +980,7 @@ async fn prepare_steps(
 ) -> Result<(), Stopped> {
     // This preparation's own grant: nothing to wait for, and nothing another
     // run's hosts can widen.
-    let egress = scoped_egress(backend, &environment.egress, warming)
+    let egress = scoped_egress(backend, &environment.egress, warming, secrets.upstreams())
         .map_err(|error| Stopped::Unprepared(PrepareFailure::said(error)))?;
     let refusals = egress.refusals();
     if let Some(watch) = watch {
@@ -1909,11 +1909,22 @@ mod tests {
             spec: crate::gateway::proxy::GrantSpec,
         ) -> Result<crate::boundary::EgressGrant, crate::boundary::BoundaryError> {
             let recorded = self.0.clone();
+            let attaching = match spec.upstreams.is_empty() {
+                true => String::new(),
+                false => format!(
+                    " attaching {}",
+                    spec.upstreams
+                        .iter()
+                        .map(|attached| attached.host())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            };
             recorded
                 .log
                 .lock()
                 .unwrap()
-                .push(format!("open {}", spec.hosts.join(",")));
+                .push(format!("open {}{attaching}", spec.hosts.join(",")));
             Ok(crate::boundary::EgressGrant::new(
                 "http://gw:8890".into(),
                 spec.client,
@@ -2185,6 +2196,58 @@ mod tests {
                 "close",
             ]
         );
+    }
+
+    /// Attached rather than lent, a credential is nowhere in the preparation's
+    /// container: not in its environment, not in its secret environment, not
+    /// on its command line. The grant it runs under carries it, for its host.
+    #[tokio::test]
+    async fn an_attached_credential_never_enters_the_preparation() {
+        let (store, cfg, _) = prepared_repo("prep-attached");
+        let recorded = std::sync::Arc::new(Recorded::default());
+        let backend = RecordingBackend(recorded.clone());
+        let environment = environment_for(&cfg, &store, Some(Path::new("/src/app")));
+        let licence = "Basic b3BzQGV4YW1wbGUuY29tOm5vdmEtbGljZW5jZS1rZXk=";
+        let secrets = PrepareSecrets::attached(vec![crate::broker::Attachment::for_test(
+            "nova.laravel.com",
+            "authorization",
+            licence,
+        )]);
+        let runner = backend.runner(Vec::new());
+        run_preparation_with(
+            &backend,
+            runner.as_ref(),
+            &environment,
+            ("tracon-warm-x", &environment.cache_volume),
+            "tracon-w-x",
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            &RunToCompletion,
+            "the base cache stays as it was",
+            &secrets,
+            None,
+        )
+        .await
+        .unwrap_or_else(|stopped| panic!("{stopped}"));
+        assert!(recorded
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.ends_with(" attaching nova.laravel.com")));
+        let commands = recorded.commands.lock().unwrap();
+        assert!(!commands.is_empty());
+        for command in commands.iter() {
+            let everything = command
+                .env
+                .iter()
+                .chain(command.secret_env.iter())
+                .map(|(name, value)| format!("{name}={value}"))
+                .chain(command.argv.iter().cloned())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!everything.contains(licence), "{everything}");
+            assert!(!everything.contains("nova-licence-key"), "{everything}");
+        }
     }
 
     /// Lent credentials are in every command of the preparation they are lent

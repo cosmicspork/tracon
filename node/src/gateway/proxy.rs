@@ -256,6 +256,11 @@ pub struct GrantSpec {
     /// The sentence a refused host gets back, as the status line's reason
     /// and the body: what to change, for whoever reads the failure.
     pub refusal: String,
+    /// Credentials the node attaches for this client, each to its one host
+    /// (`config::upstreams`). A plain `http://<host>/…` request for one of
+    /// these is sent on by the node over its own TLS with the credential
+    /// written in; the client never holds it.
+    pub upstreams: Vec<crate::broker::Attachment>,
 }
 
 /// A grant as the proxy holds it.
@@ -268,6 +273,7 @@ pub struct Grant {
     patterns: Allowlist,
     plain_http: bool,
     refusal: String,
+    upstreams: Vec<crate::broker::Attachment>,
     /// Hosts the operator opened to this grant after it was issued: until it
     /// is revoked (`None`), or until a moment (`Some`).
     widened: parking_lot::RwLock<HashMap<String, Option<std::time::Instant>>>,
@@ -296,6 +302,14 @@ impl Grant {
     /// The hosts this grant refused, first refused first.
     pub fn refused(&self) -> Vec<String> {
         self.refused.lock().clone()
+    }
+
+    /// The credential this grant attaches for `host`, if it attaches one.
+    /// Matched exactly: no pattern, suffix or widening reaches it.
+    fn upstream(&self, host: &str) -> Option<&crate::broker::Attachment> {
+        self.upstreams
+            .iter()
+            .find(|attachment| attachment.host() == host)
     }
 
     fn remember_refusal(&self, host: &str) {
@@ -350,6 +364,7 @@ impl Grants {
             patterns: Allowlist::new(&spec.patterns)?,
             plain_http: spec.plain_http,
             refusal: spec.refusal,
+            upstreams: spec.upstreams,
             widened: Default::default(),
             refused: Default::default(),
         };
@@ -645,6 +660,35 @@ pub struct Granted {
     grants: Grants,
     refusal: Refusal,
     resolve: Resolve,
+    /// The TLS the node opens to a declared upstream; `None` only in tests,
+    /// whose upstreams speak plain HTTP.
+    upstream_tls: Option<tokio_rustls::TlsConnector>,
+}
+
+/// TLS to public hosts, verified against the web's roots, as the model
+/// gateway's client is.
+fn public_tls() -> tokio_rustls::TlsConnector {
+    static TLS: std::sync::OnceLock<tokio_rustls::TlsConnector> = std::sync::OnceLock::new();
+    TLS.get_or_init(|| {
+        tls_trusting(tokio_rustls::rustls::RootCertStore::from_iter(
+            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+        ))
+    })
+    .clone()
+}
+
+fn tls_trusting(roots: tokio_rustls::rustls::RootCertStore) -> tokio_rustls::TlsConnector {
+    use tokio_rustls::rustls;
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    // The request is forwarded over HTTP/1.1 as it arrived.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    tokio_rustls::TlsConnector::from(Arc::new(config))
 }
 
 impl Granted {
@@ -658,7 +702,28 @@ impl Granted {
             grants,
             refusal,
             resolve: system_resolver(),
+            upstream_tls: Some(public_tls()),
         }
+    }
+
+    /// Reach declared upstreams over plain HTTP. For tests, whose upstreams
+    /// hold no certificate.
+    #[doc(hidden)]
+    pub fn upstreams_over_plain_http(mut self) -> Self {
+        self.upstream_tls = None;
+        self
+    }
+
+    /// Verify declared upstreams against `root` (DER) alone. For tests,
+    /// whose upstreams hold a certificate no public root signed.
+    #[doc(hidden)]
+    pub fn trusting_upstream_root(mut self, root: Vec<u8>) -> Self {
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots
+            .add(root.into())
+            .expect("a test root the store accepts");
+        self.upstream_tls = Some(tls_trusting(roots));
+        self
     }
 
     /// As `new`, dialling any address. For tests, whose upstreams can only be
@@ -764,6 +829,19 @@ async fn handle_granted(
         return Ok(response);
     };
     let tunnel = req.method() == Method::CONNECT;
+    // A plain request for a host this grant attaches a credential to. The
+    // declaration is what opens the host, and only by this path: a CONNECT
+    // to it is still the grant's hosts' to allow, and carries nothing.
+    if !tunnel && req.uri().scheme_str() == Some("http") {
+        let host = req.uri().host().map(|host| {
+            host.trim_matches(|c| c == '[' || c == ']')
+                .to_ascii_lowercase()
+        });
+        if let Some(attachment) = host.as_deref().and_then(|host| grant.upstream(host)) {
+            let attachment = attachment.clone();
+            return Ok(forward_upstream(req, &grant, &attachment, &granted).await);
+        }
+    }
     let target = match (tunnel, req.uri().scheme_str(), req.uri().host()) {
         (true, _, _) => req
             .uri()
@@ -852,9 +930,173 @@ async fn handle_granted(
     }
 }
 
+/// Headers that describe one hop, never the request: dropped before a
+/// request is sent on to a declared upstream, with any the request's own
+/// `Connection` names.
+const HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "proxy-connection",
+    "keep-alive",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "te",
+    "trailer",
+    "upgrade",
+];
+
+/// Send `req`, a plain `http://<host>/…` request, to `https://<host>/…` with
+/// `attachment` written in, and hand the answer back. The node's own TLS, to
+/// the one host the attachment is for: nothing the client sent is relied on
+/// for where it goes, and the client's own credentials for it are dropped,
+/// so a placeholder it was given never reaches the host.
+///
+/// A redirect is not followed. It is the client's to follow, through this
+/// proxy again, so a credential is only ever attached by host and never
+/// carried to wherever an answer points.
+async fn forward_upstream(
+    mut req: Request<Incoming>,
+    grant: &Grant,
+    attachment: &crate::broker::Attachment,
+    granted: &Granted,
+) -> Response<Forwarded> {
+    let host = attachment.host().to_string();
+    if req.uri().port_u16().is_some_and(|port| port != 80) {
+        return answer(
+            StatusCode::FORBIDDEN,
+            "a credentialed upstream is asked for as http://<host>/ and reached on 443",
+        );
+    }
+    let stream = match dial(&granted.refusal, &granted.resolve, &host, 443).await {
+        Dialled::Stream(stream) => stream,
+        Dialled::Refused(why) => {
+            tracing::warn!(client = %grant.client, %host, why, "upstream refused");
+            return answer(StatusCode::FORBIDDEN, why);
+        }
+        Dialled::Unreachable => {
+            tracing::warn!(client = %grant.client, %host, "upstream unreachable");
+            return answer(StatusCode::BAD_GATEWAY, "upstream unreachable");
+        }
+    };
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|path| path.as_str().to_string())
+        .unwrap_or_else(|| "/".into());
+    let Ok(path) = path.parse() else {
+        return answer(StatusCode::BAD_REQUEST, "unusable request target");
+    };
+    *req.uri_mut() = path;
+    let headers = req.headers_mut();
+    let named: Vec<String> = headers
+        .get_all(hyper::header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    for name in HOP_BY_HOP
+        .iter()
+        .copied()
+        .chain(named.iter().map(String::as_str))
+    {
+        headers.remove(name);
+    }
+    headers.remove(hyper::header::AUTHORIZATION);
+    headers.remove(attachment.header());
+    let Ok(host_header) = hyper::header::HeaderValue::from_str(&host) else {
+        return answer(StatusCode::BAD_REQUEST, "unusable host");
+    };
+    headers.insert(hyper::header::HOST, host_header);
+    attachment.apply(headers);
+    tracing::info!(client = %grant.client, %host, credential = attachment.credential(), "granted proxy attached a credential");
+    let sent = match &granted.upstream_tls {
+        Some(tls) => {
+            let Ok(name) = tokio_rustls::rustls::pki_types::ServerName::try_from(host.clone())
+            else {
+                return answer(StatusCode::BAD_REQUEST, "unusable host");
+            };
+            match tls.connect(name, stream).await {
+                Ok(stream) => send_on(TokioIo::new(stream), req).await,
+                Err(error) => {
+                    tracing::warn!(client = %grant.client, %host, %error, "upstream TLS failed");
+                    return answer(StatusCode::BAD_GATEWAY, "upstream TLS failed");
+                }
+            }
+        }
+        None => send_on(TokioIo::new(stream), req).await,
+    };
+    let Some(mut response) = sent else {
+        return answer(StatusCode::BAD_GATEWAY, "upstream unreachable");
+    };
+    if let Some(back) = response
+        .headers()
+        .get(hyper::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|location| through_proxy(location, &host))
+        .and_then(|back| hyper::header::HeaderValue::from_str(&back).ok())
+    {
+        response.headers_mut().insert(hyper::header::LOCATION, back);
+    }
+    response.map(|body| body.boxed())
+}
+
+async fn send_on<I>(io: I, req: Request<Incoming>) -> Option<Response<Incoming>>
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(io).await.ok()?;
+    tokio::spawn(connection);
+    sender.send_request(req).await.ok()
+}
+
+/// A redirect to the same declared host, as the plain URL the client asks
+/// this proxy for, so following it is credentialed too rather than a CONNECT
+/// that carries nothing. A redirect anywhere else is left as it is.
+fn through_proxy(location: &str, host: &str) -> Option<String> {
+    let url = url::Url::parse(location).ok()?;
+    let same = url.scheme() == "https"
+        && url.host_str() == Some(host)
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    if !same {
+        return None;
+    }
+    let mut back = format!("http://{host}{}", url.path());
+    if let Some(query) = url.query() {
+        back.push('?');
+        back.push_str(query);
+    }
+    Some(back)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_redirect_to_the_same_host_comes_back_through_the_proxy() {
+        let host = "nova.laravel.com";
+        assert_eq!(
+            through_proxy("https://nova.laravel.com/dist/x.zip?sig=1", host).as_deref(),
+            Some("http://nova.laravel.com/dist/x.zip?sig=1")
+        );
+        assert_eq!(
+            through_proxy("https://NOVA.laravel.com:443/a", host).as_deref(),
+            Some("http://nova.laravel.com/a")
+        );
+        for elsewhere in [
+            "https://cdn.example.com/x.zip",
+            "https://nova.laravel.com.evil.example/x",
+            "https://nova.laravel.com:8443/x",
+            "https://user@nova.laravel.com/x",
+            "http://nova.laravel.com/x",
+            "/relative/path",
+        ] {
+            assert_eq!(through_proxy(elsewhere, host), None, "{elsewhere}");
+        }
+    }
 
     fn allow() -> Allowlist {
         Allowlist::new(&[r"^api\.anthropic\.com$".into(), "api.openai.com".into()]).unwrap()

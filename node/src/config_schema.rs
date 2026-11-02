@@ -342,6 +342,17 @@ pub const KEYS: &[KeySpec] = &[
     // [[work.priority]]
     live("work.priority.name"),
     live("work.priority.value"),
+    // [upstreams]
+    live("upstreams.preparation"),
+    // [[upstreams.host]]
+    live("upstreams.host.host"),
+    live("upstreams.host.credential"),
+    live("upstreams.host.attach"),
+    live("upstreams.host.header"),
+    live("upstreams.host.value"),
+    live("upstreams.host.username"),
+    live("upstreams.host.password"),
+    live("upstreams.host.sessions"),
     // [auth]
     restart("auth.public_origin"),
     restart("auth.trusted_proxies"),
@@ -448,6 +459,7 @@ pub const NOT_BY_PEER: &[(&str, &str)] = &[
     ("providers.*.login", WHERE_CREDENTIALS_GO),
     ("embed.base_url", WHERE_CREDENTIALS_GO),
     ("embed.api_key_file", WHERE_CREDENTIALS_GO),
+    ("upstreams", WHERE_CREDENTIALS_GO),
 ];
 
 const WHO_REACHES: &str = "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer";
@@ -1012,6 +1024,10 @@ mod tests {
             &["providers", "*", "login"],
             &["embed", "base_url"],
             &["embed", "api_key_file"],
+            &["upstreams"],
+            &["upstreams", "preparation"],
+            &["upstreams", "host", "credential"],
+            &["upstreams", "host", "host"],
         ] {
             assert!(peer_refusal(key).is_some(), "{key:?}");
         }

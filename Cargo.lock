@@ -3479,6 +3479,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
  "tokio-util",
@@ -3496,6 +3497,7 @@ dependencies = [
  "url",
  "uuid",
  "webauthn-rs",
+ "webpki-roots",
  "x25519-dalek",
  "zip",
 ]

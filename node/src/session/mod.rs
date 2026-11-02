@@ -2748,13 +2748,24 @@ impl Manager {
         // the gateway host, which `NO_PROXY` keeps off any proxy. A harness's
         // shell inherits its environment, so the agent's installs go through
         // the grant.
+        // Upstreams that opt sessions in are attached by the grant, so the
+        // agent reaches them as the credential's owner without holding it.
         let environment = crate::environment::session_environment(&self.cfg, &self.store, id);
+        let upstreams = self
+            .tools
+            .broker
+            .read()
+            .map(|broker| {
+                broker.session_attachments(&self.cfg.live().upstreams, &spec.channel, &self.node_id)
+            })
+            .unwrap_or_default();
         let egress = self
             .backend
             .egress_grant(crate::environment::session_grant(
                 &self.cfg,
                 &environment,
                 id,
+                upstreams,
             ))
             .map_err(|error| {
                 tracing::info!(session = %id, %error, "the session keeps the harness proxy");
