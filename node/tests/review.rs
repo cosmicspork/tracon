@@ -1156,6 +1156,7 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
             reword: None,
             resume: false,
             pushed: false,
+            ready: true,
             before_push: None,
             journal: &tracon::review::publish::NoJournal,
         },
@@ -5498,10 +5499,34 @@ async fn an_update_without_forge_outputs_only_pushes() {
     assert!(!gh.contains("PATCH"), "{gh}");
     assert!(!gh.contains("comments"), "{gh}");
     assert!(!gh.contains("pr create"), "{gh}");
+    // Ready already, so it is left as it is.
+    assert!(!gh.contains("pr ready"), "{gh}");
     assert_eq!(
         f.forge_branch(),
         f.store.get_review(&id).unwrap().unwrap().head_sha
     );
+}
+
+/// A pull request drafted while its new revision was on the way is marked
+/// ready by the approval of that revision, in the same step: approving never
+/// needs a second click.
+#[tokio::test]
+async fn approving_an_update_of_a_draft_marks_it_ready() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    let mut draft = pull_seven(&base);
+    draft["draft"] = json!(true);
+    gh_forge(&f, draft);
+    let id = review_id(&f.submit_update(json!({})).await);
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("ARGS: pr ready 7 --repo owner/name"), "{gh}");
+    assert!(!gh.contains("--undo"), "{gh}");
 }
 
 /// The operator edits what goes to the forge; the edit is what is sent.

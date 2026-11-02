@@ -269,7 +269,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": MR_MERGE,
-            "description": "Merge a GitLab merge request only when its source SHA still matches the granted revision.",
+            "description": "Merge a GitLab merge request only when its source SHA still matches the granted revision. A draft is refused: it is marked ready first, on its own, with mr_ready or on its review.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": PROJECT }, "iid": { "type": "integer" },
                 "head_sha": { "type": "string" }, "squash": { "type": "boolean" },
@@ -458,6 +458,14 @@ pub async fn call(
                 let mr = get(http, token, &format!("{project_url}/merge_requests/{iid}")).await?;
                 if mr["sha"].as_str() != Some(sha) {
                     return Err("merge request source changed since the authorized revision".into());
+                }
+                // A draft is one someone said is not ready; merging never
+                // marks it ready on its own.
+                if is_draft(&mr) {
+                    return Err(format!(
+                        "merge request !{iid} is a draft; mark it ready first (Mark ready on its \
+                         review, or {MR_READY}), then merge"
+                    ));
                 }
                 if let Some(recheck) = before_mutation {
                     recheck()?;
