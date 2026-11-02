@@ -25,10 +25,18 @@ use crate::runner::{Runner, RunnerCommand};
 fn probe() -> String {
     crate::config::resource_name("boundary-probe")
 }
-pub const HARNESS_POLICY: &str = "tracon-harness";
+/// The harness pods' NetworkPolicy, `<prefix>-harness` (`[boundary]
+/// resource_prefix`): `tracon-harness` on a node with the default prefix.
+pub fn harness_policy() -> String {
+    crate::config::resource_name("harness")
+}
+
 /// The node's own ingress policy, read only to learn whether it admits
-/// harness pods on the egress port.
-pub const NODE_POLICY: &str = "tracon-node";
+/// harness pods on the egress port, or sandboxes on the sandbox port:
+/// `<prefix>-node`.
+pub fn node_policy() -> String {
+    crate::config::resource_name("node")
+}
 
 /// Whether the harness policy's ingress admits nothing but the node's pod.
 /// Every harness is driven over its attached stdio, so no rules at all is the
@@ -89,6 +97,20 @@ pub const SECRET_RIGHTS: &[(&str, &str, &str, &str)] = &[
     ("", "secrets", "", "list"),
 ];
 
+/// The verbs a node that runs its sandboxes over the protocol needs: make,
+/// read and remove its sandbox pods, read their logs (what a supervisor that
+/// never connected said), and read the policies it verifies. No attach, since
+/// stdio is the protocol's, and nothing on Secrets, since no run keeps
+/// anything in one.
+pub const PROTOCOL_RIGHTS: &[(&str, &str, &str, &str)] = &[
+    ("", "pods", "", "create"),
+    ("", "pods", "", "get"),
+    ("", "pods", "", "list"),
+    ("", "pods", "", "delete"),
+    ("", "pods", "log", "get"),
+    ("networking.k8s.io", "networkpolicies", "", "get"),
+];
+
 /// Whether this service account may do each of `rights` in `namespace`:
 /// the first right it may not, or an error asking.
 async fn first_refused(
@@ -142,6 +164,9 @@ pub async fn secret_rights(client: kube::Client, namespace: &str) -> Result<(), 
 }
 
 pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryReport {
+    if super::uses_sandbox_protocol(cfg) {
+        return check_all_sandboxes(b, cfg, deep).await;
+    }
     let mut checks = Vec::new();
     let runtime = check_runtime(b, cfg).await;
     let runtime_ok = runtime.ok;
@@ -424,11 +449,11 @@ fn check_no_runtime_socket(pod: &Pod) -> CheckResult {
     )
 }
 
-/// Whether one rule's peers admit a harness pod: no `from` at all, or a pod
-/// selector in this namespace that is empty or names the harness role.
-/// Anything wider or stranger is not counted, so the egress port stays shut
-/// rather than assumed open.
-fn admits_harness(rule: &NetworkPolicyIngressRule) -> bool {
+/// Whether one rule's peers admit a pod of `role`: no `from` at all, or a
+/// pod selector in this namespace that is empty or names the role. Anything
+/// wider or stranger is not counted, so the port stays shut rather than
+/// assumed open.
+fn admits_role(rule: &NetworkPolicyIngressRule, role: &str) -> bool {
     let Some(peers) = rule.from.as_deref().filter(|peers| !peers.is_empty()) else {
         return true;
     };
@@ -442,8 +467,7 @@ fn admits_harness(rule: &NetworkPolicyIngressRule) -> bool {
                     .as_deref()
                     .unwrap_or_default()
                     .is_empty()
-                    && (labels.is_empty()
-                        || labels.get(ROLE_LABEL).is_some_and(|role| role == "harness"))
+                    && (labels.is_empty() || labels.get(ROLE_LABEL).is_some_and(|r| r == role))
             })
     })
 }
@@ -492,8 +516,13 @@ fn rule_ports(
 /// Only the shape the deployment ships is read; a policy this cannot read as
 /// admitting it is taken as not.
 fn node_admits(rules: &[NetworkPolicyIngressRule], port: i32) -> bool {
+    node_admits_role(rules, "harness", port)
+}
+
+/// `node_admits` for pods of any `role`.
+fn node_admits_role(rules: &[NetworkPolicyIngressRule], role: &str, port: i32) -> bool {
     rules.iter().any(|rule| {
-        admits_harness(rule)
+        admits_role(rule, role)
             && rule_ports(rule.ports.as_deref()).is_none_or(|ports| {
                 ports.iter().any(|entry| {
                     matches!(entry, PolicyPort::Tcp { first, last } if (*first..=*last).contains(&port))
@@ -603,6 +632,7 @@ async fn network(
             Err("the network check failed".to_string()),
         )
     };
+    let (harness_policy, node_policy) = (harness_policy(), node_policy());
     let spec = runner.spec();
     let Some(ps) = &pod.spec else {
         return fail("pod has no spec".into());
@@ -628,11 +658,11 @@ async fn network(
         Err(e) => return fail(e),
     };
     let policies: Api<NetworkPolicy> = Api::namespaced(client, &spec.env.namespace);
-    let policy = match policies.get(HARNESS_POLICY).await {
+    let policy = match policies.get(&harness_policy).await {
         Ok(p) => p,
         Err(e) => {
             return fail(format!(
-                "NetworkPolicy {HARNESS_POLICY} missing in {}: {e}",
+                "NetworkPolicy {harness_policy} missing in {}: {e}",
                 spec.env.namespace
             ))
         }
@@ -649,7 +679,7 @@ async fn network(
         .unwrap_or(false);
     if !selects_harness {
         return fail(format!(
-            "{HARNESS_POLICY} does not select {ROLE_LABEL}=harness"
+            "{harness_policy} does not select {ROLE_LABEL}=harness"
         ));
     }
     let types = pspec.policy_types.clone().unwrap_or_default();
@@ -675,7 +705,7 @@ async fn network(
         Err(why) => return fail(why),
     };
     let isolated = format!(
-        "no resolver; {HARNESS_POLICY} allows egress only to the node pod on the forward and \
+        "no resolver; {harness_policy} allows egress only to the node pod on the forward and \
          proxy ports"
     );
     // The rest is whether per-client egress is on, which never fails the
@@ -683,12 +713,12 @@ async fn network(
     // either order, and a node whose policy predates the port runs as it did.
     let egress = match opens_egress {
         false => Err(format!(
-            "{HARNESS_POLICY} does not allow egress to the node on port {egress_port}, so no \
+            "{harness_policy} does not allow egress to the node on port {egress_port}, so no \
              grant is issued: a preparation's registries and a session's own hosts stay \
-             shut. Add the port to its egress and to {NODE_POLICY}'s ingress \
+             shut. Add the port to its egress and to {node_policy}'s ingress \
              (deploy/kubernetes/base) and check the boundary again"
         )),
-        true => match policies.get_opt(NODE_POLICY).await {
+        true => match policies.get_opt(&node_policy).await {
             Ok(None) => Ok(()),
             Ok(Some(node)) => {
                 let ingress = node
@@ -704,7 +734,7 @@ async fn network(
                 match !governs_ingress || node_admits(ingress, i32::from(egress_port)) {
                     true => Ok(()),
                     false => Err(format!(
-                        "{NODE_POLICY} does not admit harness pods on port {egress_port}, so \
+                        "{node_policy} does not admit harness pods on port {egress_port}, so \
                          no grant is issued: a preparation's registries and a session's own \
                          hosts stay shut. Add the port to its ingress (deploy/kubernetes/base) \
                          and check the boundary again"
@@ -712,7 +742,7 @@ async fn network(
                 }
             }
             Err(e) => Err(format!(
-                "could not read {NODE_POLICY} to learn whether it admits the egress port: {e}"
+                "could not read {node_policy} to learn whether it admits the egress port: {e}"
             )),
         },
     };
@@ -721,6 +751,434 @@ async fn network(
         Err(why) => format!("{isolated}; {why}"),
     };
     (CheckResult::ok(CheckId::NetworkIsolated, detail), egress)
+}
+
+/// Whether a policy is the single route a sandbox pod is allowed (the
+/// shape shipped in `deploy/kubernetes/sandbox-protocol`): it selects exactly
+/// the sandbox role, governs both directions, admits nothing in, and lets
+/// out only TCP to the node pod on `port`. No rule for DNS, the node pod's
+/// other ports, the API server or anything else.
+pub fn sandbox_policy_shape(policy: &NetworkPolicy, port: i32) -> Result<(), String> {
+    let name = crate::provider::kubernetes::sandbox_policy();
+    let role = crate::provider::kubernetes::SANDBOX_ROLE;
+    let spec = policy
+        .spec
+        .as_ref()
+        .ok_or_else(|| format!("{name} has no spec"))?;
+    let selector = spec.pod_selector.clone().unwrap_or_default();
+    let exactly = selector.match_labels.clone().unwrap_or_default()
+        == std::collections::BTreeMap::from([(ROLE_LABEL.to_string(), role.to_string())])
+        && selector
+            .match_expressions
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty();
+    if !exactly {
+        return Err(format!(
+            "{name} does not select exactly {ROLE_LABEL}={role}"
+        ));
+    }
+    let types = spec.policy_types.clone().unwrap_or_default();
+    if !(types.iter().any(|t| t == "Ingress") && types.iter().any(|t| t == "Egress")) {
+        return Err(format!("{name} must govern both Ingress and Egress"));
+    }
+    if !spec.ingress.as_deref().unwrap_or_default().is_empty() {
+        return Err(format!(
+            "{name} admits ingress; nothing ever dials a sandbox, so it should admit none"
+        ));
+    }
+    let rules = spec.egress.as_deref().unwrap_or_default();
+    if rules.is_empty() {
+        return Err(format!(
+            "{name} allows no egress at all; a sandbox could not reach the node"
+        ));
+    }
+    for rule in rules {
+        let peers = rule.to.as_deref().unwrap_or_default();
+        if peers.is_empty() {
+            return Err(format!("an egress rule of {name} has no peer restriction"));
+        }
+        for peer in peers {
+            let to_node = peer.ip_block.is_none()
+                && peer.namespace_selector.is_none()
+                && peer.pod_selector.as_ref().is_some_and(|s| {
+                    s.match_expressions
+                        .as_deref()
+                        .unwrap_or_default()
+                        .is_empty()
+                        && s.match_labels
+                            .as_ref()
+                            .and_then(|l| l.get(ROLE_LABEL))
+                            .is_some_and(|v| v == "node")
+                });
+            if !to_node {
+                return Err(format!(
+                    "{name} lets a sandbox reach beyond the node pod (another pod, a \
+                     namespace or an address block)"
+                ));
+            }
+        }
+        let entries = rule_ports(rule.ports.as_deref()).unwrap_or_default();
+        if entries.is_empty() {
+            return Err(format!("an egress rule of {name} allows every port"));
+        }
+        for entry in entries {
+            match entry {
+                PolicyPort::Tcp { first, last } if first == port && last == port => {}
+                PolicyPort::Tcp { first, last } if first == last => {
+                    return Err(format!(
+                        "{name} allows port {first}; only the sandbox port {port} is expected \
+                         (DNS, the forward, the proxy and the egress port are not)"
+                    ))
+                }
+                PolicyPort::Tcp { first, last } => {
+                    return Err(format!(
+                        "{name} allows the port range {first}-{last}; only the sandbox port \
+                         {port} is expected"
+                    ))
+                }
+                PolicyPort::Other(what) => {
+                    return Err(format!(
+                        "{name} allows {what}; only TCP to the sandbox port {port} is expected"
+                    ))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The five checks for a node whose harness pods are sandboxes over the
+/// protocol. What is read is the same kind of evidence: the admitted pod
+/// (a gated probe the provider renders, never scheduled), the policies, the
+/// node's rights; `--deep` runs the egress script in a real sandbox, through
+/// the tunnels a session gets.
+async fn check_all_sandboxes(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryReport {
+    let mut checks = Vec::new();
+    let rest = |checks: &mut Vec<CheckResult>, why: &str| {
+        for id in [
+            CheckId::HarnessUnprivileged,
+            CheckId::NoRuntimeSocket,
+            CheckId::NetworkIsolated,
+        ] {
+            checks.push(CheckResult::fail(id, why.to_string()));
+        }
+    };
+    let provider = match b.sandbox_provider().await {
+        Ok(provider) => provider,
+        Err(e) => {
+            checks.push(CheckResult::fail(CheckId::Runtime, e.clone()));
+            rest(&mut checks, "not checked: runtime unavailable");
+            return BoundaryReport { checks };
+        }
+    };
+    let runtime = sandbox_runtime(b, &provider).await;
+    let runtime_ok = runtime.ok;
+    checks.push(runtime);
+    if !runtime_ok {
+        rest(&mut checks, "not checked: runtime unavailable");
+        return BoundaryReport { checks };
+    }
+    match create_sandbox_probe(&provider).await {
+        Ok(pod) => {
+            checks.push(check_unprivileged(&pod));
+            checks.push(sandbox_storage(&pod, &provider));
+            checks.push(sandbox_network(&provider, &pod).await);
+            let _ = provider
+                .pods()
+                .delete(&probe(), &DeleteParams::default().grace_period(0))
+                .await;
+        }
+        Err(e) => rest(&mut checks, &format!("probe pod failed: {e}")),
+    }
+    if deep {
+        checks.push(sandbox_egress(b, cfg, &provider).await);
+    }
+    BoundaryReport { checks }
+}
+
+async fn sandbox_runtime(
+    b: &KubeBackend,
+    provider: &crate::provider::kubernetes::KubeSandboxProvider,
+) -> CheckResult {
+    let spec = &provider.options().spec;
+    if let Some(error) = b.refusal_error() {
+        return CheckResult::fail(CheckId::Runtime, error);
+    }
+    let client = match b.client().await {
+        Ok(c) => c,
+        Err(e) => return CheckResult::fail(CheckId::Runtime, e),
+    };
+    let reviews: Api<SelfSubjectAccessReview> = Api::all(client);
+    match first_refused(&reviews, &spec.env.namespace, PROTOCOL_RIGHTS).await {
+        Ok(None) => {}
+        Ok(Some(refused)) => {
+            return CheckResult::fail(
+                CheckId::Runtime,
+                format!(
+                    "service account may not {refused} in {}",
+                    spec.env.namespace
+                ),
+            )
+        }
+        Err(e) => return CheckResult::fail(CheckId::Runtime, format!("access review: {e}")),
+    }
+    let dispatcher = match provider.dispatcher().await {
+        Ok(d) => d,
+        Err(e) => return CheckResult::fail(CheckId::Runtime, e.to_string()),
+    };
+    // The node's own bundle: fetched and checked for its release unless it
+    // is given one, then packed for the init containers.
+    if crate::bundle::managed(&b.cfg) {
+        if let Err(e) = crate::bundle::ensure(&b.cfg).await {
+            return CheckResult::fail(CheckId::Runtime, format!("harness bundle: {e}"));
+        }
+    }
+    let bundle = match provider.bundle(&dispatcher).await {
+        Ok(bundle) => bundle,
+        Err(e) => return CheckResult::fail(CheckId::Runtime, format!("harness bundle: {e}")),
+    };
+    CheckResult::ok(
+        CheckId::Runtime,
+        format!(
+            "api reachable; pods, pods/log and networkpolicies granted in {}; sandboxes over \
+             the protocol dial {} and fetch the bundle {} (sha256 {}) there, and no run keeps \
+             anything in a Secret; node {}",
+            spec.env.namespace,
+            provider.advertise(&dispatcher),
+            provider.options().bundle.display(),
+            &bundle.sha256[..12],
+            spec.env.node_name
+        ),
+    )
+}
+
+/// The provider's own rendering of a sandbox, gated so it is admitted and
+/// never scheduled, as admitted.
+async fn create_sandbox_probe(
+    provider: &crate::provider::kubernetes::KubeSandboxProvider,
+) -> Result<Pod, String> {
+    use crate::provider::{Bootstrap, CreateSpec, Resources, Shape};
+    let pods = provider.pods();
+    let _ = pods
+        .delete(&probe(), &DeleteParams::default().grace_period(0))
+        .await;
+    let pin = crate::runner::protocol::node_server()
+        .map_err(|e| e.to_string())?
+        .pin()
+        .to_string();
+    let labels = crate::runner::RunLabels::of(crate::runner::RunKind::Probe);
+    let dispatcher = provider.dispatcher().await.map_err(|e| e.to_string())?;
+    let bundle = provider
+        .bundle(&dispatcher)
+        .await
+        .map_err(|e| e.to_string())?;
+    let name = probe();
+    let pod = provider
+        .render(
+            &name,
+            &CreateSpec {
+                name: Some(&name),
+                image: "",
+                resources: &Resources::default(),
+                mounts: &[crate::runner::Mount::local("/work")],
+                bootstrap: &Bootstrap {
+                    run: name.clone(),
+                    cert_pin: pin,
+                    token: String::new(),
+                },
+                labels: &labels,
+                shape: Shape::Session,
+            },
+            &provider.advertise(&dispatcher),
+            &bundle.sha256,
+            true,
+        )
+        .map_err(|e| e.to_string())?;
+    pods.create(&PostParams::default(), &pod)
+        .await
+        .map_err(|e| e.to_string())?;
+    pods.get(&name).await.map_err(|e| e.to_string())
+}
+
+fn sandbox_storage(
+    pod: &Pod,
+    provider: &crate::provider::kubernetes::KubeSandboxProvider,
+) -> CheckResult {
+    let base = check_no_runtime_socket(pod);
+    if !base.ok {
+        return base;
+    }
+    let found = crate::provider::kubernetes::breaches(pod, &provider.options().spec.gateway_host);
+    if !found.is_empty() {
+        return CheckResult::fail(CheckId::NoRuntimeSocket, found.join("; "));
+    }
+    CheckResult::ok(
+        CheckId::NoRuntimeSocket,
+        "no host namespaces, no API token, no hostPath, no Secret and nothing of the state \
+         claim: only emptyDirs of the pod's own, the bundle read-only among them",
+    )
+}
+
+async fn sandbox_network(
+    provider: &crate::provider::kubernetes::KubeSandboxProvider,
+    pod: &Pod,
+) -> CheckResult {
+    let fail = |detail: String| CheckResult::fail(CheckId::NetworkIsolated, detail);
+    let spec = &provider.options().spec;
+    let Some(ps) = &pod.spec else {
+        return fail("pod has no spec".into());
+    };
+    if ps.dns_policy.as_deref() != Some("None") {
+        return fail("sandbox pod has a resolver".into());
+    }
+    let local = |ip: &str| {
+        ip.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    };
+    let aliases: Vec<_> = ps.host_aliases.iter().flatten().collect();
+    if let Some(alias) = aliases.iter().find(|a| !local(&a.ip)) {
+        return fail(format!(
+            "a name in the sandbox pod resolves to {}",
+            alias.ip
+        ));
+    }
+    if !aliases.iter().any(|a| {
+        a.hostnames
+            .iter()
+            .flatten()
+            .any(|h| h == &spec.gateway_host)
+    }) {
+        return fail(format!(
+            "{} is not the sandbox's loopback, where its tunnels listen",
+            spec.gateway_host
+        ));
+    }
+    let port = match provider.dispatcher().await {
+        Ok(d) => i32::from(d.local_addr().port()),
+        Err(e) => return fail(e.to_string()),
+    };
+    let policies = provider.policies();
+    let name = crate::provider::kubernetes::sandbox_policy();
+    let policy = match policies.get(&name).await {
+        Ok(p) => p,
+        Err(e) => {
+            return fail(format!(
+                "NetworkPolicy {name} missing in {}: {e}; apply \
+                 deploy/kubernetes/sandbox-protocol",
+                spec.env.namespace
+            ))
+        }
+    };
+    if let Err(why) = sandbox_policy_shape(&policy, port) {
+        return fail(why);
+    }
+    let node = node_policy();
+    match policies.get_opt(&node).await {
+        Ok(None) => {}
+        Ok(Some(policy)) => {
+            let ingress = policy
+                .spec
+                .as_ref()
+                .and_then(|s| s.ingress.as_deref())
+                .unwrap_or_default();
+            let governs = policy
+                .spec
+                .as_ref()
+                .and_then(|s| s.policy_types.as_ref())
+                .is_none_or(|types| types.iter().any(|t| t == "Ingress"));
+            if governs
+                && !node_admits_role(ingress, crate::provider::kubernetes::SANDBOX_ROLE, port)
+            {
+                return fail(format!(
+                    "{node} does not admit sandboxes on port {port}, so none could connect; \
+                     add it to its ingress (deploy/kubernetes/sandbox-protocol)"
+                ));
+            }
+        }
+        Err(e) => return fail(format!("could not read {node}: {e}")),
+    }
+    CheckResult::ok(
+        CheckId::NetworkIsolated,
+        format!(
+            "no resolver; {} is the sandbox's loopback; {name} allows egress only to the node \
+             pod on the sandbox port {port} and no ingress; the MCP and model gateway and both \
+             proxies are tunnels over that one connection",
+            spec.gateway_host
+        ),
+    )
+}
+
+/// What only a sandbox must also show from inside: no name resolves, and
+/// the node pod's own ports are not there except through the tunnels.
+fn sandbox_only_script(pod_ip: &str, forward: u16) -> String {
+    let host = match pod_ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{pod_ip}]"),
+        _ => pod_ip.to_string(),
+    };
+    format!(
+        "getent hosts example.com >/dev/null 2>&1 && echo DIRECT_DNS_OK; \
+         curl -s -o /dev/null -m 5 --noproxy '*' http://{host}:{forward}/harness/ping && echo DIRECT_NODE_OK; "
+    )
+}
+
+fn sandbox_only_verdict(out: &str, egress_port: u16) -> CheckResult {
+    if out.contains("DIRECT_DNS_OK") {
+        return CheckResult::fail(CheckId::Egress, "a name resolved inside the sandbox");
+    }
+    if out.contains("DIRECT_NODE_OK") {
+        return CheckResult::fail(
+            CheckId::Egress,
+            "the sandbox reached the node pod's forward port directly, around its tunnels",
+        );
+    }
+    if let Some(refused) = anonymous_egress_verdict(out, egress_port) {
+        return refused;
+    }
+    let verdict = egress_verdict(out, Denial::Drops);
+    match verdict.ok {
+        true => CheckResult::ok(
+            CheckId::Egress,
+            format!(
+                "{}; from inside, no name resolves and the node pod answers only through the \
+                 tunnels",
+                verdict.detail
+            ),
+        ),
+        false => verdict,
+    }
+}
+
+async fn sandbox_egress(
+    b: &KubeBackend,
+    cfg: &Config,
+    provider: &crate::provider::kubernetes::KubeSandboxProvider,
+) -> CheckResult {
+    let spec = &provider.options().spec;
+    let forward = match &cfg.gateway.harness_listen {
+        HarnessListen::Tcp(a) => a.port(),
+        HarnessListen::Unix(_) => cfg.gateway.forward_port,
+    };
+    let script = format!(
+        "{}{}{}",
+        sandbox_only_script(&spec.env.pod_ip, forward),
+        anonymous_egress_probe(&spec.gateway_host, cfg.gateway.egress_port),
+        egress_script(&spec.gateway_host, forward)
+    );
+    let cmd = RunnerCommand {
+        argv: vec!["sh".into(), "-c".into(), script],
+        name: crate::config::resource_name("egress-probe"),
+        labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
+        ..Default::default()
+    };
+    let runner = crate::boundary::Backend::runner(b, Vec::new());
+    match runner.run_probe(cmd).await {
+        Ok(out) => sandbox_only_verdict(
+            &String::from_utf8_lossy(&out.stdout),
+            cfg.gateway.egress_port,
+        ),
+        Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
+    }
 }
 
 const ANONYMOUS_GRANT: &str = "GRANT_ANONYMOUS_OK";
@@ -739,6 +1197,7 @@ fn anonymous_egress_probe(gateway_host: &str, port: u16) -> String {
 /// What the anonymous probe found: a failure when the proxy served the
 /// request, or did not challenge it while the checks say it is reachable.
 fn anonymous_egress_verdict(out: &str, port: u16) -> Option<CheckResult> {
+    let node_policy = node_policy();
     if out.contains(ANONYMOUS_GRANT) {
         return Some(CheckResult::fail(
             CheckId::Egress,
@@ -755,7 +1214,7 @@ fn anonymous_egress_verdict(out: &str, port: u16) -> Option<CheckResult> {
             format!(
                 "the per-client egress proxy on port {port} did not challenge a request with \
                  no credentials (its CONNECT answered {status}, not 407): is the port open \
-                 in {NODE_POLICY}'s ingress, and is the node serving?"
+                 in {node_policy}'s ingress, and is the node serving?"
             ),
         )
     })
@@ -1005,7 +1464,7 @@ mod tests {
         assert!(served.unwrap().detail.contains("presented no grant"));
         let silent = anonymous_egress_verdict("EGRESS_CONNECT=000\n", 7424).unwrap();
         assert!(silent.detail.contains("answered 000"), "{}", silent.detail);
-        assert!(silent.detail.contains(NODE_POLICY), "{}", silent.detail);
+        assert!(silent.detail.contains(&node_policy()), "{}", silent.detail);
         assert!(anonymous_egress_verdict("", 7424).is_some());
     }
 
@@ -1050,6 +1509,208 @@ mod tests {
         let mut asserted: Vec<&str> = SECRET_RIGHTS.iter().map(|(_, _, _, verb)| *verb).collect();
         asserted.sort_unstable();
         assert_eq!(granted, asserted);
+    }
+
+    fn sandbox_policy(egress: Vec<NetworkPolicyEgressRule>) -> NetworkPolicy {
+        NetworkPolicy {
+            metadata: Default::default(),
+            spec: Some(k8s_openapi::api::networking::v1::NetworkPolicySpec {
+                pod_selector: Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                        match_labels: Some(
+                            [(ROLE_LABEL.to_string(), "sandbox".to_string())].into(),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
+                ingress: Some(vec![]),
+                egress: Some(egress),
+            }),
+        }
+    }
+
+    /// A sandbox's one route: egress only to the node pod, only on the
+    /// sandbox port, nothing in. DNS, the node pod's old ports, a range, a
+    /// wider peer, an ingress rule or a wider selector are each refused.
+    #[test]
+    fn the_sandbox_policy_allows_one_route_and_nothing_else() {
+        assert_eq!(
+            sandbox_policy_shape(&sandbox_policy(vec![egress_to_node(&[7426])]), 7426),
+            Ok(())
+        );
+        let why = sandbox_policy_shape(&sandbox_policy(vec![egress_to_node(&[7426, 7421])]), 7426)
+            .unwrap_err();
+        assert!(why.contains("port 7421"), "{why}");
+        let mut dns = egress_to_node(&[53]);
+        dns.ports.as_mut().unwrap()[0].protocol = Some("UDP".into());
+        let why = sandbox_policy_shape(&sandbox_policy(vec![egress_to_node(&[7426]), dns]), 7426)
+            .unwrap_err();
+        assert!(why.contains("UDP port 53"), "{why}");
+        assert!(sandbox_policy_shape(&sandbox_policy(vec![]), 7426).is_err());
+        assert!(sandbox_policy_shape(&sandbox_policy(vec![egress_to_node(&[])]), 7426).is_err());
+        let mut anywhere = egress_to_node(&[7426]);
+        anywhere.to = Some(vec![k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+            ip_block: Some(k8s_openapi::api::networking::v1::IPBlock {
+                cidr: "0.0.0.0/0".into(),
+                except: None,
+            }),
+            ..Default::default()
+        }]);
+        assert!(sandbox_policy_shape(&sandbox_policy(vec![anywhere]), 7426).is_err());
+        let mut range = egress_to_node(&[7426]);
+        range.ports.as_mut().unwrap()[0].end_port = Some(7430);
+        assert!(sandbox_policy_shape(&sandbox_policy(vec![range]), 7426).is_err());
+
+        let mut admits = sandbox_policy(vec![egress_to_node(&[7426])]);
+        admits.spec.as_mut().unwrap().ingress = Some(vec![ingress(Some(vec![pods("node")]))]);
+        assert!(sandbox_policy_shape(&admits, 7426)
+            .unwrap_err()
+            .contains("admits ingress"));
+        let mut egress_only = sandbox_policy(vec![egress_to_node(&[7426])]);
+        egress_only.spec.as_mut().unwrap().policy_types = Some(vec!["Egress".into()]);
+        assert!(sandbox_policy_shape(&egress_only, 7426).is_err());
+        let mut narrower = sandbox_policy(vec![egress_to_node(&[7426])]);
+        narrower
+            .spec
+            .as_mut()
+            .unwrap()
+            .pod_selector
+            .as_mut()
+            .unwrap()
+            .match_labels
+            .as_mut()
+            .unwrap()
+            .insert("team".into(), "a".into());
+        assert!(sandbox_policy_shape(&narrower, 7426)
+            .unwrap_err()
+            .contains("does not select exactly"));
+    }
+
+    /// The node admits sandboxes on the sandbox port only through a rule
+    /// that names them.
+    #[test]
+    fn the_node_policy_admits_sandboxes_on_their_port_or_not() {
+        let from = |role: &str, ports: &[i32]| NetworkPolicyIngressRule {
+            from: Some(vec![pods(role)]),
+            ports: Some(ports.iter().map(|p| port(*p)).collect()),
+        };
+        assert!(node_admits_role(
+            &[from("harness", &[7421]), from("sandbox", &[7426])],
+            "sandbox",
+            7426
+        ));
+        assert!(!node_admits_role(
+            &[from("harness", &[7426])],
+            "sandbox",
+            7426
+        ));
+        assert!(!node_admits_role(
+            &[from("sandbox", &[7421])],
+            "sandbox",
+            7426
+        ));
+    }
+
+    /// The shipped manifests: the base carries the sandbox policy (selecting
+    /// nothing until a node runs sandboxes) and opens the node's sandbox port
+    /// to sandboxes alone; the overlay's Role is exactly the rights the
+    /// protocol checks assert, with nothing on Secrets and no attach, and its
+    /// node policy admits sandboxes alone.
+    #[test]
+    fn the_shipped_manifests_give_a_sandbox_one_route() {
+        let port = crate::config::KUBE_SANDBOX_PORT;
+        let file = |name: &str| {
+            String::from_utf8_lossy(&super::super::Manifests::get(name).unwrap().data).into_owned()
+        };
+        let policy = file("networkpolicy-sandbox.yaml");
+        for said in [
+            "name: tracon-sandbox",
+            "tracon.dev/role: sandbox",
+            r#"policyTypes: ["Ingress", "Egress"]"#,
+            "ingress: []",
+            "tracon.dev/role: node",
+            &format!("port: {port}"),
+        ] {
+            assert!(policy.contains(said), "{said}:\n{policy}");
+        }
+        let ports: Vec<&str> = policy.lines().filter(|l| l.contains("port:")).collect();
+        assert_eq!(ports.len(), 1, "{policy}");
+        assert!(file("networkpolicy-node.yaml").contains(&format!("port: {port}")));
+        assert!(file("deployment.yaml").contains(&format!("containerPort: {port}")));
+        assert!(file("kustomization.yaml").contains("networkpolicy-sandbox.yaml"));
+
+        let overlay = |name: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../deploy/kubernetes/sandbox-protocol")
+                .join(name);
+            std::fs::read_to_string(&path).unwrap()
+        };
+        let role: String = overlay("role.yaml")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!role.contains("secrets"), "{role}");
+        assert!(!role.contains("attach"), "{role}");
+        let mut granted: Vec<(String, String)> = Vec::new();
+        let mut resource = String::new();
+        for line in role.lines().map(str::trim) {
+            let list = |line: &str| -> Vec<String> {
+                line.split(['[', ']', ',', '"'])
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty() && !v.ends_with(':'))
+                    .map(str::to_string)
+                    .collect()
+            };
+            if let Some(rest) = line.strip_prefix("resources:") {
+                resource = list(rest).join(",");
+            } else if let Some(rest) = line.strip_prefix("verbs:") {
+                granted.extend(list(rest).into_iter().map(|v| (resource.clone(), v)));
+            }
+        }
+        granted.sort();
+        let mut asserted: Vec<(String, String)> = PROTOCOL_RIGHTS
+            .iter()
+            .map(|(_, resource, sub, verb)| {
+                let resource = match sub.is_empty() {
+                    true => resource.to_string(),
+                    false => format!("{resource}/{sub}"),
+                };
+                (resource, verb.to_string())
+            })
+            .collect();
+        asserted.sort();
+        assert_eq!(granted, asserted);
+        let node = overlay("networkpolicy-node.yaml");
+        assert!(node.contains("tracon.dev/role: sandbox"), "{node}");
+        assert!(!node.contains("tracon.dev/role: harness"), "{node}");
+        let kustomization = overlay("kustomization.yaml");
+        assert!(
+            kustomization.contains("name: tracon-harness"),
+            "{kustomization}"
+        );
+        assert!(overlay("configmap.yaml").contains("sandbox_protocol = true"));
+    }
+
+    /// From inside a sandbox: a resolved name or the node pod's own port
+    /// reached directly fails; the shared verdict holds as a dropping
+    /// boundary's, with the per-client proxy challenging.
+    #[test]
+    fn from_inside_a_sandbox_only_the_tunnels_answer() {
+        let script = sandbox_only_script("10.244.0.9", 7421);
+        assert!(
+            script.contains("http://10.244.0.9:7421/harness/ping"),
+            "{script}"
+        );
+        assert!(sandbox_only_script("fd00::9", 7421).contains("http://[fd00::9]:7421/"));
+        let good = "EGRESS_CONNECT=407\nDIRECT_NAME_SECONDS=20\nDIRECT_ADDR_SECONDS=20\nPROXY_ALLOWED\npong";
+        let ok = sandbox_only_verdict(good, 7424);
+        assert!(ok.ok, "{}", ok.detail);
+        for marker in ["DIRECT_DNS_OK", "DIRECT_NODE_OK", "DIRECT_OK"] {
+            assert!(!sandbox_only_verdict(&format!("{marker}\n{good}"), 7424).ok);
+        }
+        assert!(!sandbox_only_verdict(&good.replace("407", "000"), 7424).ok);
     }
 
     #[test]

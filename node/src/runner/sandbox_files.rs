@@ -117,6 +117,13 @@ fn is_workspace(volume: &str) -> bool {
     own(volume).is_some_and(|rest| rest.starts_with("workspace-"))
 }
 
+/// Whether a volume is a package cache (a session's, a repository's, a
+/// preparation's run cache): what a preparation fills and a session only
+/// reads from.
+fn is_cache(volume: &str) -> bool {
+    own(volume).is_some_and(|rest| rest.starts_with("cache-") || rest.starts_with("prep-cache-"))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FilesError {
     #[error("not a volume name: {0}")]
@@ -160,6 +167,10 @@ pub fn sync_mode(volume: &str, kind: RunKind) -> Option<(Mode, Limits)> {
         return None;
     }
     match kind {
+        // Sent in, so a session's installs find what a preparation fetched,
+        // and never taken back: a cache is too large to return every turn,
+        // and nothing a session leaves in one is anything another needs.
+        RunKind::Session if is_cache(volume) => None,
         RunKind::Session if is_workspace(volume) => Some((Mode::Checkout, checkout_limits())),
         RunKind::Session => Some((Mode::Whole, checkout_limits())),
         RunKind::Prepare => Some((Mode::Whole, PREPARED_LIMITS)),
@@ -174,6 +185,11 @@ pub fn sync_mode(volume: &str, kind: RunKind) -> Option<(Mode, Limits)> {
 pub struct FilesStore {
     root: PathBuf,
     every: Duration,
+    /// Volumes it keeps that are never sent, whatever a run mounts.
+    withheld: Vec<String>,
+    /// Keep every volume a run names, making an empty one where none is
+    /// kept yet, rather than leaving it to the runtime.
+    every_volume: bool,
 }
 
 impl FilesStore {
@@ -181,7 +197,27 @@ impl FilesStore {
         FilesStore {
             root: root.into(),
             every: SYNC_EVERY,
+            withheld: Vec::new(),
+            every_volume: false,
         }
+    }
+
+    /// Keep every volume a run mounts here, an empty one made for a name not
+    /// kept yet, as a runtime makes a volume on first mount. For a provider
+    /// that mounts no runtime volume at all (Kubernetes, whose store is the
+    /// state claim itself).
+    pub fn keeping_every_volume(mut self) -> Self {
+        self.every_volume = true;
+        self
+    }
+
+    /// Never send `volume` into a sandbox, even where a run mounts it: the
+    /// provider gives the run empty storage of its own there instead. For a
+    /// volume shared between runs (the harness state every session once
+    /// shared), whose every other run's files a sandbox must not be handed.
+    pub fn withholding(mut self, volume: impl Into<String>) -> Self {
+        self.withheld.push(volume.into());
+        self
     }
 
     /// This node's, under its state directory.
@@ -401,6 +437,13 @@ impl FilesStore {
         let mut provided = Vec::new();
         let mut placed = Vec::new();
         for mount in mounts {
+            if self.withheld.contains(&mount.volume) {
+                provided.push(mount.clone());
+                continue;
+            }
+            if self.every_volume && !mount.is_local() && self.tree(&mount.volume).is_none() {
+                std::fs::create_dir_all(self.path(&mount.volume)?)?;
+            }
             let Some(tree) = self.tree(&mount.volume) else {
                 provided.push(mount.clone());
                 continue;

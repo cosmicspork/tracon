@@ -26,6 +26,13 @@ use crate::gateway::proxy::{GrantSpec, Grants, Refusal};
 use crate::runner::kube::{KubeRunner, KubeSpec, PodEnv, SecretRights};
 use crate::runner::{Mount, Runner};
 
+/// Whether this node runs its harness pods as sandboxes over the sandbox
+/// protocol (`[runtime.kubernetes] sandbox_protocol`, `provider::kubernetes`).
+pub fn uses_sandbox_protocol(cfg: &Config) -> bool {
+    cfg.runtime.kind == crate::config::RuntimeKind::Kubernetes
+        && cfg.runtime.kubernetes.sandbox_protocol
+}
+
 /// The manifests a node of this kind expects around it, printed by
 /// `tracon setup` for the operator (or the Coder template) to apply.
 #[derive(Embed)]
@@ -169,6 +176,12 @@ impl KubeBackend {
         if let Err(error) = &self.refusal {
             return Some(format!("per-client egress is off on this node: {error}"));
         }
+        // A sandbox reaches the egress proxy through its tunnel, and the
+        // grant's credentials travel over the protocol: neither a policy port
+        // nor a Secret is involved.
+        if uses_sandbox_protocol(&self.cfg) {
+            return None;
+        }
         let secrets = match self.secret_rights.verdict() {
             Some(Ok(())) => None,
             Some(Err(why)) => Some(why),
@@ -236,12 +249,67 @@ impl KubeBackend {
             Ok(mut spec) => {
                 spec.extra_mounts = extra_mounts;
                 adjust(&mut spec);
+                if uses_sandbox_protocol(&self.cfg) {
+                    return self.protocol_runner(client, spec);
+                }
                 Arc::new(
                     KubeRunner::new(client, spec).with_secret_rights(self.secret_rights.clone()),
                 )
             }
             Err(e) => Arc::new(Unavailable(e)),
         }
+    }
+
+    /// Where a node running sandboxes keeps the trees it sends them: the
+    /// state claim's own directories, every volume a run names among them,
+    /// except the harness state every session once shared, which no sandbox
+    /// is handed (a session gets its own, `materialize::own_state`).
+    pub fn files_store(&self) -> crate::runner::sandbox_files::FilesStore {
+        crate::runner::sandbox_files::FilesStore::new(&self.cfg.runtime.kubernetes.state_mount)
+            .withholding(crate::session::materialize::harness_state_volume())
+            .keeping_every_volume()
+    }
+
+    /// The sandbox provider around `spec`, which names the pod a harness would
+    /// have run in.
+    fn provider_for(
+        &self,
+        client: kube::Client,
+        spec: KubeSpec,
+    ) -> crate::provider::kubernetes::KubeSandboxProvider {
+        crate::provider::kubernetes::KubeSandboxProvider::new(
+            client,
+            crate::provider::kubernetes::KubeSandboxOptions::from_config(&self.cfg, spec),
+        )
+    }
+
+    /// The provider for this node's own harness, for the checks.
+    pub async fn sandbox_provider(
+        &self,
+    ) -> Result<crate::provider::kubernetes::KubeSandboxProvider, String> {
+        let spec = self.spec()?;
+        Ok(self.provider_for(self.client().await?, spec))
+    }
+
+    /// A sandbox per command over the protocol, with its trees sent over the
+    /// files channel and its routes to the node as tunnels. The image identity
+    /// is a plain runner's, which answers a digest-pinned reference without
+    /// running anything.
+    fn protocol_runner(&self, client: kube::Client, mut spec: KubeSpec) -> Arc<dyn Runner> {
+        let mounts = std::mem::take(&mut spec.extra_mounts);
+        let image = spec.image.clone();
+        let workdir = spec.workdir.clone();
+        let delegate = Arc::new(KubeRunner::new(client.clone(), spec.clone()));
+        let provider = self.provider_for(client, spec);
+        Arc::new(
+            crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
+                .with_mounts(mounts)
+                .with_workdir(workdir)
+                .with_delegate(delegate)
+                .with_files(self.files_store())
+                .with_tunnels(crate::runner::tunnels::kube_tunnels(&self.cfg))
+                .with_bundled_harness(true),
+        )
     }
 
     pub async fn runner_for(&self, extra_mounts: Vec<Mount>) -> Result<KubeRunner, String> {
@@ -423,6 +491,7 @@ impl Backend for KubeBackend {
         source: &std::path::Path,
     ) -> Result<(), BoundaryError> {
         crate::workspace::validate_tree(source).map_err(|e| BoundaryError::Other(e.to_string()))?;
+        refuse_live(volume)?;
         let root = self.cfg.runtime.kubernetes.state_mount.join(volume);
         let staged = root.with_extension(format!("staging-{}", uuid::Uuid::now_v7()));
         let _ = std::fs::remove_dir_all(&staged);
@@ -440,6 +509,9 @@ impl Backend for KubeBackend {
         volume: &str,
         destination: &std::path::Path,
     ) -> Result<(), BoundaryError> {
+        if export_live(volume, destination, false).await? {
+            return Ok(());
+        }
         self.export_with(volume, destination, |source, staged| {
             crate::workspace::copy_tree(source, staged, false)
         })
@@ -454,6 +526,9 @@ impl Backend for KubeBackend {
         volume: &str,
         destination: &std::path::Path,
     ) -> Result<(), BoundaryError> {
+        if export_live(volume, destination, true).await? {
+            return Ok(());
+        }
         self.export_with(volume, destination, crate::workspace::copy_checkout)
     }
 
@@ -522,6 +597,11 @@ impl Backend for KubeBackend {
     }
 
     fn secret_env_refusal(&self) -> Option<String> {
+        // Over the protocol, secret environment goes with the spawn, never
+        // into a pod spec or a Secret.
+        if uses_sandbox_protocol(&self.cfg) {
+            return None;
+        }
         let why = match self.secret_rights.verdict() {
             Some(Ok(())) => return None,
             Some(Err(why)) => why,
@@ -559,7 +639,38 @@ impl Backend for KubeBackend {
     }
 
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
+        refuse_live(volume)?;
         crate::boundary::remove_directory_volume(&self.cfg.runtime.kubernetes.state_mount, volume)
+    }
+}
+
+/// A volume a running sandbox holds is its, not the claim's copy: as a
+/// runtime refuses to replace or remove a volume a container mounts.
+fn refuse_live(volume: &str) -> Result<(), BoundaryError> {
+    match crate::runner::sandbox_files::is_live(volume) {
+        true => Err(BoundaryError::Other(format!(
+            "volume {volume} is in use by a running sandbox"
+        ))),
+        false => Ok(()),
+    }
+}
+
+/// Export a volume a running sandbox holds from the sandbox itself, checked
+/// as it arrives. `false` when no sandbox holds it: the claim's copy is
+/// then the one to read.
+async fn export_live(
+    volume: &str,
+    destination: &std::path::Path,
+    checkout: bool,
+) -> Result<bool, BoundaryError> {
+    match crate::runner::sandbox_files::export_live(volume, destination, checkout).await {
+        None => Ok(false),
+        Some(Err(e)) => Err(BoundaryError::Other(format!("copy out of {volume}: {e}"))),
+        Some(Ok(_)) => {
+            crate::workspace::validate_tree(destination)
+                .map_err(|e| BoundaryError::Other(e.to_string()))?;
+            Ok(true)
+        }
     }
 }
 

@@ -415,6 +415,14 @@ fn what_comes_back_from_which_run() {
     assert_eq!(mode("tracon-scratch-a", RunKind::Probe), None);
     assert_eq!(mode("tracon-check-a", RunKind::Session), None);
     assert_eq!(mode("tracon-check-a", RunKind::Prepare), None);
+    // A cache a session is sent never comes back from it; a preparation's
+    // does, since filling it is what the preparation is for.
+    assert_eq!(mode("tracon-cache-r-a", RunKind::Session), None);
+    assert_eq!(mode("tracon-prep-cache-a", RunKind::Session), None);
+    assert_eq!(
+        mode("tracon-prep-cache-a", RunKind::Prepare),
+        Some(Mode::Whole)
+    );
 
     assert!(backs("tracon-workspace-a"));
     assert!(backs("tracon-scratch-a"));
@@ -492,4 +500,37 @@ fn a_session_gets_its_own_state() {
         Mount::at("tracon-scratch-s", "state", "/root/.claude", false)
     );
     assert_eq!(mounts[1].sub_path, "harness/plugin");
+}
+
+/// A withheld volume is never sent, even though the store keeps it: the run
+/// is handed it as a mount, for the provider to give empty storage of its own.
+#[test]
+fn a_withheld_volume_is_provided_not_sent() {
+    let (_dir, store) = store_with("tracon-harness-state");
+    let store = store.withholding("tracon-harness-state");
+    let mounts = vec![Mount::volume(
+        "tracon-harness-state",
+        "/home/h/.claude",
+        false,
+    )];
+    let (provided, plan) = store.plan(&mounts).unwrap();
+    assert_eq!(provided, mounts);
+    assert!(plan.is_none());
+}
+
+/// A store that keeps every volume makes the one a run names before it is
+/// kept, and sends it in like any other.
+#[test]
+fn a_store_keeping_every_volume_makes_what_it_does_not_hold_yet() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesStore::new(dir.path().join("store")).keeping_every_volume();
+    let mounts = vec![Mount::volume("tracon-cache-r-a", "/cache", false)];
+    let (provided, plan) = store.plan(&mounts).unwrap();
+    assert_eq!(provided, vec![Mount::local("/cache")]);
+    assert_eq!(plan.unwrap().targets(), ["/cache"]);
+    assert!(store.holds("tracon-cache-r-a"));
+    assert!(FilesStore::new(dir.path().join("store"))
+        .keeping_every_volume()
+        .plan(&[Mount::volume("../x", "/x", false)])
+        .is_err());
 }

@@ -1359,6 +1359,12 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # (on a cloud, the nodes' and load balancers' public IPs),
                                     # and any NAT64 (64:ff9b::/96) or 6to4 (2002::/16) range the
                                     # cluster uses, since an IPv4 address inside one is not decoded
+# sandbox_protocol = false          # (under [runtime.kubernetes]) every harness pod a sandbox over the
+                                    # sandbox protocol ("Sandboxes on Kubernetes"): tracon-sandbox
+                                    # from the node's own bundle, files and stdio over the protocol,
+                                    # tunnels for the gateways, no Secret, no claim mounted
+# sandbox_port = 7426               # (under [runtime.kubernetes]) where sandboxes dial the node pod,
+                                    # and where their init containers fetch the bundle
 # [runtime.kubernetes.builder]      # build repository images on a cluster ("Images on Kubernetes");
                                     # left out, a pod-hosted node builds nothing
 # addr = "tcp://buildkitd.tracon-build.svc:1234"  # BuildKit's mutual-TLS listener
@@ -1881,6 +1887,51 @@ addresses it checked. On a cloud, list the nodes' and load balancers' public add
 in `internal_cidrs` too: they reach the cluster from outside it, and nothing private
 about them says so. An entry that is not an address block is refused when `node.toml`
 loads.
+
+#### Sandboxes on Kubernetes
+
+With `[runtime.kubernetes] sandbox_protocol = true`, every harness pod is a sandbox
+over the sandbox protocol, as on Podman with `sandbox_protocol`, `sandbox_files` and
+`sandbox_tunnels` together. Apply `deploy/kubernetes/sandbox-protocol` (an overlay of
+the base) for it:
+
+- **Bundle.** The node's own: `[sandbox] bundle`, else its release's, which it fetches
+  and checks into `<state>/bundles` as a Podman node with `sandbox_images` does (at the
+  boundary check, so at start). It serves it as one tar on the sandbox port. Each pod's
+  init container, in the pod's own image (it needs `sh`, `curl` or `wget`, `sha256sum`
+  and `tar`), fetches it, checks it against the digest the node wrote into the pod
+  spec, and unpacks it into an emptyDir mounted read-only at `/opt/tracon`.
+  `tracon-sandbox` from it is the pod's only process, and the harness it starts over
+  the protocol is the bundle's. Pods run as uid 65532 with home `/home/harness`.
+- **Files.** Nothing of the state claim is mounted, so the claim is the node's alone.
+  Every directory a run names is an emptyDir of the pod's own, filled over the
+  protocol and, for a session's workspace and own harness state, taken back at each
+  turn end, every 60 s in a turn and at exit, as with Podman's `sandbox_files`. A
+  session's harness state is its own; the state every session once shared is never
+  sent. Caches are sent in and come back only from a preparation.
+- **Placement.** Pods sit beside the node pod (`tracon.dev/role=node`) by pod
+  affinity on `kubernetes.io/hostname`, through the scheduler: a machine with no
+  room refuses the pod (`out_of_cpu`, `out_of_memory`, ...), as one bound by
+  `nodeName` was refused by the kubelet.
+- **Route.** A sandbox dials the node pod's address on `sandbox_port` (7426) over TLS
+  pinned to the node's certificate. Its policy, `tracon-sandbox`, allows that and
+  nothing else: no DNS, no ingress, none of the node pod's other ports. The MCP and
+  model gateway and both proxies are tunnels over the connection, and the gateway's
+  name is the sandbox's loopback, so a harness addresses them as it always did.
+- **No Secrets.** A run's secret environment travels with its spawn over the
+  protocol. The run's one-time token is in the pod spec, where it is worth nothing
+  once spent: the first hello that presents it consumes it, the node only takes a
+  connection from the address of the pod it issued the token to (anything else is
+  closed before it is read), and the token is revoked when the run ends or fails to
+  connect. The overlay's Role has no rule on Secrets and no `pods/attach`.
+
+The checks read the provider's own rendering back after admission (a gated probe),
+the `tracon-sandbox` policy's shape and that `tracon-node` admits sandboxes on the
+port; `--deep` runs the egress script in a sandbox through its tunnels and also
+checks that no name resolves and that the node pod's forward port is not reachable
+directly. Names follow `[boundary] resource_prefix`: the policies a node reads are
+`<prefix>-sandbox`, `<prefix>-harness` and `<prefix>-node`, and the repository images
+it pushes are `<registry>/<prefix>-repo-…`.
 
 #### Images on Kubernetes
 

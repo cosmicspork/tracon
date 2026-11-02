@@ -65,13 +65,14 @@ pub fn host_arch() -> Option<&'static str> {
 }
 
 /// The bundle this node's sandboxes mount: `[sandbox] bundle` when set,
-/// else, with `sandbox_images` on, the one the node fetches for itself.
+/// else, with `sandbox_images` on (or a pod-hosted node's
+/// `sandbox_protocol`), the one the node fetches for itself.
 /// `None` when neither applies.
 pub fn effective(cfg: &Config) -> Option<PathBuf> {
     if let Some(bundle) = &cfg.sandbox.bundle {
         return Some(bundle.clone());
     }
-    if !cfg.runtime.podman.sandbox_images {
+    if !fetches_own(cfg) {
         return None;
     }
     host_arch().map(|arch| managed_dir(&Config::state_dir(), env!("CARGO_PKG_VERSION"), arch))
@@ -79,7 +80,14 @@ pub fn effective(cfg: &Config) -> Option<PathBuf> {
 
 /// Whether the node fetches its bundle rather than being given one.
 pub fn managed(cfg: &Config) -> bool {
-    cfg.runtime.podman.sandbox_images && cfg.sandbox.bundle.is_none()
+    fetches_own(cfg) && cfg.sandbox.bundle.is_none()
+}
+
+/// Whether the node's sandboxes run a bundle it fetches for itself when it is
+/// given none: Podman's with `sandbox_images`, and a pod-hosted node's with
+/// `[runtime.kubernetes] sandbox_protocol`, whose init containers copy it in.
+fn fetches_own(cfg: &Config) -> bool {
+    cfg.runtime.podman.sandbox_images || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
 }
 
 pub fn managed_dir(state_dir: &Path, version: &str, arch: &str) -> PathBuf {

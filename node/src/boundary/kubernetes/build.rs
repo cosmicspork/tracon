@@ -53,9 +53,29 @@ const WORKERS_TIMEOUT: Duration = Duration::from_secs(10);
 /// before every build.
 const CHECK_BOUND: Duration = Duration::from_secs(15);
 
-/// What this node pushes, by name under the registry: only these are ever
-/// removed from it.
-const OWN: &str = "tracon-repo-";
+/// The stem every node names its repository images with locally
+/// (`repo_image`), shared because a tag is keyed on what it is built from.
+const SHARED_STEM: &str = "tracon-repo-";
+
+/// What this node pushes, by name under the registry: `<prefix>-repo-`
+/// (`[boundary] resource_prefix`). Only these are ever removed from it, so two
+/// nodes pushing to one registry never take each other's images for their
+/// own. `tracon-repo-` on a node with the default prefix.
+fn own_stem() -> String {
+    crate::config::resource_name("repo-")
+}
+
+/// A local image's name under the registry, with this node's stem.
+fn registry_rest(rest: &str) -> String {
+    restemmed(rest, &own_stem())
+}
+
+fn restemmed(rest: &str, stem: &str) -> String {
+    match rest.strip_prefix(SHARED_STEM) {
+        Some(tail) => format!("{stem}{tail}"),
+        None => rest.to_string(),
+    }
+}
 
 /// `90 seconds`, `45 minutes`: a deadline as the operator set it.
 fn duration_words(duration: Duration) -> String {
@@ -177,14 +197,18 @@ impl BuildKitBuilder {
         if tag.starts_with(&format!("{}/", self.prefix)) {
             return tag.to_string();
         }
-        format!("{}/{}", self.prefix, tag.strip_prefix(LOCAL).unwrap_or(tag))
+        format!(
+            "{}/{}",
+            self.prefix,
+            registry_rest(tag.strip_prefix(LOCAL).unwrap_or(tag))
+        )
     }
 
     /// The image a `localhost/` name refers to here; any other name is a
     /// registry's own already.
     pub fn resolve(&self, image: &str) -> String {
         match image.strip_prefix(LOCAL) {
-            Some(rest) => format!("{}/{rest}", self.prefix),
+            Some(rest) => format!("{}/{}", self.prefix, registry_rest(rest)),
             None => image.to_string(),
         }
     }
@@ -499,7 +523,7 @@ impl ImageBuilder for BuildKitBuilder {
     /// never this node's to delete.
     async fn remove(&self, image: &str) {
         let image = self.resolve(image);
-        if !image.starts_with(&format!("{}/{OWN}", self.prefix)) {
+        if !image.starts_with(&format!("{}/{}", self.prefix, own_stem())) {
             return;
         }
         if let Err(error) = self.registry.remove(&image).await {
@@ -511,6 +535,18 @@ impl ImageBuilder for BuildKitBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node with its own resource prefix pushes under its own stem, and
+    /// only a repository image is renamed.
+    #[test]
+    fn a_pushed_repository_image_carries_the_nodes_stem() {
+        assert_eq!(
+            restemmed("tracon-repo-app-1-src:abc", "spike-repo-"),
+            "spike-repo-app-1-src:abc"
+        );
+        assert_eq!(restemmed("other/app:1", "spike-repo-"), "other/app:1");
+        assert_eq!(own_stem(), "tracon-repo-");
+    }
     use crate::boundary::registry::tests::{docker_config, serve};
 
     const DIGEST: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";

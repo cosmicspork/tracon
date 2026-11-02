@@ -7,5 +7,6 @@ resources:
   - pvc.yaml
   - networkpolicy-harness.yaml
   - networkpolicy-node.yaml
+  - networkpolicy-sandbox.yaml
   - configmap.yaml
   - deployment.yaml

@@ -79,6 +79,9 @@ spec:
               containerPort: 8888
             - name: egress
               containerPort: 7424
+            # Sandboxes dial it, with `[runtime.kubernetes] sandbox_protocol`.
+            - name: sandbox
+              containerPort: 7426
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -251,6 +251,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.start_timeout_secs"),
     restart("runtime.kubernetes.image_pull_secrets"),
     restart("runtime.kubernetes.internal_cidrs"),
+    restart("runtime.kubernetes.sandbox_protocol"),
+    restart("runtime.kubernetes.sandbox_port"),
     // [runtime.kubernetes.builder]
     restart("runtime.kubernetes.builder.addr"),
     restart("runtime.kubernetes.builder.tls_dir").path(PathKind::SecretDir),

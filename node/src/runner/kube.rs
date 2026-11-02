@@ -64,6 +64,20 @@ pub struct PodEnv {
 }
 
 impl PodEnv {
+    /// The namespace the node's own pod runs in, which harness pods may be
+    /// configured away from (`[runtime.kubernetes] namespace`).
+    pub fn own_namespace() -> Option<String> {
+        std::env::var("TRACON_NAMESPACE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
     pub fn detect(cfg: &Config) -> Result<Self, String> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let namespace = if cfg.runtime.kubernetes.namespace.is_empty() {
@@ -113,7 +127,7 @@ impl Sizing {
         }
     }
 
-    fn sized(self, resources: &KubeResources) -> PodSizing {
+    pub(crate) fn sized(self, resources: &KubeResources) -> PodSizing {
         match self {
             Self::Session => resources.session(),
             Self::Command => resources.command(),
@@ -149,7 +163,7 @@ pub fn label_value(value: &str) -> Option<String> {
 /// The labels a harness pod carries: the two every selector reads (`role`,
 /// `session`), then what it is for. A value with nothing left once sanitized
 /// is left out rather than rendered empty.
-fn pod_labels(
+pub(crate) fn pod_labels(
     name: &str,
     labels: &RunLabels,
     sizing: Sizing,
@@ -212,7 +226,7 @@ impl Refusal {
 
     /// The kubelet's admission reason, read: `OutOf` and the resource it ran
     /// out of.
-    fn from_reason(reason: &str) -> Option<Self> {
+    pub(crate) fn from_reason(reason: &str) -> Option<Self> {
         Some(match reason.strip_prefix("OutOf")? {
             "cpu" => Self::OutOfCpu,
             "memory" => Self::OutOfMemory,
@@ -226,7 +240,7 @@ impl Refusal {
 /// The capacity refusal a pod's status reports, if that is how it ended: phase
 /// Failed, an `OutOf*` reason, and no container that ever ran. A pod whose
 /// container ran and ended is a command's own result, whatever its phase.
-fn refusal(status: &PodStatus) -> Option<Refusal> {
+pub(crate) fn refusal(status: &PodStatus) -> Option<Refusal> {
     if status.phase.as_deref() != Some("Failed") {
         return None;
     }
@@ -245,7 +259,7 @@ fn refusal(status: &PodStatus) -> Option<Refusal> {
 /// What a refused pod is reported as: the resource it was refused for, what
 /// it asked for, and the `[runtime.kubernetes.resources.*]` key that sizes
 /// it, which is what an operator changes. `said` is the cluster's own words.
-fn refusal_error(
+pub(crate) fn refusal_error(
     name: &str,
     refusal: Refusal,
     sizing: Sizing,
@@ -302,7 +316,7 @@ fn refusal_error(
 /// `failed quota: <name>: must specify ...` when the quota covers a resource
 /// the pod leaves unset) or the LimitRange's (`... per Container ...`,
 /// `... per Pod ...`).
-fn quota_refused(code: u16, message: &str) -> bool {
+pub(crate) fn quota_refused(code: u16, message: &str) -> bool {
     code == 403
         && [
             "exceeded quota",
@@ -530,7 +544,7 @@ impl KubeSpec {
     /// Explicit requests and a memory limit, always. A namespace's
     /// LimitRange fills in whatever a pod leaves out, and a request above
     /// its default limit is then refused at admission.
-    fn requirements(sizing: &PodSizing) -> ResourceRequirements {
+    pub(crate) fn requirements(sizing: &PodSizing) -> ResourceRequirements {
         let quantity = |value: &str| Quantity(value.to_string());
         let mut limits = std::collections::BTreeMap::from([(
             "memory".to_string(),
@@ -549,7 +563,7 @@ impl KubeSpec {
         }
     }
 
-    fn pull_secrets(&self) -> Option<Vec<LocalObjectReference>> {
+    pub(crate) fn pull_secrets(&self) -> Option<Vec<LocalObjectReference>> {
         (!self.image_pull_secrets.is_empty()).then(|| {
             self.image_pull_secrets
                 .iter()
@@ -1112,10 +1126,10 @@ struct CaptureEnd {
     stderr: Vec<u8>,
 }
 
-const HARNESS_CONTAINER: &str = "harness";
+pub(crate) const HARNESS_CONTAINER: &str = "harness";
 
 /// The status of the one container a harness pod runs, by name.
-fn harness_status(status: &PodStatus) -> Option<&ContainerStatus> {
+pub(crate) fn harness_status(status: &PodStatus) -> Option<&ContainerStatus> {
     let statuses = status.container_statuses.as_deref()?;
     statuses
         .iter()
@@ -1126,7 +1140,7 @@ fn harness_status(status: &PodStatus) -> Option<&ContainerStatus> {
 /// Why a pod has not started, in the words an operator can act on. The pod
 /// status has no "pulling" state: a pull shows as `ContainerCreating`, and the
 /// pod's events (which a runner holds no right to read) say the rest.
-fn pending_reason(status: &PodStatus) -> String {
+pub(crate) fn pending_reason(status: &PodStatus) -> String {
     if let Some(waiting) = harness_status(status)
         .and_then(|c| c.state.as_ref())
         .and_then(|s| s.waiting.as_ref())
@@ -1325,7 +1339,7 @@ fn digest_pinned(image: &str) -> bool {
 /// actually digest-shaped (`repo@sha256:hex`); a bare `sha256:hex` with no
 /// repository, or anything else, is not something `immutable_image_identity`
 /// can parse and must not be returned as if it were.
-fn normalize_image_id(raw: &str) -> Option<String> {
+pub(crate) fn normalize_image_id(raw: &str) -> Option<String> {
     let stripped = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
     stripped.contains("@sha256:").then(|| stripped.to_string())
 }
