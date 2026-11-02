@@ -8,6 +8,7 @@
 pub mod kube;
 pub mod podman;
 pub mod protocol;
+pub mod sandbox_files;
 
 use async_trait::async_trait;
 use futures_core::future::BoxFuture;
@@ -42,6 +43,22 @@ impl Mount {
             target: target.into(),
             read_only,
         }
+    }
+
+    /// Storage of the sandbox's own at `target`, removed with it: where a
+    /// tree sent over the files channel lands (`sandbox_files`). Only a
+    /// sandbox provider is given one.
+    pub fn local(target: impl Into<String>) -> Self {
+        Self {
+            volume: String::new(),
+            sub_path: String::new(),
+            target: target.into(),
+            read_only: false,
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.volume.is_empty()
     }
 
     pub fn at(

@@ -457,9 +457,22 @@ impl SandboxConn {
         dir: impl Into<PathBuf>,
         exclusions: Exclusions,
     ) -> Result<TreeSummary, SandboxError> {
+        self.import_dir_within(local, dir, exclusions, None).await
+    }
+
+    /// [`Self::import_dir`], asking the sandbox to unpack within `limits`
+    /// rather than its defaults: a tree carrying what a preparation installed
+    /// is larger than a checkout.
+    pub async fn import_dir_within(
+        &self,
+        local: &Path,
+        dir: impl Into<PathBuf>,
+        exclusions: Exclusions,
+        limits: Option<Limits>,
+    ) -> Result<TreeSummary, SandboxError> {
         let args = protocol::encode_args(&ImportRequest {
             dir: dir.into(),
-            limits: None,
+            limits,
         });
         let (response, stream) = self
             .send(request(Method::POST, path::IMPORT, Some(args)), false)
@@ -474,6 +487,22 @@ impl SandboxConn {
             }
         }
         json_body(checked(response).await?).await
+    }
+
+    /// The archive of `dir` as the sandbox packs it, for a caller that
+    /// unpacks it itself with [`files::unpack_async`] (which holds it to the
+    /// same rules [`Self::export_tar`] does). A transfer that fails halfway
+    /// ends in a read error, never in a shorter archive.
+    pub async fn export_reader(
+        &self,
+        dir: impl Into<PathBuf>,
+        exclusions: Exclusions,
+    ) -> Result<H2Reader, SandboxError> {
+        let args = protocol::encode_args(&ExportRequest {
+            dir: dir.into(),
+            exclusions,
+        });
+        self.open_read(path::EXPORT, args).await
     }
 
     /// Export `dir` from the sandbox into `dest` on the node, validated as it

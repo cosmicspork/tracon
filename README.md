@@ -1303,6 +1303,11 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # protocol instead of podman's pipes; network, volumes and
                                     # images as before. Linux hosts only
 # sandbox_init = false              # start tracon-sandbox under podman's --init, not as PID 1
+# sandbox_files = false             # with sandbox_protocol: workspaces and harness state on the
+                                    # sandbox's own disk, sent in at start and read back over the
+                                    # protocol (exports live; the session's own state at each turn
+                                    # end, every 60 s in a turn, at exit). A lost sandbox loses only
+                                    # what changed since its last sync
 # [sandbox]
 # bundle = "/path/to/<version>/amd64" # the harness bundle (scripts/harness-bundle.sh --sandbox)
                                     # holding bin/tracon-sandbox, mounted read-only at /opt/tracon;

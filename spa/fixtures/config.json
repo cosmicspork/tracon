@@ -1305,6 +1305,22 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "runtime.podman.sandbox_files",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "runtime.kubernetes.namespace",
       "path": null,
       "secret": false,

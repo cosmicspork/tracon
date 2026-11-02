@@ -71,6 +71,9 @@ pub struct ProtocolRunner {
     /// the services beside a session, which stay containers of their own
     /// joined to the sandbox's network.
     delegate: Option<Arc<dyn Runner>>,
+    /// Where the volumes it sends over the files channel are kept, rather
+    /// than mounted (`sandbox_files`).
+    files: Option<super::sandbox_files::FilesStore>,
 }
 
 impl ProtocolRunner {
@@ -83,7 +86,15 @@ impl ProtocolRunner {
             workdir: "/work".into(),
             connect_within: CONNECT_WITHIN,
             delegate: None,
+            files: None,
         }
+    }
+
+    /// Send the volumes `store` keeps over the files channel instead of
+    /// mounting them.
+    pub fn with_files(mut self, store: super::sandbox_files::FilesStore) -> Self {
+        self.files = Some(store);
+        self
     }
 
     /// Accept sandboxes with `server` rather than this process's own.
@@ -148,6 +159,12 @@ impl ProtocolRunner {
             .cloned()
             .collect();
         let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
+        let (provided, files) = match &self.files {
+            Some(store) => store
+                .plan(&mounts)
+                .map_err(|e| RunnerError::Other(format!("sandbox {name}: {e}")))?,
+            None => (mounts.clone(), None),
+        };
         let created = {
             // While the sandbox is made, not while it runs.
             let _images = crate::boundary::reconcile::images_in_use().await;
@@ -156,7 +173,7 @@ impl ProtocolRunner {
                     name: Some(name),
                     image: &image,
                     resources: &Resources::default(),
-                    mounts: &mounts,
+                    mounts: &provided,
                     bootstrap: &bootstrap,
                 })
                 .await
@@ -175,6 +192,7 @@ impl ProtocolRunner {
             handle: handle.clone(),
             run,
             conn: None,
+            files: None,
             armed: true,
         };
         running()
@@ -196,6 +214,22 @@ impl ProtocolRunner {
         };
         let mut teardown = teardown;
         teardown.conn = Some(conn.clone());
+        if let Some(files) = files {
+            // A spawn is a session's harness unless it says otherwise.
+            let kind = cmd.labels.kind.unwrap_or(match stdin {
+                true => super::RunKind::Session,
+                false => super::RunKind::Probe,
+            });
+            match files.attach(&conn, name, kind).await {
+                Ok(attached) => teardown.files = Some(attached),
+                Err(error) => {
+                    teardown.finish().await;
+                    return Err(RunnerError::Other(format!(
+                        "send files to sandbox {name}: {error}"
+                    )));
+                }
+            }
+        }
         let workdir = cmd.workdir.clone().unwrap_or_else(|| self.workdir.clone());
         // As on a container: a working directory only a mount provides is
         // passed; otherwise the image's own applies, which is the same path.
@@ -246,6 +280,7 @@ struct Teardown {
     handle: Handle,
     run: String,
     conn: Option<SandboxConn>,
+    files: Option<super::sandbox_files::Attached>,
     armed: bool,
 }
 
@@ -259,6 +294,7 @@ impl Teardown {
             self.handle.clone(),
             self.run.clone(),
             self.conn.take(),
+            self.files.take(),
         )
         .await;
     }
@@ -279,6 +315,7 @@ impl Drop for Teardown {
             self.handle.clone(),
             self.run.clone(),
             self.conn.take(),
+            self.files.take(),
         ));
     }
 }
@@ -290,8 +327,13 @@ async fn teardown(
     handle: Handle,
     run: String,
     conn: Option<SandboxConn>,
+    files: Option<super::sandbox_files::Attached>,
 ) {
     server.tokens().revoke(&run);
+    // While the sandbox is still there to read from.
+    if let Some(files) = files {
+        files.finish().await;
+    }
     if let Some(conn) = conn {
         // Its processes get their stop signal and grace from the sandbox,
         // before the provider's removal makes sure of it.
@@ -374,6 +416,8 @@ impl Runner for ProtocolRunner {
     /// The sandbox the name is running in, else a sandbox of that name (one
     /// left by an earlier node process, which the provider named as asked).
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
+        // What it changed comes back before it goes.
+        super::sandbox_files::finish_named(name).await;
         let handle = running()
             .lock()
             .unwrap()

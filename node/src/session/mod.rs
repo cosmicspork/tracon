@@ -3043,6 +3043,9 @@ impl Manager {
             .map_err(anyhow::Error::msg)?;
         let container = crate::config::resource_name(&format!("h-{slug}"));
         let mut mounts = scratch.mounts;
+        if crate::boundary::podman::uses_sandbox_files(&self.cfg) {
+            materialize::own_state(&mut mounts, &scratch.volume);
+        }
         mounts.push(workspace.mount("/work", false));
         let (runner, cache_env) = session_runner(
             self.backend.as_ref(),
