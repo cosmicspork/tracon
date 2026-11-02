@@ -314,6 +314,14 @@ pub async fn recipe(repo: &Path, entry: &Repo, run_as: &RunAs) -> Result<Recipe,
         hash.update(profile.as_bytes());
         hash.update([0]);
     }
+    // A recipe may stand on the stock base (`FROM ${TRACON_SANDBOX_BASE}`),
+    // so a new base is a new recipe.
+    if let Some(base) = crate::sandbox_images::active_base() {
+        hash.update(crate::sandbox_images::BASE_ARG.as_bytes());
+        hash.update([0]);
+        hash.update(base.as_bytes());
+        hash.update([0]);
+    }
     Ok(Recipe {
         dockerfile,
         context,
@@ -353,7 +361,7 @@ pub(crate) async fn default_commit(repo: &Path) -> Result<(String, String), Stri
 
 /// `localhost/tracon-repo-<name>-<hash>`: readable in `podman images`, and
 /// distinct for two repositories that share a directory name.
-fn image_name(repo: &Path) -> String {
+pub(crate) fn image_name(repo: &Path) -> String {
     let slug: String = repo
         .file_name()
         .map(|name| name.to_string_lossy().to_ascii_lowercase())
@@ -751,6 +759,12 @@ pub async fn session_image(
     building: &(dyn Fn() + Send + Sync),
 ) -> SessionImage {
     let repos = cfg.repos();
+    if crate::sandbox_images::enabled(cfg) {
+        let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) else {
+            return SessionImage::default();
+        };
+        return sandbox_session_image(backend, cfg, store, repo, entry, building).await;
+    }
     let Some(entry) = repos
         .iter()
         .find(|entry| entry.matches(repo))
@@ -776,7 +790,36 @@ pub async fn session_image(
             backend.kind()
         ));
     }
-    let base = match &entry.image {
+    let base = match repository_base(backend, cfg, store, repo, entry, builder, building).await {
+        Ok(base) => base,
+        Err(aside) => return aside,
+    };
+    let runner = backend.runner_for(harness_id, Vec::new());
+    let harness = SessionHarness {
+        id: harness_id,
+        version: harness_version,
+        image: backend.harness_image(cfg, harness_id),
+        layer,
+        run_as,
+    };
+    ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await
+}
+
+/// The repository's own image a session on `repo` stands on: the one its
+/// entry names, or the one built from its Dockerfile (built here if there is
+/// none yet, rebuilt behind the session if its recipe moved). `Err` is what
+/// the session is told instead.
+async fn repository_base(
+    backend: &Arc<dyn Backend>,
+    cfg: &Arc<Config>,
+    store: &Arc<Store>,
+    repo: &Path,
+    entry: &Repo,
+    builder: &dyn ImageBuilder,
+    building: &(dyn Fn() + Send + Sync),
+) -> Result<String, SessionImage> {
+    let run_as = RunAs::of(cfg);
+    Ok(match &entry.image {
         Some(image) => image.clone(),
         None => {
             let repo_path = repo.to_string_lossy();
@@ -802,25 +845,68 @@ pub async fn session_image(
                 None => {
                     building();
                     match ensure_base(backend.as_ref(), cfg, store, repo, false).await {
-                        Ensured::Unavailable { reason } => return SessionImage::aside(reason),
+                        Ensured::Unavailable { reason } => return Err(SessionImage::aside(reason)),
                         ensured => match ensured.image() {
                             Some(image) => image.to_string(),
-                            None => return SessionImage::default(),
+                            None => return Err(SessionImage::default()),
                         },
                     }
                 }
             }
         }
+    })
+}
+
+/// A session's image with `[runtime.podman] sandbox_images` on: nothing is
+/// layered, since the harness comes from the bundle. The repository's
+/// prepared snapshot where its entry prepares anything (made now, once, if
+/// there is none for what the default branch needs), else its own image,
+/// else the stock base.
+async fn sandbox_session_image(
+    backend: &Arc<dyn Backend>,
+    cfg: &Arc<Config>,
+    store: &Arc<Store>,
+    repo: &Path,
+    entry: &Repo,
+    building: &(dyn Fn() + Send + Sync),
+) -> SessionImage {
+    let toolchain = match (&entry.image, &entry.dockerfile, backend.image_builder()) {
+        (None, None, _) => crate::environment::harness_image(cfg),
+        (_, _, Some(builder)) => {
+            match repository_base(backend, cfg, store, repo, entry, builder, building).await {
+                Ok(base) => base,
+                Err(aside) => return aside,
+            }
+        }
+        (_, _, None) => {
+            return SessionImage::aside(format!(
+                "the {} runtime cannot build images",
+                backend.kind()
+            ))
+        }
     };
-    let runner = backend.runner_for(harness_id, Vec::new());
-    let harness = SessionHarness {
-        id: harness_id,
-        version: harness_version,
-        image: backend.harness_image(cfg, harness_id),
-        layer,
-        run_as,
+    let environment = crate::environment::environment_for(cfg, store, Some(repo));
+    let snapshot = match environment.image == toolchain {
+        true => {
+            crate::sandbox_images::snapshot_for(
+                backend.as_ref(),
+                cfg,
+                store,
+                repo,
+                &environment,
+                true,
+            )
+            .await
+        }
+        // A standing image is what this session runs; the one its checks
+        // will run is still being built.
+        false => None,
     };
-    ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await
+    SessionImage {
+        image: Some(snapshot.unwrap_or_else(|| toolchain.clone())),
+        toolchain_image: Some(toolchain),
+        note: None,
+    }
 }
 
 struct SessionHarness<'a> {
@@ -1152,7 +1238,17 @@ pub(crate) async fn warm_base_cache(
     if environment.prepare.is_empty() {
         return;
     }
-    let Some(entry) = building_entry(cfg, repo) else {
+    // With `sandbox_images`, a repository prepared in the stock base has a
+    // snapshot too, so any entry with a `prepare` is warmed.
+    let entry = match crate::sandbox_images::enabled(cfg) {
+        true => cfg
+            .repos()
+            .iter()
+            .find(|entry| entry.matches(repo))
+            .cloned(),
+        false => building_entry(cfg, repo),
+    };
+    let Some(entry) = entry else {
         return;
     };
     // `ensure_base` builds nothing for a held entry, so it never gets here;
@@ -1169,25 +1265,27 @@ pub(crate) async fn warm_base_cache(
         }
     };
     let warming = (environment.image.clone(), commit.clone());
+    if crate::sandbox_images::enabled(cfg) {
+        let secrets = match lend(cfg, repo, &entry) {
+            Ok(secrets) => secrets,
+            Err(error) => {
+                tracing::warn!(repo = %repo.display(), %error, "no snapshot made");
+                return;
+            }
+        };
+        if let Err(error) =
+            crate::sandbox_images::warm(backend, cfg, store, repo, &environment, &secrets).await
+        {
+            tracing::warn!(repo = %repo.display(), %error, "no snapshot made");
+        }
+        return;
+    }
     if warmed_in(repo).as_ref() == Some(&warming) {
         tracing::info!(repo = %repo.display(), image = %environment.image, "base cache already warmed in this image");
         return;
     }
-    let lent = entry.prepare_credentials;
-    let upstreams = cfg.live().upstreams.clone();
     let warmed = async {
-        let secrets = match upstreams.preparation {
-            crate::config::PreparationLending::Env => crate::environment::PrepareSecrets::new(
-                crate::broker::preparation_env_for(repo, &lent)
-                    .map_err(|error| format!("prepare_credentials: {error}"))?,
-            ),
-            crate::config::PreparationLending::Attach => {
-                crate::environment::PrepareSecrets::attached(
-                    crate::broker::preparation_attachments_for(repo, &lent, &upstreams)
-                        .map_err(|error| format!("prepare_credentials: {error}"))?,
-                )
-            }
-        };
+        let secrets = lend(cfg, repo, &entry)?;
         let tree = crate::review::snapshot_candidate(
             &repo.to_string_lossy(),
             &commit,
@@ -1233,6 +1331,27 @@ pub(crate) async fn warm_base_cache(
     }
 }
 
+/// What the default branch's preparation is lent: the entry's
+/// `prepare_credentials`, as environment or attached by the node.
+fn lend(
+    cfg: &Config,
+    repo: &Path,
+    entry: &Repo,
+) -> Result<crate::environment::PrepareSecrets, String> {
+    let lent = &entry.prepare_credentials;
+    let upstreams = cfg.live().upstreams.clone();
+    Ok(match upstreams.preparation {
+        crate::config::PreparationLending::Env => crate::environment::PrepareSecrets::new(
+            crate::broker::preparation_env_for(repo, lent)
+                .map_err(|error| format!("prepare_credentials: {error}"))?,
+        ),
+        crate::config::PreparationLending::Attach => crate::environment::PrepareSecrets::attached(
+            crate::broker::preparation_attachments_for(repo, lent, &upstreams)
+                .map_err(|error| format!("prepare_credentials: {error}"))?,
+        ),
+    })
+}
+
 /// The environment a run in `repo` gets, with its image built first if the
 /// entry names a Dockerfile. A build that fails leaves whatever
 /// `environment_for` still resolves: the last image that built, or the
@@ -1246,7 +1365,17 @@ pub async fn environment(
     if let Some(repo) = repo {
         ensure_base(backend, cfg, store, repo, false).await;
     }
-    crate::environment::environment_for(cfg, store, repo)
+    let mut environment = crate::environment::environment_for(cfg, store, repo);
+    if let Some(repo) = repo {
+        if let Some(snapshot) =
+            crate::sandbox_images::snapshot_for(backend, cfg, store, repo, &environment, false)
+                .await
+        {
+            environment.image = snapshot;
+            environment.image_source = crate::sandbox_images::SNAPSHOT_SOURCE;
+        }
+    }
+    environment
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1401,7 +1530,7 @@ fn settle_failure(store: &Store, id: &str, failure: &BuildFailure) {
 /// stands on, and nothing this node did not build: a session layer's base is
 /// removed with it only when it is a repository image of this node's, never
 /// an image an entry pinned.
-async fn supersede(builder: &dyn ImageBuilder, store: &Store, repo: &Path, kind: &str) {
+pub(crate) async fn supersede(builder: &dyn ImageBuilder, store: &Store, repo: &Path, kind: &str) {
     let depth = match builder.retains_previous() {
         true => 2,
         false => 1,
@@ -1636,6 +1765,10 @@ async fn build_base(
     .await
     .map_err(|e| staged(e.to_string()))?;
     let containerfile = stage.path().join("Containerfile");
+    let dockerfile = match crate::sandbox_images::active_base() {
+        Some(base) => with_base_arg(&dockerfile, &base),
+        None => dockerfile,
+    };
     std::fs::write(&containerfile, dockerfile).map_err(|e| staged(e.to_string()))?;
     let scratch = builder.scratch_dir().unwrap_or_else(std::env::temp_dir);
     let context = crate::review::snapshot_candidate_in(
@@ -1695,6 +1828,38 @@ async fn build_base(
         },
         source: source.image,
     })
+}
+
+/// `dockerfile` with the pinned stock base declared ahead of its first
+/// `FROM`, so `FROM ${TRACON_SANDBOX_BASE}` builds on it. After any parser
+/// directives, which must stay first.
+fn with_base_arg(dockerfile: &[u8], base: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(dockerfile);
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let directive = line
+            .trim()
+            .strip_prefix('#')
+            .map(|rest| {
+                let rest = rest.trim_start().to_ascii_lowercase();
+                ["syntax", "escape", "check"].iter().any(|name| {
+                    rest.strip_prefix(name)
+                        .is_some_and(|after| after.trim_start().starts_with('='))
+                })
+            })
+            .unwrap_or(false);
+        if !directive {
+            break;
+        }
+        at += line.len();
+    }
+    let mut out = text[..at].to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("ARG {}={base}\n", crate::sandbox_images::BASE_ARG));
+    out.push_str(&text[at..]);
+    out.into_bytes()
 }
 
 /// The commands whose first word the image has no tool for, so the operator

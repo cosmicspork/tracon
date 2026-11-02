@@ -237,6 +237,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.podman.sandbox_init"),
     restart("runtime.podman.sandbox_files"),
     restart("runtime.podman.sandbox_tunnels"),
+    restart("runtime.podman.sandbox_images"),
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image").host_only(),
     restart("runtime.kubernetes.state_claim"),
@@ -362,6 +363,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("metrics.listen"),
     // [sandbox]
     restart("sandbox.bundle").host_only(),
+    restart("sandbox.base_image").host_only(),
+    restart("sandbox.release_url").host_only(),
     // [work]
     live("work.default_priority"),
     // [[work.priority]]
@@ -479,6 +482,9 @@ pub const HOST_ONLY_REASON: &str =
 pub fn host_only_reason(key: &str) -> &'static str {
     match key {
         "runtime.kubernetes.state_mount" => HOST_ONLY_REASON,
+        "sandbox.release_url" => {
+            "is where the node downloads the binaries every sandbox runs, so it is changed at the node, not from elsewhere"
+        }
         "sandbox.bundle" => {
             "is the directory whose binaries every sandbox runs, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
         }
@@ -998,7 +1004,9 @@ mod tests {
                 "gateway.harness_listen",
                 "runtime.kubernetes.harness_image",
                 "runtime.kubernetes.state_mount",
+                "sandbox.base_image",
                 "sandbox.bundle",
+                "sandbox.release_url",
             ]
         );
         assert!(lookup(&["runtime", "kubernetes"]).host_only);

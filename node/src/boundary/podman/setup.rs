@@ -97,6 +97,10 @@ pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
     if !super::uses_sandbox_tunnels(cfg) {
         out.push((cfg.boundary.gateway_image.clone(), "gateway"));
     }
+    // Harnesses come from the bundle, and sandboxes run the stock base.
+    if crate::sandbox_images::enabled(cfg) {
+        return out;
+    }
     for id in crate::adapter::enabled(cfg) {
         out.push((cfg.podman_harness_image(id), harness_dir_for(id)));
     }
@@ -108,6 +112,19 @@ pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
 /// the label cannot be judged, which is not the same as stale.
 pub async fn harness_images(cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
     let mut out = Vec::new();
+    if crate::sandbox_images::enabled(cfg) {
+        // Every harness runs in the base image, from the bundle.
+        let image = crate::sandbox_images::base_image(cfg);
+        let present = podman(&["image", "exists", &image]).await.is_ok();
+        for id in crate::adapter::enabled(cfg) {
+            out.push(crate::boundary::HarnessImage {
+                harness_id: id.to_string(),
+                image: image.clone(),
+                state: if present { "current" } else { "missing" },
+            });
+        }
+        return out;
+    }
     for id in crate::adapter::enabled(cfg) {
         let image = cfg.podman_harness_image(id);
         let state = if podman(&["image", "exists", &image]).await.is_err() {
@@ -191,18 +208,21 @@ pub async fn converge(cfg: &Config) -> Result<bool, BoundaryError> {
 async fn steps(cfg: &Config, rebuild: bool, restart_gateway: bool) -> Result<bool, BoundaryError> {
     super::ensure_machine(cfg).await?;
     let built = ensure_images(cfg, rebuild).await?;
+    let fetched = crate::sandbox_images::converge(cfg)
+        .await
+        .map_err(BoundaryError::Other)?;
     std::fs::create_dir_all(Config::harness_state_dir())?;
     // Sandboxes on no network reach the node through tunnels, and the node
     // serves the allowlist itself: no internal network, allowlist file or
     // gateway to keep. One left from before is not removed; nothing joins
     // it.
     if super::uses_sandbox_tunnels(cfg) {
-        return Ok(built);
+        return Ok(built || fetched);
     }
     let created = ensure_network(cfg).await?;
     let rewritten = write_allowlist(cfg)?;
     let restarted = ensure_gateway(cfg, restart_gateway).await?;
-    Ok(built || created || rewritten || restarted)
+    Ok(built || fetched || created || rewritten || restarted)
 }
 
 /// A digest of everything [`converge`] builds images from, cheap enough to
@@ -216,6 +236,7 @@ pub fn definitions(cfg: &Config) -> String {
         hash.update(expected_digest(cfg, dir).as_bytes());
         hash.update([0]);
     }
+    hash.update(crate::sandbox_images::definitions(cfg).as_bytes());
     hex::encode(hash.finalize())
 }
 

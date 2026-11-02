@@ -334,7 +334,7 @@ pub fn session_environment(cfg: &Config, store: &Store, session_id: &str) -> Rep
 /// The image the node's own sessions run in, for this runtime kind.
 pub fn harness_image(cfg: &Config) -> String {
     match cfg.runtime.kind {
-        crate::config::RuntimeKind::Podman => cfg.boundary.harness_image.clone(),
+        crate::config::RuntimeKind::Podman => cfg.podman_harness_image(&cfg.harness.id),
         crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
     }
 }
