@@ -215,7 +215,9 @@ export function issueChanges(
 ): FieldChange[] {
   const issue = details.issue
   if (!issue) return []
-  const shown = (v: unknown) => (Array.isArray(v) ? v.join(', ') : v === null || v === undefined ? '' : String(v))
+  // Jira answers labels sorted, so a call naming the same set in another order changes nothing.
+  const shown = (v: unknown) =>
+    Array.isArray(v) ? v.map(String).sort().join(', ') : v === null || v === undefined ? '' : String(v)
   return (['summary', 'priority', 'parent', 'labels'] as const)
     .filter((key) => key in args && args[key] !== null)
     .map((key) => ({ key, before: shown(issue[key]), after: shown(args[key]) }))

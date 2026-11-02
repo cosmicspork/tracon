@@ -240,5 +240,7 @@ test('a Jira edit diffs the description and the fields it sets against the issue
     { key: 'summary', before: 'Port the feed', after: 'Port the feeds' },
     { key: 'labels', before: 'etl', after: 'etl, nead' },
   ])
+  // The same labels in another order are no change: Jira answers them sorted.
+  expect(issueChanges({ issue: { ...issue, labels: ['etl', 'nead'] } }, { labels: ['nead', 'etl'] })).toEqual([])
   expect(issueChanges({}, { summary: 'x' })).toEqual([])
 })

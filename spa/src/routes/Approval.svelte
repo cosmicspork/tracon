@@ -284,8 +284,9 @@
 
   {#if pending && details.issue?.stale}
     <div class="banner crit" role="alert">
-      the issue changed in Jira since this was asked <b
-        >· what is shown is the issue as it is now; Allow overwrites what changed, so check it or ask for changes</b
+      the issue was updated in Jira since this was asked <b
+        >· a field, comment, link or status; what is shown is the issue as it is now, and Allow overwrites only the fields
+        the call sets</b
       >
     </div>
   {/if}
