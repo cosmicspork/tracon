@@ -2686,6 +2686,176 @@
     },
     {
       "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.preparation",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "choices": [
+          "env",
+          "attach"
+        ],
+        "kind": "enum",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.host",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.credential",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.attach",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "choices": [
+          "basic",
+          "header",
+          "composer"
+        ],
+        "kind": "enum",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.header",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.value",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.username",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.password",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "upstreams.host",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "upstreams.host.sessions",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
@@ -2915,6 +3085,9 @@
       "dependency_inputs": {},
       "max_snapshot_bytes": 536870912,
       "timeout_secs": 900
+    },
+    "upstreams": {
+      "preparation": "env"
     },
     "work": {
       "default_priority": 2,

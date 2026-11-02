@@ -1090,6 +1090,9 @@ pub async fn ensure_base(
 /// from a private registry is what the others then install from the cache
 /// without the credential. A credential the broker will not lend stops the
 /// warm-up before anything runs, rather than letting the registry refuse it.
+/// Lent as environment, or with `[upstreams] preparation = "attach"` not lent
+/// into the container at all: the node attaches each to the requests for its
+/// declared host instead.
 ///
 /// One warm-up at a time per repository, in the image the node pins when it
 /// starts: one asked for while another runs waits, and warms nothing if that
@@ -1129,11 +1132,20 @@ pub(crate) async fn warm_base_cache(
         return;
     }
     let lent = entry.prepare_credentials;
+    let upstreams = cfg.live().upstreams.clone();
     let warmed = async {
-        let secrets = crate::environment::PrepareSecrets::new(
-            crate::broker::preparation_env_for(repo, &lent)
-                .map_err(|error| format!("prepare_credentials: {error}"))?,
-        );
+        let secrets = match upstreams.preparation {
+            crate::config::PreparationLending::Env => crate::environment::PrepareSecrets::new(
+                crate::broker::preparation_env_for(repo, &lent)
+                    .map_err(|error| format!("prepare_credentials: {error}"))?,
+            ),
+            crate::config::PreparationLending::Attach => {
+                crate::environment::PrepareSecrets::attached(
+                    crate::broker::preparation_attachments_for(repo, &lent, &upstreams)
+                        .map_err(|error| format!("prepare_credentials: {error}"))?,
+                )
+            }
+        };
         let tree = crate::review::snapshot_candidate(
             &repo.to_string_lossy(),
             &commit,

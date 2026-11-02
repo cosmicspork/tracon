@@ -54,6 +54,10 @@ k8s-openapi = { version = "0.28", features = ["v1_33"] }
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# The TLS the granted proxy opens itself to a declared upstream
+# (`config::upstreams`). Ring and webpki roots, as reqwest already uses.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
 regex = "1"
 ignore = "0.4"
 libc = "0.2"

@@ -11,8 +11,10 @@ pub mod edit;
 pub mod last_good;
 pub mod live;
 pub mod path_guard;
+pub mod upstreams;
 pub use edit::{edit, snapshot, update, EditError, EditOutcome, KeyPath, Op, Snapshot};
 pub use live::{ConfigHandle, Live, PendingRestart};
+pub use upstreams::{Attach, PreparationLending, Upstream, Upstreams};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -64,6 +66,9 @@ pub struct Config {
     pub external: External,
     pub docs: Docs,
     pub work: Work,
+    /// Hosts the node attaches a stored credential to, on behalf of a client
+    /// that never holds it.
+    pub upstreams: Upstreams,
 }
 
 /// The tables an older `node.toml` may still carry for OpenCode, which is
@@ -2152,6 +2157,7 @@ impl Default for Config {
             external: External::default(),
             docs: Docs::default(),
             work: Work::default(),
+            upstreams: Upstreams::default(),
             harness: Harness {
                 id: crate::adapter::claude::ClaudeAdapter::ID.into(),
                 version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
@@ -2551,6 +2557,8 @@ impl Config {
         validate_doc_kinds(&config.docs.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_priorities(&config.work.priority)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        upstreams::validate_upstreams(&config.upstreams)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_admin_peers(&config.mesh.admin_peers)
             .map_err(|error| format!("{}: {error}", path.display()))?;

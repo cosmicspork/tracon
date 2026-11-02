@@ -14,6 +14,9 @@
 //! import and is sealed on first load.
 
 pub mod guard;
+pub mod upstream;
+
+pub use upstream::{preparation_attachments_for, Attachment};
 
 use std::{
     cmp::Ordering,
@@ -56,6 +59,12 @@ pub enum BrokerError {
         first: String,
         second: String,
         key: String,
+    },
+    #[error("credential {name} cannot be attached to {host}: {reason}")]
+    Upstream {
+        name: String,
+        host: String,
+        reason: String,
     },
     #[error("credential store: {0}")]
     Io(#[from] std::io::Error),

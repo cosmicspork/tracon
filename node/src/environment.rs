@@ -442,13 +442,16 @@ pub fn check_env() -> Vec<(String, String)> {
     env
 }
 
-/// Environment lent from the broker to one preparation, and what it takes out
-/// of anything that preparation says. Only the default branch's preparation
-/// is lent any (`prepare_credentials`); every other preparation runs with
-/// none.
+/// What the broker lends one preparation: environment in its container, and
+/// what that takes out of anything the preparation says; or credentials the
+/// node attaches to its requests for their declared hosts, which never enter
+/// the container at all (`[upstreams] preparation = "attach"`). Only the
+/// default branch's preparation is lent any (`prepare_credentials`); every
+/// other preparation runs with none.
 #[derive(Clone, Default)]
 pub struct PrepareSecrets {
     env: Vec<(String, String)>,
+    upstreams: Vec<crate::broker::Attachment>,
 }
 
 impl std::fmt::Debug for PrepareSecrets {
@@ -456,6 +459,7 @@ impl std::fmt::Debug for PrepareSecrets {
         formatter
             .debug_list()
             .entries(self.env.iter().map(|(key, _)| key))
+            .entries(self.upstreams.iter().map(|attached| attached.host()))
             .finish()
     }
 }
@@ -467,7 +471,22 @@ const SHORTEST_REDACTED: usize = 6;
 
 impl PrepareSecrets {
     pub fn new(env: Vec<(String, String)>) -> Self {
-        Self { env }
+        Self {
+            env,
+            upstreams: Vec::new(),
+        }
+    }
+
+    /// Nothing in the container; `upstreams` attached by the node.
+    pub fn attached(upstreams: Vec<crate::broker::Attachment>) -> Self {
+        Self {
+            env: Vec::new(),
+            upstreams,
+        }
+    }
+
+    pub fn upstreams(&self) -> &[crate::broker::Attachment] {
+        &self.upstreams
     }
 
     pub fn env(&self) -> &[(String, String)] {
@@ -560,10 +579,12 @@ pub const SESSION_REFUSAL: &str =
 /// repository's registries where the entry opens them to sessions. Held for
 /// the life of the session. Every refusal under it is this session's, and is
 /// recorded on it (`gateway::proxy::Grants::on_refusal`).
+/// `upstreams` are the credentials attached for it (`Upstream::sessions`).
 pub fn session_grant(
     cfg: &Config,
     environment: &RepoEnvironment,
     session_id: &str,
+    upstreams: Vec<crate::broker::Attachment>,
 ) -> crate::gateway::proxy::GrantSpec {
     let hosts = match environment.session_egress.is_empty() {
         true => Vec::new(),
@@ -575,6 +596,7 @@ pub fn session_grant(
         hosts,
         patterns: cfg.gateway.allow_hosts.clone(),
         refusal: SESSION_REFUSAL.into(),
+        upstreams,
         ..Default::default()
     }
 }
@@ -690,17 +712,21 @@ pub const PREPARATION_REFUSAL: &str =
 ///
 /// `warming` names the repository when this is its default-branch warm-up,
 /// whose refusals ask the operator to save the host (`mcp::egress::PREPARE`).
+/// `upstreams` are the credentials the grant attaches, each to its own host;
+/// only that warm-up is given any, and a backend that issues no grant can
+/// attach none, so it refuses rather than run the preparation without them.
 pub fn scoped_egress(
     backend: &dyn Backend,
     hosts: &[String],
     warming: Option<&Path>,
+    upstreams: &[crate::broker::Attachment],
 ) -> Result<ScopedEgress, String> {
     let unscoped = || ScopedEgress {
         _grant: None,
         refusals: Refusals::default(),
         secret_env: Default::default(),
     };
-    if hosts.is_empty() && backend.egress_grants().is_none() {
+    if hosts.is_empty() && upstreams.is_empty() && backend.egress_grants().is_none() {
         return Ok(unscoped());
     }
     let grant = backend.egress_grant(crate::gateway::proxy::GrantSpec {
@@ -708,10 +734,17 @@ pub fn scoped_egress(
         warming: warming.map(Path::to_path_buf),
         hosts: hosts.to_vec(),
         refusal: PREPARATION_REFUSAL.into(),
+        upstreams: upstreams.to_vec(),
         ..Default::default()
     });
     let grant = match grant {
         Ok(grant) => grant,
+        Err(error) if !upstreams.is_empty() => {
+            return Err(format!(
+                "could not open preparation egress, through which its credentials are attached: \
+                 {error}"
+            ))
+        }
         // Nothing was asked for, so nothing is lost without the grant but
         // the names of what it would have refused.
         Err(error) if hosts.is_empty() => {
@@ -834,8 +867,8 @@ pub async fn prepare(
     environment: &RepoEnvironment,
 ) -> Result<PreparedEnvironment, EnvironmentError> {
     let image = approved_image(environment, cfg, plan.image.as_deref())?;
-    let egress =
-        scoped_egress(backend, &environment.egress, None).map_err(EnvironmentError::Runtime)?;
+    let egress = scoped_egress(backend, &environment.egress, None, &[])
+        .map_err(EnvironmentError::Runtime)?;
     let mut env = cache_env();
     env.push(("HOME".into(), "/cache/home".into()));
     let runner = backend.runner(Vec::new());
@@ -1033,7 +1066,7 @@ mod tests {
         // Preparation's hosts are not a session's until the entry says so.
         assert!(app.session_egress.is_empty());
         cfg.repo[0].session_egress = true;
-        let closed = session_grant(&cfg, &app, "s1");
+        let closed = session_grant(&cfg, &app, "s1", Vec::new());
         assert!(closed.hosts.is_empty());
         assert_eq!(closed.patterns, cfg.gateway.allow_hosts);
         cfg.repo[0].session_egress = true;
@@ -1041,7 +1074,7 @@ mod tests {
         assert_eq!(opened.session_egress, ["packagist"]);
         // The session's grant: the registries, expanded to the hosts they
         // are, beside what every harness may reach, and no plain HTTP.
-        let grant = session_grant(&cfg, &opened, "s1");
+        let grant = session_grant(&cfg, &opened, "s1", Vec::new());
         assert_eq!(grant.hosts, opened.egress);
         assert_eq!(grant.patterns, cfg.gateway.allow_hosts);
         assert_eq!(grant.session_id.as_deref(), Some("s1"));

@@ -602,6 +602,51 @@ And the warm-up runs whatever the default branch's install runs, so a Composer p
 an npm lifecycle script there could read the credential and send it to any host in
 `egress`; install with scripts off where the project allows it.
 
+**Attaching a credential instead of lending it.** With `[upstreams] preparation =
+"attach"` the warm-up is lent nothing: no `COMPOSER_AUTH`, no token, nothing in its
+container that a plugin or lifecycle script could read. The operator declares the host
+each credential is for, and the node writes the credential into the warm-up's requests to
+that host itself:
+
+```toml
+[upstreams]
+preparation = "attach"              # "env" (the default) lends environment as above
+
+[[upstreams.host]]
+host = "nova.laravel.com"           # exactly this host; reached on 443 over the node's own TLS
+credential = "nova"                 # an `env` credential, bound by its `repos` as above
+attach = "composer"                 # its COMPOSER_AUTH `http-basic` (or `bearer`) entry for the host
+# attach = "basic"                  # or: username = "${USER}", password = "${PASSWORD}"
+# attach = "header"                 # or: header = "Authorization", value = "Bearer ${TOKEN}"
+# sessions = true                   # attach it for sessions too, in channels the credential is bound to
+```
+
+The client asks its own egress proxy for `http://nova.laravel.com/…` in plain HTTP. The
+node, holding that client's grant, opens TLS to `https://nova.laravel.com` (verified
+against the web's roots), drops whatever `Authorization` the client sent, writes the
+credential, and hands the answer back. Nothing is intercepted: a CONNECT tunnel to any
+host, the declared one included, stays end to end and carries nothing, and is still
+`egress`'s to allow. A credential is attached only to its declared host, never to a
+lookalike or another port, and only for a client whose grant carries it. The node follows
+no redirect; one back to the declared host is pointed at the proxy again, and one anywhere
+else reaches the client as sent and carries nothing when followed. Every credential the
+entry names needs a declared upstream, or the warm-up does not run.
+
+Composer asks `https://` URLs, and keys its download cache by URL, so the install has to
+ask the plain one everywhere the cache is read: in the warm-up, in a candidate's
+preparation and on a session's workspace. Rewrite a copy of the lock rather than the
+tree's own, so the workspace never shows a change:
+
+```toml
+prepare = ["u=$(mktemp -d) && cp composer.json composer.lock \"$u\"/ && sed -i 's#https://nova.laravel.com/#http://nova.laravel.com/#g' \"$u/composer.lock\" && COMPOSER=\"$u/composer.json\" composer config secure-http false && COMPOSER=\"$u/composer.json\" composer install --no-interaction --no-scripts --prefer-dist"]
+```
+
+Composer installs into the workspace's own `vendor/` either way. Only the warm-up is
+credentialed; elsewhere the plain URL is refused at the proxy, so a package not already
+in the cache fails as it would have without the credential. With `sessions = true` a
+session can ask the declared host as the credential's owner, though it never holds the
+credential; leave it off unless an agent needs that.
+
 A refused host is put to you rather than left to fail quietly. The refusal raises a card
 naming the session and the host, once however often a package manager retries, and its
 reason line — the line `pip` or `npm` prints — tells the agent the operator has been
@@ -1281,6 +1326,20 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # default branch's preparation when the image is built, and to
                                     # nothing else. Needs `dockerfile`; each credential must also list
                                     # this repository, or a `group/**` above it, in its own `repos`
+
+# [upstreams]                       # credentials the node attaches to requests for one declared host,
+                                    # so the client never holds them (see "Attaching a credential
+                                    # instead of lending it")
+# preparation = "env"               # how prepare_credentials reach the warm-up: "env" lends their
+                                    # environment, "attach" lends nothing and attaches each through
+                                    # its [[upstreams.host]]
+# [[upstreams.host]]
+# host = "nova.laravel.com"         # exactly this host, reached over the node's own TLS on 443
+# credential = "nova"               # a broker credential of kind `env`
+# attach = "composer"               # "basic" (username, password), "header" (header, value), or
+                                    # "composer" (its COMPOSER_AUTH entry for the host); values name
+                                    # the credential's variables as ${NAME}, never a secret itself
+# sessions = false                  # attach it for sessions too, in channels the credential is bound to
 
 # [[service]]                       # something a session may start beside itself by name
                                     # (`service_start`), never by image or command. It joins the
