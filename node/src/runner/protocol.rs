@@ -19,7 +19,9 @@ use tracon_sandbox::tls::NodeIdentity;
 
 use super::tunnels::TunnelSpec;
 use super::{Mount, Runner, RunnerCommand, RunnerError, Sidecar, Spawned};
-use crate::provider::{Bootstrap, CreateSpec, Handle, Resources, SandboxProvider};
+use crate::provider::{
+    Bootstrap, CreateSpec, Handle, ProviderError, Resources, SandboxProvider, Shape,
+};
 use crate::telemetry::{run_kind, telemetry};
 
 /// How long a sandbox has to start and connect.
@@ -157,9 +159,9 @@ impl ProtocolRunner {
         &self,
         name: &str,
         cmd: &RunnerCommand,
-        stdin: bool,
-        stderr: bool,
+        shape: Shape,
     ) -> Result<Started, RunnerError> {
+        let (stdin, stderr) = (shape == Shape::Session, shape != Shape::Session);
         cmd.secret_env.validate()?;
         if cmd.argv.is_empty() {
             return Err(RunnerError::Other("empty argv".into()));
@@ -195,6 +197,8 @@ impl ProtocolRunner {
                     resources: &Resources::default(),
                     mounts: &provided,
                     bootstrap: &bootstrap,
+                    labels: &cmd.labels,
+                    shape,
                 })
                 .await
         };
@@ -202,7 +206,7 @@ impl ProtocolRunner {
             Ok(handle) => handle,
             Err(error) => {
                 server.tokens().revoke(&run);
-                return Err(RunnerError::Other(format!("start sandbox {name}: {error}")));
+                return Err(failed(error, || format!("start sandbox {name}")));
             }
         };
         let teardown = Teardown {
@@ -228,9 +232,7 @@ impl ProtocolRunner {
             Ok(conn) => conn,
             Err(error) => {
                 teardown.finish().await;
-                return Err(RunnerError::Other(format!(
-                    "connect to sandbox {name}: {error}"
-                )));
+                return Err(failed(error, || format!("connect to sandbox {name}")));
             }
         };
         let mut teardown = teardown;
@@ -296,6 +298,35 @@ impl ProtocolRunner {
             }
         };
         Ok(Started { process, teardown })
+    }
+}
+
+/// A provider's error as the runner's: a refusal for capacity keeps its
+/// classification, anything else is said as `what` failed.
+fn failed(error: ProviderError, what: impl FnOnce() -> String) -> RunnerError {
+    match error {
+        ProviderError::Refused { reason, message } => RunnerError::Refused { reason, message },
+        error => RunnerError::Other(format!("{}: {error}", what())),
+    }
+}
+
+impl ProtocolRunner {
+    async fn capture(
+        &self,
+        cmd: RunnerCommand,
+        shape: Shape,
+    ) -> Result<std::process::Output, RunnerError> {
+        let _in_flight = telemetry().run_started(run_kind(cmd.labels.kind, shape.as_str()));
+        let name = self.capture_name(&cmd.name);
+        let Started { process, teardown } = self.start(&name, &cmd, shape).await?;
+        let output = process.output().await;
+        teardown.finish().await;
+        let output = output.map_err(|e| RunnerError::Other(format!("{name}: {e}")))?;
+        Ok(std::process::Output {
+            status: std_status(exit_code(output.status)),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     }
 }
 
@@ -410,7 +441,7 @@ impl Runner for ProtocolRunner {
             true => crate::config::resource_name("h"),
             false => cmd.name.clone(),
         };
-        let Started { process, teardown } = self.start(&name, &cmd, true, false).await?;
+        let Started { process, teardown } = self.start(&name, &cmd, Shape::Session).await?;
         let stdio = match process.stdio().await {
             Ok(stdio) => stdio,
             Err(error) => {
@@ -439,17 +470,11 @@ impl Runner for ProtocolRunner {
     }
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
-        let _in_flight = telemetry().run_started(run_kind(cmd.labels.kind, "command"));
-        let name = self.capture_name(&cmd.name);
-        let Started { process, teardown } = self.start(&name, &cmd, false, true).await?;
-        let output = process.output().await;
-        teardown.finish().await;
-        let output = output.map_err(|e| RunnerError::Other(format!("{name}: {e}")))?;
-        Ok(std::process::Output {
-            status: std_status(exit_code(output.status)),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+        self.capture(cmd, Shape::Command).await
+    }
+
+    async fn run_probe(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
+        self.capture(cmd, Shape::Probe).await
     }
 
     /// The sandbox the name is running in, else a sandbox of that name (one

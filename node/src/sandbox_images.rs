@@ -555,6 +555,8 @@ impl Held {
                     resources: &Resources::default(),
                     mounts,
                     bootstrap: &bootstrap,
+                    labels: &crate::runner::RunLabels::of(crate::runner::RunKind::Prepare),
+                    shape: crate::provider::Shape::Command,
                 })
                 .await
         };

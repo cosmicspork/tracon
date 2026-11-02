@@ -33,6 +33,7 @@
 
 pub mod apple;
 pub mod capabilities;
+pub mod kubernetes;
 pub mod placement;
 pub mod podman;
 pub mod probe;
@@ -49,7 +50,7 @@ pub use placement::{place, Candidate, Placement};
 pub use requirements::{DoMode, Requirements};
 
 use crate::boundary::BoundaryReport;
-use crate::runner::Mount;
+use crate::runner::{Mount, RunLabels};
 
 /// Which provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -186,6 +187,27 @@ impl std::fmt::Debug for Bootstrap {
     }
 }
 
+/// Which of the runner's ways a sandbox was made for: a session's harness
+/// (`spawn`), a command run to its end (`run_capture`), or a probe
+/// (`run_probe`). A provider that sizes what it makes (Kubernetes) sizes by
+/// it; the others ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Session,
+    Command,
+    Probe,
+}
+
+impl Shape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Command => "command",
+            Self::Probe => "probe",
+        }
+    }
+}
+
 /// One sandbox to make.
 #[derive(Debug, Clone, Copy)]
 pub struct CreateSpec<'a> {
@@ -200,6 +222,10 @@ pub struct CreateSpec<'a> {
     /// The session's directories; the harness bundle is the provider's own.
     pub mounts: &'a [Mount],
     pub bootstrap: &'a Bootstrap,
+    /// What the run is for, for a provider that labels what it makes
+    /// (Kubernetes). Never a secret: see `RunLabels`.
+    pub labels: &'a RunLabels,
+    pub shape: Shape,
 }
 
 /// A sandbox's network, as the provider reports it.
@@ -221,6 +247,13 @@ pub enum ProviderError {
     },
     #[error("no such sandbox: {0}")]
     NotFound(String),
+    /// Refused for lack of capacity before anything of it started, as
+    /// `RunnerError::Refused` classifies it.
+    #[error("{message}")]
+    Refused {
+        reason: &'static str,
+        message: String,
+    },
     #[error("{0}")]
     Failed(String),
 }
@@ -388,6 +421,8 @@ mod tests {
                 resources: &Resources::default(),
                 mounts: &[],
                 bootstrap: &bootstrap(),
+                labels: &RunLabels::default(),
+                shape: Shape::Command,
             })
             .await
             .unwrap();

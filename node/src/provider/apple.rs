@@ -731,6 +731,8 @@ mod tests {
                 resources,
                 mounts,
                 bootstrap,
+                labels: &crate::runner::RunLabels::default(),
+                shape: crate::provider::Shape::Session,
             })
             .await
         }

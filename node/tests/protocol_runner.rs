@@ -405,6 +405,8 @@ async fn the_podman_provider_takes_the_supervisors_connection_past_a_bad_one() {
             resources: &Resources::default(),
             mounts: &[],
             bootstrap: &bootstrap,
+            labels: &tracon::runner::RunLabels::default(),
+            shape: tracon::provider::Shape::Probe,
         })
         .await
         .unwrap();

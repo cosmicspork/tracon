@@ -864,6 +864,8 @@ impl SandboxProvider for PodmanProvider {
             resources,
             mounts: &[],
             bootstrap,
+            labels: &crate::runner::RunLabels::default(),
+            shape: super::Shape::Session,
         })
         .await
     }
@@ -1107,6 +1109,8 @@ mod tests {
                 resources: &Resources::default(),
                 mounts,
                 bootstrap: &bootstrap(),
+                labels: &crate::runner::RunLabels::default(),
+                shape: crate::provider::Shape::Command,
             })
             .await
     }

@@ -3050,7 +3050,9 @@ impl Manager {
             .map_err(anyhow::Error::msg)?;
         let container = crate::config::resource_name(&format!("h-{slug}"));
         let mut mounts = scratch.mounts;
-        if crate::boundary::podman::uses_sandbox_files(&self.cfg) {
+        if crate::boundary::podman::uses_sandbox_files(&self.cfg)
+            || crate::boundary::kubernetes::uses_sandbox_protocol(&self.cfg)
+        {
             materialize::own_state(&mut mounts, &scratch.volume);
         }
         mounts.push(workspace.mount("/work", false));

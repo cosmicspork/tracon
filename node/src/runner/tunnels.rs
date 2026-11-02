@@ -73,6 +73,45 @@ pub fn gateway_tunnels(cfg: &Config) -> Vec<TunnelSpec> {
     tunnels
 }
 
+/// The tunnels a Kubernetes sandbox gets in place of its routes to the node
+/// pod: the harness listener at the forward port, the node's own allowlist
+/// proxy at `proxy_port`, and its per-client egress proxy at `egress_port`,
+/// each where a harness pod reached it before (`http://<gateway_host>:<port>`,
+/// the gateway's name now the sandbox's loopback). They lead to the node's
+/// listeners on its own loopback, which serve on every address of its pod.
+pub fn kube_tunnels(cfg: &Config) -> Vec<TunnelSpec> {
+    let local = |port: u16| Endpoint::Tcp(format!("{}:{port}", Ipv4Addr::LOCALHOST));
+    let forward = match &cfg.gateway.harness_listen {
+        HarnessListen::Tcp(addr) => addr.port(),
+        HarnessListen::Unix(_) => cfg.gateway.forward_port,
+    };
+    let mut tunnels = vec![
+        TunnelSpec::loopback("gateway", forward, endpoint(&cfg.gateway.harness_listen)),
+        TunnelSpec::loopback(
+            "proxy",
+            cfg.gateway.proxy_port,
+            local(cfg.gateway.proxy_port),
+        ),
+        TunnelSpec::loopback(
+            "egress",
+            cfg.gateway.egress_port,
+            local(cfg.gateway.egress_port),
+        ),
+    ];
+    // An unspecified listener address is the node's every address, its
+    // loopback among them; dialling the unspecified address is not portable.
+    for tunnel in &mut tunnels {
+        if let Endpoint::Tcp(addr) = &tunnel.endpoint {
+            if let Ok(addr) = addr.parse::<std::net::SocketAddr>() {
+                if addr.ip().is_unspecified() {
+                    tunnel.endpoint = local(addr.port());
+                }
+            }
+        }
+    }
+    tunnels
+}
+
 /// Open every tunnel on `conn`, before anything is started in the sandbox
 /// that might dial one. All or nothing: on a failure the ones already open
 /// are dropped, and the sandbox's teardown closes their listeners.
@@ -129,5 +168,29 @@ mod tests {
         let tunnels = gateway_tunnels(&cfg);
         assert_eq!(tunnels.len(), 2);
         assert_eq!(tunnels[0].endpoint, Endpoint::Tcp("127.0.0.1:7499".into()));
+    }
+
+    /// A pod-hosted node's listeners face its pod network; a sandbox reaches
+    /// each through a tunnel on its own loopback, at the port it reached the
+    /// node pod on before, and the tunnel dials the node's loopback.
+    #[test]
+    fn the_kube_tunnels_stand_in_for_the_node_pods_ports() {
+        let mut cfg = Config::default();
+        cfg.gateway.harness_listen = HarnessListen::Tcp("0.0.0.0:7421".parse().unwrap());
+        let tunnels = kube_tunnels(&cfg);
+        let shape: Vec<(&str, ListenAddr, Endpoint)> = tunnels
+            .iter()
+            .map(|t| (t.name.as_str(), t.listen.clone(), t.endpoint.clone()))
+            .collect();
+        let local = |port: u16| ListenAddr::Tcp(format!("127.0.0.1:{port}"));
+        let node = |port: u16| Endpoint::Tcp(format!("127.0.0.1:{port}"));
+        assert_eq!(
+            shape,
+            vec![
+                ("gateway", local(7421), node(7421)),
+                ("proxy", local(8888), node(8888)),
+                ("egress", local(7424), node(7424)),
+            ]
+        );
     }
 }

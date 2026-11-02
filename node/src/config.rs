@@ -181,6 +181,10 @@ pub fn validate_metrics(config: &Config) -> Result<(), String> {
     if let HarnessListen::Tcp(addr) = &gateway.harness_listen {
         taken.push(("gateway.harness_listen", addr.port()));
     }
+    let kube = &config.runtime.kubernetes;
+    if config.runtime.kind == RuntimeKind::Kubernetes && kube.sandbox_protocol {
+        taken.push(("runtime.kubernetes.sandbox_port", kube.sandbox_port));
+    }
     match taken.iter().find(|(_, port)| *port == listen.port()) {
         Some((what, port)) => Err(format!(
             "metrics.listen: port {port} is {what}'s; give the metrics listener a port of its own (7425 is free)"
@@ -1393,7 +1397,27 @@ pub struct Kubernetes {
     /// `64:ff9b::/96`; 6to4, `2002::/16`): an IPv4 address carried inside
     /// such an IPv6 one is not decoded, so the block itself must be named.
     pub internal_cidrs: Vec<String>,
+    /// Run every harness pod as a sandbox over the sandbox protocol
+    /// (`provider::kubernetes`): `tracon-sandbox` from the harness bundle,
+    /// copied in by an init container, dials the node pod on `sandbox_port`
+    /// over TLS, and the harness's process, stdio, files and its routes to the
+    /// MCP gateway, the model gateway and the proxies all travel over that one
+    /// connection. Its workspace and state are on the pod's own emptyDirs, not
+    /// the state claim; no Secret is made for a run; the pod is placed beside
+    /// the node pod by affinity. Needs the `tracon-sandbox` NetworkPolicy
+    /// (`deploy/kubernetes/sandbox-protocol`). The bundle is the node's own
+    /// (`[sandbox] bundle`, else its release's, fetched and checked as
+    /// `sandbox_images` does on Podman), which the node hands each pod's init
+    /// container on the same port.
+    pub sandbox_protocol: bool,
+    /// The port the node listens on, on its pod address, for its sandboxes'
+    /// connections.
+    pub sandbox_port: u16,
 }
+
+/// The port a pod-hosted node takes its sandboxes' connections on by
+/// default.
+pub const KUBE_SANDBOX_PORT: u16 = 7426;
 
 /// What a harness pod asks the scheduler for. Three kinds: a session (the
 /// harness and whatever it runs while the operator works), a command run to
@@ -1671,6 +1695,8 @@ impl Default for Kubernetes {
             image_pull_secrets: Vec::new(),
             shm_size: "1Gi".into(),
             internal_cidrs: Vec::new(),
+            sandbox_protocol: false,
+            sandbox_port: KUBE_SANDBOX_PORT,
         }
     }
 }

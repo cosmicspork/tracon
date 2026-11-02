@@ -392,3 +392,55 @@ async fn a_captured_pod_is_created_sized_with_shared_memory_and_pull_secrets() {
         .iter()
         .any(|v| v.name == scratch.name && v.empty_dir.is_some()));
 }
+
+/// With `[runtime.kubernetes] sandbox_protocol` left off, a run is the
+/// harness pod it always was: the harness's own command, attached stdio
+/// rather than a supervisor, the state claim mounted by subPath, and no
+/// sandbox listener or bundle anywhere in it.
+#[tokio::test(start_paused = true)]
+async fn without_the_sandbox_protocol_a_run_is_the_harness_pod_it_was() {
+    use tracon::boundary::Backend as _;
+    let api = KubeApi::new(NAMESPACE).default_script(Script::exits(0));
+    let state = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.runtime.kind = RuntimeKind::Kubernetes;
+    cfg.runtime.kubernetes.state_mount = state.path().to_path_buf();
+    assert!(!cfg.runtime.kubernetes.sandbox_protocol);
+    assert!(!tracon::boundary::kubernetes::uses_sandbox_protocol(&cfg));
+    let env = PodEnv {
+        namespace: NAMESPACE.into(),
+        pod_ip: "10.244.0.9".into(),
+        node_name: "general-1".into(),
+    };
+    let backend =
+        tracon::boundary::kubernetes::KubeBackend::with_client(&cfg, env.clone(), api.client());
+    let cmd = RunnerCommand {
+        argv: vec!["true".into()],
+        name: "tracon-c-off".into(),
+        mounts: vec![tracon::runner::Mount::volume(
+            "tracon-workspace-a",
+            "/work",
+            false,
+        )],
+        ..Default::default()
+    };
+    let runner = backend.runner(Vec::new());
+    let name = runner.capture_name(&cmd.name);
+    runner.run_capture(cmd.clone()).await.unwrap();
+    let created = api.created();
+    assert_eq!(created.len(), 1);
+    let expected = KubeSpec::from_config(&cfg, env)
+        .capture_pod(&name, &cmd)
+        .unwrap();
+    let mut made = created[0].clone();
+    made.metadata.uid = None;
+    assert_eq!(
+        serde_json::to_value(&made.spec).unwrap(),
+        serde_json::to_value(&expected.spec).unwrap()
+    );
+    assert_eq!(made.metadata.labels, expected.metadata.labels);
+    let rendered = serde_json::to_string(&made).unwrap();
+    assert!(rendered.contains("subPath"), "{rendered}");
+    assert!(!rendered.contains("tracon-sandbox"), "{rendered}");
+    assert!(!rendered.contains("TRACON_SANDBOX"), "{rendered}");
+}

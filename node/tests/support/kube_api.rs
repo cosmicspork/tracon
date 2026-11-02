@@ -53,6 +53,8 @@ pub struct Script {
     pub logs: String,
     /// What the kubelet reports as the container's `imageID` once started.
     pub image_id: String,
+    /// The pod's address once it runs.
+    pub pod_ip: String,
 }
 
 impl Default for Script {
@@ -64,6 +66,7 @@ impl Default for Script {
             exit_code: Some(0),
             logs: String::new(),
             image_id: String::new(),
+            pod_ip: "10.244.0.42".into(),
         }
     }
 }
@@ -102,6 +105,11 @@ impl Script {
 
     pub fn image_id(mut self, image_id: &str) -> Self {
         self.image_id = image_id.into();
+        self
+    }
+
+    pub fn pod_ip(mut self, ip: &str) -> Self {
+        self.pod_ip = ip.into();
         self
     }
 
@@ -382,7 +390,7 @@ fn observed(stored: &Stored) -> Pod {
     } else if !ran {
         PodStatus {
             phase: Some("Running".into()),
-            pod_ip: Some("10.244.0.42".into()),
+            pod_ip: Some(script.pod_ip.clone()),
             container_statuses: Some(vec![ContainerStatus {
                 image_id: script.image_id.clone(),
                 ready: true,

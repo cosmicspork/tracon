@@ -80,6 +80,8 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
             resources: &Resources::default(),
             mounts: &[],
             bootstrap: &bootstrap,
+            labels: &crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
+            shape: super::Shape::Probe,
         })
         .await
         .context("create")?;

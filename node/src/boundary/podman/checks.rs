@@ -229,12 +229,15 @@ async fn create_sandbox_probe(
         cert_pin: pin,
         token: String::new(),
     };
+    let labels = crate::runner::RunLabels::of(crate::runner::RunKind::Probe);
     let create = CreateSpec {
         name: Some(probe),
         image: &spec.image,
         resources: &Resources::default(),
         mounts: &mounts,
         bootstrap: &bootstrap,
+        labels: &labels,
+        shape: crate::provider::Shape::Probe,
     };
     let bundle = &provider.options().bundle;
     if !bundle.join("bin/tracon-sandbox").is_file() {

@@ -1,0 +1,29 @@
+# The node with every harness pod a sandbox over the sandbox protocol
+# (`[runtime.kubernetes] sandbox_protocol = true`). On top of the base:
+#
+# - the node's Role loses what only harness pods needed: `pods/attach`
+#   (a sandbox's stdio is the protocol's) and every verb on Secrets (no run
+#   keeps anything in one, so the node can neither read nor list them);
+# - the harness pods' policy goes, and the node pod admits only sandboxes,
+#   only on the sandbox port;
+# - a fresh node is seeded with the setting on. A node whose node.toml is
+#   already on its state volume keeps that file: add the key there.
+#
+# Sandbox pods are placed beside the node pod by affinity and mount nothing
+# of the state claim, so the claim stays ReadWriteOnce to the node alone.
+# The bundle each one runs is the node's own, which it fetches and checks for
+# its release and serves to the pods' init containers on the sandbox port.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - path: role.yaml
+  - path: networkpolicy-node.yaml
+  - path: configmap.yaml
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: tracon-harness
