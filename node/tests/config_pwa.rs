@@ -101,6 +101,7 @@ async fn a_phone_changes_a_live_key_with_a_passkey_and_the_node_uses_it() {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),

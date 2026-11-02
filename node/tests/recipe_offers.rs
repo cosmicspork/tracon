@@ -106,6 +106,7 @@ fn node_with(toml: &str, backend: Arc<dyn Backend>) -> Node {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),

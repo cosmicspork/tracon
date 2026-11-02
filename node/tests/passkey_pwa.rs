@@ -92,6 +92,7 @@ async fn a_paired_phone_enrolls_a_passkey_and_confirms_an_admin_action_with_it()
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),

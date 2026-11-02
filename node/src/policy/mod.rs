@@ -374,7 +374,7 @@ pub fn session_grant(req: &Request) -> Option<SessionGrant> {
 }
 
 /// `*` matches any run of characters; nothing else is special.
-fn glob(pattern: &str, value: &str) -> bool {
+pub(crate) fn glob(pattern: &str, value: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     let [first, .., last] = parts.as_slice() else {
         return pattern == value;

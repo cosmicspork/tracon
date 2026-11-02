@@ -267,6 +267,7 @@ async fn rig_with_bodies() -> (Tools, Seen, Bodies) {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     };
     (tools, seen, bodies)
 }

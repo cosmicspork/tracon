@@ -594,6 +594,36 @@ const PUSH_DEVICES = {
 
 const EXTERNAL = { enabled: true, channels: ['personal', 'work', 'client-hdr'], lanes: [], stopped: [] }
 
+// Two `[[mcp_server]]` entries: one listed, one the node cannot reach.
+const MCP_SERVERS = {
+  servers: [
+    {
+      name: 'linear',
+      url: 'https://mcp.linear.app/mcp',
+      channels: ['personal'],
+      credential: 'linear',
+      listed: true,
+      listed_secs_ago: 140,
+      error: null,
+      tools: [
+        { name: 'linear__list_issues', remote: 'list_issues', description: 'List issues in a team.', setting: 'allow', decision: 'allow', rule_id: 'mcp_server.linear.allow' },
+        { name: 'linear__create_issue', remote: 'create_issue', description: 'Create an issue.', setting: null, decision: 'ask', rule_id: null },
+        { name: 'linear__delete_issue', remote: 'delete_issue', description: 'Delete an issue.', setting: 'deny', decision: 'deny', rule_id: 'mcp_server.linear.deny' },
+      ],
+    },
+    {
+      name: 'figma',
+      url: 'http://127.0.0.1:3845/mcp',
+      channels: ['personal', 'work'],
+      credential: null,
+      listed: false,
+      listed_secs_ago: null,
+      error: 'MCP server figma is unreachable: error sending request for url (http://127.0.0.1:3845/mcp)',
+      tools: [],
+    },
+  ],
+}
+
 // Everything Settings reads, in its populated form.
 const BASE = {
   '/api/nodes': NODES,
@@ -614,6 +644,7 @@ const BASE = {
   '/api/transfers': TRANSFERS,
   '/api/push/subscriptions': PUSH_DEVICES,
   '/api/external': EXTERNAL,
+  '/api/mcp-servers': MCP_SERVERS,
   '/api/restart': {
     config: { boot_hash: CONFIG_FILE.hash, hash: CONFIG_FILE.hash, keys: [], unparseable: false },
     restart: { available: true, mechanism: 'systemd', reason: null },
@@ -705,6 +736,7 @@ const CONNECTIONS_EMPTY = {
     { ...P_CODEX, state: 'disconnected', url: null, completion: null, completion_note: null, device_code: null, channels: [] },
   ],
   '/api/credentials': { credentials: [] },
+  '/api/mcp-servers': { servers: [] },
   '/api/config': { ...CONFIG, providers: {} },
 }
 

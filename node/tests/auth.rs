@@ -49,6 +49,7 @@ fn node() -> Node {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),
@@ -836,6 +837,7 @@ async fn the_harness_router_carries_no_operator_api() {
                 policy: tracon::policy::Policy::shipped_shared(),
                 http: reqwest::Client::new(),
                 session: Default::default(),
+                upstream: Default::default(),
             }),
             Default::default(),
             Arc::new(tracon::runner::local::LocalBackend),
@@ -852,6 +854,7 @@ async fn the_harness_router_carries_no_operator_api() {
             policy: tracon::policy::Policy::shipped_shared(),
             http: reqwest::Client::new(),
             session: Default::default(),
+            upstream: Default::default(),
         }),
         mesh: None,
         auth: Arc::new(AuthState::new("127.0.0.1".into(), None)),

@@ -331,6 +331,7 @@ pub fn router(state: AppState) -> Router {
         // One prompt: the item and the session that starts on it.
         .route("/api/compose", post(api::compose))
         .route("/api/readiness", get(api::readiness))
+        .route("/api/mcp-servers", get(api::mcp_servers))
         .route("/api/sessions/archive-ended", post(api::archive_ended))
         .route("/api/sessions/archive-legacy", post(api::archive_legacy))
         .route("/api/sessions/{id}/reopen", post(api::reopen_session))
@@ -672,6 +673,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             .build()
             .expect("http client"),
         session: Default::default(),
+        upstream: Default::default(),
     });
 
     let backend = boundary::backend_for(&cfg).await;
@@ -948,6 +950,20 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let awake = crate::awake::Awake::new(state.manager.clone());
     crate::awake::install(awake.clone());
     tokio::spawn(awake.clone().run());
+    // Each `[[mcp_server]]` is listed ahead of the sessions that are offered
+    // its tools, so an orientation names them, and a server that comes back
+    // is noticed without anyone asking.
+    {
+        let tools = state.tools.clone();
+        let node_id = state.node_id.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                tools.refresh_upstream(&node_id, false).await;
+            }
+        });
+    }
     {
         let store = store.clone();
         let manager = state.manager.clone();

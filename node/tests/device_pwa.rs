@@ -95,6 +95,7 @@ async fn a_window_without_passkeys_signs_in_and_confirms_an_admin_action_through
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),

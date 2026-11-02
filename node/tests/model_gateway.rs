@@ -167,6 +167,7 @@ async fn harness(broker_toml: &str, allow: &[&str]) -> Harness {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),
@@ -872,6 +873,7 @@ async fn a_channel_at_its_daily_ceiling_is_refused_and_told_once_per_session() {
                 policy: tracon::policy::Policy::shipped_shared(),
                 http: reqwest::Client::new(),
                 session: Default::default(),
+                upstream: Default::default(),
             }),
             mesh: None,
             auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),

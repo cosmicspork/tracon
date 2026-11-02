@@ -458,6 +458,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),

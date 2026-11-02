@@ -289,6 +289,16 @@ pub const KEYS: &[KeySpec] = &[
     restart("service.port"),
     restart("service.ready"),
     restart("service.timeout_secs"),
+    // [[mcp_server]]
+    live("mcp_server.name"),
+    live("mcp_server.url"),
+    live("mcp_server.channels"),
+    live("mcp_server.credential"),
+    live("mcp_server.header"),
+    live("mcp_server.allow"),
+    live("mcp_server.ask"),
+    live("mcp_server.deny"),
+    live("mcp_server.timeout_secs"),
     // [providers.<name>]
     restart("providers.*.credential"),
     restart("providers.*.upstream"),
@@ -452,7 +462,8 @@ pub fn host_only_reason(key: &str) -> &'static str {
 /// or a table (`*` a map entry) covering everything under it, and why:
 /// who may reach or administer this node (`[auth]`, `[mesh]`, `admin_peers`
 /// and the hub among it), and where it sends its credentials (a provider's
-/// upstream, credential and sign-in, the embedding endpoint and key). A peer
+/// upstream, credential and sign-in, the embedding endpoint and key, an MCP
+/// server's address, credential and header). A peer
 /// that could change these could strand this node's own operator, keep its
 /// grant past its removal, or redirect a credential to a host of its choosing.
 /// They are changed at the node, or remotely with this node's own passkey.
@@ -465,6 +476,9 @@ pub const NOT_BY_PEER: &[(&str, &str)] = &[
     ("embed.base_url", WHERE_CREDENTIALS_GO),
     ("embed.api_key_file", WHERE_CREDENTIALS_GO),
     ("upstreams", WHERE_CREDENTIALS_GO),
+    ("mcp_server.url", WHERE_CREDENTIALS_GO),
+    ("mcp_server.credential", WHERE_CREDENTIALS_GO),
+    ("mcp_server.header", WHERE_CREDENTIALS_GO),
 ];
 
 const WHO_REACHES: &str = "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer";

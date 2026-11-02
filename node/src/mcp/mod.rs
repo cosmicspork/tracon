@@ -25,6 +25,7 @@ pub mod schema;
 pub mod services;
 pub mod setup;
 pub mod show;
+pub mod upstream;
 pub mod wait;
 pub mod work;
 
@@ -81,6 +82,9 @@ pub struct Tools {
     /// needs the tools to decide what a session is offered, so the cycle is
     /// broken here rather than by merging the two.
     pub session: std::sync::OnceLock<SessionAccess>,
+    /// The `[[mcp_server]]` entries' listings and the MCP sessions the node
+    /// holds with them.
+    pub upstream: upstream::Registry,
 }
 
 #[derive(Clone)]
@@ -425,8 +429,111 @@ impl Tools {
             if !self.cfg.service.is_empty() {
                 out.extend(services::definitions(&self.cfg));
             }
+            // Another server's tools are only ever asked, run or refused
+            // here, so they need a node that can hold an approval.
+            out.extend(
+                self.upstream
+                    .definitions(&self.cfg.live().mcp_server, channel, &available),
+            );
         }
         out
+    }
+
+    /// The `[[mcp_server]]` a namespaced tool belongs to, as the node is
+    /// configured now, and the server's own name for the tool.
+    fn upstream_tool(&self, name: &str) -> Option<(crate::config::McpServer, String)> {
+        let live = self.cfg.live();
+        let (server, rest) = upstream::server_of(&live.mcp_server, name)?;
+        let remote = self
+            .upstream
+            .remote_name(server, name)
+            .unwrap_or_else(|| rest.to_string());
+        Some((server.clone(), remote))
+    }
+
+    /// How a call to another server's tool is answered under `policy`, from
+    /// the policy's own standing for it; `None` for a tool that is not
+    /// another server's.
+    pub fn upstream_decision(
+        &self,
+        policy: &Policy,
+        name: &str,
+        standing: crate::policy::Standing,
+    ) -> Option<Decision> {
+        let (server, remote) = self.upstream_tool(name)?;
+        let policy_decision = Decision {
+            verdict: standing.verdict,
+            rule_id: standing.rule_id,
+            reason: standing.reason,
+        };
+        Some(upstream::decide(&server, &remote, policy, policy_decision))
+    }
+
+    /// The input schema another server gave one of its tools, as offered.
+    pub fn upstream_schema(&self, name: &str) -> Option<Value> {
+        let live = self.cfg.live();
+        let (server, _) = upstream::server_of(&live.mcp_server, name)?;
+        self.upstream.input_schema(server, name)
+    }
+
+    /// Every `[[mcp_server]]` as the node sees it now, for the operator.
+    pub fn upstream_status(&self) -> Vec<Value> {
+        self.upstream
+            .status(&self.cfg.live().mcp_server, &self.policy.read())
+    }
+
+    /// List again the servers whose listing is stale, so a `tools/list` and
+    /// a session's orientation see what they offer now.
+    pub async fn refresh_upstream(&self, node_id: &str, force: bool) {
+        let servers = self.cfg.live().mcp_server.clone();
+        if servers.is_empty() {
+            return;
+        }
+        self.upstream
+            .refresh(&servers, &self.broker, node_id, force)
+            .await;
+    }
+
+    /// Whether a call to another server's tool can be made for this caller
+    /// at all: the server serves its channel, the channel may use its
+    /// credential, and the server has listed the tool. Checked before the
+    /// call is decided, so an unreachable server or a tool it does not have
+    /// never becomes an approval.
+    async fn upstream_ready(&self, ctx: &CallContext, name: &str) -> Result<(), String> {
+        let Some((server, _)) = self.upstream_tool(name) else {
+            return Ok(());
+        };
+        if !server.serves(&ctx.channel) {
+            return Err(format!(
+                "MCP server {} is not offered on channel {}",
+                server.name, ctx.channel
+            ));
+        }
+        if let Some(credential) = &server.credential {
+            let broker = self.broker.read().unwrap();
+            if !broker
+                .available_to(&ctx.channel, &ctx.node_id)
+                .contains(&credential.as_str())
+            {
+                return Err(format!(
+                    "MCP server {} needs credential {credential}, which channel {} may not use",
+                    server.name, ctx.channel
+                ));
+            }
+        }
+        if self.upstream.remote_name(&server, name).is_none() {
+            self.refresh_upstream(&ctx.node_id, false).await;
+        }
+        if self.upstream.remote_name(&server, name).is_some() {
+            return Ok(());
+        }
+        Err(match self.upstream.unavailable(&server) {
+            Some(why) => format!(
+                "MCP server {} cannot be reached for {name}: {why}",
+                server.name
+            ),
+            None => format!("MCP server {} lists no tool {name}", server.name),
+        })
     }
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
@@ -573,6 +680,7 @@ impl Tools {
                 "consequential calls require a valid operation_id and canonical arguments".into(),
             );
         }
+        self.upstream_ready(ctx, name).await?;
         // A workflow the node does not start is refused before the operator
         // is asked about it, not after.
         if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
@@ -881,7 +989,32 @@ impl Tools {
                     .ok_or("services are not available on this node")?;
                 services::call(access, ctx, name, args).await
             }
-            other => Err(format!("no tool named {other}")),
+            other => match self.upstream_tool(other) {
+                Some((server, remote)) => {
+                    // Decided again at the last moment: an entry edited to
+                    // deny while the call waited on the operator holds.
+                    let decision = self.decide(ctx, other, args);
+                    match decision.verdict {
+                        Verdict::Deny => Err(refusal(decision)),
+                        Verdict::Ask if !gated.one_shot => {
+                            Err(format!("{other} runs only once the operator allows it"))
+                        }
+                        Verdict::Allow | Verdict::Ask => {
+                            self.upstream
+                                .call(
+                                    &server,
+                                    &self.broker,
+                                    &ctx.channel,
+                                    &ctx.node_id,
+                                    &remote,
+                                    args,
+                                )
+                                .await
+                        }
+                    }
+                }
+                None => Err(format!("no tool named {other}")),
+            },
         };
         let result = match (name, result) {
             (
@@ -1821,6 +1954,9 @@ impl Tools {
         if tool.verdict == Verdict::Deny {
             return tool;
         }
+        if let Some((server, remote)) = self.upstream_tool(name) {
+            return upstream::decide(&server, &remote, &self.policy.read(), tool);
+        }
         if let Some((action, target, revision)) = consequential(name, args) {
             let Some(access) = self.session.get() else {
                 return Decision {
@@ -2029,13 +2165,26 @@ impl Tools {
                 })),
                 Err(e) => Err(e),
             },
-            "tools/list" => Ok(json!({ "tools": self.list_offered(ctx) })),
+            "tools/list" => {
+                self.refresh_upstream(&ctx.node_id, false).await;
+                Ok(json!({ "tools": self.list_offered(ctx) }))
+            }
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                let upstream = self.upstream_tool(name).is_some();
                 self.call(ctx, name, &args)
                     .await
-                    .map(|v| tool_result(&v, false))
+                    .map(|v| match v {
+                        // Another server's own content, as it sent it: text,
+                        // images or structured results alike.
+                        v if upstream && v["content"].is_array() => {
+                            let mut v = v;
+                            v["isError"] = json!(false);
+                            v
+                        }
+                        v => tool_result(&v, false),
+                    })
                     .or_else(|e| Ok(tool_result(&json!(e), true)))
             }
             "ping" => Ok(json!({})),
@@ -2898,6 +3047,7 @@ mod tests {
             policy: Policy::shipped_shared(),
             http: reqwest::Client::new(),
             session: Default::default(),
+            upstream: Default::default(),
         }
     }
 

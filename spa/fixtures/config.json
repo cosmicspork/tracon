@@ -1,5 +1,227 @@
 {
   "//": "GET /api/config as a node with this node.toml would answer it. `keys` is config_schema's own description (node/src/http/config_api.rs checks it and rewrites it under TRACON_WRITE_FIXTURES=1); `effective` holds Config::default() with this document over it; `providers` and `repo` are filled in by fixtures/states/settings.mjs.",
+  "document": {
+    "github": {
+      "dispatch": {
+        "op/homelab": [
+          "renovate.yaml"
+        ]
+      }
+    },
+    "harness": {
+      "id": "claude",
+      "version": "2.5.0"
+    },
+    "mesh": {
+      "hub_url": "https://hub.example.net"
+    },
+    "node_name": "laptop",
+    "notify": {
+      "contact": "mailto:op@example.com"
+    },
+    "publish": {
+      "gh": "/usr/bin/gh"
+    },
+    "review": {
+      "max_diff_lines": 4000,
+      "max_files": 120
+    },
+    "service": [
+      {
+        "image": "ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a",
+        "name": "browser",
+        "port": 9222,
+        "ready": "/json/version"
+      }
+    ],
+    "session": {
+      "budget_tokens": 2000000,
+      "default_channel": "personal"
+    }
+  },
+  "effective": {
+    "auth": {
+      "trusted_proxies": []
+    },
+    "boundary": {
+      "auto_reconcile": true,
+      "gateway_container": "tracon-gw",
+      "gateway_image": "localhost/tracon-gateway",
+      "gateway_ip": "10.89.0.2",
+      "harness_image": "localhost/tracon-harness-claude",
+      "network": "tracon-int",
+      "podman": "",
+      "start_machine": true,
+      "stop_timeout_secs": 10,
+      "subnet": "10.89.0.0/24"
+    },
+    "consulta": {
+      "args": [
+        "run",
+        "--project",
+        "/home/op/src/consulta",
+        "consulta"
+      ],
+      "command": "uv",
+      "timeout_secs": 60
+    },
+    "docs": {
+      "export_channel": "",
+      "export_every_secs": 1800,
+      "preview_listen": "127.0.0.1:7422"
+    },
+    "embed": {
+      "base_url": "http://127.0.0.1:8080",
+      "batch": 16,
+      "dim": 1024,
+      "enabled": false,
+      "min_similarity": 0.45,
+      "model": "bge-m3",
+      "timeout_secs": 60
+    },
+    "external": {
+      "enabled": false,
+      "idle_timeout_secs": 3600,
+      "repo_roots": [
+        "~/src"
+      ]
+    },
+    "gateway": {
+      "allow_hosts": [
+        "^api\\.anthropic\\.com$",
+        "^api\\.openai\\.com$",
+        "^chatgpt\\.com$",
+        "^auth\\.openai\\.com$"
+      ],
+      "egress_port": 7424,
+      "forward_port": 7421,
+      "harness_listen": "/run/user/1000/tracon/harness.sock",
+      "proxy_port": 8888,
+      "qa_proxy_port": 8890
+    },
+    "github": {
+      "dispatch": {
+        "op/homelab": [
+          "renovate.yaml"
+        ]
+      }
+    },
+    "harness": {
+      "experimental": [],
+      "id": "claude",
+      "native_binary": "",
+      "tools": [],
+      "version": "2.5.0"
+    },
+    "memory": {
+      "promote_at": "02:00"
+    },
+    "mesh": {
+      "command_timeout_secs": 15,
+      "heartbeat_secs": 60,
+      "hub_url": "https://hub.example.net",
+      "poll_secs": 30,
+      "renew_credentials": false,
+      "sandbox_relay": {
+        "enabled": false,
+        "max_streams": 16,
+        "target": ""
+      },
+      "stream_idle_secs": 120,
+      "stream_max_body_bytes": 8388608,
+      "stream_max_concurrent": 16,
+      "stream_max_response_bytes": 268435456,
+      "stream_open_timeout_secs": 30
+    },
+    "node_name": "laptop",
+    "notify": {
+      "contact": "mailto:op@example.com"
+    },
+    "publish": {
+      "commits": "squash",
+      "forge_timeout_secs": 15,
+      "gh": "/usr/bin/gh",
+      "git": "git",
+      "glab": "glab",
+      "style": {}
+    },
+    "review": {
+      "max_diff_lines": 4000,
+      "max_files": 120
+    },
+    "runtime": {
+      "approved_images": [],
+      "kind": "podman",
+      "kubernetes": {
+        "gateway_host": "tracon-gw",
+        "harness_home": "/home/harness",
+        "harness_image": "ghcr.io/cosmicspork/tracon-harness-claude:0.32.0",
+        "image_pull_secrets": [],
+        "internal_cidrs": [],
+        "namespace": "",
+        "resources": {
+          "command": {},
+          "session": {}
+        },
+        "shm_size": "1Gi",
+        "start_timeout_secs": 900,
+        "state_claim": "tracon-state",
+        "state_mount": "/state",
+        "uid": 65532
+      }
+    },
+    "service": [
+      {
+        "image": "ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a",
+        "name": "browser",
+        "port": 9222,
+        "ready": "/json/version"
+      }
+    ],
+    "session": {
+      "approval_expiry_secs": 86400,
+      "budget_tokens": 2000000,
+      "claim_grace_secs": 60,
+      "default_channel": "personal",
+      "harness_api_timeout_secs": 30,
+      "permission_timeout_secs": 900,
+      "suspend_published_after_secs": 1800,
+      "worktree_root": "/home/op/.local/state/tracon/worktrees"
+    },
+    "supervision": {
+      "checks": [
+        "just check"
+      ],
+      "dependency_inputs": {},
+      "max_snapshot_bytes": 536870912,
+      "timeout_secs": 900
+    },
+    "upstreams": {
+      "preparation": "env"
+    },
+    "work": {
+      "default_priority": 2,
+      "priority": [
+        {
+          "name": "Urgent",
+          "value": 4
+        },
+        {
+          "name": "Priority",
+          "value": 3
+        },
+        {
+          "name": "Planned",
+          "value": 2
+        },
+        {
+          "name": "Backlog",
+          "value": 1
+        }
+      ]
+    }
+  },
+  "hash": "28d011898668fb6ed96ed2222530ced994a44a4301b921d2078dfe011e8dab24",
   "keys": [
     {
       "admin": true,
@@ -1913,6 +2135,166 @@
     },
     {
       "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.name",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.url",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.channels",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.credential",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.header",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.allow",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.ask",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.deny",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
@@ -2890,228 +3272,6 @@
       "why_not_by_peer": "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer"
     }
   ],
-  "document": {
-    "node_name": "laptop",
-    "harness": {
-      "id": "claude",
-      "version": "2.5.0"
-    },
-    "session": {
-      "budget_tokens": 2000000,
-      "default_channel": "personal"
-    },
-    "review": {
-      "max_diff_lines": 4000,
-      "max_files": 120
-    },
-    "publish": {
-      "gh": "/usr/bin/gh"
-    },
-    "github": {
-      "dispatch": {
-        "op/homelab": [
-          "renovate.yaml"
-        ]
-      }
-    },
-    "mesh": {
-      "hub_url": "https://hub.example.net"
-    },
-    "notify": {
-      "contact": "mailto:op@example.com"
-    },
-    "service": [
-      {
-        "name": "browser",
-        "image": "ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a",
-        "port": 9222,
-        "ready": "/json/version"
-      }
-    ]
-  },
-  "effective": {
-    "auth": {
-      "trusted_proxies": []
-    },
-    "boundary": {
-      "auto_reconcile": true,
-      "gateway_container": "tracon-gw",
-      "gateway_image": "localhost/tracon-gateway",
-      "gateway_ip": "10.89.0.2",
-      "harness_image": "localhost/tracon-harness-claude",
-      "network": "tracon-int",
-      "podman": "",
-      "start_machine": true,
-      "stop_timeout_secs": 10,
-      "subnet": "10.89.0.0/24"
-    },
-    "consulta": {
-      "args": [
-        "run",
-        "--project",
-        "/home/op/src/consulta",
-        "consulta"
-      ],
-      "command": "uv",
-      "timeout_secs": 60
-    },
-    "docs": {
-      "export_channel": "",
-      "export_every_secs": 1800,
-      "preview_listen": "127.0.0.1:7422"
-    },
-    "embed": {
-      "base_url": "http://127.0.0.1:8080",
-      "batch": 16,
-      "dim": 1024,
-      "enabled": false,
-      "min_similarity": 0.45,
-      "model": "bge-m3",
-      "timeout_secs": 60
-    },
-    "external": {
-      "enabled": false,
-      "idle_timeout_secs": 3600,
-      "repo_roots": [
-        "~/src"
-      ]
-    },
-    "gateway": {
-      "allow_hosts": [
-        "^api\\.anthropic\\.com$",
-        "^api\\.openai\\.com$",
-        "^chatgpt\\.com$",
-        "^auth\\.openai\\.com$"
-      ],
-      "egress_port": 7424,
-      "forward_port": 7421,
-      "harness_listen": "/run/user/1000/tracon/harness.sock",
-      "proxy_port": 8888,
-      "qa_proxy_port": 8890
-    },
-    "github": {
-      "dispatch": {
-        "op/homelab": [
-          "renovate.yaml"
-        ]
-      }
-    },
-    "harness": {
-      "experimental": [],
-      "id": "claude",
-      "native_binary": "",
-      "tools": [],
-      "version": "2.5.0"
-    },
-    "memory": {
-      "promote_at": "02:00"
-    },
-    "mesh": {
-      "command_timeout_secs": 15,
-      "heartbeat_secs": 60,
-      "poll_secs": 30,
-      "renew_credentials": false,
-      "sandbox_relay": {
-        "enabled": false,
-        "max_streams": 16,
-        "target": ""
-      },
-      "stream_idle_secs": 120,
-      "stream_max_body_bytes": 8388608,
-      "stream_max_concurrent": 16,
-      "stream_max_response_bytes": 268435456,
-      "stream_open_timeout_secs": 30,
-      "hub_url": "https://hub.example.net"
-    },
-    "node_name": "laptop",
-    "notify": {
-      "contact": "mailto:op@example.com"
-    },
-    "publish": {
-      "commits": "squash",
-      "forge_timeout_secs": 15,
-      "gh": "/usr/bin/gh",
-      "git": "git",
-      "glab": "glab",
-      "style": {}
-    },
-    "review": {
-      "max_diff_lines": 4000,
-      "max_files": 120
-    },
-    "runtime": {
-      "approved_images": [],
-      "kind": "podman",
-      "kubernetes": {
-        "gateway_host": "tracon-gw",
-        "harness_home": "/home/harness",
-        "harness_image": "ghcr.io/cosmicspork/tracon-harness-claude:0.32.0",
-        "image_pull_secrets": [],
-        "internal_cidrs": [],
-        "namespace": "",
-        "resources": {
-          "command": {},
-          "session": {}
-        },
-        "shm_size": "1Gi",
-        "start_timeout_secs": 900,
-        "state_claim": "tracon-state",
-        "state_mount": "/state",
-        "uid": 65532
-      }
-    },
-    "service": [
-      {
-        "name": "browser",
-        "image": "ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a",
-        "port": 9222,
-        "ready": "/json/version"
-      }
-    ],
-    "session": {
-      "approval_expiry_secs": 86400,
-      "budget_tokens": 2000000,
-      "claim_grace_secs": 60,
-      "default_channel": "personal",
-      "harness_api_timeout_secs": 30,
-      "permission_timeout_secs": 900,
-      "suspend_published_after_secs": 1800,
-      "worktree_root": "/home/op/.local/state/tracon/worktrees"
-    },
-    "supervision": {
-      "checks": [
-        "just check"
-      ],
-      "dependency_inputs": {},
-      "max_snapshot_bytes": 536870912,
-      "timeout_secs": 900
-    },
-    "upstreams": {
-      "preparation": "env"
-    },
-    "work": {
-      "default_priority": 2,
-      "priority": [
-        {
-          "name": "Urgent",
-          "value": 4
-        },
-        {
-          "name": "Priority",
-          "value": 3
-        },
-        {
-          "name": "Planned",
-          "value": 2
-        },
-        {
-          "name": "Backlog",
-          "value": 1
-        }
-      ]
-    }
-  },
-  "toml": "node_name = \"laptop\"\n\n[harness]\nid = \"claude\"\nversion = \"2.5.0\"\n\n[session]\nbudget_tokens = 2000000\ndefault_channel = \"personal\"\n\n[review]\nmax_diff_lines = 4000\nmax_files = 120\n\n[publish]\ngh = \"/usr/bin/gh\"\n\n[github.dispatch]\n\"op/homelab\" = [\"renovate.yaml\"]\n\n[mesh]\nhub_url = \"https://hub.example.net\"\n\n[notify]\ncontact = \"mailto:op@example.com\"\n\n[[service]]\nname = \"browser\"\nimage = \"ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a\"\nport = 9222\nready = \"/json/version\"\n",
-  "hash": "28d011898668fb6ed96ed2222530ced994a44a4301b921d2078dfe011e8dab24",
-  "redacted": "<redacted>"
+  "redacted": "<redacted>",
+  "toml": "node_name = \"laptop\"\n\n[harness]\nid = \"claude\"\nversion = \"2.5.0\"\n\n[session]\nbudget_tokens = 2000000\ndefault_channel = \"personal\"\n\n[review]\nmax_diff_lines = 4000\nmax_files = 120\n\n[publish]\ngh = \"/usr/bin/gh\"\n\n[github.dispatch]\n\"op/homelab\" = [\"renovate.yaml\"]\n\n[mesh]\nhub_url = \"https://hub.example.net\"\n\n[notify]\ncontact = \"mailto:op@example.com\"\n\n[[service]]\nname = \"browser\"\nimage = \"ghcr.io/op/chromium@sha256:5b0e8a1c9d2f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2f4a\"\nport = 9222\nready = \"/json/version\"\n"
 }

@@ -196,6 +196,7 @@ async fn every_session_holds_its_own_grant_whatever_its_harness() {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let issued: Arc<std::sync::Mutex<Vec<GrantSpec>>> = Default::default();
     let backend = Arc::new(Granting {

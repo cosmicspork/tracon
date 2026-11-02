@@ -50,6 +50,7 @@ pub async fn harness_on(cfg: Config, backend: Arc<dyn tracon::boundary::Backend>
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let bus = Bus::new();
     let manager = Manager::new(
