@@ -142,10 +142,27 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
                 ),
             );
         }
+        if let Some(missing) = crate::provider::podman::service_bundles(cfg)
+            .into_iter()
+            .map(|(bundle, _)| bundle)
+            .find(|bundle| !bundle.is_dir())
+        {
+            return CheckResult::fail(
+                CheckId::Runtime,
+                format!(
+                    "[runtime.podman] sandbox_services is on, and service bundle {:?} is not a directory",
+                    missing.display().to_string()
+                ),
+            );
+        }
+        let services = match super::uses_sandbox_services(cfg) {
+            true => ", services in the sandbox",
+            false => "",
+        };
         return CheckResult::ok(
             CheckId::Runtime,
             format!(
-                "podman {version}, rootless, images present; commands run over the sandbox protocol from {}{}",
+                "podman {version}, rootless, images present; commands run over the sandbox protocol from {}{}{services}",
                 bundle.display(),
                 match super::uses_sandbox_tunnels(cfg) {
                     true => ", reaching the node through tunnels with no gateway container",
@@ -456,7 +473,7 @@ fn check_node_only(cfg: &Config, c: &serde_json::Value) -> CheckResult {
         return CheckResult::fail(
             CheckId::NetworkIsolated,
             format!(
-                "host paths are bind-mounted into the sandbox at {}; only the bundle and the socket directory may be",
+                "host paths are bind-mounted into the sandbox at {}; only the bundle, the socket directory and read-only service bundles may be",
                 binds.join(", ")
             ),
         );

@@ -238,6 +238,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.podman.sandbox_files"),
     restart("runtime.podman.sandbox_tunnels"),
     restart("runtime.podman.sandbox_images"),
+    restart("runtime.podman.sandbox_services"),
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image").host_only(),
     restart("runtime.kubernetes.state_claim"),
@@ -296,6 +297,10 @@ pub const KEYS: &[KeySpec] = &[
     restart("service.port"),
     restart("service.ready"),
     restart("service.timeout_secs"),
+    restart("service.bundle").host_only(),
+    restart("service.run"),
+    restart("service.env.*"),
+    restart("service.restart"),
     // [[mcp_server]]
     live("mcp_server.name"),
     live("mcp_server.url"),
@@ -484,6 +489,9 @@ pub fn host_only_reason(key: &str) -> &'static str {
         "runtime.kubernetes.state_mount" => HOST_ONLY_REASON,
         "sandbox.release_url" => {
             "is where the node downloads the binaries every sandbox runs, so it is changed at the node, not from elsewhere"
+        }
+        "service.bundle" => {
+            "is a directory of binaries mounted into every sandbox, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
         }
         "sandbox.bundle" => {
             "is the directory whose binaries every sandbox runs, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
@@ -1007,6 +1015,7 @@ mod tests {
                 "sandbox.base_image",
                 "sandbox.bundle",
                 "sandbox.release_url",
+                "service.bundle",
             ]
         );
         assert!(lookup(&["runtime", "kubernetes"]).host_only);

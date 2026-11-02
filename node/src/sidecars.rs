@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::config::{Config, Service};
-use crate::runner::{sidecar_name, Runner, Sidecar};
+use crate::runner::{sidecar_name, InSandbox, Runner, RunnerError, Sidecar};
 use crate::store::{now_ms, SessionRow, Store};
 
 pub const STARTED: &str = "started";
@@ -119,6 +119,13 @@ fn sidecar(service: &Service, session_container: &str) -> Sidecar {
         command: service.command.clone(),
         port: service.port,
         ready: service.ready.clone(),
+        in_sandbox: service.bundle.as_ref().map(|_| InSandbox {
+            service: service.name.clone(),
+            argv: service.sandbox_argv(),
+            env: service.env.clone(),
+            restart: service.restart,
+            ready_within: Duration::from_secs(service.timeout_secs()),
+        }),
     }
 }
 
@@ -175,9 +182,13 @@ pub async fn start(cx: &Context<'_>, name: &str, wait: Duration) -> Result<Value
                 }));
                 return Ok(view(service, FAILED, Some(&detail)));
             }
-            (cx.record)(json!({
+            let mut started = json!({
                 "name": name, "container": sidecar.name, "state": STARTED, "image": service.image,
-            }));
+            });
+            if let Some(bundle) = &service.bundle {
+                started["bundle"] = json!(bundle);
+            }
+            (cx.record)(started);
             now_ms()
         }
     };
@@ -217,11 +228,18 @@ async fn await_ready(
     let deadline = tokio::time::Instant::now() + wait;
     let timeout_ms = (service.timeout_secs() * 1000) as i64;
     loop {
-        let ready = cx
-            .runner
-            .probe_sidecar(sidecar)
-            .await
-            .map_err(|error| error.to_string())?;
+        let ready = match cx.runner.probe_sidecar(sidecar).await {
+            Ok(ready) => ready,
+            // Given up on where it runs: failed now, not at the timeout.
+            Err(RunnerError::ServiceFailed(detail)) => {
+                let _ = cx.runner.kill(&sidecar.name).await;
+                (cx.record)(json!({
+                    "name": service.name, "container": sidecar.name, "state": FAILED, "detail": detail,
+                }));
+                return Ok(view(service, FAILED, Some(&detail)));
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if ready {
             if current.is_none_or(|c| c.state != READY) {
                 (cx.record)(json!({
@@ -230,7 +248,9 @@ async fn await_ready(
             }
             return Ok(view(service, READY, None));
         }
-        if now_ms() - started_ms >= timeout_ms {
+        // A supervised service is timed by its supervisor, each start, and
+        // restarted by its policy; it fails when the supervisor gives up.
+        if !cx.runner.supervises_sidecar(sidecar) && now_ms() - started_ms >= timeout_ms {
             let detail = format!(
                 "did not answer on {} within {}s",
                 service.port,
@@ -295,6 +315,10 @@ mod tests {
         /// Probes before the service answers; `usize::MAX` never.
         ready_after: usize,
         probes: AtomicUsize,
+        /// Runs services under a supervisor of its own.
+        supervises: bool,
+        /// Probes before the supervisor gives up on it.
+        fails_after: Option<usize>,
     }
 
     #[async_trait]
@@ -314,7 +338,14 @@ mod tests {
             Ok(())
         }
         async fn probe_sidecar(&self, _: &Sidecar) -> Result<bool, RunnerError> {
-            Ok(self.probes.fetch_add(1, Ordering::SeqCst) >= self.ready_after)
+            let probes = self.probes.fetch_add(1, Ordering::SeqCst);
+            if self.fails_after.is_some_and(|n| probes >= n) {
+                return Err(RunnerError::ServiceFailed("exited with 1; boom".into()));
+            }
+            Ok(probes >= self.ready_after)
+        }
+        fn supervises_sidecar(&self, _: &Sidecar) -> bool {
+            self.supervises
         }
     }
 
@@ -327,6 +358,7 @@ mod tests {
                 port: 9222,
                 ready: Some("/json/version".into()),
                 timeout_secs,
+                ..Service::default()
             }],
             ..Config::default()
         }
@@ -437,5 +469,84 @@ mod tests {
         // Asking again starts it afresh.
         start(&cx, "browser", Duration::ZERO).await.unwrap();
         assert_eq!(runner.started.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_bundled_service_is_described_for_the_sandbox_and_timed_by_its_supervisor() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let row = session(&store);
+        let mut cfg = cfg(1);
+        cfg.service[0].image = String::new();
+        cfg.service[0].bundle = Some("/srv/browser/amd64".into());
+        cfg.service[0].restart = crate::config::ServiceRestart::Always;
+        let runner = FakeRunner {
+            ready_after: usize::MAX,
+            supervises: true,
+            ..Default::default()
+        };
+        let record = recorder(store.clone());
+        let cx = Context {
+            cfg: &cfg,
+            store: &store,
+            runner: &runner,
+            session: &row,
+            record: &record,
+        };
+        let v = start(&cx, "browser", Duration::ZERO).await.unwrap();
+        assert_eq!(v["state"], STARTING, "{v}");
+        let started = runner.started.lock().unwrap()[0].clone();
+        let in_sandbox = started.in_sandbox.unwrap();
+        assert_eq!(in_sandbox.service, "browser");
+        assert_eq!(
+            in_sandbox.argv,
+            [
+                "/opt/tracon-services/browser/run",
+                "--remote-debugging-port=9222"
+            ]
+        );
+        assert_eq!(in_sandbox.ready_within, Duration::from_secs(1));
+        assert_eq!(in_sandbox.restart, crate::config::ServiceRestart::Always);
+        assert_eq!(
+            recorded(&store, "s1")["browser"].state,
+            STARTED,
+            "recorded as started"
+        );
+
+        // Past the catalogue's timeout, still restarting: not failed, since
+        // its supervisor restarts it by its policy.
+        let v = status(&cx, "browser", Duration::from_millis(1600))
+            .await
+            .unwrap();
+        assert_eq!(v["state"], STARTING, "{v}");
+        assert!(runner.killed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_service_its_supervisor_gave_up_on_fails_at_once_with_why() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let row = session(&store);
+        let cfg = cfg(30);
+        let runner = FakeRunner {
+            ready_after: usize::MAX,
+            supervises: true,
+            fails_after: Some(1),
+            ..Default::default()
+        };
+        let record = recorder(store.clone());
+        let cx = Context {
+            cfg: &cfg,
+            store: &store,
+            runner: &runner,
+            session: &row,
+            record: &record,
+        };
+        let v = start(&cx, "browser", Duration::from_secs(5)).await.unwrap();
+        assert_eq!(v["state"], FAILED, "{v}");
+        assert!(v["detail"].as_str().unwrap().contains("boom"), "{v}");
+        assert_eq!(recorded(&store, "s1")["browser"].state, FAILED);
+        assert_eq!(
+            runner.killed.lock().unwrap().clone(),
+            vec!["tracon-h-s1-svc-browser"]
+        );
     }
 }

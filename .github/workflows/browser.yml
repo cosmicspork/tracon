@@ -4,15 +4,24 @@ name: browser
 # that touches it (Dependabot's upstream bumps included), and published on
 # merge, apart from tracon's releases: a Chrome fix should not wait for one.
 # Nodes pin it by digest, so a publish changes nothing until an operator pins it.
+#
+# Its bundle, which a sandbox's supervisor runs in place of the image, is
+# assembled and smoke-tested on the stock base's own base image for both
+# architectures, each on its own kind of runner (Chrome does not run under
+# emulation). Releases attach it (release.yml); here it is only checked.
 on:
   pull_request:
     paths:
       - containers/browser/**
+      - scripts/browser-bundle.sh
+      - containers/sandbox-base/Containerfile
       - .github/workflows/browser.yml
   push:
     branches: [main]
     paths:
       - containers/browser/**
+      - scripts/browser-bundle.sh
+      - containers/sandbox-base/Containerfile
       - .github/workflows/browser.yml
   # Republish from main, e.g. after a failed push.
   workflow_dispatch:
@@ -67,3 +76,27 @@ jobs:
             echo 'ready = "/json/version"'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The arm64 runner image may come without it.
+      - name: Podman
+        run: command -v podman || { sudo apt-get update && sudo apt-get install -y podman; }
+
+      - name: Assemble
+        run: scripts/browser-bundle.sh --arch ${{ matrix.arch }} --out services
+
+      - name: Smoke test on the base's base image
+        run: containers/browser/bundle-smoke.sh services/*/${{ matrix.arch }}

@@ -209,6 +209,9 @@ pub struct SandboxLaunch {
     pub userns: Option<String>,
     /// Environment the image does not set and the sandbox needs.
     pub env: Vec<(String, String)>,
+    /// Catalogue service bundles, each mounted read-only at its target
+    /// (`/opt/tracon-services/<name>`), for the supervisor to run.
+    pub service_bundles: Vec<(std::path::PathBuf, String)>,
 }
 
 /// Where the bundle is mounted inside a sandbox.
@@ -323,6 +326,13 @@ impl RunSpec {
             "type=bind,src={},dst={BUNDLE_TARGET},ro,relabel=shared",
             launch.bundle.display()
         ));
+        for (bundle, target) in &launch.service_bundles {
+            a.push("--mount".into());
+            a.push(format!(
+                "type=bind,src={},dst={target},ro,relabel=shared",
+                bundle.display()
+            ));
+        }
         // Read-only: the supervisor dials the socket, and nothing inside may
         // put another in its place.
         a.push("--mount".into());
@@ -591,6 +601,13 @@ impl Runner for PodmanRunner {
     }
 
     async fn start_sidecar(&self, sidecar: &super::Sidecar) -> Result<(), RunnerError> {
+        if sidecar.image.is_empty() {
+            return Err(RunnerError::Other(format!(
+                "service {} has a bundle and no image, so it runs only inside a sandbox \
+                 ([runtime.podman] sandbox_services)",
+                sidecar.name
+            )));
+        }
         let out = self
             .podman()?
             .args(self.spec.sidecar_args(sidecar))
@@ -731,6 +748,7 @@ mod tests {
             command: vec!["--remote-debugging-port=9222".into()],
             port: 9222,
             ready: Some("/json/version".into()),
+            in_sandbox: None,
         };
         let a = spec().sidecar_args(&sidecar);
         let line = a.join(" ");
@@ -754,6 +772,24 @@ mod tests {
             ..sidecar
         });
         assert_eq!(tcp.last().unwrap(), "exec 3<>/dev/tcp/127.0.0.1/9222");
+    }
+
+    #[tokio::test]
+    async fn a_service_with_only_a_bundle_is_not_started_as_a_container() {
+        let sidecar = crate::runner::Sidecar {
+            name: "tracon-h-s1-svc-browser".into(),
+            session_container: "tracon-h-s1".into(),
+            image: String::new(),
+            command: Vec::new(),
+            port: 9222,
+            ready: None,
+            in_sandbox: None,
+        };
+        let error = PodmanRunner::new(spec())
+            .start_sidecar(&sidecar)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("sandbox_services"), "{error}");
     }
 
     #[test]

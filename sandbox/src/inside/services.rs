@@ -337,6 +337,12 @@ impl Run {
                         Ok(Ok(_))
                     )
                 }
+                Probe::Http { addr, path } => {
+                    matches!(
+                        tokio::time::timeout(interval, http_ok(addr, path)).await,
+                        Ok(true)
+                    )
+                }
                 Probe::Command(argv) => {
                     let mut spec = SpawnSpec::new(argv.clone());
                     spec.stdin = false;
@@ -392,6 +398,32 @@ impl Run {
             }
         })
     }
+}
+
+/// Whether `GET path` on `addr` answers 2xx. Only the status line is read.
+async fn http_ok(addr: &str, path: &str) -> bool {
+    use tokio::io::AsyncWriteExt as _;
+    let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
+        return false;
+    };
+    // The host as given: a CDP browser answers only a Host that is an
+    // address or `localhost`.
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).await.is_err() {
+        return false;
+    }
+    let mut status = Vec::new();
+    let mut reader = BufReader::new(stream).take(256);
+    if reader.read_until(b'\n', &mut status).await.is_err() {
+        return false;
+    }
+    // `HTTP/1.x 2xx ...`
+    let status = String::from_utf8_lossy(&status);
+    let mut words = status.split_whitespace();
+    words.next().is_some_and(|v| v.starts_with("HTTP/"))
+        && words
+            .next()
+            .is_some_and(|code| code.len() == 3 && code.starts_with('2'))
 }
 
 async fn exited(exit: &mut watch::Receiver<Option<ExitStatus>>) -> ExitStatus {

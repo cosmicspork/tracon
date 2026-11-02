@@ -1353,6 +1353,22 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "runtime.podman.sandbox_services",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "runtime.kubernetes.namespace",
       "path": null,
       "secret": false,
@@ -2227,6 +2243,81 @@
       "secret": false,
       "shape": {
         "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": false,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.bundle",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      },
+      "why_not": "is a directory of binaries mounted into every sandbox, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.run",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.env.*",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "service",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "service.restart",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "choices": [
+          "never",
+          "on-failure",
+          "always"
+        ],
+        "kind": "enum",
         "optional": false
       }
     },
