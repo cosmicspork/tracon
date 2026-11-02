@@ -1,0 +1,8 @@
+#!/bin/sh
+while [ ! -s /run/tracon/bootstrap ]; do sleep 0.2; done
+set -a
+. /run/tracon/bootstrap
+set +a
+rm -f /run/tracon/bootstrap
+export TRACON_SANDBOX_TOKEN_FILE=/run/tracon/token
+exec /opt/tracon/bin/tracon-sandbox

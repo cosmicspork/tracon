@@ -1780,18 +1780,29 @@ impl Tools {
         // An egress card opens or saves the host it asked about and runs no
         // call, so an edit to it would be silently dropped: what the operator
         // allowed would not be what happened. Refused instead.
-        if matches!(approval.tool.as_str(), egress::REQUEST | egress::PREPARE)
+        let place = crate::store::approvals::PLACE_TOOL;
+        let takes_no_edit = matches!(approval.tool.as_str(), egress::REQUEST | egress::PREPARE)
+            || approval.tool == place;
+        if takes_no_edit
             && option_id != OPTION_REQUEST_CHANGES
             && option_id != crate::adapter::types::OPTION_REJECT_ONCE
         {
             if let Some(edited) = &answer.arguments {
                 let asked: Value = serde_json::from_str(&approval.arguments).unwrap_or_default();
                 if *edited != asked {
+                    let message = match approval.tool == place {
+                        true => {
+                            "this card runs the session where it asked and takes no edit; \
+                                 reject it instead"
+                        }
+                        false => {
+                            "this card opens the host it asked about and takes no edit; \
+                                  reject it instead"
+                        }
+                    };
                     return Err(SessionError::Unfit(vec![schema::FieldError {
                         field: String::new(),
-                        message: "this card opens the host it asked about and takes no edit; \
-                                  reject it instead"
-                            .into(),
+                        message: message.into(),
                     }]));
                 }
             }
@@ -1801,6 +1812,40 @@ impl Tools {
                 return self
                     .allow_egress(&approval, option_id, opened, notes, by.as_deref())
                     .await;
+            }
+        }
+        // A placement card runs the session there or ends it: there is no
+        // call to run, and nothing to change.
+        if approval.tool == place {
+            if option_id == OPTION_REQUEST_CHANGES {
+                return Err(rejected(
+                    "a session is run on DigitalOcean or not run: allow it or reject it",
+                ));
+            }
+            if option_id == OPTION_ALLOW_ONCE {
+                use crate::store::approvals::{Decision, RUNNING, SUCCEEDED};
+                let decision = Decision {
+                    state: RUNNING,
+                    option_id,
+                    note: notes.as_deref(),
+                    bound_to: Some(&approval.arguments),
+                    ..Default::default()
+                };
+                if !access.store.decide_approval(id, &decision)? {
+                    return Err(no_longer_waiting());
+                }
+                let decided = access.store.get_approval(id)?.unwrap_or(approval);
+                access
+                    .manager
+                    .approval_answered(&decided, RUNNING, by.as_deref())
+                    .await;
+                access.store.finish_approval(
+                    id,
+                    SUCCEEDED,
+                    Some(&json!({ "placed": "digitalocean" }).to_string()),
+                    None,
+                )?;
+                return Ok(());
             }
         }
         // A warm-up's ask is saved or refused: the warm-up is over, so there

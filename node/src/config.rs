@@ -73,11 +73,14 @@ pub struct Config {
     /// that never holds it.
     pub upstreams: Upstreams,
     /// Where sessions may run and what each channel and repository requires
-    /// of the sandbox provider (`crate::provider`). Shown, not enforced yet.
+    /// of the sandbox provider (`crate::provider`).
     pub placement: crate::provider::requirements::Placement,
     pub metrics: Metrics,
     /// What every sandbox is given: the harness bundle.
     pub sandbox: Sandbox,
+    /// How this node reaches DigitalOcean's Harness Runtime, for sessions
+    /// `[placement] digitalocean` sends there.
+    pub digitalocean: crate::provider::digitalocean::Settings,
 }
 
 /// `[sandbox]`: what a sandbox provider mounts into each sandbox.
@@ -2630,6 +2633,7 @@ impl Default for Config {
             placement: Default::default(),
             metrics: Metrics::default(),
             sandbox: Sandbox::default(),
+            digitalocean: Default::default(),
             harness: Harness {
                 id: crate::adapter::claude::ClaudeAdapter::ID.into(),
                 version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
@@ -3068,6 +3072,11 @@ impl Config {
         validate_repos(&config.repo).map_err(|error| format!("{}: {error}", path.display()))?;
         crate::provider::requirements::validate(&config.placement)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        crate::provider::digitalocean::validate(
+            &config.digitalocean,
+            config.mesh.sandbox_relay.enabled,
+        )
+        .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_mcp_servers(&config.mcp_server)

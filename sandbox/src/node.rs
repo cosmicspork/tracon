@@ -99,40 +99,79 @@ impl Default for ServerOptions {
 /// One-time tokens, each naming the run it was issued for. A token is
 /// consumed by the first hello that presents it, accepted or not by anything
 /// after, so a copy of a sandbox's environment is worth nothing once that
-/// sandbox has connected.
+/// sandbox has connected. One issued with a window
+/// ([`TokenRegistry::issue_within`]) is also worth nothing once the window
+/// has passed unused, for a provider that may keep a copy of how it was
+/// delivered.
 #[derive(Clone, Default)]
 pub struct TokenRegistry {
     // Keyed by the token's digest, so the table never holds a usable token
     // and a lookup does not compare secrets byte by byte.
-    issued: Arc<Mutex<HashMap<[u8; 32], String>>>,
+    issued: Arc<Mutex<HashMap<[u8; 32], Issued>>>,
+}
+
+struct Issued {
+    run: String,
+    /// Redeemable until then; `None` for no window of its own.
+    until: Option<std::time::Instant>,
 }
 
 impl TokenRegistry {
     /// A fresh token for `run`: 32 random bytes, base64url.
     pub fn issue(&self, run: impl Into<String>) -> String {
+        self.insert(run.into(), None)
+    }
+
+    /// A fresh token for `run` that is refused unless redeemed within
+    /// `window` of now.
+    pub fn issue_within(&self, run: impl Into<String>, window: Duration) -> String {
+        self.insert(run.into(), Some(std::time::Instant::now() + window))
+    }
+
+    fn insert(&self, run: String, until: Option<std::time::Instant>) -> String {
         use ring::rand::SecureRandom as _;
         let mut bytes = [0u8; 32];
         ring::rand::SystemRandom::new()
             .fill(&mut bytes)
             .expect("system randomness");
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-        self.issued
-            .lock()
-            .unwrap()
-            .insert(Sha256::digest(token.as_bytes()).into(), run.into());
+        let mut issued = self.issued.lock().unwrap();
+        // Expired tokens are dropped as new ones are issued, so a run whose
+        // sandbox never came leaves nothing behind for long.
+        let now = std::time::Instant::now();
+        issued.retain(|_, i| i.until.is_none_or(|until| until > now));
+        issued.insert(
+            Sha256::digest(token.as_bytes()).into(),
+            Issued { run, until },
+        );
         token
     }
 
     /// Forget every unused token issued for `run`.
     pub fn revoke(&self, run: &str) {
-        self.issued.lock().unwrap().retain(|_, r| r != run);
+        self.issued.lock().unwrap().retain(|_, i| i.run != run);
     }
 
-    fn redeem(&self, token: &str) -> Option<String> {
+    /// Whether an unused, unexpired token for `run` is outstanding.
+    pub fn outstanding(&self, run: &str) -> bool {
+        let now = std::time::Instant::now();
         self.issued
             .lock()
             .unwrap()
-            .remove(&<[u8; 32]>::from(Sha256::digest(token.as_bytes())))
+            .values()
+            .any(|i| i.run == run && i.until.is_none_or(|until| until > now))
+    }
+
+    fn redeem(&self, token: &str) -> Option<String> {
+        let issued = self
+            .issued
+            .lock()
+            .unwrap()
+            .remove(&<[u8; 32]>::from(Sha256::digest(token.as_bytes())))?;
+        match issued.until {
+            Some(until) if until <= std::time::Instant::now() => None,
+            _ => Some(issued.run),
+        }
     }
 }
 
@@ -903,5 +942,48 @@ impl EventStream {
         serde_json::from_slice(&self.line)
             .map(Some)
             .map_err(|e| SandboxError::Protocol(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_is_redeemed_once() {
+        let tokens = TokenRegistry::default();
+        let token = tokens.issue("run-1");
+        assert!(tokens.outstanding("run-1"));
+        assert_eq!(tokens.redeem(&token).as_deref(), Some("run-1"));
+        assert_eq!(tokens.redeem(&token), None);
+        assert!(!tokens.outstanding("run-1"));
+    }
+
+    #[test]
+    fn a_windowed_token_is_refused_once_its_window_has_passed() {
+        let tokens = TokenRegistry::default();
+        let late = tokens.issue_within("late", Duration::from_millis(1));
+        let early = tokens.issue_within("early", Duration::from_secs(60));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!tokens.outstanding("late"));
+        assert_eq!(tokens.redeem(&late), None);
+        assert_eq!(tokens.redeem(&early).as_deref(), Some("early"));
+    }
+
+    #[test]
+    fn issuing_drops_expired_tokens() {
+        let tokens = TokenRegistry::default();
+        tokens.issue_within("gone", Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+        tokens.issue("fresh");
+        assert_eq!(tokens.issued.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn revoking_forgets_the_runs_tokens() {
+        let tokens = TokenRegistry::default();
+        let token = tokens.issue_within("run", Duration::from_secs(60));
+        tokens.revoke("run");
+        assert_eq!(tokens.redeem(&token), None);
     }
 }

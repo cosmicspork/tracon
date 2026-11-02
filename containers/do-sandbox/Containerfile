@@ -1,0 +1,21 @@
+# The source image of a node's DigitalOcean Harness Runtime template
+# (`[digitalocean] image`): a harness image with the harness bundle at
+# /opt/tracon and the `tracon-sandbox` s6 service, which waits for the
+# bootstrap the node delivers by exec after each create and then runs the
+# supervisor as its child under the runtime's own init.
+#
+#   podman build --build-arg BASE=<harness image> \
+#     --build-context bundle=<bundle>/<version>/amd64 \
+#     -t <registry>/tracon-do-sandbox containers/do-sandbox
+#   podman push <registry>/tracon-do-sandbox   # then name it by digest
+#
+# The runtime rebases it onto its base template, so the image that runs is
+# the runtime's own build of this one.
+ARG BASE
+FROM ${BASE}
+USER root
+RUN --mount=type=bind,from=bundle,target=/bundle \
+    mkdir -p /opt/tracon && cp -a /bundle/. /opt/tracon/ \
+ && test -x /opt/tracon/bin/tracon-sandbox
+COPY run /etc/services.d/tracon-sandbox/run
+RUN chmod 0755 /etc/services.d/tracon-sandbox/run

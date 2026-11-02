@@ -33,6 +33,7 @@
 
 pub mod apple;
 pub mod capabilities;
+pub mod digitalocean;
 pub mod kubernetes;
 pub mod placement;
 pub mod podman;

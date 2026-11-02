@@ -29,6 +29,14 @@ const CHUNK: usize = 64 * 1024;
 /// RFC 6455's fixed GUID for `Sec-WebSocket-Accept`.
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+static PUBLISHED: std::sync::OnceLock<watch::Receiver<Option<String>>> = std::sync::OnceLock::new();
+
+/// The hub relay's name for this node while the node holds its listen
+/// stream; `None` with no relay, or while it is not held.
+pub fn current_host() -> Option<String> {
+    PUBLISHED.get().and_then(|host| host.borrow().clone())
+}
+
 pub struct SandboxRelay {
     identity: Arc<Identity>,
     hub_url: String,
@@ -57,6 +65,12 @@ impl SandboxRelay {
     /// accepted the listen stream; `None` while it is not held.
     pub fn host(&self) -> watch::Receiver<Option<String>> {
         self.host.subscribe()
+    }
+
+    /// Make this relay's name the one [`current_host`] reads: the node's
+    /// sandbox providers tell their sandboxes it.
+    pub fn publish(&self) {
+        let _ = PUBLISHED.set(self.host());
     }
 
     /// Hold the listen stream for as long as the node runs, reconnecting

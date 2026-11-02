@@ -1425,10 +1425,13 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # sessions = false                  # attach it for sessions too, in channels the credential is bound to
 
 # [placement]                       # where sessions may run and what each channel and repository
-                                    # requires of the sandbox provider. Reported, not enforced yet:
-                                    # Settings → System shows each provider's capabilities beside
-                                    # the checks they rest on, and no session is placed by them
-# digitalocean = "off"              # off | overflow (only once every local provider is full) | prefer
+                                    # requires of the sandbox provider. Decided as each session starts
+                                    # once DigitalOcean is on or a requirement is set; the session's
+                                    # log says where it runs and why
+# digitalocean = "off"              # off | overflow (only once every local provider is full) | prefer.
+                                    # A node whose own boundary is not verified asks first: a card
+                                    # offers DigitalOcean, and nothing moves without it
+# local_limit = 4                   # sessions on this node's own runtime at once; one more is full
 # [placement.channel.acme]          # one channel's requirements
 # client = true                     # client work: route must be node-only, and no open resolver
 # forbid_digitalocean = true
@@ -1444,6 +1447,27 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # privilege = ["unprivileged"]      # unprivileged | root-in-vm (asked only of a container)
 # runtime_socket = ["absent"]       # absent | present
 # image_identity = ["exact"]        # exact | derived
+
+# [digitalocean]                    # DigitalOcean's Harness Runtime, for sessions [placement] sends
+                                    # there. Off without a credential. Each sandbox is a microVM whose
+                                    # only route is this node (egress admits node_addr alone; DNS is
+                                    # the runtime's, open, so client work never goes). Needs
+                                    # [runtime.podman] sandbox_protocol, sandbox_files and
+                                    # sandbox_tunnels: nothing is mounted there
+# credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
+# image = "registry.example/tracon-do-sandbox@sha256:…"  # by digest; built with
+                                    # containers/do-sandbox. Registered as a template once per digest
+                                    # (about seven minutes), never per session
+# base_template = "sandbox"         # the runtime's base the image is rebased onto
+# region = ""                       # the API host's region; empty for the default
+# size = ""                         # a sandbox size slug; empty for the runtime's default
+# limit = 4                         # sandboxes there at once
+# listen = "0.0.0.0:8443"           # where the node takes its sandboxes' TLS connections
+# node_addr = "203.0.113.7:443"     # what they dial: an address, not a name. A load balancer's 443
+                                    # forwarding to listen, or the hub relay's address
+# relay = false                     # reached through the hub relay ([mesh.sandbox_relay], whose
+                                    # target is listen); its name for this node is the SNI
+# server_name = ""                  # SNI to send otherwise; empty is tracon-node
 
 # [[service]]                       # something a session may start beside itself by name
                                     # (`service_start`), never by image or command. It joins the

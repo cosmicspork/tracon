@@ -746,6 +746,14 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         manager: manager.clone(),
     });
     manager.record_egress_refusals();
+    // Off unless `[digitalocean]` names a credential and `[placement]
+    // digitalocean` is not `off`.
+    if let Err(error) =
+        crate::provider::digitalocean::runtime::DoRuntime::start(&cfg, broker.clone(), &node_id)
+            .await
+    {
+        tracing::error!(%error, "the DigitalOcean sandbox provider did not start");
+    }
     // With a hub configured, every frame this node publishes is tapped into
     // the mesh client's outbox, and peer state is pulled into the same tables.
     let mesh = cfg.mesh.hub_url.as_ref().map(|url| {
@@ -765,8 +773,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         if relay.enabled && relay.target.is_empty() {
             tracing::warn!("[mesh.sandbox_relay] is on but names no target; not serving the relay");
         } else if relay.enabled {
-            crate::mesh::sandbox_relay::SandboxRelay::new(client.identity_shared(), url, relay)
-                .spawn();
+            let relay =
+                crate::mesh::sandbox_relay::SandboxRelay::new(client.identity_shared(), url, relay);
+            relay.publish();
+            relay.spawn();
         }
         client
     });

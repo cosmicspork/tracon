@@ -5,6 +5,7 @@ pub mod chunks;
 pub mod exhaustion;
 pub mod external;
 pub mod materialize;
+pub mod placing;
 pub mod state;
 pub mod supervisor;
 pub mod waits;
@@ -582,6 +583,9 @@ pub struct Manager {
     restart: Arc<crate::restart::Restart>,
     /// Held while a continuation is checked and started; see [`Continuing`].
     continuing: Arc<Mutex<()>>,
+    /// Sessions placed off this node's own runtime (on DigitalOcean): the
+    /// rest of `live` is what counts against `[placement] local_limit`.
+    elsewhere: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// The manager's continuation guard, held. Every path that carries a session
@@ -626,6 +630,7 @@ impl Manager {
             told: Arc::default(),
             restart: Arc::default(),
             continuing: Arc::default(),
+            elsewhere: Arc::default(),
         }
     }
 
@@ -2090,7 +2095,11 @@ impl Manager {
             None => self.resolve_harness(&spec)?,
         };
         if let Some(node) = self.store.get_node(&self.node_id)? {
-            if node.state != "ready" {
+            // Where DigitalOcean may take sessions, a node whose own boundary
+            // is not verified asks the operator to run one there instead
+            // (`placing`), so the session is made.
+            if node.state != "ready" && !crate::provider::digitalocean::runtime::enabled(&self.cfg)
+            {
                 return Err(SessionError::NodeRefused(
                     node.failed_detail
                         .or(node.failed_check)
@@ -2446,6 +2455,118 @@ impl Manager {
             .is_some_and(|row| row.state == SessionState::Starting.as_str()))
     }
 
+    /// Sessions running on this node's own runtime now, besides `id`.
+    async fn running_locally(&self, id: &str) -> u32 {
+        let live: Vec<String> = self.live.lock().await.keys().cloned().collect();
+        let mut elsewhere = self.elsewhere.lock();
+        elsewhere.retain(|other| live.contains(other));
+        live.iter()
+            .filter(|other| *other != id && !elsewhere.contains(*other))
+            .count() as u32
+    }
+
+    /// Decide where a starting session runs (`placing`), asking the
+    /// operator first when that is what the decision is, and record it.
+    async fn place(
+        &self,
+        id: &str,
+        channel: &str,
+        origin: Option<&std::path::Path>,
+        started: Instant,
+    ) -> anyhow::Result<placing::Placed> {
+        use crate::provider::digitalocean::runtime as do_runtime;
+        use crate::provider::{Placement, ProviderKind};
+        let resolved = placing::resolve(&self.cfg, channel, origin);
+        let runtime = do_runtime::global().filter(|_| do_runtime::enabled(&self.cfg));
+        if !placing::in_play(runtime.is_some(), &resolved) {
+            return Ok(placing::Placed::Local);
+        }
+        let mut providers = Vec::new();
+        if let Some(kind) = ProviderKind::of_backend(self.backend.kind()) {
+            let node = self.store.get_node(&self.node_id).ok().flatten();
+            providers.push(placing::local_candidate(
+                kind,
+                placing::node_health(node.as_ref()),
+                self.running_locally(id).await,
+                self.cfg.live().placement.local_limit,
+            ));
+        }
+        if let Some(runtime) = &runtime {
+            providers.push(runtime.candidate(&self.cfg).await);
+        }
+        let mode = self.cfg.live().placement.digitalocean;
+        let decision = crate::provider::place(
+            &providers,
+            &resolved.requirements,
+            mode,
+            resolved.forbid_digitalocean,
+        );
+        let record = |payload: serde_json::Value| {
+            self.record(NewEvent {
+                session_id: id.to_string(),
+                work_item_id: None,
+                kind: ek::PLACEMENT.into(),
+                ref_id: None,
+                payload,
+                at_ms: now_ms(),
+                mono_ms: started.elapsed().as_millis() as i64,
+            })
+        };
+        record(placing::event(&decision, &resolved, &providers));
+        let elsewhere =
+            |runtime: Option<Arc<crate::provider::digitalocean::runtime::DoRuntime>>| {
+                let runtime = runtime.ok_or_else(|| {
+                    anyhow::anyhow!("DigitalOcean was chosen but is not running on this node")
+                })?;
+                self.elsewhere.lock().insert(id.to_string());
+                Ok::<_, anyhow::Error>(placing::Placed::DigitalOcean {
+                    runtime,
+                    requirements: resolved.requirements.clone(),
+                })
+            };
+        match decision {
+            Placement::Place {
+                provider: ProviderKind::DigitalOcean,
+            } => elsewhere(runtime),
+            Placement::Place { .. } => Ok(placing::Placed::Local),
+            Placement::Refuse { reason } => {
+                anyhow::bail!("no sandbox provider can take this session: {reason}")
+            }
+            Placement::Ask { reason, offer } => {
+                let card = placing::ask(
+                    &self.store,
+                    &self.node_id,
+                    channel,
+                    id,
+                    &reason,
+                    offer,
+                    self.cfg.live().session.approval_expiry_secs,
+                )?;
+                self.publish_queue().await;
+                loop {
+                    match placing::answer(&self.store, &card.id)? {
+                        placing::Answer::Waiting => {}
+                        placing::Answer::Allowed => {
+                            record(serde_json::json!({
+                                "decision": "place",
+                                "provider": offer,
+                                "approval_id": card.id,
+                            }));
+                            return elsewhere(runtime);
+                        }
+                        placing::Answer::Declined(why) => {
+                            anyhow::bail!("not run on {}: {why}", offer.as_str())
+                        }
+                    }
+                    if !self.startable(id)? {
+                        anyhow::bail!("the session was stopped while its placement was asked");
+                    }
+                    tokio::time::sleep(placing::ASK_POLL).await;
+                }
+            }
+        }
+    }
+
     /// Prepare a starting session's workspace (`prepare_session_workspace`)
     /// and record how it went. `None` when the entry prepares nothing.
     async fn prepare_workspace(
@@ -2719,7 +2840,16 @@ impl Manager {
         let origin = crate::environment::origin_repo(&self.store, Some(id))
             .ok()
             .flatten();
+        let placed = self
+            .place(id, &spec.channel, origin.as_deref(), started)
+            .await?;
         let image = match origin.clone() {
+            // The repository's image is this node's runtime's; elsewhere the
+            // session runs in the provider's own.
+            Some(_) if placed.is_elsewhere() => crate::repo_image::SessionImage {
+                note: Some("the session runs on DigitalOcean, in its template's image".into()),
+                ..Default::default()
+            },
             Some(origin) => {
                 let announce = || {
                     self.record(NewEvent {
@@ -3056,13 +3186,22 @@ impl Manager {
             materialize::own_state(&mut mounts, &scratch.volume);
         }
         mounts.push(workspace.mount("/work", false));
-        let (runner, cache_env) = session_runner(
-            self.backend.as_ref(),
-            adapter.id(),
-            image.image.as_deref(),
-            session_cache,
-            mounts,
-        );
+        let (runner, cache_env) = match &placed {
+            placing::Placed::DigitalOcean {
+                runtime,
+                requirements,
+            } => (
+                runtime.runner(&self.cfg, requirements.clone(), mounts),
+                Vec::new(),
+            ),
+            placing::Placed::Local => session_runner(
+                self.backend.as_ref(),
+                adapter.id(),
+                image.image.as_deref(),
+                session_cache,
+                mounts,
+            ),
+        };
 
         // Record the container name before it exists: it is deterministic, and a
         // launch that fails after the container is created would otherwise leave

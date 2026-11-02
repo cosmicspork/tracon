@@ -70,6 +70,9 @@ const SENSITIVE: &[&str] = &[
     "repo.commits",
     "gateway.forward_port",
     "placement",
+    // Where sessions run, and the listener and address sandboxes reach the
+    // node by.
+    "digitalocean",
 ];
 
 fn pattern_covers(pattern: &str, key: &[&str]) -> bool {
