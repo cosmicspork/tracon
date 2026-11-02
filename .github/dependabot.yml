@@ -24,10 +24,15 @@ updates:
 
   # The sandbox base image's Ubuntu digest, monthly. The apt snapshot date and
   # the toolchain pins beside it move by hand; `sandbox-base.yml` builds and
-  # smoke-tests either kind of change on both architectures.
+  # smoke-tests either kind of change on both architectures. Only the 24.04
+  # digest moves here: a new release changes the snapshot suite, the PPA and
+  # every repo image built on it, so that is a deliberate change by hand.
   - package-ecosystem: docker
     directory: /containers/sandbox-base
     schedule:
       interval: monthly
     commit-message:
       prefix: build
+    ignore:
+      - dependency-name: "*ubuntu"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
