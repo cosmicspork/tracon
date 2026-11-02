@@ -294,8 +294,9 @@ jobs:
           push-to-registry: true
 
   # The harness bundle per architecture, from this release's own tracon-agent
-  # (checked against its .sha256 by the script) and the Claude Code build the
-  # harness image pins. Packaging only, so one kind of runner assembles both.
+  # and tracon-sandbox (each checked against its .sha256 by the script) and the
+  # Claude Code build the harness image pins. Packaging only, so one kind of
+  # runner assembles both.
   bundle:
     needs: [release-please, binaries]
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -317,6 +318,7 @@ jobs:
         run: |
           scripts/harness-bundle.sh --arch ${{ matrix.arch }} \
             --agent-release "${{ needs.release-please.outputs.version }}" \
+            --sandbox-release "${{ needs.release-please.outputs.version }}" \
             --version "${{ needs.release-please.outputs.version }}" \
             --out bundle
       - name: Attest the bundle
@@ -337,7 +339,9 @@ jobs:
   # install.sh fetches: a static Linux x86_64 node and hub, and a native
   # Apple Silicon node. `tracon-agent` is the native harness's binary, for
   # both architectures a node's Podman runs (an Apple Silicon Mac's machine
-  # is arm64); its image fetches it from here.
+  # is arm64); its image fetches it from here. `tracon-sandbox`, the
+  # in-sandbox supervisor, goes to the same two architectures, and the bundle
+  # job fetches both from here.
   binaries:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
@@ -346,10 +350,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
-            bins: --bin tracon --bin tracon-hub --bin tracon-agent
+            bins: --bin tracon --bin tracon-hub --bin tracon-agent --bin tracon-sandbox
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
-            bins: --bin tracon-agent
+            bins: --bin tracon-agent --bin tracon-sandbox
           - target: aarch64-apple-darwin
             os: macos-15
             bins: --bin tracon
