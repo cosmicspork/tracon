@@ -305,7 +305,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": PR_MERGE,
-            "description": "Merge one GitHub pull request at the exact head SHA. This only runs with current scoped authority.",
+            "description": "Merge one GitHub pull request at the exact head SHA. This only runs with current scoped authority. A draft is refused: it is marked ready first, on its own, with pr_ready or on its review.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -585,6 +585,9 @@ pub async fn call(
                 if pr["head"]["sha"].as_str() != Some(head_sha) {
                     return Err("pull request head changed since the authorized revision".into());
                 }
+                if let Some(refusal) = merge_refusal(&pr) {
+                    return Err(refusal);
+                }
                 if let Some(recheck) = before_mutation {
                     recheck()?;
                 }
@@ -759,6 +762,19 @@ pub fn ready_arg(args: &Value) -> Result<bool, String> {
         Some(Value::Bool(b)) => Ok(*b),
         Some(_) => Err("ready is true or false".into()),
     }
+}
+
+/// Why a pull request as GitHub just read it is not merged: a draft is one
+/// someone said is not ready, and merging never marks it ready on its own,
+/// or the guard would mean nothing.
+fn merge_refusal(pr: &Value) -> Option<String> {
+    (pr["draft"] == true).then(|| {
+        format!(
+            "pull request #{} is a draft; mark it ready first (Mark ready on its review, or \
+             {PR_READY}), then merge",
+            pr["number"]
+        )
+    })
 }
 
 /// What `pr_ready` does with a pull request as GitHub just read it.
@@ -1384,6 +1400,16 @@ mod tests {
             ready_step(&pr(true), false).unwrap(),
             ReadyStep::Already(_)
         ));
+    }
+
+    #[test]
+    fn a_draft_pull_request_is_not_merged_until_it_is_marked_ready() {
+        let draft = json!({ "number": 7, "state": "open", "draft": true });
+        let refusal = merge_refusal(&draft).unwrap();
+        assert!(refusal.contains("#7 is a draft"), "{refusal}");
+        assert!(refusal.contains("mark it ready first"), "{refusal}");
+        let ready = json!({ "number": 7, "state": "open", "draft": false });
+        assert_eq!(merge_refusal(&ready), None);
     }
 
     #[test]

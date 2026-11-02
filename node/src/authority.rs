@@ -200,6 +200,11 @@ pub struct PublishRequest<'a> {
     /// stops a second approval from repeating a side effect blind, and a
     /// recovery is the one caller that looks at the forge before it acts.
     pub recover: bool,
+    /// The operator approved it, here or through a recovery of their
+    /// approval: an existing change that is a draft is marked ready. An
+    /// authority grant publishing on its own opens a new change as a draft
+    /// and leaves an existing one as it is (`Publication::ready`).
+    pub operator: bool,
 }
 
 /// Where an approval landed, and exactly what it sent to the forge.
@@ -482,6 +487,7 @@ pub async fn publish_review(
         decided_revision_id,
         outputs: edited_outputs,
         recover,
+        operator,
     } = request;
     // The publish keys (`[publish]`, `[supervision]`) as they apply now.
     let live = ctx.cfg.live();
@@ -569,10 +575,14 @@ pub async fn publish_review(
         serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
     let intent =
         revision_intent(ctx.store, revision_id.as_deref()).map_err(PublishError::Conflict)?;
-    let outputs = edited_outputs
+    let mut outputs = edited_outputs
         .cloned()
         .unwrap_or_else(|| intent.forge.clone())
         .resolve(&target, title, body);
+    // Nothing a person did not approve is opened ready to merge.
+    if !operator && target.change.is_none() && !target.initial {
+        outputs.draft = true;
+    }
     // The branch and the squashed commit's message are prose like the
     // description: what the operator approved is what ships, held to the
     // same rules the submission was.
@@ -771,6 +781,7 @@ pub async fn publish_review(
             }),
             resume,
             pushed: record.pushed_sha.is_some(),
+            ready: operator,
             before_push: recheck_authority,
             journal: &journal,
         },

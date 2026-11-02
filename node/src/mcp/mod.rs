@@ -1290,6 +1290,7 @@ impl Tools {
                 decided_revision_id: decided_revision.as_deref(),
                 outputs: None,
                 recover: false,
+                operator: false,
             },
         )
         .await

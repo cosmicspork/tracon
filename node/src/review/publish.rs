@@ -275,6 +275,8 @@ pub struct ChangeState {
     /// The change's source branch lives in another repository (a fork).
     pub cross_repository: bool,
     pub head_sha: String,
+    /// A draft: the forge will not merge it until it is marked ready.
+    pub draft: bool,
 }
 
 impl ChangeState {
@@ -478,6 +480,13 @@ pub struct Publication<'a> {
     pub resume: bool,
     /// A previous attempt recorded a push the forge confirmed.
     pub pushed: bool,
+    /// The operator approved this revision. An existing change that is a
+    /// draft is marked ready with it, so approving never needs a second
+    /// step. Without an operator (an authority grant publishing on its own),
+    /// an existing change is left as it is, and a new one is opened as a
+    /// draft (`Outputs::draft`): nothing becomes mergeable unless a person
+    /// said so.
+    pub ready: bool,
     pub before_push: Option<&'a (dyn Fn() -> Result<(), String> + Send + Sync)>,
     pub journal: &'a dyn Journal,
 }
@@ -826,6 +835,21 @@ async fn attempt(
                 )
                 .await?;
             }
+            // Approved, a draft is made ready in the same step: a draft
+            // here is one the agent, its reviewer or the node's backstop
+            // made while this revision was on its way.
+            if p.ready && verified.as_ref().is_some_and(|state| state.draft) {
+                set_ready(
+                    provider,
+                    cfg,
+                    &publisher,
+                    &env,
+                    p.target,
+                    change.number,
+                    true,
+                )
+                .await?;
+            }
             let url = verified.map(|state| state.url).unwrap_or_default();
             (url, change.number)
         }
@@ -974,6 +998,7 @@ pub async fn change_state(
             target_branch: text("/base/ref"),
             cross_repository: !text("/head/repo/full_name").eq_ignore_ascii_case(&target.project),
             head_sha: text("/head/sha"),
+            draft: v.get("draft").and_then(Value::as_bool).unwrap_or(false),
         },
         Provider::Gitlab => ChangeState {
             url: text("/web_url"),
@@ -983,8 +1008,36 @@ pub async fn change_state(
             target_branch: text("/target_branch"),
             cross_repository: v.get("source_project_id") != v.get("target_project_id"),
             head_sha: text("/sha"),
+            draft: v.get("draft").and_then(Value::as_bool).unwrap_or(false)
+                || v.get("work_in_progress")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
         },
     })
+}
+
+/// Mark an open change ready for review, or with `ready: false` turn it back
+/// into a draft, through the forge's CLI with the brokered credential. A
+/// change already in that state is left as it is: both CLIs answer it
+/// without a write.
+pub async fn set_ready(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    target: &Target,
+    number: u64,
+    ready: bool,
+) -> Result<(), PublishError> {
+    let number = number.to_string();
+    let project = target.project.as_str();
+    let args: Vec<&str> = match (provider, ready) {
+        (Provider::Github, true) => vec!["pr", "ready", &number, "--repo", project],
+        (Provider::Github, false) => vec!["pr", "ready", &number, "--undo", "--repo", project],
+        (Provider::Gitlab, true) => vec!["mr", "update", &number, "--ready", "--repo", project],
+        (Provider::Gitlab, false) => vec!["mr", "update", &number, "--draft", "--repo", project],
+    };
+    run_cli(provider, cfg, dir, env, &args).await.map(drop)
 }
 
 /// What `target.branch` holds on the forge, or `None` when there is no such
@@ -2080,6 +2133,7 @@ encoding ISO-8859-1\n\nsubject\n";
             reword: None,
             resume: false,
             pushed: false,
+            ready: true,
             before_push: None,
             journal,
         }
@@ -2386,6 +2440,7 @@ encoding ISO-8859-1\n\nsubject\n";
             target_branch: "main".into(),
             cross_repository: false,
             head_sha: "abc123".into(),
+            draft: false,
         };
         let gh = Provider::Github;
         assert_eq!(state.reconcile_refusal(gh, &target, 7, "abc123"), None);

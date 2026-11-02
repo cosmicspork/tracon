@@ -3594,6 +3594,7 @@ async fn decide_review_here(
                     decided_revision_id: decided_revision.as_deref(),
                     outputs: b.outputs.as_ref(),
                     recover: false,
+                    operator: true,
                 },
             )
             .await
@@ -3715,6 +3716,7 @@ async fn recover_publication_here(
             decided_revision_id: row.revision_id.as_deref(),
             outputs: Some(&outputs),
             recover: true,
+            operator: true,
         },
     )
     .await
