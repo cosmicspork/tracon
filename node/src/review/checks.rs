@@ -30,6 +30,7 @@ use crate::{
     },
     runner::{Mount, RunKind, RunLabels, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
+    telemetry::{telemetry, Purpose},
 };
 
 /// How much of a check's combined output stays in its authoritative record.
@@ -350,6 +351,7 @@ pub async fn run_required_for(
                     .to_string(),
                 })
                 .map_err(|error| error.to_string())?;
+            telemetry().check_finished("review", environment.repo.as_deref(), "reused", None);
             results.push(CheckResult {
                 command: command.clone(),
                 ok,
@@ -461,6 +463,12 @@ pub async fn run_required_for(
                     ),
                 )
                 .map_err(|error| error.to_string())?;
+            telemetry().check_finished(
+                "review",
+                environment.repo.as_deref(),
+                "interrupted",
+                Some(started.elapsed()),
+            );
             results.push(CheckResult {
                 command: command.clone(),
                 ok: false,
@@ -532,6 +540,12 @@ pub async fn run_required_for(
                     ),
                 )
                 .map_err(|error| error.to_string())?;
+            telemetry().check_finished(
+                "review",
+                environment.repo.as_deref(),
+                "cancelled",
+                Some(started.elapsed()),
+            );
             results.push(cancelled_result(
                 command,
                 &reason,
@@ -637,6 +651,14 @@ pub async fn run_required_for(
                 &with_candidate_tree(candidate, metadata),
             )
             .map_err(|error| error.to_string())?;
+        if recorded {
+            telemetry().check_finished(
+                "review",
+                environment.repo.as_deref(),
+                outcome,
+                Some(started.elapsed()),
+            );
+        }
         if !recorded {
             // The row left `running` while this execution was in flight —
             // cancelled by the controller between the process exiting and
@@ -837,6 +859,7 @@ async fn prepare_candidate(
             tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
             cancel,
             "no check was run",
+            Purpose::Check,
         )
         .await
     };
@@ -873,6 +896,7 @@ pub(crate) async fn run_preparation(
     deadline: tokio::time::Instant,
     cancel: &dyn Cancel,
     unprepared: &str,
+    purpose: Purpose,
 ) -> Result<(), Stopped> {
     run_preparation_with(
         backend,
@@ -885,6 +909,7 @@ pub(crate) async fn run_preparation(
         unprepared,
         &PrepareSecrets::default(),
         None,
+        purpose,
     )
     .await
 }
@@ -906,6 +931,7 @@ pub(crate) async fn run_preparation_with(
     unprepared: &str,
     secrets: &PrepareSecrets,
     warming: Option<&std::path::Path>,
+    purpose: Purpose,
 ) -> Result<(), Stopped> {
     let prepared = prepare_steps(
         backend,
@@ -919,6 +945,7 @@ pub(crate) async fn run_preparation_with(
         secrets,
         warming,
         None,
+        purpose,
     )
     .await;
     match prepared {
@@ -964,12 +991,60 @@ pub(crate) async fn run_preparation_watched(
         &PrepareSecrets::default(),
         None,
         Some(watch),
+        Purpose::Trial,
     )
     .await
 }
 
+/// `run_steps`, counted as a preparation for `purpose`
+/// (`tracon_preparations_total`).
 #[allow(clippy::too_many_arguments)]
 async fn prepare_steps(
+    backend: &dyn Backend,
+    runner: &dyn Runner,
+    environment: &RepoEnvironment,
+    volumes: (&str, &str),
+    runner_name: &str,
+    deadline: tokio::time::Instant,
+    cancel: &dyn Cancel,
+    unprepared: &str,
+    secrets: &PrepareSecrets,
+    warming: Option<&std::path::Path>,
+    watch: Option<&std::sync::OnceLock<Refusals>>,
+    purpose: Purpose,
+) -> Result<(), Stopped> {
+    let begun = std::time::Instant::now();
+    let prepared = run_steps(
+        backend,
+        runner,
+        environment,
+        volumes,
+        runner_name,
+        deadline,
+        cancel,
+        unprepared,
+        secrets,
+        warming,
+        watch,
+    )
+    .await;
+    let outcome = match &prepared {
+        Ok(()) => "prepared",
+        Err(Stopped::Unprepared(_)) => "failed",
+        Err(Stopped::TimedOut) => "timed_out",
+        Err(Stopped::Cancelled { .. }) => "cancelled",
+    };
+    telemetry().preparation_finished(
+        purpose,
+        environment.repo.as_deref(),
+        outcome,
+        begun.elapsed(),
+    );
+    prepared
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_steps(
     backend: &dyn Backend,
     runner: &dyn Runner,
     environment: &RepoEnvironment,
@@ -2234,6 +2309,7 @@ mod tests {
             "the base cache stays as it was",
             &secrets,
             None,
+            Purpose::Warm,
         )
         .await
         .unwrap_or_else(|stopped| panic!("{stopped}"));
@@ -2293,6 +2369,7 @@ mod tests {
             "the base cache stays as it was",
             &secrets,
             None,
+            Purpose::Warm,
         )
         .await
         .unwrap_err();

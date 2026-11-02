@@ -1279,6 +1279,13 @@ impl Manager {
             },
         )?;
         if closed {
+            if let Ok(Some(row)) = self.store.get_session(id) {
+                crate::telemetry::telemetry().session_ended(
+                    &crate::telemetry::SessionSeries::of_row(&self.store, &row),
+                    reason.as_str(),
+                    None,
+                );
+            }
             let mut payload = json!({ "state": "closed", "end_reason": reason.as_str() });
             if let (Some(payload), Some(detail)) = (payload.as_object_mut(), detail.as_object()) {
                 payload.extend(detail.clone());
@@ -2332,6 +2339,7 @@ impl Manager {
 
         let this = self.clone();
         let started = Instant::now();
+        let series = session_series(&self.store, &id, &spec, adapter.id());
         tokio::spawn(async move {
             if let Err(e) = this
                 .start(
@@ -2367,6 +2375,7 @@ impl Manager {
                 }
                 // A session that never started holds no capability.
                 this.tokens.lock().await.remove(&id);
+                crate::telemetry::telemetry().session_start_failed(&series);
                 // A harness that is not the one this node drives is a fact
                 // about the image, not about this session: every session here
                 // ends the same way until the image or the pin changes, and
@@ -3169,6 +3178,15 @@ impl Manager {
             at_ms: now_ms(),
             mono_ms: started.elapsed().as_millis() as i64,
         });
+        let series = session_series(&self.store, id, &spec, adapter.id());
+        crate::telemetry::telemetry().session_started(
+            &series,
+            match image.image {
+                Some(_) => "repository",
+                None => "harness",
+            },
+            started.elapsed(),
+        );
         if let Some(reopened) = &reopened {
             self.record(NewEvent {
                 session_id: id.to_string(),
@@ -3224,7 +3242,8 @@ impl Manager {
         }
         .with_checks(environment.checks)
         .with_waits(self.waits())
-        .with_kickoff(kickoff);
+        .with_kickoff(kickoff)
+        .with_series(series);
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let waits = self.waits();
@@ -4712,6 +4731,21 @@ pub fn harness_environment(
 /// outcome, not an error: the session starts anyway, since it is the one that
 /// can fix what broke. The entry's own time limit bounds it, as it bounds a
 /// check's preparation, and `cancel` stops it sooner.
+/// What a session's metric series are labelled with (`telemetry`).
+fn session_series(
+    store: &Store,
+    id: &str,
+    spec: &NewSession,
+    harness: &str,
+) -> crate::telemetry::SessionSeries {
+    crate::telemetry::SessionSeries::new(
+        spec.phase.as_str(),
+        harness,
+        crate::telemetry::session_repo(store, id).as_deref(),
+        Some(&spec.channel),
+    )
+}
+
 pub async fn prepare_session_workspace(
     backend: &dyn crate::boundary::Backend,
     environment: &crate::environment::RepoEnvironment,
@@ -4738,6 +4772,7 @@ pub async fn prepare_session_workspace(
                 tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
                 cancel,
                 "the session starts without it",
+                crate::telemetry::Purpose::Session,
             )
             .await;
             match prepared {

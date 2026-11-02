@@ -1907,6 +1907,46 @@ tokens per accepted change. Provenance — which model, which prompts, which app
 which policy version shipped a commit — is a query over data captured for metrics
 anyway.
 
+That is the workflow's own record, served as JSON at `/api/metrics`. What the cluster
+needs to decide how big a node must be is a scrape target: `[metrics] listen` (unset by
+default, 7425 by convention) serves `GET /metrics` from one process-global registry
+(`telemetry`, the Prometheus project's `prometheus-client`), on a router that has
+nothing else, needs no credential and takes no input. Its port is refused at load when
+another of the node's listeners has it, and the harness NetworkPolicy does not admit it.
+Nor does the shipped node NetworkPolicy (`deploy/kubernetes/base/networkpolicy-node.yaml`),
+which admits only harness pods, on 7421, 8888 and 7424: an in-cluster Prometheus cannot
+scrape 7425 until an overlay adds an ingress rule admitting the scraper alone.
+
+| Family | Labels |
+|---|---|
+| `tracon_pod_refusals_total` | kind, sizing, reason (`out_of_cpu`, `out_of_memory`, `out_of_pods`, `out_of_ephemeral_storage`, `out_of_other`, `quota`) |
+| `tracon_pod_start_failures_total` | kind, sizing, reason (`image_pull`, `config_error`, `start_timeout`, `create_error`, `attach_error`, `other`) |
+| `tracon_pod_start_seconds` | kind, sizing |
+| `tracon_runs_in_flight` | kind |
+| `tracon_sessions` | state, phase, harness, repo, channel (from the store at scrape time) |
+| `tracon_session_starts_total` | outcome, phase, harness, repo, channel |
+| `tracon_session_ends_total` | reason, phase, harness, repo, channel |
+| `tracon_session_ready_seconds` | harness, image (`repository`, `harness`) |
+| `tracon_session_duration_seconds` | harness, reason (end reason, or `suspended`) |
+| `tracon_checks_total` | origin (`review`, `trial`, `verify`), repo, outcome |
+| `tracon_check_duration_seconds` | origin, outcome |
+| `tracon_preparations_total` | purpose (`check`, `session`, `warm`, `trial`, `environment`), repo, outcome |
+| `tracon_preparation_duration_seconds` | purpose, outcome |
+| `tracon_image_builds_total` | image (`base`, `session`), repo, outcome (`built`, `failed`, `transient`) |
+| `tracon_image_build_duration_seconds` | image, outcome |
+| `tracon_gateway_requests_total` | provider, model, channel |
+| `tracon_gateway_tokens_total` | provider, model, channel, type |
+| `tracon_build_info` | version, runtime |
+
+The cardinality rule: a label value comes only from an enum, a configured repository,
+channel or provider, or the model catalogue (a model outside a provider's catalogue is
+counted as `other`, so a harness cannot mint series by naming models). Never a session
+id, pod name, review id, branch, prompt, path, error text or credential: those never
+recur, and a series that never recurs is churn in the store and useless to `rate()`.
+Per-session drill-down is already the cluster's, by joining its per-pod series to
+`kube_pod_labels` through the pod labels above. Histograms carry fewer labels than
+counters. `repo` and `channel` are the same sanitized values the pod labels carry.
+
 ## Clients
 
 Every node serves the same embedded SPA; a client is a matter of shell.

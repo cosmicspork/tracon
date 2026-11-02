@@ -39,6 +39,7 @@ use crate::boundary::Backend;
 use crate::config::{Config, Repo};
 use crate::runner::{Mount, RunnerCommand};
 use crate::store::Store;
+use crate::telemetry::telemetry;
 
 /// Where a drafted field came from, for the agent to check and the operator
 /// to read.
@@ -985,6 +986,12 @@ async fn run(
                         () = until_cancelled(cancelled) => {
                             let _ = runner.kill(&running).await;
                             let _ = backend.remove_volume(&copy).await;
+                            telemetry().check_finished(
+                                "trial",
+                                environment.repo.as_deref(),
+                                "cancelled",
+                                Some(started.elapsed()),
+                            );
                             break;
                         }
                     };
@@ -1030,6 +1037,18 @@ async fn run(
                             }
                         }
                     };
+                    // A trial records no outcome of its own; read off the
+                    // step as a review's check would have recorded it.
+                    telemetry().check_finished(
+                        "trial",
+                        environment.repo.as_deref(),
+                        match (step.ok, step.exit) {
+                            (true, _) => "passed",
+                            (false, Some(_)) => "failed",
+                            (false, None) => "interrupted",
+                        },
+                        Some(started.elapsed()),
+                    );
                     let _ = backend.remove_volume(&copy).await;
                     step
                 }

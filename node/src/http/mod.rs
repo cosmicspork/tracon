@@ -7,6 +7,7 @@ pub mod device;
 pub mod environments;
 pub mod evidence;
 mod mcp;
+pub mod metrics;
 pub mod passkey;
 mod peer_admin;
 mod policy_admin;
@@ -932,6 +933,35 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             tracing::error!(%error, "HTML preview listener stopped");
         }
     });
+
+    // The scrape target, only when configured: its own router, so nothing of
+    // the operator's is reachable through it.
+    crate::telemetry::telemetry().set_build_info(
+        env!("CARGO_PKG_VERSION"),
+        match cfg.runtime.kind {
+            crate::config::RuntimeKind::Podman => "podman",
+            crate::config::RuntimeKind::Kubernetes => "kubernetes",
+        },
+    );
+    crate::telemetry::telemetry().set_catalogue(&cfg);
+    if let Some(metrics_listen) = cfg.metrics.listen {
+        if metrics_listen.port() == listen.port() {
+            anyhow::bail!(
+                "metrics.listen: port {} is the operator listener's; give the metrics listener a port of its own",
+                listen.port()
+            );
+        }
+        let metrics_listener = tokio::net::TcpListener::bind(metrics_listen)
+            .await
+            .with_context(|| format!("bind metrics listener {metrics_listen}"))?;
+        let metrics_app = metrics::router(store.clone(), state.node_id.clone());
+        tracing::info!(listen = %metrics_listen, "metrics listener");
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(metrics_listener, metrics_app).await {
+                tracing::error!(%error, "metrics listener stopped");
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

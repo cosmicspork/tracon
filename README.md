@@ -1517,6 +1517,11 @@ preview_listen = "127.0.0.1:7422"   # isolated HTML capability origin
 # description = "how to run something here"   # what doc_write tells an agent it is for
 # working_note = false              # true: the shipped policy writes it unasked
 
+# [metrics]                         # a Prometheus scrape target, GET /metrics; unset, nothing listens
+# listen = "127.0.0.1:7425"         # unauthenticated and read-only: loopback on a host; "0.0.0.0:7425"
+                                    # only in a pod behind a NetworkPolicy that admits the scraper alone.
+                                    # A port another listener of the node has is refused at load
+
 [embed]                             # semantic search; off unless enabled
 enabled = false
 base_url = "http://127.0.0.1:8080"  # an OpenAI-shaped /v1/embeddings
@@ -1532,6 +1537,44 @@ min_similarity = 0.45               # cosine floor for a semantic match; model-d
 For `[embed]`, a local `llama-server --embedding -m <model>.gguf` is enough; BGE-M3
 and Qwen3-Embedding-0.6B (which wants `pooling = last`) are the models it was built
 against. Without an endpoint, search is text-only and the Documents screen says so.
+
+`[metrics] listen` serves `GET /metrics` in the OpenMetrics text format on a
+listener of its own: no credential, no input, nothing of the operator's API, and
+the shipped harness NetworkPolicy does not admit its port. The families: pod
+refusals and start failures by kind, sizing and reason, pod start time, runs in
+flight, sessions held by state, session starts, ends, readiness and duration,
+checks and preparations with their durations, repository image builds, the
+gateway's model calls and tokens by provider, model and channel, and
+`tracon_build_info`. Every label value comes from an enum, a configured
+repository, channel or provider, or the model catalogue (any other model is
+`other`); never a session id, pod name, branch, prompt, path or error text, so
+every series recurs. Per-session detail is the cluster's: join its per-pod
+series to `kube_pod_labels{label_tracon_dev_session=...}`. On Kubernetes,
+kube-state-metrics needs
+`--metric-labels-allowlist=pods=[tracon.dev/kind,tracon.dev/sizing,tracon.dev/repo,tracon.dev/channel,tracon.dev/harness,tracon.dev/phase,tracon.dev/session]`
+for those labels to reach it.
+
+The shipped node NetworkPolicy (`deploy/kubernetes/base/networkpolicy-node.yaml`)
+admits ingress only from harness pods, and only on 7421, 8888 and 7424, so an
+in-cluster Prometheus cannot reach 7425 until an overlay adds a rule admitting the
+scraper alone, for example:
+
+```yaml
+# overlay patch to the tracon-node NetworkPolicy: append one ingress rule
+- op: add
+  path: /spec/ingress/-
+  value:
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+    ports:
+      - protocol: TCP
+        port: 7425
+```
 
 HTML bundle previews are served from `preview_listen`, never the operator
 origin, and embedded with `sandbox="allow-scripts"`. Set `preview_url` when a

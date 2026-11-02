@@ -945,6 +945,43 @@ async fn build_session(
     key: &str,
     harness: &SessionHarness<'_>,
 ) -> Result<BuiltImage, BuildFailure> {
+    let begun = std::time::Instant::now();
+    let built = build_session_layer(builder, runner, repo, base, harness_image, key, harness).await;
+    count_build("session", repo, built.as_ref().err(), begun);
+    built
+}
+
+/// What a build is counted as in `tracon_image_builds_total`.
+fn count_build(
+    image: &str,
+    repo: &Path,
+    failure: Option<&BuildFailure>,
+    begun: std::time::Instant,
+) {
+    let outcome = match failure {
+        None => "built",
+        Some(failure) if failure.transient => "transient",
+        Some(_) => "failed",
+    };
+    crate::telemetry::telemetry().image_built(
+        image,
+        repo.file_name()
+            .map(|name| name.to_string_lossy())
+            .as_deref(),
+        outcome,
+        begun.elapsed(),
+    );
+}
+
+async fn build_session_layer(
+    builder: &dyn ImageBuilder,
+    runner: &dyn Runner,
+    repo: &Path,
+    base: &str,
+    harness_image: &str,
+    key: &str,
+    harness: &SessionHarness<'_>,
+) -> Result<BuiltImage, BuildFailure> {
     let staged = |error: String| BuildFailure {
         error,
         log_tail: String::new(),
@@ -1176,6 +1213,7 @@ pub(crate) async fn warm_base_cache(
             "the base cache stays as it was",
             &secrets,
             Some(repo),
+            crate::telemetry::Purpose::Warm,
         )
         .await;
         let _ = backend.remove_volume(&work).await;
@@ -1565,6 +1603,19 @@ struct Built {
 /// layer over it. The context is materialized from Git objects into a
 /// directory of the node's; nothing the working tree holds is in it.
 async fn build(
+    builder: &dyn ImageBuilder,
+    cfg: &Config,
+    store: &Store,
+    repo: &Path,
+    recipe: &Recipe,
+) -> Result<Built, BuildFailure> {
+    let begun = std::time::Instant::now();
+    let built = build_base(builder, cfg, store, repo, recipe).await;
+    count_build(BASE, repo, built.as_ref().err(), begun);
+    built
+}
+
+async fn build_base(
     builder: &dyn ImageBuilder,
     cfg: &Config,
     store: &Store,

@@ -3018,6 +3018,22 @@
     },
     {
       "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "metrics.listen",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
       "apply": "live",
       "editable": true,
       "editable_at_node": true,

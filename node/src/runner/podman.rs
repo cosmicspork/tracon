@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::Config;
+use crate::telemetry::{run_kind, telemetry};
 
 /// Everything that puts a harness process inside the boundary.
 #[derive(Debug, Clone)]
@@ -324,10 +325,19 @@ impl Runner for PodmanRunner {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        Spawned::from_child(child)
+        // Counted until the harness is gone.
+        let running = telemetry().run_started(run_kind(cmd.labels.kind, "session"));
+        let mut spawned = Spawned::from_child(child)?;
+        let done = spawned.done;
+        spawned.done = Box::pin(async move {
+            let _running = running;
+            done.await
+        });
+        Ok(spawned)
     }
 
     async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
+        let _running = telemetry().run_started(run_kind(cmd.labels.kind, "command"));
         self.ensure_volumes(&cmd).await?;
         let name = self.capture_name(&cmd.name);
         let secrets = secret_env_for(&cmd)?;

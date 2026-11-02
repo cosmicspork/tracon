@@ -25,6 +25,7 @@ use kube::{Api, Client};
 
 use super::{Mount, RunLabels, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::{Config, KubeResources, PodSizing};
+use crate::telemetry::{run_kind, telemetry};
 
 mod secret;
 pub use secret::{secret_name, SecretRights, PID_LABEL, RUN_LABEL, SWEEP_GRACE};
@@ -826,7 +827,26 @@ impl KubeRunner {
     /// `KubeSpec::start_timeout`, because it is the part a cluster can stall
     /// on for reasons the command never sees. A pod that ran and ended before
     /// it was looked at has started too.
-    async fn wait_started(&self, name: &str, sizing: Sizing) -> Result<(), RunnerError> {
+    async fn wait_started(&self, name: &str, start: &Start) -> Result<(), RunnerError> {
+        match self.await_start(name, start.sizing).await {
+            Ok(()) => {
+                start.started();
+                Ok(())
+            }
+            Err((reason, error)) => {
+                start.failed(reason, &error);
+                Err(error)
+            }
+        }
+    }
+
+    /// `wait_started`, with each failure's `tracon_pod_start_failures_total`
+    /// reason beside it.
+    async fn await_start(
+        &self,
+        name: &str,
+        sizing: Sizing,
+    ) -> Result<(), (&'static str, RunnerError)> {
         let pods = self.pods();
         let timeout = self.spec.start_timeout;
         let deadline = tokio::time::Instant::now() + timeout;
@@ -834,17 +854,20 @@ impl KubeRunner {
             let pod = pods
                 .get(name)
                 .await
-                .map_err(|e| RunnerError::Other(format!("get pod {name}: {e}")))?;
+                .map_err(|e| ("other", RunnerError::Other(format!("get pod {name}: {e}"))))?;
             let status = pod.status.unwrap_or_default();
             // Refused for capacity: it never started and never will, and the
             // reason is lost if it is read as a run that ended.
             if let Some(refused) = refusal(&status) {
-                return Err(refusal_error(
-                    name,
-                    refused,
-                    sizing,
-                    &self.spec.resources,
-                    status.message.as_deref().unwrap_or_default(),
+                return Err((
+                    refused.as_str(),
+                    refusal_error(
+                        name,
+                        refused,
+                        sizing,
+                        &self.spec.resources,
+                        status.message.as_deref().unwrap_or_default(),
+                    ),
                 ));
             }
             let phase = status.phase.as_deref().unwrap_or_default();
@@ -858,23 +881,25 @@ impl KubeRunner {
                 .and_then(|s| s.waiting.as_ref())
                 .and_then(|w| w.reason.as_deref())
             {
-                if matches!(
-                    reason,
-                    "ErrImagePull"
-                        | "ImagePullBackOff"
-                        | "CreateContainerConfigError"
-                        | "InvalidImageName"
-                ) {
-                    return Err(RunnerError::Other(format!("pod {name}: {reason}")));
+                let counted = match reason {
+                    "ErrImagePull" | "ImagePullBackOff" | "InvalidImageName" => Some("image_pull"),
+                    "CreateContainerConfigError" => Some("config_error"),
+                    _ => None,
+                };
+                if let Some(counted) = counted {
+                    return Err((counted, RunnerError::Other(format!("pod {name}: {reason}"))));
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(RunnerError::Other(format!(
-                    "pod {name} did not start in {}s: {}; \
-                     [runtime.kubernetes] start_timeout_secs sets how long a start may take",
-                    timeout.as_secs(),
-                    pending_reason(&status)
-                )));
+                return Err((
+                    "start_timeout",
+                    RunnerError::Other(format!(
+                        "pod {name} did not start in {}s: {}; \
+                         [runtime.kubernetes] start_timeout_secs sets how long a start may take",
+                        timeout.as_secs(),
+                        pending_reason(&status)
+                    )),
+                ));
             }
             tokio::time::sleep(START_POLL).await;
         }
@@ -942,15 +967,20 @@ impl KubeRunner {
         };
         let pods = self.pods();
         self.remove(&name).await;
+        let start = Start::new(&cmd, sizing);
+        let _running = telemetry().run_started(start.kind);
         // Dropped with this future before it is released, the guard deletes
         // the Secret as `removal` deletes the pod.
-        let mut env = self.create_pod(&name, &pod, &cmd).await?;
+        let mut env = self
+            .create_pod(&name, &pod, &cmd)
+            .await
+            .inspect_err(|e| start.failed("create_error", e))?;
         let mut removal = PodRemoval {
             pods: pods.clone(),
             name: name.clone(),
             armed: true,
         };
-        let started = self.wait_started(&name, sizing).await;
+        let started = self.wait_started(&name, &start).await;
         secret::release(&mut env).await;
         let result = match started {
             Ok(()) => match self.wait_finished(&name).await {
@@ -1042,6 +1072,39 @@ impl KubeRunner {
     }
 }
 
+/// A pod on its way up, for what `telemetry` counts of it: the kind it runs,
+/// how it is sized, and when it was created.
+struct Start {
+    kind: &'static str,
+    sizing: Sizing,
+    begun: std::time::Instant,
+}
+
+impl Start {
+    fn new(cmd: &RunnerCommand, sizing: Sizing) -> Self {
+        Self {
+            kind: run_kind(cmd.labels.kind, sizing.as_str()),
+            sizing,
+            begun: std::time::Instant::now(),
+        }
+    }
+
+    fn started(&self) {
+        telemetry().pod_started(self.kind, self.sizing.as_str(), self.begun.elapsed());
+    }
+
+    /// A refusal is counted as one, by its own classification; anything else
+    /// as a start that failed for `reason`.
+    fn failed(&self, reason: &'static str, error: &RunnerError) {
+        match error {
+            RunnerError::Refused { reason, .. } => {
+                telemetry().pod_refused(self.kind, self.sizing.as_str(), reason)
+            }
+            _ => telemetry().pod_start_failed(self.kind, self.sizing.as_str(), reason),
+        }
+    }
+}
+
 struct CaptureEnd {
     code: i32,
     image_id: Option<String>,
@@ -1118,8 +1181,14 @@ impl Runner for KubeRunner {
         let pod = self.spec.pod(&name, &cmd, false)?;
         let pods = self.pods();
         self.remove(&name).await;
-        let mut env = self.create_pod(&name, &pod, &cmd).await?;
-        let started = self.wait_started(&name, Sizing::Session).await;
+        let start = Start::new(&cmd, Sizing::Session);
+        // Counted until the harness is gone: it moves into `done`.
+        let running = telemetry().run_started(start.kind);
+        let mut env = self
+            .create_pod(&name, &pod, &cmd)
+            .await
+            .inspect_err(|e| start.failed("create_error", e))?;
+        let started = self.wait_started(&name, &start).await;
         // Started or not, the Secret has done its work: the kubelet read it
         // into the container's environment when it created the container.
         secret::release(&mut env).await;
@@ -1141,7 +1210,9 @@ impl Runner for KubeRunner {
             Ok(a) => a,
             Err(e) => {
                 self.remove(&name).await;
-                return Err(RunnerError::Other(format!("attach {name}: {e}")));
+                let error = RunnerError::Other(format!("attach {name}: {e}"));
+                start.failed("attach_error", &error);
+                return Err(error);
             }
         };
         let stdin = attached
@@ -1156,6 +1227,7 @@ impl Runner for KubeRunner {
             stdin: Box::new(stdin),
             stdout: Box::new(stdout),
             done: Box::pin(async move {
+                let _running = running;
                 let _ = attached.join().await;
                 let code = pods_for_exit
                     .get(&exit_name)
