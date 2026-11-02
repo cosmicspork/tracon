@@ -1853,6 +1853,13 @@ impl Supervisor {
             };
             let (kind, mut payload, tokens) =
                 match until_silent(turn, &activity, TURN_IDLE, TURN_MAX).await {
+                    // A harness that counted nothing is not said to have
+                    // spent zero: the turn is settled from the gateway alone.
+                    Ok(Ok(turn)) if turn.unreported => (
+                        ek::TURN_END,
+                        json!({ "stop_reason": turn.stop_reason, "usage_unreported": true }),
+                        0,
+                    ),
                     Ok(Ok(turn)) => (
                         ek::TURN_END,
                         json!({
@@ -1906,7 +1913,12 @@ impl Supervisor {
 
     /// Record the end of a turn: flush whatever text was still streaming, log
     /// the outcome, reconcile the two usage sources, and charge the session.
-    async fn on_turn_done(&mut self, kind: &'static str, payload: serde_json::Value, tokens: i64) {
+    async fn on_turn_done(
+        &mut self,
+        kind: &'static str,
+        mut payload: serde_json::Value,
+        tokens: i64,
+    ) {
         self.flush_chunks();
         let session = self.store.get_session(&self.session_id).ok().flatten();
         let previous = session.as_ref().map(|s| s.tokens_used).unwrap_or(0);
@@ -1916,8 +1928,14 @@ impl Supervisor {
         // gateway.
         let harness_tokens = (kind != ek::ERROR).then_some(tokens);
         let cost = self.turn_cost(session.as_ref());
-        let usage =
-            crate::metrics::settle_turn(&self.store, &self.session_id, harness_tokens, cost);
+        let usage = if kind == ek::TURN_END && payload["usage_unreported"] == true {
+            let usage = crate::metrics::settle_unreported_turn(&self.store, &self.session_id, cost);
+            // The turn's line shows what it spent, which only the gateway saw.
+            payload["charged_tokens"] = json!(usage.charged);
+            usage
+        } else {
+            crate::metrics::settle_turn(&self.store, &self.session_id, harness_tokens, cost)
+        };
         let _ = self.store.update_session(
             &self.session_id,
             SessionPatch {

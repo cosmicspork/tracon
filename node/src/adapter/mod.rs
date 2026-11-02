@@ -395,6 +395,11 @@ pub enum HarnessEvent {
 pub struct TurnResult {
     pub stop_reason: String,
     pub usage: crate::adapter::types::Usage,
+    /// The harness said nothing of what this turn spent, so `usage` is not a
+    /// count: a Claude Code compaction whose `result` leaves its summary
+    /// requests out, with no trusted `modelUsage` rise to count them from.
+    /// The gateway's count stands alone for it.
+    pub unreported: bool,
 }
 
 #[derive(Clone)]

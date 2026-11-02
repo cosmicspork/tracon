@@ -334,6 +334,8 @@ async fn compacting_runs_the_harnesss_own_compaction_and_tells_its_summary() {
         .expect("the compaction finished")
         .unwrap();
     assert_eq!(r.stop_reason, "end_turn");
+    // Its result counts none of the summary requests: unreported, not zero.
+    assert!(r.unreported, "{r:?}");
     let deadline = tokio::time::Instant::now() + support::events::DEADLINE;
     let mut started = Vec::new();
     let compacted = loop {

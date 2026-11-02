@@ -586,6 +586,12 @@ impl Pump {
         let mut unasked: HashMap<String, (String, Value)> = HashMap::new();
         // A `compact_boundary` whose summary has not arrived yet.
         let mut compacting: Option<Value> = None;
+        // The metadata of a `compact_boundary` in the turn now running, for
+        // its `result` to be read against.
+        let mut compacted: Option<Value> = None;
+        // The CLI's `modelUsage` as of the last `result` that carried it: a
+        // running total. `None` until this process has sent one.
+        let mut model_usage: Option<Usage> = None;
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim();
             if line.is_empty() {
@@ -686,6 +692,7 @@ impl Pump {
                 // `/compact`: the summary is the user message that follows.
                 "system" if v["subtype"] == "compact_boundary" => {
                     compacting = Some(v["compact_metadata"].clone());
+                    compacted = Some(v["compact_metadata"].clone());
                 }
                 // The summary the model works from now. The CLI's own echo
                 // of the command (`<local-command-stdout>`) follows it.
@@ -784,11 +791,11 @@ impl Pump {
                         drop(turn.lock().unwrap().take());
                         continue;
                     }
-                    let usage = usage_of(&v);
+                    let spent = spent_of(&v, compacted.take().as_ref(), &mut model_usage);
                     let _ = tx
                         .send(HarnessEvent::Usage {
                             size: None,
-                            used: Some(usage.charged()),
+                            used: spent.context_used,
                             cost_usd: v["total_cost_usd"].as_f64(),
                         })
                         .await;
@@ -800,7 +807,8 @@ impl Pump {
                     if let Some(done) = turn.lock().unwrap().take() {
                         let _ = done.send(TurnResult {
                             stop_reason: stop.into(),
-                            usage,
+                            usage: spent.usage,
+                            unreported: spent.unreported,
                         });
                     }
                 }
@@ -880,6 +888,104 @@ fn usage_of(v: &Value) -> Usage {
         cached_read_tokens: cached,
         cache_write_tokens: written,
     }
+}
+
+/// What a `result` says the turn spent, and how full the context is after it.
+#[derive(Debug, PartialEq)]
+struct Spent {
+    usage: Usage,
+    /// The CLI did not count all of it: see `TurnResult::unreported`.
+    unreported: bool,
+    context_used: Option<u64>,
+}
+
+/// A turn's spend from its `result`. A turn that compacted (`compacted`, the
+/// boundary's metadata) ran the CLI's summariser, whose requests its `usage`
+/// leaves out, for `/compact` and automatic compaction alike. Their counts are
+/// then taken from `modelUsage`, which is the process's running total like
+/// `total_cost_usd`, so what it rose by since the last `result` (`seen`) when
+/// that is more than `usage` says. The rise is trusted only once this process
+/// has already sent a `result` with `modelUsage` (`seen` is `Some`): a
+/// compaction that is the process's first result (an ended session reopened
+/// with `--resume`) would otherwise be charged whatever total the CLI starts
+/// from. A compaction with no trusted rise, or with none and no usage, is
+/// unreported rather than under-counted or zero. Its context is the
+/// boundary's `post_tokens` when the result counts nothing. The raw shape of a
+/// compaction's result is unconfirmed, so each case is handled.
+fn spent_of(v: &Value, compacted: Option<&Value>, seen: &mut Option<Usage>) -> Spent {
+    let usage = usage_of(v);
+    let reported = v["modelUsage"].is_object();
+    let total = model_usage_of(v);
+    // What `modelUsage` rose by, when there is a rise to trust.
+    let rose = seen.as_ref().filter(|_| reported).map(|seen| {
+        let input_tokens = total.input_tokens.saturating_sub(seen.input_tokens);
+        let output_tokens = total.output_tokens.saturating_sub(seen.output_tokens);
+        let cached_read_tokens = total
+            .cached_read_tokens
+            .saturating_sub(seen.cached_read_tokens);
+        let cache_write_tokens = total
+            .cache_write_tokens
+            .saturating_sub(seen.cache_write_tokens);
+        Usage {
+            input_tokens,
+            output_tokens,
+            cached_read_tokens,
+            cache_write_tokens,
+            total_tokens: input_tokens + output_tokens + cached_read_tokens + cache_write_tokens,
+        }
+    });
+    // A result with no `modelUsage` says nothing of the running total.
+    if reported {
+        *seen = Some(total);
+    }
+    let Some(metadata) = compacted else {
+        return Spent {
+            context_used: Some(usage.charged()),
+            usage,
+            unreported: false,
+        };
+    };
+    let context_used = if usage.charged() == 0 {
+        metadata["post_tokens"].as_u64()
+    } else {
+        Some(usage.charged())
+    };
+    match rose {
+        Some(rose) if rose.charged() > usage.charged() => Spent {
+            usage: rose,
+            unreported: false,
+            context_used,
+        },
+        Some(_) if usage.charged() > 0 => Spent {
+            usage,
+            unreported: false,
+            context_used,
+        },
+        _ => Spent {
+            usage,
+            unreported: true,
+            context_used,
+        },
+    }
+}
+
+/// `modelUsage` added up over every model the process has used.
+fn model_usage_of(v: &Value) -> Usage {
+    let mut sum = Usage::default();
+    for m in v["modelUsage"]
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+    {
+        let n = |k: &str| m[k].as_u64().unwrap_or(0);
+        sum.input_tokens += n("inputTokens");
+        sum.output_tokens += n("outputTokens");
+        sum.cached_read_tokens += n("cacheReadInputTokens");
+        sum.cache_write_tokens += n("cacheCreationInputTokens");
+    }
+    sum.total_tokens =
+        sum.input_tokens + sum.output_tokens + sum.cached_read_tokens + sum.cache_write_tokens;
+    sum
 }
 
 /// A `tool_result` block as the terminal update of its tool call. The ledger
@@ -1476,6 +1582,128 @@ mod tests {
         assert!(auto["summary"].is_null());
         // Wording it does not know is kept whole rather than guessed at.
         assert_eq!(compact_summary("  just a summary "), "just a summary");
+    }
+
+    /// A `/compact` whose result counts nothing is unreported, not free,
+    /// and leaves the context at the size the boundary gives.
+    #[test]
+    fn a_compaction_that_reports_no_usage_is_unreported_not_zero() {
+        let boundary = json!({ "trigger": "manual", "pre_tokens": 158_869, "post_tokens": 4_943 });
+        let mut seen = None;
+        for result in [
+            json!({ "type": "result", "usage": { "input_tokens": 0, "output_tokens": 0 } }),
+            json!({ "type": "result" }),
+        ] {
+            let spent = spent_of(&result, Some(&boundary), &mut seen);
+            assert!(spent.unreported, "{result}");
+            assert_eq!(spent.usage.charged(), 0);
+            assert_eq!(spent.context_used, Some(4_943));
+        }
+    }
+
+    /// When `modelUsage` rose over the compaction, that rise is what it spent:
+    /// the field is the process's running total, not the turn's.
+    #[test]
+    fn a_compaction_is_counted_from_what_model_usage_rose_by() {
+        let boundary = json!({ "trigger": "manual", "post_tokens": 4_943 });
+        let model = |input: u64, output: u64| {
+            json!({ "claude-opus": {
+                "inputTokens": input, "outputTokens": output,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+            } })
+        };
+        let mut seen = None;
+        let before = json!({
+            "type": "result",
+            "usage": { "input_tokens": 1_000, "output_tokens": 50 },
+            "modelUsage": model(1_000, 50),
+        });
+        let turn = spent_of(&before, None, &mut seen);
+        assert!(!turn.unreported);
+        assert_eq!(turn.usage.charged(), 1_050);
+        assert_eq!(turn.context_used, Some(1_050));
+
+        let compact = json!({
+            "type": "result",
+            "usage": { "input_tokens": 0, "output_tokens": 0 },
+            "modelUsage": model(161_638, 6_345),
+        });
+        let spent = spent_of(&compact, Some(&boundary), &mut seen);
+        assert!(!spent.unreported);
+        assert_eq!(spent.usage.input_tokens, 160_638);
+        assert_eq!(spent.usage.output_tokens, 6_295);
+        assert_eq!(spent.usage.charged(), 166_933);
+        assert_eq!(spent.context_used, Some(4_943));
+    }
+
+    /// A turn that compacted on its own counts its main loop in `usage` but
+    /// not the summariser's request, which `modelUsage` did count: the
+    /// larger rise is what the turn spent.
+    #[test]
+    fn an_automatic_compaction_is_counted_from_the_larger_model_usage_rise() {
+        let boundary = json!({ "trigger": "auto", "pre_tokens": 158_869, "post_tokens": 4_943 });
+        let model = |input: u64, output: u64| {
+            json!({ "claude-opus": {
+                "inputTokens": input, "outputTokens": output,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+            } })
+        };
+        let mut seen = None;
+        let before = json!({
+            "type": "result",
+            "usage": { "input_tokens": 1_000, "output_tokens": 50 },
+            "modelUsage": model(1_000, 50),
+        });
+        spent_of(&before, None, &mut seen);
+
+        // The main loop's 8_000 + 200, plus the summariser's 160_000 + 6_000.
+        let turn = json!({
+            "type": "result",
+            "usage": { "input_tokens": 8_000, "output_tokens": 200 },
+            "modelUsage": model(169_000, 6_250),
+        });
+        let spent = spent_of(&turn, Some(&boundary), &mut seen);
+        assert!(!spent.unreported);
+        assert_eq!(spent.usage.input_tokens, 168_000);
+        assert_eq!(spent.usage.output_tokens, 6_200);
+        assert_eq!(spent.usage.charged(), 174_200);
+        assert_eq!(spent.context_used, Some(8_200));
+
+        // A rise no larger than `usage` adds nothing to trust over it.
+        let turn = json!({
+            "type": "result",
+            "usage": { "input_tokens": 3_000, "output_tokens": 100 },
+            "modelUsage": model(171_000, 6_300),
+        });
+        let spent = spent_of(&turn, Some(&boundary), &mut seen);
+        assert!(!spent.unreported);
+        assert_eq!(spent.usage.charged(), 3_100);
+        assert_eq!(spent.context_used, Some(3_100));
+    }
+
+    /// A compaction that is the process's first result (an ended session
+    /// reopened with `--resume` to compact) has no earlier `modelUsage` to
+    /// measure a rise from, and the CLI may start its total from the
+    /// session's earlier spend: it is unreported, not charged that total.
+    #[test]
+    fn a_compaction_that_is_the_first_result_is_unreported() {
+        let boundary = json!({ "trigger": "manual", "post_tokens": 4_943 });
+        let model_usage = json!({ "claude-opus": {
+            "inputTokens": 900_000, "outputTokens": 40_000,
+            "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+        } });
+        for usage in [
+            json!({ "input_tokens": 0, "output_tokens": 0 }),
+            json!({ "input_tokens": 2_000, "output_tokens": 100 }),
+        ] {
+            let mut seen = None;
+            let result = json!({ "type": "result", "usage": usage, "modelUsage": model_usage });
+            let spent = spent_of(&result, Some(&boundary), &mut seen);
+            assert!(spent.unreported, "{result}");
+            assert!(spent.usage.charged() < 900_000, "{result}");
+            // The next result measures its rise from this one.
+            assert_eq!(seen.map(|s| s.charged()), Some(940_000));
+        }
     }
 
     #[test]

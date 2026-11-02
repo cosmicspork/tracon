@@ -52,6 +52,7 @@ impl HarnessHandle for FakeHandle {
                 cached_read_tokens: 0,
                 cache_write_tokens: 0,
             },
+            unreported: false,
         })
     }
     async fn cancel(&self) -> Result<(), AdapterError> {

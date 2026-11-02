@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     eventLine,
+    turnEndLine,
     fallbackLine,
     groupLog,
     policyLine,
@@ -117,17 +118,6 @@
     for (const d of runs) d.open = open
   }
 
-  function turnEnd(e: Event): string {
-    const usage = e.payload.usage as { total_tokens?: number } | undefined
-    const total = usage?.total_tokens
-    if (e.payload.stop_reason === 'max_turn_requests') {
-      const spent = total !== undefined ? ` · ${formatTokens(total)} tokens` : ''
-      return `turn stopped at the harness's request limit${spent} · a prompt carries on`
-    }
-    return total !== undefined
-      ? `turn ended · ${formatTokens(total)} tokens`
-      : `turn ended · ${e.payload.stop_reason ?? ''}`
-  }
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -208,7 +198,7 @@
       {:else if e.kind === 'permission_expired'}
         <div class="mark crit">{e.payload.reason ?? 'denied: unanswered'}</div>
       {:else if e.kind === 'turn_end'}
-        <div class="mark">{turnEnd(e)}</div>
+        <div class="mark">{turnEndLine(e.payload)}</div>
       {:else if e.kind === 'cloning'}
         <div class="sys">cloning {e.payload.repo} from its forge · once on this node, before the workspace is made</div>
       {:else if e.kind === 'worktree'}
