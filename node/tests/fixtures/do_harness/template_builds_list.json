@@ -1,0 +1,13 @@
+{
+  "builds": [
+    {
+      "build_id": "0190c0de-0000-7000-8000-0000000000e1",
+      "template_id": "0190c0de-0000-7000-8000-0000000000d1",
+      "name": "tracon-hdr-rebase-test",
+      "status": "SUCCEEDED",
+      "created_at": "2026-11-02T01:38:20Z",
+      "updated_at": "2026-11-02T01:45:57Z"
+    }
+  ],
+  "next_page_token": ""
+}

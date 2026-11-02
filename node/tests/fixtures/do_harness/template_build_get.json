@@ -1,0 +1,10 @@
+{
+  "build": {
+    "build_id": "0190c0de-0000-7000-8000-0000000000e2",
+    "template_id": "0190c0de-0000-7000-8000-0000000000d1",
+    "status": "FAILED",
+    "error": "pull ghcr.io/example/base:1: unauthorized",
+    "created_at": "2026-11-02T02:00:00Z",
+    "updated_at": "2026-11-02T02:01:00Z"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "exit_code": 3,
+  "stdout": "hello\n",
+  "stderr": "warning: something\n"
+}

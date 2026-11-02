@@ -1,0 +1,25 @@
+{
+  "next_page_token": "",
+  "sessions": [
+    {
+      "session_id": "0190c0de-0000-7000-8000-0000000000b1",
+      "name": "tracon-live",
+      "agent_kind": "AGENT_KIND_NONE",
+      "status": "SESSION_STATUS_PAUSED",
+      "pause_reason": "idle",
+      "sandbox_id": "0190c0de-0000-7000-8000-0000000000b2",
+      "created_at": "2026-11-02T04:56:54.435303Z",
+      "last_event_at": "2026-11-02T05:11:56.84352Z",
+      "config_id": "0190c0de-0000-7000-8000-0000000000a1"
+    },
+    {
+      "session_id": "0190c0de-0000-7000-8000-0000000000b3",
+      "name": "tracon-destroyed",
+      "agent_kind": "AGENT_KIND_NONE",
+      "status": "SESSION_STATUS_DESTROYED",
+      "created_at": "2026-11-02T01:39:00.3Z",
+      "last_event_at": "2026-11-02T02:00:00Z",
+      "config_id": "0190c0de-0000-7000-8000-0000000000a3"
+    }
+  ]
+}

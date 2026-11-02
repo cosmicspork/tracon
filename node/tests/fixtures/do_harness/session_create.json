@@ -1,0 +1,16 @@
+{
+  "session": {
+    "session_id": "0190c0de-0000-7000-8000-000000000001",
+    "name": "tracon-spike-l1",
+    "agent_kind": "AGENT_KIND_NONE",
+    "status": "SESSION_STATUS_READY",
+    "sandbox_id": "0190c0de-0000-7000-8000-000000000002",
+    "created_at": "2026-11-02T04:56:54.435302793Z",
+    "last_event_at": "2026-11-02T04:56:54.435302793Z",
+    "keep_warm": true,
+    "config_id": "0190c0de-0000-7000-8000-000000000003",
+    "warnings": [
+      "egress.allow_ips: no host allowlist is set, so the destination ACL permits only these IP literals and denies every hostname"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "checkpoints": [
+    {
+      "checkpoint_id": "0190c0de-0000-7000-8000-0000000000c3",
+      "session_id": "0190c0de-0000-7000-8000-000000000001",
+      "status": "READY",
+      "kind": "implicit",
+      "size_bytes": 54760833024,
+      "created_at": "2026-11-02T05:30:00.250Z",
+      "a_field_this_client_does_not_know": {"nested": true}
+    },
+    {
+      "checkpoint_id": "0190c0de-0000-7000-8000-0000000000c1",
+      "session_id": "0190c0de-0000-7000-8000-000000000001",
+      "status": "READY",
+      "kind": "explicit",
+      "label": "prepared",
+      "size_bytes": "54760833024",
+      "created_at": "2026-11-02T05:10:00Z"
+    },
+    {
+      "checkpoint_id": "0190c0de-0000-7000-8000-0000000000c2",
+      "session_id": "0190c0de-0000-7000-8000-000000000001",
+      "status": "FAILED",
+      "kind": "implicit",
+      "created_at": "2026-11-02T05:00:00Z",
+      "error_message": "capture failed"
+    }
+  ],
+  "next_page_token": ""
+}

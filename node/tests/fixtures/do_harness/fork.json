@@ -1,0 +1,16 @@
+{
+  "sessions": [
+    {
+      "session_id": "0190c0de-0000-7000-8000-000000000011",
+      "name": "session-sandbox-20261102-013934-fork-ce44118d",
+      "agent_kind": "AGENT_KIND_NONE",
+      "status": "SESSION_STATUS_READY",
+      "created_at": "2026-11-02T01:39:34.653922571Z",
+      "last_event_at": "2026-11-02T01:39:34.653922571Z",
+      "sandbox_id": "0190c0de-0000-7000-8000-000000000012",
+      "parent_session_id": "0190c0de-0000-7000-8000-000000000001",
+      "fork_id": "ce44118d-7f94-48cb-8ba2-f4cbfe8927e9",
+      "config_id": "0190c0de-0000-7000-8000-000000000003"
+    }
+  ]
+}

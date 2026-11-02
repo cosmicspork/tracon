@@ -12,6 +12,7 @@ pub mod config_schema;
 pub mod continuation;
 pub mod corpus;
 pub mod data;
+pub mod do_harness;
 pub mod embed;
 pub mod environment;
 pub mod explain;

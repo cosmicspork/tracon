@@ -1,0 +1,18 @@
+{
+  "config": {
+    "spend_limit": "0.00",
+    "is_auto_prepay_enabled": true,
+    "prepay_amount": "25.00",
+    "prepay_threshold": "5.00",
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-01T00:00:00Z",
+    "prepay_flow": "PREPAY_FLOW_PREPAYMENT"
+  },
+  "status": {
+    "balance": "10.00",
+    "is_auto_prepay_enabled": true,
+    "eligible": true,
+    "month_to_date_balance": "-10.00",
+    "can_purchase_credits": true
+  }
+}
