@@ -384,6 +384,7 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
                 jira::ISSUE_COMMENT,
                 jira::ISSUE_UPDATE,
                 jira::ISSUE_CREATE,
+                jira::ISSUE_LINK,
                 jira::ISSUE_TRANSITION,
             ],
         ),
