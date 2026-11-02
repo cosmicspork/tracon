@@ -505,6 +505,13 @@ fn push_repository(out: &mut String, facts: &Facts) {
     if submit {
         out.push_str(", and `submit_review` publishes");
     }
+    if offered(mcp::branch::FETCH) {
+        out.push_str(
+            ". `fetch_branch` brings any branch of origin up to date in it as \
+             `origin/<branch>`, at any time: the base after your change merged, or a branch to \
+             build on",
+        );
+    }
     out.push_str(".\n");
 }
 
@@ -1639,6 +1646,19 @@ mod tests {
         assert!(!text.contains("submit_review"), "{text}");
         let text = told(github.as_ref(), &tools[3..]);
         assert!(text.contains("; `submit_review` defaults to it."), "{text}");
+        assert!(!text.contains("fetch_branch"), "{text}");
+        // Where it is offered, the way to fetch is named.
+        let text = told(
+            github.as_ref(),
+            &["submit_review".to_string(), "fetch_branch".to_string()],
+        );
+        assert!(
+            text.contains(
+                "`submit_review` publishes. `fetch_branch` brings any branch of origin up to \
+                 date in it as `origin/<branch>`"
+            ),
+            "{text}"
+        );
 
         // A local-only repository, or a host that is neither forge: nothing.
         for remote in [

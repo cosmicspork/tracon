@@ -259,6 +259,10 @@ pub struct Intent {
     pub signed: Vec<String>,
 }
 
+/// What a refusal to update a change that is no longer open says, so a
+/// publication that failed on one is told apart (`publish_failed_view`).
+pub const NOT_OPEN: &str = "is not open";
+
 /// What the forge says about an existing change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeState {
@@ -278,7 +282,8 @@ impl ChangeState {
     pub fn refusal(&self, provider: Provider, target: &Target, number: u64) -> Option<String> {
         let noun = provider.noun();
         if !self.open {
-            Some(format!("{noun} {number} is not open"))
+            let how = if self.merged { "merged" } else { "closed" };
+            Some(format!("{noun} {number} {NOT_OPEN}: it was {how}"))
         } else if self.cross_repository {
             Some(format!(
                 "{noun} {number} comes from another repository; only a branch of {} can be updated",

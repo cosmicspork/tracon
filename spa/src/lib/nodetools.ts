@@ -25,6 +25,7 @@ export const NODE_TOOLS = new Set([
   'approval_status',
   'request_egress',
   'show_work',
+  'fetch_branch',
   // GitHub
   'pr_status',
   'pr_comment',
@@ -187,6 +188,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return line(`Ask to reach ${str(a.host) || 'a host'}`, clip(str(a.why), 48))
     case 'show_work':
       return line('Show work', clip(str(a.title)))
+    case 'fetch_branch':
+      return `Fetch origin/${str(a.branch) || 'a branch'}`
     case 'pr_status':
       return `Pull request #${pr}`
     case 'pr_comment':

@@ -11,8 +11,9 @@
 //! session; `tracon-workspace-<id>` to every open session using that
 //! workspace; `tracon-cache-w-<id>` to that same workspace, whose sessions
 //! installed into it before session caches were kept per repository;
-//! `tracon-check-<run>` to a check run, as `tracon-prep-…`, `tracon-warm-…`
-//! and a setup trial's `tracon-try-…` are to the run that made them;
+//! `tracon-check-<run>` to a check run, as `tracon-prep-…`, `tracon-warm-…`,
+//! a setup trial's `tracon-try-…` and a `fetch_branch`'s bundle
+//! `tracon-fetch-…` are to the run that made them;
 //! `tracon-cache-<hash>` — a repository's base cache, or as
 //! `tracon-cache-r-<hash>` its sessions' build cache — to nobody (it is
 //! rebuilt on demand, so it goes only when asked for). The
@@ -163,12 +164,17 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
             verdict(true, "the check run has finished")
         };
     }
-    // What one check run or one cache warm-up made for itself, and removes
-    // itself when it ends. One still here a day later was left by a run that
-    // did not finish.
-    if ["tracon-prep-", "tracon-warm-", "tracon-try-"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
+    // What one check run, one cache warm-up or one fetch_branch made for
+    // itself, and removes itself when it ends. One still here a day later was
+    // left by a run that did not finish.
+    if [
+        "tracon-prep-",
+        "tracon-warm-",
+        "tracon-try-",
+        "tracon-fetch-",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
     {
         return if created_ms.is_some_and(|created| owners.now_ms - created < WORKSPACE_GRACE_MS) {
             verdict(
@@ -409,6 +415,7 @@ mod tests {
             "tracon-prep-cache-0199",
             "tracon-warm-0199",
             "tracon-try-0199",
+            "tracon-fetch-0199",
         ] {
             assert!(classify_volume(left, old, &o).0, "{left}");
             assert!(
