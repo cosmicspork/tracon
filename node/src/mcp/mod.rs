@@ -10,6 +10,7 @@
 pub mod approvals;
 pub mod aside;
 pub mod audit;
+pub mod branch;
 pub mod checking;
 pub mod consulta;
 pub mod docs;
@@ -348,11 +349,12 @@ impl Tools {
 
     /// What an external harness is not offered: a verdict is what a review
     /// session the node started gives on someone else's change. Nor does it
-    /// run behind the node's proxy, beside the node's services, or in a
-    /// repository the node can set up: those tools refuse it, so it is not
-    /// shown them.
+    /// run behind the node's proxy, beside the node's services, in a
+    /// workspace the node can fetch into, or in a repository the node can set
+    /// up: those tools refuse it, so it is not shown them.
     pub const NOT_EXTERNAL: &'static [&'static str] = &[
         review::VERDICT,
+        branch::FETCH,
         egress::REQUEST,
         services::START,
         services::STATUS,
@@ -419,6 +421,10 @@ impl Tools {
             // Showing work reaches the operator and nothing else: it is read
             // from the node's own snapshot and never leaves tracon.
             out.extend(show::definitions());
+            // Fetching a branch reads the forge with the repository's own
+            // credential and moves one remote-tracking ref of this session's
+            // workspace: nothing on the forge changes.
+            out.extend(branch::definitions());
             // Drafting and trying a repository's entry reach nothing this
             // session cannot; proposing one is always the operator's call.
             out.extend(setup::definitions());
@@ -666,6 +672,18 @@ impl Tools {
                 .map_err(|error| error.to_string())?;
             *gate = audit::Gate::node("show-work");
             return show::call(access, ctx, args).await;
+        }
+        if name == branch::FETCH {
+            let access = self
+                .session
+                .get()
+                .ok_or("fetching a branch is not available on this node")?;
+            access
+                .manager
+                .caller_active(ctx)
+                .map_err(|error| error.to_string())?;
+            *gate = audit::Gate::node("fetch-branch");
+            return branch::call(access, ctx, args).await;
         }
         if name == approvals::STATUS {
             let access = self

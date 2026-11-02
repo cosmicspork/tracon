@@ -3851,6 +3851,21 @@ pub(crate) fn publish_failed_view(
     brought_back: &str,
 ) -> Value {
     let error = failed.note.clone().unwrap_or_default();
+    // A review's change is fixed at its first submit, so a change merged or
+    // closed since cannot take this revision, however it is resubmitted.
+    let next = if error.contains(review::publish::NOT_OPEN) {
+        format!(
+            "The change this review updates is no longer open, and a review's change is fixed \
+             at its first submit, so resubmitting this review cannot publish it. Fetch {base} \
+             (`fetch_branch`, where you have it), rebase the commits not yet on it onto it, and \
+             submit them as a new review, without review_id.",
+            base = failed.base
+        )
+    } else {
+        "If the failure names something to change, change it and resubmit with the same \
+         review_id."
+            .to_string()
+    };
     json!({
         "review_id": r.id,
         "state": "publish_failed",
@@ -3864,9 +3879,8 @@ pub(crate) fn publish_failed_view(
         "message": format!(
             "{says}The operator approved this review, but publishing it failed: \
              {error}. It is back with the operator, who can retry the same \
-             publication or reject it. If the failure names something to change, \
-             change it and resubmit with the same review_id. Call review_status \
-             again with the same review_id to keep waiting.{brought_back}"
+             publication or reject it. {next} Call review_status again with the same \
+             review_id to keep waiting.{brought_back}"
         ),
     })
 }
@@ -4344,6 +4358,70 @@ mod tests {
             lane: None,
             publication_failed: None,
         }
+    }
+
+    /// A publication that failed because the change it updates merged or
+    /// closed is not sent back to be resubmitted on the same review, whose
+    /// change cannot move: it is told to rebase onto the base and submit a
+    /// new review. Any other failure keeps the resubmit advice.
+    #[test]
+    fn a_publication_refused_for_a_merged_change_says_to_submit_a_new_review() {
+        let failed = |note: &str| crate::store::PublicationRow {
+            id: "p1".into(),
+            review_id: "r1".into(),
+            revision_id: None,
+            candidate_id: "c1".into(),
+            channel: "work".into(),
+            node_id: "n".into(),
+            provider: "github".into(),
+            project: "owner/name".into(),
+            base: "main".into(),
+            branch: "feat/x".into(),
+            head_sha: "sha1".into(),
+            state: "failed".into(),
+            pushed_sha: None,
+            result: None,
+            note: Some(note.into()),
+            attempts: 1,
+            instance: "i".into(),
+            created_ms: 1,
+            updated_ms: 1,
+            title: None,
+            body: None,
+            outputs_json: None,
+            forge_contacted: true,
+        };
+        let merged = review::publish::ChangeState {
+            url: "https://github.test/pull/7".into(),
+            open: false,
+            merged: true,
+            source_branch: "feat/x".into(),
+            target_branch: "main".into(),
+            cross_repository: false,
+            head_sha: "sha1".into(),
+        };
+        let target: Target = serde_json::from_value(json!({
+            "provider": "github", "project": "owner/name", "base": "main", "branch": "feat/x",
+        }))
+        .unwrap();
+        let refusal = merged.refusal(Provider::Github, &target, 7).unwrap();
+        assert_eq!(refusal, "pull request 7 is not open: it was merged");
+
+        let view = publish_failed_view(&review_at("sha1"), &failed(&refusal), "", "");
+        let message = view["message"].as_str().unwrap();
+        assert!(message.contains("Fetch main"), "{message}");
+        assert!(message.contains("submit them as a new review"), "{message}");
+        assert!(
+            !message.contains("resubmit with the same review_id"),
+            "{message}"
+        );
+
+        let view = publish_failed_view(&review_at("sha1"), &failed("push rejected"), "", "");
+        let message = view["message"].as_str().unwrap();
+        assert!(
+            message.contains("resubmit with the same review_id"),
+            "{message}"
+        );
     }
 
     /// A run of an external candidate's checks under way is attached to, and

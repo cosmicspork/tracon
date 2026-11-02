@@ -1365,13 +1365,129 @@ async fn forge_branch(repo: &Path, name: &str) -> Option<String> {
     .then_some(remote)
 }
 
+/// What a workspace is given to hold a forge branch as the managed clone
+/// last fetched it (`bundle_branch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchBundle {
+    /// The branch's tip in the clone.
+    pub sha: String,
+    /// Whether a bundle was written: none is needed when the workspace
+    /// already holds the tip, and only its ref has to move.
+    pub bundled: bool,
+}
+
+/// Write to `dest` a bundle of the managed clone's `origin/<branch>` that a
+/// session's workspace can fetch from, holding only the commits it lacks.
+/// `have` is what the workspace's refs name, as the workspace reported it:
+/// any of those the clone also holds as a commit is left out of the bundle,
+/// and anything else in it (a commit only the agent made, a line that is not
+/// an object id) is ignored, so the report decides nothing but the bundle's
+/// size. A branch the clone does not hold as one of its forge's is refused.
+/// Callers hold `clone_lock`.
+pub async fn bundle_branch(
+    repo: &Path,
+    branch: &str,
+    have: &[String],
+    dest: &Path,
+) -> Result<BranchBundle, String> {
+    let repo = &managed_clone(repo)?;
+    let remote = forge_branch(repo, branch)
+        .await
+        .ok_or_else(|| format!("origin has no branch {branch}"))?;
+    let sha = local_git(
+        repo,
+        &["rev-parse", "--verify", &format!("{remote}^{{commit}}")],
+    )
+    .await?;
+    let ids: String = have
+        .iter()
+        .filter(|id| matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|id| format!("{id}\n"))
+        .collect();
+    let known = if ids.is_empty() {
+        String::new()
+    } else {
+        local_git_with(
+            repo,
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            Some(ids),
+            Duration::from_secs(60),
+        )
+        .await?
+    };
+    let exclude: String = known
+        .lines()
+        .filter_map(|line| line.strip_suffix(" commit"))
+        .map(|id| format!("^{id}\n"))
+        .collect();
+    let missing = local_git_with(
+        repo,
+        &["rev-list", "--count", &sha, "--stdin"],
+        Some(exclude.clone()),
+        Duration::from_secs(60),
+    )
+    .await?;
+    if missing == "0" {
+        return Ok(BranchBundle {
+            sha,
+            bundled: false,
+        });
+    }
+    let dest = dest.to_string_lossy();
+    local_git_with(
+        repo,
+        &["bundle", "create", &dest, "--stdin"],
+        Some(format!("{remote}\n{exclude}")),
+        Duration::from_secs(300),
+    )
+    .await?;
+    Ok(BranchBundle { sha, bundled: true })
+}
+
 /// A Git command against a managed clone that never leaves the disk, so it
 /// needs no credential, with its trimmed output.
 async fn local_git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    local_git_with(repo, args, None, Duration::from_secs(60)).await
+}
+
+/// `local_git`, with `input` on its standard input and its own time limit.
+async fn local_git_with(
+    repo: &Path,
+    args: &[&str],
+    input: Option<String>,
+    limit: Duration,
+) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
     let anonymous = crate::git_remote::Credential::Anonymous;
     let mut command = managed_git(repo, &anonymous).map_err(|e| e.to_string())?;
-    command.args(args).kill_on_drop(true);
-    let out = tokio::time::timeout(Duration::from_secs(60), command.output())
+    command
+        .args(args)
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let run = async {
+        let mut child = command.spawn()?;
+        // Written beside the read, not before it: `cat-file` answers each
+        // line as it comes, and would block on a full pipe that nothing
+        // reads while the rest of the input waits.
+        let writing = match (input, child.stdin.take()) {
+            (Some(input), Some(mut stdin)) => Some(tokio::spawn(async move {
+                let _ = stdin.write_all(input.as_bytes()).await;
+            })),
+            _ => None,
+        };
+        let out = child.wait_with_output().await;
+        if let Some(writing) = writing {
+            let _ = writing.await;
+        }
+        out
+    };
+    let out = tokio::time::timeout(limit, run)
         .await
         .map_err(|_| format!("git {} ran out of time", args[0]))?
         .map_err(|e| e.to_string())?;

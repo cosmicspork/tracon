@@ -36,6 +36,7 @@ test('operator calls carry the question, the host or the title', () => {
   expect(nodeCallText('question_status', { question_id: 'q' })).toBe('Wait for an answer')
   expect(nodeCallText('question_status', { question_ids: ['a', 'b', 'c'] })).toBe('Wait for an answer · 3 of them')
   expect(nodeCallText('request_egress', { host: 'pypi.org', why: 'uv sync' })).toBe('Ask to reach pypi.org · uv sync')
+  expect(nodeCallText('fetch_branch', { branch: 'main' })).toBe('Fetch origin/main')
   expect(nodeCallText('notify_operator', { title: 'Checks pass', message: 'm' })).toBe('Notify the operator · Checks pass')
   expect(nodeCallText('report_issue', { title: 'review_status lags' })).toBe('Report an issue · review_status lags')
   expect(nodeCallText('approval_status', { approval_id: 'a' })).toBe('Wait for an approval')
