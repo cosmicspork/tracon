@@ -76,6 +76,21 @@ pub struct Config {
     /// of the sandbox provider (`crate::provider`). Shown, not enforced yet.
     pub placement: crate::provider::requirements::Placement,
     pub metrics: Metrics,
+    /// What every sandbox is given: the harness bundle.
+    pub sandbox: Sandbox,
+}
+
+/// `[sandbox]`: what a sandbox provider mounts into each sandbox.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Sandbox {
+    /// The harness bundle for this host's architecture: the directory
+    /// holding `bin/tracon-sandbox` (one `<version>/<arch>` of
+    /// `scripts/harness-bundle.sh`'s output). Mounted read-only at
+    /// `/opt/tracon` in every sandbox, and relabelled for containers on an
+    /// SELinux host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<PathBuf>,
 }
 
 /// The Prometheus scrape target (`GET /metrics`, `telemetry`): unset, nothing
@@ -932,10 +947,25 @@ pub enum RuntimeKind {
 #[serde(default)]
 pub struct Runtime {
     pub kind: RuntimeKind,
+    pub podman: PodmanRuntime,
     pub kubernetes: Kubernetes,
     /// Immutable project images the operator explicitly accepts in addition to
     /// digest-addressed images from safe devcontainer metadata.
     pub approved_images: Vec<String>,
+}
+
+/// `[runtime.podman]`: how the Podman boundary runs what it runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PodmanRuntime {
+    /// Run every harness, check and preparation under `tracon-sandbox` from
+    /// `[sandbox] bundle`, with its control and stdio over the sandbox
+    /// protocol rather than `podman run`'s own pipes. The network, volumes
+    /// and images stay as they are. Linux hosts only.
+    pub sandbox_protocol: bool,
+    /// Start `tracon-sandbox` under Podman's `--init` rather than as the
+    /// container's PID 1.
+    pub sandbox_init: bool,
 }
 
 /// The `[[repo]]` table a running node resolves against, once the operator
@@ -2350,6 +2380,7 @@ impl Default for Config {
             upstreams: Upstreams::default(),
             placement: Default::default(),
             metrics: Metrics::default(),
+            sandbox: Sandbox::default(),
             harness: Harness {
                 id: crate::adapter::claude::ClaudeAdapter::ID.into(),
                 version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
@@ -2611,6 +2642,20 @@ impl Config {
         dirs::runtime_dir()
             .unwrap_or_else(|| std::env::temp_dir().join(format!("tracon-{}", uid())))
             .join("tracon")
+    }
+
+    /// Where the Podman sandbox provider makes each sandbox's socket
+    /// directory: beside the harness socket when that is a unix socket (so a
+    /// scratch node with its own keeps its own), else under the runtime
+    /// directory. Short either way, for the socket path limit.
+    pub fn sandbox_socket_dir(&self) -> PathBuf {
+        match &self.gateway.harness_listen {
+            HarnessListen::Unix(path) => path
+                .parent()
+                .map(|dir| dir.join("sandbox"))
+                .unwrap_or_else(|| Self::runtime_dir().join("sandbox")),
+            HarnessListen::Tcp(_) => Self::runtime_dir().join("sandbox"),
+        }
     }
 
     /// Where `tracon setup` writes the embedded container definitions.

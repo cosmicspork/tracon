@@ -268,6 +268,55 @@ impl PodmanBackend {
     pub fn spec(&self) -> RunSpec {
         RunSpec::from_config(&self.cfg, self.selinux)
     }
+
+    /// The runner for `spec`: `podman run` itself, or, with
+    /// `[runtime.podman] sandbox_protocol`, a sandbox per command over the
+    /// sandbox protocol.
+    fn runner_with(&self, spec: RunSpec) -> Arc<dyn Runner> {
+        match uses_sandbox_protocol(&self.cfg) {
+            true => protocol_runner(&self.cfg, spec),
+            false => Arc::new(PodmanRunner::new(spec)),
+        }
+    }
+}
+
+/// Whether this node runs its Podman commands over the sandbox protocol. Off
+/// a Linux host the supervisor's socket would be on the far side of the
+/// Podman machine's file sharing, which carries no sockets, so the setting
+/// is refused there.
+pub fn uses_sandbox_protocol(cfg: &Config) -> bool {
+    if !cfg.runtime.podman.sandbox_protocol {
+        return false;
+    }
+    if !cfg!(target_os = "linux") {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "[runtime.podman] sandbox_protocol needs a Linux host; running podman as before"
+            )
+        });
+        return false;
+    }
+    true
+}
+
+/// A sandbox per command, made by the Podman provider around `spec`. The
+/// provider takes the boundary; the runner keeps `spec`'s mounts, image and
+/// working directory, and hands image identity and services on to a plain
+/// `PodmanRunner`.
+pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
+    let mounts = spec.extra_mounts.clone();
+    let image = spec.image.clone();
+    let workdir = spec.workdir.clone();
+    let mut boundary = spec.clone();
+    boundary.extra_mounts = Vec::new();
+    let provider = crate::provider::podman::PodmanProvider::from_config(cfg, boundary);
+    Arc::new(
+        crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
+            .with_mounts(mounts)
+            .with_workdir(workdir)
+            .with_delegate(Arc::new(PodmanRunner::new(spec))),
+    )
 }
 
 #[async_trait]
@@ -322,7 +371,7 @@ impl Backend for PodmanBackend {
     fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
         let mut spec = RunSpec::for_harness(&self.cfg, harness_id, self.selinux);
         spec.extra_mounts = extra_mounts;
-        Arc::new(PodmanRunner::new(spec))
+        self.runner_with(spec)
     }
 
     fn runner_in(
@@ -334,7 +383,7 @@ impl Backend for PodmanBackend {
         let mut spec = RunSpec::for_harness(&self.cfg, harness_id, self.selinux);
         spec.image = image.to_string();
         spec.extra_mounts = extra_mounts;
-        Arc::new(PodmanRunner::new(spec))
+        self.runner_with(spec)
     }
 
     fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
@@ -422,8 +471,17 @@ impl Backend for PodmanBackend {
     }
 
     async fn reconcile(&self, names: &[String]) {
+        let provider = uses_sandbox_protocol(&self.cfg)
+            .then(|| crate::provider::podman::PodmanProvider::from_config(&self.cfg, self.spec()));
         for name in names {
             let _ = podman(&["rm", "-f", "-i", name]).await;
+            // And the socket directory a sandbox of that name had.
+            if let Some(provider) = &provider {
+                use crate::provider::SandboxProvider as _;
+                let _ = provider
+                    .destroy(&crate::provider::Handle(name.clone()))
+                    .await;
+            }
         }
     }
 
@@ -822,6 +880,28 @@ mod tests {
     use super::{machine_state_from, resolve_podman, MachineState};
     use serde_json::json;
     use std::path::Path;
+
+    /// Off unless asked, so a node's sessions run as they always have.
+    #[test]
+    fn the_sandbox_protocol_is_off_unless_asked_and_read_from_its_own_block() {
+        let default = crate::config::Config::default();
+        assert!(!super::uses_sandbox_protocol(&default));
+        assert!(!default.runtime.podman.sandbox_init);
+        assert!(default.sandbox.bundle.is_none());
+        let on: crate::config::Config = toml::from_str(
+            "[runtime.podman]\nsandbox_protocol = true\nsandbox_init = true\n\
+             [sandbox]\nbundle = \"/opt/bundle\"\n",
+        )
+        .unwrap();
+        assert_eq!(super::uses_sandbox_protocol(&on), cfg!(target_os = "linux"));
+        assert!(on.runtime.podman.sandbox_init);
+        assert_eq!(on.sandbox.bundle.as_deref(), Some(Path::new("/opt/bundle")));
+        // Beside the harness socket, so a node with its own keeps its own.
+        let mut scratch = on.clone();
+        scratch.gateway.harness_listen =
+            crate::config::HarnessListen::Unix("/tmp/n1/harness.sock".into());
+        assert_eq!(scratch.sandbox_socket_dir(), Path::new("/tmp/n1/sandbox"));
+    }
 
     #[test]
     fn machine_state_reads_the_list_json() {

@@ -13,7 +13,10 @@ use tracon_sandbox::tls::NodeIdentity;
 
 use super::apple::{AppleOptions, AppleProvider, BUNDLE_TARGET};
 use super::capabilities::{Dns, Route};
-use super::{Bootstrap, Capabilities, Handle, ProviderKind, Resources, SandboxProvider};
+use super::podman::PodmanProvider;
+use super::{
+    Bootstrap, Capabilities, CreateSpec, Handle, ProviderKind, Resources, SandboxProvider,
+};
 
 /// How long the sandbox has to start and take the node's connection.
 const CONNECT_WITHIN: Duration = Duration::from_secs(60);
@@ -26,19 +29,30 @@ pub struct ProbeOptions {
     pub bundle: PathBuf,
     /// Leave the sandbox running afterwards, for a look inside.
     pub keep: bool,
+    /// What to call the sandbox, where the provider names it as asked.
+    pub name: Option<String>,
 }
 
 /// What one probe saw. Each line is printed as it happens.
 pub async fn run(options: ProbeOptions) -> Result<()> {
-    let provider = match options.provider {
-        ProviderKind::Apple => AppleProvider::new(AppleOptions {
-            bundle: options
-                .bundle
-                .canonicalize()
-                .with_context(|| format!("bundle {}", options.bundle.display()))?,
+    let bundle = options
+        .bundle
+        .canonicalize()
+        .with_context(|| format!("bundle {}", options.bundle.display()))?;
+    let provider: Box<dyn SandboxProvider> = match options.provider {
+        ProviderKind::Apple => Box::new(AppleProvider::new(AppleOptions {
+            bundle,
             socket_dir: AppleOptions::default_socket_dir(),
             limit: None,
-        }),
+        })),
+        // The boundary this node's configuration describes: its network,
+        // gateway and proxy, as a session's sandbox gets them.
+        ProviderKind::Podman => {
+            let mut cfg = crate::config::Config::load();
+            cfg.sandbox.bundle = Some(bundle);
+            let spec = crate::runner::podman::RunSpec::from_config(&cfg, false);
+            Box::new(PodmanProvider::from_config(&cfg, spec))
+        }
         other => bail!("the probe does not support {} yet", other.as_str()),
     };
     let supervisor = options.bundle.join("bin/tracon-sandbox");
@@ -53,24 +67,27 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
     let identity = NodeIdentity::generate()?;
     let server = SandboxServer::new(&identity, ServerOptions::default())?;
     let bootstrap = Bootstrap {
-        node_addr: String::new(),
+        run: "probe".into(),
         cert_pin: server.pin().to_string(),
         token: server.tokens().issue("probe"),
     };
 
     let started = Instant::now();
     let handle = provider
-        .create(&options.image, &Resources::default(), &[], &bootstrap)
+        .create(&CreateSpec {
+            name: options.name.as_deref(),
+            image: &options.image,
+            resources: &Resources::default(),
+            mounts: &[],
+            bootstrap: &bootstrap,
+        })
         .await
         .context("create")?;
     line("created", format!("{} in {}", handle.0, ms(started)));
 
-    let outcome = exercise(&provider, &server, &handle).await;
+    let outcome = exercise(provider.as_ref(), &server, &handle).await;
     match options.keep {
-        true => line(
-            "kept",
-            format!("{} (container delete --force {0})", handle.0),
-        ),
+        true => line("kept", handle.0.clone()),
         false => {
             provider.destroy(&handle).await.context("destroy")?;
             line("destroyed", handle.0.clone());
@@ -89,13 +106,13 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
 }
 
 async fn exercise(
-    provider: &AppleProvider,
+    provider: &dyn SandboxProvider,
     server: &SandboxServer,
     handle: &Handle,
 ) -> Result<Capabilities> {
     let started = Instant::now();
-    let conn = server
-        .connect_to(&provider.node_socket(handle), CONNECT_WITHIN)
+    let conn = provider
+        .connect(handle, server, CONNECT_WITHIN)
         .await
         .context("connect to the sandbox")?;
     let info = conn.info();

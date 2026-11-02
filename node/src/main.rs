@@ -125,7 +125,7 @@ enum SandboxCommand {
     /// Make one sandbox, connect to it, run a command in it, read its
     /// isolation back from the provider, and remove it.
     Probe {
-        /// The provider to probe (apple).
+        /// The provider to probe (apple, podman).
         #[arg(long)]
         provider: String,
         /// The harness bundle for the sandbox's architecture, with
@@ -138,6 +138,9 @@ enum SandboxCommand {
         /// Leave the sandbox running afterwards.
         #[arg(long)]
         keep: bool,
+        /// What to call the sandbox (Podman's container name).
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -796,17 +799,22 @@ async fn main() -> Result<()> {
                     bundle,
                     image,
                     keep,
+                    name,
                 },
         } => {
             let provider = match provider.as_str() {
                 "apple" => tracon::provider::ProviderKind::Apple,
-                other => anyhow::bail!("unknown provider {other:?}; the probe knows apple"),
+                "podman" => tracon::provider::ProviderKind::Podman,
+                other => {
+                    anyhow::bail!("unknown provider {other:?}; the probe knows apple and podman")
+                }
             };
             tracon::provider::probe::run(tracon::provider::probe::ProbeOptions {
                 provider,
                 image,
                 bundle,
                 keep,
+                name,
             })
             .await
         }

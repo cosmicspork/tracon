@@ -1,10 +1,13 @@
 //! How the node gets a harness process. `PodmanRunner` puts it inside the
-//! Podman boundary, the Kubernetes runner inside a harness pod; `LocalRunner`
-//! (tests only) runs the argv on the host so the adapter can be exercised
-//! without containers.
+//! Podman boundary, the Kubernetes runner inside a harness pod, and
+//! `ProtocolRunner` inside a sandbox provider's sandbox over the sandbox
+//! protocol (Podman's, with `[runtime.podman] sandbox_protocol`);
+//! `LocalRunner` (tests only) runs the argv on the host so the adapter can be
+//! exercised without containers.
 
 pub mod kube;
 pub mod podman;
+pub mod protocol;
 
 use async_trait::async_trait;
 use futures_core::future::BoxFuture;

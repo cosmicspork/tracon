@@ -1256,6 +1256,38 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "runtime.podman.sandbox_protocol",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.podman.sandbox_init",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "runtime.kubernetes.namespace",
       "path": null,
       "secret": false,
@@ -3031,6 +3063,23 @@
         "kind": "string",
         "optional": true
       }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": false,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "sandbox.bundle",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      },
+      "why_not": "is the directory whose binaries every sandbox runs, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
     },
     {
       "admin": true,
