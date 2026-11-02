@@ -61,6 +61,21 @@ images:
     podman build -t localhost/tracon-gateway containers/gateway
     podman build -t localhost/tracon-harness-claude containers/harness-claude
 
+# `just sandbox-base`, then `just sandbox-smoke target/harness-bundle/<version>/<arch>`.
+# The stock sandbox base image, for this host's architecture.
+sandbox-base tag="dev":
+    podman build -t localhost/tracon-sandbox-base:{{tag}} containers/sandbox-base
+
+# Smoke-test the base image with a harness bundle mounted as a session mounts it.
+sandbox-smoke bundle tag="dev":
+    containers/sandbox-base/smoke.sh localhost/tracon-sandbox-base:{{tag}} {{bundle}}
+
+# `--agent <static tracon-agent>` (`just native-agent` builds one) or
+# `--agent-release <version>`; see scripts/harness-bundle.sh for the rest.
+# The harness bundle for one architecture, into target/harness-bundle.
+bundle arch *args:
+    ./scripts/harness-bundle.sh --arch {{arch}} {{args}}
+
 # Create the harness network and gateway the node owns.
 setup: images
     cargo run --bin tracon -- setup

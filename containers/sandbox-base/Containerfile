@@ -1,0 +1,133 @@
+# The stock sandbox base: Ubuntu LTS with the general toolchain the
+# repositories tracon serves build with, for linux/amd64 and linux/arm64.
+# A repository image may build on it; a session without one runs it as is.
+#
+# No harness lives here. tracon-agent, Claude Code and tracon-sandbox arrive as
+# the harness bundle (`scripts/harness-bundle.sh`), mounted read-only at
+# /opt/tracon, so a harness update never rebuilds this image and this image
+# never pins a harness version.
+#
+# What is pinned and how:
+# - the base image by digest (Dependabot moves the tag and digest together);
+# - Ubuntu's own packages through snapshot.ubuntu.com at one date, for both
+#   architectures (the snapshot carries ports' arm64 under the same path);
+# - Node, uv and Composer by release digest, never through an installer;
+# - PHP from the ondrej/php PPA, whose signing key is checked in here. That
+#   PPA keeps only its newest build and has no snapshot service, so the minor
+#   version is pinned and the patch level is whatever the build saw: the
+#   image digest, not this file, is what makes a session reproducible.
+FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+
+LABEL org.opencontainers.image.source="https://github.com/cosmicspork/tracon" \
+      org.opencontainers.image.description="Stock base image for tracon sandboxes: Ubuntu 24.04 with git, a C toolchain, Node, Python with uv, and PHP with Composer"
+
+ARG UBUNTU_SNAPSHOT=20261025T000000Z
+ARG PHP_VERSION=8.5
+ARG NODE_VERSION=24.22.2
+ARG NODE_LINUX_ARM64_SHA256=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8
+ARG NODE_LINUX_X64_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
+ARG UV_VERSION=0.13.6
+ARG UV_LINUX_ARM64_SHA256=819692e404d23e5aae6bc44c0e260f1f5492fd1910ab4693b2c650f926dbe800
+ARG UV_LINUX_X64_SHA256=5d61f26b6c7213779eda90edc6971ea6b0b796bfb8d49a574c8ad69b59838548
+ARG COMPOSER_VERSION=2.11.1
+ARG COMPOSER_SHA256=6f1b891e1d4927d62740276c540fb490e47689e19e102c49e8da849794882f8c
+ARG TARGETARCH
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    TZ=UTC
+
+COPY ondrej-php.asc /etc/apt/keyrings/ondrej-php.asc
+
+# CA certificates come first, from the image's default sources: those are plain
+# HTTP with Release signatures checked against the pre-installed
+# ubuntu-keyring, and the snapshot service is HTTPS only.
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*; \
+    printf '%s\n' \
+      'Types: deb' \
+      "URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}" \
+      'Suites: noble noble-updates noble-security' \
+      'Components: main universe' \
+      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+      'Check-Valid-Until: no' \
+      > /etc/apt/sources.list.d/ubuntu.sources; \
+    printf '%s\n' \
+      'Types: deb' \
+      'URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu' \
+      'Suites: noble' \
+      'Components: main' \
+      'Signed-By: /etc/apt/keyrings/ondrej-php.asc' \
+      > /etc/apt/sources.list.d/ondrej-php.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      build-essential pkg-config \
+      git openssh-client curl \
+      file less procps tzdata \
+      jq ripgrep sqlite3 \
+      unzip zip xz-utils \
+      python3 \
+      "php${PHP_VERSION}-cli" \
+      "php${PHP_VERSION}-bcmath" \
+      "php${PHP_VERSION}-curl" \
+      "php${PHP_VERSION}-gd" \
+      "php${PHP_VERSION}-intl" \
+      "php${PHP_VERSION}-mbstring" \
+      "php${PHP_VERSION}-mysql" \
+      "php${PHP_VERSION}-pgsql" \
+      "php${PHP_VERSION}-readline" \
+      "php${PHP_VERSION}-redis" \
+      "php${PHP_VERSION}-sqlite3" \
+      "php${PHP_VERSION}-xml" \
+      "php${PHP_VERSION}-zip"; \
+    rm -rf /var/lib/apt/lists/*; \
+    php --version
+
+RUN set -eu; case "${TARGETARCH}" in \
+      amd64) asset=x64; digest="${NODE_LINUX_X64_SHA256}" ;; \
+      arm64) asset=arm64; digest="${NODE_LINUX_ARM64_SHA256}" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${asset}.tar.xz"; \
+    echo "${digest}  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+      --exclude='*/CHANGELOG.md' --exclude='*/README.md' --exclude='*/share/doc'; \
+    rm -f /tmp/node.tar.xz; \
+    node --version; npm --version
+
+# The musl build: static, so it runs whatever libc a repository image ends up
+# with on top of this one.
+RUN set -eu; case "${TARGETARCH}" in \
+      amd64) triple=x86_64-unknown-linux-musl; digest="${UV_LINUX_X64_SHA256}" ;; \
+      arm64) triple=aarch64-unknown-linux-musl; digest="${UV_LINUX_ARM64_SHA256}" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${triple}.tar.gz"; \
+    echo "${digest}  /tmp/uv.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/uv.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/uv-${triple}/uv" "/tmp/uv-${triple}/uvx" /usr/local/bin/; \
+    rm -rf /tmp/uv.tar.gz "/tmp/uv-${triple}"; \
+    uv --version
+
+RUN set -eu; \
+    curl -fsSL -o /tmp/composer.phar "https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar"; \
+    echo "${COMPOSER_SHA256}  /tmp/composer.phar" | sha256sum -c -; \
+    install -m 0755 /tmp/composer.phar /usr/local/bin/composer; \
+    rm -f /tmp/composer.phar; \
+    composer --version
+
+# The session user is the one layered repository images already run as:
+# uid and gid 65532, home /home/harness, working in /work with /cache beside
+# it. /opt/tracon is where the harness bundle is mounted; its bin/ is on PATH
+# so the harness and its tools are found without the node naming paths.
+RUN set -eu; \
+    groupadd --gid 65532 harness; \
+    useradd --uid 65532 --gid 65532 --home-dir /home/harness --create-home --shell /bin/bash harness; \
+    mkdir -p /work /cache /opt/tracon; \
+    chown 65532:65532 /work /cache
+ENV PATH=/opt/tracon/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/home/harness
+USER 65532:65532
+WORKDIR /work
