@@ -753,6 +753,22 @@ async fn submit(
             broken.join("; ")
         ));
     }
+    // The backstop: a new revision on its way to a change that is open
+    // drafts it at once, whatever the agent said, so the forge cannot merge
+    // the revision before this one in the meantime. It stays a draft until
+    // the operator approves a revision or marks it ready. Best effort: a
+    // forge that cannot be reached does not cost the agent its submission.
+    if let (Some(existing), Some(_)) = (&resubmission, &target.change) {
+        let revision = store
+            .review_revisions(&existing.id)
+            .map(|revisions| revisions.len() + 1)
+            .unwrap_or_default();
+        let why = format!("revision {revision} is on its way");
+        if let Err(error) = mark_change(manager, existing, &target, false, "node", Some(&why)).await
+        {
+            tracing::warn!(%error, review = %existing.id, "change not drafted for a new revision");
+        }
+    }
     let ships = what_ships(&intent);
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     let max_snapshot_bytes = manager.cfg().live().supervision.max_snapshot_bytes;
@@ -2041,6 +2057,86 @@ fn what_ships(intent: &review::publish::Intent) -> Value {
         "commit_message": message,
         "drops_signatures": if own { Vec::new() } else { intent.signed.clone() },
     })
+}
+
+/// Mark `target`'s change, the one `review` publishes to, ready for review,
+/// or with `ready: false` turn it back into a draft: as the node or the
+/// operator does it, not an agent's call. It goes through the forge CLI
+/// publication uses, with the channel's credential, and is recorded by
+/// review (`record_change_ready`).
+pub(crate) async fn mark_change(
+    manager: &Manager,
+    review: &ReviewRow,
+    target: &Target,
+    ready: bool,
+    by: &str,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let change = target
+        .change
+        .as_ref()
+        .ok_or("this review has no change on the forge yet")?;
+    let provider = Provider::parse(&target.provider).ok_or_else(|| {
+        format!(
+            "{} is not a provider this node publishes to",
+            target.provider
+        )
+    })?;
+    let env = manager
+        .broker()
+        .read()
+        .unwrap()
+        .env_for(provider.credential(), &review.channel, manager.node_id())
+        .map_err(|e| format!("this needs the forge credential on {}: {e}", review.channel))?;
+    let dir = review::publish::inspection_dir().map_err(|e| e.to_string())?;
+    let live = manager.cfg().live();
+    review::publish::set_ready(provider, &live, &dir, &env, target, change.number, ready)
+        .await
+        .map_err(|e| e.to_string())?;
+    record_change_ready(manager, review, ready, by, reason);
+    Ok(())
+}
+
+/// Record that `review`'s change was marked ready or turned back into a
+/// draft, by whom and why: what the review page says a draft is waiting on.
+/// Kept by review, so a review an external harness submitted, which has no
+/// session, has it too; a review with a session also says so in its log.
+pub(crate) fn record_change_ready(
+    manager: &Manager,
+    review: &ReviewRow,
+    ready: bool,
+    by: &str,
+    reason: Option<&str>,
+) {
+    let number = serde_json::from_str::<Target>(&review.target)
+        .ok()
+        .and_then(|target| target.change)
+        .map(|change| change.number);
+    let at_ms = now_ms();
+    let payload = json!({
+        "review_id": review.id,
+        "number": number,
+        "ready": ready,
+        "by": by,
+        "reason": reason.map(str::trim).filter(|reason| !reason.is_empty()),
+    });
+    let mut mark = payload.clone();
+    mark["at_ms"] = json!(at_ms);
+    if let Err(error) = manager.store().put_change_mark(&review.id, &mark) {
+        tracing::warn!(%error, review = %review.id, "change mark not recorded");
+    }
+    let Some(session_id) = review.session_id.as_deref() else {
+        return;
+    };
+    manager.record_new_event(crate::store::NewEvent {
+        session_id: session_id.to_string(),
+        work_item_id: None,
+        kind: ek::CHANGE_READY.into(),
+        ref_id: Some(review.id.clone()),
+        payload,
+        at_ms,
+        mono_ms: 0,
+    });
 }
 
 /// Whether a review of a repository with nothing on the forge yet can be
@@ -4399,6 +4495,7 @@ mod tests {
             target_branch: "main".into(),
             cross_repository: false,
             head_sha: "sha1".into(),
+            draft: false,
         };
         let target: Target = serde_json::from_value(json!({
             "provider": "github", "project": "owner/name", "base": "main", "branch": "feat/x",

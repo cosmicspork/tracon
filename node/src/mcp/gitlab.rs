@@ -255,14 +255,19 @@ pub fn definitions() -> Vec<Value> {
             "name": MR_READY,
             "description": "Mark a draft GitLab merge request ready, or with `ready: false` turn \
                             it back into a draft. A merge request already in that state is left \
-                            as it is (`already: true`); a closed or merged one is refused. The \
-                            operator is asked before it changes. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            as it is (`already: true`); a closed or merged one is refused. Making \
+                            a draft of the change of a review you submitted or are reviewing, \
+                            once that review pushed to it or opened it, is not asked: do it as \
+                            soon as you know another revision is coming or find something \
+                            blocking. Marking it ready, and anything on another change, is \
+                            asked: the operator decides before it changes. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": { "type": "string", "description": PROJECT },
                     "iid": { "type": "integer" },
                     "ready": { "type": "boolean", "description": "true (the default) marks it ready; false makes it a draft again." },
+                    "reason": { "type": "string", "description": "With `ready: false`: why it is not ready, shown on its review." },
                 },
                 "required": ["project", "iid"],
             },

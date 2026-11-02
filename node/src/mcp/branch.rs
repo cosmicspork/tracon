@@ -137,6 +137,7 @@ fn step_command(step: &str, rest: &[&str], mounts: Vec<Mount>, name: &str) -> Ru
         workdir: Some("/work".into()),
         image: None,
         name: name.to_string(),
+        labels: crate::runner::RunLabels::of(crate::runner::RunKind::Prepare),
     }
 }
 

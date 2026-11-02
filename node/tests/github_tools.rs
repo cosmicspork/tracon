@@ -453,6 +453,168 @@ async fn pr_ready_waits_on_the_operator_then_marks_the_draft_ready_and_back() {
     assert_eq!(bodies.lock().unwrap().len(), 2);
 }
 
+/// A review's change: `number` on owner/name, which a publication of the
+/// review pushed to when `pushed`.
+fn owned_review(store: &tracon::store::Store, id: &str, session: &str, number: u64, pushed: bool) {
+    let mut review = support::rows::review_row(id, session, "approved");
+    review.channel = "work".into();
+    review.target = json!({
+        "provider": "github", "project": "owner/name", "base": "main",
+        "branch": format!("feat/{number}"),
+        "change": { "number": number, "url": format!("https://github.test/owner/name/pull/{number}") },
+    })
+    .to_string();
+    store.insert_review(&review).unwrap();
+    if !pushed {
+        return;
+    }
+    let publication = format!("{id}-p");
+    store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: id,
+            revision_id: None,
+            candidate_id: "c",
+            channel: "work",
+            node_id: "n1",
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: &format!("feat/{number}"),
+            head_sha: &review.head_sha,
+            instance: "i",
+        })
+        .unwrap();
+    store
+        .publication_pushed(&publication, &review.head_sha)
+        .unwrap();
+}
+
+/// The change of a review a session submitted, or is reviewing, and that a
+/// publication of the review pushed to, is drafted without asking: drafting
+/// blocks nothing that cannot be undone, and the agent knows first that
+/// another revision is coming. Who drafted it and why is kept for the review
+/// page, and the audit says the node let it run. Marking it ready is asked:
+/// a ready change can be merged at a revision nobody approved. Any other
+/// change is still asked about, and a review session may not touch one at
+/// all.
+#[tokio::test]
+async fn pr_ready_on_the_change_of_a_review_the_session_owns_is_not_asked() {
+    state::isolate();
+    let (t, seen) = session_rig(r#""run_status""#).await;
+    let access = t.session.get().unwrap();
+    owned_review(&access.store, "r1", "s3", 8, true);
+    let mut reviewer = support::rows::session_row("rev", "n1", "work");
+    reviewer.phase = "review".into();
+    reviewer.review_id = Some("r1".into());
+    access.store.insert_session(&reviewer).unwrap();
+
+    let owner = CallContext::session("s3", "work", "n1");
+    let draft = json!({ "repo": "owner/name", "number": 8, "ready": false,
+                        "reason": "addressing the reviewer's findings" });
+    let (err, v) = call(&t, &owner, "pr_ready", draft).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["draft"], true, "{v}");
+    let said = access
+        .store
+        .last_event_payload("s3", "change_ready")
+        .unwrap()
+        .unwrap();
+    assert_eq!(said["review_id"], "r1");
+    assert_eq!(said["ready"], false);
+    assert_eq!(said["by"], "agent");
+    assert_eq!(said["reason"], "addressing the reviewer's findings");
+    // It ran, so the audit does not call it refused.
+    let audited = access
+        .store
+        .last_event_payload("s3", "tool_decided")
+        .unwrap()
+        .unwrap();
+    assert_eq!(audited["tool"], "pr_ready", "{audited}");
+    assert_eq!(audited["decision"], "node_allowed", "{audited}");
+    assert_eq!(audited["rule"], "own-change", "{audited}");
+    assert_eq!(audited["outcome"], "ok", "{audited}");
+
+    // The reviewer drafts it on the same terms.
+    let reviewing = CallContext::session("rev", "work", "n1");
+    let blocking = json!({ "repo": "owner/name", "number": 8, "ready": false });
+    let (err, v) = call(&t, &reviewing, "pr_ready", blocking).await;
+    assert!(!err, "{v}");
+    let said = access
+        .store
+        .last_event_payload("s3", "change_ready")
+        .unwrap()
+        .unwrap();
+    assert_eq!(said["by"], "reviewer");
+    let reached = seen.lock().unwrap().len();
+
+    // Marking it ready is asked, of the owner and of the reviewer alike.
+    let ready = json!({ "repo": "owner/name", "number": 8, "ready": true });
+    for caller in [&owner, &reviewing] {
+        let (err, v) = call(&t, caller, "pr_ready", ready.clone()).await;
+        assert!(!err, "{v}");
+        assert!(v.to_string().contains("approval"), "{v}");
+    }
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        reached,
+        "nothing reached GitHub"
+    );
+
+    // Another change: the reviewer is refused, the owner is asked.
+    let other = json!({ "repo": "owner/name", "number": 7, "ready": false });
+    let (err, v) = call(&t, &reviewing, "pr_ready", other.clone()).await;
+    assert!(err);
+    assert!(
+        v.as_str()
+            .unwrap_or_default()
+            .contains("only the change of the review"),
+        "{v}"
+    );
+    let (_, v) = call(&t, &owner, "pr_ready", other).await;
+    assert!(v.to_string().contains("approval"), "{v}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        reached,
+        "nothing reached GitHub"
+    );
+}
+
+/// Naming a change does not make it a review's own: `submit_review` adopts
+/// any open change of its repository, so a review that never pushed to or
+/// opened the change it names drafts it only as any other call would, asked.
+#[tokio::test]
+async fn a_review_that_never_pushed_to_its_change_does_not_own_it() {
+    state::isolate();
+    let (t, seen) = session_rig(r#""run_status""#).await;
+    let access = t.session.get().unwrap();
+    owned_review(&access.store, "r1", "s3", 9, false);
+    let mut reviewer = support::rows::session_row("rev", "n1", "work");
+    reviewer.phase = "review".into();
+    reviewer.review_id = Some("r1".into());
+    access.store.insert_session(&reviewer).unwrap();
+    let draft = json!({ "repo": "owner/name", "number": 9, "ready": false });
+
+    let owner = CallContext::session("s3", "work", "n1");
+    let (_, v) = call(&t, &owner, "pr_ready", draft.clone()).await;
+    assert!(v.to_string().contains("approval"), "{v}");
+    let reviewing = CallContext::session("rev", "work", "n1");
+    let (err, v) = call(&t, &reviewing, "pr_ready", draft).await;
+    assert!(err);
+    assert!(
+        v.as_str()
+            .unwrap_or_default()
+            .contains("only the change of the review"),
+        "{v}"
+    );
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+    assert!(access
+        .store
+        .last_event_payload("s3", "change_ready")
+        .unwrap()
+        .is_none());
+}
+
 #[tokio::test]
 async fn pr_ready_refuses_a_merged_pull_request_without_writing() {
     state::isolate();
@@ -1129,6 +1291,14 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
 
     let review = listed(&t, &CallContext::session("review", "work", "n1")).await;
     assert_eq!(review, narrowed(&|n| Tools::REVIEW_TOOLS.contains(&n)));
+    // Its one forge write is drafting its review's change.
+    assert!(review.iter().any(|n| n == "pr_ready"), "{review:?}");
+    for withheld in ["pr_merge", "pr_comment", "submit_review"] {
+        assert!(
+            !review.iter().any(|n| n == withheld),
+            "{withheld} in {review:?}"
+        );
+    }
 
     let external = listed(&t, &CallContext::external(None, "work", "n1")).await;
     assert_eq!(external, narrowed(&|n| !Tools::NOT_EXTERNAL.contains(&n)));

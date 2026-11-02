@@ -583,6 +583,13 @@ pub async fn publish_review(
     if !operator && target.change.is_none() && !target.initial {
         outputs.draft = true;
     }
+    // A resubmission waits in the node's running checks before it is saved
+    // to the review (`mcp::review::submit`).
+    let newer_revision_checking = ctx
+        .manager
+        .checking()
+        .get(&review.id)
+        .is_some_and(|entry| entry.outcome().is_none());
     // The branch and the squashed commit's message are prose like the
     // description: what the operator approved is what ships, held to the
     // same rules the submission was.
@@ -781,7 +788,11 @@ pub async fn publish_review(
             }),
             resume,
             pushed: record.pushed_sha.is_some(),
-            ready: operator,
+            // A newer revision whose checks are running is not on the review
+            // yet, so the approval of this one is still accepted; it does not
+            // make the change ready while that revision is on its way. The
+            // operator can still mark it ready on purpose.
+            ready: operator && !newer_revision_checking,
             before_push: recheck_authority,
             journal: &journal,
         },

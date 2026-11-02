@@ -324,6 +324,21 @@ impl Store {
         Ok(payload.and_then(|p| serde_json::from_str(&p).ok()))
     }
 
+    /// Record the latest mark of `review_id`'s change ready or back into a
+    /// draft (`mcp::review::record_change_ready`). Kept by review, not on a
+    /// session's log, because a review an external harness submitted has no
+    /// session, and its change is drafted all the same.
+    pub fn put_change_mark(&self, review_id: &str, mark: &serde_json::Value) -> Result<()> {
+        self.kv_put(&change_mark_key(review_id), &mark.to_string())
+    }
+
+    /// The latest mark of `review_id`'s change, if anything marked it.
+    pub fn change_mark(&self, review_id: &str) -> Result<Option<serde_json::Value>> {
+        Ok(self
+            .kv_get(&change_mark_key(review_id))?
+            .and_then(|mark| serde_json::from_str(&mark).ok()))
+    }
+
     pub fn publication_pushed(&self, id: &str, sha: &str) -> Result<()> {
         self.publication_set(id, "pushed", Some(sha), None, None)
     }
@@ -404,6 +419,11 @@ impl Store {
             params![instance, now_ms()],
         )?)
     }
+}
+
+/// Where a review's latest change mark is kept.
+fn change_mark_key(review_id: &str) -> String {
+    format!("change_ready:{review_id}")
 }
 
 #[cfg(test)]
