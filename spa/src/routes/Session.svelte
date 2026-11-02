@@ -19,7 +19,7 @@
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { usageNote as usageNoteFor } from '../lib/usage'
   import { repetitionHint } from '../lib/log'
-  import { askMode, compactOffered, composerState, sessionControls } from '../lib/session-actions'
+  import { askMode, compactOffered, compactionRunning, composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
   import {
@@ -162,12 +162,19 @@
   const ask = $derived(session ? askMode(session, askableHere) : ({ kind: 'none' } as const))
   const canCompact = $derived(session ? compactOffered(session, askableHere) : false)
   let compacting = $state(false)
+  /** The session and last event seq when Compact was accepted: the button
+   *  stays disabled until that compaction's turn ends, not just until the
+   *  node takes the request. */
+  let compactAsked = $state<{ id: string; since: number } | null>(null)
+  const compactRunning = $derived(compactAsked?.id === id && compactionRunning(store.events, compactAsked.since))
   async function compact() {
-    if (compacting) return
+    if (compacting || compactRunning) return
     compacting = true
     error = null
+    const since = store.events.at(-1)?.seq ?? 0
     try {
       await api.compact(id)
+      compactAsked = { id, since }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
     } finally {
@@ -429,11 +436,11 @@
     <a class="mono" href="#authority" title="where it runs, what it can reach, what it must ask about and what is refused"
       >what it may do</a
     >
-    {#if canCompact}
+    {#if canCompact || compactRunning}
       <button
         class="lnk"
         onclick={() => void compact()}
-        disabled={unreachable !== null || compacting}
+        disabled={unreachable !== null || compacting || compactRunning || busy}
         title={isTerminal(session.state) || session.state === 'suspended'
           ? 'start its harness again in its own conversation and compact it, so asking it costs less'
           : "shrink its conversation with the harness's own compaction"}>Compact</button

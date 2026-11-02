@@ -56,6 +56,22 @@ function parentOf(e: Event): string | undefined {
   return undefined
 }
 
+/// The `context_compacting` events whose compaction is over: a
+/// `context_compacted`, or the end of the turn it ran in, has followed. Only
+/// one still running is shown; the line for its end says the rest.
+function endedCompactions(events: Event[]): Set<Event> {
+  const ended = new Set<Event>()
+  let open: Event | undefined
+  for (const e of events) {
+    if (e.kind === 'context_compacting') open = e
+    else if (open && (e.kind === 'context_compacted' || e.kind === 'turn_end' || e.kind === 'error')) {
+      ended.add(open)
+      open = undefined
+    }
+  }
+  return ended
+}
+
 export function groupLog(
   events: Event[],
   progress: Map<string, string> = new Map(),
@@ -69,8 +85,10 @@ export function groupLog(
   // A subagent's events, kept apart so they neither join nor break the
   // parent's runs, and grouped under the call that spawned it.
   const under = new Map<string, Event[]>()
+  const ended = endedCompactions(events)
 
   for (const e of events) {
+    if (ended.has(e)) continue
     const parent = parentOf(e)
     if (parent && parent !== within) {
       under.set(parent, [...(under.get(parent) ?? []), e])
@@ -439,6 +457,18 @@ export function eventLine(e: Event): EventLine | null {
         default:
           return line('crit', [exited, `could not restart: ${str(p.reason) || 'no reason given'}`])
       }
+    }
+    case 'context_compacting': {
+      const trigger = str(p.trigger)
+      const why =
+        trigger === 'manual'
+          ? 'on request'
+          : trigger === 'overflow'
+            ? 'the model refused it as too long'
+            : trigger === 'threshold'
+              ? 'it is near the context window'
+              : ''
+      return line('wait', ['compacting the conversation…', why])
     }
     case 'context_compacted': {
       // The harness's own estimates, so said as roughly.

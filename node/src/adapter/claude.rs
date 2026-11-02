@@ -671,6 +671,17 @@ impl Pump {
                         }
                     }
                 }
+                // The CLI has begun compacting, on its own or for a
+                // `/compact`, and will say nothing more until it is done. Its
+                // status does not say which, so no trigger is given; the
+                // supervisor has already said so for a `/compact` it sent.
+                "system" if v["subtype"] == "status" && v["status"] == "compacting" => {
+                    let _ = tx
+                        .send(HarnessEvent::Other(json!({
+                            "sessionUpdate": "context_compacting",
+                        })))
+                        .await;
+                }
                 // The CLI compacted the conversation, on its own or for a
                 // `/compact`: the summary is the user message that follows.
                 "system" if v["subtype"] == "compact_boundary" => {
