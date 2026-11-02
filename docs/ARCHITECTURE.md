@@ -760,6 +760,19 @@ left out when nothing is left. Labels are readable by anyone with `get pods`, so
 is ever a credential, a branch, a prompt or a path; the owner of a repository is left
 out too. A session's labels live on its `LaunchSpec`, so a relaunch keeps them.
 
+**A pod the node cannot fit is refused, and says why.** Pods are bound to the node's own
+Kubernetes node by `nodeName`, so the scheduler never weighs them: one that does not
+fit is failed by the kubelet's admission (phase Failed, reason `OutOfcpu`,
+`OutOfmemory`, ..., no container ever started), and a namespace's ResourceQuota or
+LimitRange refuses one at create. The runner reports either as a refusal
+(`RunnerError::Refused`, classified `out_of_cpu`, `out_of_memory`, `out_of_pods`,
+`out_of_ephemeral_storage`, `out_of_other` or `quota`) naming the resource, what the pod
+requested and the `[runtime.kubernetes.resources.*]` key that sizes it, rather than as
+a session that failed to attach or a capture that ended without an exit code. A quota
+that covers a resource the pod leaves unset (`failed quota: ...: must specify
+limits.cpu`, which every pod meets while `cpu_limit` is unset) is a `quota` refusal
+that names the key to set.
+
 **The checks verify what runs.** They render the same run specification a session
 uses onto a probe that is created but never started, so a mutating admission webhook
 that adds privilege fails the check rather than passing the rendering, and a second

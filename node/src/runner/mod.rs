@@ -255,6 +255,15 @@ pub enum RunnerError {
     Spawn(#[from] std::io::Error),
     #[error("{0}")]
     Other(String),
+    /// The cluster refused to run the command for lack of capacity, before
+    /// anything of it started. `reason` classifies it
+    /// (`runner::kube::Refusal::as_str`); `message` names the resource and
+    /// the setting that sizes it.
+    #[error("{message}")]
+    Refused {
+        reason: &'static str,
+        message: String,
+    },
 }
 
 /// A running harness, reduced to what a stdio transport needs: its pipes and
