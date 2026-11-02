@@ -1015,6 +1015,54 @@ export interface ActionStanding {
   grants?: AuthorityGrant[]
 }
 
+/** How a call to the node's tools was decided. */
+export type AuditDecision =
+  | 'policy_allowed'
+  | 'node_allowed'
+  | 'denied'
+  | 'refused'
+  | 'asked'
+  | 'pending'
+  | 'approved'
+  | 'edited'
+  | 'rejected'
+  | 'changes_requested'
+  | 'expired'
+
+/** One call a session made to the node's tools, from its audit. */
+export interface AuditCall {
+  at_ms: number
+  tool: string
+  title?: string
+  /** Redacted by the node: credentials by name and by look, long text cut. */
+  arguments: unknown
+  decision: AuditDecision
+  /**
+   * `policy`, `grant` or `node`; for a held call, the operator and where they
+   * answered from, `nobody` when it expired, or null while it waits.
+   */
+  decided_by: string | null
+  rule?: string | null
+  reason?: string | null
+  approval_id?: string | null
+  /** When the operator decided a held call. */
+  decided_ms?: number | null
+  /** The approval's own state: `running`, `succeeded`, `failed`, … */
+  approval_state?: string
+  /** `ok`, `error`, or `held` for a call that waited on the operator. */
+  outcome?: string
+  error?: string | null
+  edited_arguments?: unknown
+  note?: string | null
+}
+
+/** `/api/sessions/{id}/audit`. */
+export interface SessionAudit {
+  session_id: string
+  node_id: string
+  calls: AuditCall[]
+}
+
 /**
  * What a session may do, from `/api/sessions/{id}/authority`. Every verdict is
  * produced by the functions that decide the real call, so this is the gate

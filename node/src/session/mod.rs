@@ -505,6 +505,14 @@ pub struct OperatorAnswer {
     pub arguments: Option<serde_json::Value>,
     pub reason: Option<String>,
     pub notes: Option<String>,
+    /// The hash of the arguments the operator read
+    /// ([`crate::store::approvals::arguments_hash`]). When given, an approval
+    /// is decided only if it still holds exactly those.
+    pub arguments_hash: Option<String>,
+    /// Who answered, as the audit names them: the operator at the node, in a
+    /// signed-in browser, with the token, or through a peer. Not sent on to
+    /// the owner of a peer's card, which names the peer itself.
+    pub by: Option<String>,
 }
 
 impl OperatorAnswer {
@@ -515,6 +523,7 @@ impl OperatorAnswer {
             arguments: self.arguments,
             reason: self.reason,
             notes: self.notes,
+            arguments_hash: self.arguments_hash,
         }
     }
 }
@@ -3458,21 +3467,42 @@ impl Manager {
         approval: &crate::store::approvals::ApprovalRow,
         state: &str,
     ) {
+        self.approval_answered(approval, state, None).await
+    }
+
+    /// [`Self::approval_decided`], naming who answered it. The answer's record
+    /// carries what the audit shows: who, and whether what runs is the
+    /// operator's edit rather than the call as asked.
+    pub async fn approval_answered(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        state: &str,
+        by: Option<&str>,
+    ) {
         use crate::store::approvals as a;
         let kind = match state {
             a::RUNNING | a::REJECTED | a::CHANGES_REQUESTED => ek::PERMISSION_ANSWER,
             a::EXPIRED => ek::PERMISSION_EXPIRED,
             _ => ek::APPROVAL_SETTLED,
         };
-        self.record_approval(
-            approval,
-            kind,
-            json!({
-                "approval_id": approval.id, "permission_id": approval.id,
-                "tool": approval.tool, "state": state, "reason": approval.reason,
-                "option_id": approval.answer_option_id, "notes": approval.operator_note,
-            }),
-        );
+        let mut payload = json!({
+            "approval_id": approval.id, "permission_id": approval.id,
+            "tool": approval.tool, "state": state, "reason": approval.reason,
+            "option_id": approval.answer_option_id, "notes": approval.operator_note,
+        });
+        if kind == ek::PERMISSION_ANSWER {
+            payload["decided_by"] = json!(by.unwrap_or("operator"));
+            payload["arguments_hash"] = json!(approval.arguments_hash());
+            if let Some(edited) = approval
+                .edited_arguments
+                .as_deref()
+                .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+            {
+                payload["edited"] = json!(true);
+                payload["edited_arguments"] = crate::mcp::audit::redacted(&edited);
+            }
+        }
+        self.record_approval(approval, kind, payload);
         self.publish_queue().await;
         if let Some(session_id) = &approval.session_id {
             self.wait_moved(session_id).await;

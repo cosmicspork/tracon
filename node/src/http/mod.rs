@@ -348,6 +348,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}", get(api::get_session))
         .route("/api/sessions/{id}/events", get(api::session_events))
         .route("/api/sessions/{id}/authority", get(api::session_authority))
+        .route("/api/sessions/{id}/audit", get(api::session_audit))
         .route("/api/sessions/{id}/outcome", get(api::session_outcome))
         .route("/api/sessions/{id}/prompt", post(api::prompt))
         .route(

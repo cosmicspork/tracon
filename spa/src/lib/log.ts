@@ -37,8 +37,10 @@ function quietAllow(e: Event): boolean {
   return verdict === undefined || verdict === null || verdict === 'allow'
 }
 
-/// Kinds the log renders nothing for; they must not end a run either.
-export const SILENT = new Set(['usage', 'plan'])
+/// Kinds the log renders nothing for; they must not end a run either. A
+/// `tool_decided` record is the session's audit of a call the log already
+/// shows; the audit panel reads it.
+export const SILENT = new Set(['usage', 'plan', 'tool_decided'])
 
 export interface LogEntry {
   kind: 'leaf' | 'tools'

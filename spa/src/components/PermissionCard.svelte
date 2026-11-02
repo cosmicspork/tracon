@@ -5,7 +5,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
-  import { cardRequest, editableFields, editedArguments, isApproval, isEgress, isWarmUpEgress, withheldOptions } from '../lib/permission'
+  import { argumentsHash, cardRequest, editableFields, editedArguments, isApproval, isEgress, isWarmUpEgress, withheldOptions } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -61,7 +61,8 @@
       const edited = optionId === 'allow_once' && !egress ? editedArguments(permission, drafts) : undefined
       // A peer's approval has no page here to ask for changes on, so the
       // notes are written on the card.
-      await api.answer(permission.id, optionId, edited, optionId === 'request_changes' ? { notes: notes.trim() } : {})
+      const said = optionId === 'request_changes' ? { notes: notes.trim() } : {}
+      await api.answer(permission.id, optionId, edited, { ...said, argumentsHash: argumentsHash(permission) })
       await store.refetch()
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)

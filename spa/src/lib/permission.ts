@@ -15,6 +15,20 @@ export function isApproval(p: Pick<Permission, 'raw_input'>): boolean {
   }
 }
 
+/**
+ * The hash of the arguments an approval card shows, which an answer sends
+ * back so the node decides only the call that was read.
+ */
+export function argumentsHash(p: Pick<Permission, 'raw_input'>): string | undefined {
+  if (!p.raw_input) return undefined
+  try {
+    const hash = JSON.parse(p.raw_input)?.arguments_hash
+    return typeof hash === 'string' ? hash : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function rawTool(p: Pick<Permission, 'raw_input'>): unknown {
   if (!p.raw_input) return undefined
   try {

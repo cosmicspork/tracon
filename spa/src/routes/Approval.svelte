@@ -166,7 +166,10 @@
         id,
         optionId,
         optionId === 'allow_once' ? changedArguments(original, edited) : undefined,
-        optionId === 'reject_once' ? { reason: text } : optionId === 'request_changes' ? { notes: text } : {},
+        {
+          ...(optionId === 'reject_once' ? { reason: text } : optionId === 'request_changes' ? { notes: text } : {}),
+          argumentsHash: details.arguments_hash,
+        },
       )
       await store.refetch()
       leaveAfterVerdict(router, { prefix: '/approvals', id, from: openedFrom, fallback })

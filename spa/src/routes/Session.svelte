@@ -4,6 +4,7 @@
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import OutcomePanel from '../components/OutcomePanel.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'
+  import SessionAuditPanel from '../components/SessionAuditPanel.svelte'
   import SessionAuthorityPanel from '../components/SessionAuthorityPanel.svelte'
   import ShownWork from '../components/ShownWork.svelte'
   import ContinuationPanel from '../components/ContinuationPanel.svelte'
@@ -631,6 +632,7 @@
   <!-- Open by default once the session has ended: that is when what it came
        to is the question. -->
   <OutcomePanel {id} open={isTerminal(session.state) || router.hash === '#outcome'} />
+  <SessionAuditPanel {id} open={router.hash === '#audit'} />
   <ShownWork items={shownWork} />
   <TransferExport channel={session.channel} />
 
