@@ -100,7 +100,7 @@ pub fn definitions() -> Vec<Value> {
                     "add_labels": { "type": "array", "items": { "type": "string" },
                                     "description": "Labels to add, keeping the rest." },
                     "remove_labels": { "type": "array", "items": { "type": "string" },
-                                       "description": "Labels to remove, keeping the rest." },
+                                       "description": "Labels to remove, keeping the rest. Matched ignoring case; any the issue does not have come back as not_on_issue." },
                     "parent": { "type": "string", "description": "Parent issue key." },
                 },
                 "required": ["key"],
@@ -254,11 +254,34 @@ pub async fn call(
                     RELATIVE.join(", ")
                 ));
             }
+            // Jira removes a label only as it is spelled on the issue, and
+            // answers 204 for one it does not have, so a removal is matched
+            // to the issue's own labels first. If they cannot be read, the
+            // edit goes as asked.
+            let (edits, not_on_issue) = if edits.iter().any(|e| e.get("remove").is_some()) {
+                match current_labels(http, &url, email, token, key).await {
+                    Some(present) => match_removals(edits, &present),
+                    None => (edits, Vec::new()),
+                }
+            } else {
+                (edits, Vec::new())
+            };
             let mut named: Vec<String> = fields.keys().cloned().collect();
             let mut body = json!({ "fields": fields });
             if !edits.is_empty() {
                 named.push("labels".into());
                 body["update"] = json!({ "labels": edits });
+            }
+            let answer = |named: Vec<String>| {
+                let mut v = json!({ "key": key, "updated": named });
+                if !not_on_issue.is_empty() {
+                    v["not_on_issue"] = json!(not_on_issue);
+                }
+                v
+            };
+            if named.is_empty() {
+                // Every label to remove was already absent: nothing to send.
+                return Ok(answer(named));
             }
             let res = http
                 .put(format!("{url}/rest/api/2/issue/{key}"))
@@ -274,7 +297,7 @@ pub async fn call(
             }
             // A successful edit answers 204 with no body: there is nothing to
             // read back but what was asked for.
-            Ok(json!({ "key": key, "updated": named }))
+            Ok(answer(named))
         }
         ISSUE_CREATE => {
             let project = args
@@ -607,6 +630,57 @@ fn label_edits(args: &Value) -> Result<Vec<Value>, String> {
     let add = add.into_iter().map(|l| json!({ "add": l }));
     let remove = remove.into_iter().map(|l| json!({ "remove": l }));
     Ok(add.chain(remove).collect())
+}
+
+/// The labels `key` has now, or `None` when Jira does not say.
+async fn current_labels(
+    http: &reqwest::Client,
+    url: &str,
+    email: &str,
+    token: &str,
+    key: &str,
+) -> Option<Vec<String>> {
+    let res = http
+        .get(format!("{url}/rest/api/2/issue/{key}"))
+        .query(&[("fields", "labels")])
+        .basic_auth(email, Some(token))
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let v: Value = res.json().await.ok()?;
+    Some(
+        v["fields"]["labels"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// `edits` with each removal spelled as the issue has it, ignoring case, and
+/// the removals the issue does not have, which are dropped from the edit.
+fn match_removals(edits: Vec<Value>, present: &[String]) -> (Vec<Value>, Vec<String>) {
+    let mut absent = Vec::new();
+    let edits = edits
+        .into_iter()
+        .filter_map(|e| {
+            let Some(asked) = e.get("remove").and_then(Value::as_str) else {
+                return Some(e);
+            };
+            match present.iter().find(|l| l.eq_ignore_ascii_case(asked)) {
+                Some(l) => Some(json!({ "remove": l })),
+                None => {
+                    absent.push(asked.to_string());
+                    None
+                }
+            }
+        })
+        .collect();
+    (edits, absent)
 }
 
 /// A list of Jira labels, each a single token, as `field` gave them.
@@ -950,6 +1024,21 @@ mod tests {
             vec![json!({ "remove": "stale" })]
         );
         assert!(label_edits(&json!({ "summary": "x" })).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_removal_is_spelled_as_the_issue_has_it_and_one_it_lacks_is_dropped() {
+        let edits = vec![
+            json!({ "add": "nead" }),
+            json!({ "remove": "STALE" }),
+            json!({ "remove": "gone" }),
+        ];
+        let (edits, absent) = match_removals(edits, &["etl".into(), "stale".into()]);
+        assert_eq!(
+            edits,
+            vec![json!({ "add": "nead" }), json!({ "remove": "stale" })]
+        );
+        assert_eq!(absent, vec!["gone".to_string()]);
     }
 
     #[test]

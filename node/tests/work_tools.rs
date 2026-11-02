@@ -46,6 +46,16 @@ async fn stub(
     if path == "/rest/api/2/issue/WRK-1" && method == "PUT" {
         return (axum::http::StatusCode::NO_CONTENT, Json(Value::Null));
     }
+    // An issue whose labels are read before a removal is sent.
+    if path == "/rest/api/2/issue/WRK-3" {
+        return match method.as_str() {
+            "GET" => (
+                axum::http::StatusCode::OK,
+                Json(json!({ "key": "WRK-3", "fields": { "labels": ["Stale", "etl"] } })),
+            ),
+            _ => (axum::http::StatusCode::NO_CONTENT, Json(Value::Null)),
+        };
+    }
     if path == "/rest/api/2/issue/WRK-9" && method == "PUT" {
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -638,6 +648,46 @@ async fn a_relative_label_edit_is_sent_as_jiras_update_verbs_not_a_replacement()
         json!([{ "add": "nead" }, { "remove": "stale" }])
     );
     assert!(body["fields"].get("labels").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn a_label_removal_matches_the_issues_spelling_and_reports_one_it_lacks() {
+    state::isolate();
+    let (mut t, _, bodies, _) = rig_with_bodies().await;
+    t.policy = allowing(r#""issue_update""#);
+    let c = ctx("work", "n1");
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_update",
+        json!({ "key": "WRK-3", "remove_labels": ["stale", "gone"] }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["updated"], json!(["labels"]));
+    assert_eq!(v["not_on_issue"], json!(["gone"]));
+    let sent = bodies.0.lock().unwrap().clone();
+    let (method, _, body) = sent.last().unwrap();
+    assert_eq!(method, "PUT");
+    assert_eq!(body["update"]["labels"], json!([{ "remove": "Stale" }]));
+
+    // Nothing left to remove: no PUT, and the answer says so.
+    let before = bodies.0.lock().unwrap().len();
+    let (err, v) = call(
+        &t,
+        &c,
+        "issue_update",
+        json!({ "key": "WRK-3", "remove_labels": ["gone"] }),
+    )
+    .await;
+    assert!(!err, "{v}");
+    assert_eq!(v["updated"], json!([]));
+    assert_eq!(v["not_on_issue"], json!(["gone"]));
+    let sent = bodies.0.lock().unwrap().clone();
+    assert!(
+        sent[before..].iter().all(|(m, _, _)| m == "GET"),
+        "{sent:?}"
+    );
 }
 
 #[tokio::test]
