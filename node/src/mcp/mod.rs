@@ -308,7 +308,10 @@ impl Tools {
 
     /// The tools a review session gets: what it needs to read, what it needs
     /// to exercise the candidate and show what it saw, and its verdict.
-    /// Nothing that publishes or reaches a forge.
+    /// Nothing that publishes. The one forge write is drafting its review's
+    /// own change when it finds something blocking (`pr_ready`, `mr_ready`,
+    /// refused for any other change), which blocks nothing that cannot be
+    /// undone.
     pub const REVIEW_TOOLS: &'static [&'static str] = &[
         memory::RECALL,
         docs::DOC_READ,
@@ -323,6 +326,8 @@ impl Tools {
         services::STATUS,
         show::SHOW,
         review::VERDICT,
+        github::PR_READY,
+        gitlab::MR_READY,
     ];
 
     /// What a session of each phase calls on most turns, marked
@@ -712,6 +717,25 @@ impl Tools {
                 return Err(refusal);
             }
         }
+        // Drafting the change of a review this session submitted or is
+        // reviewing, and pushed to or opened, is not asked: drafting blocks
+        // nothing that cannot be undone, and the agent is the first to know
+        // another revision is coming. Marking it ready is asked like any
+        // other call: a ready change can be merged at a revision nobody
+        // approved. A review session may touch no other change.
+        let own_change = matches!(name, github::PR_READY | gitlab::MR_READY)
+            .then(|| self.own_change(ctx, name, args))
+            .flatten();
+        if own_change.is_none()
+            && matches!(name, github::PR_READY | gitlab::MR_READY)
+            && audience == Audience::Session(crate::session::Phase::Review)
+        {
+            return Err(format!(
+                "a review session marks only the change of the review it is reviewing; {name} \
+                 names another"
+            ));
+        }
+        let drafts_own_change = own_change.is_some() && github::ready_arg(args) == Ok(false);
         if plan_write {
             *gate = audit::Gate::node("plan-artifact");
         } else {
@@ -735,6 +759,9 @@ impl Tools {
                         approval_id: None,
                     };
                     return Err(refusal(decision));
+                }
+                Verdict::Ask if drafts_own_change => {
+                    *gate = audit::Gate::node("own-change");
                 }
                 // Nothing waits on the operator: the call is held as an
                 // approval and the caller is told so at once.
@@ -768,7 +795,72 @@ impl Tools {
                 return Err(error.to_string());
             }
         }
-        self.dispatch(ctx, name, args, false).await
+        let result = self.dispatch(ctx, name, args, false).await;
+        // Kept even when the change was already that way: the reason is
+        // what the review page says it waits on.
+        if let (Ok(_), Some((review, by)), Some(access)) =
+            (&result, &own_change, self.session.get())
+        {
+            review::record_change_ready(
+                &access.manager,
+                review,
+                github::ready_arg(args).unwrap_or(true),
+                by,
+                args.get("reason").and_then(Value::as_str),
+            );
+        }
+        result
+    }
+
+    /// The review whose change a `pr_ready` or `mr_ready` call names, when
+    /// the caller owns it: the execute session that submitted it, or the
+    /// review session reviewing it. With who that is, as the review page
+    /// says it (`agent` or `reviewer`).
+    ///
+    /// Naming the change is not enough: `submit_review` adopts any open
+    /// change of the repository it is pointed at, so a review owns one only
+    /// once a publication of it pushed to it or opened it, which the
+    /// operator approved.
+    fn own_change(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Option<(crate::store::ReviewRow, &'static str)> {
+        let access = self.session.get()?;
+        let session = access.store.get_session(ctx.session_id()?).ok()??;
+        let (provider, project, number) = match name {
+            github::PR_READY => ("github", args["repo"].as_str()?, args["number"].as_u64()?),
+            _ => ("gitlab", args["project"].as_str()?, args["iid"].as_u64()?),
+        };
+        let names = |r: &crate::store::ReviewRow| {
+            serde_json::from_str::<crate::review::publish::Target>(&r.target).is_ok_and(|t| {
+                t.provider == provider
+                    && t.project.eq_ignore_ascii_case(project)
+                    && t.change.is_some_and(|change| change.number == number)
+            }) && access
+                .store
+                .publications_for_review(&r.id)
+                .is_ok_and(|rows| {
+                    rows.iter()
+                        .any(|row| row.pushed_sha.is_some() || row.state == "opened")
+                })
+        };
+        if session.phase == crate::session::Phase::Review.as_str() {
+            let review = access
+                .store
+                .get_review(session.review_id.as_deref()?)
+                .ok()??;
+            return names(&review).then_some((review, "reviewer"));
+        }
+        access
+            .store
+            .reviews_of_session(&session.id)
+            .ok()?
+            .into_iter()
+            .rev()
+            .find(|r| names(r))
+            .map(|review| (review, "agent"))
     }
 
     /// Whether a decision was the signed policy's or an operator's scoped

@@ -6016,6 +6016,139 @@ async fn a_review_updates_the_change_it_opened() {
     }
 }
 
+/// A new revision of a review whose change is open drafts that change at
+/// once, whatever the agent did, so a merge on the forge cannot land the
+/// revision before it while it checks. The approval of the new revision
+/// marks it ready again.
+#[tokio::test]
+async fn resubmitting_a_published_review_drafts_its_change_until_approval() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    f.forget_logs();
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // A first publication opens the change ready, and drafts nothing.
+    let gh = f.gh_log();
+    assert!(gh.contains("pr create"), "{gh}");
+    assert!(!gh.contains("--draft") && !gh.contains("pr ready"), "{gh}");
+
+    let wt = std::path::Path::new(&f.worktree);
+    let origin = f.dir.join("origin.git");
+    let held = sh_out(&origin, "git rev-parse refs/heads/feat/x");
+    gh_forge(&f, pull_one("feat/x", &held));
+    sh(
+        wt,
+        "echo two >> a.txt && git add -A && git commit -qm 'fix: two'",
+    );
+    f.forget_logs();
+    let mut args = f.submit_args();
+    args["review_id"] = json!(id);
+    let resubmitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(review_id(&resubmitted), id, "{resubmitted}");
+    let gh = f.gh_log();
+    assert!(
+        gh.contains("ARGS: pr ready 1 --undo --repo owner/name"),
+        "{gh}"
+    );
+    let said = f
+        .store
+        .last_event_payload("s1", "change_ready")
+        .unwrap()
+        .unwrap();
+    assert_eq!(said["by"], "node");
+    assert_eq!(said["ready"], false);
+    assert_eq!(said["reason"], "revision 2 is on its way");
+}
+
+/// A review an external harness submitted has no session to log on, and
+/// its change is drafted by a new revision all the same: the mark is kept by
+/// review, so the review page can say why it is a draft.
+#[tokio::test]
+async fn an_external_reviews_change_drafted_for_a_new_revision_is_recorded() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let external = tracon::mcp::CallContext::external(None, "work", "n1");
+    let mut args = f.submit_args();
+    args["branch"] = json!("feat/x");
+    args["worktree"] = json!(f.worktree);
+    let submitted =
+        tracon::mcp::review::call(&f.store, &f.manager, &external, "submit_review", &args)
+            .await
+            .unwrap();
+    let id = review_id(&submitted);
+    assert_eq!(f.store.get_review(&id).unwrap().unwrap().session_id, None);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        f.store.change_mark(&id).unwrap(),
+        None,
+        "nothing drafted yet"
+    );
+
+    let wt = std::path::Path::new(&f.worktree);
+    let origin = f.dir.join("origin.git");
+    let held = sh_out(&origin, "git rev-parse refs/heads/feat/x");
+    gh_forge(&f, pull_one("feat/x", &held));
+    sh(
+        wt,
+        "echo two >> a.txt && git add -A && git commit -qm 'fix: two'",
+    );
+    f.forget_logs();
+    args["review_id"] = json!(id);
+    let resubmitted =
+        tracon::mcp::review::call(&f.store, &f.manager, &external, "submit_review", &args)
+            .await
+            .unwrap();
+    assert_eq!(review_id(&resubmitted), id, "{resubmitted}");
+    let gh = f.gh_log();
+    assert!(
+        gh.contains("ARGS: pr ready 1 --undo --repo owner/name"),
+        "{gh}"
+    );
+    let mark = f
+        .store
+        .change_mark(&id)
+        .unwrap()
+        .expect("the mark, by review");
+    assert_eq!(mark["review_id"], json!(id));
+    assert_eq!(mark["number"], 1);
+    assert_eq!(mark["ready"], false);
+    assert_eq!(mark["by"], "node");
+    assert_eq!(mark["reason"], "revision 2 is on its way");
+    assert!(mark["at_ms"].as_i64().is_some(), "{mark}");
+}
+
+/// An approval of revision N while revision N+1's checks run is still
+/// accepted (N+1 is not on the review until they pass), but it does not mark
+/// the change ready: N+1 is on its way, and nothing would draft it again.
+#[tokio::test]
+async fn approving_a_revision_while_a_newer_one_checks_leaves_the_draft_a_draft() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    let mut draft = pull_seven(&base);
+    draft["draft"] = json!(true);
+    gh_forge(&f, draft);
+    let id = review_id(&f.submit_update(json!({})).await);
+    // Revision 2's checks, under the review it revises, not settled.
+    f.manager
+        .checking()
+        .begin(&id, "s1", "a-newer-candidate", vec!["true".into()]);
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(!gh.contains("pr ready"), "{gh}");
+}
+
 /// A review published before publication recorded the change it opened
 /// finds it in the publication record, so it can still be resubmitted.
 #[tokio::test]

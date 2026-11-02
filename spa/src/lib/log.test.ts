@@ -278,6 +278,8 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['service', { name: 'postgres', container: 'c', state: 'ready' }, 'service postgres ready'],
     ['service', { name: 'postgres', state: 'failed', detail: 'did not answer on 5432 within 30s' }, 'service postgres failed · did not answer on 5432 within 30s'],
     ['published', { url: 'https://github.com/o/r/pull/418', review_id: 'rev-1' }, 'published · o/r/pull/418'],
+    ['change_ready', { review_id: 'rev-1', number: 418, ready: true, by: 'operator' }, 'change #418 marked ready · by the operator'],
+    ['change_ready', { review_id: 'rev-1', number: 418, ready: false, by: 'reviewer', reason: 'a blocking finding' }, 'change #418 turned back into a draft · by the reviewer · a blocking finding'],
     ['session_suspended', { idle_ms: 1_800_000 }, 'suspended · idle 30m after publishing'],
     ['session_paused', { source: 'operator', reason: 'operator paused the session' }, 'paused by the operator'],
     ['session_paused', { source: 'watchdog', reason: '3 failed tool calls in a row' }, 'paused by the node · 3 failed tool calls in a row'],

@@ -358,6 +358,12 @@ pub mod event_kind {
     /// and `detail` for a failure). The events are also how everything that
     /// removes a session's container finds the services to remove with it.
     pub const SERVICE: &str = "service";
+    /// The change a review of this session publishes to was marked ready
+    /// or turned back into a draft, about the review (`ref_id`): its
+    /// `review_id`, the change's `number`, `ready`, `by` —
+    /// `agent`, `reviewer`, `operator` or `node` — and the `reason` given
+    /// for a draft). What the review page says a draft is waiting on.
+    pub const CHANGE_READY: &str = "change_ready";
     /// The operator abandoned the work this session was the latest attempt
     /// at (`reason`, `summary`): its item closed, or its lineage put away.
     pub const ABANDONED: &str = "abandoned";

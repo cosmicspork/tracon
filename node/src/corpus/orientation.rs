@@ -572,6 +572,17 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
                  the node suspends it, and it is carried on when a CI failure or a review \
                  comment needs an answer.\n\n",
             );
+            if let Some(ready) = ready_tool(facts) {
+                out.push_str(&format!(
+                    "Once your review's change is open on the forge, it can be merged there \
+                     while you work on it. The moment you start on findings or decide another \
+                     revision is coming, call `{ready}` with `ready: false` and a `reason` on \
+                     it; drafting your own review's change is not asked. Marking it ready again \
+                     is the operator's to allow, so leave that to approving your next \
+                     revision. Submitting a new revision drafts it anyway, until the operator \
+                     approves that revision.\n\n"
+                ));
+            }
             if let Some(plan) = facts.plan_body {
                 out.push_str("### Plan\n\n");
                 push_capped(
@@ -596,6 +607,33 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
 /// the tools it can call.
 fn offered(facts: &Facts, name: &str) -> bool {
     facts.tools.iter().any(|t| t == name)
+}
+
+/// The tool that marks this session's change ready or turns it back into a
+/// draft, when it is offered.
+fn ready_tool(facts: &Facts) -> Option<&'static str> {
+    [crate::mcp::github::PR_READY, crate::mcp::gitlab::MR_READY]
+        .into_iter()
+        .find(|name| offered(facts, name))
+}
+
+/// What a reviewer does about a change already open on the forge when it
+/// finds something blocking: draft it, so it is not merged before a revision
+/// lands. Said only when the review has such a change and the tool is here.
+fn blocking(facts: &Facts, review: &crate::store::ReviewRow) -> String {
+    let change = serde_json::from_str::<crate::review::publish::Target>(&review.target)
+        .ok()
+        .and_then(|target| target.change);
+    match (ready_tool(facts), change) {
+        (Some(ready), Some(change)) => format!(
+            "This change is already open on the forge (#{}). If you find something blocking, \
+             call `{ready}` with `ready: false` and a `reason` on it before your verdict, so it \
+             is not merged in the meantime; this is not asked. Marking it ready is the \
+             operator's; leave it to them. Touch no other change.\n\n",
+            change.number
+        ),
+        _ => String::new(),
+    }
 }
 
 /// What a reviewer can do besides reading the diff: run the change, where the
@@ -654,8 +692,9 @@ fn push_review(out: &mut String, store: &Store, facts: &Facts, missing: &mut Vec
          not seen how it was made; judge the diff against the requirements above and the \
          plan, with the evidence below, and end by calling `review_verdict` (approve, or \
          request_changes with findings), saying in `basis` what it rests on. A human decides \
-         after you; your verdict informs them.\n\n{toolchain}\n\n{}### Proposed change\n\n**{}**\n\n",
+         after you; your verdict informs them.\n\n{toolchain}\n\n{}{}### Proposed change\n\n**{}**\n\n",
         exercising(facts.tools, facts.services),
+        blocking(facts, r),
         title
     ));
     push_capped(
@@ -2537,6 +2576,88 @@ mod tests {
             prepared: None,
             stale_base: None,
         }
+    }
+
+    /// A change already open on the forge can be merged there while the
+    /// agent revises it or a reviewer finds it wanting. Both are told to
+    /// draft it, with the tool their channel offers, and only where they
+    /// have one and there is a change to draft.
+    #[test]
+    fn sessions_are_told_to_draft_an_open_change_another_revision_is_coming_for() {
+        let store = Store::open_in_memory().unwrap();
+        let item = item("Carry the invoice rewrite", "Round half to even.");
+        let manifest = crate::manifest::LaunchManifest::default();
+        let told = |tools: &[String]| {
+            let facts = Facts {
+                node_name: "n",
+                node_id: "id",
+                backend: "local",
+                harness: "fake",
+                harness_version: "1",
+                channel: "personal",
+                project_id: None,
+                project_name: None,
+                tools,
+                services: &[],
+                worktree: "/work",
+                phase: "execute",
+                item: Some(&item),
+                plan_body: None,
+                ready: &[],
+                review: None,
+                manifest: &manifest,
+                egress: None,
+                forge_repo: None,
+                prepared: None,
+                stale_base: None,
+            };
+            assemble(&store, &Policy::shipped(), &facts).0
+        };
+        let text = told(&["submit_review".to_string(), "pr_ready".to_string()]);
+        assert!(
+            text.contains("call `pr_ready` with `ready: false` and a `reason`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Submitting a new revision drafts it"),
+            "{text}"
+        );
+        let text = told(&["submit_review".to_string(), "mr_ready".to_string()]);
+        assert!(
+            text.contains("call `mr_ready` with `ready: false`"),
+            "{text}"
+        );
+        assert!(!told(&["submit_review".to_string()]).contains("ready: false"));
+
+        let row = external_review(&store, "r1", "aaaaaaaaaaaaaaaa");
+        let mut opened = row.clone();
+        opened.target = json!({
+            "provider": "github", "project": "o/n", "base": "main", "branch": "feat/x",
+            "change": { "number": 7, "url": "https://github.test/pull/7" },
+        })
+        .to_string();
+        let tools = ["review_verdict".to_string(), "pr_ready".to_string()];
+        let told = |row: &ReviewRow, tools: &[String]| {
+            let facts = reviewing(
+                ReviewFacts {
+                    row,
+                    session_id: "s-review",
+                    revision: None,
+                    no_toolchain: None,
+                    checks_configured: true,
+                },
+                tools,
+            );
+            blocking(&facts, row)
+        };
+        assert_eq!(told(&row, &tools), "", "nothing open yet");
+        let said = told(&opened, &tools);
+        assert!(said.contains("already open on the forge (#7)"), "{said}");
+        assert!(
+            said.contains("call `pr_ready` with `ready: false`"),
+            "{said}"
+        );
+        assert_eq!(told(&opened, &tools[..1]), "");
     }
 
     #[test]

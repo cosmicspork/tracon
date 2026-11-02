@@ -552,6 +552,16 @@ export function eventLine(e: Event): EventLine | null {
       const url = str(p.url)
       return line('ok', ['published', url ? forgePath(url) : ''], url || undefined, url ? 'open' : undefined)
     }
+    case 'change_ready': {
+      // The change the review publishes to marked ready, or turned back into
+      // a draft while another revision is coming, by whom and why.
+      const number = num(p.number)
+      const change = number !== null ? `change #${number}` : 'change'
+      const by = str(p.by)
+      const byWho = by ? `by the ${by}` : ''
+      if (p.ready === true) return line('ok', [`${change} marked ready`, byWho])
+      return line('wait', [`${change} turned back into a draft`, byWho, str(p.reason)])
+    }
     case 'conversation_resumed': {
       // The operator asked a session that had ended or was put away: the same
       // session, its harness started again in its own conversation.

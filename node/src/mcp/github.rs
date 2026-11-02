@@ -292,13 +292,18 @@ pub fn definitions() -> Vec<Value> {
             "description": "Mark a draft GitHub pull request ready for review, or with `ready: \
                             false` turn it back into a draft. A pull request already in that \
                             state is left as it is (`already: true`); a closed or merged one is \
-                            refused. The operator is asked before it changes. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            refused. Making a draft of the change of a review you submitted or \
+                            are reviewing, once that review pushed to it or opened it, is not \
+                            asked: do it as soon as you know another revision is coming or find \
+                            something blocking. Marking it ready, and anything on another change, \
+                            is asked: the operator decides before it changes. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string", "description": REPO },
                     "number": { "type": "integer" },
                     "ready": { "type": "boolean", "description": "true (the default) marks it ready for review; false makes it a draft again." },
+                    "reason": { "type": "string", "description": "With `ready: false`: why it is not ready, shown on its review." },
                 },
                 "required": ["repo", "number"],
             },
