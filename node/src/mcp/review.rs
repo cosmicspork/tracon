@@ -4399,6 +4399,7 @@ mod tests {
             target_branch: "main".into(),
             cross_repository: false,
             head_sha: "sha1".into(),
+            draft: false,
         };
         let target: Target = serde_json::from_value(json!({
             "provider": "github", "project": "owner/name", "base": "main", "branch": "feat/x",
