@@ -48,6 +48,9 @@ pub struct Config {
     /// Services a session may ask for by name (`service_start`): each a
     /// digest-pinned image run beside the session in its network namespace.
     pub service: Vec<Service>,
+    /// MCP servers outside the node whose tools sessions reach through the
+    /// node's own MCP endpoint, each tool decided allow, ask or deny.
+    pub mcp_server: Vec<McpServer>,
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
     /// The providers `node.toml` itself names, as opposed to the ones
@@ -198,6 +201,147 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
                 return Err(format!(
                     "service {name}: ready must be an HTTP path starting with '/'"
                 ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One `[[mcp_server]]`: an MCP server outside the node, spoken to over
+/// streamable HTTP by the node alone. A session never learns its address or
+/// holds its credential; it sees the server's tools on the node's own MCP
+/// endpoint as `<name>__<tool>`, and each call is decided before the node
+/// makes it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpServer {
+    /// The namespace its tools are offered under: `linear` offers
+    /// `linear__create_issue`.
+    pub name: String,
+    /// The server's streamable HTTP endpoint.
+    pub url: String,
+    /// Channels whose sessions are offered its tools. Empty means none, as
+    /// an unbound credential is unusable rather than universal.
+    pub channels: Vec<String>,
+    /// A broker credential whose `TOKEN` is sent with every request, as
+    /// `Authorization: Bearer <TOKEN>` unless `header` names another header.
+    /// It must be bound to the calling channel too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    /// The header that carries the credential's `TOKEN` as it is, for a
+    /// server that does not take a bearer token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// Tools, by the server's own names, that run without asking unless a
+    /// signed policy rule denies them. `*` matches any run of characters.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Tools always put to the operator, even when a policy rule allows
+    /// them. A tool no list names is asked unless a policy rule allows it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ask: Vec<String>,
+    /// Tools refused outright. Deny wins over ask, and ask over allow.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    /// How long one call may take. Zero takes the default.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub timeout_secs: u64,
+}
+
+impl McpServer {
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+    pub fn timeout_secs(&self) -> u64 {
+        match self.timeout_secs {
+            0 => Self::DEFAULT_TIMEOUT_SECS,
+            n => n,
+        }
+    }
+
+    /// Whether a session on `channel` is offered this server at all.
+    pub fn serves(&self, channel: &str) -> bool {
+        self.channels.iter().any(|c| c == channel)
+    }
+}
+
+/// Headers the node writes itself on every MCP request, which a credential
+/// may not be sent in place of.
+const MCP_RESERVED_HEADERS: &[&str] = &[
+    "accept",
+    "content-type",
+    "content-length",
+    "host",
+    "connection",
+    "transfer-encoding",
+    "mcp-session-id",
+    "mcp-protocol-version",
+];
+
+/// A server's name is the prefix its tools are offered under and split back
+/// off by, so it is held to characters that cannot run into `__`.
+pub fn validate_mcp_servers(servers: &[McpServer]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for server in servers {
+        let name = &server.name;
+        if name.is_empty()
+            || name.len() > 24
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            || name.starts_with('-')
+        {
+            return Err(format!(
+                "mcp_server {name:?}: name must be 1-24 lowercase letters, digits or '-'"
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!("mcp_server {name}: named twice"));
+        }
+        match url::Url::parse(&server.url) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") && url.host().is_some() => {
+                if !url.username().is_empty() || url.password().is_some() {
+                    return Err(format!(
+                        "mcp_server {name}: url must not carry a user or password; name a \
+                         credential instead"
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "mcp_server {name}: url must be an http or https address"
+                ))
+            }
+        }
+        if server
+            .credential
+            .as_deref()
+            .is_some_and(|c| c.trim().is_empty())
+        {
+            return Err(format!("mcp_server {name}: credential is empty"));
+        }
+        if let Some(header) = &server.header {
+            if server.credential.is_none() {
+                return Err(format!(
+                    "mcp_server {name}: header names where a credential goes, and no \
+                     credential is named"
+                ));
+            }
+            let lower = header.to_ascii_lowercase();
+            if reqwest::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+                || MCP_RESERVED_HEADERS.contains(&lower.as_str())
+            {
+                return Err(format!(
+                    "mcp_server {name}: header {header:?} is not one a credential can be sent in"
+                ));
+            }
+        }
+        for (list, tools) in [
+            ("allow", &server.allow),
+            ("ask", &server.ask),
+            ("deny", &server.deny),
+        ] {
+            if tools.iter().any(|t| t.trim().is_empty()) {
+                return Err(format!("mcp_server {name}: {list} has an empty entry"));
             }
         }
     }
@@ -2149,6 +2293,7 @@ impl Default for Config {
             live_repo: LiveRepos::default(),
             live: ConfigHandle::default(),
             service: Vec::new(),
+            mcp_server: Vec::new(),
             providers: default_providers(),
             declared_providers: Default::default(),
             memory: Memory::default(),
@@ -2560,6 +2705,8 @@ impl Config {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_mcp_servers(&config.mcp_server)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_doc_kinds(&config.docs.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_priorities(&config.work.priority)
@@ -2857,6 +3004,76 @@ mod tests {
         assert_eq!(retired_opencode_sections(text), ["ui", "launch"]);
         assert!(retired_opencode_sections("[ui]\n").is_empty());
         assert!(retired_opencode_sections("[review]\nmax_files = 1\n").is_empty());
+    }
+
+    /// A server name that could run into the separator, an address that is
+    /// not one, or a credential header the node writes itself is refused at
+    /// load, with the entry named.
+    #[test]
+    fn an_mcp_server_entry_the_node_could_not_honour_is_refused_at_load() {
+        let ok = McpServer {
+            name: "linear".into(),
+            url: "https://mcp.linear.app/mcp".into(),
+            channels: vec!["personal".into()],
+            credential: Some("linear".into()),
+            ..Default::default()
+        };
+        validate_mcp_servers(std::slice::from_ref(&ok)).unwrap();
+        for (bad, says) in [
+            (
+                McpServer {
+                    name: "my_server".into(),
+                    ..ok.clone()
+                },
+                "name must be",
+            ),
+            (
+                McpServer {
+                    url: "ftp://x".into(),
+                    ..ok.clone()
+                },
+                "http or https",
+            ),
+            (
+                McpServer {
+                    url: "https://u:p@x/mcp".into(),
+                    ..ok.clone()
+                },
+                "user or password",
+            ),
+            (
+                McpServer {
+                    header: Some("mcp-session-id".into()),
+                    ..ok.clone()
+                },
+                "not one a credential",
+            ),
+            (
+                McpServer {
+                    credential: None,
+                    header: Some("x-api-key".into()),
+                    ..ok.clone()
+                },
+                "no credential",
+            ),
+            (
+                McpServer {
+                    deny: vec![" ".into()],
+                    ..ok.clone()
+                },
+                "empty entry",
+            ),
+        ] {
+            let error = validate_mcp_servers(&[bad]).unwrap_err();
+            assert!(error.contains(says), "{error}");
+        }
+        assert!(validate_mcp_servers(&[ok.clone(), ok])
+            .unwrap_err()
+            .contains("twice"));
+        let text = "[[mcp_server]]\nname = \"linear\"\nurl = \"https://x/mcp\"\nchannels = [\"personal\"]\nallow = [\"list_*\"]\n";
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert_eq!(parsed.mcp_server[0].allow, vec!["list_*".to_string()]);
+        assert_eq!(parsed.mcp_server[0].timeout_secs(), 60);
     }
 
     #[test]

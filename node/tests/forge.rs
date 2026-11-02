@@ -167,6 +167,7 @@ fn node_with(broker: SharedBroker) -> axum::Router {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),

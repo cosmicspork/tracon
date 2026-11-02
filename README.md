@@ -860,6 +860,24 @@ only your decision publishes or sends the work back. Its tools read and run, nev
 publish: `recall`, `doc_read`, `doc_search`, `work_list`, `work_show`,
 `service_start`, `service_status`, `show_work`, and `review_verdict`.
 
+### Other MCP servers
+
+An MCP server outside the node (a tracker's, a design tool's) is registered as an
+`[[mcp_server]]` under **Settings → Configuration** or in `node.toml`: its
+streamable HTTP address, the channels it serves, and optionally a broker credential
+whose `TOKEN` is sent with each request. Only the node speaks to the server. An
+execute session, or a harness you run yourself, sees each of its tools on the node's
+own MCP endpoint as `<name>__<tool>`, deferred behind tool search like the node's
+other tools. Each call is decided before the node makes it: a signed policy denial
+refuses it; the entry's `deny` list refuses it, its `ask` list puts it to you, and
+its `allow` list runs it unattended (only while the policy bundle is valid). A tool
+no list names is asked, unless a policy rule allows `<name>__<tool>` by name. An
+asked call is an approval like any other, holding the exact arguments the session
+sent, and runs once you allow it. A server that cannot be reached is reported to
+the caller, not put to you. `GET /api/mcp-servers` lists each server, whether it
+could be listed, and how a call to each tool is answered now. Only streamable HTTP
+is supported; a stdio server is not.
+
 ### Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.
@@ -1380,6 +1398,23 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed
 # native_binary = "/path/to/tracon-agent"  # a Linux build for tracon-agent's image (`just
                                     # native-agent`) in place of this version's release asset
+
+# [[mcp_server]]                    # an MCP server outside the node (streamable HTTP). Sessions see
+                                    # its tools on the node's own MCP endpoint as `<name>__<tool>`,
+                                    # deferred behind tool search like the node's other tools; only
+                                    # the node speaks to the server. Applies without a restart
+# name = "linear"                   # 1-24 lowercase letters, digits or '-'
+# url = "https://mcp.linear.app/mcp"
+# channels = ["personal"]           # who is offered its tools; empty means nobody
+# credential = "linear"             # a broker credential whose TOKEN is sent as
+                                    # `Authorization: Bearer <TOKEN>`; bound to the calling channel too
+# header = "X-Api-Key"              # send TOKEN as it is in this header instead
+# allow = ["list_*", "get_*"]       # by the server's own tool names, `*` a wildcard: run unattended
+                                    # unless a signed policy rule denies them (and the bundle is valid)
+# ask = ["get_secret"]              # always put to the operator, with the exact arguments
+# deny = ["delete_*"]               # refused. Deny wins over ask, ask over allow; a tool no list names
+                                    # is asked unless a policy rule allows `<name>__<tool>` by name
+# timeout_secs = 60                 # how long one call may take
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"

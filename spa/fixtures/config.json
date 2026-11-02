@@ -2135,6 +2135,166 @@
     },
     {
       "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.name",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.url",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.channels",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.credential",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.header",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      },
+      "why_not_by_peer": "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.allow",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.ask",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.deny",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "mcp_server",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mcp_server.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,

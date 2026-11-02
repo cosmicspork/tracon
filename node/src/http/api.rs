@@ -1066,6 +1066,22 @@ pub struct ReadinessQuery {
 
 /// Whether a repository is ready to investigate, to verify and to publish
 /// from, with what each path lacks, before a session is spent finding out.
+#[derive(Deserialize, Default)]
+pub struct McpServersQuery {
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+/// Every `[[mcp_server]]`, listed again first when it is stale (or every one,
+/// with `refresh`), with each tool and how a call to it is answered now.
+pub async fn mcp_servers(
+    State(s): State<AppState>,
+    Query(q): Query<McpServersQuery>,
+) -> Json<serde_json::Value> {
+    s.tools.refresh_upstream(&s.node_id, q.refresh).await;
+    Json(json!({ "servers": s.tools.upstream_status() }))
+}
+
 pub async fn readiness(
     State(s): State<AppState>,
     Query(q): Query<ReadinessQuery>,
@@ -2343,7 +2359,9 @@ pub async fn get_approval(
         "arguments_hash": a.arguments_hash(),
         "edited_arguments": parse(a.edited_arguments.as_deref()),
         "result": parse(a.result.as_deref()),
-        "input_schema": crate::mcp::schema::input_schema(&a.tool),
+        "input_schema": crate::mcp::schema::input_schema(&a.tool)
+            .cloned()
+            .or_else(|| s.tools.upstream_schema(&a.tool)),
         "format": shown.format,
         "prose_fields": shown.prose_fields,
         "locked_fields": shown.locked_fields,

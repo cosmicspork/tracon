@@ -1934,6 +1934,30 @@ export interface Holding {
   propagation: string
 }
 
+/** One tool another MCP server lists, as `GET /api/mcp-servers` reports it. */
+export interface McpServerTool {
+  name: string
+  remote: string
+  description: string
+  /** What the server's entry says of it, by its allow, ask and deny lists. */
+  setting: 'allow' | 'ask' | 'deny' | null
+  /** How a call to it is answered now, policy included. */
+  decision: 'allow' | 'ask' | 'deny'
+  rule_id: string | null
+}
+
+/** One `[[mcp_server]]` as the node sees it now. */
+export interface McpServerStatus {
+  name: string
+  url: string
+  channels: string[]
+  credential: string | null
+  listed: boolean
+  listed_secs_ago: number | null
+  error: string | null
+  tools: McpServerTool[]
+}
+
 export interface DataInventory {
   database_bytes: number
   total_bytes: number

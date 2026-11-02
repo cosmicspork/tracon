@@ -17,6 +17,7 @@ import type {
   CredentialSummary,
   StorageItem,
   DataInventory,
+  McpServerStatus,
   DocKindInfo,
   Document,
   EnrollStatus,
@@ -440,6 +441,8 @@ export const api = {
   /** Runtime storage whose owner is over; removed only with `apply`. Loopback only. */
   /** What the serving node holds, kind by kind, and where each is deleted. */
   data: () => call<DataInventory>('GET', '/api/maintenance/data'),
+  mcpServers: (refresh = false) =>
+    call<{ servers: McpServerStatus[] }>('GET', `/api/mcp-servers${refresh ? '?refresh=true' : ''}`),
   storageSweep: (apply: boolean, caches: boolean) =>
     call<{ applied: boolean; items: StorageItem[] }>('POST', '/api/maintenance/storage', { apply, caches }),
   /** A channel keeps its work and takes no new sessions. */

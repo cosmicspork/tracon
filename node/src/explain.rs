@@ -105,15 +105,25 @@ pub fn session_authority(
             // deny rule matches on. An argument-scoped allow shows up as
             // `scoped` rather than being reported as an allow the call may not
             // actually get.
-            standing: policy.explain(&Request {
-                channel: &session.channel,
-                action: name,
-                kind: Some(crate::mcp::TOOL_KIND),
-                resource: None,
-                command: None,
-                arguments: None,
-                doc_kinds: Some(&kinds),
-            }),
+            standing: {
+                let mut standing = policy.explain(&Request {
+                    channel: &session.channel,
+                    action: name,
+                    kind: Some(crate::mcp::TOOL_KIND),
+                    resource: None,
+                    command: None,
+                    arguments: None,
+                    doc_kinds: Some(&kinds),
+                });
+                // Another server's tool is answered by its entry too.
+                if let Some(decision) = tools.upstream_decision(&policy, name, standing.clone()) {
+                    standing.verdict = decision.verdict;
+                    standing.rule_id = decision.rule_id;
+                    standing.reason = decision.reason;
+                    standing.scoped.clear();
+                }
+                standing
+            },
             grants: Vec::new(),
         })
         .collect();

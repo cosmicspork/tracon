@@ -22,6 +22,7 @@
   import Passkeys from '../components/settings/Passkeys.svelte'
   import Maintenance from '../components/settings/Maintenance.svelte'
   import DataHeld from '../components/settings/DataHeld.svelte'
+  import McpServers from '../components/settings/McpServers.svelte'
   import Repositories from '../components/settings/Repositories.svelte'
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
   import NodeList from '../components/settings/NodeList.svelte'
@@ -817,6 +818,8 @@
   <Card title="Forge tokens" note={`GitHub and GitLab tokens on ${store.node?.name ?? 'the serving node'} and the channels each serves.`}>
     <CredentialSettings version={credentialsVersion} onchange={() => (credentialsVersion += 1)} />
   </Card>
+
+  <McpServers />
 {/if}
 
 {#if activeSection === 'channels'}

@@ -79,6 +79,7 @@ impl Harness {
             policy: tracon::policy::Policy::shipped_shared(),
             http: reqwest::Client::new(),
             session: Default::default(),
+            upstream: Default::default(),
         });
         let manager = Manager::new(
             store.clone(),
@@ -2868,6 +2869,7 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),
@@ -3134,6 +3136,7 @@ async fn orientation_setup(
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let manager = Manager::new(
         store.clone(),
@@ -4579,6 +4582,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
         policy: tracon::policy::Policy::shipped_shared(),
         http: reqwest::Client::new(),
         session: Default::default(),
+        upstream: Default::default(),
     });
     let killed: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let manager = Manager::new(
