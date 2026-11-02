@@ -47,11 +47,11 @@ impl Workspace {
 }
 
 pub fn volume_name(id: &str) -> String {
-    format!("tracon-workspace-{}", safe_id(id))
+    crate::config::resource_name(&format!("workspace-{}", safe_id(id)))
 }
 
 pub fn scratch_volume_name(id: &str) -> String {
-    format!("tracon-scratch-{}", safe_id(id))
+    crate::config::resource_name(&format!("scratch-{}", safe_id(id)))
 }
 
 pub fn snapshot_path(id: &str) -> PathBuf {

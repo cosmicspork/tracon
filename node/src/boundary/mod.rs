@@ -405,7 +405,7 @@ pub struct VolumeInfo {
     pub created_ms: Option<i64>,
 }
 
-/// The `tracon-` volumes kept as directories under `root`, as the Kubernetes
+/// This node's volumes kept as directories under `root`, as the Kubernetes
 /// and local backends store them. A staging copy mid-import is not a volume.
 pub fn directory_volumes(root: &std::path::Path) -> Result<Vec<VolumeInfo>, BoundaryError> {
     let entries = match std::fs::read_dir(root) {
@@ -417,7 +417,7 @@ pub fn directory_volumes(root: &std::path::Path) -> Result<Vec<VolumeInfo>, Boun
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("tracon-") || name.contains(".staging-") || !entry.path().is_dir() {
+        if !crate::gc::is_own(&name) || name.contains(".staging-") || !entry.path().is_dir() {
             continue;
         }
         let created_ms = entry

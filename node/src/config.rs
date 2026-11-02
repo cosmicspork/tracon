@@ -1920,6 +1920,62 @@ pub struct Boundary {
     /// built from changes under it. Off, they change only when `tracon setup`
     /// runs, and the boundary check refuses until it has.
     pub auto_reconcile: bool,
+    /// What every runtime volume and container this node names begins with,
+    /// before a `-`: the shared harness state, the boundary probes, each
+    /// session's, check's and preparation's own. A second node on the same
+    /// container host sets its own, so it neither mounts the first's harness
+    /// state nor counts, probes or sweeps the first's resources. Read once as
+    /// the node starts; changing it later strands what the old one named.
+    pub resource_prefix: String,
+}
+
+/// The default `[boundary] resource_prefix`, and every name a node used
+/// before there was one.
+pub const DEFAULT_RESOURCE_PREFIX: &str = "tracon";
+
+static RESOURCE_PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// This process's `[boundary] resource_prefix`: the one its node
+/// configuration was first loaded with. Names are made far from any `Config`
+/// (a workspace's volume, a check's container), and a process runs one
+/// node, so it is held once rather than passed everywhere.
+pub fn resource_prefix() -> &'static str {
+    RESOURCE_PREFIX
+        .get()
+        .map(String::as_str)
+        .unwrap_or(DEFAULT_RESOURCE_PREFIX)
+}
+
+/// A runtime resource name of this node's: `<prefix>-<rest>`.
+pub fn resource_name(rest: &str) -> String {
+    format!("{}-{rest}", resource_prefix())
+}
+
+/// A prefix is a name's first segment: lowercase letters, digits and inner
+/// `-`, as every container and volume name accepts. Another node's must not
+/// begin with the default's `tracon-`, or the default node would read the
+/// other's names as its own.
+pub fn validate_resource_prefix(prefix: &str) -> Result<(), String> {
+    let well_formed = !prefix.is_empty()
+        && prefix.len() <= 32
+        && prefix.starts_with(|c: char| c.is_ascii_lowercase())
+        && !prefix.ends_with('-')
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !well_formed {
+        return Err(format!(
+            "[boundary] resource_prefix {prefix:?} must be 1-32 lowercase letters, digits and inner '-', starting with a letter"
+        ));
+    }
+    if prefix != DEFAULT_RESOURCE_PREFIX
+        && prefix.starts_with(&format!("{DEFAULT_RESOURCE_PREFIX}-"))
+    {
+        return Err(format!(
+            "[boundary] resource_prefix {prefix:?} must not begin with \"{DEFAULT_RESOURCE_PREFIX}-\": a node with the default would take its resources for its own"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2403,6 +2459,7 @@ impl Default for Config {
                 start_machine: true,
                 stop_timeout_secs: 10,
                 auto_reconcile: true,
+                resource_prefix: DEFAULT_RESOURCE_PREFIX.into(),
             },
             gateway: Gateway {
                 allow_hosts: vec![
@@ -2703,8 +2760,18 @@ impl Config {
         self.auth.public_origin().ok().flatten()
     }
 
+    /// This node's configuration, which also fixes the process's
+    /// [`resource_prefix`].
     pub fn load() -> Self {
-        Self::load_from(&Self::config_path())
+        let config = Self::load_from(&Self::config_path());
+        config.claim_resource_prefix();
+        config
+    }
+
+    /// The first configuration this process loads as its own names its
+    /// runtime resources from then on.
+    fn claim_resource_prefix(&self) {
+        let _ = RESOURCE_PREFIX.set(self.boundary.resource_prefix.clone());
     }
 
     /// Lenient load for one-shot commands: a bad file logs and yields defaults.
@@ -2718,7 +2785,9 @@ impl Config {
     /// Strict load for `serve`: a file that exists but does not parse is an
     /// error, so a typo cannot silently drop the whole configuration.
     pub fn try_load() -> Result<Self, String> {
-        Self::try_load_from(&Self::config_path())
+        let config = Self::try_load_from(&Self::config_path())?;
+        config.claim_resource_prefix();
+        Ok(config)
     }
 
     pub fn try_load_from(path: &Path) -> Result<Self, String> {
@@ -2804,6 +2873,8 @@ impl Config {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_admin_peers(&config.mesh.admin_peers)
             .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_resource_prefix(&config.boundary.resource_prefix)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_models(&config.providers)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         config
@@ -2869,6 +2940,39 @@ fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_resource_prefix_names_a_second_node_s_resources_apart() {
+        assert_eq!(Config::default().boundary.resource_prefix, "tracon");
+        for good in ["tracon", "spike-s", "dev2", "tracon2"] {
+            assert!(validate_resource_prefix(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "Spike",
+            "spike-",
+            "-spike",
+            "2dev",
+            "spike_s",
+            "spike/s",
+            "tracon-dev",
+            "tracon-",
+        ] {
+            assert!(validate_resource_prefix(bad).is_err(), "{bad:?}");
+        }
+        let cfg = Config::from_toml(
+            "[boundary]\nresource_prefix = \"spike-s\"\n",
+            Path::new("node.toml"),
+        )
+        .unwrap();
+        assert_eq!(cfg.boundary.resource_prefix, "spike-s");
+        let error = Config::from_toml(
+            "[boundary]\nresource_prefix = \"tracon-dev\"\n",
+            Path::new("node.toml"),
+        )
+        .unwrap_err();
+        assert!(error.contains("resource_prefix"), "{error}");
+    }
 
     #[test]
     fn the_other_harness_image_follows_the_configured_one() {

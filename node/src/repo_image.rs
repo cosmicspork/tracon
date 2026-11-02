@@ -1017,7 +1017,7 @@ async fn build_session_layer(
                 .map(String::from)
                 .to_vec(),
             image: Some(built.image.clone()),
-            name: format!("tracon-probe-{}", uuid::Uuid::now_v7().simple()),
+            name: crate::config::resource_name(&format!("probe-{}", uuid::Uuid::now_v7().simple())),
             labels: crate::runner::RunLabels {
                 harness: Some(harness.id.to_string()),
                 ..crate::runner::RunLabels::of(crate::runner::RunKind::Probe)
@@ -1196,7 +1196,7 @@ pub(crate) async fn warm_base_cache(
         .await
         .map_err(|error| error.to_string())?;
         let id = uuid::Uuid::now_v7().simple().to_string();
-        let work = format!("tracon-warm-{id}");
+        let work = crate::config::resource_name(&format!("warm-{id}"));
         backend
             .import_writable(&work, &tree.root)
             .await
@@ -1207,7 +1207,7 @@ pub(crate) async fn warm_base_cache(
             runner.as_ref(),
             &environment,
             (&work, &environment.cache_volume),
-            &format!("tracon-w-{}", &id[..12]),
+            &crate::config::resource_name(&format!("w-{}", &id[..12])),
             tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
             &crate::review::checks::RunToCompletion,
             "the base cache stays as it was",
@@ -1725,7 +1725,7 @@ async fn missing_tools(runner: &dyn Runner, image: &str, commands: &[String]) ->
         .run_probe(RunnerCommand {
             argv,
             image: Some(image.to_string()),
-            name: format!("tracon-probe-{}", uuid::Uuid::now_v7().simple()),
+            name: crate::config::resource_name(&format!("probe-{}", uuid::Uuid::now_v7().simple())),
             labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
             ..Default::default()
         })

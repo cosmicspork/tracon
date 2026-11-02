@@ -901,8 +901,8 @@ async fn run(
     )
     .await
     .map_err(|error| error.to_string())?;
-    let work = format!("tracon-try-{id}");
-    let cache = format!("tracon-try-cache-{id}");
+    let work = crate::config::resource_name(&format!("try-{id}"));
+    let cache = crate::config::resource_name(&format!("try-cache-{id}"));
     let runner = backend.runner(Vec::new());
     let timeout = Duration::from_secs(environment.timeout_secs);
     let outcome = async {
@@ -921,7 +921,7 @@ async fn run(
                 runner.as_ref(),
                 &environment,
                 (&work, &cache),
-                &format!("tracon-t-{}", &id[..12]),
+                &crate::config::resource_name(&format!("t-{}", &id[..12])),
                 tokio::time::Instant::now() + timeout,
                 &stop,
                 "the checks were not run",
@@ -950,7 +950,7 @@ async fn run(
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
-            let copy = format!("tracon-try-{id}-c{index}");
+            let copy = crate::config::resource_name(&format!("try-{id}-c{index}"));
             let started = std::time::Instant::now();
             let step = match backend.clone_volume(&work, &copy).await {
                 Err(error) => Step {
@@ -963,7 +963,7 @@ async fn run(
                 },
                 Ok(()) => {
                     let env = crate::environment::check_env();
-                    let name = format!("tracon-t-{}-c{index}", &id[..12]);
+                    let name = crate::config::resource_name(&format!("t-{}-c{index}", &id[..12]));
                     let running = runner.capture_name(&name);
                     let cmd = RunnerCommand {
                         argv: crate::review::output::merged_shell(command),

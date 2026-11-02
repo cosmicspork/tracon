@@ -959,7 +959,7 @@ impl KubeRunner {
         sizing: Sizing,
     ) -> Result<std::process::Output, RunnerError> {
         self.ensure_mount_roots(&cmd).await?;
-        let name = self.capture_name(&Self::name_for(&cmd, "tracon-x"));
+        let name = self.capture_name(&Self::name_for(&cmd, &crate::config::resource_name("x")));
         let asked = cmd.image.clone().unwrap_or_else(|| self.spec.image.clone());
         let pod = match sizing {
             Sizing::Probe => self.spec.probe_pod(&name, &cmd)?,
@@ -1177,7 +1177,7 @@ fn exit_status(code: i32) -> std::process::ExitStatus {
 impl Runner for KubeRunner {
     async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
         self.ensure_mount_roots(&cmd).await?;
-        let name = Self::name_for(&cmd, "tracon-h");
+        let name = Self::name_for(&cmd, &crate::config::resource_name("h"));
         let pod = self.spec.pod(&name, &cmd, false)?;
         let pods = self.pods();
         self.remove(&name).await;
@@ -1276,7 +1276,11 @@ impl Runner for KubeRunner {
     fn capture_name(&self, name: &str) -> String {
         format!(
             "{}-{}",
-            if name.is_empty() { "tracon-x" } else { name },
+            if name.is_empty() {
+                crate::config::resource_name("x")
+            } else {
+                name.to_string()
+            },
             std::process::id()
         )
     }

@@ -326,7 +326,7 @@ fn std_status(code: i32) -> std::process::ExitStatus {
 impl Runner for ProtocolRunner {
     async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
         let name = match cmd.name.is_empty() {
-            true => "tracon-h".to_string(),
+            true => crate::config::resource_name("h"),
             false => cmd.name.clone(),
         };
         let Started { process, teardown } = self.start(&name, &cmd, true, false).await?;
@@ -389,7 +389,11 @@ impl Runner for ProtocolRunner {
     fn capture_name(&self, name: &str) -> String {
         format!(
             "{}-{}",
-            if name.is_empty() { "tracon-x" } else { name },
+            if name.is_empty() {
+                crate::config::resource_name("x")
+            } else {
+                name.to_string()
+            },
             std::process::id()
         )
     }

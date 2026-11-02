@@ -502,6 +502,23 @@
     {
       "admin": true,
       "apply": "restart",
+      "editable": false,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "boundary.resource_prefix",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not": "names every volume this node mounts, the shared harness state among them, so a node set to another's would run on that node's state; it is changed at the node, not from elsewhere"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
       "editable": true,
       "editable_at_node": true,
       "editable_by_peer": true,

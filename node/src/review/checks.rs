@@ -403,7 +403,7 @@ pub async fn run_required_for(
         // copy of what preparation made of it. Each check gets its own
         // writable copy so its mutations are never visible to another check
         // and never reach the candidate's own read-only evidence.
-        let scratch_volume = format!("tracon-check-{run_id}");
+        let scratch_volume = crate::config::resource_name(&format!("check-{run_id}"));
         let started = std::time::Instant::now();
         let mut env = Vec::new();
         let mut mounts = vec![Mount::volume(scratch_volume.clone(), "/work", false)];
@@ -482,7 +482,8 @@ pub async fn run_required_for(
             });
             continue;
         }
-        let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
+        let runner_name =
+            crate::config::resource_name(&format!("c-{index}-{}", &hash(&run_id)[..12]));
         // What the runner will actually call this execution, not what it was
         // asked to: a kill has to name the same thing the runtime named, or
         // it stops nothing at all.
@@ -835,8 +836,8 @@ async fn prepare_candidate(
     cancel: &dyn Cancel,
 ) -> Result<Prepared, Stopped> {
     let ready = Prepared {
-        work: format!("tracon-prep-{run_id}"),
-        cache: format!("tracon-prep-cache-{run_id}"),
+        work: crate::config::resource_name(&format!("prep-{run_id}")),
+        cache: crate::config::resource_name(&format!("prep-cache-{run_id}")),
     };
     let staged = async {
         backend.import_writable(&ready.work, snapshot).await?;
@@ -855,7 +856,7 @@ async fn prepare_candidate(
             runner,
             environment,
             (&ready.work, &ready.cache),
-            &format!("tracon-p-{}", &hash(run_id)[..12]),
+            &crate::config::resource_name(&format!("p-{}", &hash(run_id)[..12])),
             tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
             cancel,
             "no check was run",
@@ -1602,7 +1603,8 @@ mod tests {
     fn kube_check_pod_name_fits_the_63_char_label_bound() {
         for index in [0usize, 1, 9, 42, 999] {
             let run_id = uuid::Uuid::now_v7().to_string();
-            let runner_name = format!("tracon-c-{index}-{}", &hash(&run_id)[..12]);
+            let runner_name =
+                crate::config::resource_name(&format!("c-{index}-{}", &hash(&run_id)[..12]));
             let worst_case = format!("{runner_name}-{}", u32::MAX);
             assert!(
                 worst_case.len() <= 63,

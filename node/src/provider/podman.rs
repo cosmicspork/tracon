@@ -487,10 +487,10 @@ impl SandboxProvider for PodmanProvider {
     async fn create(&self, spec: &CreateSpec<'_>) -> Result<Handle, ProviderError> {
         let name = match spec.name {
             Some(name) if !name.is_empty() => name.to_string(),
-            _ => format!(
-                "tracon-s-{}",
+            _ => crate::config::resource_name(&format!(
+                "s-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..12]
-            ),
+            )),
         };
         let handle = Handle(name.clone());
         if !self.options.bundle.join("bin/tracon-sandbox").is_file() {
@@ -700,11 +700,15 @@ impl SandboxProvider for PodmanProvider {
     }
 
     async fn capacity(&self) -> Result<Capacity, ProviderError> {
+        // Every node on the container host labels its sandboxes alike; only
+        // the name says which are this node's.
         let text = self
             .cli(&[
                 "ps",
                 "--filter",
                 &format!("label={SANDBOX_LABEL}"),
+                "--filter",
+                &format!("name=^{}-", crate::config::resource_prefix()),
                 "--filter",
                 "status=running",
                 "--format",

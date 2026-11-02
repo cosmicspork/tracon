@@ -208,7 +208,10 @@ pub fn base_cache_volume(repo: Option<&Path>, image: &str) -> String {
     }
     hash.update([0]);
     hash.update(image.as_bytes());
-    format!("tracon-cache-base-{}", &hex::encode(hash.finalize())[..24])
+    crate::config::resource_name(&format!(
+        "cache-base-{}",
+        &hex::encode(hash.finalize())[..24]
+    ))
 }
 
 impl RepoEnvironment {
@@ -350,7 +353,7 @@ pub fn session_cache_volume(base_cache: &str, channel: &str) -> String {
     hash.update(base_cache.as_bytes());
     hash.update([0]);
     hash.update(channel.as_bytes());
-    format!("tracon-cache-r-{}", &hex::encode(hash.finalize())[..24])
+    crate::config::resource_name(&format!("cache-r-{}", &hex::encode(hash.finalize())[..24]))
 }
 
 /// What the repository's `prepare` did to a session's workspace before its
@@ -856,7 +859,10 @@ pub fn inspect(
         image,
         dependency_inputs: inputs,
         command: command.to_string(),
-        cache_volume: format!("tracon-cache-{}", &hex::encode(hash.finalize())[..24]),
+        cache_volume: crate::config::resource_name(&format!(
+            "cache-{}",
+            &hex::encode(hash.finalize())[..24]
+        )),
     })
 }
 
@@ -891,7 +897,7 @@ pub async fn prepare(
             ],
             workdir: Some("/work".into()),
             image: Some(image.clone()),
-            name: format!("tracon-prepare-{}", workspace.id),
+            name: crate::config::resource_name(&format!("prepare-{}", workspace.id)),
             labels: RunLabels {
                 repo: environment.repo.clone(),
                 ..RunLabels::of(RunKind::Prepare)
@@ -948,7 +954,7 @@ pub async fn verify(
                 ],
                 workdir: Some("/work".into()),
                 image: Some(prepared.image.clone()),
-                name: format!("tracon-verify-{}-{n}", workspace.id),
+                name: crate::config::resource_name(&format!("verify-{}-{n}", workspace.id)),
                 labels: RunLabels::of(RunKind::Check),
             })
             .await

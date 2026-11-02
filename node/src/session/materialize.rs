@@ -156,7 +156,15 @@ pub struct Scratch {
 }
 
 pub const PODMAN_HARNESS_HOME: &str = "/root";
-pub const HARNESS_STATE_VOLUME: &str = "tracon-harness-state";
+/// The harness state every session on this node shares.
+pub fn harness_state_volume() -> String {
+    crate::config::resource_name("harness-state")
+}
+
+/// The scratch volume the boundary probe stages its configuration in.
+pub fn probe_scratch_volume() -> String {
+    crate::config::resource_name("probe-scratch")
+}
 
 pub fn state_target(home: &str, layout: Layout) -> String {
     format!("{home}/{}", layout.dir)
@@ -167,7 +175,7 @@ pub fn state_target(home: &str, layout: Layout) -> String {
 /// configuration and is never imported into a harness.
 pub fn state_mounts(home: &str, layout: Layout) -> std::io::Result<Vec<Mount>> {
     Ok(vec![Mount::volume(
-        HARNESS_STATE_VOLUME,
+        harness_state_volume(),
         state_target(home, layout),
         false,
     )])
@@ -249,7 +257,7 @@ pub fn probe_scratch(
     adapter: &dyn HarnessAdapter,
     wiring: &Wiring,
 ) -> std::io::Result<Scratch> {
-    let volume = "tracon-probe-scratch".to_string();
+    let volume = probe_scratch_volume();
     let dir = Config::state_dir().join("probe");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;

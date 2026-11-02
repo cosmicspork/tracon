@@ -10,8 +10,6 @@ use crate::{
     runner::{podman::RunSpec, RunnerCommand},
 };
 
-const PROBE: &str = "tracon-boundary-probe";
-
 pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryReport {
     let mut checks = Vec::new();
 
@@ -42,7 +40,8 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
         crate::adapter::layout(&cfg.harness.id),
     )
     .unwrap_or_default();
-    checks.extend(probe_checks(cfg, &spec, PROBE).await);
+    let probe = crate::config::resource_name("boundary-probe");
+    checks.extend(probe_checks(cfg, &spec, &probe).await);
 
     if deep {
         checks.push(check_egress(cfg, selinux).await);
@@ -415,12 +414,13 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
     };
     // Clear a leftover of the same name from a crashed prior `--deep` run, or
     // this run fails with a name conflict instead of re-probing.
-    let _ = podman(&["rm", "-f", "-i", "tracon-egress-probe"]).await;
+    let probe = crate::config::resource_name("egress-probe");
+    let _ = podman(&["rm", "-f", "-i", &probe]).await;
     if super::uses_sandbox_protocol(cfg) {
         // Run as everything else runs: in a sandbox, over the protocol.
         let runner = super::protocol_runner(cfg, spec);
         let cmd = RunnerCommand {
-            name: "tracon-egress-probe".into(),
+            name: probe.clone(),
             ..cmd
         };
         return match runner.run_capture(cmd).await {
@@ -444,7 +444,7 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
             Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
         };
     }
-    let args = spec.podman_args("tracon-egress-probe", &cmd, false);
+    let args = spec.podman_args(&probe, &cmd, false);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     match podman(&argv).await {
         // The internal network has no route out at all, so a denied
