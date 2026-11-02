@@ -5,13 +5,14 @@
 #
 #   scripts/harness-bundle.sh --arch amd64|arm64 \
 #       (--agent PATH | --agent-release VERSION) \
-#       [--sandbox PATH] [--claude-archive PATH] [--version VERSION] [--out DIR]
+#       [--sandbox PATH | --sandbox-release VERSION] \
+#       [--claude-archive PATH] [--version VERSION] [--out DIR]
 #
 # Layout, under --out (default target/harness-bundle):
 #
 #   <version>/<arch>/bin/tracon-agent
 #   <version>/<arch>/bin/claude
-#   <version>/<arch>/bin/tracon-sandbox     (when --sandbox is given)
+#   <version>/<arch>/bin/tracon-sandbox     (with --sandbox or --sandbox-release)
 #   <version>/<arch>/manifest.json
 #   tracon-bundle-<version>-<arch>.tar.gz          entries rooted at <version>/<arch>/
 #   tracon-bundle-<version>-<arch>.tar.gz.sha256
@@ -34,8 +35,10 @@
 #   digests pinned in containers/harness-claude/Containerfile, so the bundle
 #   and the image cannot drift apart. --claude-archive supplies the archive
 #   from disk; it is held to the same digest.
-# - tracon-sandbox: the in-sandbox supervisor, a static build passed with
-#   --sandbox. Optional until it ships; the manifest lists only what is there.
+# - tracon-sandbox: the in-sandbox supervisor, a static build (--sandbox) or
+#   a release's asset checked the same way as tracon-agent's
+#   (--sandbox-release). Optional, because releases before it shipped have no
+#   such asset; the manifest lists only what is there.
 #
 # The bundle version defaults to the workspace version: tracon-agent and
 # tracon-sandbox speak to the node that ships with them.
@@ -45,13 +48,14 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 
 die() { echo "harness-bundle: $*" >&2; exit 1; }
 
-arch='' agent='' agent_release='' sandbox='' claude_archive='' version='' out=''
+arch='' agent='' agent_release='' sandbox='' sandbox_release='' claude_archive='' version='' out=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch) arch=${2:?}; shift 2 ;;
     --agent) agent=${2:?}; shift 2 ;;
     --agent-release) agent_release=${2:?}; shift 2 ;;
     --sandbox) sandbox=${2:?}; shift 2 ;;
+    --sandbox-release) sandbox_release=${2:?}; shift 2 ;;
     --claude-archive) claude_archive=${2:?}; shift 2 ;;
     --version) version=${2:?}; shift 2 ;;
     --out) out=${2:?}; shift 2 ;;
@@ -69,6 +73,9 @@ if [ -n "$agent" ] && [ -n "$agent_release" ]; then
   die "pass one of --agent and --agent-release"
 fi
 [ -n "$agent" ] || [ -n "$agent_release" ] || die "pass --agent PATH or --agent-release VERSION"
+if [ -n "$sandbox" ] && [ -n "$sandbox_release" ]; then
+  die "pass one of --sandbox and --sandbox-release"
+fi
 
 if [ -z "$version" ]; then
   version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"$/\1/p}' "$root/Cargo.toml")
@@ -79,6 +86,8 @@ semver='^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'
 [[ "$version" =~ $semver ]] || die "bundle version '$version' is not a version"
 agent_version=${agent_release:-$version}
 [[ "$agent_version" =~ $semver ]] || die "tracon-agent version '$agent_version' is not a version"
+sandbox_version=${sandbox_release:-$version}
+[[ "$sandbox_version" =~ $semver ]] || die "tracon-sandbox version '$sandbox_version' is not a version"
 
 containerfile="$root/containers/harness-claude/Containerfile"
 pinned() { sed -n "s/^ARG $1=\(.*\)$/\1/p" "$containerfile"; }
@@ -134,13 +143,20 @@ dest="$out/$version/$arch"
 rm -rf "$dest"
 mkdir -p "$dest/bin"
 
-if [ -n "$agent_release" ]; then
-  asset="tracon-agent-$triple"
-  base="https://github.com/cosmicspork/tracon/releases/download/v$agent_release"
+# Fetches <name>-<triple> from a release, held to the .sha256 published beside
+# it, into $fetched. Not a command substitution: errexit doesn't reach in there.
+release_asset() {
+  local asset="$1-$triple"
+  local base="https://github.com/cosmicspork/tracon/releases/download/v$2"
   curl -fsSL -o "$work/$asset" "$base/$asset"
   curl -fsSL -o "$work/$asset.sha256" "$base/$asset.sha256"
   check_digest "$work/$asset" "$(cut -d' ' -f1 "$work/$asset.sha256")"
-  agent="$work/$asset"
+  fetched="$work/$asset"
+}
+
+if [ -n "$agent_release" ]; then
+  release_asset tracon-agent "$agent_release"
+  agent=$fetched
 fi
 [ -f "$agent" ] || die "no tracon-agent at $agent"
 check_static "$agent"
@@ -157,6 +173,10 @@ tar -xzf "$claude_archive" -C "$work/claude" claude
 command -v file >/dev/null 2>&1 && { file "$work/claude/claude" | grep -q "$elf" || die "the Claude Code archive is not $arch"; }
 install -m 0755 "$work/claude/claude" "$dest/bin/claude"
 
+if [ -n "$sandbox_release" ]; then
+  release_asset tracon-sandbox "$sandbox_release"
+  sandbox=$fetched
+fi
 if [ -n "$sandbox" ]; then
   [ -f "$sandbox" ] || die "no tracon-sandbox at $sandbox"
   check_static "$sandbox"
@@ -175,7 +195,7 @@ fi
   if [ -n "$sandbox" ]; then
     printf ',\n    "tracon-sandbox": {\n'
     printf '      "path": "bin/tracon-sandbox",\n      "version": "%s",\n      "sha256": "%s"\n    }' \
-      "$version" "$(sha256 "$dest/bin/tracon-sandbox")"
+      "$sandbox_version" "$(sha256 "$dest/bin/tracon-sandbox")"
   fi
   printf '\n  }\n}\n'
 } > "$dest/manifest.json"
