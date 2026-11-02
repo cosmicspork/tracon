@@ -3642,6 +3642,7 @@ dependencies = [
  "tracon-acp",
  "tracon-hub",
  "tracon-proto",
+ "tracon-sandbox",
  "tracon-sync",
  "url",
  "uuid",

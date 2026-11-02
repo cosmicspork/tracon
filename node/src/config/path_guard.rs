@@ -99,6 +99,7 @@ fn program_names(key: &str) -> &'static [&'static str] {
         "publish.git" => &["git"],
         "consulta.command" => &["uv", "consulta"],
         "runtime.kubernetes.builder.buildctl" => &["buildctl"],
+        "provider.apple.container" => &["container"],
         _ => &[],
     }
 }

@@ -13,8 +13,10 @@
 //! Kubernetes's checks read as capabilities ([`capabilities::from_checks`]),
 //! shown in the checks interface and acted on by nothing yet.
 
+pub mod apple;
 pub mod capabilities;
 pub mod placement;
+pub mod probe;
 pub mod requirements;
 
 use async_trait::async_trait;

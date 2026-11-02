@@ -113,6 +113,32 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Sandbox providers, outside any session.
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SandboxCommand {
+    /// Make one sandbox, connect to it, run a command in it, read its
+    /// isolation back from the provider, and remove it.
+    Probe {
+        /// The provider to probe (apple).
+        #[arg(long)]
+        provider: String,
+        /// The harness bundle for the sandbox's architecture, with
+        /// bin/tracon-sandbox in it.
+        #[arg(long)]
+        bundle: std::path::PathBuf,
+        /// The image to run.
+        #[arg(long, default_value = "ubuntu:24.04")]
+        image: String,
+        /// Leave the sandbox running afterwards.
+        #[arg(long)]
+        keep: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -763,6 +789,27 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Repo { command } => repo_command(command).await,
+        Command::Sandbox {
+            command:
+                SandboxCommand::Probe {
+                    provider,
+                    bundle,
+                    image,
+                    keep,
+                },
+        } => {
+            let provider = match provider.as_str() {
+                "apple" => tracon::provider::ProviderKind::Apple,
+                other => anyhow::bail!("unknown provider {other:?}; the probe knows apple"),
+            };
+            tracon::provider::probe::run(tracon::provider::probe::ProbeOptions {
+                provider,
+                image,
+                bundle,
+                keep,
+            })
+            .await
+        }
         Command::Provenance { sha } => {
             use reqwest::Method;
             let v = node_call(Method::GET, &format!("/api/provenance/{sha}"), None, None).await?;

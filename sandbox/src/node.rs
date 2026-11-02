@@ -168,6 +168,39 @@ impl SandboxServer {
         self.accept(io).await
     }
 
+    /// Connect to a sandbox listening on the unix socket at `path` (the
+    /// sandbox's [`crate::carrier::Dial::Listen`], relayed out to the host)
+    /// and run the handshake, trying again until `within` has passed.
+    ///
+    /// A relay may accept the connection before anything inside listens and
+    /// then close it, so a connection that ends before TLS completes is
+    /// tried again too. A refused token or a protocol error is not.
+    pub async fn connect_to(
+        &self,
+        path: &Path,
+        within: Duration,
+    ) -> Result<SandboxConn, SandboxError> {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut delay = Duration::from_millis(20);
+        loop {
+            let attempt = match tokio::net::UnixStream::connect(path).await {
+                Ok(stream) => self.accept(stream).await,
+                Err(error) => Err(SandboxError::Io(error)),
+            };
+            match attempt {
+                Ok(conn) => return Ok(conn),
+                Err(
+                    error @ (SandboxError::Io(_) | SandboxError::Tls(_) | SandboxError::Timeout),
+                ) if tokio::time::Instant::now() + delay < deadline => {
+                    tracing::debug!(%error, path = %path.display(), "sandbox not listening yet");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_millis(500));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Run the handshake on an accepted connection: TLS, then the hello,
     /// whose token must be one this server issued and nobody has used. No
     /// channel exists before that check passes.
