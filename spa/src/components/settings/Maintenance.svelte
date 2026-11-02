@@ -10,8 +10,9 @@
   } from '../../lib/desktop-setup'
   import { admin, type Maintenance as MaintenanceState } from '../../lib/admin'
   import { store } from '../../lib/store.svelte'
+  import type { BoundaryResult } from '../../lib/types'
 
-  let { boundary }: { boundary?: Snippet } = $props()
+  let { boundary, onchecked }: { boundary?: Snippet; onchecked?: (result: BoundaryResult) => void } = $props()
 
   let data = $state<MaintenanceState | null>(null)
   let busy = $state('')
@@ -49,7 +50,7 @@
 
   function recheckBoundary() {
     void act('boundary', async () => {
-      await admin.boundaryCheck()
+      onchecked?.(await admin.boundaryCheck())
       await store.refetch()
       await load()
       return data?.boundary.state === 'ready' ? 'Isolation checks passed.' : 'Isolation checks have not passed; review the reported reason.'

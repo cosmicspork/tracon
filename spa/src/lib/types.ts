@@ -1614,6 +1614,36 @@ export function permissionOptions(p: Permission): { option_id: string; name: str
   }
 }
 
+/** One boundary check, as the node reports it. */
+export interface BoundaryCheck {
+  id: string
+  ok: boolean
+  detail: string
+}
+
+/** One capability a provider's checks established, or did not (`value` null). */
+export interface CapabilityLine {
+  capability: string
+  value: string | null
+  check: string | null
+  detail: string
+}
+
+/** What a sandbox provider can promise, read from its boundary checks. Reported, not enforced. */
+export interface ProviderCapabilities {
+  provider: string
+  verified: boolean
+  lines: CapabilityLine[]
+  enforced: boolean
+}
+
+export interface BoundaryResult {
+  state: string
+  checks: { checks: BoundaryCheck[] }
+  /** Absent from a node that predates provider capabilities. */
+  providers?: ProviderCapabilities[]
+}
+
 /** The settings the interface writes, and the context it needs to explain them. */
 /** One model a node declares under a provider: what the picker offers and a declaring harness is told. */
 export interface ModelDecl {

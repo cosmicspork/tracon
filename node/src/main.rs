@@ -810,10 +810,8 @@ async fn main() -> Result<()> {
         Command::Channel(cmd) => channel_command(cmd).await,
         Command::CheckBoundary { deep } => {
             let cfg = config::Config::load();
-            let report = boundary::backend_for(&cfg)
-                .await
-                .check_all(&cfg, deep)
-                .await;
+            let backend = boundary::backend_for(&cfg).await;
+            let report = backend.check_all(&cfg, deep).await;
             for c in &report.checks {
                 println!(
                     "{} {:<22} {}",
@@ -821,6 +819,19 @@ async fn main() -> Result<()> {
                     c.id.as_str(),
                     c.detail
                 );
+            }
+            if let Some(caps) = tracon::provider::backend_report(backend.kind(), &report) {
+                println!(
+                    "\ncapabilities ({}, reported, not enforced):",
+                    caps.provider.as_str()
+                );
+                for line in &caps.lines {
+                    println!(
+                        "  {:<16} {}",
+                        line.capability,
+                        line.value.unwrap_or("not established")
+                    );
+                }
             }
             match report.first_failure() {
                 None => Ok(()),
