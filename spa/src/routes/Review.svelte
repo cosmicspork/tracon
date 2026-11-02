@@ -26,6 +26,7 @@
     type Review,
     type ReviewAuthorship,
     type CandidateCheckRun,
+    type ChangeDraft,
     type ForgeState,
     type ReviewIntent,
     type ReviewOutputs,
@@ -50,6 +51,7 @@
     lostOwner,
     ownersReviewer,
     publishedChange,
+    draftControl,
     publishedLabel,
     rereadDelay,
     rereadPeer,
@@ -77,6 +79,8 @@
   let publication = $state<ReviewPublication | null>(null)
   /** Where the published request stands on the forge, as last followed. */
   let forgeState = $state<ForgeState | null>(null)
+  /** Whether the change it updates is a draft and why, as the node last knew it. */
+  let changeDraft = $state<ChangeDraft | null>(null)
   /** Why no reviewer is reading it, as the node last found. */
   let reviewerReason = $state<string | null>(null)
   let reviewerStarting = $state(false)
@@ -186,6 +190,7 @@
         authorship = d.authorship ?? null
         publication = d.publication ?? null
         forgeState = d.forge_state ?? null
+        changeDraft = d.change_draft ?? null
         reviewerReason = d.review_session_reason ?? null
         reviewerStarting = d.review_session_starting ?? false
         reviewerView = d.reviewer ?? null
@@ -514,6 +519,8 @@
   const reviewerWaits = $derived(reviewerReason?.startsWith('waiting for') ?? false)
   const session = $derived(review?.session_id ? store.sessions.get(review.session_id) : undefined)
   const reviewer = $derived(review?.review_session_id ? store.sessions.get(review.review_session_id) : undefined)
+  /** The change's draft state and the button beside it; only its owner marks it. */
+  const drafting = $derived(draftControl(changeDraft, (session?.turn_active ?? 0) > 0))
   // The reviewer's id and state alone: the session row changes on every
   // update it streams, and the poll below must not be put off by each one.
   const liveReviewerId = $derived(reviewer?.id)
@@ -666,6 +673,7 @@
       ownerDetail = d.owner_detail ?? null
       publication = d.publication ?? null
       forgeState = d.forge_state ?? null
+      changeDraft = d.change_draft ?? null
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting ?? false
       reviewerView = d.reviewer ?? null
@@ -700,6 +708,19 @@
     } catch {
       // Asked again on the next poll, a little later each time.
       pollFailures++
+    }
+  }
+
+  /** Mark the change ready for review, or turn it back into a draft, on the forge. */
+  async function markReady(ready: boolean) {
+    busy = true
+    error = null
+    try {
+      changeDraft = (await api.markReviewReady(id, ready)).change_draft
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
     }
   }
 
@@ -863,6 +884,16 @@
           title="Force-push over the branch as submitted"
           >rewrites history · replaces {intent.lease?.slice(0, 8)}</span
         >
+      {/if}
+      {#if drafting}
+        <span class="drafting">
+          {#if drafting.note}<span class="chip" class:warn={changeDraft?.draft}>{drafting.note}</span>{/if}
+          {#if !remoteOwner}
+            {#each drafting.actions as action (action.label)}
+              <button class="lnk" disabled={busy} onclick={() => markReady(action.ready)}>{action.label}</button>
+            {/each}
+          {/if}
+        </span>
       {/if}
     </dd>
 
@@ -1898,6 +1929,13 @@
     gap: 8px;
     font-size: 13px;
     color: var(--ink2);
+  }
+  .kv .drafting {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-left: 6px;
   }
   .kv .chip.warn {
     background: var(--wash-wait);

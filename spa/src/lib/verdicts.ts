@@ -2,7 +2,7 @@
 // A disabled button with no reason is a puzzle; every action that cannot be
 // taken says so beside it instead.
 
-import type { ForgeState, OwnerDetail, ReviewerView } from './types'
+import type { ChangeDraft, ForgeState, OwnerDetail, ReviewerView } from './types'
 
 export type VerdictAction = 'approve' | 'revise' | 'reject'
 
@@ -98,6 +98,30 @@ export function publishedLabel(
   const name = change.number === null ? (gitlab ? 'MR' : 'PR') : gitlab ? `MR !${change.number}` : `PR #${change.number}`
   if (!forge) return name
   return `${name} · ${forge.state}${forge.draft && forge.state === 'open' ? ' · draft' : ''}`
+}
+
+/**
+ * What the review page says of an open change's draft state, and the button
+ * beside it: "Mark ready" for a draft, "Back to draft" for one that is ready,
+ * both while neither is known. `midTurn` is the owning session in a turn,
+ * which may be about to resubmit or draft it. Null for no change, or one that
+ * is merged or closed.
+ */
+export function draftControl(
+  change: ChangeDraft | null | undefined,
+  midTurn: boolean,
+): { note: string | null; actions: { label: string; ready: boolean }[] } | null {
+  if (!change || change.state !== 'open') return null
+  const ready = { label: 'Mark ready', ready: true }
+  const back = { label: 'Back to draft', ready: false }
+  const said: string[] = []
+  if (change.draft) said.push(change.why ? `draft: ${change.why}` : 'draft')
+  else if (change.in_flight) said.push(`revision ${change.in_flight.revision} is checking`)
+  if (midTurn) said.push('the agent is mid-turn')
+  return {
+    note: said.length ? said.join(' · ') : null,
+    actions: change.draft === null ? [ready, back] : change.draft ? [ready] : [back],
+  }
 }
 
 /** What the review page offers of its reviewer, from what happened to the latest revision. */

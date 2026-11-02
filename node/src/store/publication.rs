@@ -339,6 +339,30 @@ impl Store {
             .and_then(|mark| serde_json::from_str(&mark).ok()))
     }
 
+    /// `latest_event_payload`, with when the event was recorded: what tells
+    /// whether it came after something kept outside the log.
+    pub fn latest_event_at(
+        &self,
+        session_id: &str,
+        kind: &str,
+        ref_id: &str,
+    ) -> Result<Option<(i64, serde_json::Value)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT at_ms, payload FROM event WHERE session_id=?1 AND kind=?2 AND ref_id=?3
+                 ORDER BY seq DESC LIMIT 1",
+                params![session_id, kind, ref_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(at, payload)| {
+            serde_json::from_str(&payload)
+                .ok()
+                .map(|payload| (at, payload))
+        }))
+    }
+
     pub fn publication_pushed(&self, id: &str, sha: &str) -> Result<()> {
         self.publication_set(id, "pushed", Some(sha), None, None)
     }

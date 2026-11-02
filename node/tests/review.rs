@@ -6060,6 +6060,138 @@ async fn resubmitting_a_published_review_drafts_its_change_until_approval() {
     assert_eq!(said["by"], "node");
     assert_eq!(said["ready"], false);
     assert_eq!(said["reason"], "revision 2 is on its way");
+    // The revision is on the review now, waiting on the operator, and the
+    // page says so; its approval marks the change ready again.
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["draft"], true, "{detail}");
+    assert_eq!(
+        detail["change_draft"]["why"], "revision 2 is waiting for approval",
+        "{detail}"
+    );
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["draft"], false, "{detail}");
+}
+
+/// The operator drafts a review's change and marks it ready from the review
+/// page, with no revision pending: merging revision 1 as it stands after an
+/// agent drafted it is a Mark ready away. The page says why it is a draft.
+#[tokio::test]
+async fn the_operator_marks_a_reviews_change_ready_or_back_to_draft() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    // Nothing on the forge yet: nothing to mark.
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/ready"),
+            Some(json!({ "ready": false })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["number"], 1, "{detail}");
+    assert!(
+        detail["change_draft"]["draft"].is_null(),
+        "not looked at yet"
+    );
+
+    f.forget_logs();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/ready"),
+            Some(json!({ "ready": false })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        f.gh_log()
+            .contains("ARGS: pr ready 1 --undo --repo owner/name"),
+        "{}",
+        f.gh_log()
+    );
+    assert_eq!(body["change_draft"]["draft"], true, "{body}");
+    assert_eq!(
+        body["change_draft"]["why"],
+        "you turned it back into a draft"
+    );
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["draft"], true, "{detail}");
+
+    f.forget_logs();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/ready"),
+            Some(json!({ "ready": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("ARGS: pr ready 1 --repo owner/name"), "{gh}");
+    assert!(!gh.contains("--undo"), "{gh}");
+    assert_eq!(body["change_draft"]["draft"], false, "{body}");
+    assert!(body["change_draft"]["why"].is_null(), "{body}");
+}
+
+/// The forge follower records a look whenever the change's snapshot moves:
+/// a CI status, or the draft flip the mark itself caused. A look that agrees
+/// with the mark leaves its reason standing; only one that disagrees, a flip
+/// by hand on the forge, overrules it.
+#[tokio::test]
+async fn a_later_look_that_agrees_with_the_mark_keeps_its_reason() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_forge(&f, pull_seven(&f.base_sha()));
+    let id = f.submit().await;
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let marked_at = tracon::store::now_ms() - 1_000;
+    f.store
+        .put_change_mark(
+            &id,
+            &json!({
+                "review_id": id, "number": 1, "ready": false, "by": "agent",
+                "reason": "addressing the reviewer's findings", "at_ms": marked_at,
+            }),
+        )
+        .unwrap();
+    let look = |draft: bool, at_ms: i64| tracon::store::NewEvent {
+        session_id: "s1".into(),
+        work_item_id: None,
+        kind: "forge_follow".into(),
+        ref_id: Some(f.publication_id(&id)),
+        payload: json!({
+            "review_id": id,
+            "changes": [],
+            "snapshot": { "state": "open", "draft": draft, "checks": {}, "comments": 0 },
+        }),
+        at_ms,
+        mono_ms: 0,
+    };
+    let why = "the agent marked it not ready: addressing the reviewer's findings";
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["why"], why, "{detail}");
+
+    // The follower's next look sees the draft the mark made.
+    f.store.append_event(&look(true, marked_at + 500)).unwrap();
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["draft"], true, "{detail}");
+    assert_eq!(detail["change_draft"]["why"], why, "{detail}");
+    assert_eq!(detail["change_draft"]["by"], "agent", "{detail}");
+
+    // Someone marks it ready by hand on the forge: the look is what stands.
+    f.store.append_event(&look(false, marked_at + 900)).unwrap();
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["draft"], false, "{detail}");
+    assert!(detail["change_draft"]["why"].is_null(), "{detail}");
+    assert!(detail["change_draft"]["by"].is_null(), "{detail}");
 }
 
 /// A review an external harness submitted has no session to log on, and
@@ -6122,6 +6254,24 @@ async fn an_external_reviews_change_drafted_for_a_new_revision_is_recorded() {
     assert_eq!(mark["by"], "node");
     assert_eq!(mark["reason"], "revision 2 is on its way");
     assert!(mark["at_ms"].as_i64().is_some(), "{mark}");
+    // The page says it is a draft and why, with no session to read it from.
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["change_draft"]["draft"], true, "{detail}");
+    assert_eq!(
+        detail["change_draft"]["why"], "revision 2 is waiting for approval",
+        "{detail}"
+    );
+    // The operator marks it ready from the page, and it says so.
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/ready"),
+            Some(json!({ "ready": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["change_draft"]["draft"], false, "{body}");
+    assert_eq!(body["change_draft"]["by"], "operator", "{body}");
 }
 
 /// An approval of revision N while revision N+1's checks run is still

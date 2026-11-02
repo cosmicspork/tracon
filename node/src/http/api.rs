@@ -2540,6 +2540,14 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         Some(_) => None,
     }
     .unwrap_or(serde_json::Value::Null);
+    // Whether the change it updates is a draft and why, with the revision on
+    // its way that is not on the review yet: what Mark ready and Back to
+    // draft are shown from. Node-local: the owner marks it and follows it.
+    let change_draft = match &remote_owner {
+        None => crate::mcp::review::change_draft_view(s.store(), &s.manager, r),
+        Some(_) => None,
+    }
+    .unwrap_or(serde_json::Value::Null);
     // What the agent showed of its work, each marked stale once the candidate
     // moved past the commit it was shown at. Node-local, like the checks: a
     // mirror never had the workspace it was read from.
@@ -2648,6 +2656,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         "publications": publications,
         "publication": publication,
         "forge_state": forge_state,
+        "change_draft": change_draft,
         "shown_work": shown_work,
         "authorship": authorship,
     }))
@@ -2680,6 +2689,7 @@ const OWNER_FIELDS: &[&str] = &[
     "publications",
     "publication",
     "forge_state",
+    "change_draft",
 ];
 
 /// The review row's own fields the owner's reviewer writes, taken from the
@@ -3033,6 +3043,50 @@ pub async fn release_review(
     s.store().release_review(&s.node_id, &id)?;
     s.manager.publish_queue().await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What `POST /api/reviews/{id}/ready` takes: true marks the change ready,
+/// false turns it back into a draft.
+#[derive(Deserialize)]
+pub struct ReadyBody {
+    pub ready: bool,
+}
+
+/// `POST /api/reviews/{id}/ready`: the operator marks the change a review
+/// updates ready for review, or turns it back into a draft, with or without
+/// a revision pending: merging revision 1 as it stands after an agent drafted
+/// it is a Mark ready and a merge. Answers with the change's draft state as
+/// the page shows it. Only the node that owns the review holds its forge
+/// credential.
+pub async fn mark_review_ready(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<ReadyBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review belongs to another node; mark its change there".into(),
+        ));
+    }
+    let target: crate::review::publish::Target = serde_json::from_str(&r.target)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if target.change.is_none() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review has no change on the forge yet".into(),
+        ));
+    }
+    crate::mcp::review::mark_change(&s.manager, &r, &target, b.ready, "operator", None)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({
+        "change_draft": crate::mcp::review::change_draft_view(s.store(), &s.manager, &r),
+    })))
 }
 
 /// `GET /api/reviews/{id}/review-session`: what became of a review's

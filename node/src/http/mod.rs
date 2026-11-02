@@ -419,6 +419,7 @@ pub fn router(state: AppState) -> Router {
             post(api::reconcile_publication),
         )
         .route("/api/reviews/{id}/release", post(api::release_review))
+        .route("/api/reviews/{id}/ready", post(api::mark_review_ready))
         .route(
             "/api/reviews/{id}/review-session",
             get(api::get_review_session).post(api::start_review_session),
